@@ -21,6 +21,8 @@ The table below summarizes the set of open source pre-trained weights currently 
 | EnCodon 600M       | MLM (random p=0.15)            | 2048        | 12     | 16    | 8192         | `mlm/encodon_600m.sh` | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-600M-v1)    | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-600M-v1)    |
 | EnCodon 1B         | MLM (random p=0.15)            | 2048        | 18     | 16    | 8192         | `mlm/encodon_1b.sh`   | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-1B-v1)      | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-1B-v1)      |
 | EnCodon 1B (CDSWT) | MLM (codon frequency-weighted) | 2048        | 18     | 16    | 8192         | `cdswt/encodon_1b.sh` | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-Cdwt-1B-v1) | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-Cdwt-1B-v1) |
+| EnCodon 5B         | MLM (codon p=0.15)             | 4096        | 24     | 32    | 16384        | `mlm/encodon_5b.sh`   | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-Cdwt-5B-v1) | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-Cdwt-5B-v1) |
+| EnCodon 5B (CDSWT) | MLM (codon frequency-weighted) | 4096        | 24     | 32    | 16384        | `cdswt/encodon_5b.sh` | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-Cdwt-5B-v1) | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-Cdwt-5B-v1) |
 
 ## Repository Structure
 
@@ -75,12 +77,29 @@ We also present the ability to utilize a simpler model architecture that directl
 
 <br>
 
-The training step speedups for the 80M Encodon model when both Transformer Engine (TE) and Sequence Packing (THD) are applied compared to the Xformers based model are shown below. We benchmarked on NVIDIA H100 80GB HBM3 GPUs using a micro batch-size is 32. The training step speedups for the 1B Encodon model are on a micro batch-size of 4.
+The figure below shows training throughput speedups, derived from `tokens/s/gpu`, for the `80M` and `1B` Encodon models when Transformer Engine (TE) and sequence packing (THD) are applied relative to the Xformers-based baseline.
 
 ![xf](assets/images/training_acceleration_plot.png)
 
-For inferencing, we can also demonstrate acceleration when using each models TE counterpart. Thus, a 1.4X speedup in this chart shows how much faster the TE version of the model is over the original baseline PyTorch SDPA model.
-![i](assets/images/inference_plot.png)
+All training experiments reported here were run on `8 x NVIDIA H100 80GB HBM3` GPUs in `bfloat16` precision. The absolute throughputs used to compute the speedups above are reported below in `tokens/s/gpu`.
+
+| Model | Xformers (`tokens/s/gpu`) | SDPA (`tokens/s/gpu`) | TE-BSHD (`tokens/s/gpu`) | TE-THD (`tokens/s/gpu`) | Speedup over baseline         |
+| ----- | ------------------------: | --------------------: | -----------------------: | ----------------------: | ----------------------------- |
+| 80M   |                    117119 |                145357 |                   419087 |                 1028891 | 1.00x / 1.24x / 3.58x / 9.79x |
+| 1B    |                      8698 |                  9899 |                    26476 |                   69300 | 1.00x / 1.14x / 3.04x / 7.97x |
+| 5B    |                      2320 |                  2865 |                     5112 |                   13973 | 1.00x / 1.23x / 2.20x / 6.02x |
+
+For inference, we report both relative speedup and absolute throughput. The figure below compares inference configurations by relative speedup within each model size.
+
+![Inference speedup across model sizes](assets/images/inference_plot.png)
+
+All inference experiments reported here were run on `8 x NVIDIA H100 80GB HBM3` GPUs in `bfloat16` precision. The absolute throughputs used to compute the speedups above are reported below in `tokens/s/gpu`.
+
+| Model | Xformers (`tokens/s/gpu`) | SDPA (`tokens/s/gpu`) | TE-BSHD (`tokens/s/gpu`) | TE-THD (`tokens/s/gpu`) | Speedup over baseline          |
+| ----- | ------------------------: | --------------------: | -----------------------: | ----------------------: | ------------------------------ |
+| 80M   |                    156819 |                190380 |                   542147 |                 1875140 | 1.00x / 1.21x / 3.46x / 11.96x |
+| 1B    |                     18655 |                 21715 |                    46551 |                  221110 | 1.00x / 1.16x / 2.50x / 11.85x |
+| 5B    |                      5316 |                  5991 |                     9996 |                   40373 | 1.00x / 1.13x / 1.88x / 7.59x  |
 
 ## Quickstart
 
@@ -185,8 +204,10 @@ Optional path overrides:
 ```bash
   --out_dir <dir>
   --checkpoints_dir <dir>
-  --pretrained_ckpt_path <path>
 ```
+
+- `--out_dir`: Base output directory for logs, metrics, and other artifacts. Defaults to `results/`.
+- `--checkpoints_dir`: Directory where training checkpoints are saved. Defaults to `<out_dir>/checkpoints/`. This directory also enables **automatic resumption**: if the runner finds a `last.ckpt` file inside this directory, it will reload the model weights and full trainer state (optimizer, learning-rate schedule, global step, etc.) so training picks up exactly where it left off. This is essential for long pretraining runs on clusters where jobs may be preempted or interrupted. On a fresh run the directory will be empty, so training starts from scratch as expected.
 
 For multi-node execution consider using `torchrun`.
 
@@ -254,6 +275,10 @@ python -m src.runner finetune \
     [--use_transformer_engine]
 
 ```
+
+- `--pretrained_ckpt_path`: Path to a pretrained checkpoint whose **model weights only** are loaded as the starting point for finetuning. The optimizer state, learning-rate schedule, and global step are not restored — training starts fresh from step 0 with the pretrained weights. Accepts a local `.ckpt` file, a local directory containing a `.safetensors` file and `config.json`, or a HuggingFace Hub repo ID (e.g. `nvidia/codon-fm-base`).
+- `--checkpoints_dir`: Directory where finetuning checkpoints are saved. Defaults to `<out_dir>/checkpoints/`. If the runner finds a `last.ckpt` here, it resumes the finetuning run (model weights, optimizer, step count) from that checkpoint instead of starting from the pretrained weights. This enables automatic resumption of interrupted finetuning jobs.
+- `--resume_trainer_state`: When set, restores the full trainer state (optimizer, scheduler, step count) from the pretrained checkpoint rather than only loading model weights. Useful when continuing a pretraining run as a finetuning job.
 
 #### Evaluation
 

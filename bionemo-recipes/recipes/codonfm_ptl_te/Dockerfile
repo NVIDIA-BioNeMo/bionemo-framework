@@ -64,3 +64,18 @@ RUN chown -R ${USERNAME:-vscode}:${USERNAME:-vscode} /workspace/codonfm
 
 # Switch to the non-root user
 USER $USERNAME
+
+# ----------------- For benchmarking only -----------------
+# Warning: I was only able to build this image in an instance with 2TB of memory.
+# Otherwise, a segmentation fault occurs during the build process:
+# /bin/bash: line 1: 13517 Segmentation fault      (core dumped) ptxas -arch=sm_90 -m64 -v --generate-line-info "/tmp/tmpxft_00002f58_00000000-6_flash_fwd_hdim64_256_fp16_paged_split_sm90.ptx" -o "/tmp/tmpxft_00002f58_00000000-8_flash_fwd_hdim64_256_fp16_paged_split_sm90.cubin" > /tmp/tmpxft_00002f58_00000000-10_2eb7d280_stdout 2> /tmp/tmpxft_00002f58_00000000-10_2eb7d280_stderr
+#
+# Could have also been caused by CUDA-compatibility issues.
+
+FROM base AS benchmarking
+
+WORKDIR /workspace/codonfm
+
+RUN pip install -v --no-build-isolation -U git+https://github.com/facebookresearch/xformers.git@v0.0.32.post2#egg=xformers --no-deps
+
+COPY . .
