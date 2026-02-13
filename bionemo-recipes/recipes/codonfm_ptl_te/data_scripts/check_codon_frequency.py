@@ -23,7 +23,7 @@ import numpy as np
 from tqdm import tqdm
 
 
-sys.path.append("/workspace/codon_fm")
+sys.path.append("/workspace/codonfm")
 from src.tokenizer import Tokenizer
 
 
