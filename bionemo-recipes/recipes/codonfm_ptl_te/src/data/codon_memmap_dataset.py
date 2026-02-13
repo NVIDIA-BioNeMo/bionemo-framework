@@ -250,6 +250,16 @@ class CodonMemmapDataset(torch.utils.data.Dataset):
         if len(set(self.train_indices) & set(self.val_indices)) > 0:
             raise ValueError("Train and validation splits overlap")
 
+    def get_sequence_length(self, idx: int) -> int:
+        """Return the unpadded token count for sample *idx* without loading data.
+
+        The length accounts for CLS and SEP tokens that ``process_item`` prepends/appends.
+        """
+        global_idx = self.current_split_indices[idx]
+        _, start_token_idx, end_token_idx = self.global_indices[global_idx]
+        raw_len = end_token_idx - start_token_idx
+        return min(raw_len, self.context_length - 2) + 2  # +2 for CLS / SEP
+
     def __getitem__(self, idx):  # noqa: D105
         global_idx = self.current_split_indices[idx]
         chunk_id, start_token_idx, end_token_idx = self.global_indices[global_idx]

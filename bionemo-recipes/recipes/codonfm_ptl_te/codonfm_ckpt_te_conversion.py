@@ -26,13 +26,38 @@ Usage:
 
 import argparse
 import logging
+import os
 
 import torch
+from safetensors.torch import save_file as safetensors_save_file
 
 from src.utils.load_checkpoint import load_checkpoint
 
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_HYPERPARAMETER_KEYS = (
+    "vocab_size",
+    "hidden_size",
+    "num_hidden_layers",
+    "num_attention_heads",
+    "intermediate_size",
+    "hidden_act",
+    "hidden_dropout_prob",
+    "attention_probs_dropout_prob",
+    "initializer_range",
+    "layer_norm_eps",
+    "pad_token_id",
+    "position_embedding_type",
+    "classifier_dropout",
+    "rotary_theta",
+    "ignore_index",
+    "loss_type",
+    "lora",
+    "lora_alpha",
+    "lora_r",
+    "lora_dropout",
+)
 
 # PYTorch -> TE keymap
 PYTORCH_TO_TE_KEYMAP = {
@@ -300,6 +325,11 @@ def convert_state_dict(src: dict, keymap: dict):
     return dst_state_dict
 
 
+def filter_hyper_parameters(hyper_parameters: dict) -> dict:
+    """Keep only conversion-compatible hyperparameter keys."""
+    return {key: value for key, value in hyper_parameters.items() if key in ALLOWED_HYPERPARAMETER_KEYS}
+
+
 def main():
     """Main function."""
     logging.basicConfig(level=logging.INFO)
@@ -325,6 +355,7 @@ def main():
     # Load source checkpoint (automatically detects format)
     logger.info(f"Loading checkpoint from {args.src}")
     src_checkpoint = load_checkpoint(args.src, map_location="cpu")
+    src_checkpoint["hyper_parameters"] = filter_hyper_parameters(src_checkpoint["hyper_parameters"])
 
     # Perform conversion based on direction
     if args.direction == "pytorch2te":
@@ -341,11 +372,19 @@ def main():
         dst_state_dict = split_qkv(converted_state_dict, src_checkpoint["hyper_parameters"])
 
     # Prepare final checkpoint
-    dst_checkpoint = {"state_dict": dst_state_dict, "hyper_parameters": src_checkpoint["hyper_parameters"]}
+    dst_checkpoint = {
+        "state_dict": dst_state_dict,
+        "hyper_parameters": src_checkpoint["hyper_parameters"],
+    }
 
     # Save the converted checkpoint in pickled format
     torch.save(dst_checkpoint, args.dst)
-    logger.info(f"Successfully converted checkpoint from {args.src} to {args.dst}")
+    logger.info(f"Successfully converted checkpoint saved to {args.dst}")
+
+    # Save the state_dict in safetensors format alongside the .ckpt file
+    safetensors_path = os.path.splitext(args.dst)[0] + ".safetensors"
+    safetensors_save_file(dst_state_dict, safetensors_path)
+    logger.info(f"Successfully saved safetensors checkpoint to {safetensors_path}")
 
 
 if __name__ == "__main__":

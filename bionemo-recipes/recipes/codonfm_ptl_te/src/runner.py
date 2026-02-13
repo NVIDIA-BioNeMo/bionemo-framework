@@ -17,6 +17,7 @@
 import argparse
 import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 
@@ -63,7 +64,7 @@ def get_parser():  # noqa: D103
         "--pretrained_ckpt_path",
         type=str,
         default=None,
-        help="Path to pretrained checkpoint. Defaults to --checkpoint_path if set.",
+        help="The path to the pre-trained model checkpoint to start fine-tuning from.",
     )
 
     # Data arguments
@@ -88,8 +89,8 @@ def get_parser():  # noqa: D103
         choices=["CodonMemmapDataset", "MutationDataset", "CodonBertDataset", "SimpleCodonDataset"],
     )
     parser.add_argument("--num_workers", type=int, default=12)
-    parser.add_argument("--train_batch_size", type=int, default=16)
-    parser.add_argument("--val_batch_size", type=int, default=16)
+    parser.add_argument("--train_batch_size", type=int, default=None)
+    parser.add_argument("--val_batch_size", type=int, default=None)
     parser.add_argument("--groups_to_use", type=str, nargs="+", default=[])
     parser.add_argument("--context_length", type=int, default=2048)
     parser.add_argument("--train_val_test_ratio", type=float, nargs=3, default=[0.9998, 0.0002, 0.00])
@@ -102,6 +103,18 @@ def get_parser():  # noqa: D103
         choices=["bshd", "thd"],
         help="Collate function to use for batching. If None, uses PyTorch's default collate.",
     )
+    parser.add_argument(
+        "--max_tokens_per_batch",
+        type=int,
+        default=None,
+        help=(
+            "Maximum total unpadded tokens per micro-batch (token-budget batching). "
+            "When set with --collate_fn thd, the number of samples per batch varies so "
+            "that the total token count stays within this budget, preventing OOM from "
+            "batches of long sequences. If not set, falls back to fixed sample-count "
+            "batching with --train_batch_size."
+        ),
+    )
 
     # Model arguments
     parser.add_argument(
@@ -113,6 +126,7 @@ def get_parser():  # noqa: D103
             "encodon_80m",
             "encodon_600m",
             "encodon_1b",
+            "encodon_5b",
             "encodon_10b",
         ],
     )
@@ -150,6 +164,7 @@ def get_parser():  # noqa: D103
         default=None,
         help="For evaluation, the directory to write predictions to.",
     )
+    parser.add_argument("--task_type", type=str, default=None, help="For evaluation, the task type to run.")
 
     # Finetune specific
     parser.add_argument(
@@ -229,10 +244,29 @@ def get_parser():  # noqa: D103
 
 
 def main():  # noqa: D103
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,
+    )
+
     parser = get_parser()
     args = parser.parse_args()
     if args.mode in ["eval"] and not args.checkpoint_path:
         parser.error(f"--checkpoint_path is required for mode '{args.mode}'")
+
+    if args.mode == "pretrain":
+        if args.checkpoint_path:
+            parser.error("--checkpoint_path is not used in pretrain mode")
+        if args.pretrained_ckpt_path:
+            parser.error("--pretrained_ckpt_path is not used in pretrain mode")
+    elif args.mode == "finetune":
+        if args.checkpoint_path:
+            parser.error("--checkpoint_path is not used in finetune mode; use --pretrained_ckpt_path instead")
+    elif args.mode == "eval":
+        if args.pretrained_ckpt_path:
+            parser.error("--pretrained_ckpt_path is not used in eval mode; use --checkpoint_path instead")
 
     # Validate data_path requirement based on dataset
     if args.dataset_name != "SimpleCodonDataset" and not args.data_path:
@@ -249,6 +283,14 @@ def main():  # noqa: D103
 
     if (args.attn_input_format == "thd" or args.collate_fn == "thd") and not args.use_transformer_engine:
         raise ValueError("THD format requires transformer engine")
+    if args.max_tokens_per_batch is not None and args.collate_fn != "thd":
+        parser.error("--max_tokens_per_batch requires --collate_fn thd")
+    if args.train_batch_size is not None and args.max_tokens_per_batch is not None:
+        parser.error("--train_batch_size and --max_tokens_per_batch are mutually exclusive")
+    if args.mode != "eval" and args.train_batch_size is None and args.max_tokens_per_batch is None:
+        parser.error("One of --train_batch_size or --max_tokens_per_batch is required")
+    if args.mode == "eval" and args.val_batch_size is None and args.max_tokens_per_batch is None:
+        parser.error("For eval mode, one of --val_batch_size or --max_tokens_per_batch is required")
     cfg = get_config(args)
 
     out_dir = args.out_dir
@@ -283,7 +325,7 @@ def main():  # noqa: D103
             raise ValueError("THD format is not supported for finetuning")
         ckpt_path = os.path.join(checkpoints_dir, "last.ckpt")
         cfg_dict["ckpt_path"] = ckpt_path
-        cfg_dict["pretrained_ckpt_path"] = args.checkpoint_path
+        cfg_dict["pretrained_ckpt_path"] = args.pretrained_ckpt_path
         cfg_dict["resume_trainer_state"] = args.resume_trainer_state
         task_fn = finetune
         task_kwargs = dict(  # noqa: C408
