@@ -27,10 +27,9 @@ from tqdm import tqdm
 sys.path.append("/workspace/codonfm")
 from src.tokenizer import Tokenizer
 
-def main(data_dir: Path):
-    data_path = data_dir / Path("processed_unfiltered")
+def main(pretraining_processed_data_dir: Path, data_dir: Path):
     tax_ids_to_remove = json.load(open(data_dir / Path("taxids_to_remove.json")))
-    metadata = json.load(open(data_path / "metadata.json"))
+    metadata = json.load(open(pretraining_processed_data_dir / "metadata.json"))
     tokenizer = Tokenizer()
 
     groups = set([x["file_name"][:-4] for x in metadata["file_metadata"]])  # noqa: C403
@@ -42,13 +41,13 @@ def main(data_dir: Path):
         else:
             curr_taxids_to_remove = set()
         mmap = np.memmap(
-            data_path / cm["sequences"]["path"],
+            pretraining_processed_data_dir / cm["sequences"]["path"],
             dtype=cm["sequences"]["dtype"],
             mode="r",
             shape=tuple(cm["sequences"]["shape"]),
         )
         idx_mmap = np.memmap(
-            data_path / cm["index"]["path"], dtype=cm["index"]["dtype"], mode="r", shape=tuple(cm["index"]["shape"])
+            pretraining_processed_data_dir / cm["index"]["path"], dtype=cm["index"]["dtype"], mode="r", shape=tuple(cm["index"]["shape"])
         )
         for start, end, taxid in idx_mmap:
             if taxid in curr_taxids_to_remove:
@@ -60,11 +59,12 @@ def main(data_dir: Path):
     # %%
     for g in counts:
         counts[g] = counts[g].tolist()
-    json.dump(counts, open("/data/ncbi/codon_counts_nopathogen.json", "w"))
+    json.dump(counts, open(data_dir / "codon_counts_nopathogen.json", "w"))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Check codon frequency")
+    parser.add_argument("--pretraining_processed_data_dir", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
     args = parser.parse_args()
-    main(Path(args.data_dir))
+    main(Path(args.pretraining_processed_data_dir), Path(args.data_dir))
