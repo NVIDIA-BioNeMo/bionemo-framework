@@ -25,6 +25,7 @@ import polars as pl
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
+
 sys.path.append("/workspace/codonfm")
 from src.tokenizer import Tokenizer
 

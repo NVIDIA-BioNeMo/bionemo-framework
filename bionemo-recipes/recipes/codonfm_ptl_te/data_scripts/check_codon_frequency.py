@@ -27,7 +27,9 @@ from tqdm import tqdm
 sys.path.append("/workspace/codonfm")
 from src.tokenizer import Tokenizer
 
+
 def main(pretraining_processed_data_dir: Path, data_dir: Path):
+    """Check codon frequency."""
     tax_ids_to_remove = json.load(open(data_dir / Path("taxids_to_remove.json")))
     metadata = json.load(open(pretraining_processed_data_dir / "metadata.json"))
     tokenizer = Tokenizer()
@@ -47,7 +49,10 @@ def main(pretraining_processed_data_dir: Path, data_dir: Path):
             shape=tuple(cm["sequences"]["shape"]),
         )
         idx_mmap = np.memmap(
-            pretraining_processed_data_dir / cm["index"]["path"], dtype=cm["index"]["dtype"], mode="r", shape=tuple(cm["index"]["shape"])
+            pretraining_processed_data_dir / cm["index"]["path"],
+            dtype=cm["index"]["dtype"],
+            mode="r",
+            shape=tuple(cm["index"]["shape"]),
         )
         for start, end, taxid in idx_mmap:
             if taxid in curr_taxids_to_remove:
