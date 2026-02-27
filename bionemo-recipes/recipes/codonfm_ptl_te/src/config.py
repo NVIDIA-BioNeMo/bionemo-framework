@@ -133,8 +133,8 @@ def get_callbacks_config(args: Any) -> Dict[str, fdl.Config]:
         ),
         "model_summary": fdl.Config(ModelSummary, max_depth=-1),
         "lr_monitor": fdl.Config(LearningRateMonitor, logging_interval="step", log_weight_decay=True),
-        "grad_norm_callback": fdl.Config(GradientNormLogger, log_every_n_steps=100),
-        "timer_callback": fdl.Config(StepTimingCallback, log_every_n_steps=100, mode="train"),
+        "grad_norm_callback": fdl.Config(GradientNormLogger, log_every_n_steps=args.log_every_n_steps),
+        "timer_callback": fdl.Config(StepTimingCallback, log_every_n_steps=args.log_every_n_steps, mode="train"),
     }
     if args.mode == "eval":
         callbacks["pred_writer"] = fdl.Config(
