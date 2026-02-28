@@ -151,6 +151,7 @@ def get_parser():  # noqa: D103
         default=None,
         help="For evaluation, the directory to write predictions to.",
     )
+    parser.add_argument("--task_type", type=str, default=None, help="For evaluation, the task type to run.")
 
     # Finetune specific
     parser.add_argument(
