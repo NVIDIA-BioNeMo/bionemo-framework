@@ -64,3 +64,8 @@ RUN chown -R ${USERNAME:-vscode}:${USERNAME:-vscode} /workspace/codonfm
 
 # Switch to the non-root user
 USER $USERNAME
+
+# ----------------- For benchmarking only -----------------
+FROM production AS benchmarking
+
+RUN pip install -v --no-build-isolation -U git+https://github.com/facebookresearch/xformers.git@v0.0.32.post2#egg=xformers --no-deps
