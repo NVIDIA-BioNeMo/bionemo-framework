@@ -68,4 +68,4 @@ USER $USERNAME
 # ----------------- For benchmarking only -----------------
 FROM production AS benchmarking
 
-RUN pip install -v --no-build-isolation -U git+https://github.com/facebookresearch/xformers.git@v0.0.32.post2#egg=xformers --no-deps
+RUN MAX_JOBS=4 pip install -v --no-build-isolation -U git+https://github.com/facebookresearch/xformers.git@v0.0.32.post2#egg=xformers --no-deps
