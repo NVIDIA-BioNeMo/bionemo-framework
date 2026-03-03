@@ -21,6 +21,8 @@ The table below summarizes the set of open source pre-trained weights currently 
 | EnCodon 600M       | MLM (random p=0.15)            | 2048        | 12     | 16    | 8192         | `mlm/encodon_600m.sh` | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-600M-v1)    | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-600M-v1)    |
 | EnCodon 1B         | MLM (random p=0.15)            | 2048        | 18     | 16    | 8192         | `mlm/encodon_1b.sh`   | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-1B-v1)      | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-1B-v1)      |
 | EnCodon 1B (CDSWT) | MLM (codon frequency-weighted) | 2048        | 18     | 16    | 8192         | `cdswt/encodon_1b.sh` | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-Cdwt-1B-v1) | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-Cdwt-1B-v1) |
+| EnCodon 5B         | MLM (codon p=0.15)             | 4096        | 24     | 32    | 16384        | `mlm/encodon_5b.sh`   | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-Cdwt-5B-v1) | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-Cdwt-5B-v1) |
+| EnCodon 5B (CDSWT) | MLM (codon frequency-weighted) | 4096        | 24     | 32    | 16384        | `cdswt/encodon_5b.sh` | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-Cdwt-5B-v1) | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-Cdwt-5B-v1) |
 
 ## Repository Structure
 
