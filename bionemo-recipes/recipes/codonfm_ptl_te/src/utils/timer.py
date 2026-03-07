@@ -21,9 +21,10 @@ from lightning.pytorch.callbacks import Callback
 
 
 class StepTimingCallback(Callback):  # noqa: D101
-    def __init__(self, log_every_n_steps: int = 100, mode: str = "train"):  # noqa: D107
+    def __init__(self, log_every_n_steps: int = 100, mode: str = "train", warmup_steps: int = 40):  # noqa: D107
         self.mode = mode
         self.log_every_n_steps = log_every_n_steps
+        self.warmup_steps = warmup_steps
         self.batch_times_wo_optimizer_step = []
         self.batch_times_with_optimizer_step = []
         self.step_start_time = None
@@ -40,7 +41,7 @@ class StepTimingCallback(Callback):  # noqa: D101
         if self.mode != "train":
             return
         """Record batch_level time from start batch to before optimizer step"""
-        if self.step_start_time is not None:
+        if self.step_start_time is not None and trainer.global_step >= self.warmup_steps:
             batch_time = time.perf_counter() - self.step_start_time
             self.batch_times_wo_optimizer_step.append(batch_time)
             if trainer.global_step % self.log_every_n_steps == 0:
@@ -59,7 +60,7 @@ class StepTimingCallback(Callback):  # noqa: D101
         if self.mode != "train":
             return
         """Log batch-level timing."""
-        if self.step_start_time is not None:
+        if self.step_start_time is not None and trainer.global_step >= self.warmup_steps:
             batch_time = time.perf_counter() - self.step_start_time
             self.batch_times_with_optimizer_step.append(batch_time)
 
