@@ -239,7 +239,7 @@ class EnCodonTE(nn.Module):
             if self.config.attn_input_format == "bshd":
                 te_rope_emb = self.rotary_embeddings(max_seq_len=hidden_states.shape[1])
             elif self.config.attn_input_format == "thd":
-                te_rope_emb = self.rotary_embeddings(max_seq_len=kwargs["cu_seq_lens_q"][-1])
+                te_rope_emb = self.rotary_embeddings(max_seq_len=kwargs["max_length_q"])
         te_rope_emb = te_rope_emb.to(hidden_states.device, non_blocking=True)
 
         for i, layer_module in enumerate(self.layers):
