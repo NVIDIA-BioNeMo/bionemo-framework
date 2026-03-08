@@ -65,6 +65,11 @@ class EnCodonTE(nn.Module):
         config.qkv_weight_interleaved = True
         config.self_attn_mask_type = "padding"
         config.rotary_pos_interleaved = False
+        if os.getenv("CODON_FM_TE_IMPL", "exact") == "exact":
+            print("BRUNO: Using exact implementation")
+        else:
+            print("BRUNO: Using TE implementation")
+
         self.layers = nn.ModuleList(
             [
                 (EncodonTELayer if os.getenv("CODON_FM_TE_IMPL", "exact") == "exact" else TETransformerLayer)(
