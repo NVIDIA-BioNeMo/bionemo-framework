@@ -72,6 +72,10 @@ USER $USERNAME
 #
 # Could have also been caused by CUDA-compatibility issues.
 
-FROM production AS benchmarking
+FROM base AS benchmarking
+
+WORKDIR /workspace/codonfm
 
 RUN pip install -v --no-build-isolation -U git+https://github.com/facebookresearch/xformers.git@v0.0.32.post2#egg=xformers --no-deps
+
+COPY . .
