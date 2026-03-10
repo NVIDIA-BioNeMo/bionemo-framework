@@ -74,6 +74,8 @@ class StepTimingCallback(Callback):  # noqa: D101
                     sync_dist=True,
                 )
 
+                self.batch_times_with_optimizer_step = []
+
     def on_predict_batch_start(self, trainer, pl_module, batch, batch_idx):  # noqa: D102
         if self.mode != "predict":
             return
