@@ -363,6 +363,8 @@ def get_trainer_config(args: Any) -> Dict[str, Any]:
         sync_batchnorm=False,
         accumulate_grad_batches=args.gradient_accumulation_steps,
     )
+    if getattr(args, "max_tokens_per_batch", None) is not None:
+        trainer_kwargs["use_distributed_sampler"] = False
     if args.check_val_every_n_epoch:
         trainer_kwargs["check_val_every_n_epoch"] = args.check_val_every_n_epoch
     else:
