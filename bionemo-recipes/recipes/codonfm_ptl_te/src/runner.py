@@ -102,6 +102,18 @@ def get_parser():  # noqa: D103
         choices=["bshd", "thd"],
         help="Collate function to use for batching. If None, uses PyTorch's default collate.",
     )
+    parser.add_argument(
+        "--max_tokens_per_batch",
+        type=int,
+        default=None,
+        help=(
+            "Maximum total unpadded tokens per micro-batch (token-budget batching). "
+            "When set with --collate_fn thd, the number of samples per batch varies so "
+            "that the total token count stays within this budget, preventing OOM from "
+            "batches of long sequences. If not set, falls back to fixed sample-count "
+            "batching with --train_batch_size."
+        ),
+    )
 
     # Model arguments
     parser.add_argument(
@@ -251,6 +263,8 @@ def main():  # noqa: D103
 
     if (args.attn_input_format == "thd" or args.collate_fn == "thd") and not args.use_transformer_engine:
         raise ValueError("THD format requires transformer engine")
+    if args.max_tokens_per_batch is not None and args.collate_fn != "thd":
+        parser.error("--max_tokens_per_batch requires --collate_fn thd")
     cfg = get_config(args)
 
     out_dir = args.out_dir

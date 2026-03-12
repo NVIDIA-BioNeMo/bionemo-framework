@@ -206,6 +206,7 @@ def get_data_config(args: Any) -> fdl.Config:
         persistent_workers=False,
         world_size=args.num_nodes * args.num_gpus,
         is_evaluation=args.mode == "eval",
+        max_tokens_per_batch=getattr(args, "max_tokens_per_batch", None),
     )
 
 

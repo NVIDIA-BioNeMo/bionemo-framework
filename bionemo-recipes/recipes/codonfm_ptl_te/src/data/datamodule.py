@@ -19,9 +19,10 @@ from typing import Any, Callable, Dict, Optional
 
 import lightning as L  # noqa: N812
 import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, SequentialSampler
 
 from .stateful_dataset import StatefulDataset
+from .token_packing_batch_sampler import TokenPackingBatchSampler
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class CodonFMDataModule(L.LightningDataModule):
         persistent_workers: bool = False,
         process_item: Callable = lambda *x: x,
         is_evaluation: bool = False,  # if True, whole dataset will be used for evaluation.
+        max_tokens_per_batch: Optional[int] = None,
     ):
         super().__init__()
 
@@ -88,6 +90,7 @@ class CodonFMDataModule(L.LightningDataModule):
 
         self.world_size = world_size
         self.train_iters = train_iters
+        self.max_tokens_per_batch = max_tokens_per_batch
 
         self.micro_batch_size = self.train_batch_size
         self.global_batch_size = self.train_batch_size * self.world_size * self.gradient_accumulation_steps
@@ -138,6 +141,9 @@ class CodonFMDataModule(L.LightningDataModule):
             shuffle=self.shuffle,
         )
 
+        if self.max_tokens_per_batch is not None:
+            return self._make_token_packed_dataloader(train_ds)
+
         sampler = None
         if dist.is_initialized():
             sampler = DistributedSampler(train_ds, shuffle=False, drop_last=True)
@@ -157,6 +163,32 @@ class CodonFMDataModule(L.LightningDataModule):
             pin_memory=self.pin_memory,
         )
         return dl
+
+    def _make_token_packed_dataloader(self, dataset) -> DataLoader:
+        """Build a DataLoader that uses token-budget batching via ``TokenPackingBatchSampler``."""
+        assert self.max_tokens_per_batch is not None
+        if dist.is_initialized():
+            sampler = DistributedSampler(dataset, shuffle=False, drop_last=True)
+        else:
+            sampler = SequentialSampler(dataset)
+
+        batch_sampler = TokenPackingBatchSampler(
+            sampler=sampler,
+            dataset=dataset,
+            max_tokens_per_batch=self.max_tokens_per_batch,
+            drop_last=True,
+        )
+
+        logger.info("Using token-packed batching with max_tokens_per_batch=%d", self.max_tokens_per_batch)
+
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
+            persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
+        )
 
     def val_dataloader(self) -> DataLoader:  # noqa: D102
         if self.is_evaluation:
