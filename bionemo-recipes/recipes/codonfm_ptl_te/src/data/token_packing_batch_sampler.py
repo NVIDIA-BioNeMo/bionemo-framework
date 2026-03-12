@@ -44,6 +44,7 @@ class TokenPackingBatchSampler:
         self.dataset = dataset
         self.max_tokens_per_batch = max_tokens_per_batch
         self.drop_last = drop_last
+        self.samples_yielded = 0
 
     def __iter__(self):  # noqa: D105
         batch: list[int] = []
@@ -61,11 +62,14 @@ class TokenPackingBatchSampler:
 
             if current_tokens + sample_length > self.max_tokens_per_batch:
                 if batch:
+                    self.samples_yielded += len(batch)
                     yield batch
                 batch = [idx]
                 current_tokens = sample_length
             elif current_tokens + sample_length == self.max_tokens_per_batch:
-                yield [*batch, idx]
+                complete_batch = [*batch, idx]
+                self.samples_yielded += len(complete_batch)
+                yield complete_batch
                 batch = []
                 current_tokens = 0
             else:
@@ -73,4 +77,5 @@ class TokenPackingBatchSampler:
                 current_tokens += sample_length
 
         if batch and not self.drop_last:
+            self.samples_yielded += len(batch)
             yield batch

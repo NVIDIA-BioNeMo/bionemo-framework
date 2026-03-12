@@ -18,6 +18,7 @@ import logging
 from typing import Any, Callable, Dict, Optional
 
 import lightning as L  # noqa: N812
+import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler, SequentialSampler
 
@@ -61,7 +62,7 @@ class CodonFMDataModule(L.LightningDataModule):
         train_iters: Optional[int] = None,
         collate_fn: Optional[Callable] = None,
         num_workers: int = 8,
-        train_batch_size: int = 32,
+        train_batch_size: Optional[int] = 32,
         val_batch_size: int = 32,
         gradient_accumulation_steps: int = 1,
         shuffle: bool = True,
@@ -72,6 +73,11 @@ class CodonFMDataModule(L.LightningDataModule):
         max_tokens_per_batch: Optional[int] = None,
     ):
         super().__init__()
+
+        if max_tokens_per_batch is not None and train_batch_size is not None:
+            raise ValueError("train_batch_size and max_tokens_per_batch are mutually exclusive.")
+        if max_tokens_per_batch is None and train_batch_size is None:
+            raise ValueError("Exactly one of train_batch_size or max_tokens_per_batch must be provided.")
 
         self.seed = seed
         self.init_consumed_samples = 0
@@ -92,8 +98,14 @@ class CodonFMDataModule(L.LightningDataModule):
         self.train_iters = train_iters
         self.max_tokens_per_batch = max_tokens_per_batch
 
-        self.micro_batch_size = self.train_batch_size
-        self.global_batch_size = self.train_batch_size * self.world_size * self.gradient_accumulation_steps
+        if train_batch_size is not None:
+            self.micro_batch_size = train_batch_size
+            self.global_batch_size = train_batch_size * self.world_size * self.gradient_accumulation_steps
+        else:
+            self.micro_batch_size = None
+            self.global_batch_size = None
+
+        self._batch_sampler: Optional[TokenPackingBatchSampler] = None
 
         self.collate_fn = collate_fn
         self.pin_memory = pin_memory
@@ -120,17 +132,28 @@ class CodonFMDataModule(L.LightningDataModule):
             )
         return dataset
 
+    def _compute_total_samples(self, dataset_len: int) -> int:
+        """Compute ``total_samples`` for the ``StatefulDataset`` wrapper."""
+        if not self.train_iters:
+            return dataset_len
+
+        if self.global_batch_size is not None:
+            # Fixed batch: exact total
+            return self.train_iters * self.global_batch_size
+
+        # THD packing: upper bound (assumes 1 token per sample worst case).
+        # Guarantees StatefulDataset wraps the dataset so training can cycle
+        # through data for all train_iters steps with epoch-aware shuffling.
+        assert self.max_tokens_per_batch is not None
+        return self.train_iters * self.max_tokens_per_batch * self.gradient_accumulation_steps * self.world_size
+
     def train_dataloader(self) -> DataLoader:  # noqa: D102
         if self.is_evaluation:
             # For evaluation mode, return test dataloader
             return self.test_dataloader()
 
         train_ds = self.dataset.get_train(self.hparams.process_item)
-
-        if self.train_iters:
-            train_samples = self.train_iters * self.global_batch_size
-        else:
-            train_samples = len(train_ds)
+        train_samples = self._compute_total_samples(len(train_ds))
 
         consumed_samples = self.calc_consumed_samples()
         train_ds = self.get_stateful_dataset(
@@ -172,7 +195,7 @@ class CodonFMDataModule(L.LightningDataModule):
         else:
             sampler = SequentialSampler(dataset)
 
-        batch_sampler = TokenPackingBatchSampler(
+        self._batch_sampler = TokenPackingBatchSampler(
             sampler=sampler,
             dataset=dataset,
             max_tokens_per_batch=self.max_tokens_per_batch,
@@ -183,7 +206,7 @@ class CodonFMDataModule(L.LightningDataModule):
 
         return DataLoader(
             dataset,
-            batch_sampler=batch_sampler,
+            batch_sampler=self._batch_sampler,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
             persistent_workers=self.persistent_workers,
@@ -234,7 +257,20 @@ class CodonFMDataModule(L.LightningDataModule):
         return self.test_dataloader()
 
     def calc_consumed_samples(self) -> int:
-        """Calculate consumed samples for resuming training/evaluation."""
+        """Calculate consumed samples for resuming training/evaluation.
+
+        For fixed-batch mode the count is derived from ``global_step * global_batch_size``.
+        For token-packing mode the count is the exact sum of samples yielded across all
+        ranks, obtained via ``dist.all_reduce``.
+        """
+        if self.max_tokens_per_batch is not None:
+            if self._batch_sampler is not None:
+                local_count = torch.tensor([self._batch_sampler.samples_yielded], dtype=torch.long, device="cuda")
+                if dist.is_initialized():
+                    dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+                return self.init_consumed_samples + int(local_count.item())
+            return self.init_consumed_samples
+
         consumed_samples = 0
         if hasattr(self, "trainer") and self.trainer is not None and self.train_iters is not None:
             # Training mode - use trainer global step
@@ -243,8 +279,7 @@ class CodonFMDataModule(L.LightningDataModule):
                 (self.trainer.global_step - self.init_global_step) * self.global_batch_size, total_samples
             )
 
-        consumed_samples = self.init_consumed_samples + consumed_samples
-        return consumed_samples
+        return self.init_consumed_samples + consumed_samples
 
     def state_dict(self) -> Dict[Any, Any]:
         """Called when saving a checkpoint.
