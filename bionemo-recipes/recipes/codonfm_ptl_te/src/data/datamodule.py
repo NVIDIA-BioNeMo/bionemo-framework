@@ -76,7 +76,7 @@ class CodonFMDataModule(L.LightningDataModule):
 
         if max_tokens_per_batch is not None and train_batch_size is not None:
             raise ValueError("train_batch_size and max_tokens_per_batch are mutually exclusive.")
-        if max_tokens_per_batch is None and train_batch_size is None:
+        if not is_evaluation and max_tokens_per_batch is None and train_batch_size is None:
             raise ValueError("Exactly one of train_batch_size or max_tokens_per_batch must be provided.")
 
         self.seed = seed
@@ -98,7 +98,10 @@ class CodonFMDataModule(L.LightningDataModule):
         self.train_iters = train_iters
         self.max_tokens_per_batch = max_tokens_per_batch
 
-        if train_batch_size is not None:
+        if is_evaluation:
+            self.micro_batch_size = val_batch_size
+            self.global_batch_size = val_batch_size * self.world_size
+        elif train_batch_size is not None:
             self.micro_batch_size = train_batch_size
             self.global_batch_size = train_batch_size * self.world_size * self.gradient_accumulation_steps
         else:

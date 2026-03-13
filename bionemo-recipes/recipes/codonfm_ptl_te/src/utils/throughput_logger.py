@@ -50,6 +50,7 @@ class ThroughputLogger(Callback):
         self._val_tokens_per_second: list[float] = []
         self._predict_step_start_time: float | None = None
         self._predict_tokens_per_second: list[float] = []
+        self._predict_epoch_tokens_per_second: list[float] = []
 
     def _count_unpadded_tokens(self, batch) -> int:
         """Return the number of unpadded tokens in a batch."""
@@ -124,18 +125,24 @@ class ThroughputLogger(Callback):
             return
 
         step_time = time.perf_counter() - self._predict_step_start_time
-        self._predict_tokens_per_second.append(self._count_unpadded_tokens(batch) / step_time)
+        tps = self._count_unpadded_tokens(batch) / step_time
+        self._predict_tokens_per_second.append(tps)
+        self._predict_epoch_tokens_per_second.append(tps)
 
         if batch_idx % self.log_every_n_steps == 0 and self._predict_tokens_per_second:
             mean_tps = np.mean(self._predict_tokens_per_second)
-            log.info("predict batch %d — unpadded tokens/s/GPU: %.1f", batch_idx, mean_tps)
+            if trainer.is_global_zero:
+                log.info("predict batch %d — unpadded tokens/s/GPU: %.1f", batch_idx, mean_tps)
             self._predict_tokens_per_second = []
 
     def on_predict_epoch_end(self, trainer, pl_module):
-        """Log remaining aggregated prediction throughput at the end of the predict epoch."""
-        if not self._predict_tokens_per_second:
+        """Log aggregated prediction throughput across the full epoch."""
+        if not self._predict_epoch_tokens_per_second:
             return
 
-        mean_tps = np.mean(self._predict_tokens_per_second)
-        log.info("predict epoch end — unpadded tokens/s/GPU: %.1f", mean_tps)
+        mean_tps = np.mean(self._predict_epoch_tokens_per_second)
+        n_batches = len(self._predict_epoch_tokens_per_second)
+        if trainer.is_global_zero:
+            log.info("predict epoch end — unpadded tokens/s/GPU: %.1f (over %d batches)", mean_tps, n_batches)
+        self._predict_epoch_tokens_per_second = []
         self._predict_tokens_per_second = []

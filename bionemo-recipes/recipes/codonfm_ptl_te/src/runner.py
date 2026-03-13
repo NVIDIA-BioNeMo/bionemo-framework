@@ -17,6 +17,7 @@
 import argparse
 import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 
@@ -243,6 +244,13 @@ def get_parser():  # noqa: D103
 
 
 def main():  # noqa: D103
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,
+    )
+
     parser = get_parser()
     args = parser.parse_args()
     if args.mode in ["eval"] and not args.checkpoint_path:
@@ -267,7 +275,7 @@ def main():  # noqa: D103
         parser.error("--max_tokens_per_batch requires --collate_fn thd")
     if args.train_batch_size is not None and args.max_tokens_per_batch is not None:
         parser.error("--train_batch_size and --max_tokens_per_batch are mutually exclusive")
-    if args.train_batch_size is None and args.max_tokens_per_batch is None:
+    if args.mode != "eval" and args.train_batch_size is None and args.max_tokens_per_batch is None:
         parser.error("One of --train_batch_size or --max_tokens_per_batch is required")
     cfg = get_config(args)
 
