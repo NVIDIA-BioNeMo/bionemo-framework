@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Optional
 import lightning as L  # noqa: N812
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler, SequentialSampler
+from torch.utils.data import DataLoader, DistributedSampler, RandomSampler, SequentialSampler
 
 from .stateful_dataset import StatefulDataset
 from .token_packing_batch_sampler import TokenPackingBatchSampler
@@ -147,16 +147,33 @@ class CodonFMDataModule(L.LightningDataModule):
         assert self.max_tokens_per_batch is not None
         return self.train_iters * self.max_tokens_per_batch * self.gradient_accumulation_steps * self.world_size
 
+    @property
+    def _common_dl_kwargs(self) -> dict:
+        """Kwargs shared by every DataLoader in this module."""
+        return {
+            "num_workers": self.num_workers,
+            "collate_fn": self.collate_fn,
+            "persistent_workers": self.persistent_workers,
+            "pin_memory": self.pin_memory,
+        }
+
     def train_dataloader(self) -> DataLoader:  # noqa: D102
         if self.is_evaluation:
             # For evaluation mode, return test dataloader
             return self.test_dataloader()
 
+        train_ds = self._prepare_train_dataset()
+
+        if self.max_tokens_per_batch is not None:
+            return self._make_token_packed_dataloader(train_ds)
+        return self._make_fixed_batch_dataloader(train_ds)
+
+    def _prepare_train_dataset(self):
+        """Load the training split and wrap it with ``StatefulDataset`` when needed."""
         train_ds = self.dataset.get_train(self.hparams.process_item)
         train_samples = self._compute_total_samples(len(train_ds))
-
         consumed_samples = self.calc_consumed_samples()
-        train_ds = self.get_stateful_dataset(
+        return self.get_stateful_dataset(
             train_ds,
             total_samples=train_samples,
             consumed_samples=consumed_samples,
@@ -164,36 +181,30 @@ class CodonFMDataModule(L.LightningDataModule):
             shuffle=self.shuffle,
         )
 
-        if self.max_tokens_per_batch is not None:
-            return self._make_token_packed_dataloader(train_ds)
+    def _make_fixed_batch_dataloader(self, dataset) -> DataLoader:
+        """Build a DataLoader with a fixed per-device batch size."""
+        sampler = DistributedSampler(dataset, shuffle=False, drop_last=True) if dist.is_initialized() else None
 
-        sampler = None
-        if dist.is_initialized():
-            sampler = DistributedSampler(train_ds, shuffle=False, drop_last=True)
+        dataloader_shuffle = self.shuffle and sampler is None and not isinstance(dataset, StatefulDataset)
 
-        # Ensure that the dataloader is not shuffled if StatefulDataset is used.
-        dataloader_shuffle = self.shuffle and sampler is None and not isinstance(train_ds, StatefulDataset)
-
-        dl = DataLoader(
-            train_ds,
+        return DataLoader(
+            dataset,
             shuffle=dataloader_shuffle,
             sampler=sampler,
-            num_workers=self.num_workers,
             batch_size=self.train_batch_size,
-            collate_fn=self.collate_fn,
-            persistent_workers=self.persistent_workers,
             drop_last=True,
-            pin_memory=self.pin_memory,
+            **self._common_dl_kwargs,
         )
-        return dl
 
     def _make_token_packed_dataloader(self, dataset) -> DataLoader:
         """Build a DataLoader that uses token-budget batching via ``TokenPackingBatchSampler``."""
         assert self.max_tokens_per_batch is not None
+        shuffle = self.shuffle and not isinstance(dataset, StatefulDataset)
+
         if dist.is_initialized():
-            sampler = DistributedSampler(dataset, shuffle=False, drop_last=True)
+            sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=True)
         else:
-            sampler = SequentialSampler(dataset)
+            sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
 
         self._batch_sampler = TokenPackingBatchSampler(
             sampler=sampler,
@@ -204,53 +215,28 @@ class CodonFMDataModule(L.LightningDataModule):
 
         logger.info("Using token-packed batching with max_tokens_per_batch=%d", self.max_tokens_per_batch)
 
-        return DataLoader(
-            dataset,
-            batch_sampler=self._batch_sampler,
-            num_workers=self.num_workers,
-            collate_fn=self.collate_fn,
-            persistent_workers=self.persistent_workers,
-            pin_memory=self.pin_memory,
-        )
+        return DataLoader(dataset, batch_sampler=self._batch_sampler, **self._common_dl_kwargs)
 
     def val_dataloader(self) -> DataLoader:  # noqa: D102
         if self.is_evaluation:
             return self.test_dataloader()
         val_ds = self.dataset.get_validation(self.hparams.process_item)
-        sampler = None
-        if dist.is_initialized():
-            sampler = DistributedSampler(val_ds)
-
-        dl = DataLoader(
-            val_ds,
-            shuffle=False,
-            sampler=sampler,
-            num_workers=self.num_workers,
-            batch_size=self.val_batch_size,
-            collate_fn=self.collate_fn,
-            persistent_workers=self.persistent_workers,
-            pin_memory=self.pin_memory,
+        sampler = DistributedSampler(val_ds) if dist.is_initialized() else None
+        return DataLoader(
+            val_ds, shuffle=False, sampler=sampler, batch_size=self.val_batch_size, **self._common_dl_kwargs
         )
-        return dl
 
     def test_dataloader(self) -> DataLoader:  # noqa: D102
         test_ds = self.dataset.get_test(self.hparams.process_item)
-        sampler = None
-        if dist.is_initialized():
-            sampler = DistributedSampler(test_ds, shuffle=False)
-
-        dl = DataLoader(
+        sampler = DistributedSampler(test_ds, shuffle=False) if dist.is_initialized() else None
+        return DataLoader(
             test_ds,
             shuffle=False,
             sampler=sampler,
-            num_workers=self.num_workers,
             batch_size=self.val_batch_size,
-            collate_fn=self.collate_fn,
-            persistent_workers=self.persistent_workers,
-            pin_memory=self.pin_memory,
             drop_last=False,
+            **self._common_dl_kwargs,
         )
-        return dl
 
     def predict_dataloader(self) -> DataLoader:
         """Return test dataloader for prediction."""
