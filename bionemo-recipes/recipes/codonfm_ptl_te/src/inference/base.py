@@ -44,7 +44,7 @@ class BaseInference(LightningModule, ABC):
         self.attn_input_format = attn_input_format
         self.model = None
         self.prediction_counter = 0  # Initialize prediction counter
-        self.save_hyperparameters()
+        self.save_hyperparameters(logger=False)
 
     @abstractmethod
     def configure_model(self):

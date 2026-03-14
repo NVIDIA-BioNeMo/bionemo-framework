@@ -36,6 +36,7 @@ from src.inference.task_types import TaskTypes
 from src.models.encodon_pl import EncodonPL
 from src.models.encodon_te_pl import EncodonTEPL
 from src.tokenizer import Tokenizer
+from src.utils.load_checkpoint import resolve_model_path
 
 
 class EncodonInference(BaseInference):
@@ -50,8 +51,8 @@ class EncodonInference(BaseInference):
         state_dict = None
         hparams = None
 
-        # Check if model_path is a safetensors directory or a .ckpt file
-        model_path = Path(self.model_path)
+        # Resolve model_path: local file/dir pass through, Hub repo IDs are downloaded.
+        model_path = Path(resolve_model_path(self.model_path))
 
         if model_path.is_dir():
             # Load from safetensors format

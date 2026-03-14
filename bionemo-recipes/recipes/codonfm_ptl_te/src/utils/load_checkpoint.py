@@ -18,11 +18,35 @@ import json
 from pathlib import Path
 
 import torch
+from huggingface_hub import snapshot_download
 from safetensors.torch import load_file
 
 
+def resolve_model_path(path: str) -> str:
+    """Resolve a model path that may be a local path or a HuggingFace Hub repo ID.
+
+    If ``path`` points to an existing local file or directory it is returned
+    unchanged.  Otherwise it is treated as a HuggingFace Hub repo ID and
+    downloaded via ``snapshot_download``, returning the local cache directory.
+    """
+    p = Path(path)
+    if p.exists():
+        return str(p)
+    try:
+        return snapshot_download(
+            repo_id=path,
+            allow_patterns=["*.safetensors", "*.json"],
+        )
+    except Exception as e:
+        raise FileNotFoundError(
+            f"'{path}' was not found as a local file or directory, and could not "
+            f"be resolved as a HuggingFace Hub repo ID: {e}"
+        ) from e
+
+
 def load_checkpoint(checkpoint_path: str, map_location: str = "cpu"):
-    """Load checkpoint from either PyTorch .ckpt file or safetensors directory."""
+    """Load checkpoint from a PyTorch .ckpt file, safetensors directory, or HuggingFace Hub repo ID."""
+    checkpoint_path = resolve_model_path(checkpoint_path)
     if Path(checkpoint_path).is_dir():
         safetensors_files = list(Path(checkpoint_path).glob("*.safetensors"))
 
@@ -37,22 +61,3 @@ def load_checkpoint(checkpoint_path: str, map_location: str = "cpu"):
         return {"state_dict": state_dict, "hyper_parameters": hparams}
     else:
         return torch.load(checkpoint_path, map_location=map_location, weights_only=True)
-
-
-def download_checkpoint(repo_id: str, local_dir: str = None) -> str:  # noqa: RUF013
-    """Download checkpoint from huggingface hub.
-
-    Args:
-        repo_id: HuggingFace Hub repository ID (e.g., 'username/model-name')
-        local_dir: Local directory to download the checkpoint to
-
-    Returns:
-        str: Local path to the downloaded checkpoint
-    """
-    # check that huggingface_hub is installed
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError:
-        raise ImportError("huggingface_hub is not installed. Please install it with `pip install huggingface_hub`")
-
-    return snapshot_download(repo_id=repo_id, cache_dir=None, local_dir=local_dir, resume_download=True)
