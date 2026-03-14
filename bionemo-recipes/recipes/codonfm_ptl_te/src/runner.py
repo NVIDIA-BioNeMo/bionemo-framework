@@ -90,7 +90,7 @@ def get_parser():  # noqa: D103
     )
     parser.add_argument("--num_workers", type=int, default=12)
     parser.add_argument("--train_batch_size", type=int, default=None)
-    parser.add_argument("--val_batch_size", type=int, default=16)
+    parser.add_argument("--val_batch_size", type=int, default=None)
     parser.add_argument("--groups_to_use", type=str, nargs="+", default=[])
     parser.add_argument("--context_length", type=int, default=2048)
     parser.add_argument("--train_val_test_ratio", type=float, nargs=3, default=[0.9998, 0.0002, 0.00])
@@ -277,6 +277,8 @@ def main():  # noqa: D103
         parser.error("--train_batch_size and --max_tokens_per_batch are mutually exclusive")
     if args.mode != "eval" and args.train_batch_size is None and args.max_tokens_per_batch is None:
         parser.error("One of --train_batch_size or --max_tokens_per_batch is required")
+    if args.mode == "eval" and args.val_batch_size is None and args.max_tokens_per_batch is None:
+        parser.error("For eval mode, one of --val_batch_size or --max_tokens_per_batch is required")
     cfg = get_config(args)
 
     out_dir = args.out_dir

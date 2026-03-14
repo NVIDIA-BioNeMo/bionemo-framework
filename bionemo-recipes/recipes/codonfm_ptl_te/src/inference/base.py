@@ -30,11 +30,18 @@ class BaseInference(LightningModule, ABC):
         use_transformer_engine: Whether to use Transformer Engine.
     """  # noqa: D205
 
-    def __init__(self, model_path: str, task_type: str, use_transformer_engine: bool = False):  # noqa: D107
+    def __init__(  # noqa: D107
+        self,
+        model_path: str,
+        task_type: str,
+        use_transformer_engine: bool = False,
+        attn_input_format: str = "bshd",
+    ):
         super().__init__()
         self.task_type = task_type
         self.model_path = model_path
         self.use_transformer_engine = use_transformer_engine
+        self.attn_input_format = attn_input_format
         self.model = None
         self.prediction_counter = 0  # Initialize prediction counter
         self.save_hyperparameters()

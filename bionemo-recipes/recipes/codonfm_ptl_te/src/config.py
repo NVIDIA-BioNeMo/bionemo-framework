@@ -327,6 +327,7 @@ def get_model_config(args: Any) -> fdl.Config:
             model_path=args.checkpoint_path,
             task_type=args.task_type,
             use_transformer_engine=args.use_transformer_engine,
+            attn_input_format=args.attn_input_format,
         )
     else:
         raise ValueError(f"Unknown mode: {args.mode}")

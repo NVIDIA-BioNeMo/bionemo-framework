@@ -96,6 +96,8 @@ class EncodonInference(BaseInference):
         hparams["optimizer"] = dummy_optimizer
         hparams["scheduler"] = None
 
+        hparams["attn_input_format"] = self.attn_input_format
+
         self.model = EncodonTEPL(**hparams) if self.use_transformer_engine else EncodonPL(**hparams)
         self.model.configure_model(state_dict=state_dict)
         self.model.to(self.device)
@@ -169,7 +171,12 @@ class EncodonInference(BaseInference):
             embeddings = output.all_hidden_states[-1]
             if embeddings.dtype != torch.float:
                 embeddings = embeddings.float()
-            embeddings = embeddings[:, 0, :]  # [CLS] token
+            if self.attn_input_format == "thd":
+                cu_seq_lens = batch[MetadataFields.CU_SEQ_LENS_Q]
+                cls_indices = cu_seq_lens[:-1].long()
+                embeddings = embeddings[cls_indices]
+            else:
+                embeddings = embeddings[:, 0, :]  # [CLS] token
             embeddings = embeddings.cpu().numpy()
         return EmbeddingOutput(embeddings=embeddings, ids=ids)
 

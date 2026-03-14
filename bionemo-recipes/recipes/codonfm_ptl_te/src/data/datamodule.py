@@ -63,7 +63,7 @@ class CodonFMDataModule(L.LightningDataModule):
         collate_fn: Optional[Callable] = None,
         num_workers: int = 8,
         train_batch_size: Optional[int] = 32,
-        val_batch_size: int = 32,
+        val_batch_size: Optional[int] = 32,
         gradient_accumulation_steps: int = 1,
         shuffle: bool = True,
         pin_memory: bool = False,
@@ -78,6 +78,8 @@ class CodonFMDataModule(L.LightningDataModule):
             raise ValueError("train_batch_size and max_tokens_per_batch are mutually exclusive.")
         if not is_evaluation and max_tokens_per_batch is None and train_batch_size is None:
             raise ValueError("Exactly one of train_batch_size or max_tokens_per_batch must be provided.")
+        if val_batch_size is None and max_tokens_per_batch is None:
+            raise ValueError("One of val_batch_size or max_tokens_per_batch must be provided.")
 
         self.seed = seed
         self.init_consumed_samples = 0
@@ -99,8 +101,12 @@ class CodonFMDataModule(L.LightningDataModule):
         self.max_tokens_per_batch = max_tokens_per_batch
 
         if is_evaluation:
-            self.micro_batch_size = val_batch_size
-            self.global_batch_size = val_batch_size * self.world_size
+            if val_batch_size is not None:
+                self.micro_batch_size = val_batch_size
+                self.global_batch_size = val_batch_size * self.world_size
+            else:
+                self.micro_batch_size = None
+                self.global_batch_size = None
         elif train_batch_size is not None:
             self.micro_batch_size = train_batch_size
             self.global_batch_size = train_batch_size * self.world_size * self.gradient_accumulation_steps
@@ -220,26 +226,45 @@ class CodonFMDataModule(L.LightningDataModule):
 
         return DataLoader(dataset, batch_sampler=self._batch_sampler, **self._common_dl_kwargs)
 
+    def _make_token_packed_eval_dataloader(self, dataset) -> DataLoader:
+        """Build a token-packed DataLoader for validation / test / prediction."""
+        assert self.max_tokens_per_batch is not None
+        if dist.is_initialized():
+            sampler = DistributedSampler(dataset, shuffle=False, drop_last=False)
+        else:
+            sampler = SequentialSampler(dataset)
+        batch_sampler = TokenPackingBatchSampler(
+            sampler=sampler,
+            dataset=dataset,
+            max_tokens_per_batch=self.max_tokens_per_batch,
+            drop_last=False,
+        )
+        return DataLoader(dataset, batch_sampler=batch_sampler, **self._common_dl_kwargs)
+
     def val_dataloader(self) -> DataLoader:  # noqa: D102
         if self.is_evaluation:
             return self.test_dataloader()
         val_ds = self.dataset.get_validation(self.hparams.process_item)
-        sampler = DistributedSampler(val_ds) if dist.is_initialized() else None
-        return DataLoader(
-            val_ds, shuffle=False, sampler=sampler, batch_size=self.val_batch_size, **self._common_dl_kwargs
-        )
+        if self.val_batch_size is not None:
+            sampler = DistributedSampler(val_ds) if dist.is_initialized() else None
+            return DataLoader(
+                val_ds, shuffle=False, sampler=sampler, batch_size=self.val_batch_size, **self._common_dl_kwargs
+            )
+        return self._make_token_packed_eval_dataloader(val_ds)
 
     def test_dataloader(self) -> DataLoader:  # noqa: D102
         test_ds = self.dataset.get_test(self.hparams.process_item)
-        sampler = DistributedSampler(test_ds, shuffle=False) if dist.is_initialized() else None
-        return DataLoader(
-            test_ds,
-            shuffle=False,
-            sampler=sampler,
-            batch_size=self.val_batch_size,
-            drop_last=False,
-            **self._common_dl_kwargs,
-        )
+        if self.val_batch_size is not None:
+            sampler = DistributedSampler(test_ds, shuffle=False) if dist.is_initialized() else None
+            return DataLoader(
+                test_ds,
+                shuffle=False,
+                sampler=sampler,
+                batch_size=self.val_batch_size,
+                drop_last=False,
+                **self._common_dl_kwargs,
+            )
+        return self._make_token_packed_eval_dataloader(test_ds)
 
     def predict_dataloader(self) -> DataLoader:
         """Return test dataloader for prediction."""
@@ -261,8 +286,12 @@ class CodonFMDataModule(L.LightningDataModule):
             return self.init_consumed_samples
 
         consumed_samples = 0
-        if hasattr(self, "trainer") and self.trainer is not None and self.train_iters is not None:
-            # Training mode - use trainer global step
+        if (
+            hasattr(self, "trainer")
+            and self.trainer is not None
+            and self.train_iters is not None
+            and self.global_batch_size is not None
+        ):
             total_samples = self.train_iters * self.global_batch_size
             consumed_samples = min(
                 (self.trainer.global_step - self.init_global_step) * self.global_batch_size, total_samples
