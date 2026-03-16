@@ -187,8 +187,10 @@ Optional path overrides:
 ```bash
   --out_dir <dir>
   --checkpoints_dir <dir>
-  --pretrained_ckpt_path <path>
 ```
+
+- `--out_dir`: Base output directory for logs, metrics, and other artifacts. Defaults to `results/`.
+- `--checkpoints_dir`: Directory where training checkpoints are saved. Defaults to `<out_dir>/checkpoints/`. This directory also enables **automatic resumption**: if the runner finds a `last.ckpt` file inside this directory, it will reload the model weights and full trainer state (optimizer, learning-rate schedule, global step, etc.) so training picks up exactly where it left off. This is essential for long pretraining runs on clusters where jobs may be preempted or interrupted. On a fresh run the directory will be empty, so training starts from scratch as expected.
 
 For multi-node execution consider using `torchrun`.
 
@@ -256,6 +258,10 @@ python -m src.runner finetune \
     [--use_transformer_engine]
 
 ```
+
+- `--pretrained_ckpt_path`: Path to a pretrained checkpoint whose **model weights only** are loaded as the starting point for finetuning. The optimizer state, learning-rate schedule, and global step are not restored — training starts fresh from step 0 with the pretrained weights. Accepts a local `.ckpt` file, a local directory containing a `.safetensors` file and `config.json`, or a HuggingFace Hub repo ID (e.g. `nvidia/codon-fm-base`).
+- `--checkpoints_dir`: Directory where finetuning checkpoints are saved. Defaults to `<out_dir>/checkpoints/`. If the runner finds a `last.ckpt` here, it resumes the finetuning run (model weights, optimizer, step count) from that checkpoint instead of starting from the pretrained weights. This enables automatic resumption of interrupted finetuning jobs.
+- `--resume_trainer_state`: When set, restores the full trainer state (optimizer, scheduler, step count) from the pretrained checkpoint rather than only loading model weights. Useful when continuing a pretraining run as a finetuning job.
 
 #### Evaluation
 

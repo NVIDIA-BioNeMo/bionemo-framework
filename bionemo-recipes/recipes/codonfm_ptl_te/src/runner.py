@@ -64,7 +64,7 @@ def get_parser():  # noqa: D103
         "--pretrained_ckpt_path",
         type=str,
         default=None,
-        help="Path to pretrained checkpoint. Defaults to --checkpoint_path if set.",
+        help="The path to the pre-trained model checkpoint to start fine-tuning from.",
     )
 
     # Data arguments
@@ -256,6 +256,18 @@ def main():  # noqa: D103
     if args.mode in ["eval"] and not args.checkpoint_path:
         parser.error(f"--checkpoint_path is required for mode '{args.mode}'")
 
+    if args.mode == "pretrain":
+        if args.checkpoint_path:
+            parser.error("--checkpoint_path is not used in pretrain mode")
+        if args.pretrained_ckpt_path:
+            parser.error("--pretrained_ckpt_path is not used in pretrain mode")
+    elif args.mode == "finetune":
+        if args.checkpoint_path:
+            parser.error("--checkpoint_path is not used in finetune mode; use --pretrained_ckpt_path instead")
+    elif args.mode == "eval":
+        if args.pretrained_ckpt_path:
+            parser.error("--pretrained_ckpt_path is not used in eval mode; use --checkpoint_path instead")
+
     # Validate data_path requirement based on dataset
     if args.dataset_name != "SimpleCodonDataset" and not args.data_path:
         parser.error(f"--data_path is required for dataset '{args.dataset_name}'")
@@ -313,7 +325,7 @@ def main():  # noqa: D103
             raise ValueError("THD format is not supported for finetuning")
         ckpt_path = os.path.join(checkpoints_dir, "last.ckpt")
         cfg_dict["ckpt_path"] = ckpt_path
-        cfg_dict["pretrained_ckpt_path"] = args.checkpoint_path
+        cfg_dict["pretrained_ckpt_path"] = args.pretrained_ckpt_path
         cfg_dict["resume_trainer_state"] = args.resume_trainer_state
         task_fn = finetune
         task_kwargs = dict(  # noqa: C408
