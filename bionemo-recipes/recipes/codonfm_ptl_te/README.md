@@ -77,12 +77,29 @@ We also present the ability to utilize a simpler model architecture that directl
 
 <br>
 
-The training step speedups for the 80M Encodon model when both Transformer Engine (TE) and Sequence Packing (THD) are applied compared to the Xformers based model are shown below. We benchmarked on NVIDIA H100 80GB HBM3 GPUs using a micro batch-size is 32. The training step speedups for the 1B Encodon model are on a micro batch-size of 4.
+The figure below shows training throughput speedups, derived from `tokens/s/gpu`, for the `80M` and `1B` Encodon models when Transformer Engine (TE) and sequence packing (THD) are applied relative to the Xformers-based baseline.
 
 ![xf](assets/images/training_acceleration_plot.png)
 
-For inferencing, we can also demonstrate acceleration when using each models TE counterpart. Thus, a 1.4X speedup in this chart shows how much faster the TE version of the model is over the original baseline PyTorch SDPA model.
-![i](assets/images/inference_plot.png)
+All training experiments reported here were run on `8 x NVIDIA H100 80GB HBM3` GPUs in `bfloat16` precision. The absolute throughputs used to compute the speedups above are reported below in `tokens/s/gpu`.
+
+| Model | Xformers (`tokens/s/gpu`) | SDPA (`tokens/s/gpu`) | TE-BSHD (`tokens/s/gpu`) | TE-THD (`tokens/s/gpu`) | Speedup over baseline         |
+| ----- | ------------------------: | --------------------: | -----------------------: | ----------------------: | ----------------------------- |
+| 80M   |                    117119 |                145357 |                   419087 |                 1028891 | 1.00x / 1.24x / 3.58x / 9.79x |
+| 1B    |                      8698 |                  9899 |                    26476 |                   69300 | 1.00x / 1.14x / 3.04x / 7.97x |
+| 5B    |                      2320 |                  2865 |                     5112 |                   13973 | 1.00x / 1.23x / 2.20x / 6.02x |
+
+For inference, we report both relative speedup and absolute throughput. The figure below compares inference configurations by relative speedup within each model size.
+
+![Inference speedup across model sizes](assets/images/inference_plot.png)
+
+All inference experiments reported here were run on `8 x NVIDIA H100 80GB HBM3` GPUs in `bfloat16` precision. The absolute throughputs used to compute the speedups above are reported below in `tokens/s/gpu`.
+
+| Model | Xformers (`tokens/s/gpu`) | SDPA (`tokens/s/gpu`) | TE-BSHD (`tokens/s/gpu`) | TE-THD (`tokens/s/gpu`) | Speedup over baseline          |
+| ----- | ------------------------: | --------------------: | -----------------------: | ----------------------: | ------------------------------ |
+| 80M   |                    156819 |                190380 |                   542147 |                 1875140 | 1.00x / 1.21x / 3.46x / 11.96x |
+| 1B    |                     18655 |                 21715 |                    46551 |                  221110 | 1.00x / 1.16x / 2.50x / 11.85x |
+| 5B    |                      5316 |                  5991 |                     9996 |                   40373 | 1.00x / 1.13x / 1.88x / 7.59x  |
 
 ## Quickstart
 
