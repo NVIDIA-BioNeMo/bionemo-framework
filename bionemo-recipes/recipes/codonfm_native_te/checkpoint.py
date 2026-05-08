@@ -221,3 +221,91 @@ def save_final_model_fsdp2(
     save_file(model_state_dict, os.path.join(save_directory, "model.safetensors"))
     config.to_json_file(os.path.join(save_directory, "config.json"))
     logger.info(f"Saved final FSDP2 model to {save_directory}")
+
+
+# ============================================================================
+# DDP Checkpointing
+# ============================================================================
+
+
+def load_checkpoint_ddp(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    ckpt_path: str | os.PathLike,
+    dist_config: DistributedConfig,
+) -> CheckpointOutput:
+    """Load DDP checkpoint."""
+    checkpoint_path, _ = get_latest_checkpoint(ckpt_path)
+    if not checkpoint_path:
+        logger.info("No DDP checkpoint found, starting from scratch")
+        return CheckpointOutput(model, optimizer, scheduler, 0, 0)
+
+    checkpoint = torch.load(
+        checkpoint_path / "checkpoint.pt",
+        map_location=f"cuda:{dist_config.local_rank}",
+        weights_only=True,
+    )
+
+    model.load_state_dict(checkpoint["model"], strict=False)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
+
+    if dist_config.is_main_process():
+        logger.info(f"Loaded DDP checkpoint from step {checkpoint['step']}")
+
+    # Increment the step by one to avoid re-running the previous step.
+    return CheckpointOutput(model, optimizer, scheduler, checkpoint["step"] + 1, checkpoint["epoch"])
+
+
+def save_checkpoint_ddp(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    ckpt_path: str | os.PathLike,
+    step: int,
+    epoch: int,
+    dist_config: DistributedConfig,
+    max_checkpoints: int | None = None,
+) -> None:
+    """Save DDP checkpoint (rank-0 only since the model is replicated)."""
+    if not dist_config.is_main_process():
+        return
+
+    ckpt_path = Path(ckpt_path)
+    checkpoint_path = ckpt_path / f"step_{step}"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "step": step,
+            "epoch": epoch,
+        },
+        checkpoint_path / "checkpoint.pt",
+    )
+    logger.info(f"Saved DDP checkpoint to {checkpoint_path}")
+
+    if max_checkpoints is not None:
+        prune_checkpoints(ckpt_path, max_checkpoints)
+
+
+def save_final_model_ddp(
+    model: torch.nn.Module,
+    config,
+    save_directory: str | os.PathLike,
+    dist_config: DistributedConfig,
+) -> None:
+    """Save final model for DDP - only on main process."""
+    if not dist_config.is_main_process():
+        return
+
+    # Unwrap DDP if wrapped.
+    underlying_model = model.module if hasattr(model, "module") else model
+
+    os.makedirs(save_directory, exist_ok=True)
+    save_file(underlying_model.state_dict(), os.path.join(save_directory, "model.safetensors"))
+    config.to_json_file(os.path.join(save_directory, "config.json"))
+    logger.info(f"Saved final DDP model to {save_directory}")
