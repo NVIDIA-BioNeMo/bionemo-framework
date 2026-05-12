@@ -17,13 +17,14 @@
 
 import logging
 from contextlib import nullcontext
+from datetime import timedelta
 from pathlib import Path
 
 import hydra
 import nvdlfw_inspect.api as debug_api
 import torch
 from checkpoint import load_checkpoint_ddp, save_checkpoint_ddp, save_final_model_ddp, should_save_checkpoint
-from dataset import create_bshd_dataloader, create_thd_dataloader
+from dataset import create_dataloaders
 from distributed_config import DistributedConfig
 from modeling_codonfm_te import MODEL_PRESETS, CodonFMConfig, CodonFMForMaskedLM
 from omegaconf import DictConfig, OmegaConf
@@ -52,7 +53,7 @@ def main(args: DictConfig) -> float | None:
     dist_config = DistributedConfig()
     logger.info("Initializing distributed training: %s", dist_config)
     device = torch.device(f"cuda:{dist_config.local_rank}")
-    torch.distributed.init_process_group(backend="nccl", device_id=device)
+    torch.distributed.init_process_group(backend="nccl", device_id=device, timeout=timedelta(hours=1))
     torch.cuda.set_device(dist_config.local_rank)
 
     # DDP keeps a single param dtype per replica, so it can't emulate FSDP2's
@@ -145,12 +146,16 @@ def main(args: DictConfig) -> float | None:
         optimizer = AdamW(model.parameters(), **OmegaConf.to_container(args.adamw_kwargs, resolve=True))
         scheduler = get_linear_schedule_with_warmup(optimizer, **args.lr_scheduler_kwargs)
 
-        # Create dataloader
         dataloader_kwargs = OmegaConf.to_container(args.dataset, resolve=True)
-        train_dataloader, sampler = (
-            create_thd_dataloader(dist_config, **dataloader_kwargs)
-            if args.use_sequence_packing
-            else create_bshd_dataloader(dist_config, **dataloader_kwargs)
+        use_split_dataset = dataloader_kwargs.pop("use_split_dataset", False)
+        split_kwargs = dataloader_kwargs.pop("split_kwargs", None)
+        train_dataloader, val_dataloader, sampler = create_dataloaders(
+            dist_config,
+            use_sequence_packing=args.use_sequence_packing,
+            build_validation=args.validation.enabled,
+            use_split_dataset=use_split_dataset,
+            split_kwargs=split_kwargs,
+            **dataloader_kwargs,
         )
 
         # Resume from checkpoint if available
@@ -224,6 +229,29 @@ def main(args: DictConfig) -> float | None:
                             dist_config=dist_config,
                             max_checkpoints=args.checkpoint.max_checkpoints,
                         )
+
+                    if val_dataloader is not None and step > 0 and step % args.validation.eval_interval == 0:
+                        model.eval()
+                        val_loss_sum = torch.zeros((), device=device)
+                        val_batches_seen = torch.zeros((), device=device)
+                        val_iter = iter(val_dataloader)
+                        with torch.no_grad():
+                            for _ in range(args.validation.num_batches):
+                                try:
+                                    val_batch = next(val_iter)
+                                except StopIteration:
+                                    break
+                                val_batch = {
+                                    k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in val_batch.items()
+                                }
+                                val_outputs = model(**val_batch)
+                                val_loss_sum += val_outputs.loss.detach()
+                                val_batches_seen += 1
+                        torch.distributed.all_reduce(val_loss_sum)
+                        torch.distributed.all_reduce(val_batches_seen)
+                        avg_val_loss = (val_loss_sum / val_batches_seen.clamp(min=1)).item()
+                        perf_logger.log_validation(step, {"loss": avg_val_loss})
+                        model.train()
 
                     step += 1
                     if step >= args.num_train_steps:

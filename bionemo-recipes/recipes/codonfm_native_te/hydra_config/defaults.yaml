@@ -11,8 +11,20 @@ dataset:
   data_path: ???
   micro_batch_size: ???
   num_workers: 1
-  max_seq_length: 512
+  max_seq_length: 2048
   mlm_probability: 0.15
+  seed: 123  # Used for DistributedSampler, MLM masking RNG, and (when split mode is on) the cluster split.
+  use_split_dataset: true
+  split_kwargs:
+    train_val_test_ratio: [0.9998, 0.0002, 0.0]
+    context_overlap: 0
+    pretraining_task: mlm
+    min_seq_length: 100
+    max_filter_seq_length: 150_000
+    groups_to_use: null
+    taxid_exclusion_file: null
+    split_name_prefix: ""
+    force_recompute: false
 
 # WandB config
 wandb_init_args:
@@ -35,7 +47,7 @@ fp4_config:
 adamw_kwargs:
   lr: 4e-4
   fused: true
-  betas: [0.9, 0.98]
+  betas: [0.9, 0.999]
   eps: 1e-8
   weight_decay: 0.01
 
@@ -54,6 +66,11 @@ checkpoint:
 
 logger:
   frequency: 100
+
+validation:
+  enabled: false
+  eval_interval: 500
+  num_batches: 10
 
 quant_stats_config:
   enabled: false

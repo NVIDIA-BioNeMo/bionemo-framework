@@ -30,3 +30,8 @@ checkpoint:
 
 logger:
   frequency: 1
+
+validation:
+  enabled: true
+  eval_interval: 50
+  num_batches: 4

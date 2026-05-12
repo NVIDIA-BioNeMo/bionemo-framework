@@ -11,7 +11,7 @@ dataset:
   data_path: ???
   micro_batch_size: 4
   num_workers: 1
-  max_seq_length: 512
+  max_seq_length: 2048
 
 # WandB config
 wandb_init_args:
