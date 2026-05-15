@@ -25,6 +25,9 @@ CODE_MOUNT="/workspace/bionemo"
 : "${HUGGING_FACE_HUB_TOKEN:?Set HUGGING_FACE_HUB_TOKEN in ~/.bash_profile}"
 : "${CLUSTER_NAME:?Set CLUSTER_NAME in ~/.bash_profile}"
 
+export GLOBAL_BATCH_SIZE=1536
+export MICRO_BATCH_SIZE=4
+
 # Experiment parameters
 export CONFIG_NAME=encodon_1b
 export NPROC_PER_NODE=8
@@ -32,7 +35,6 @@ export DIST_STRATEGY=ddp  # fsdp or ddp
 
 # Training
 export NUM_TRAIN_STEPS=1000
-export MICRO_BATCH_SIZE=31
 export LEARNING_RATE=7.5e-5
 export NUM_WORKERS=1
 export USE_SEQUENCE_PACKING=False
@@ -77,7 +79,17 @@ else
   BATCH_TYPE_TAG="bshd"
 fi
 
-export WANDB_RUN_NAME="${MODEL_SIZE}_${DIST_STRATEGY}_${BATCH_TYPE_TAG}_bs${MICRO_BATCH_SIZE}_${PRECISION_TAG}_nodes_${SLURM_JOB_NUM_NODES}_${CLUSTER_NAME}"
+# Derive grad accumulation from GBS / (MBS * GPUs).
+TOTAL_GPUS=$(( NPROC_PER_NODE * SLURM_JOB_NUM_NODES ))
+TOTAL_PER_STEP=$(( MICRO_BATCH_SIZE * TOTAL_GPUS ))
+if [ "${TOTAL_PER_STEP}" -eq 0 ] || [ "$(( GLOBAL_BATCH_SIZE % TOTAL_PER_STEP ))" -ne 0 ]; then
+  echo "ERROR: GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE} must be a positive multiple of MICRO_BATCH_SIZE*NPROC_PER_NODE*NODES=${TOTAL_PER_STEP}" >&2
+  exit 1
+fi
+export GRAD_ACC_STEPS=$(( GLOBAL_BATCH_SIZE / TOTAL_PER_STEP ))
+echo "Batch sizing: GBS=${GLOBAL_BATCH_SIZE}, MBS=${MICRO_BATCH_SIZE}, NPROC=${NPROC_PER_NODE}, NODES=${SLURM_JOB_NUM_NODES}, GRAD_ACC=${GRAD_ACC_STEPS}"
+
+export WANDB_RUN_NAME="${MODEL_SIZE}_${DIST_STRATEGY}_${BATCH_TYPE_TAG}_gbs${GLOBAL_BATCH_SIZE}_mbs${MICRO_BATCH_SIZE}_ga${GRAD_ACC_STEPS}_${PRECISION_TAG}_nodes_${SLURM_JOB_NUM_NODES}_${CLUSTER_NAME}"
 
 # Mounts
 RESULTS_DIR="${BASE_DIR}/results/${WANDB_RUN_NAME}"
@@ -117,6 +129,7 @@ torchrun --nproc_per_node=${NPROC_PER_NODE} ${TRAIN_SCRIPT} \
   logger.frequency=${LOGGER_FREQUENCY} \
   num_train_steps=${NUM_TRAIN_STEPS} \
   dataset.micro_batch_size=${MICRO_BATCH_SIZE} \
+  grad_acc_steps=${GRAD_ACC_STEPS} \
   adamw_kwargs.lr=${LEARNING_RATE} \
   dataset.num_workers=${NUM_WORKERS} \
   dataset.data_path=/workspace/bionemo/data/processed_unfiltered/ \
@@ -151,7 +164,9 @@ COMMAND="export CONFIG_NAME=\"${CONFIG_NAME}\"; ${COMMAND}"
 COMMAND="export QUANT_STATS_ENABLED=\"${QUANT_STATS_ENABLED}\"; ${COMMAND}"
 COMMAND="export LOGGER_FREQUENCY=\"${LOGGER_FREQUENCY}\"; ${COMMAND}"
 COMMAND="export NUM_TRAIN_STEPS=\"${NUM_TRAIN_STEPS}\"; ${COMMAND}"
+COMMAND="export GLOBAL_BATCH_SIZE=\"${GLOBAL_BATCH_SIZE}\"; ${COMMAND}"
 COMMAND="export MICRO_BATCH_SIZE=\"${MICRO_BATCH_SIZE}\"; ${COMMAND}"
+COMMAND="export GRAD_ACC_STEPS=\"${GRAD_ACC_STEPS}\"; ${COMMAND}"
 COMMAND="export LEARNING_RATE=\"${LEARNING_RATE}\"; ${COMMAND}"
 COMMAND="export NUM_WORKERS=\"${NUM_WORKERS}\"; ${COMMAND}"
 COMMAND="export USE_SEQUENCE_PACKING=\"${USE_SEQUENCE_PACKING}\"; ${COMMAND}"

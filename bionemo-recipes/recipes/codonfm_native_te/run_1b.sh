@@ -4,6 +4,9 @@ set -euo pipefail
 export CPATH=/usr/local/cuda/include
 export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
+export GLOBAL_BATCH_SIZE=1536
+export MICRO_BATCH_SIZE=4
+
 # Run config
 export CONFIG_NAME=encodon_1b
 export NPROC_PER_NODE=8
@@ -11,7 +14,6 @@ export DIST_STRATEGY=ddp  # fsdp or ddp
 
 # Training
 export NUM_TRAIN_STEPS=100
-export MICRO_BATCH_SIZE=31
 export NUM_WORKERS=1
 export USE_SEQUENCE_PACKING=True
 # Precision mode: one of fp32, bf16, bf16-mixed. bf16-mixed matches the reference codonfm `--bf16`.
@@ -53,7 +55,17 @@ if [ "${FP8_ENABLED}" = "True" ]; then
 else
   PRECISION_TAG="${PRECISION}"
 fi
-export WANDB_RUN_NAME="${MODEL_SIZE}_${DIST_STRATEGY}_bs${MICRO_BATCH_SIZE}_${PRECISION_TAG}"
+# Derive grad accumulation from GBS / (MBS * GPUs). Single-node run.
+NUM_NODES=1
+TOTAL_PER_STEP=$(( MICRO_BATCH_SIZE * NPROC_PER_NODE * NUM_NODES ))
+if [ "${TOTAL_PER_STEP}" -eq 0 ] || [ "$(( GLOBAL_BATCH_SIZE % TOTAL_PER_STEP ))" -ne 0 ]; then
+  echo "ERROR: GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE} must be a positive multiple of MICRO_BATCH_SIZE*NPROC_PER_NODE*NODES=${TOTAL_PER_STEP}" >&2
+  exit 1
+fi
+export GRAD_ACC_STEPS=$(( GLOBAL_BATCH_SIZE / TOTAL_PER_STEP ))
+echo "Batch sizing: GBS=${GLOBAL_BATCH_SIZE}, MBS=${MICRO_BATCH_SIZE}, NPROC=${NPROC_PER_NODE}, NODES=${NUM_NODES}, GRAD_ACC=${GRAD_ACC_STEPS}"
+
+export WANDB_RUN_NAME="${MODEL_SIZE}_${DIST_STRATEGY}_gbs${GLOBAL_BATCH_SIZE}_mbs${MICRO_BATCH_SIZE}_ga${GRAD_ACC_STEPS}_${PRECISION_TAG}"
 
 # Pick training script based on distributed strategy.
 case "${DIST_STRATEGY}" in
@@ -75,6 +87,7 @@ torchrun --nproc_per_node=${NPROC_PER_NODE} ${TRAIN_SCRIPT} \
   logger.frequency=${LOGGER_FREQUENCY} \
   num_train_steps=${NUM_TRAIN_STEPS} \
   dataset.micro_batch_size=${MICRO_BATCH_SIZE} \
+  grad_acc_steps=${GRAD_ACC_STEPS} \
   dataset.num_workers=${NUM_WORKERS} \
   dataset.data_path=${DATASET_DATA_PATH} \
   use_sequence_packing=${USE_SEQUENCE_PACKING} \
