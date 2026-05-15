@@ -14,7 +14,10 @@ export NUM_TRAIN_STEPS=100
 export MICRO_BATCH_SIZE=31
 export NUM_WORKERS=1
 export USE_SEQUENCE_PACKING=True
-export USE_FP32_MASTER_WEIGHTS=True
+# Precision mode: one of fp32, bf16, bf16-mixed. bf16-mixed matches the reference codonfm `--bf16`.
+export PRECISION=bf16-mixed
+# Only used for FSDP2 + bf16-mixed. One of fp32, bf16.
+export GRAD_REDUCE_TYPE=fp32
 export NUM_WARMUP_STEPS=500
 
 # Logging / W&B
@@ -46,24 +49,19 @@ if [ "${FP8_ENABLED}" = "True" ]; then
   RECIPE_SHORT="${FP8_RECIPE##*.}"
   RECIPE_SHORT="${RECIPE_SHORT%BlockScaling}"
   RECIPE_SHORT="${RECIPE_SHORT%Scaling}"
-  PRECISION_TAG="${RECIPE_SHORT,,}_${FP8_FORMAT,,}"
+  PRECISION_TAG="${PRECISION}_${RECIPE_SHORT,,}_${FP8_FORMAT,,}"
 else
-  PRECISION_TAG="bf16"
+  PRECISION_TAG="${PRECISION}"
 fi
 export WANDB_RUN_NAME="${MODEL_SIZE}_${DIST_STRATEGY}_bs${MICRO_BATCH_SIZE}_${PRECISION_TAG}"
 
 # Pick training script based on distributed strategy.
-# DDP can't emulate FSDP's fp32-master / bf16-param split, so force fp32 master weights off.
 case "${DIST_STRATEGY}" in
   fsdp)
     TRAIN_SCRIPT=train_fsdp2.py
     ;;
   ddp)
     TRAIN_SCRIPT=train_ddp.py
-    if [ "${USE_FP32_MASTER_WEIGHTS}" = "True" ]; then
-      echo "DIST_STRATEGY=ddp: overriding USE_FP32_MASTER_WEIGHTS=True -> False" >&2
-      export USE_FP32_MASTER_WEIGHTS=False
-    fi
     ;;
   *)
     echo "DIST_STRATEGY must be 'fsdp' or 'ddp', got '${DIST_STRATEGY}'" >&2
@@ -80,7 +78,8 @@ torchrun --nproc_per_node=${NPROC_PER_NODE} ${TRAIN_SCRIPT} \
   dataset.num_workers=${NUM_WORKERS} \
   dataset.data_path=${DATASET_DATA_PATH} \
   use_sequence_packing=${USE_SEQUENCE_PACKING} \
-  use_fp32_master_weights=${USE_FP32_MASTER_WEIGHTS} \
+  precision=${PRECISION} \
+  grad_reduce_type=${GRAD_REDUCE_TYPE} \
   lr_scheduler_kwargs.num_warmup_steps=${NUM_WARMUP_STEPS} \
   wandb_init_args.name=${WANDB_RUN_NAME} \
   wandb_init_args.project=${WANDB_PROJECT} \

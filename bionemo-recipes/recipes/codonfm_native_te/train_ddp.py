@@ -40,6 +40,20 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+_VALID_PRECISIONS = ("fp32", "bf16", "bf16-mixed")
+
+
+def precision_context(precision: str):
+    """Return a fresh autocast context for the given precision mode.
+
+    For `bf16-mixed`, wraps forward in `torch.autocast(cuda, bf16)`. For `fp32` and `bf16`,
+    returns a nullcontext — params are already in the target dtype, no autocast needed.
+    """
+    if precision == "bf16-mixed":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
+
+
 @hydra.main(config_path="hydra_config", config_name="L0_sanity", version_base="1.2")
 def main(args: DictConfig) -> float | None:
     """Train CodonFM with TE layers using DDP.
@@ -49,17 +63,15 @@ def main(args: DictConfig) -> float | None:
     """
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
+    if args.precision not in _VALID_PRECISIONS:
+        raise ValueError(f"precision must be one of {_VALID_PRECISIONS}, got {args.precision!r}")
+
     # Initialize distributed configuration
     dist_config = DistributedConfig()
     logger.info("Initializing distributed training: %s", dist_config)
     device = torch.device(f"cuda:{dist_config.local_rank}")
     torch.distributed.init_process_group(backend="nccl", device_id=device, timeout=timedelta(hours=1))
     torch.cuda.set_device(dist_config.local_rank)
-
-    # DDP keeps a single param dtype per replica, so it can't emulate FSDP2's
-    # MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32) split. Reject up-front.
-    if args.use_fp32_master_weights:
-        raise ValueError("FP32 master weights are not supported with DDP. Use train_fsdp2.py instead.")
 
     perf_logger = None
     try:
@@ -127,9 +139,8 @@ def main(args: DictConfig) -> float | None:
         else:
             model = model.to(device)
 
-        # DDP replicates the full model on each GPU. Cast params to bf16 since the optimizer
-        # update happens in the same dtype as the params (no FP32 master weights here).
-        model = model.to(dtype=torch.bfloat16)
+        if args.precision == "bf16":
+            model = model.to(dtype=torch.bfloat16)
 
         # Assign layer names for debug API
         if args.quant_stats_config.enabled:
@@ -190,11 +201,12 @@ def main(args: DictConfig) -> float | None:
                 sync_context = nullcontext() if is_accumulation_boundary else model.no_sync()
 
                 with sync_context:
-                    # Forward pass
-                    outputs = model(**batch)
-
-                    # Backward pass - scale loss by grad_acc_steps for proper gradient averaging
-                    loss = outputs.loss / args.grad_acc_steps
+                    # Forward pass under the precision-specific autocast context.
+                    # backward inherits the cached autocast state — no need to wrap it.
+                    with precision_context(args.precision):
+                        outputs = model(**batch)
+                        # Scale loss by grad_acc_steps for proper gradient averaging
+                        loss = outputs.loss / args.grad_acc_steps
                     loss.backward()
 
                 # Log micro-batch data for accumulation metrics
@@ -244,7 +256,8 @@ def main(args: DictConfig) -> float | None:
                                 val_batch = {
                                     k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in val_batch.items()
                                 }
-                                val_outputs = model(**val_batch)
+                                with precision_context(args.precision):
+                                    val_outputs = model(**val_batch)
                                 val_loss_sum += val_outputs.loss.detach()
                                 val_batches_seen += 1
                         torch.distributed.all_reduce(val_loss_sum)

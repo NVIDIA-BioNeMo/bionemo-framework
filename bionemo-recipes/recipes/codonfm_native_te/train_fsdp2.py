@@ -40,6 +40,39 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+_VALID_PRECISIONS = ("fp32", "bf16", "bf16-mixed")
+_VALID_REDUCE_TYPES = ("fp32", "bf16")
+_PRECISION_TO_STORAGE_DTYPE = {
+    "fp32": torch.float32,
+    "bf16": torch.bfloat16,
+    "bf16-mixed": torch.float32,  # master shards stored fp32; MP policy casts to bf16 at compute time
+}
+
+
+def _assert_fsdp_param_dtypes(model: torch.nn.Module, precision: str) -> None:
+    """Verify FSDP2 produced the expected param storage dtypes."""
+    expected = _PRECISION_TO_STORAGE_DTYPE[precision]
+    for name, param in model.named_parameters():
+        if param.dtype != expected:
+            raise RuntimeError(
+                f"FSDP2 precision={precision}: expected param storage {expected}, got {param.dtype} for {name}"
+            )
+    logger.info("FSDP2 param dtype check OK (precision=%s, storage=%s)", precision, expected)
+
+
+def _assert_fsdp_optimizer_state_dtypes(optimizer: torch.optim.Optimizer, precision: str) -> None:
+    """Verify optimizer moments are in the expected dtype after the first step."""
+    expected = _PRECISION_TO_STORAGE_DTYPE[precision]
+    for param_state in optimizer.state.values():
+        for key in ("exp_avg", "exp_avg_sq"):
+            t = param_state.get(key)
+            if t is not None and t.dtype != expected:
+                raise RuntimeError(
+                    f"FSDP2 precision={precision}: optimizer state {key} dtype={t.dtype}, expected {expected}"
+                )
+    logger.info("FSDP2 optimizer state dtype check OK (precision=%s, dtype=%s)", precision, expected)
+
+
 @hydra.main(config_path="hydra_config", config_name="L0_sanity", version_base="1.2")
 def main(args: DictConfig) -> float | None:
     """Train CodonFM with TE layers using FSDP2.
@@ -48,6 +81,11 @@ def main(args: DictConfig) -> float | None:
         float: The minimum loss value seen during training.
     """
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    if args.precision not in _VALID_PRECISIONS:
+        raise ValueError(f"precision must be one of {_VALID_PRECISIONS}, got {args.precision!r}")
+    if args.grad_reduce_type not in _VALID_REDUCE_TYPES:
+        raise ValueError(f"grad_reduce_type must be one of {_VALID_REDUCE_TYPES}, got {args.grad_reduce_type!r}")
 
     # Initialize distributed configuration
     dist_config = DistributedConfig()
@@ -115,11 +153,17 @@ def main(args: DictConfig) -> float | None:
 
         logger.info("Initialized Model:\n%s", model)
 
-        # Apply FSDP2 sharding with optional mixed precision policy
-        if args.use_fp32_master_weights:
+        # Apply FSDP2 sharding with precision-specific mixed precision policy.
+        #   fp32       - no MP overrides; sharded params stay fp32.
+        #   bf16       - no MP overrides; params get cast to bf16 after init_empty_weights below.
+        #   bf16-mixed - fp32 master shards, MP policy casts to bf16 at compute time. grad_reduce_type
+        #                controls reduce-scatter dtype (default fp32 is more conservative than PTL FSDP
+        #                bf16-mixed, which reduces in bf16).
+        if args.precision == "bf16-mixed":
+            reduce_dtype = torch.float32 if args.grad_reduce_type == "fp32" else torch.bfloat16
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=torch.bfloat16,
-                reduce_dtype=torch.float32,
+                reduce_dtype=reduce_dtype,
                 output_dtype=torch.bfloat16,
                 cast_forward_inputs=False,
             )
@@ -132,6 +176,13 @@ def main(args: DictConfig) -> float | None:
         # Initialize weights from meta device
         if args.use_meta_device:
             model.init_empty_weights()
+
+        # Pure bf16: cast sharded params (and downstream optimizer state) to bf16. Must happen
+        # after init_empty_weights so the cast catches the freshly-initialized values, not metadata.
+        if args.precision == "bf16":
+            model = model.to(dtype=torch.bfloat16)
+
+        _assert_fsdp_param_dtypes(model, args.precision)
 
         # Assign layer names for debug API
         if args.quant_stats_config.enabled:
@@ -172,6 +223,7 @@ def main(args: DictConfig) -> float | None:
         # Training loop
         step = start_step
         micro_step = 0  # Gradient accumulation step counter
+        optimizer_state_asserted = False
         while step < args.num_train_steps:
             batches_in_epoch = 0
             for batch in train_dataloader:
@@ -199,6 +251,9 @@ def main(args: DictConfig) -> float | None:
                     # Optimizer step
                     optimizer.step()
                     scheduler.step()
+                    if not optimizer_state_asserted:
+                        _assert_fsdp_optimizer_state_dtypes(optimizer, args.precision)
+                        optimizer_state_asserted = True
                     optimizer.zero_grad()
 
                     perf_logger.log_step(

@@ -6,6 +6,8 @@ defaults:
 model_preset: encodon_1b
 num_train_steps: 500_000
 
+precision: bf16-mixed
+
 use_sequence_packing: true
 dataset:
   data_path: ???

@@ -6,6 +6,8 @@ defaults:
 model_preset: encodon_200k
 num_train_steps: 250
 
+precision: fp32
+
 use_sequence_packing: false
 dataset:
   data_path: train.parquet

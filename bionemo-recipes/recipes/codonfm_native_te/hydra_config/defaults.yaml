@@ -81,4 +81,15 @@ quant_stats_config:
 # Note: The layers are going to come in 1 indexed and we convert them to be 0 indexed at runtime.
 fp8_layers: null
 fp4_layers: null
-use_fp32_master_weights: null
+
+# Precision mode. One of:
+#   fp32       - params, compute, grads, and optimizer state all in fp32.
+#   bf16       - params, compute, grads, and optimizer state all in bf16 (pure bf16).
+#   bf16-mixed - fp32 master weights + bf16 compute (via autocast in DDP, via FSDP2
+#                MixedPrecisionPolicy.param_dtype=bf16 in FSDP2).
+precision: ???
+
+# Gradient reduce dtype for FSDP2 when precision=bf16-mixed. One of: fp32, bf16.
+# fp32 (default) is more conservative than PTL FSDP bf16-mixed (which reduces in bf16).
+# Ignored for other precision modes and for DDP.
+grad_reduce_type: fp32
