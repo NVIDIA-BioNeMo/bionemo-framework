@@ -11,6 +11,14 @@
 #SBATCH --exclusive
 set -euxo pipefail
 
+# Establish or inherit chain ID: manual launch picks SLURM_JOB_ID; trap-resubmit inherits via --export.
+if [ -z "${CHAIN_ID:-}" ]; then
+  export CHAIN_ID="${SLURM_JOB_ID}"
+  echo "Starting NEW chain: CHAIN_ID=${CHAIN_ID}"
+else
+  echo "Continuing chain ${CHAIN_ID} (current job ${SLURM_JOB_ID})"
+fi
+
 # ============================================================================
 # Codon 1B
 # ============================================================================
@@ -26,7 +34,7 @@ CODE_MOUNT="/workspace/bionemo"
 : "${CLUSTER_NAME:?Set CLUSTER_NAME in ~/.bash_profile}"
 
 export GLOBAL_BATCH_SIZE=1536
-export MICRO_BATCH_SIZE=4
+export MICRO_BATCH_SIZE=96
 
 # Experiment parameters
 export CONFIG_NAME=encodon_1b
@@ -34,7 +42,7 @@ export NPROC_PER_NODE=8
 export DIST_STRATEGY=ddp  # fsdp or ddp
 
 # Training
-export NUM_TRAIN_STEPS=1000
+export NUM_TRAIN_STEPS=100
 export LEARNING_RATE=7.5e-5
 export NUM_WORKERS=1
 export USE_SEQUENCE_PACKING=False
@@ -89,7 +97,7 @@ fi
 export GRAD_ACC_STEPS=$(( GLOBAL_BATCH_SIZE / TOTAL_PER_STEP ))
 echo "Batch sizing: GBS=${GLOBAL_BATCH_SIZE}, MBS=${MICRO_BATCH_SIZE}, NPROC=${NPROC_PER_NODE}, NODES=${SLURM_JOB_NUM_NODES}, GRAD_ACC=${GRAD_ACC_STEPS}"
 
-export WANDB_RUN_NAME="${MODEL_SIZE}_${DIST_STRATEGY}_${BATCH_TYPE_TAG}_gbs${GLOBAL_BATCH_SIZE}_mbs${MICRO_BATCH_SIZE}_ga${GRAD_ACC_STEPS}_${PRECISION_TAG}_nodes_${SLURM_JOB_NUM_NODES}_${CLUSTER_NAME}"
+export WANDB_RUN_NAME="${MODEL_SIZE}_${DIST_STRATEGY}_${BATCH_TYPE_TAG}_gbs${GLOBAL_BATCH_SIZE}_mbs${MICRO_BATCH_SIZE}_ga${GRAD_ACC_STEPS}_${PRECISION_TAG}_nodes_${SLURM_JOB_NUM_NODES}_${CLUSTER_NAME}_chain_${CHAIN_ID}"
 
 # Mounts
 RESULTS_DIR="${BASE_DIR}/results/${WANDB_RUN_NAME}"
@@ -98,6 +106,10 @@ CKPT_DIR="${BASE_DIR}/checkpoints/${WANDB_RUN_NAME}"
 mkdir -p "${RESULTS_DIR}" "${CKPT_DIR}"
 
 MOUNTS="${DATA_DIR}:${CODE_MOUNT}/data,${RESULTS_DIR}:${CODE_MOUNT}/results,${CKPT_DIR}:${CODE_MOUNT}/checkpoints"
+
+# Resolve head node on the host (scontrol is not available inside the container).
+MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
+MASTER_PORT=29500
 
 
 read -r -d '' COMMAND <<'OUTER_EOF' || true
@@ -123,7 +135,14 @@ case "${DIST_STRATEGY}" in
     ;;
 esac
 
-torchrun --nproc_per_node=${NPROC_PER_NODE} ${TRAIN_SCRIPT} \
+torchrun \
+  --nproc_per_node=${NPROC_PER_NODE} \
+  --rdzv_id=${SLURM_JOB_ID} \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+  --nnodes=${SLURM_JOB_NUM_NODES} \
+  --node-rank=${SLURM_NODEID} \
+  ${TRAIN_SCRIPT} \
   --config-name ${CONFIG_NAME} \
   quant_stats_config.enabled=${QUANT_STATS_ENABLED} \
   logger.frequency=${LOGGER_FREQUENCY} \
@@ -182,6 +201,8 @@ COMMAND="export HYDRA_RUN_DIR=\"${HYDRA_RUN_DIR}\"; ${COMMAND}"
 COMMAND="export FP8_ENABLED=\"${FP8_ENABLED}\"; ${COMMAND}"
 COMMAND="export FP8_RECIPE=\"${FP8_RECIPE}\"; ${COMMAND}"
 COMMAND="export FP8_FORMAT=\"${FP8_FORMAT}\"; ${COMMAND}"
+COMMAND="export MASTER_ADDR=\"${MASTER_ADDR}\"; ${COMMAND}"
+COMMAND="export MASTER_PORT=\"${MASTER_PORT}\"; ${COMMAND}"
 
 COMMAND="export WANDB_API_KEY=\"${WANDB_API_KEY}\"; ${COMMAND}"
 COMMAND="export HUGGING_FACE_HUB_TOKEN=\"${HUGGING_FACE_HUB_TOKEN}\"; ${COMMAND}"
@@ -193,12 +214,14 @@ echo "Launching: ${WANDB_RUN_NAME}"
 trap '
     rc=$?
     if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-      echo "Killed by signal (rc=$rc) — assuming SLURM timeout, resubmitting..."
-      sbatch --dependency=singleton "${BASH_SOURCE[0]}"
+      echo "Timed out (rc=$rc) — resubmitting chain ${CHAIN_ID}."
+      sbatch --dependency=singleton \
+             --export=ALL,CHAIN_ID="${CHAIN_ID}" \
+             "${BASH_SOURCE[0]}"
     elif [ "$rc" -eq 0 ]; then
-      echo "Clean exit — training finished, NOT resubmitting."
+      echo "Training finished cleanly — chain ${CHAIN_ID} ends."
     else
-      echo "Error exit (rc=$rc) — NOT resubmitting; investigate ${RESULTS_DIR}"
+      echo "Real error (rc=$rc) — chain ${CHAIN_ID} ends so you can investigate."
     fi
   ' EXIT
 
