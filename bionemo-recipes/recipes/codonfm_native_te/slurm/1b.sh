@@ -121,6 +121,11 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Nodes: ${SLURM_JOB_NUM_NODES}"
 echo "========================================="
 
+# cuDNN fused-attn sub-backend 1 OOMs on Blackwell (sm_103) with THD+padding (TE 2.12 / cuDNN 9.19); force flash-attn varlen.
+if [ "${USE_SEQUENCE_PACKING}" = "True" ]; then
+  export NVTE_FUSED_ATTN=0
+fi
+
 # Pick training script based on distributed strategy.
 case "${DIST_STRATEGY}" in
   fsdp)
