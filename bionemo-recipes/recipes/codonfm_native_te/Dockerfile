@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM nvcr.io/nvidia/pytorch:26.02-py3
+FROM nvcr.io/nvidia/pytorch:26.04-py3
 
 RUN apt-get update && apt-get install -y tmux npm
 
