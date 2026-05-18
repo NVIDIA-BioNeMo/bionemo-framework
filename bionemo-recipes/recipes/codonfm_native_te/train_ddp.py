@@ -241,6 +241,13 @@ def main(args: DictConfig) -> float | None:
                             dist_config=dist_config,
                             max_checkpoints=args.checkpoint.max_checkpoints,
                         )
+                        if args.checkpoint.save_final_model_with_checkpoint:
+                            save_final_model_ddp(
+                                model=model,
+                                config=config,
+                                save_directory=ckpt_path / f"step_{step}" / "final_model",
+                                dist_config=dist_config,
+                            )
 
                     if val_dataloader is not None and step > 0 and step % args.validation.eval_interval == 0:
                         model.eval()
