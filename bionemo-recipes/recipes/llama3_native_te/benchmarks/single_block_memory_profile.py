@@ -235,6 +235,7 @@ def run_bare(args, use_fp8: bool, use_fp8_autocast_only: bool = False):
     torch.cuda.manual_seed(42)
     num_layers = args.num_layers
 
+    torch.cuda.memory._record_memory_history(max_entries=500000)
     log_memory("before_model_init")
 
     dims = args.dims
@@ -271,13 +272,8 @@ def run_bare(args, use_fp8: bool, use_fp8_autocast_only: bool = False):
     x = torch.randn(SEQ_LEN, BATCH_SIZE, hidden, dtype=DTYPE, device=device)
     target = torch.randn(SEQ_LEN, BATCH_SIZE, hidden, dtype=DTYPE, device=device)
 
-    # Warmup: one untimed step to compile CUDA kernels before recording
     _warmup_step(model, optimizer, x, target, use_fp8_autocast=use_autocast, recipe=recipe)
     log_memory("after_warmup")
-
-    # Reset peak stats and start recording AFTER warmup
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.memory._record_memory_history(max_entries=500000)
 
     for step in range(NUM_STEPS):
         optimizer.zero_grad(set_to_none=True)
@@ -320,6 +316,7 @@ def run_fsdp2(args, use_fp8: bool, use_fp8_autocast_only: bool = False):
     torch.cuda.manual_seed(42)
     num_layers = args.num_layers
 
+    torch.cuda.memory._record_memory_history(max_entries=500000)
     log_memory("before_model_init")
 
     dims = args.dims
@@ -334,7 +331,6 @@ def run_fsdp2(args, use_fp8: bool, use_fp8_autocast_only: bool = False):
     log_memory("after_model_init_meta")
 
     mesh = DeviceMesh("cuda", list(range(world_size)))
-    # Per-layer FSDP2 sharding (standard pattern for transformer stacks)
     for layer in model:
         fully_shard(layer, mesh=mesh)
     log_memory("after_fsdp_shard")
@@ -368,13 +364,8 @@ def run_fsdp2(args, use_fp8: bool, use_fp8_autocast_only: bool = False):
     x = torch.randn(SEQ_LEN, BATCH_SIZE, hidden, dtype=DTYPE, device=device)
     target = torch.randn(SEQ_LEN, BATCH_SIZE, hidden, dtype=DTYPE, device=device)
 
-    # Warmup: one untimed step to compile CUDA kernels before recording
     _warmup_step(model, optimizer, x, target, use_fp8_autocast=use_autocast, recipe=recipe)
     log_memory("after_warmup")
-
-    # Reset peak stats and start recording AFTER warmup
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.memory._record_memory_history(max_entries=500000)
 
     for step in range(NUM_STEPS):
         optimizer.zero_grad(set_to_none=True)
