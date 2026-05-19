@@ -71,47 +71,47 @@ nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 
 echo ""
 echo "=== 1/10: bare (BF16 baseline, no FSDP2) ==="
-python $SCRIPT --mode bare --snapshot-dir $SNAP
+python $SCRIPT --mode bare --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 2/10: mxfp8 (MXFP8 + qinit + HPIV, no FSDP2) ==="
-python $SCRIPT --mode mxfp8 --snapshot-dir $SNAP
+python $SCRIPT --mode mxfp8 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 3/10: mxfp8 --no-hpiv (MXFP8 + qinit, NO HPIV, no FSDP2) ==="
-python $SCRIPT --mode mxfp8 --no-hpiv --snapshot-dir $SNAP
+python $SCRIPT --mode mxfp8 --no-hpiv --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 4/10: fp8-no-qinit (FP8 autocast, BF16 weights, no FSDP2) ==="
-python $SCRIPT --mode fp8-no-qinit --snapshot-dir $SNAP
+python $SCRIPT --mode fp8-no-qinit --model-size 70b --snapshot-dir $SNAP
 
 # === FSDP2 modes, 1 layer ===
 
 echo ""
 echo "=== 5/10: bare-fsdp2 (BF16 + FSDP2, 1 layer, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode bare-fsdp2 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode bare-fsdp2 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 6/10: mxfp8-fsdp2 (MXFP8 + qinit + FSDP2, 1 layer, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-fsdp2 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-fsdp2 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 7/10: fp8-no-qinit-fsdp2 (FP8 autocast + FSDP2, 1 layer, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode fp8-no-qinit-fsdp2 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode fp8-no-qinit-fsdp2 --model-size 70b --snapshot-dir $SNAP
 
 # === FSDP2 modes, 4 layers ===
 
 echo ""
 echo "=== 8/10: bare-fsdp2 4-layer (BF16 + FSDP2, 4 layers, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode bare-fsdp2 --num-layers 4 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode bare-fsdp2 --num-layers 4 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 9/10: mxfp8-fsdp2 4-layer (MXFP8 + qinit + FSDP2, 4 layers, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-fsdp2 --num-layers 4 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-fsdp2 --num-layers 4 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 10/10: fp8-no-qinit-fsdp2 4-layer (FP8 autocast + FSDP2, 4 layers, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode fp8-no-qinit-fsdp2 --num-layers 4 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode fp8-no-qinit-fsdp2 --num-layers 4 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "========================================="

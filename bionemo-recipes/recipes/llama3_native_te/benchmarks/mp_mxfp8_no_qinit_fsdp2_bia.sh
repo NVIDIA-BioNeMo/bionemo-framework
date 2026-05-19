@@ -57,11 +57,11 @@ nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 
 echo ""
 echo "=== 1/2: mxfp8-no-qinit-fsdp2 (1 layer, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-no-qinit-fsdp2 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-no-qinit-fsdp2 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "=== 2/2: mxfp8-no-qinit-fsdp2 (4 layers, 2 GPUs) ==="
-torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-no-qinit-fsdp2 --num-layers 4 --snapshot-dir $SNAP
+torchrun --nproc-per-node 2 $SCRIPT --mode mxfp8-no-qinit-fsdp2 --num-layers 4 --model-size 70b --snapshot-dir $SNAP
 
 echo ""
 echo "========================================="
