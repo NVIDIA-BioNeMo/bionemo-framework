@@ -56,6 +56,8 @@ def pytest_collection_modifyitems(items):
     stats_test_names = {
         "test_sanity_ddp_fp8_stats_logging",
         "test_sanity_fsdp2_fp8_stats_logging",
+        "test_sanity_ddp_fp8_partial_layers_stats_logging",
+        "test_sanity_fsdp2_fp8_partial_layers_stats_logging",
     }
     stats_tests = [item for item in items if item.name in stats_test_names]
     other_tests = [item for item in items if item.name not in stats_test_names]

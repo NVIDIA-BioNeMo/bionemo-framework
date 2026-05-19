@@ -192,7 +192,6 @@ def create_bshd_dataloader(
         data_collator = base_collator
         logger.info("Using standard DataCollatorForLanguageModeling")
 
-    # TODO(BIONEMO-3246) - remove the pin_memory=False once StatefulDataLoader supports pin_memory again.
     dataloader_class = StatefulDataLoader if use_stateful_dataloader else DataLoader
     train_dataloader = dataloader_class(
         tokenized_dataset,
@@ -200,7 +199,7 @@ def create_bshd_dataloader(
         batch_size=micro_batch_size,
         collate_fn=data_collator,
         num_workers=num_workers,
-        pin_memory=not use_stateful_dataloader,
+        pin_memory=True,
         persistent_workers=num_workers > 0,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
     )
@@ -288,7 +287,6 @@ def create_thd_dataloader(
             f"Using GenomicDataCollator (uppercase={uppercase_labels}, mask_degenerate={mask_degenerate_bases})"
         )
 
-    # TODO(BIONEMO-3246) - remove the pin_memory=False once StatefulDataLoader supports pin_memory again.
     dataloader_class = StatefulDataLoader if use_stateful_dataloader else DataLoader
     train_dataloader = dataloader_class(
         TokenPackingDataset(
@@ -299,7 +297,7 @@ def create_thd_dataloader(
         batch_size=None,  # The TokenPackingDataset will handle the batching.
         collate_fn=data_collator,
         num_workers=num_workers,
-        pin_memory=not use_stateful_dataloader,
+        pin_memory=True,
         persistent_workers=num_workers > 0,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
     )

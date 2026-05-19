@@ -34,11 +34,87 @@ from torch.distributed.checkpoint.state_dict_loader import load as dcp_load
 from torch.distributed.checkpoint.state_dict_saver import async_save as dcp_async_save
 from torch.distributed.checkpoint.state_dict_saver import save as dcp_save
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam as _FSDPParam
 from torch.distributed.tensor import DTensor
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 
 from distributed_config import DistributedConfig
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch FSDP2's FSDPParam.reset_sharded_param to handle QuantizedTensor.
+#
+# After checkpoint load, set_state_dict calls copy_() on FSDP-sharded params.
+# For QuantizedTensor (MXFP8Tensor), copy_() re-quantizes which can invalidate
+# the old untyped_storage, causing data_ptr() to crash. The original code
+# (PyTorch _fsdp_param.py) compares storage pointers without guarding against
+# QuantizedTensor. This patch wraps the comparison in a try/except so that
+# reset_sharded_param can proceed normally (re-recording _sharded_param_data).
+# ---------------------------------------------------------------------------
+
+
+def _patched_reset_sharded_param(self):  # type: ignore[no-untyped-def]
+    """reset_sharded_param with QuantizedTensor safety."""
+    module_info = self._module_info
+    new_param = getattr(module_info.module, module_info.param_name)
+    if new_param is not self.sharded_param:
+        if torch.__future__.get_swap_module_params_on_conversion():
+            raise AssertionError(
+                f"Expects swap_tensors to preserve object but got {new_param} instead of {self.sharded_param}"
+            )
+        self.sharded_param = new_param
+
+    local_tensor = new_param._local_tensor
+    if local_tensor.is_meta:
+        return
+
+    updated_local_tensor = False
+    same_local_tensor = False
+
+    if type(self._sharded_param_data) is torch.Tensor:
+        try:
+            same_local_tensor = (
+                self._sharded_param_data.untyped_storage().data_ptr() > 0
+                and self._sharded_param_data.untyped_storage().data_ptr() == local_tensor.untyped_storage().data_ptr()
+            )
+        except RuntimeError:
+            # QuantizedTensor (e.g. MXFP8Tensor) can have invalid storage
+            # after copy_() re-quantization. Treat as not-same so that
+            # _sharded_param_data gets re-recorded below.
+            same_local_tensor = False
+
+    padded_sharded_size = self.padded_sharded_param_size
+    shard_dim = self.fsdp_placement.dim
+    length = local_tensor.size(shard_dim) if local_tensor.numel() > 0 else 0
+
+    if local_tensor.size() != padded_sharded_size and not same_local_tensor:
+        if shard_dim != 0:
+            raise AssertionError(f"Shard({shard_dim}) requires even sharding: {local_tensor.size()=}")
+        padded_local_tensor = local_tensor.new_zeros(padded_sharded_size)
+        padded_local_tensor.narrow(dim=shard_dim, start=0, length=length).copy_(local_tensor)
+        local_tensor = padded_local_tensor
+        updated_local_tensor = True
+
+    if self.pin_memory and not local_tensor.is_pinned():
+        local_tensor = local_tensor.cpu().pin_memory()
+        updated_local_tensor = True
+
+    if not same_local_tensor:
+        self._sharded_param_data = local_tensor.view(-1)
+
+    if not isinstance(self.sharded_param, DTensor):
+        raise AssertionError(f"Expected DTensor, got {type(self.sharded_param)}")
+
+    if updated_local_tensor:
+        self.sharded_param._local_tensor = local_tensor.narrow(dim=shard_dim, start=0, length=length)
+        if not self.sharded_param._local_tensor.is_contiguous():
+            raise AssertionError("Expected sharded_param._local_tensor to be contiguous")
+
+    self._sharding_spec = self.sharded_param._spec
+
+
+_FSDPParam.reset_sharded_param = _patched_reset_sharded_param
 
 
 logger = logging.getLogger(__name__)

@@ -34,7 +34,7 @@ def _make_args(logging_frequency=1, num_train_steps=100):
             "wandb": {"project": "test", "mode": "disabled"},
             "num_train_steps": num_train_steps,
             "profiler": {"enabled": False},
-            "fp8_stats_config": {"enabled": False},
+            "quant_stats_config": {"enabled": False},
         }
     )
 

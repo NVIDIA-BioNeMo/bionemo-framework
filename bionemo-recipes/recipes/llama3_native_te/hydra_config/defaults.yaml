@@ -32,6 +32,8 @@ dataset:
 wandb:
   name: ???
   project: null # Optional: set to your wandb project name
+  id: null # Set to a fixed ID to resume the same run across restarts
+  resume: allow # "allow" resumes if id exists, else creates new run
 
 # TransformerEngine FP8 config. See
 # https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html for more information on
@@ -41,6 +43,8 @@ fp8_config:
   fp8_recipe: transformer_engine.common.recipe.DelayedScaling
   fp8_format: "HYBRID"
   fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: false # If this is set to true, fp8_config.enabled must also be set to true.
 
 fp4_config:
   enabled: false
@@ -74,10 +78,15 @@ checkpoint:
 logger:
   frequency: 100
 
-fp8_stats_config:
+quant_stats_config:
   enabled: false
-  fp8_stats_file: ./fp8_debugging_stats.yaml
-  fp8_log_dir: ./log_fp8_stats
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: ./log_quant_stats
+
+# Note: The layers are going to come in 1 indexed and we convert them to be 0 indexed at runtime.
+fp8_layers: null
+fp4_layers: null
+use_fp32_master_weights: null  # Use TE FusedAdam for FP32 master weights
 
 profiler:
   enabled: false
