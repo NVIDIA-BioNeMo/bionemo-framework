@@ -135,7 +135,7 @@ def load_savanna_state_dict(path: Path) -> dict[str, torch.Tensor]:
     Returns:
         Flat state dict with keys like 'sequential.{i}.xxx'.
     """
-    raw = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
+    raw = torch.load(str(path), map_location="cpu", weights_only=False, mmap=True)
     if "module" in raw:
         raw = raw["module"]
 
