@@ -278,6 +278,29 @@ def test_b2b_causal_conv1d_module_device_handling():  # noqa: D103
         assert result_cuda.device == x_cuda.device, "Device mismatch on CUDA"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for subquadratic guard test")
+@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.ensure_subquadratic_b2b_causal_conv1d_supported")
+@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.b2b_causal_conv1d")
+def test_b2b_causal_conv1d_module_checks_subquadratic_kernel_once(mock_b2b, mock_ensure):  # noqa: D103
+    mock_b2b.side_effect = mock_b2b_causal_conv1d
+    proj_conv = MockProjConv(kernel_size=3)
+    mixer = MockMixer(kernel_size=5)
+    b2b_module = B2BCausalConv1dModule(
+        proj_conv,
+        mixer,
+        operator_type="hyena_short_conv",
+        b2b_causal_conv1d=mock_b2b,
+        pg_collection=MockProcessGroupCollection(),
+    )
+
+    x = torch.randn(2, 96, 32, device="cuda")
+    b2b_module(x)
+    b2b_module(x)
+
+    assert mock_ensure.call_count == 1
+    assert mock_b2b.call_count == 2
+
+
 def test_b2b_causal_conv1d_effective_padding_size():
     """Test the zigzag pattern for data distribution in context parallel mode."""
     proj_conv = MockProjConv(kernel_size=3)
