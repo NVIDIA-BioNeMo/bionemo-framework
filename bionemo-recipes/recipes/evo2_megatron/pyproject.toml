@@ -36,7 +36,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = []
+test = [
+    "pytest>=8.0",
+]
 
 [project.scripts]
 torchrun = "torch.distributed.run:main"
