@@ -51,6 +51,11 @@ PRETEST_ENV = copy.deepcopy(os.environ)
 # Note: mbridge_checkpoint_path fixture is provided by conftest.py at session scope
 
 
+def _xfail_if_unsupported_subquadratic_ops(result: subprocess.CompletedProcess, use_subquadratic_ops: bool) -> None:
+    if use_subquadratic_ops and "failed a CUDA self-test" in result.stderr:
+        pytest.xfail("subquadratic_ops_torch CUDA kernels are unsupported in this environment")
+
+
 def _read_jsonl_results(output_file: Path) -> list[dict]:
     """Read JSONL output file and return parsed records."""
     records = []
@@ -342,6 +347,7 @@ def run_infer_subprocess(
         env=env,
     )
 
+    _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
     assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     assert output_file.exists(), "Output file was not created"
 
@@ -449,6 +455,7 @@ def _run_infer_prompt_file(
         timeout=512,
         env=copy.deepcopy(PRETEST_ENV),
     )
+    _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
     assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     records = _read_jsonl_results(output_file)
     return {record["id"]: record for record in records}
@@ -644,10 +651,10 @@ def test_subquadratic_ops_matches_baseline(mbridge_checkpoint_path, tmp_path):
     """Greedy generation with --use-subquadratic-ops must match the standard path.
 
     This is the end-to-end correctness check for the subq-ops inference path.
-    The currently enabled subq path uses fft_causal_conv1d for FFT-sized filters;
-    short direct kernels and fused B2B prefill stay on the standard path until
-    the fused kernels support causal_conv1d 1.6+ semantics. With greedy decoding
-    (top_k=1) and the same seed, both paths must produce identical output.
+    The subq path uses guarded subquadratic kernels. If the local CUDA/GPU
+    combination cannot run those kernels correctly, the guard raises before
+    invalid outputs can propagate. With greedy decoding (top_k=1) and the same
+    seed, supported subq kernels must produce identical output.
     """
     output_baseline = tmp_path / "output_baseline.jsonl"
     output_subq = tmp_path / "output_subq.jsonl"

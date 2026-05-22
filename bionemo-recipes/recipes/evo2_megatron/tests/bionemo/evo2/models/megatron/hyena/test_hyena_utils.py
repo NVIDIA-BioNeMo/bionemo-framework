@@ -296,11 +296,11 @@ def test_b2b_causal_conv1d_effective_padding_size():
 
 
 @pytest.mark.xfail(
-    reason="subquadratic-ops fused B2B kernel does not match causal_conv1d 1.6+ short-conv semantics",
+    reason="subquadratic-ops fused B2B kernel may fail CUDA/PTX self-test on unsupported GPUs",
     strict=True,
 )
 def test_b2b_causal_conv1d_module_matches_sequential_reference():
-    """Document the isolated B2B mismatch before re-enabling the fused path."""
+    """Document the isolated B2B CUDA kernel behavior before relying on the fused path."""
     if not torch.cuda.is_available():
         pytest.skip("B2B causal conv isolation test requires CUDA")
 

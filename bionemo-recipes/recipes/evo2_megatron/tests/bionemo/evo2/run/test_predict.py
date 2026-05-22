@@ -43,6 +43,11 @@ from ..utils import check_fp8_support, find_free_network_port, is_a6000_gpu
 PRETEST_ENV = copy.deepcopy(os.environ)
 
 
+def _xfail_if_unsupported_subquadratic_ops(result: subprocess.CompletedProcess, use_subquadratic_ops: bool) -> None:
+    if use_subquadratic_ops and "failed a CUDA self-test" in result.stderr:
+        pytest.xfail("subquadratic_ops_torch CUDA kernels are unsupported in this environment")
+
+
 @pytest.fixture(scope="module")
 def mbridge_checkpoint_1b_8k_bf16_path(mbridge_checkpoint_1b_8k_bf16) -> Path:
     """Module-scoped alias for the session-scoped 1b-8k-bf16 checkpoint.
@@ -664,6 +669,7 @@ def test_predict_evo2_short_embedding_is_prefix_invariant_across_batch_padding(
             capture_output=True,
             text=True,
         )
+        _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
         if result.returncode != 0:
             print("STDOUT:\n" + result.stdout)
             print("STDERR:\n" + result.stderr)

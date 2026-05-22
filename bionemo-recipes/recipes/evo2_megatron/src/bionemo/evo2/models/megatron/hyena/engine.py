@@ -19,10 +19,17 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from einops import rearrange
 
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import (
+    ensure_subquadratic_causal_conv1d_supported,
+    ensure_subquadratic_fft_causal_conv1d_supported,
+)
+
 
 try:
+    from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
     from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d as _subq_fft_causal_conv1d
 except ImportError as _subq_import_error:
+    _subq_causal_conv1d = None
     _subq_fft_causal_conv1d = None
     _subq_error_msg = f"subquadratic_ops_torch not available: {_subq_import_error}"
 
@@ -87,6 +94,7 @@ def parallel_fir(
     if fir_length >= 128:
         if use_subquadratic_ops:
             # subq-ops fft_causal_conv1d expects [B, D, L] input and [D, L] filter; dtypes must match
+            ensure_subquadratic_fft_causal_conv1d_supported()
             k = weight[:, :, :L].squeeze(1) if weight.dim() == 3 else weight[:, :L]
             u_fp32 = u.to(torch.float32)
             z = _subq_fft_causal_conv1d(u_fp32, k.to(torch.float32))
@@ -101,14 +109,24 @@ def parallel_fir(
                     D=bias,
                 ).to(dtype=u.dtype)
     else:
-        z = F.conv1d(
-            u.to(torch.float32),
-            weight.to(torch.float32),
-            bias=None,
-            stride=1,
-            padding=fir_length - 1,
-            groups=u.shape[1],  # always set to D, regardless of filter grouping
-        )[..., :L]
+        if use_subquadratic_ops:
+            if _subq_causal_conv1d is None:
+                raise ImportError(_subq_error_msg)
+            # subq-ops causal_conv1d expects pre-padded [B, D, L+pad] input and [D, K] weight.
+            ensure_subquadratic_causal_conv1d_supported()
+            pad_size = fir_length - 1
+            x_padded = F.pad(u.to(torch.float32), (pad_size, 0))
+            w = weight.squeeze(1) if weight.dim() == 3 else weight
+            z = _subq_causal_conv1d(x_padded, w.to(torch.float32))[..., pad_size:]
+        else:
+            z = F.conv1d(
+                u.to(torch.float32),
+                weight.to(torch.float32),
+                bias=None,
+                stride=1,
+                padding=fir_length - 1,
+                groups=u.shape[1],
+            )[..., :L]
 
         z = z.to(u.dtype)
 

@@ -27,6 +27,7 @@ dependencies = [
     # nvidia-resiliency-ext is pulled transitively by megatron-bridge.
     "emerging_optimizers",
     "subquadratic-ops-torch-cu13",
+    "email-validator",
 
     # These are dependencies for examples only, but are useful for actually doing analyses with this model
     "biopython",
@@ -88,6 +89,8 @@ override-dependencies = [
     "triton; sys_platform == 'never'",
     "transformer-engine; sys_platform == 'never'",
     "transformer-engine[pytorch]; sys_platform == 'never'",
+    # Avoid alpha Pydantic releases; langchain imports pulled by nvidia-resiliency-ext are not compatible.
+    "pydantic>=2.12,<2.14",
     # Avoid optional log-pattern-mining dependency conflicts from nvidia-resiliency-ext.
     "logsage; sys_platform == 'never'",
     "drain3; sys_platform == 'never'",

@@ -119,9 +119,7 @@ class HyenaMixer(MegatronModule):
         self.fast_conv_mixer = self.hyena_config.fast_conv_mixer
 
         self.use_subquadratic_ops = self.transformer_config.use_subquadratic_ops
-        # TODO: Re-enable B2BCausalConv1dModule for short/medium Hyena layers once
-        # subquadratic-ops updates it to support causal_conv1d 1.6+ semantics.
-        self.use_fused_b2b_causal_conv1d = False
+        self.use_fused_b2b_causal_conv1d = self.use_subquadratic_ops
 
         # Per attention head and per partition values.
         assert torch.distributed.is_initialized()

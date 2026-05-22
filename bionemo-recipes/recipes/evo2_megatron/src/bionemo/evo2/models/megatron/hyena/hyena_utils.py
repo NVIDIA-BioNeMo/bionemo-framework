@@ -33,6 +33,11 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint,
 from torch.autograd.function import Function
 
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import (
+    ensure_subquadratic_b2b_causal_conv1d_supported,
+    ensure_subquadratic_causal_conv1d_supported,
+    ensure_subquadratic_fft_causal_conv1d_supported,
+)
 
 
 try:
@@ -50,10 +55,25 @@ except ImportError:
 
 
 try:
-    from subquadratic_ops_torch.b2b_causal_conv1d import b2b_causal_conv1d
-    from subquadratic_ops_torch.causal_conv1d import causal_conv1d
-    from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d
+    from subquadratic_ops_torch.b2b_causal_conv1d import b2b_causal_conv1d as _subq_b2b_causal_conv1d
+    from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
+    from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d as _subq_fft_causal_conv1d
     from subquadratic_ops_torch.implicit_filter import implicit_filter
+
+    def causal_conv1d(*args, **kwargs):
+        """Run guarded subquadratic causal_conv1d."""
+        ensure_subquadratic_causal_conv1d_supported()
+        return _subq_causal_conv1d(*args, **kwargs)
+
+    def b2b_causal_conv1d(*args, **kwargs):
+        """Run guarded subquadratic b2b_causal_conv1d."""
+        ensure_subquadratic_b2b_causal_conv1d_supported()
+        return _subq_b2b_causal_conv1d(*args, **kwargs)
+
+    def fft_causal_conv1d(*args, **kwargs):
+        """Run guarded subquadratic fft_causal_conv1d."""
+        ensure_subquadratic_fft_causal_conv1d_supported()
+        return _subq_fft_causal_conv1d(*args, **kwargs)
 except ImportError as e:
     msg_causal_conv1d = f"Problem importing subquadratic_ops: {e}. causal_conv1d is not available."
     msg_b2b_causal_conv1d = f"Problem importing subquadratic_ops: {e}. b2b_causal_conv1d is not available."
