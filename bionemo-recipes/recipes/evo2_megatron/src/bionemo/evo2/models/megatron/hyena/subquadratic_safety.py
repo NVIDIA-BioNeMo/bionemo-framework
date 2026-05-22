@@ -42,6 +42,14 @@ def _assert_close_or_raise(op_name: str, actual: torch.Tensor, expected: torch.T
 
 
 @lru_cache(maxsize=None)
+def ensure_subquadratic_ops_supported(device_index: int | None = None) -> None:
+    """Validate all subquadratic_ops_torch CUDA kernels used by Evo2."""
+    ensure_subquadratic_causal_conv1d_supported(device_index)
+    ensure_subquadratic_fft_causal_conv1d_supported(device_index)
+    ensure_subquadratic_b2b_causal_conv1d_supported(device_index)
+
+
+@lru_cache(maxsize=None)
 def ensure_subquadratic_causal_conv1d_supported(device_index: int | None = None) -> None:
     """Validate subquadratic_ops_torch.causal_conv1d before using it for model data."""
     if not torch.cuda.is_available():

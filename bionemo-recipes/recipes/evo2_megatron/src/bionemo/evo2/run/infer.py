@@ -107,6 +107,7 @@ from megatron.core.utils import get_model_config
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 from bionemo.evo2.run.text_generation_controller import Evo2TextGenerationController
 
@@ -469,6 +470,8 @@ def setup_inference_engine(
         dist_config=dist_config,
     )
     logger.info("Initialized distributed environment")
+    if use_subquadratic_ops:
+        ensure_subquadratic_ops_supported()
 
     # -------------------------------------------------------------------------
     # Step 5: Create model and load weights

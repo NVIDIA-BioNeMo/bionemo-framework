@@ -33,11 +33,6 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint,
 from torch.autograd.function import Function
 
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
-from bionemo.evo2.models.megatron.hyena.subquadratic_safety import (
-    ensure_subquadratic_b2b_causal_conv1d_supported,
-    ensure_subquadratic_causal_conv1d_supported,
-    ensure_subquadratic_fft_causal_conv1d_supported,
-)
 
 
 try:
@@ -469,7 +464,6 @@ def fftconv_func(
     k_rev=None,
     bidirectional=False,
     use_subquadratic_ops=False,
-    check_subquadratic_ops=True,
 ):
     """Apply a 1D convolution to the input sequence u using the filter k and the shortcut D."""
     seqlen = u.shape[-1]
@@ -503,8 +497,6 @@ def fftconv_func(
     # causal
     else:
         if use_subquadratic_ops:
-            if check_subquadratic_ops and u.is_cuda:
-                ensure_subquadratic_fft_causal_conv1d_supported()
             y = fft_causal_conv1d(u, k.squeeze(0))
         else:
             fft_size = max(fft_size, 2 * k.shape[-1])
@@ -903,7 +895,6 @@ class ParallelHyenaOperator(nn.Module):
         self.zigzag = zigzag
 
         self.use_subquadratic_ops = transformer_config.use_subquadratic_ops
-        self._subquadratic_ops_checked = False
 
         self.model_parallel_size = self.pg_collection.tp.size() if self.pg_collection.tp is not None else 1
         self.model_parallel_rank = self.pg_collection.tp.rank() if self.pg_collection.tp is not None else 0
@@ -985,16 +976,6 @@ class ParallelHyenaOperator(nn.Module):
         with get_cuda_rng_tracker().fork(), torch.no_grad():
             bounds = math.sqrt(1 / self.kernel_size)
             torch.nn.init.uniform_(self.conv_bias, a=-bounds, b=bounds)
-
-    def _ensure_subquadratic_ops_supported(self):
-        """Run expensive subquadratic-op CUDA self-tests once per operator instance."""
-        if self._subquadratic_ops_checked or not self.use_subquadratic_ops:
-            return
-        if self.operator_type == "hyena_medium_conv" and self.kernel_size < 128:
-            ensure_subquadratic_causal_conv1d_supported()
-        else:
-            ensure_subquadratic_fft_causal_conv1d_supported()
-        self._subquadratic_ops_checked = True
 
     def forward_long(self, *, x1, x2, v, h, bias, inference_context):
         """Forward pass long."""
@@ -1086,7 +1067,6 @@ class ParallelHyenaOperator(nn.Module):
                 fir_length=self.kernel_size,  # self.short_filter_length,
                 compute_state=inference_context is not None,
                 use_subquadratic_ops=self.use_subquadratic_ops,
-                check_subquadratic_ops=False,
             )
             y = rearrange(y, "b d l -> b l d")
             y = y * x1
@@ -1112,8 +1092,6 @@ class ParallelHyenaOperator(nn.Module):
         Input shapes: bs, (num_groups, group_size), seq_length
         Output shapes: bs, (num_groups, group_size), seq_length
         """
-        if x1.is_cuda:
-            self._ensure_subquadratic_ops_supported()
         B, GDG, L = x1.shape  # noqa: N806
         x1, x2, v = x1[..., :L], x2[..., :L], v[..., :L]
 
@@ -1204,7 +1182,6 @@ class ParallelHyenaOperator(nn.Module):
                     gelu=False,
                     bidirectional=self.bidirectional,
                     use_subquadratic_ops=self.use_subquadratic_ops,
-                    check_subquadratic_ops=False,
                 )
                 z = z.to(v.dtype)
 
@@ -1404,7 +1381,6 @@ class ParallelCausalDepthwiseConv1d(nn.Module):
         self.num_groups = num_groups
         self.transformer_config = transformer_config
         self.use_subquadratic_ops = transformer_config.use_subquadratic_ops
-        self._subquadratic_ops_checked = False
         self.short_conv_L = hyena_config.short_conv_L
         self.local_init = local_init
         if pg_collection is None:
@@ -1496,9 +1472,6 @@ class ParallelCausalDepthwiseConv1d(nn.Module):
         # Projection conv is fused with SE/MR layers by B2BCausalConv1dModule when available.
         if self.use_fast_causal_conv:  # hyena_proj_conv case
             if self.use_subquadratic_ops:
-                if x.is_cuda and not self._subquadratic_ops_checked:
-                    ensure_subquadratic_causal_conv1d_supported()
-                    self._subquadratic_ops_checked = True
                 y = causal_conv1d(x, weight)[..., pad_size:]
             else:
                 y = causal_conv1d_fn(x, weight, bias=None, activation=None)[..., pad_size:]
@@ -1566,7 +1539,6 @@ class B2BCausalConv1dModule(nn.Module):
         """
         super().__init__()
         self.b2b_causal_conv1d_fn = b2b_causal_conv1d
-        self._check_subquadratic_ops = b2b_causal_conv1d is globals()["b2b_causal_conv1d"]
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
@@ -1591,14 +1563,6 @@ class B2BCausalConv1dModule(nn.Module):
             raise ValueError(f"Operator type {operator_type} not supported")
 
         self.effective_pad_size = (self._mixer_kernel_size - 1) + (self._proj_conv_kernel_size - 1)
-        self._subquadratic_ops_checked = False
-
-    def _ensure_subquadratic_ops_supported(self):
-        """Run the B2B CUDA self-test once per wrapper instance."""
-        if self._subquadratic_ops_checked or not self._check_subquadratic_ops:
-            return
-        ensure_subquadratic_b2b_causal_conv1d_supported()
-        self._subquadratic_ops_checked = True
 
     def forward(self, x, _use_cp=True):
         """Forward pass for the B2BCausalConv1dModule.
@@ -1612,8 +1576,6 @@ class B2BCausalConv1dModule(nn.Module):
         # Validate input dimensions
         if x.dim() != 3:
             raise ValueError("Input tensor must be 3D [batch_size, hidden_dim, seq_len]")
-        if x.is_cuda:
-            self._ensure_subquadratic_ops_supported()
 
         # Extract weights at runtime to avoid parameter registration
         proj_weight = self._proj_conv_module.short_conv_weight
@@ -1747,9 +1709,6 @@ class ParallelCausalDepthwiseConv1dWithState(ParallelCausalDepthwiseConv1d):
         L = u.shape[1]  # noqa: N806
         fir_state = get_filter_state("fir")
         if fir_state is None:
-            if self.use_subquadratic_ops and u.is_cuda and not self._subquadratic_ops_checked:
-                ensure_subquadratic_causal_conv1d_supported()
-                self._subquadratic_ops_checked = True
             z_pre, fir_state = engine.parallel_fir(
                 u=u,
                 weight=torch.tensor(weight),  # self.short_filter_weight,
@@ -1759,7 +1718,6 @@ class ParallelCausalDepthwiseConv1dWithState(ParallelCausalDepthwiseConv1d):
                 fir_length=self.kernel_size,  # self.short_filter_length,
                 compute_state=inference_context is not None,
                 use_subquadratic_ops=self.use_subquadratic_ops,
-                check_subquadratic_ops=False,
             )
         else:
             if len(u.shape) > 2:

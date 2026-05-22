@@ -35,10 +35,11 @@ from megatron.bridge.training.gpt_step import forward_step as gpt_forward_step
 from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.pretrain import pretrain
-from megatron.bridge.utils.common_utils import get_rank_safe
+from megatron.bridge.utils.common_utils import get_local_rank_preinit, get_rank_safe
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import MODEL_OPTIONS, hyena_forward_step, infer_model_type
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
 
 
@@ -885,7 +886,9 @@ def train(args: argparse.Namespace) -> None:
     if args.num_layers:
         cfg.model.num_layers = args.num_layers
     if args.use_subquadratic_ops:
-        # TODO assert that it is installed
+        if torch.cuda.is_available():
+            torch.cuda.set_device(get_local_rank_preinit())
+        ensure_subquadratic_ops_supported()
         cfg.model.use_subquadratic_ops = True
 
     if args.no_activation_checkpointing:

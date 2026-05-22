@@ -19,11 +19,6 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from einops import rearrange
 
-from bionemo.evo2.models.megatron.hyena.subquadratic_safety import (
-    ensure_subquadratic_causal_conv1d_supported,
-    ensure_subquadratic_fft_causal_conv1d_supported,
-)
-
 
 try:
     from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
@@ -83,7 +78,6 @@ def parallel_fir(
     fir_length,
     compute_state,
     use_subquadratic_ops=False,
-    check_subquadratic_ops=True,
 ):
     """Compute parallel finite impulse response filtering with optional state computation."""
     L = u.shape[1]  # noqa: N806
@@ -95,8 +89,6 @@ def parallel_fir(
     if fir_length >= 128:
         if use_subquadratic_ops:
             # subq-ops fft_causal_conv1d expects [B, D, L] input and [D, L] filter; dtypes must match
-            if check_subquadratic_ops and u.is_cuda:
-                ensure_subquadratic_fft_causal_conv1d_supported()
             k = weight[:, :, :L].squeeze(1) if weight.dim() == 3 else weight[:, :L]
             u_fp32 = u.to(torch.float32)
             z = _subq_fft_causal_conv1d(u_fp32, k.to(torch.float32))
@@ -115,8 +107,6 @@ def parallel_fir(
             if _subq_causal_conv1d is None:
                 raise ImportError(_subq_error_msg)
             # subq-ops causal_conv1d expects pre-padded [B, D, L+pad] input and [D, K] weight.
-            if check_subquadratic_ops and u.is_cuda:
-                ensure_subquadratic_causal_conv1d_supported()
             pad_size = fir_length - 1
             x_padded = F.pad(u.to(torch.float32), (pad_size, 0))
             w = weight.squeeze(1) if weight.dim() == 3 else weight

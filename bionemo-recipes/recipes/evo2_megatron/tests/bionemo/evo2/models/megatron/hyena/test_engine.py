@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 
 from bionemo.evo2.models.megatron.hyena import engine
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 
 
 def test_fftconv_func_is_prefix_invariant_when_filter_is_longer_than_input():
@@ -83,6 +84,11 @@ def test_parallel_fir_short_cuda_path_matches_torch_depthwise_conv1d(use_subquad
     """Short FIR prefill should match F.conv1d or fail before returning bad subq output."""
     if not torch.cuda.is_available():
         pytest.skip("short FIR CUDA path requires CUDA")
+    if use_subquadratic_ops:
+        try:
+            ensure_subquadratic_ops_supported()
+        except RuntimeError as e:
+            pytest.xfail(str(e))
 
     torch.manual_seed(1234)
     batch_size = 2
@@ -95,21 +101,16 @@ def test_parallel_fir_short_cuda_path_matches_torch_depthwise_conv1d(use_subquad
     weight = torch.randn(hidden_size, 1, kernel_size, device=device)
     bias = torch.randn(hidden_size, device=device)
 
-    try:
-        actual, state = engine.parallel_fir(
-            u=u,
-            weight=weight,
-            bias=bias,
-            L=seq_len,
-            gated_bias=True,
-            fir_length=kernel_size,
-            compute_state=True,
-            use_subquadratic_ops=use_subquadratic_ops,
-        )
-    except RuntimeError as e:
-        if use_subquadratic_ops and "failed a CUDA self-test" in str(e):
-            pytest.xfail(str(e))
-        raise
+    actual, state = engine.parallel_fir(
+        u=u,
+        weight=weight,
+        bias=bias,
+        L=seq_len,
+        gated_bias=True,
+        fir_length=kernel_size,
+        compute_state=True,
+        use_subquadratic_ops=use_subquadratic_ops,
+    )
 
     u_bdl = u.transpose(1, 2).contiguous()
     expected = F.conv1d(

@@ -37,6 +37,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     wang_init_method,
     zigzag_get_overlapping_patches,
 )
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 
 
 class MockProcessGroup:
@@ -137,7 +138,6 @@ def test_parallel_causal_depthwise_conv1d_uses_subquadratic_fast_conv(
         pg_collection=types.SimpleNamespace(cp=None),
         use_fast_causal_conv=True,
         use_subquadratic_ops=True,
-        _subquadratic_ops_checked=False,
     )
 
     y = ParallelCausalDepthwiseConv1d.forward(module, x, _use_cp=False)
@@ -304,29 +304,6 @@ def test_b2b_causal_conv1d_module_device_handling():  # noqa: D103
         assert result_cuda.device == x_cuda.device, "Device mismatch on CUDA"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for subquadratic guard test")
-@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.ensure_subquadratic_b2b_causal_conv1d_supported")
-@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.b2b_causal_conv1d")
-def test_b2b_causal_conv1d_module_checks_subquadratic_kernel_once(mock_b2b, mock_ensure):  # noqa: D103
-    mock_b2b.side_effect = mock_b2b_causal_conv1d
-    proj_conv = MockProjConv(kernel_size=3)
-    mixer = MockMixer(kernel_size=5)
-    b2b_module = B2BCausalConv1dModule(
-        proj_conv,
-        mixer,
-        operator_type="hyena_short_conv",
-        b2b_causal_conv1d=mock_b2b,
-        pg_collection=MockProcessGroupCollection(),
-    )
-
-    x = torch.randn(2, 96, 32, device="cuda")
-    b2b_module(x)
-    b2b_module(x)
-
-    assert mock_ensure.call_count == 1
-    assert mock_b2b.call_count == 2
-
-
 def test_b2b_causal_conv1d_effective_padding_size():
     """Test the zigzag pattern for data distribution in context parallel mode."""
     proj_conv = MockProjConv(kernel_size=3)
@@ -344,14 +321,14 @@ def test_b2b_causal_conv1d_effective_padding_size():
     assert b2b_module.effective_pad_size == expected_pad_size
 
 
-@pytest.mark.xfail(
-    reason="subquadratic-ops fused B2B kernel may fail CUDA/PTX self-test on unsupported GPUs",
-    strict=True,
-)
 def test_b2b_causal_conv1d_module_matches_sequential_reference():
     """Document the isolated B2B CUDA kernel behavior before relying on the fused path."""
     if not torch.cuda.is_available():
         pytest.skip("B2B causal conv isolation test requires CUDA")
+    try:
+        ensure_subquadratic_ops_supported()
+    except RuntimeError as e:
+        pytest.xfail(str(e))
 
     torch.manual_seed(1234)
     batch_size = 2

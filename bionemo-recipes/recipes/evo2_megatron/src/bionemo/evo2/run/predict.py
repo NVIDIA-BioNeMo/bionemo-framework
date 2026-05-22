@@ -106,6 +106,7 @@ except ImportError:
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.data.fasta_dataset import SimpleFastaDataset
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.recipeutils.inference.collation import batch_collator
 
 
@@ -1093,6 +1094,8 @@ def predict(
         dist_config=dist_config,
     )
     logger.info("Initialized distributed environment")
+    if use_subquadratic_ops:
+        ensure_subquadratic_ops_supported()
 
     # -------------------------------------------------------------------------
     # Step 5: Create model and load weights
