@@ -25,6 +25,7 @@ import torch.nn.functional as F  # noqa: N812
 from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     B2BCausalConv1dModule,
     ExchangeOverlappingRegionsCausal,
+    ParallelCausalDepthwiseConv1d,
     _get_inverse_zigzag_indices,
     _get_zigzag_indices,
     divide,
@@ -119,6 +120,31 @@ class MockMixer(torch.nn.Module):
 def mock_b2b_causal_conv1d(x, weight_proj, weight_mixer, skip_bias):
     """Mock implementation of b2b_causal_conv1d that returns only the tensor for test slicing."""
     return x
+
+
+@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.causal_conv1d_fn")
+@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.causal_conv1d")
+def test_parallel_causal_depthwise_conv1d_uses_subquadratic_fast_conv(
+    mock_subq_causal_conv1d, mock_fast_causal_conv1d
+):
+    """Fast projection conv should honor use_subquadratic_ops."""
+    mock_subq_causal_conv1d.side_effect = lambda x, weight: torch.zeros_like(x)
+    x = torch.randn(2, 4, 8)
+    module = types.SimpleNamespace(
+        kernel_size=3,
+        short_conv_weight=torch.ones(4, 3),
+        group_dim=1,
+        pg_collection=types.SimpleNamespace(cp=None),
+        use_fast_causal_conv=True,
+        use_subquadratic_ops=True,
+        _subquadratic_ops_checked=False,
+    )
+
+    y = ParallelCausalDepthwiseConv1d.forward(module, x, _use_cp=False)
+
+    assert y.shape == x.shape
+    mock_subq_causal_conv1d.assert_called_once()
+    mock_fast_causal_conv1d.assert_not_called()
 
 
 @pytest.mark.parametrize("operator_type", ["hyena_short_conv", "hyena_medium_conv"])

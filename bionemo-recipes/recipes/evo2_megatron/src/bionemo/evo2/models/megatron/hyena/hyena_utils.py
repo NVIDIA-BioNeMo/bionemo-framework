@@ -1492,10 +1492,16 @@ class ParallelCausalDepthwiseConv1d(nn.Module):
         else:
             x = F.pad(x, (pad_size, 0))
 
-        # subquadratic_ops causal_conv1d is only applied to the projection conv of Hyena LI layer
-        # Projection conv is fused with SE/MR layers (B2BCausalConv1dModule)
+        # subquadratic_ops causal_conv1d is only applied to the projection conv of Hyena LI layer.
+        # Projection conv is fused with SE/MR layers by B2BCausalConv1dModule when available.
         if self.use_fast_causal_conv:  # hyena_proj_conv case
-            y = causal_conv1d_fn(x, weight, bias=None, activation=None)[..., pad_size:]
+            if self.use_subquadratic_ops:
+                if x.is_cuda and not self._subquadratic_ops_checked:
+                    ensure_subquadratic_causal_conv1d_supported()
+                    self._subquadratic_ops_checked = True
+                y = causal_conv1d(x, weight)[..., pad_size:]
+            else:
+                y = causal_conv1d_fn(x, weight, bias=None, activation=None)[..., pad_size:]
         else:  # hyena_short_conv case
             y = F.conv1d(
                 x,
