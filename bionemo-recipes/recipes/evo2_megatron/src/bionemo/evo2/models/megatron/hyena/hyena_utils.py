@@ -467,7 +467,7 @@ def fftconv_func(
 ):
     """Apply a 1D convolution to the input sequence u using the filter k and the shortcut D."""
     seqlen = u.shape[-1]
-    fft_size = 2 * seqlen
+    fft_size = max(2 * seqlen, 2 * k.shape[-1])
 
     # check if k is less than seqlen -- subquadratic_ops input does not need padding
     if not use_subquadratic_ops and k.shape[-1] < seqlen:
@@ -499,7 +499,6 @@ def fftconv_func(
         if use_subquadratic_ops:
             y = fft_causal_conv1d(u, k.squeeze(0))
         else:
-            fft_size = max(fft_size, 2 * k.shape[-1])
             k_f = torch.fft.rfft(k, n=fft_size) / fft_size
             if k_rev is not None:
                 k_rev_f = torch.fft.rfft(k_rev, n=fft_size) / fft_size
@@ -646,6 +645,8 @@ class ImplicitModalFilter(nn.Module):
 
         return h, None
 
+    # Keep this eager. The short-prefill prefix-invariance tests in tests/bionemo/evo2/run
+    # cover the prior torch.compile regression with dynamic filter lengths and custom ops.
     def filter(self, L, *args, **kwargs):  # noqa: N803
         """Get t and the convolution filter for t and the requested sequence length."""
         if self._cp_size > 1:
@@ -768,8 +769,7 @@ class ExplicitSingleDecayFilter(nn.Module):
         """
         return self.filter(L, *args, **kwargs)
 
-    # Keep this eager. Compiling this helper can leave global dispatcher state
-    # that interferes with unrelated custom autograd/custom-op call sites.
+    # Keep this eager for the same short-prefill prefix-invariance reproducer as ImplicitModalFilter.filter.
     def filter(self, L, *args, **kwargs):  # noqa: N803
         """Compute the filter as a function of h and decay for the requested sequence length."""
         h = self.h[:, :L]

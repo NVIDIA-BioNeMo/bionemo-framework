@@ -537,6 +537,27 @@ def test_fftconv_func():
     assert output_short.shape == u.shape
 
 
+def test_fftconv_func_bidirectional_is_prefix_invariant_when_filter_is_longer_than_input():
+    """Bidirectional FFT convolution should not alias short prefixes when the filter is long."""
+    torch.manual_seed(1234)
+    batch_size = 2
+    short_len = 5
+    long_len = 64
+    hidden_size = 4
+    filter_len = 64
+
+    u_short = torch.randn(batch_size, hidden_size, short_len)
+    u_long = torch.zeros(batch_size, hidden_size, long_len)
+    u_long[..., :short_len] = u_short
+    k = torch.randn(1, 2 * hidden_size, filter_len)
+    D = torch.randn(hidden_size)  # noqa: N806
+
+    short_out = fftconv_func(u_short, k, D, None, gelu=False, bidirectional=True)
+    long_out = fftconv_func(u_long, k, D, None, gelu=False, bidirectional=True)[..., :short_len]
+
+    torch.testing.assert_close(short_out, long_out, rtol=1e-5, atol=1e-5)
+
+
 def test_fftconv_func_high_dimensional_input():
     """Test fftconv_func with high-dimensional input to cover the len(u.shape) > 3 case."""
     batch_size = 2

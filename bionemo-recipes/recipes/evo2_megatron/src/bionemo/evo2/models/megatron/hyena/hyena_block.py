@@ -121,8 +121,9 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
             pp_layer_offset, layer_type_list = self._select_layers_for_pipeline_parallel(layer_type_list)
 
         if get_cpu_offload_context is not None:
-            # Megatron Core changed this helper from six to seven positional arguments
-            # across releases. Pass only the arguments accepted by the installed version.
+            # MCore 0.x has shipped both six- and seven-argument variants of this helper.
+            # Pass only the arguments accepted by the installed version; if a future helper
+            # uses *args, pass the full compatibility list rather than counting *args as one slot.
             offload_args = [
                 self.config.cpu_offloading,
                 self.config.cpu_offloading_num_layers,
@@ -132,9 +133,16 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
                 self.config.cpu_offloading_double_buffering,
                 getattr(self.config, "cpu_offloading_retain_pinned_cpu_buffers", False),
             ]
-            num_offload_params = len(inspect.signature(get_cpu_offload_context).parameters)
+            offload_params = tuple(inspect.signature(get_cpu_offload_context).parameters.values())
+            if any(param.kind is inspect.Parameter.VAR_POSITIONAL for param in offload_params):
+                num_offload_args = len(offload_args)
+            else:
+                num_offload_args = sum(
+                    param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                    for param in offload_params
+                )
             (self.offload_context, self.group_prefetch_offload_commit_async) = get_cpu_offload_context(
-                *offload_args[:num_offload_params],
+                *offload_args[:num_offload_args],
             )
             self.config._cpu_offloading_context = self.offload_context if self.config.cpu_offloading else None
         else:
