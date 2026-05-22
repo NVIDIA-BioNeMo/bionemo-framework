@@ -306,7 +306,7 @@ class HyenaModelProvider(TransformerConfig, ModelProviderMixin[MCoreHyenaModel])
     apply_rope_fusion: bool = True
     make_vocab_size_divisible_by: int = 128
     gated_linear_unit: bool = True
-    fp32_residual_connection: bool = True
+    fp32_residual_connection: bool = False
     normalization: str = "RMSNorm"
     add_bias_linear: bool = False
     hidden_dropout: float = 0.0

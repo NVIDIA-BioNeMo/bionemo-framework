@@ -1046,9 +1046,6 @@ def predict(
         # Set the model to use fewer layers and skip post-processing (output heads).
         model_provider.num_layers = target_num_layers
         model_provider.post_process = False
-        if hasattr(model_provider, "fp32_residual_connection"):
-            model_provider.fp32_residual_connection = False
-
         # Also truncate the hybrid_override_pattern if it exists, since it must match num_layers
         if hasattr(model_provider, "hybrid_override_pattern") and model_provider.hybrid_override_pattern is not None:
             original_pattern = model_provider.hybrid_override_pattern
