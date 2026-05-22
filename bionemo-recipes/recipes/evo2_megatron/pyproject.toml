@@ -93,7 +93,8 @@ override-dependencies = [
 [tool.uv.sources]
 # Shared recipe utilities (framework-agnostic)
 # External dependencies with specific git tags/commits
-causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = "v1.5.4" }
+# 1.6.1 fixes a custom-op no-storage failure in no-grad/frozen forward paths.
+causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = "v1.6.1" }
 nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v1.1.4.post6" }
 
 # Internal dependencies

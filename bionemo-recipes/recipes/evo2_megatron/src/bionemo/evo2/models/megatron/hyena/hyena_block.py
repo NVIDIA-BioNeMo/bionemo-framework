@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -120,13 +121,20 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
             pp_layer_offset, layer_type_list = self._select_layers_for_pipeline_parallel(layer_type_list)
 
         if get_cpu_offload_context is not None:
-            (self.offload_context, self.group_prefetch_offload_commit_async) = get_cpu_offload_context(
+            # Megatron Core changed this helper from six to seven positional arguments
+            # across releases. Pass only the arguments accepted by the installed version.
+            offload_args = [
                 self.config.cpu_offloading,
                 self.config.cpu_offloading_num_layers,
                 self.config.num_layers,
                 self.config.cpu_offloading_activations,
                 self.config.cpu_offloading_weights,
                 self.config.cpu_offloading_double_buffering,
+                getattr(self.config, "cpu_offloading_retain_pinned_cpu_buffers", False),
+            ]
+            num_offload_params = len(inspect.signature(get_cpu_offload_context).parameters)
+            (self.offload_context, self.group_prefetch_offload_commit_async) = get_cpu_offload_context(
+                *offload_args[:num_offload_params],
             )
             self.config._cpu_offloading_context = self.offload_context if self.config.cpu_offloading else None
         else:

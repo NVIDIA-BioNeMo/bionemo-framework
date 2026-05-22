@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEVCONTAINER_JSON="${SCRIPT_DIR}/devcontainer.json"
 CONTAINER_NAME="${BIONEMO_CONTAINER_NAME:-bionemo-devcontainer}"
-IMAGE_NAME="${BIONEMO_IMAGE_NAME:-bionemo-devcontainer:latest}"
+IMAGE_NAME="${BIONEMO_IMAGE_NAME:-${CONTAINER_NAME}:latest}"
 
 # ---------------------------------------------------------------------------
 # Helpers

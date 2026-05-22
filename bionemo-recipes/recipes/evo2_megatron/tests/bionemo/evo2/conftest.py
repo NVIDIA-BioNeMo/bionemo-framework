@@ -15,15 +15,41 @@
 
 
 # conftest.py
+# ruff: noqa: E402, I001
 import copy
 import gc
+import importlib
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
-import torch
+
+# Load Transformer Engine's core library before torch; this avoids a CUDA library
+# symbol-resolution failure seen when Megatron imports torch before TE is loaded.
+importlib.import_module("transformer_engine.pytorch")
+torch = importlib.import_module("torch")
+
+# Megatron Bridge imports Transformers conversion modules during collection. In
+# this NGC image, torchvision is present but its custom ops are unavailable, so
+# make Transformers skip optional vision imports for these non-vision tests.
+transformers_import_utils = importlib.import_module("transformers.utils.import_utils")
+transformers_import_utils._torchvision_available = False
+
+
+# Megatron Bridge eagerly imports VLM recipe modules through its recipes package.
+# Those modules import qwen_vl_utils, which imports torchvision. Provide the
+# non-vision tests with a stub so Evo2 collection does not depend on VLM extras.
+def _unavailable_process_vision_info(*args, **kwargs):
+    raise RuntimeError("qwen_vl_utils is unavailable in Evo2 tests")
+
+
+qwen_vl_utils = ModuleType("qwen_vl_utils")
+qwen_vl_utils.process_vision_info = _unavailable_process_vision_info
+sys.modules["qwen_vl_utils"] = qwen_vl_utils
 
 from bionemo.core.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512

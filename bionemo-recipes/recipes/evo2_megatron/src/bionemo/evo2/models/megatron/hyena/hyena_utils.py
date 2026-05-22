@@ -486,6 +486,7 @@ def fftconv_func(u, k, D, dropout_mask, gelu=True, k_rev=None, bidirectional=Fal
         if use_subquadratic_ops:
             y = fft_causal_conv1d(u, k.squeeze(0))
         else:
+            fft_size = max(fft_size, 2 * k.shape[-1])
             k_f = torch.fft.rfft(k, n=fft_size) / fft_size
             if k_rev is not None:
                 k_rev_f = torch.fft.rfft(k_rev, n=fft_size) / fft_size
@@ -754,7 +755,8 @@ class ExplicitSingleDecayFilter(nn.Module):
         """
         return self.filter(L, *args, **kwargs)
 
-    @torch.compile(mode="max-autotune")
+    # Keep this eager. Compiling this helper can leave global dispatcher state
+    # that interferes with unrelated custom autograd/custom-op call sites.
     def filter(self, L, *args, **kwargs):  # noqa: N803
         """Compute the filter as a function of h and decay for the requested sequence length."""
         h = self.h[:, :L]
@@ -1456,10 +1458,7 @@ class ParallelCausalDepthwiseConv1d(nn.Module):
         # subquadratic_ops causal_conv1d is only applied to the projection conv of Hyena LI layer
         # Projection conv is fused with SE/MR layers (B2BCausalConv1dModule)
         if self.use_fast_causal_conv:  # hyena_proj_conv case
-            if self.use_subquadratic_ops:  # hyena_proj_conv of LI layer when subquadratic_ops is enabled
-                y = causal_conv1d(x, weight)[..., pad_size:]
-            else:
-                y = causal_conv1d_fn(x, weight, bias=None, activation=None)[..., pad_size:]
+            y = causal_conv1d_fn(x, weight, bias=None, activation=None)[..., pad_size:]
         else:  # hyena_short_conv case
             y = F.conv1d(
                 x,

@@ -622,6 +622,106 @@ def test_predict_evo2_embedding_extraction(
     assert len(seq_idx_map) == num_sequences
 
 
+@pytest.fixture(
+    params=[False, True],
+    ids=["causal-conv1d", "subquadratic-ops"],
+)
+def use_subquadratic_ops(request):
+    """Whether predict should use subquadratic Hyena kernels."""
+    return request.param
+
+
+@pytest.mark.timeout(512)
+@pytest.mark.slow
+def test_predict_evo2_short_embedding_is_prefix_invariant_across_batch_padding(
+    tmp_path,
+    mbridge_checkpoint_1b_8k_bf16_path: Path,
+    use_subquadratic_ops: bool,
+):
+    """A short sequence should embed the same alone or padded in a longer batch."""
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Embedding prediction test requires a GPU")
+
+    short_sequence = "ACGTACGTAA"
+    padding_sequence = (ALU_SEQUENCE * (256 // len(ALU_SEQUENCE) + 1))[:256]
+
+    def _write_fasta(fasta_path: Path, records: dict[str, str]) -> None:
+        fasta_path.write_text("".join(f">{name}\n{sequence}\n" for name, sequence in records.items()))
+
+    def _run_predict(fasta_path: Path, output_dir: Path) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
+        open_port = find_free_network_port()
+        subquadratic_arg = " --use-subquadratic-ops" if use_subquadratic_ops else ""
+        command = (
+            f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {open_port} "
+            f"-m bionemo.evo2.run.predict --fasta {fasta_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
+            f"--output-dir {output_dir} --micro-batch-size 2 --write-interval epoch --embedding-layer -1"
+            f"{subquadratic_arg}"
+        )
+        result = subprocess.run(
+            shlex.split(command),
+            check=False,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print("STDOUT:\n" + result.stdout)
+            print("STDERR:\n" + result.stderr)
+        assert result.returncode == 0, f"predict_evo2 command failed with code {result.returncode}"
+
+        pred_files = sorted(glob.glob(str(output_dir / "predictions__rank_*__dp_rank_*.pt")))
+        assert len(pred_files) == 1, f"Expected 1 prediction file, got {len(pred_files)}"
+        with open(output_dir / "seq_idx_map.json") as f:
+            seq_idx_map = json.load(f)
+        return torch.load(pred_files[0], weights_only=True), seq_idx_map
+
+    def _unpadded_dna_embeddings(
+        preds: dict[str, torch.Tensor],
+        seq_idx_map: dict[str, int],
+        seqid: str,
+        dna_length: int,
+    ) -> torch.Tensor:
+        matches = (preds["seq_idx"] == seq_idx_map[seqid]).nonzero(as_tuple=True)[0]
+        assert matches.numel() == 1
+        row = matches.item()
+        assert preds["pad_mask"][row].sum().item() == dna_length
+        return preds["hidden_embeddings"][row, :dna_length].to(torch.float32)
+
+    def _relative_frobenius_error(left: torch.Tensor, right: torch.Tensor) -> float:
+        numerator = (left - right).float().pow(2).sum().sqrt()
+        denominator = right.float().pow(2).sum().sqrt()
+        return float(numerator / (denominator + 1e-30))
+
+    def _assert_prefix_embeddings_close(left: torch.Tensor, right: torch.Tensor) -> None:
+        rel_error = _relative_frobenius_error(left, right)
+        bound = 4.0 * (1.03**33) * float(torch.finfo(torch.bfloat16).eps)
+        if rel_error <= bound:
+            return
+
+        rel_shuffled_hidden = _relative_frobenius_error(left, torch.roll(right, shifts=-1, dims=-1))
+        rel_shuffled_sequence = _relative_frobenius_error(left, torch.roll(right, shifts=-1, dims=0))
+        max_abs_diff = (left - right).abs().max().item()
+        raise AssertionError(
+            "Prefix embeddings exceeded bf16 relative-norm tolerance: "
+            f"rel={rel_error}, bound={bound}, rel_shuffled_hidden={rel_shuffled_hidden}, "
+            f"rel_shuffled_sequence={rel_shuffled_sequence}, max_abs_diff={max_abs_diff}"
+        )
+
+    alone_fasta = tmp_path / "short_alone.fasta"
+    padded_fasta = tmp_path / "short_padded.fasta"
+    _write_fasta(alone_fasta, {"short": short_sequence})
+    _write_fasta(padded_fasta, {"short": short_sequence, "padding": padding_sequence})
+    alone_preds, alone_seq_idx_map = _run_predict(alone_fasta, tmp_path / "alone_output")
+    padded_preds, padded_seq_idx_map = _run_predict(padded_fasta, tmp_path / "padded_output")
+    assert alone_preds["hidden_embeddings"].shape[1] == len(short_sequence)
+    assert padded_preds["hidden_embeddings"].shape[1] == len(padding_sequence)
+
+    alone_embeddings = _unpadded_dna_embeddings(alone_preds, alone_seq_idx_map, "short", len(short_sequence))
+    padded_embeddings = _unpadded_dna_embeddings(padded_preds, padded_seq_idx_map, "short", len(short_sequence))
+
+    _assert_prefix_embeddings_close(alone_embeddings, padded_embeddings)
+
+
 @pytest.mark.slow
 def test_predict_evo2_embedding_layer_validation(
     tmp_path,

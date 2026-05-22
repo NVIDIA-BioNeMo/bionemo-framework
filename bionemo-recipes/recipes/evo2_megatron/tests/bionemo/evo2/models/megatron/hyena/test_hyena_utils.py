@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F  # noqa: N812
 
 from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     B2BCausalConv1dModule,
@@ -292,6 +293,66 @@ def test_b2b_causal_conv1d_effective_padding_size():
     # Verify the effective padding size is correct
     expected_pad_size = (mixer.kernel_size - 1) + (proj_conv.kernel_size - 1)
     assert b2b_module.effective_pad_size == expected_pad_size
+
+
+@pytest.mark.xfail(
+    reason="subquadratic-ops fused B2B kernel does not match causal_conv1d 1.6+ short-conv semantics",
+    strict=True,
+)
+def test_b2b_causal_conv1d_module_matches_sequential_reference():
+    """Document the isolated B2B mismatch before re-enabling the fused path."""
+    if not torch.cuda.is_available():
+        pytest.skip("B2B causal conv isolation test requires CUDA")
+
+    torch.manual_seed(1234)
+    batch_size = 2
+    hidden_size = 4
+    seq_len = 16
+    proj_kernel_size = 3
+    mixer_kernel_size = 7
+    device = torch.device("cuda")
+
+    x = torch.randn(batch_size, 3 * hidden_size, seq_len, device=device)
+    proj_weight = torch.randn(3 * hidden_size, proj_kernel_size, device=device)
+    mixer_weight = torch.randn(hidden_size, mixer_kernel_size, device=device)
+    bias = torch.randn(hidden_size, device=device)
+
+    proj_conv = torch.nn.Module()
+    proj_conv.kernel_size = proj_kernel_size
+    proj_conv.short_conv_weight = proj_weight
+    proj_conv.group_dim = 1
+
+    mixer = torch.nn.Module()
+    mixer.use_conv_bias = True
+    mixer.group_dim = 1
+    mixer.conv_bias = bias
+    mixer.short_conv = torch.nn.Module()
+    mixer.short_conv.kernel_size = mixer_kernel_size
+    mixer.short_conv.short_conv_weight = mixer_weight.unsqueeze(1)
+
+    b2b_module = B2BCausalConv1dModule(
+        proj_conv,
+        mixer,
+        operator_type="hyena_short_conv",
+        pg_collection=MockProcessGroupCollection(),
+    )
+
+    fused = b2b_module(x).float()
+    projected = F.conv1d(
+        F.pad(x.float(), (proj_kernel_size - 1, 0)),
+        proj_weight.float().flip(-1).unsqueeze(1),
+        groups=3 * hidden_size,
+    )
+    x1, x2, v = projected[:, ::3], projected[:, 1::3], projected[:, 2::3]
+    z = x2 * v
+    mixed = F.conv1d(
+        F.pad(z, (mixer_kernel_size - 1, 0)),
+        mixer_weight.float().flip(-1).unsqueeze(1),
+        groups=hidden_size,
+    )
+    reference = x1 * (mixed + bias.float()[None, :, None] * z)
+
+    torch.testing.assert_close(fused, reference, rtol=1e-4, atol=1e-4)
 
 
 def test_zigzag_get_overlapping_patches():  # noqa: D103

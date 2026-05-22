@@ -76,7 +76,6 @@ from megatron.bridge.training.checkpointing import (
 )
 from megatron.bridge.training.config import DistributedInitConfig, RNGConfig
 from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES, get_mixed_precision_config
-from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
 from megatron.bridge.training.utils.checkpoint_utils import (
     file_exists,
     get_checkpoint_run_config_filename,
@@ -96,6 +95,14 @@ from megatron.core.tensor_parallel.mappings import _gather_along_last_dim
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_batch_on_this_cp_rank
 from torch import Tensor
+
+
+try:
+    from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
+except ImportError:
+    from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
+        HuggingFaceTokenizer as _HuggingFaceTokenizer,
+    )
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.data.fasta_dataset import SimpleFastaDataset
@@ -656,7 +663,6 @@ def _predict_step(
     if not parallel_state.is_pipeline_last_stage():
         return None
 
-    # Forward pass
     output_tensor = model(
         input_ids=batch["tokens"],
         position_ids=batch["position_ids"],
@@ -1036,9 +1042,11 @@ def predict(
                 f"Valid range: -{original_num_layers} to {original_num_layers - 1}."
             )
 
-        # Set the model to use fewer layers and skip post-processing (output heads)
+        # Set the model to use fewer layers and skip post-processing (output heads).
         model_provider.num_layers = target_num_layers
         model_provider.post_process = False
+        if hasattr(model_provider, "fp32_residual_connection"):
+            model_provider.fp32_residual_connection = False
 
         # Also truncate the hybrid_override_pattern if it exists, since it must match num_layers
         if hasattr(model_provider, "hybrid_override_pattern") and model_provider.hybrid_override_pattern is not None:
@@ -1276,6 +1284,12 @@ def predict(
 def main() -> None:
     """CLI entry point for Evo2 prediction."""
     args = parse_args()
+    try:
+        from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
+
+        register_allowed_target_prefix("bionemo.")
+    except ImportError:
+        pass
     predict(
         fasta_path=args.fasta,
         ckpt_dir=args.ckpt_dir,

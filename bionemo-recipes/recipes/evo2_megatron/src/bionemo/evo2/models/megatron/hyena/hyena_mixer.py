@@ -42,6 +42,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
 
 logger = logging.getLogger(__name__)
 
+
 try:
     from transformer_engine.common.recipe import DelayedScaling, Format
 except ImportError:
@@ -117,8 +118,10 @@ class HyenaMixer(MegatronModule):
         self.fast_conv_proj = self.hyena_config.fast_conv_proj
         self.fast_conv_mixer = self.hyena_config.fast_conv_mixer
 
-        # Use b2b causal conv1d
         self.use_subquadratic_ops = self.transformer_config.use_subquadratic_ops
+        # TODO: Re-enable B2BCausalConv1dModule for short/medium Hyena layers once
+        # subquadratic-ops updates it to support causal_conv1d 1.6+ semantics.
+        self.use_fused_b2b_causal_conv1d = False
 
         # Per attention head and per partition values.
         assert torch.distributed.is_initialized()
@@ -197,7 +200,7 @@ class HyenaMixer(MegatronModule):
                 use_conv_bias=self.transformer_config.use_short_conv_bias,
             )
 
-            if self.use_subquadratic_ops:
+            if self.use_fused_b2b_causal_conv1d:
                 # Create a wrapper module that doesn't register parameters
                 # Use the existing weights from the original model
                 self.b2b_kernel = B2BCausalConv1dModule(
@@ -228,7 +231,7 @@ class HyenaMixer(MegatronModule):
                 max_sequence_length,
             )
 
-            if self.use_subquadratic_ops and self.operator_type == "hyena_medium_conv":
+            if self.use_fused_b2b_causal_conv1d and self.operator_type == "hyena_medium_conv":
                 # Create a wrapper module that doesn't register parameters
                 # Use the existing weights from the original model
                 self.b2b_kernel = B2BCausalConv1dModule(
@@ -308,7 +311,7 @@ class HyenaMixer(MegatronModule):
         else:
             features = rearrange(features, "l b d -> b d l").contiguous()
 
-        is_b2b_eligible = self.use_subquadratic_ops and self.operator_type in [
+        is_b2b_eligible = self.use_fused_b2b_causal_conv1d and self.operator_type in [
             "hyena_short_conv",
             "hyena_medium_conv",
         ]

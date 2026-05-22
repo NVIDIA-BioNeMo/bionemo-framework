@@ -21,12 +21,15 @@ from einops import rearrange
 
 
 try:
-    from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
     from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d as _subq_fft_causal_conv1d
 except ImportError as _subq_import_error:
-    _subq_causal_conv1d = None
     _subq_fft_causal_conv1d = None
     _subq_error_msg = f"subquadratic_ops_torch not available: {_subq_import_error}"
+
+
+def _linear_causal_fft_size(input_len: int, filter_len: int) -> int:
+    """Return an FFT size that cannot alias a causal convolution prefix."""
+    return max(2 * input_len, 2 * filter_len)
 
 
 def adjust_filter_shape_for_broadcast(u, h):
@@ -50,7 +53,7 @@ def fftconv_func(*, u, k, D):  # noqa: N803
     The convolution is computed in the frequency domain and then transformed back to the time domain.
     """
     seqlen = u.shape[-1]
-    fft_size = 2 * seqlen
+    fft_size = _linear_causal_fft_size(seqlen, k.shape[-1])
 
     k_f = torch.fft.rfft(k, n=fft_size) / fft_size
     k_f = adjust_filter_shape_for_broadcast(u, k_f)
@@ -98,21 +101,14 @@ def parallel_fir(
                     D=bias,
                 ).to(dtype=u.dtype)
     else:
-        if use_subquadratic_ops:
-            # subq-ops causal_conv1d expects pre-padded [B, D, L+pad] input and [D, K] weight; dtypes must match
-            pad_size = fir_length - 1
-            x_padded = F.pad(u.to(torch.float32), (pad_size, 0))
-            w = weight.squeeze(1) if weight.dim() == 3 else weight
-            z = _subq_causal_conv1d(x_padded, w.to(torch.float32))[..., pad_size:]
-        else:
-            z = F.conv1d(
-                u.to(torch.float32),
-                weight.to(torch.float32),
-                bias=None,
-                stride=1,
-                padding=fir_length - 1,
-                groups=u.shape[1],  # always set to D, regardless of filter grouping
-            )[..., :L]
+        z = F.conv1d(
+            u.to(torch.float32),
+            weight.to(torch.float32),
+            bias=None,
+            stride=1,
+            padding=fir_length - 1,
+            groups=u.shape[1],  # always set to D, regardless of filter grouping
+        )[..., :L]
 
         z = z.to(u.dtype)
 
@@ -130,7 +126,7 @@ def parallel_fir(
 
 def parallel_iir(*, z_pre, h, D, L, poles, t, hidden_size, compute_state):  # noqa: N803
     """Compute the output state of the short convolutional filter."""
-    fft_size = 2 * L
+    fft_size = _linear_causal_fft_size(L, h.shape[-1])
     x1, x2, v = z_pre.split([hidden_size, hidden_size, hidden_size], dim=1)
 
     x1v = x1 * v
@@ -221,9 +217,9 @@ def prefill_via_modal_fft(*, x1v, L, poles, t, X_s):  # noqa: N803
     # When the model has a long convolution derived from a recurrence in modal form and prefill_style is "fft",
     # we split the filter into poles and residues and reuse FFT computation on the input.
     bs = x1v.shape[0]
-    fft_size = 2 * L
+    fft_size = X_s.shape[-1]
     state_s = (poles.to(torch.float32) * t).exp()
-    state_S = torch.fft.fft(state_s, n=fft_size).repeat(bs, 1, 1, 1)  # noqa N806: B, D, state_dim, 2 * L
+    state_S = torch.fft.fft(state_s, n=fft_size).repeat(bs, 1, 1, 1)  # noqa N806: B, D, state_dim, fft_size
     state = torch.fft.ifft(X_s[..., None, :] * state_S, n=fft_size)
     # Do not try to fix `UserWarning: Casting complex values to real discards
     # the imaginary part` by inserting state.real conversion anywhere before

@@ -8,6 +8,7 @@
         "source=${localEnv:HOME}/.cache,target=/home/ubuntu/.cache,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.claude,target=/home/ubuntu/.claude,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.claude.json,target=/home/ubuntu/.claude.json,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.codex,target=/home/ubuntu/.codex,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.config,target=/home/ubuntu/.config,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.cursor,target=/home/ubuntu/.cursor,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind,consistency=cached",
