@@ -35,6 +35,7 @@ from megatron.bridge.training.losses import masked_next_token_loss
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
+from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core import parallel_state
 from megatron.core.inference.contexts import StaticInferenceContext
@@ -51,6 +52,9 @@ from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig as _Hyen
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import get_hyena_stack_spec
 from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel as MCoreHyenaModel
 from bionemo.evo2.models.megatron.hyena.hyena_utils import hyena_no_weight_decay_cond
+
+
+register_allowed_target_prefix("bionemo.evo2.")
 
 
 def get_vocab_size(*args, **kwargs):
