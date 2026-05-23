@@ -11,6 +11,19 @@
 #SBATCH --exclusive
 set -euxo pipefail
 
+# ============================================================================
+# This script is adapted from the experiment scripts here:
+# https://gitlab-master.nvidia.com/bio-foundation-models/codon-fm/-/tree/405b2315836a9c1c1ae0c5e41d5abcf4f24d6aa8/experiment_scripts/pretraining/encodon_filtered/mlm
+#
+# Modifications:
+# - 'num_jobs' is not supported in the PTL recipe in bionemo-recipes.
+# - '--sharded-state-dict' is not supported in the PTL recipe in bionemo-recipes. It is always 'sharded'.
+# - Added support for selecting the sequence packing method (thd or bshd).
+# - Added support for selecting the distributed strategy (fsdp or ddp).
+# - Added support for selecting the gradient accumulation steps to keep the global batch size constant.
+# - Added support for selecting the attention backend (xformers or pytorch SDPA).
+# ============================================================================
+
 # Establish or inherit chain ID: manual launch picks SLURM_JOB_ID; trap-resubmit inherits via --export.
 if [ -z "${CHAIN_ID:-}" ]; then
   export CHAIN_ID="${SLURM_JOB_ID}"
@@ -20,7 +33,7 @@ else
 fi
 
 # ============================================================================
-# Codon 1B
+# CodonFM
 # ============================================================================
 
 BASE_DIR=""
@@ -37,49 +50,29 @@ export GLOBAL_BATCH_SIZE=1536
 export MICRO_BATCH_SIZE=96
 
 # Experiment parameters
-export CONFIG_NAME=encodon_1b
+export CONFIG_NAME=encodon_xx
 export NPROC_PER_NODE=8
 export DIST_STRATEGY=ddp  # fsdp or ddp
 
 # Training
 export NUM_TRAIN_STEPS=100
 export LEARNING_RATE=7.5e-5
-export NUM_WORKERS=1
+export NUM_WORKERS=12
 export USE_SEQUENCE_PACKING=False
-# Precision mode: one of fp32, bf16, bf16-mixed. bf16-mixed matches the reference codonfm `--bf16`.
+
 export PRECISION=bf16-mixed
-# Only used for FSDP2 + bf16-mixed. One of fp32, bf16.
-export GRAD_REDUCE_TYPE=fp32
-export NUM_WARMUP_STEPS=50
 
 # Logging / W&B
 export LOGGER_FREQUENCY=10
 export WANDB_PROJECT=
 
-# Checkpointing
-export SAVE_FINAL_MODEL=True
-export SAVE_EVERY_N_STEPS=100000
-export RESUME_FROM_CHECKPOINT=True
-
-# Hydra
-export HYDRA_RUN_DIR=1b_test
-
-# Quantization / FP8
-export QUANT_STATS_ENABLED=False
-export FP8_ENABLED=False
-export FP8_RECIPE=transformer_engine.common.recipe.MXFP8BlockScaling
-export FP8_FORMAT=E4M3
+# Attn-backend
+export USE_XFORMERS=1
+export USE_TRANSFORMER_ENGINE=0
 
 # Derived: build wandb run name from model size, batch size, and precision recipe
 MODEL_SIZE="${CONFIG_NAME##*_}"
-if [ "${FP8_ENABLED}" = "True" ]; then
-  RECIPE_SHORT="${FP8_RECIPE##*.}"
-  RECIPE_SHORT="${RECIPE_SHORT%BlockScaling}"
-  RECIPE_SHORT="${RECIPE_SHORT%Scaling}"
-  PRECISION_TAG="${PRECISION}_${RECIPE_SHORT,,}_${FP8_FORMAT,,}"
-else
-  PRECISION_TAG="${PRECISION}"
-fi
+PRECISION_TAG="${PRECISION}"
 
 if [ "${USE_SEQUENCE_PACKING}" = "True" ]; then
   BATCH_TYPE_TAG="thd"
@@ -121,24 +114,42 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Nodes: ${SLURM_JOB_NUM_NODES}"
 echo "========================================="
 
+export USE_XFORMERS=${USE_XFORMERS:-0}
+if [ "${USE_XFORMERS}" = "1" ]; then
+  echo "Using Xformers"
+else
+  echo "Using PyTorch SDPA attention"
+fi
+
 # cuDNN fused-attn sub-backend 1 OOMs on Blackwell (sm_103) with THD+padding (TE 2.12 / cuDNN 9.19); force flash-attn varlen.
 if [ "${USE_SEQUENCE_PACKING}" = "True" ]; then
   export NVTE_FUSED_ATTN=0
+  EXTRA_ARGS="--collate_fn thd --attn_input_format thd"
+else
+  EXTRA_ARGS="--collate_fn bshd --attn_input_format bshd"
 fi
 
 # Pick training script based on distributed strategy.
 case "${DIST_STRATEGY}" in
   fsdp)
-    TRAIN_SCRIPT=train_fsdp2.py
+    EXTRA_ARGS="${EXTRA_ARGS} --enable_fsdp"
     ;;
   ddp)
-    TRAIN_SCRIPT=train_ddp.py
+    EXTRA_ARGS="${EXTRA_ARGS}"
     ;;
   *)
     echo "DIST_STRATEGY must be 'fsdp' or 'ddp', got '${DIST_STRATEGY}'" >&2
     exit 1
     ;;
 esac
+
+if [ "${PRECISION}" = "bf16-mixed" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --bf16"
+fi
+
+if [ "${USE_TRANSFORMER_ENGINE}" = "1" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --use_transformer_engine"
+fi
 
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
@@ -147,32 +158,27 @@ torchrun \
   --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
   --nnodes=${SLURM_JOB_NUM_NODES} \
   --node-rank=${SLURM_NODEID} \
-  ${TRAIN_SCRIPT} \
-  --config-name ${CONFIG_NAME} \
-  quant_stats_config.enabled=${QUANT_STATS_ENABLED} \
-  logger.frequency=${LOGGER_FREQUENCY} \
-  num_train_steps=${NUM_TRAIN_STEPS} \
-  dataset.micro_batch_size=${MICRO_BATCH_SIZE} \
-  grad_acc_steps=${GRAD_ACC_STEPS} \
-  adamw_kwargs.lr=${LEARNING_RATE} \
-  dataset.num_workers=${NUM_WORKERS} \
-  dataset.data_path=/workspace/bionemo/data/processed_unfiltered/ \
-  use_sequence_packing=${USE_SEQUENCE_PACKING} \
-  precision=${PRECISION} \
-  grad_reduce_type=${GRAD_REDUCE_TYPE} \
-  lr_scheduler_kwargs.num_warmup_steps=${NUM_WARMUP_STEPS} \
-  wandb_init_args.name=${WANDB_RUN_NAME} \
-  +wandb_init_args.id=${WANDB_RUN_NAME} \
-  +wandb_init_args.project=${WANDB_PROJECT} \
-  checkpoint.save_final_model=${SAVE_FINAL_MODEL} \
-  checkpoint.save_every_n_steps=${SAVE_EVERY_N_STEPS} \
-  checkpoint.ckpt_dir=/workspace/bionemo/checkpoints \
-  checkpoint.resume_from_checkpoint=${RESUME_FROM_CHECKPOINT} \
-  hydra.run.dir=${HYDRA_RUN_DIR} \
-  fp8_config.enabled=${FP8_ENABLED} \
-  fp8_config.fp8_recipe=${FP8_RECIPE} \
-  fp8_config.fp8_format=${FP8_FORMAT} \
-  +dataset.pad_to_multiple_of=32
+  -m src.runner pretrain \
+  --exp_name ${WANDB_RUN_NAME} \
+  --model_name ${CONFIG_NAME} \
+  --data_path /workspace/bionemo/data/processed_unfiltered/ \
+  --process_item mlm_memmap \
+  --dataset_name CodonMemmapDataset \
+  --lr ${LEARNING_RATE} \
+  --num_gpus ${NPROC_PER_NODE} \
+  --num_nodes ${SLURM_JOB_NUM_NODES} \
+  --train_batch_size ${MICRO_BATCH_SIZE} \
+  --val_batch_size ${MICRO_BATCH_SIZE} \
+  --num_workers ${NUM_WORKERS} \
+  ${EXTRA_ARGS} \
+  --split_name_prefix nopathogen \
+  --taxid_exclusion_file /workspace/bionemo/data/taxids_to_remove.json \
+  --enable_wandb \
+  --project_name ${WANDB_PROJECT} \
+  --entity clara-discovery \
+  --gradient_accumulation_steps ${GRAD_ACC_STEPS} \
+  --max_steps ${NUM_TRAIN_STEPS} \
+  --log_every_n_steps ${LOGGER_FREQUENCY}
 
 echo "========================================="
 echo "Training complete!"
@@ -185,7 +191,6 @@ COMMAND="export PRECISION_TAG=\"${PRECISION_TAG}\"; ${COMMAND}"
 COMMAND="export CLUSTER_NAME=\"${CLUSTER_NAME}\"; ${COMMAND}"
 COMMAND="export NPROC_PER_NODE=\"${NPROC_PER_NODE}\"; ${COMMAND}"
 COMMAND="export CONFIG_NAME=\"${CONFIG_NAME}\"; ${COMMAND}"
-COMMAND="export QUANT_STATS_ENABLED=\"${QUANT_STATS_ENABLED}\"; ${COMMAND}"
 COMMAND="export LOGGER_FREQUENCY=\"${LOGGER_FREQUENCY}\"; ${COMMAND}"
 COMMAND="export NUM_TRAIN_STEPS=\"${NUM_TRAIN_STEPS}\"; ${COMMAND}"
 COMMAND="export GLOBAL_BATCH_SIZE=\"${GLOBAL_BATCH_SIZE}\"; ${COMMAND}"
@@ -195,23 +200,16 @@ COMMAND="export LEARNING_RATE=\"${LEARNING_RATE}\"; ${COMMAND}"
 COMMAND="export NUM_WORKERS=\"${NUM_WORKERS}\"; ${COMMAND}"
 COMMAND="export USE_SEQUENCE_PACKING=\"${USE_SEQUENCE_PACKING}\"; ${COMMAND}"
 COMMAND="export PRECISION=\"${PRECISION}\"; ${COMMAND}"
-COMMAND="export GRAD_REDUCE_TYPE=\"${GRAD_REDUCE_TYPE}\"; ${COMMAND}"
-COMMAND="export NUM_WARMUP_STEPS=\"${NUM_WARMUP_STEPS}\"; ${COMMAND}"
 COMMAND="export WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\"; ${COMMAND}"
 COMMAND="export WANDB_PROJECT=\"${WANDB_PROJECT}\"; ${COMMAND}"
-COMMAND="export SAVE_FINAL_MODEL=\"${SAVE_FINAL_MODEL}\"; ${COMMAND}"
-COMMAND="export SAVE_EVERY_N_STEPS=\"${SAVE_EVERY_N_STEPS}\"; ${COMMAND}"
-COMMAND="export RESUME_FROM_CHECKPOINT=\"${RESUME_FROM_CHECKPOINT}\"; ${COMMAND}"
-COMMAND="export HYDRA_RUN_DIR=\"${HYDRA_RUN_DIR}\"; ${COMMAND}"
-COMMAND="export FP8_ENABLED=\"${FP8_ENABLED}\"; ${COMMAND}"
-COMMAND="export FP8_RECIPE=\"${FP8_RECIPE}\"; ${COMMAND}"
-COMMAND="export FP8_FORMAT=\"${FP8_FORMAT}\"; ${COMMAND}"
+COMMAND="export USE_XFORMERS=\"${USE_XFORMERS}\"; ${COMMAND}"
 COMMAND="export MASTER_ADDR=\"${MASTER_ADDR}\"; ${COMMAND}"
 COMMAND="export MASTER_PORT=\"${MASTER_PORT}\"; ${COMMAND}"
-
+COMMAND="export USE_TRANSFORMER_ENGINE=\"${USE_TRANSFORMER_ENGINE}\"; ${COMMAND}"
 COMMAND="export WANDB_API_KEY=\"${WANDB_API_KEY}\"; ${COMMAND}"
 COMMAND="export HUGGING_FACE_HUB_TOKEN=\"${HUGGING_FACE_HUB_TOKEN}\"; ${COMMAND}"
 COMMAND="export HF_TOKEN=\"${HUGGING_FACE_HUB_TOKEN}\"; ${COMMAND}"
+
 
 echo "Launching: ${WANDB_RUN_NAME}"
 
