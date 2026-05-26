@@ -408,11 +408,20 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Use the faster, but maybe less accurate fused form of cross entropy, "
         "which also has bf16 grads internally.",
     )  # DONE
-    parser.add_argument(
-        "--no-fp32-residual-connection",
+    fp32_residual_group = parser.add_mutually_exclusive_group(required=False)
+    fp32_residual_group.add_argument(
+        "--fp32-residual-connection",
+        dest="fp32_residual_connection",
         action="store_true",
-        default=False,
-        help="If set, turn off fp32 residual connections which may be faster but may impact accuracy.",
+        default=None,
+        help="Enable fp32 residual connections. Defaults to the selected model provider setting.",
+    )
+    fp32_residual_group.add_argument(
+        "--no-fp32-residual-connection",
+        dest="fp32_residual_connection",
+        action="store_false",
+        default=None,
+        help="Disable fp32 residual connections. Defaults to the selected model provider setting.",
     )  # DONE
     parser.add_argument(
         "--debug-ddp-parity-freq",
@@ -859,11 +868,11 @@ def train(args: argparse.Namespace) -> None:
         cfg.model.seq_len_interpolation_factor = args.seq_len_interpolation_factor
     cfg.model.calculate_per_token_loss = not args.no_calculate_per_token_loss
     model_type = infer_model_type(args.model_size)
-    if model_type != "hyena" and not args.no_fp32_residual_connection:
+    if args.fp32_residual_connection is not None:
+        cfg.model.fp32_residual_connection = args.fp32_residual_connection
+    if model_type != "hyena" and cfg.model.fp32_residual_connection:
         logger.info("Disabling fp32_residual_connection for non-Hyena model (not compatible with TE layers)")
         cfg.model.fp32_residual_connection = False
-    else:
-        cfg.model.fp32_residual_connection = not args.no_fp32_residual_connection
     cfg.model.cross_entropy_loss_fusion = args.cross_entropy_loss_fusion
     # cfg.model.cuda_graph_impl = "local" # or "transformer_engine"
     # cfg.model.cuda_graph_scope = "full_iteration"
