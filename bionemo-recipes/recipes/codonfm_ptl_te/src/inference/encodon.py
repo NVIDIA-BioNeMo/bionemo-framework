@@ -36,6 +36,7 @@ from src.inference.task_types import TaskTypes
 from src.models.encodon_pl import EncodonPL
 from src.models.encodon_te_pl import EncodonTEPL
 from src.tokenizer import Tokenizer
+from src.utils.load_checkpoint import resolve_model_path
 
 
 class EncodonInference(BaseInference):
@@ -50,8 +51,8 @@ class EncodonInference(BaseInference):
         state_dict = None
         hparams = None
 
-        # Check if model_path is a safetensors directory or a .ckpt file
-        model_path = Path(self.model_path)
+        # Resolve model_path: local file/dir pass through, Hub repo IDs are downloaded.
+        model_path = Path(resolve_model_path(self.model_path))
 
         if model_path.is_dir():
             # Load from safetensors format
@@ -95,6 +96,8 @@ class EncodonInference(BaseInference):
 
         hparams["optimizer"] = dummy_optimizer
         hparams["scheduler"] = None
+
+        hparams["attn_input_format"] = self.attn_input_format
 
         self.model = EncodonTEPL(**hparams) if self.use_transformer_engine else EncodonPL(**hparams)
         self.model.configure_model(state_dict=state_dict)
@@ -169,7 +172,12 @@ class EncodonInference(BaseInference):
             embeddings = output.all_hidden_states[-1]
             if embeddings.dtype != torch.float:
                 embeddings = embeddings.float()
-            embeddings = embeddings[:, 0, :]  # [CLS] token
+            if self.attn_input_format == "thd":
+                cu_seq_lens = batch[MetadataFields.CU_SEQ_LENS_Q]
+                cls_indices = cu_seq_lens[:-1].long()
+                embeddings = embeddings[cls_indices]
+            else:
+                embeddings = embeddings[:, 0, :]  # [CLS] token
             embeddings = embeddings.cpu().numpy()
         return EmbeddingOutput(embeddings=embeddings, ids=ids)
 

@@ -14,6 +14,10 @@
 # limitations under the License.
 
 
+import importlib.util
+import os
+from functools import lru_cache
+
 import torch
 from einops import rearrange
 from torch import nn
@@ -21,13 +25,14 @@ from torch import nn
 from src.models.components.rotary_embedding import RotaryEmbedding, apply_rotary_pos_emb
 
 
-try:
-    import xformers.ops as xops
+@lru_cache
+def is_xformers_available():
+    """Check whether xformers is installed."""
+    return importlib.util.find_spec("xformers") is not None
 
-    HAVE_XFORMERS = True
-except ImportError:
-    xops = None
-    HAVE_XFORMERS = False
+
+if is_xformers_available():
+    import xformers.ops as xops
 
 
 class MultiHeadAttention(nn.Module):
@@ -57,6 +62,10 @@ class MultiHeadAttention(nn.Module):
         self.query = nn.Linear(embed_dim, embed_dim)
         self.key = nn.Linear(embed_dim, embed_dim)
         self.value = nn.Linear(embed_dim, embed_dim)
+
+        self.use_xformers = os.environ.get("USE_XFORMERS", "0").lower() in ("1", "true")
+        if self.use_xformers:
+            assert is_xformers_available(), "USE_XFORMERS=1 but xformers is not installed"
 
         self.rotary_emb = RotaryEmbedding(
             dim=embed_dim // num_heads,
@@ -95,21 +104,38 @@ class MultiHeadAttention(nn.Module):
         q = apply_rotary_pos_emb(q, cos, sin)
         k = apply_rotary_pos_emb(k, cos, sin)
 
-        #
-        q = rearrange(q, "b s h d -> b h s d")
-        k = rearrange(k, "b s h d -> b h s d")
-        v = rearrange(v, "b s h d -> b h s d")
+        if self.use_xformers:
+            padding_bias = attention_mask.repeat(1, 1, attention_mask.size(-1), 1)
+            padding_bias = padding_bias.to(q.dtype)
+            padding_bias = padding_bias.repeat(1, self.num_heads, 1, 1)
 
-        # torch native sdpa is numerically equivalent to Memory-efficient attention from xformers. we replaced xformers with torch native sdpa to be able to build the Transformer Engine model in the same container.
-        x = torch.nn.functional.scaled_dot_product_attention(
-            query=q,
-            key=k,
-            value=v,
-            attn_mask=attention_mask,
-            dropout_p=self.dropout_rate if self.training else 0.0,
-        )
+            attn_bias = padding_bias
 
-        # x: (batch_size, query_seq_len, n_head, head_dim)
-        x = rearrange(x, "b h q d -> b q (h d)", h=self.num_heads)
+            x = xops.memory_efficient_attention(
+                query=q,
+                key=k,
+                value=v,
+                op=None,
+                attn_bias=attn_bias,
+                p=self.dropout_rate if self.training else 0.0,
+            )
+
+            # x: (batch_size, query_seq_len, n_head, head_dim)
+            x = rearrange(x, "b q h d -> b q (h d)", h=self.num_heads)
+        else:
+            q = rearrange(q, "b s h d -> b h s d")
+            k = rearrange(k, "b s h d -> b h s d")
+            v = rearrange(v, "b s h d -> b h s d")
+
+            x = torch.nn.functional.scaled_dot_product_attention(
+                query=q,
+                key=k,
+                value=v,
+                attn_mask=attention_mask,
+                dropout_p=self.dropout_rate if self.training else 0.0,
+            )
+
+            # x: (batch_size, n_head, query_seq_len, head_dim)
+            x = rearrange(x, "b h q d -> b q (h d)", h=self.num_heads)
 
         return x

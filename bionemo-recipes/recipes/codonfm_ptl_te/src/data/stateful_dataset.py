@@ -82,6 +82,16 @@ class StatefulDataset(Dataset):
             rng.shuffle(idxs)
         return idxs
 
+    def _resolve_idx(self, idx: int) -> int:
+        """Map an external index to the underlying dataset index."""
+        idx = (self.consumed_samples + idx) % self.total_samples
+        idxs = self.get_cur_idxs(idx)
+        return idxs[idx % self.epoch_size]
+
+    def get_sequence_length(self, idx: int) -> int:
+        """Return the unpadded token count, delegating to the underlying dataset."""
+        return self.dataset.get_sequence_length(self._resolve_idx(idx))
+
     def __getitem__(self, idx: int) -> Any:
         """Get the item at the specified index.
 
@@ -92,10 +102,7 @@ class StatefulDataset(Dataset):
             Any: The item at the specified index.
 
         """
-        idx = (self.consumed_samples + idx) % self.total_samples
-        idxs = self.get_cur_idxs(idx)
-        idx = idxs[idx % self.epoch_size]
-        return self.dataset[idx]
+        return self.dataset[self._resolve_idx(idx)]
 
     def __len__(self) -> int:
         """Get the total number of samples in the dataset.

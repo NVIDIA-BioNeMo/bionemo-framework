@@ -158,6 +158,7 @@ numpy==1.26.4
 nvidia-dali-cuda130==1.51.2
 nvidia-resiliency-ext==0.4.1
 omegaconf==2.3.0
+openpyxl==3.1.5
 opt_einsum==3.4.0
 optree==0.17.0
 optuna==2.10.1
