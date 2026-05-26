@@ -27,56 +27,53 @@ import numpy as np
 import pandas as pd
 
 
-# Plausible biological labels (20 features) — visible motifs in the synthetic sequences.
+# DNA-native labels for evo2 features, each with a real central signature spliced into
+# the middle of the 200bp window so the mockup features are visually distinguishable.
 LABELS = [
-    "exon-start motif",
-    "tRNA acceptor stem",
-    "intergenic GC-rich",
-    "stop codon context",
-    "ribosome binding site",
-    "promoter -10 box",
+    "Start codon (ATG) context",
+    "TATA box",
+    "Polyadenylation signal",
+    "Bacterial promoter -10 box",
     "CpG island",
-    "splice donor",
-    "polyA signal",
-    "start codon ATG context",
-    "transposon repeat",
-    "rRNA conserved region",
-    "operon intergenic",
-    "frameshift-sensitive region",
-    "high-conservation coding",
-    "intron branch point",
-    "TF binding motif",
-    "phage integrase region",
-    "origin of replication",
     "Shine-Dalgarno sequence",
+    "Bacterial promoter -35 box",
+    "Splice donor site",
+    "Splice acceptor site",
+    "Stop codon (TAA) context",
+    "Stop codon (TAG) context",
 ]
 
 # Plausible accessions to rotate across examples.
 SEQ_IDS = ["NC_000913.3", "NC_002695.2", "chr1", "chr17"]
 
-# Central motifs to splice into each feature's top-activating windows.
-# Doesn't need biological rigor — just makes features visually distinguishable in the demo.
+# Central motif spliced into the middle ~20bp of each top-activating window.
 CENTRAL_MOTIFS = {
-    "exon-start motif": "AGGTAAGT",
-    "tRNA acceptor stem": "CCCGGGT",
-    "intergenic GC-rich": "GCGCGCGC",
-    "stop codon context": "TAATAATAA",
-    "ribosome binding site": "AGGAGG",
-    "promoter -10 box": "TATAAT",
-    "CpG island": "CGCGCGCG",
-    "splice donor": "GTAAGT",
-    "polyA signal": "AATAAA",
-    "start codon ATG context": "ATGGCC",
-    "transposon repeat": "TTAATTAA",
-    "rRNA conserved region": "GUCAGCUGGUC".replace("U", "T"),
-    "operon intergenic": "AAATTT",
-    "frameshift-sensitive region": "AAAAAAA",
-    "high-conservation coding": "GCAGCAGCA",
-    "intron branch point": "TACTAAC",
-    "TF binding motif": "TGACTCA",
-    "phage integrase region": "GCTAGGTGT",
-    "origin of replication": "ATCGATCG",
+    "Start codon (ATG) context": "GCCACCATGGCC",
+    "TATA box": "TATAAA",
+    "Polyadenylation signal": "AATAAA",
+    "Bacterial promoter -10 box": "TATAAT",
+    "CpG island": "CGCGCGCGCGCGCGCG",
     "Shine-Dalgarno sequence": "AGGAGGT",
+    "Bacterial promoter -35 box": "TTGACA",
+    "Splice donor site": "GTAAGT",  # GT at exon-intron boundary, with consensus context
+    "Splice acceptor site": "TTTTCAGG",  # AG at intron-exon boundary, with pyrimidine tract
+    "Stop codon (TAA) context": "GCCTAAGCC",  # TAA in coding context
+    "Stop codon (TAG) context": "GCCTAGGCC",  # TAG in coding context
+}
+
+# Annotation-database source for each feature label.
+DB_SOURCES = {
+    "Start codon (ATG) context": "RefSeq",
+    "TATA box": "JASPAR / ENCODE",
+    "Polyadenylation signal": "RefSeq UTR",
+    "Bacterial promoter -10 box": "bacterial annotation",
+    "CpG island": "ENCODE / RefSeq",
+    "Shine-Dalgarno sequence": "bacterial annotation",
+    "Bacterial promoter -35 box": "bacterial annotation",
+    "Splice donor site": "RefSeq",
+    "Splice acceptor site": "RefSeq",
+    "Stop codon (TAA) context": "RefSeq",
+    "Stop codon (TAG) context": "RefSeq",
 }
 
 
@@ -133,6 +130,7 @@ def _make_features(rng: np.random.Generator) -> list[dict]:
                 "feature_id": fid,
                 "description": label,
                 "label": label,
+                "db_source": DB_SOURCES[label],
                 "activation_freq": round(activation_freq, 6),
                 "max_activation": round(max_activation, 4),
                 "top_positive_logits": [],
@@ -144,15 +142,46 @@ def _make_features(rng: np.random.Generator) -> list[dict]:
 
 
 def _make_atlas(rng: np.random.Generator, features: list[dict]) -> pd.DataFrame:
-    """Build features_atlas.parquet — synthetic UMAP coords with 4 visible clusters of 5 features each."""
-    n_clusters = 4
-    cluster_centers = rng.uniform(-5.0, 5.0, size=(n_clusters, 2))
+    """Build features_atlas.parquet — UMAP coords grouped into thematic clusters.
+
+    Labeled features sit in 3 clusters: eukaryotic regulatory (0), bacterial regulatory (1),
+    codon context (2). Unlabeled features (label==None) land in a 4th "uninterpreted" cluster (3)
+    spread more diffusely between the others — mimicking what a real SAE would look like.
+    """
+    cluster_assignments = {
+        "Start codon (ATG) context": 2,
+        "TATA box": 0,
+        "Polyadenylation signal": 0,
+        "Bacterial promoter -10 box": 1,
+        "CpG island": 0,
+        "Shine-Dalgarno sequence": 1,
+        "Bacterial promoter -35 box": 1,
+        "Splice donor site": 0,
+        "Splice acceptor site": 0,
+        "Stop codon (TAA) context": 2,
+        "Stop codon (TAG) context": 2,
+    }
+    cluster_centers = {
+        0: (-3.0, 1.5),
+        1: (3.0, 1.5),
+        2: (0.0, -3.0),
+        3: (0.0, 0.5),  # uninterpreted: between the other clusters
+    }
+
     coords = []
-    for fid in range(len(features)):
-        cluster_idx = fid // (len(features) // n_clusters)
-        center = cluster_centers[cluster_idx]
-        xy = center + rng.normal(0, 0.5, size=2)
-        coords.append(xy)
+    cluster_ids = []
+    for f in features:
+        if f["label"] is None:
+            cid = 3
+            sigma = 1.4  # diffuse for the unlabeled cloud
+        else:
+            cid = cluster_assignments[f["label"]]
+            sigma = 0.4
+        cx, cy = cluster_centers[cid]
+        x = cx + rng.normal(0, sigma)
+        y = cy + rng.normal(0, sigma)
+        coords.append((x, y))
+        cluster_ids.append(cid)
     coords = np.array(coords)
 
     return pd.DataFrame(
@@ -161,12 +190,61 @@ def _make_atlas(rng: np.random.Generator, features: list[dict]) -> pd.DataFrame:
             "x": coords[:, 0].round(4),
             "y": coords[:, 1].round(4),
             "label": [f["label"] for f in features],
+            "db_source": [f["db_source"] for f in features],
             "activation_freq": [f["activation_freq"] for f in features],
             "log_frequency": [round(float(np.log10(f["activation_freq"])), 4) for f in features],
             "max_activation": [f["max_activation"] for f in features],
-            "cluster": [fid // (len(features) // n_clusters) for fid in range(len(features))],
+            "cluster_id": cluster_ids,
         }
     )
+
+
+def _make_unlabeled_example(rng: np.random.Generator, feature_max: float, window: int = 200) -> dict:
+    """A top-activating example for an unlabeled feature: random sequence + gaussian activation bump."""
+    seq = _random_dna(rng, window)
+    bump_center = int(rng.integers(60, 141))
+    sigma = 8.0
+    peak = float(feature_max * rng.uniform(0.5, 1.0))
+    positions = np.arange(window)
+    activations = peak * np.exp(-((positions - bump_center) ** 2) / (2 * sigma**2))
+    activations[activations < 0.01] = 0.0
+
+    seq_id = SEQ_IDS[int(rng.integers(0, len(SEQ_IDS)))]
+    start = int(rng.integers(1, 5_000_001))
+
+    return {
+        "sequence_id": seq_id,
+        "start": start,
+        "end": start + window,
+        "sequence": seq,
+        "activations": [round(float(a), 3) for a in activations],
+        "max_activation": round(float(activations.max()), 4),
+        "max_activation_position": int(activations.argmax()),
+    }
+
+
+def _make_unlabeled_features(rng: np.random.Generator, n: int, start_id: int) -> list[dict]:
+    """Build n unlabeled features — no semantic label, random top-activator sequences."""
+    out = []
+    for i in range(n):
+        fid = start_id + i
+        activation_freq = float(np.exp(rng.uniform(np.log(0.001), np.log(0.1))))
+        max_activation = float(rng.uniform(5.0, 30.0))
+        examples = [_make_unlabeled_example(rng, max_activation) for _ in range(30)]
+        out.append(
+            {
+                "feature_id": fid,
+                "description": None,
+                "label": None,
+                "db_source": None,
+                "activation_freq": round(activation_freq, 6),
+                "max_activation": round(max_activation, 4),
+                "top_positive_logits": [],
+                "top_negative_logits": [],
+                "examples": examples,
+            }
+        )
+    return out
 
 
 def _make_examples_table(features: list[dict]) -> pd.DataFrame:
@@ -188,7 +266,7 @@ def _make_examples_table(features: list[dict]) -> pd.DataFrame:
                     "activations": ex["activations"],
                     "max_activation": ex["max_activation"],
                     "max_activation_position": ex["max_activation_position"],
-                    "best_annotation": None,
+                    "best_annotation": feature["db_source"],
                 }
             )
     return pd.DataFrame(rows)
@@ -208,6 +286,7 @@ def main():
         action="store_true",
         help="Also write features.json (only useful if you point the dashboard at the legacy JSON path)",
     )
+    p.add_argument("--n-unlabeled", type=int, default=9, help="How many unlabeled features to add alongside the labeled ones")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
@@ -215,6 +294,7 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     features = _make_features(rng)
+    features += _make_unlabeled_features(rng, n=args.n_unlabeled, start_id=len(features))
 
     atlas = _make_atlas(rng, features)
     atlas.to_parquet(args.output_dir / "features_atlas.parquet", index=False)

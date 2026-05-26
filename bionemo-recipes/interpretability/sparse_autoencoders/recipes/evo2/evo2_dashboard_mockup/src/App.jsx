@@ -190,7 +190,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer (Mockup)", sub
   const [selectedFeatureIds, setSelectedFeatureIds] = useState(null) // null = all selected
   const [mosaicReady, setMosaicReady] = useState(false)
   const [categoryColumns, setCategoryColumns] = useState([])
-  const [selectedCategory, setSelectedCategory] = useState('mean_variant_1bcdwt')
+  const [selectedCategory, setSelectedCategory] = useState('cluster_id')
   const [hiddenCategories, setHiddenCategories] = useState(new Set())
   const [clickedFeatureId, setClickedFeatureId] = useState(null)
   const [clusterLabels, setClusterLabels] = useState(null)
@@ -208,7 +208,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer (Mockup)", sub
   const [showEditedOnly, setShowEditedOnly] = useState(false) // Filter for edited features only
   const [histMetric1, setHistMetric1] = useState('log_frequency')
   const [histMetric2, setHistMetric2] = useState('max_activation')
-  const [histMetric3, setHistMetric3] = useState('mean_variant_1bcdwt') // tracks color-by selection
+  const [histMetric3, setHistMetric3] = useState('cluster_id') // tracks color-by selection
   const featureRefs = useRef({})
   const featureListRef = useRef(null)
   const endOfListRef = useRef(null)

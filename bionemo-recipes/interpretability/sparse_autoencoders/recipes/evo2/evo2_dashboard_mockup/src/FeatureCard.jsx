@@ -173,7 +173,7 @@ const styles = {
   },
 }
 
-const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, forceExpanded, onClick, loadExamples, vocabLogits, featureAnalysis }, ref) {
+const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, forceExpanded, onClick, loadExamples }, ref) {
   const [expanded, setExpanded] = useState(false)
   const [showDetailPage, setShowDetailPage] = useState(false)
   const [examples, setExamples] = useState([])
@@ -181,7 +181,6 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
   const examplesCacheRef = useRef(null)
   const [alignMode, setAlignMode] = useState('start')
   const scrollGroupRef = useRef([])
-  const [hoveredCodon, setHoveredCodon] = useState(null)
   const [editingTitle, setEditingTitle] = useState(false)
   const [userTitle, setUserTitle] = useState('')
   const inputRef = useRef(null)
@@ -232,16 +231,6 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
 
   const freq = feature.activation_freq || 0
   const maxAct = feature.max_activation || 0
-  const highScoreFrac = feature.high_score_fraction
-  const variantDelta = feature.mean_variant_delta
-  const siteDelta = feature.mean_site_delta
-  const localDelta = feature.mean_local_delta
-  const clinvarFrac = feature.clinvar_fraction
-  const phylop = feature.mean_phylop
-  const gcMean = feature.gc_mean
-  const trinucEntropy = feature.trinuc_entropy
-  const geneEntropy = feature.gene_entropy
-  const geneNUnique = feature.gene_n_unique
   const rawDesc = feature.label || feature.description || `Feature ${feature.feature_id}`
   const description = rawDesc.toLowerCase().includes('common codons') ? 'Unidentified Feature' : rawDesc
 
@@ -297,80 +286,10 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
     lines.push(`Max Activation,${maxAct.toFixed(4)}`)
     lines.push('')
 
-    // Vocab logits section
-    const logits = vocabLogits?.[String(feature.feature_id)]
-    if (logits) {
-      lines.push('=== TOP PROMOTED CODONS ===')
-      lines.push('Codon,Amino Acid,Logit Value')
-      const CODON_AA = {
-        'TTT':'F','TTC':'F','TTA':'L','TTG':'L','TCT':'S','TCC':'S','TCA':'S','TCG':'S',
-        'TAT':'Y','TAC':'Y','TAA':'*','TAG':'*','TGT':'C','TGC':'C','TGA':'*','TGG':'W',
-        'CTT':'L','CTC':'L','CTA':'L','CTG':'L','CCT':'P','CCC':'P','CCA':'P','CCG':'P',
-        'CAT':'H','CAC':'H','CAA':'Q','CAG':'Q','CGT':'R','CGC':'R','CGA':'R','CGG':'R',
-        'ATT':'I','ATC':'I','ATA':'I','ATG':'M','ACT':'T','ACC':'T','ACA':'T','ACG':'T',
-        'AAT':'N','AAC':'N','AAA':'K','AAG':'K','AGT':'S','AGC':'S','AGA':'R','AGG':'R',
-        'GTT':'V','GTC':'V','GTA':'V','GTG':'V','GCT':'A','GCC':'A','GCA':'A','GCG':'A',
-        'GAT':'D','GAC':'D','GAA':'E','GAG':'E','GGT':'G','GGC':'G','GGA':'G','GGG':'G',
-      }
-      ;(logits.top_positive || []).forEach(([codon, val]) => {
-        lines.push(`${codon},${CODON_AA[codon] || '?'},${val.toFixed(4)}`)
-      })
-      lines.push('')
-
-      lines.push('=== TOP SUPPRESSED CODONS ===')
-      lines.push('Codon,Amino Acid,Logit Value')
-      ;(logits.top_negative || []).forEach(([codon, val]) => {
-        lines.push(`${codon},${CODON_AA[codon] || '?'},${val.toFixed(4)}`)
-      })
-      lines.push('')
-    }
-
-    // Codon annotations section
-    const analysis = featureAnalysis?.[String(feature.feature_id)]
-    if (analysis?.codon_annotations) {
-      lines.push('=== CODON ANNOTATIONS ===')
-      const ann = analysis.codon_annotations
-      if (ann.amino_acid) {
-        lines.push(`Amino Acid,${ann.amino_acid.aa}`)
-        lines.push(`AA Frequency,${(ann.amino_acid.fraction * 100).toFixed(1)}%`)
-      }
-      if (ann.codon_usage) {
-        lines.push(`Codon Usage,${ann.codon_usage.bias}`)
-      }
-      if (ann.wobble) {
-        lines.push(`Wobble Position,${ann.wobble.preference}`)
-      }
-      if (ann.cpg) {
-        lines.push(`CpG Enriched,Yes`)
-      }
-      if (ann.position) {
-        lines.push(`Position,${ann.position.label}`)
-      }
-      lines.push('')
-    }
-
-    // GSEA enrichment section
-    const gseaCsvFields = [
-      { key: 'gsea_overall_best', label: 'GSEA Overall Best' },
-      { key: 'gsea_GO_Biological_Process', label: 'GSEA GO Biological Process' },
-      { key: 'gsea_GO_Molecular_Function', label: 'GSEA GO Molecular Function' },
-      { key: 'gsea_GO_Cellular_Component', label: 'GSEA GO Cellular Component' },
-      { key: 'gsea_InterPro_Domains', label: 'GSEA InterPro Domains' },
-      { key: 'gsea_GO_Slim', label: 'GSEA GO Slim' },
-    ]
-    const gseaLines = gseaCsvFields
-      .filter(({ key }) => feature[key] && feature[key] !== 'unlabeled')
-      .map(({ key, label }) => `${label},${feature[key]}`)
-    if (gseaLines.length > 0) {
-      lines.push('=== GSEA ENRICHMENT ===')
-      gseaLines.forEach(l => lines.push(l))
-      lines.push('')
-    }
-
     // Examples section
     if (examples && examples.length > 0) {
       lines.push('=== ACTIVATION EXAMPLES ===')
-      lines.push('Rank,Protein ID,Max Activation,Sequence')
+      lines.push('Rank,Region,Max Activation,Sequence')
       examples.forEach((ex, i) => {
         lines.push(`${i + 1},${getRegionLabel(ex) || ''},${ex.max_activation?.toFixed(4) || ''},${ex.sequence || ''}`)
       })
@@ -488,74 +407,6 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
             <span style={{ ...styles.statLabel, color: 'var(--text-muted)' }}>Recon Δ</span>
             <span style={{ ...styles.statValue, color: 'var(--text-muted)' }}>—</span>
           </div>
-          {highScoreFrac != null && !isNaN(highScoreFrac) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>Hi-Score</span>
-              <span style={{ ...styles.statValue, color: highScoreFrac > 0.6 ? '#d32f2f' : highScoreFrac < 0.4 ? '#388e3c' : '#666' }}>
-                {(highScoreFrac * 100).toFixed(0)}%
-              </span>
-            </div>
-          )}
-          {variantDelta != null && !isNaN(variantDelta) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>Δ Var</span>
-              <span style={{ ...styles.statValue, color: Math.abs(variantDelta) > 0.5 ? '#1565c0' : '#666' }}>
-                {variantDelta > 0 ? '+' : ''}{variantDelta.toFixed(2)}
-              </span>
-            </div>
-          )}
-          {siteDelta != null && !isNaN(siteDelta) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>Δ Site</span>
-              <span style={{ ...styles.statValue, color: Math.abs(siteDelta) > 0.5 ? '#7b1fa2' : '#666' }}>
-                {siteDelta > 0 ? '+' : ''}{siteDelta.toFixed(2)}
-              </span>
-            </div>
-          )}
-          {localDelta != null && !isNaN(localDelta) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>Δ Local</span>
-              <span style={{ ...styles.statValue, color: Math.abs(localDelta) > 0.5 ? '#00695c' : '#666' }}>
-                {localDelta > 0 ? '+' : ''}{localDelta.toFixed(2)}
-              </span>
-            </div>
-          )}
-          {clinvarFrac != null && !isNaN(clinvarFrac) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>ClinVar</span>
-              <span style={styles.statValue}>{(clinvarFrac * 100).toFixed(0)}%</span>
-            </div>
-          )}
-          {phylop != null && !isNaN(phylop) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>PhyloP</span>
-              <span style={styles.statValue}>{phylop.toFixed(1)}</span>
-            </div>
-          )}
-          {gcMean != null && !isNaN(gcMean) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>GC</span>
-              <span style={{ ...styles.statValue, color: Math.abs(gcMean - 0.5) > 0.1 ? '#e65100' : '#666' }}>
-                {(gcMean * 100).toFixed(0)}%
-              </span>
-            </div>
-          )}
-          {trinucEntropy != null && !isNaN(trinucEntropy) && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>Trinuc H</span>
-              <span style={{ ...styles.statValue, color: trinucEntropy < 3 ? '#ad1457' : '#666' }}>
-                {trinucEntropy.toFixed(1)}
-              </span>
-            </div>
-          )}
-          {geneNUnique != null && geneNUnique > 0 && (
-            <div style={styles.stat}>
-              <span style={styles.statLabel}>Genes</span>
-              <span style={{ ...styles.statValue, color: geneNUnique < 5 ? '#4527a0' : '#666' }}>
-                {geneNUnique}
-              </span>
-            </div>
-          )}
           <span style={styles.expandIcon}>{expanded ? '▼' : '▶'}</span>
         </div>
       </div>
@@ -587,140 +438,6 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
 
       {expanded && (
         <div style={styles.expandedContent}>
-          {/* Vocabulary logits - all codons grouped by amino acid */}
-          {vocabLogits && vocabLogits[String(feature.feature_id)] && (() => {
-            const logits = vocabLogits[String(feature.feature_id)]
-            const CODON_AA = {
-              'TTT':'F','TTC':'F','TTA':'L','TTG':'L','CTT':'L','CTC':'L','CTA':'L','CTG':'L',
-              'ATT':'I','ATC':'I','ATA':'I','ATG':'M','GTT':'V','GTC':'V','GTA':'V','GTG':'V',
-              'TCT':'S','TCC':'S','TCA':'S','TCG':'S','CCT':'P','CCC':'P','CCA':'P','CCG':'P',
-              'ACT':'T','ACC':'T','ACA':'T','ACG':'T','GCT':'A','GCC':'A','GCA':'A','GCG':'A',
-              'TAT':'Y','TAC':'Y','TAA':'*','TAG':'*','CAT':'H','CAC':'H','CAA':'Q','CAG':'Q',
-              'AAT':'N','AAC':'N','AAA':'K','AAG':'K','GAT':'D','GAC':'D','GAA':'E','GAG':'E',
-              'TGT':'C','TGC':'C','TGA':'*','TGG':'W','CGT':'R','CGC':'R','CGA':'R','CGG':'R',
-              'AGT':'S','AGC':'S','AGA':'R','AGG':'R','GGT':'G','GGC':'G','GGA':'G','GGG':'G',
-            }
-            // Build codon logit map from all entries, excluding stop codons
-            const codonLogitMap = {}
-            for (const [codon, val] of (logits.top_positive || [])) {
-              if (CODON_AA[codon] !== '*') codonLogitMap[codon] = val
-            }
-            for (const [codon, val] of (logits.top_negative || [])) {
-              if (CODON_AA[codon] !== '*') codonLogitMap[codon] = val
-            }
-            const maxAbs = Math.max(...Object.values(codonLogitMap).map(Math.abs), 0.001)
-            // Group by AA, excluding stop codons
-            const aaGroups = {}
-            for (const [codon, aa] of Object.entries(CODON_AA)) {
-              if (aa === '*') continue
-              if (!aaGroups[aa]) aaGroups[aa] = []
-              aaGroups[aa].push(codon)
-            }
-            const aaOrder = Object.keys(aaGroups).sort()
-            return (
-              <div style={{ marginBottom: '8px' }}>
-                <div style={styles.sectionHeader}>Decoder Logits</div>
-                <div style={{ position: 'relative' }}>
-                  {hoveredCodon && (() => {
-                    const val = codonLogitMap[hoveredCodon] || 0
-                    const aa = CODON_AA[hoveredCodon]
-                    return (
-                      <div style={{
-                        position: 'absolute', top: '-18px', left: '50%', transform: 'translateX(-50%)',
-                        fontSize: '9px', fontFamily: 'monospace', fontWeight: '600', color: '#333',
-                        background: '#fff', border: '1px solid #ddd', borderRadius: '3px',
-                        padding: '1px 5px', whiteSpace: 'nowrap', zIndex: 1,
-                        pointerEvents: 'none',
-                      }}>
-                        {hoveredCodon} ({aa}): {val.toFixed(3)}
-                      </div>
-                    )
-                  })()}
-                  <div style={{ display: 'flex', width: '100%', gap: '1px' }}>
-                    {aaOrder.map(aa => {
-                      const codons = aaGroups[aa] || []
-                      return (
-                        <div key={aa} style={{ flex: codons.length, minWidth: 0 }}>
-                          <div style={{ fontSize: '7px', fontWeight: '700', color: '#555', textAlign: 'center' }}>{aa}</div>
-                          <div style={{ display: 'flex', alignItems: 'flex-end', height: '28px' }}>
-                            {codons.sort().map(codon => {
-                              const val = codonLogitMap[codon] || 0
-                              const h = Math.max(1, (Math.abs(val) / maxAbs) * 24)
-                              const isHovered = hoveredCodon === codon
-                              const barColor = val === 0 ? '#ccc' : val > 0 ? '#76b900' : '#e57373'
-                              return (
-                                <div key={codon} style={{
-                                  flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
-                                  justifyContent: 'flex-end', height: '28px',
-                                }}
-                                  onMouseEnter={() => setHoveredCodon(codon)}
-                                  onMouseLeave={() => setHoveredCodon(null)}
-                                >
-                                  <div style={{
-                                    width: '100%', maxWidth: '12px', height: `${h}px`, borderRadius: '1px',
-                                    background: barColor,
-                                    opacity: val === 0 ? 0.5 : Math.abs(val) / maxAbs * 0.7 + 0.3,
-                                    outline: isHovered ? '1.5px solid #333' : 'none',
-                                    outlineOffset: '-0.5px',
-                                  }} />
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              </div>
-            )
-          })()}
-
-          {/* Analysis summary tags */}
-          {featureAnalysis && featureAnalysis[String(feature.feature_id)] && (() => {
-            const analysis = featureAnalysis[String(feature.feature_id)]
-            const tags = []
-            const ann = analysis.codon_annotations || {}
-
-            if (ann.amino_acid) tags.push({ label: `AA: ${ann.amino_acid.aa} (${(ann.amino_acid.fraction * 100).toFixed(0)}%)`, color: '#e3f2fd' })
-            if (ann.codon_usage) tags.push({ label: `${ann.codon_usage.bias} codons`, color: '#fff3e0' })
-            if (ann.wobble) tags.push({ label: `wobble ${ann.wobble.preference}`, color: '#f3e5f5' })
-            if (ann.cpg) tags.push({ label: `CpG enriched`, color: '#fce4ec' })
-            if (ann.position) tags.push({ label: `N-terminal`, color: '#e8f5e9' })
-
-            // GSEA enrichment tags
-            const gseaFields = [
-              { key: 'gsea_GO_Biological_Process', prefix: 'GO:BP', color: '#e8eaf6' },
-              { key: 'gsea_GO_Molecular_Function', prefix: 'GO:MF', color: '#ede7f6' },
-              { key: 'gsea_GO_Cellular_Component', prefix: 'GO:CC', color: '#e0f2f1' },
-              { key: 'gsea_InterPro_Domains', prefix: 'InterPro', color: '#fff8e1' },
-              { key: 'gsea_GO_Slim', prefix: 'GO Slim', color: '#f1f8e9' },
-            ]
-            for (const { key, prefix, color } of gseaFields) {
-              const val = feature[key]
-              if (val && val !== 'unlabeled' && val !== 'other') {
-                tags.push({ label: `${prefix}: ${val}`, color })
-              }
-            }
-
-            // Codon optimality metrics from annotations
-            if (ann.cai != null) tags.push({ label: `CAI: ${ann.cai.toFixed(3)}`, color: '#e0f7fa' })
-            if (ann.tai != null) tags.push({ label: `tAI: ${ann.tai.toFixed(3)}`, color: '#e0f7fa' })
-            if (ann.rscu != null) tags.push({ label: `RSCU: ${ann.rscu.toFixed(2)}`, color: '#e0f7fa' })
-
-            if (tags.length === 0) return null
-            return (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '10px' }}>
-                {tags.map((t, i) => (
-                  <span key={i} style={{
-                    padding: '2px 6px', borderRadius: '3px', fontSize: '9px',
-                    fontWeight: '500', background: t.color, color: '#333',
-                  }}>{t.label}</span>
-                ))}
-              </div>
-            )
-          })()}
-
           {/* Sequence examples */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
             <div style={styles.sectionHeader}>Top Activating Sequences</div>
@@ -781,8 +498,6 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
         <FeatureDetailPage
           feature={feature}
           examples={examples}
-          vocabLogits={vocabLogits}
-          featureAnalysis={featureAnalysis}
           onClose={() => setShowDetailPage(false)}
         />
       )}
