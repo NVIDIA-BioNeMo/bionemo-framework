@@ -17,8 +17,11 @@ dependencies = [
     "pyarrow>=10.0",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# No package code lives here yet — the recipe is just an entry-point for
+# scripts/ that depends on the shared `sae` workspace package. Declare no
+# packages so setuptools doesn't try to discover anything.
+[tool.setuptools]
+packages = []
 
 [tool.uv.sources]
 sae = { workspace = true }
