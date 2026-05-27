@@ -107,11 +107,16 @@ echo "============================================================"
 if [[ -f "${PARQUET_DIR}/metadata.json" ]]; then
     echo "Reusing existing parquet shards at $PARQUET_DIR"
 else
-    python "${RECIPE_DIR}/scripts/pt_to_parquet.py" \
-        --predict-dir "$PREDICT_DIR" \
-        --output "$PARQUET_DIR" \
-        --model-name "$MODEL" \
+    PT_TO_PARQUET_ARGS=(
+        --predict-dir "$PREDICT_DIR"
+        --output "$PARQUET_DIR"
+        --model-name "$MODEL"
         --layer "$LAYER"
+    )
+    if [[ -n "${MAX_TOKENS:-}" ]]; then
+        PT_TO_PARQUET_ARGS+=(--max-tokens "$MAX_TOKENS")
+    fi
+    python "${RECIPE_DIR}/scripts/pt_to_parquet.py" "${PT_TO_PARQUET_ARGS[@]}"
 fi
 
 fi  # end if _SKIP_STEPS_0_TO_3

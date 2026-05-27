@@ -29,6 +29,7 @@ their shards into the final output dir and writes a unified metadata.json.
 
 import argparse
 import json
+import random
 import shutil
 # ProcessPoolExecutor — not threads — because the per-shard work (torch.load,
 # Arrow encoding, parquet write) is GIL-bound and saturates a single Python
@@ -43,28 +44,42 @@ from tqdm import tqdm
 
 
 def _load_one(pt_path: Path) -> tuple[torch.Tensor, int]:
-    """Load one .pt, mask padding, return (flat [N_tokens, H] fp32, n_sequences)."""
+    """Load one .pt, mask padding, return (flat [N_tokens, H] in source dtype, n_sequences).
+
+    We keep predict_evo2's bf16 output dtype end-to-end rather than upcasting to
+    fp32 — halves parquet size + network-FS write time. SAE train.py casts to
+    fp32 internally for the loss, so on-disk dtype is invisible to training.
+    """
     d = torch.load(pt_path, map_location="cpu", weights_only=False)
     hidden = d["hidden_embeddings"]
     mask = d["pad_mask"].bool()
-    flat = hidden[mask].float()
+    flat = hidden[mask]
     return flat, hidden.shape[0]
 
 
-def _writer_worker(worker_id: int, pt_subset: list[Path], temp_dir: Path, shard_size: int) -> dict:
+def _writer_worker(
+    worker_id: int, pt_subset: list[Path], temp_dir: Path, shard_size: int, max_tokens: int = 0
+) -> dict:
     """Process a slice of .pt files into its own ActivationStore at temp_dir.
+
+    If max_tokens > 0, stop after that many tokens have been appended — useful
+    for capping cache size to a training budget without processing every .pt.
 
     Returns a dict with the worker's metadata, used by the merge step.
     """
     temp_dir.mkdir(parents=True, exist_ok=True)
     store = ActivationStore(temp_dir, ActivationStoreConfig(shard_size=shard_size))
     n_sequences = 0
+    n_tokens = 0
     for pt in pt_subset:
+        if max_tokens and n_tokens >= max_tokens:
+            break
         flat, n_seqs = _load_one(pt)
         store.append(flat)
         n_sequences += n_seqs
+        n_tokens += flat.shape[0]
     store.finalize(metadata={"n_sequences": n_sequences})
-    return {"worker_id": worker_id, "metadata": store.metadata}
+    return {"worker_id": worker_id, "metadata": store.metadata, "n_tokens": n_tokens}
 
 
 def _merge_temp_stores(temp_dirs: list[Path], output: Path, model_name: str, layer: int) -> dict:
@@ -116,11 +131,23 @@ def main():
     p.add_argument("--layer", type=int, required=True, help="Stamped into metadata.json")
     p.add_argument("--shard-size", type=int, default=100_000)
     p.add_argument("--writers", type=int, default=4, help="Parallel writer workers (each owns its own ActivationStore)")
+    p.add_argument(
+        "--max-tokens",
+        type=int,
+        default=0,
+        help="Cap total tokens written across all writers. 0 = no cap. Each writer gets max_tokens/writers.",
+    )
+    p.add_argument("--shuffle-seed", type=int, default=42, help="Seed for shuffling .pt files before sharding")
     args = p.parse_args()
 
     pt_files = sorted(args.predict_dir.rglob("predictions__*.pt"))
     if not pt_files:
         raise FileNotFoundError(f"No predictions__*.pt under {args.predict_dir}")
+
+    # Shuffle so that capping by --max-tokens samples randomly across the input
+    # FASTA rather than processing only the first contiguous chunk. Each writer's
+    # slice ends up containing a stratified sample of sources.
+    random.Random(args.shuffle_seed).shuffle(pt_files)
 
     # Split files evenly across writers.
     n_writers = max(1, min(args.writers, len(pt_files)))
@@ -128,11 +155,16 @@ def main():
     splits = [pt_files[i : i + chunk] for i in range(0, len(pt_files), chunk)]
     temp_dirs = [args.output.with_name(args.output.name + f".tmp_writer_{i}") for i in range(len(splits))]
 
+    per_writer_budget = (args.max_tokens // len(splits)) if args.max_tokens else 0
+
     print(f"Sharding {len(pt_files)} .pt files across {len(splits)} writers (~{chunk} files each)")
+    if args.max_tokens:
+        print(f"Token cap: {args.max_tokens:,} total -> {per_writer_budget:,} per writer")
 
     with ProcessPoolExecutor(max_workers=len(splits)) as ex:
         futures = {
-            ex.submit(_writer_worker, i, split, temp_dirs[i], args.shard_size): i for i, split in enumerate(splits)
+            ex.submit(_writer_worker, i, split, temp_dirs[i], args.shard_size, per_writer_budget): i
+            for i, split in enumerate(splits)
         }
         for fut in tqdm(futures, desc="writers"):
             result = fut.result()
