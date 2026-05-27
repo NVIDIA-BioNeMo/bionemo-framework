@@ -586,8 +586,11 @@ def _padding_collate_fn(
         min_length: Minimum length to pad to
 
     Returns:
-        Dictionary with batched and padded tensors
+        Dictionary with batched and padded tensors, or None when the input
+        batch is empty (can happen on DP shard boundaries — caller must skip).
     """
+    if not batch:
+        return None
     max_len = max(sample["tokens"].shape[0] for sample in batch)
     if min_length is not None:
         max_len = max(max_len, min_length)
@@ -1197,6 +1200,9 @@ def predict(
 
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(dataloader):
+            # Empty batches can be handed to a rank on DP shard boundaries.
+            if batch_data is None:
+                continue
             # Move to GPU
             batch_gpu = {
                 k: v.cuda(non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch_data.items()
