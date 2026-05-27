@@ -30,7 +30,11 @@ their shards into the final output dir and writes a unified metadata.json.
 import argparse
 import json
 import shutil
-from concurrent.futures import ThreadPoolExecutor
+# ProcessPoolExecutor — not threads — because the per-shard work (torch.load,
+# Arrow encoding, parquet write) is GIL-bound and saturates a single Python
+# interpreter, defeating the point of multiple writers. Subprocesses give
+# us a real Nx speedup on multi-core boxes.
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import torch
@@ -126,7 +130,7 @@ def main():
 
     print(f"Sharding {len(pt_files)} .pt files across {len(splits)} writers (~{chunk} files each)")
 
-    with ThreadPoolExecutor(max_workers=len(splits)) as ex:
+    with ProcessPoolExecutor(max_workers=len(splits)) as ex:
         futures = {
             ex.submit(_writer_worker, i, split, temp_dirs[i], args.shard_size): i for i, split in enumerate(splits)
         }
