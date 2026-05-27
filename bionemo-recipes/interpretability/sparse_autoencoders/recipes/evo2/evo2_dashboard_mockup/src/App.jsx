@@ -481,7 +481,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer (Mockup)", sub
         const sequentialColumns = []
 
         for (const col of columns) {
-          if (['x', 'y', 'feature_id', 'top_example_idx'].includes(col.name)) continue
+          if (['x', 'y', 'feature_id', 'top_example_idx', 'logo_path'].includes(col.name)) continue
 
           if (col.type === 'VARCHAR') {
             const isGsea = col.name.startsWith('gsea_')
@@ -597,6 +597,10 @@ export default function App({ title = "Evo 2 SAE Feature Explorer (Mockup)", sub
           .map(c => `"${c.name}"`)
           .join(', ')
         const extraSelect = categorySelectCols ? `, ${categorySelectCols}` : ''
+        // logo_path is optional — older parquets won't have it, so detect and
+        // include it only if the column exists.
+        const hasLogoPath = columns.some(c => c.name === 'logo_path')
+        const logoSelect = hasLogoPath ? ', logo_path' : ''
         const featuresResult = await vg.coordinator().query(`
           SELECT
             feature_id,
@@ -605,6 +609,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer (Mockup)", sub
             max_activation,
             x,
             y
+            ${logoSelect}
             ${extraSelect}
           FROM features
           ORDER BY feature_id
@@ -618,6 +623,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer (Mockup)", sub
             max_activation: row.max_activation,
             x: row.x,
             y: row.y,
+            logo_path: row.logo_path,
           }
           for (const col of detectedCategories) {
             if (col.type === 'string' || col.type === 'integer') {

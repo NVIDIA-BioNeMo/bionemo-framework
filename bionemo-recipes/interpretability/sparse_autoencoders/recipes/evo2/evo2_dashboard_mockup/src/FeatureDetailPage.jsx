@@ -121,6 +121,17 @@ export default function FeatureDetailPage({ feature, examples, onClose }) {
           </div>
         </div>
 
+        {feature.logo_path && (
+          <div style={styles.section}>
+            <div style={styles.sectionTitle}>Sequence Logo</div>
+            <img
+              src={feature.logo_path}
+              alt={`Sequence logo for ${description}`}
+              style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
+            />
+          </div>
+        )}
+
         <div style={styles.section}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
             <div style={styles.sectionTitle}>Top Activating Sequences</div>

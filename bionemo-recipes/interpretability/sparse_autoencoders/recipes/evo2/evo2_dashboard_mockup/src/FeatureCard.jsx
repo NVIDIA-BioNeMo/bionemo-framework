@@ -438,6 +438,16 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
 
       {expanded && (
         <div style={styles.expandedContent}>
+          {feature.logo_path && (
+            <div style={{ marginBottom: '14px' }}>
+              <div style={styles.sectionHeader}>Sequence Logo</div>
+              <img
+                src={feature.logo_path}
+                alt={`Sequence logo for ${displayTitle}`}
+                style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
+              />
+            </div>
+          )}
           {/* Sequence examples */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
             <div style={styles.sectionHeader}>Top Activating Sequences</div>

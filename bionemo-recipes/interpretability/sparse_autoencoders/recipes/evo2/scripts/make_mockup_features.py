@@ -61,6 +61,73 @@ CENTRAL_MOTIFS = {
     "Stop codon (TAG) context": "GCCTAGGCC",  # TAG in coding context
 }
 
+# 19bp PWM window centered on the activation peak (positions -9..+9).
+PWM_WINDOW = 19
+PWM_PEAK = 9
+PWM_BASES = ["A", "C", "G", "T"]
+
+
+# Per-position base probabilities for each feature's central signature. Positions
+# outside the signature are filled with near-uniform (low information) draws so
+# real-looking logos have low-info flanks.
+PWM_SIGNATURES: dict[str, list[dict[str, float]]] = {
+    # Kozak-like GCCACCATGG — ATG at signature positions 6..8.
+    "Start codon (ATG) context": [
+        {"G": 0.70}, {"C": 0.70}, {"C": 0.70}, {"A": 0.60}, {"C": 0.65},
+        {"C": 0.60}, {"A": 0.95}, {"T": 0.95}, {"G": 0.95}, {"G": 0.75},
+    ],
+    "TATA box": [  # TATAAA
+        {"T": 0.90}, {"A": 0.90}, {"T": 0.90},
+        {"A": 0.70, "G": 0.20}, {"A": 0.95}, {"A": 0.80, "T": 0.15},
+    ],
+    "Polyadenylation signal": [  # AATAAA
+        {"A": 0.90}, {"A": 0.90}, {"T": 0.85},
+        {"A": 0.85}, {"A": 0.85}, {"A": 0.80},
+    ],
+    "Bacterial promoter -10 box": [  # TATAAT
+        {"T": 0.90}, {"A": 0.85}, {"T": 0.85},
+        {"A": 0.75}, {"A": 0.75}, {"T": 0.85},
+    ],
+    # CpG-rich: alternating GC bias across 12 positions, no sharp single peak.
+    "CpG island": [
+        {"C": 0.55, "G": 0.35}, {"G": 0.55, "C": 0.35},
+        {"C": 0.55, "G": 0.35}, {"G": 0.55, "C": 0.35},
+        {"C": 0.55, "G": 0.35}, {"G": 0.55, "C": 0.35},
+        {"C": 0.55, "G": 0.35}, {"G": 0.55, "C": 0.35},
+        {"C": 0.55, "G": 0.35}, {"G": 0.55, "C": 0.35},
+        {"C": 0.55, "G": 0.35}, {"G": 0.55, "C": 0.35},
+    ],
+    "Shine-Dalgarno sequence": [  # AGGAGGT
+        {"A": 0.80}, {"G": 0.90}, {"G": 0.90},
+        {"A": 0.75}, {"G": 0.90}, {"G": 0.85}, {"T": 0.60},
+    ],
+    "Bacterial promoter -35 box": [  # TTGACA
+        {"T": 0.90}, {"T": 0.85}, {"G": 0.85},
+        {"A": 0.80}, {"C": 0.85}, {"A": 0.80},
+    ],
+    # GT at the exon|intron boundary is essentially invariant.
+    "Splice donor site": [  # GT.AAGT
+        {"G": 0.99}, {"T": 0.99}, {"A": 0.60},
+        {"A": 0.70}, {"G": 0.80}, {"T": 0.60},
+    ],
+    # Pyrimidine tract leading into an invariant AG at the intron|exon boundary.
+    "Splice acceptor site": [
+        {"T": 0.80}, {"T": 0.80}, {"T": 0.80}, {"T": 0.80},
+        {"C": 0.70}, {"A": 0.99}, {"G": 0.99}, {"G": 0.55},
+    ],
+    "Stop codon (TAA) context": [  # GCC.TAA.GCC — coding-context flanks
+        {"G": 0.45, "C": 0.40}, {"C": 0.55, "G": 0.30}, {"C": 0.50, "G": 0.35},
+        {"T": 0.95}, {"A": 0.90}, {"A": 0.90},
+        {"G": 0.45, "C": 0.40}, {"C": 0.55, "G": 0.30}, {"C": 0.50, "G": 0.35},
+    ],
+    "Stop codon (TAG) context": [
+        {"G": 0.45, "C": 0.40}, {"C": 0.55, "G": 0.30}, {"C": 0.50, "G": 0.35},
+        {"T": 0.95}, {"A": 0.90}, {"G": 0.90},
+        {"G": 0.45, "C": 0.40}, {"C": 0.55, "G": 0.30}, {"C": 0.50, "G": 0.35},
+    ],
+}
+
+
 # Annotation-database source for each feature label.
 DB_SOURCES = {
     "Start codon (ATG) context": "RefSeq",
@@ -80,6 +147,80 @@ DB_SOURCES = {
 def _random_dna(rng: np.random.Generator, length: int) -> str:
     """Generate a length-N DNA string by uniform-sampling A/C/G/T."""
     return "".join(rng.choice(list("ACGT"), size=length))
+
+
+def _build_pwm(rng: np.random.Generator, label: str | None) -> np.ndarray:
+    """Build a (PWM_WINDOW, 4) probability PWM for one feature label.
+
+    Central signature pulled from PWM_SIGNATURES (or near-uniform for unlabeled
+    features). Flanks are exactly uniform (0 bits — blank logomaker columns)
+    so the logo reads as "this is the motif, everything else is background"
+    instead of a sea of tiny speckle letters.
+    """
+    pwm = np.zeros((PWM_WINDOW, 4))
+    uniform = np.full(4, 0.25)
+    signature = PWM_SIGNATURES.get(label) if label else None
+
+    if signature is None:
+        # Unlabeled feature: essentially uniform — a very tight Dirichlet draw
+        # produces a flat, mostly-blank logo with no spurious consensus.
+        return np.tile(uniform, (PWM_WINDOW, 1))
+
+    sig_len = len(signature)
+    sig_start = PWM_PEAK - sig_len // 2  # center the signature on the activation peak
+    for i in range(PWM_WINDOW):
+        sig_idx = i - sig_start
+        if 0 <= sig_idx < sig_len:
+            spec = signature[sig_idx]
+            row = np.zeros(4)
+            for base, prob in spec.items():
+                row[PWM_BASES.index(base)] = prob
+            # Distribute the remainder evenly across unspecified bases — no
+            # randomness, so secondary letters stay symmetric and quiet.
+            remainder = max(0.0, 1.0 - sum(spec.values()))
+            unspec = [b for b in PWM_BASES if b not in spec]
+            if unspec and remainder > 0:
+                share = remainder / len(unspec)
+                for b in unspec:
+                    row[PWM_BASES.index(b)] = share
+            row = np.clip(row, 1e-6, None)
+            row /= row.sum()
+            pwm[i] = row
+        else:
+            # Flank: exactly uniform -> 0 bits -> blank column in the logo.
+            pwm[i] = uniform
+
+    return pwm
+
+
+def _render_logo(pwm: np.ndarray, feature_id: int, out_dir: Path) -> Path:
+    """Render a WebLogo-style PNG for one feature's PWM using logomaker.
+
+    The information transform produces letter heights in bits (0..2). Position
+    labels are relative to the activation peak (-PWM_PEAK..+PWM_PEAK).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless backend — safe for cron/CI
+    import logomaker
+    import matplotlib.pyplot as plt
+
+    df = pd.DataFrame(pwm, columns=PWM_BASES)
+    info_df = logomaker.transform_matrix(df, from_type="probability", to_type="information")
+
+    fig, ax = plt.subplots(figsize=(6, 1.8))
+    logomaker.Logo(info_df, ax=ax, color_scheme="classic")
+    ax.set_xticks(range(PWM_WINDOW))
+    ax.set_xticklabels([str(i - PWM_PEAK) for i in range(PWM_WINDOW)], fontsize=8)
+    ax.set_ylabel("Bits")
+    ax.set_ylim(0, 2)
+    ax.set_xlabel("Position relative to peak")
+    fig.tight_layout()
+
+    out_path = out_dir / f"feature_{feature_id}.png"
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
 
 def _make_example(rng: np.random.Generator, label: str, feature_max: float, window: int = 200) -> dict:
@@ -136,6 +277,7 @@ def _make_features(rng: np.random.Generator) -> list[dict]:
                 "top_positive_logits": [],
                 "top_negative_logits": [],
                 "examples": examples,
+                "logo_path": f"/logos/feature_{fid}.png",
             }
         )
     return features
@@ -195,6 +337,7 @@ def _make_atlas(rng: np.random.Generator, features: list[dict]) -> pd.DataFrame:
             "log_frequency": [round(float(np.log10(f["activation_freq"])), 4) for f in features],
             "max_activation": [f["max_activation"] for f in features],
             "cluster_id": cluster_ids,
+            "logo_path": [f["logo_path"] for f in features],
         }
     )
 
@@ -242,6 +385,9 @@ def _make_unlabeled_features(rng: np.random.Generator, n: int, start_id: int) ->
                 "top_positive_logits": [],
                 "top_negative_logits": [],
                 "examples": examples,
+                # No motif means no logo — the UI will fall back to its
+                # "no logo available" empty-state for unlabeled features.
+                "logo_path": None,
             }
         )
     return out
@@ -295,6 +441,20 @@ def main():
 
     features = _make_features(rng)
     features += _make_unlabeled_features(rng, n=args.n_unlabeled, start_id=len(features))
+
+    # Render one WebLogo PNG per labeled feature into <output>/logos/. Unlabeled
+    # features get no logo — an empty WebLogo reads as a render bug, so we let
+    # the dashboard show its "no logo" empty state instead.
+    logo_dir = args.output_dir / "logos"
+    logo_dir.mkdir(parents=True, exist_ok=True)
+    rendered = 0
+    for f in features:
+        if f["label"] is None:
+            continue
+        pwm = _build_pwm(rng, f["label"])
+        _render_logo(pwm, f["feature_id"], logo_dir)
+        rendered += 1
+    print(f"Wrote {rendered} logo PNGs -> {logo_dir}")
 
     atlas = _make_atlas(rng, features)
     atlas.to_parquet(args.output_dir / "features_atlas.parquet", index=False)
