@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import App from './App'
 import ColoredSequence from './ColoredSequence'
 import GeneUMAPView from './GeneUMAPView'
+import SteeringComparison from './SteeringComparison'
 
 // Hit http://localhost:5176/#preview to see all three views side by side.
 // Tabs switch between the existing dashboard ("Main") and the two new
@@ -30,6 +31,7 @@ const TABS = [
   { id: 'main', label: 'Main dashboard (features + atlas + WebLogos)' },
   { id: 'sequence', label: 'ColoredSequence (mock 500bp)' },
   { id: 'genes', label: 'Gene UMAP (500 genes, precomputed)' },
+  { id: 'steering', label: 'Steering comparison (mock suppress/baseline/amplify)' },
 ]
 
 const styles = {
@@ -254,6 +256,18 @@ export default function Preview() {
               UMAP with that feature emphasized (~2–5 sec, runs in browser).
             </div>
             <GeneUMAPView height={620} />
+          </div>
+        )}
+
+        {tab === 'steering' && (
+          <div style={styles.genesWrap}>
+            <div style={styles.title}>Steering comparison</div>
+            <div style={styles.subtitle}>
+              Side-by-side <b>suppress / baseline / amplify</b> of a chosen SAE feature at
+              a masked sequence position. All data is hand-rolled mock — when the real
+              steering backend lands, the same UI swaps in live results.
+            </div>
+            <SteeringComparison />
           </div>
         )}
       </div>

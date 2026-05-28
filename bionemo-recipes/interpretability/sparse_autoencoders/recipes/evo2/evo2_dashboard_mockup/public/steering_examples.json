@@ -1,0 +1,156 @@
+{
+  "seeds": {
+    "ecoli_16s": {
+      "name": "E. coli 16S rRNA — A1408 region",
+      "description": "Bacterial 16S ribosomal RNA, position 1408 is the known aminoglycoside-resistance site (mutation A1408G confers kanamycin resistance).",
+      "sequence": "GGGTGAAGTCGTAACAAGGTAACCGTAGGGGAACCTGCGGTTGGATCACCTCCTTACCG",
+      "mask_position": 32
+    },
+    "promoter": {
+      "name": "E. coli σ70 promoter (TATA region)",
+      "description": "Synthetic bacterial promoter; the masked position sits inside the −10 TATAAT consensus.",
+      "sequence": "GCAATTGACAAGTAACCGAGCATTAGCTATAATGTGATAGCTCAGATGAGCCATGCGGT",
+      "mask_position": 30
+    },
+    "brca1_exon": {
+      "name": "BRCA1 exon 11 fragment",
+      "description": "Human BRCA1 coding region. Masked position is the third base of a codon — the position where the model's choice maps to amino-acid identity.",
+      "sequence": "ATGGATTTATCTGCTCTTCGCGTTGAAGAAGTACAAAATGTCATTAATGCTATGCAGAA",
+      "mask_position": 28
+    },
+    "random": {
+      "name": "Random control sequence",
+      "description": "Uniformly-sampled ACGT, no biological structure. Steering should produce minimal shifts here.",
+      "sequence": "GTACCATGCAGTTCGAACTGCATGCTAGCATAGCTACGATCGTACGATCGATCGATCGA",
+      "mask_position": 30
+    }
+  },
+  "comparisons": {
+    "ecoli_16s__kanamycin_resistance": {
+      "feature_id": 12,
+      "feature_label": "kanamycin_resistance",
+      "suppress": {"p_base": {"A": 0.85, "C": 0.05, "G": 0.04, "T": 0.06}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.74, "C": 0.12, "G": 0.08, "T": 0.06}, "feature_activation": 1.8, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.18, "C": 0.07, "G": 0.71, "T": 0.04}, "feature_activation": 4.7, "top_base": "G"},
+      "effect_size": 0.63,
+      "narrative": "Matches the known A1408G aminoglycoside-resistance mutation. Amplifying the kanamycin-resistance feature pushes the model from the wild-type A toward the resistance-conferring G."
+    },
+    "ecoli_16s__rRNA_structural": {
+      "feature_id": 18,
+      "feature_label": "rRNA_structural",
+      "suppress": {"p_base": {"A": 0.42, "C": 0.21, "G": 0.21, "T": 0.16}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.74, "C": 0.12, "G": 0.08, "T": 0.06}, "feature_activation": 2.1, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.91, "C": 0.04, "G": 0.03, "T": 0.02}, "feature_activation": 5.2, "top_base": "A"},
+      "effect_size": 0.17,
+      "narrative": "Amplifying the rRNA structural-context feature reinforces the wild-type A; suppressing it flattens toward uniform. The feature acts as a confidence multiplier on the natural base."
+    },
+    "promoter__TATA_box": {
+      "feature_id": 4,
+      "feature_label": "TATA_box",
+      "suppress": {"p_base": {"A": 0.28, "C": 0.24, "G": 0.23, "T": 0.25}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.62, "C": 0.10, "G": 0.07, "T": 0.21}, "feature_activation": 1.5, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.79, "C": 0.04, "G": 0.03, "T": 0.14}, "feature_activation": 3.8, "top_base": "A"},
+      "effect_size": 0.17,
+      "narrative": "Amplifying the TATA-box feature reinforces the A at position 5 of the TATAAT motif; suppressing it collapses the distribution toward uniform — the model loses confidence in the consensus."
+    },
+    "promoter__exon_start": {
+      "feature_id": 7,
+      "feature_label": "exon_start",
+      "suppress": {"p_base": {"A": 0.55, "C": 0.16, "G": 0.12, "T": 0.17}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.62, "C": 0.10, "G": 0.07, "T": 0.21}, "feature_activation": 0.4, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.60, "C": 0.11, "G": 0.08, "T": 0.21}, "feature_activation": 1.1, "top_base": "A"},
+      "effect_size": 0.07,
+      "narrative": "Null result: the exon_start feature has minimal activity in a bacterial promoter context. Probabilities barely shift across the three interventions."
+    },
+    "brca1_exon__alpha_helix": {
+      "feature_id": 0,
+      "feature_label": "alpha_helix",
+      "suppress": {"p_base": {"A": 0.18, "C": 0.31, "G": 0.39, "T": 0.12}, "feature_activation": 0.0, "top_base": "G"},
+      "baseline": {"p_base": {"A": 0.08, "C": 0.22, "G": 0.58, "T": 0.12}, "feature_activation": 2.3, "top_base": "G"},
+      "amplify": {"p_base": {"A": 0.03, "C": 0.10, "G": 0.83, "T": 0.04}, "feature_activation": 5.1, "top_base": "G"},
+      "effect_size": 0.25,
+      "narrative": "Amplifying the α-helix feature in a BRCA1 codon-3 position increases preference for G — helix-favoring codons (e.g. GAG/GAA glutamate, GCC alanine) end in G or C. Suppressing flattens the codon-bias signal."
+    },
+    "brca1_exon__beta_sheet": {
+      "feature_id": 1,
+      "feature_label": "beta_sheet",
+      "suppress": {"p_base": {"A": 0.10, "C": 0.20, "G": 0.55, "T": 0.15}, "feature_activation": 0.0, "top_base": "G"},
+      "baseline": {"p_base": {"A": 0.08, "C": 0.22, "G": 0.58, "T": 0.12}, "feature_activation": 0.7, "top_base": "G"},
+      "amplify": {"p_base": {"A": 0.06, "C": 0.31, "G": 0.49, "T": 0.14}, "feature_activation": 2.0, "top_base": "G"},
+      "effect_size": 0.09,
+      "narrative": "Mild effect: β-sheet propensity nudges the third codon position slightly toward C (β-sheet residues like Val/Ile use codons ending in C/T), but the structural context isn't strong enough to flip the top base."
+    },
+    "brca1_exon__kanamycin_resistance": {
+      "feature_id": 12,
+      "feature_label": "kanamycin_resistance",
+      "suppress": {"p_base": {"A": 0.07, "C": 0.22, "G": 0.59, "T": 0.12}, "feature_activation": 0.0, "top_base": "G"},
+      "baseline": {"p_base": {"A": 0.08, "C": 0.22, "G": 0.58, "T": 0.12}, "feature_activation": 0.1, "top_base": "G"},
+      "amplify": {"p_base": {"A": 0.09, "C": 0.21, "G": 0.58, "T": 0.12}, "feature_activation": 0.4, "top_base": "G"},
+      "effect_size": 0.01,
+      "narrative": "Null result: kanamycin_resistance is a bacterial-rRNA-specific feature and has essentially no activity in a human exonic context. The intervention is rejected by the surrounding sequence."
+    },
+    "random__TATA_box": {
+      "feature_id": 4,
+      "feature_label": "TATA_box",
+      "suppress": {"p_base": {"A": 0.24, "C": 0.27, "G": 0.26, "T": 0.23}, "feature_activation": 0.0, "top_base": "C"},
+      "baseline": {"p_base": {"A": 0.25, "C": 0.25, "G": 0.25, "T": 0.25}, "feature_activation": 0.2, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.41, "C": 0.21, "G": 0.18, "T": 0.20}, "feature_activation": 1.3, "top_base": "A"},
+      "effect_size": 0.16,
+      "narrative": "Modest effect on random sequence: amplifying TATA_box biases toward A (the most common base in TATAAT), but the surrounding context has no TATA motif so the lift is small."
+    },
+    "random__kanamycin_resistance": {
+      "feature_id": 12,
+      "feature_label": "kanamycin_resistance",
+      "suppress": {"p_base": {"A": 0.25, "C": 0.25, "G": 0.25, "T": 0.25}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.26, "C": 0.24, "G": 0.25, "T": 0.25}, "feature_activation": 0.0, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.27, "C": 0.24, "G": 0.25, "T": 0.24}, "feature_activation": 0.3, "top_base": "A"},
+      "effect_size": 0.02,
+      "narrative": "Null result: in a non-rRNA random control, the kanamycin_resistance feature doesn't fire and forcing it doesn't propagate. Demonstrates the SAE doesn't blindly comply with steering when the input doesn't support the feature."
+    },
+    "promoter__rRNA_structural": {
+      "feature_id": 18,
+      "feature_label": "rRNA_structural",
+      "suppress": {"p_base": {"A": 0.60, "C": 0.12, "G": 0.07, "T": 0.21}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.62, "C": 0.10, "G": 0.07, "T": 0.21}, "feature_activation": 0.3, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.65, "C": 0.10, "G": 0.06, "T": 0.19}, "feature_activation": 1.5, "top_base": "A"},
+      "effect_size": 0.03,
+      "narrative": "Null result: the rRNA_structural feature has minimal activity in a DNA promoter context. Probabilities essentially unchanged."
+    },
+    "ecoli_16s__TATA_box": {
+      "feature_id": 4,
+      "feature_label": "TATA_box",
+      "suppress": {"p_base": {"A": 0.78, "C": 0.10, "G": 0.07, "T": 0.05}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.74, "C": 0.12, "G": 0.08, "T": 0.06}, "feature_activation": 0.4, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.71, "C": 0.13, "G": 0.08, "T": 0.08}, "feature_activation": 1.2, "top_base": "A"},
+      "effect_size": 0.04,
+      "narrative": "Subtle: TATA_box is a eukaryotic promoter motif and has limited activity in a bacterial rRNA context. Small lift in T probability but not enough to compete with the wild-type A."
+    },
+    "ecoli_16s__alpha_helix": {
+      "feature_id": 0,
+      "feature_label": "alpha_helix",
+      "suppress": {"p_base": {"A": 0.73, "C": 0.12, "G": 0.09, "T": 0.06}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.74, "C": 0.12, "G": 0.08, "T": 0.06}, "feature_activation": 0.1, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.72, "C": 0.13, "G": 0.09, "T": 0.06}, "feature_activation": 0.5, "top_base": "A"},
+      "effect_size": 0.02,
+      "narrative": "Null result: α-helix is a protein-coding feature, not relevant in a non-coding rRNA context. The model rejects the steering signal."
+    },
+    "brca1_exon__exon_start": {
+      "feature_id": 7,
+      "feature_label": "exon_start",
+      "suppress": {"p_base": {"A": 0.12, "C": 0.22, "G": 0.48, "T": 0.18}, "feature_activation": 0.0, "top_base": "G"},
+      "baseline": {"p_base": {"A": 0.08, "C": 0.22, "G": 0.58, "T": 0.12}, "feature_activation": 1.6, "top_base": "G"},
+      "amplify": {"p_base": {"A": 0.04, "C": 0.18, "G": 0.71, "T": 0.07}, "feature_activation": 4.2, "top_base": "G"},
+      "effect_size": 0.13,
+      "narrative": "Amplifying exon_start sharpens the model's preference for the canonical G at this codon position; suppressing it flattens toward uniform exon-like noise."
+    },
+    "promoter__alpha_helix": {
+      "feature_id": 0,
+      "feature_label": "alpha_helix",
+      "suppress": {"p_base": {"A": 0.63, "C": 0.09, "G": 0.07, "T": 0.21}, "feature_activation": 0.0, "top_base": "A"},
+      "baseline": {"p_base": {"A": 0.62, "C": 0.10, "G": 0.07, "T": 0.21}, "feature_activation": 0.0, "top_base": "A"},
+      "amplify": {"p_base": {"A": 0.61, "C": 0.10, "G": 0.08, "T": 0.21}, "feature_activation": 0.3, "top_base": "A"},
+      "effect_size": 0.02,
+      "narrative": "Null result: α-helix is protein-coding; promoters aren't coding regions. The feature doesn't fire and steering has no traction."
+    }
+  }
+}
