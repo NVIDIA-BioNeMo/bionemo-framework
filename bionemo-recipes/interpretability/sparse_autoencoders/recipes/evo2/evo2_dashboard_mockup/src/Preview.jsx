@@ -1,13 +1,13 @@
 import React, { useState } from 'react'
 import App from './App'
-import SteeringExplorer from './SteeringExplorer'
+import SteeringDemo from './SteeringDemo'
 
 // Hit http://localhost:5176/#preview to see the tabbed preview. The plain `/`
 // URL still renders the unchanged main dashboard.
 
 const TABS = [
   { id: 'main', label: 'Main dashboard (features + atlas + WebLogos)' },
-  { id: 'steering', label: 'Steering explorer (mock slider + heatmap)' },
+  { id: 'steering', label: 'Causal steering (Decode-gLM-style)' },
 ]
 
 const styles = {
@@ -73,13 +73,13 @@ export default function Preview() {
 
         {tab === 'steering' && (
           <div style={styles.wrap}>
-            <div style={styles.title}>Steering explorer</div>
+            <div style={styles.title}>Causal steering of SAE features</div>
             <div style={styles.subtitle}>
-              Slide the <b>clamp</b> control to see per-position P(A/C/G/T) shifts across an entire
-              200 bp sequence. All data is algorithmically generated mock — when the real
-              steering backend lands, the same UI swaps in live results.
+              Pick a position, pick a feature, drag the clamp. Replicates Hutchinson et al. 2025
+              (Decode-gLM) — features that genuinely represent biological concepts move predictions
+              toward biologically meaningful outputs; unrelated features don't.
             </div>
-            <SteeringExplorer />
+            <SteeringDemo />
           </div>
         )}
       </div>
