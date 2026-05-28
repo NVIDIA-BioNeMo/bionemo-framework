@@ -32,6 +32,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint, sharded_state_dict_default
 from torch.autograd.function import Function
 
+from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 
 
@@ -467,7 +468,7 @@ def fftconv_func(
 ):
     """Apply a 1D convolution to the input sequence u using the filter k and the shortcut D."""
     seqlen = u.shape[-1]
-    fft_size = max(2 * seqlen, 2 * k.shape[-1])
+    fft_size = linear_causal_fft_size(seqlen, k.shape[-1])
 
     # check if k is less than seqlen -- subquadratic_ops input does not need padding
     if not use_subquadratic_ops and k.shape[-1] < seqlen:
