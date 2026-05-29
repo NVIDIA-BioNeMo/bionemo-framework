@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools-scm>=8", "setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bionemo-rldif"
+license.file = "LICENSE"
+readme = "README.md"
+description = "BioNeMo RLDIF"
+authors = [{ name = "Flagship Pioneering", email = "oviessmann@flagshippioneering.com" }]
+dynamic = ["version"]
+dependencies = ['bionemo-core', 'torch-scatter']
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bionemo.*"]
+namespaces = true
+exclude = ["test*."]
+
+[tool.setuptools_scm]
+root = '../..'
+version_scheme = "post-release"
+local_scheme = "no-local-version"
+
+[tool.uv]
+cache-keys = [{ git = true }]
