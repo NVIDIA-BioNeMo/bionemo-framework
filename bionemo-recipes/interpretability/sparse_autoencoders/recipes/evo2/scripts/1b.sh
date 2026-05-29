@@ -122,7 +122,7 @@ torchrun --nproc_per_node "${DEVICES:-4}" "${RECIPE_DIR}/scripts/train.py" \
     --top-k "${TOP_K:-32}" \
     --auxk "${AUXK:-512}" \
     --auxk-coef "${AUXK_COEF:-0.03125}" \
-    --dead-tokens-threshold "${DEAD_TOKENS_THRESHOLD:-500000}" \
+    --dead-tokens-threshold "${DEAD_TOKENS_THRESHOLD:-10000000}" \
     --init-pre-bias \
     --n-epochs "${N_EPOCHS:-3}" \
     --batch-size 4096 \

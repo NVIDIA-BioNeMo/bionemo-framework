@@ -289,7 +289,10 @@ class TopKSAE(SparseAutoencoder):
         recon_aux = F.linear(codes_aux, self.decoder.weight[:, dead_indices], self.decoder.bias)
 
         # Target is the residual (what primary reconstruction missed)
-        # Work in normalized space for the aux loss
+        # Canonical: residual = x - recon, i.e. the actual reconstruction error.
+        # The previous form `x - recon + pre_bias` simplifies to `x - decoder(codes)`,
+        # which has norm dominated by ||pre_bias|| rather than the actual error,
+        # weakening the aux gradient by roughly (||pre_bias|| / ||error||)^2.
         if self.normalize_input and norm_info is not None:
             # Normalize x to match the space where encoding happened
             x_norm = (x - norm_info["mu"]) / norm_info["std"]
@@ -297,7 +300,7 @@ class TopKSAE(SparseAutoencoder):
             recon_norm = self.decoder(codes) + self.pre_bias
             residual = x_norm - recon_norm.detach()
         else:
-            residual = x - recon.detach() + self.pre_bias.detach()
+            residual = x - recon.detach()
 
         # Normalized MSE: MSE / variance of target
         mse = (recon_aux - residual).pow(2).mean(dim=-1)  # [batch]
