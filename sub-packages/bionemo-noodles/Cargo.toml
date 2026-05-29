@@ -9,7 +9,7 @@ name = "noodles_fasta_wrapper"  # The name of the library
 path = "rust/src/lib.rs"        # Path to the library file
 
 [dependencies]
-pyo3 = { version = "0.18", features = ["extension-module"] }
+pyo3 = { version = "0.24", features = ["extension-module"] }
 noodles-fasta = "0.45.0"  # Update to the latest version of noodles
 noodles-core = "*"
 memmap2 = "*"
