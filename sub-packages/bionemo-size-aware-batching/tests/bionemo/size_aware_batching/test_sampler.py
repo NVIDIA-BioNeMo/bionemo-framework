@@ -332,6 +332,26 @@ def test_init_bucket_batch_sampler_with_invalid_shuffle(sample_data):
         )
 
 
+def test_init_bucket_batch_sampler_with_invalid_generator(sample_data):
+    (
+        sizes,
+        bucket_boundaries,
+        base_batch_sampler_class,
+        base_batch_sampler_shared_kwargs,
+        base_batch_sampler_individual_kwargs,
+    ) = sample_data
+    # generator should be either None or an instance of torch.Generator.
+    with pytest.raises(TypeError):
+        BucketBatchSampler(
+            sizes=sizes,
+            bucket_boundaries=bucket_boundaries,
+            base_batch_sampler_class=base_batch_sampler_class,
+            base_batch_sampler_shared_kwargs=base_batch_sampler_shared_kwargs,
+            base_batch_sampler_individual_kwargs=base_batch_sampler_individual_kwargs,
+            generator=1,
+        )
+
+
 def test_init_bucket_batch_sampler_with_invalid_base_batch_sampler_class(sample_data):
     (
         sizes,
@@ -426,6 +446,64 @@ def test_init_bucket_batch_sampler_with_invalid_base_batch_sampler_kwargs(sample
             base_batch_sampler_class=base_batch_sampler_class,
             base_batch_sampler_shared_kwargs={},
             base_batch_sampler_individual_kwargs={"batch_size": [2, 3, 5]},
+        )
+        # base_batch_sampler_shared_kwargs and base_batch_sampler_individual_kwargs should be keyword argument dictionary
+        with pytest.raises(TypeError):
+            BucketBatchSampler(
+                sizes=sizes,
+                bucket_boundaries=bucket_boundaries,
+                base_batch_sampler_class=base_batch_sampler_class,
+                base_batch_sampler_shared_kwargs={1: False},  # type: ignore
+                base_batch_sampler_individual_kwargs=base_batch_sampler_individual_kwargs,
+            )
+
+
+def test_bucket_batch_sampler_with_invalid_sampler(sample_data):
+    (
+        sizes,
+        bucket_boundaries,
+        base_batch_sampler_class,
+        base_batch_sampler_shared_kwargs,
+        base_batch_sampler_individual_kwargs,
+    ) = sample_data
+    # sampler must be an instance of class inherited from torch.utils.data.Sampler
+    with pytest.raises(TypeError):
+        BucketBatchSampler(
+            sizes=sizes,
+            bucket_boundaries=bucket_boundaries,
+            base_batch_sampler_class=base_batch_sampler_class,
+            base_batch_sampler_shared_kwargs=base_batch_sampler_shared_kwargs,
+            base_batch_sampler_individual_kwargs=base_batch_sampler_individual_kwargs,
+            sampler=DataLoader,  # type: ignore
+        )
+
+
+def test_bucket_batch_sampler_with_invalid_num_batches(sample_data):
+    (
+        sizes,
+        bucket_boundaries,
+        base_batch_sampler_class,
+        base_batch_sampler_shared_kwargs,
+        base_batch_sampler_individual_kwargs,
+    ) = sample_data
+    # num_batches must be a positive integer.
+    with pytest.raises(ValueError):
+        BucketBatchSampler(
+            sizes=sizes,
+            bucket_boundaries=bucket_boundaries,
+            base_batch_sampler_class=base_batch_sampler_class,
+            base_batch_sampler_shared_kwargs=base_batch_sampler_shared_kwargs,
+            base_batch_sampler_individual_kwargs=base_batch_sampler_individual_kwargs,
+            num_batches=-1,
+        )
+    with pytest.raises(ValueError):
+        BucketBatchSampler(
+            sizes=sizes,
+            bucket_boundaries=bucket_boundaries,
+            base_batch_sampler_class=base_batch_sampler_class,
+            base_batch_sampler_shared_kwargs=base_batch_sampler_shared_kwargs,
+            base_batch_sampler_individual_kwargs=base_batch_sampler_individual_kwargs,
+            num_batches=2.0,  # type: ignore
         )
 
 
@@ -528,6 +606,7 @@ def test_bucket_batch_sampler_with_size_aware_batch_sampler(sample_data):
         base_batch_sampler_shared_kwargs={"sizeof": cost_of_element},
         base_batch_sampler_individual_kwargs={"max_total_size": [10, 30, 50]},
         shuffle=False,
+        num_batches=11,
     )
     batch_lists_first_iter = list(iter(batch_sampler))
     ref_batch_lists = [
@@ -556,6 +635,7 @@ def test_bucket_batch_sampler_with_size_aware_batch_sampler(sample_data):
         base_batch_sampler_individual_kwargs={"max_total_size": [10, 30, 50]},
         shuffle=True,
         generator=torch.Generator(),
+        num_batches=20,
     )
     batch_lists_first_iter = list(iter(batch_sampler))
     assert set(functools.reduce(operator.iadd, batch_lists_first_iter, [])) == set(range(25))
@@ -605,3 +685,18 @@ def test_iter_bucket_batch_sampler_with_empty_buckets(sample_data):
     assert len(batch_sampler.bucket_element_indices[0]) == 0
     assert torch.all(torch.sort(torch.tensor(batch_sampler.bucket_element_indices[1]))[0] == torch.arange(25))
     assert len(batch_sampler.bucket_element_indices[2]) == 0
+
+
+def test_bucket_batch_sampler_with_sampler():
+    # make sure the sampler is indeed used
+    ref_indices = [6, 5, 7, 3, 1, 2, 4, 9, 0, 8]
+    batch_sampler = BucketBatchSampler(
+        sizes=torch.ones(len(ref_indices)),
+        bucket_boundaries=torch.tensor([0, 2]),
+        base_batch_sampler_class=BatchSampler,
+        base_batch_sampler_shared_kwargs={"drop_last": False, "batch_size": 10},
+        shuffle=False,
+        sampler=ref_indices,
+    )
+    batch = next(iter(batch_sampler))
+    assert batch == ref_indices
