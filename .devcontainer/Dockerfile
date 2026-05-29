@@ -18,18 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
 
-# Install Node.js 22 LTS and the OpenAI Codex CLI.
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm install -g --no-fund --no-audit @openai/codex \
-    && npm cache clean --force
-
-# Default Codex to Landlock where nested namespaces are restricted.
-RUN mkdir -p /home/ubuntu/.codex \
-    && printf '[features]\nuse_legacy_landlock = true\n' > /home/ubuntu/.codex/config.toml \
-    && chown -R ubuntu:ubuntu /home/ubuntu/.codex
-
 USER ubuntu
 RUN curl https://cursor.com/install -fsS | bash  # Install cursor-agent CLI tool
 RUN curl -fsSL https://claude.ai/install.sh | bash  # Install Claude CLI tool

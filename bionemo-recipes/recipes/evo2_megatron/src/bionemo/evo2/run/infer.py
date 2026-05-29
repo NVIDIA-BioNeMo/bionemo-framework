@@ -92,7 +92,7 @@ from megatron.bridge.training.utils.checkpoint_utils import (
     read_run_config,
 )
 from megatron.bridge.utils.common_utils import get_world_size_safe
-from megatron.bridge.utils.instantiate_utils import instantiate, register_allowed_target_prefix
+from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.inference.contexts import StaticInferenceContext
 from megatron.core.inference.engines.static_engine import StaticInferenceEngine
@@ -140,6 +140,16 @@ from bionemo.evo2.run.text_generation_controller import Evo2TextGenerationContro
 logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
+def _register_bionemo_target_prefix() -> None:
+    try:
+        from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
+
+        register_allowed_target_prefix("bionemo.")
+    except ImportError:
+        pass
+
+
 _WRAPPER_INIT_ACCEPTS_CONFIG = (
     "inference_wrapper_config" in inspect.signature(AbstractModelInferenceWrapper.__init__).parameters
 )
@@ -160,7 +170,7 @@ class _TextGenerationTokenizerAdapter:
 
     @property
     def bos(self) -> Optional[int]:
-        return getattr(self._tokenizer, "bos", None)
+        return getattr(self._tokenizer, "bos", getattr(self._tokenizer, "bos_id", None))
 
     @property
     def eod(self) -> Optional[int]:
@@ -485,7 +495,7 @@ def setup_inference_engine(
         raise FileNotFoundError(f"run_config.yaml not found at {run_config_filename}")
 
     run_config = read_run_config(run_config_filename)
-    register_allowed_target_prefix("bionemo.")
+    _register_bionemo_target_prefix()
     model_provider = instantiate(run_config["model"])
     logger.info(f"Instantiated model provider: {type(model_provider).__name__}")
 
