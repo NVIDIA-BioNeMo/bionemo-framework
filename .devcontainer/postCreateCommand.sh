@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Install Codex as the devcontainer user so the binary lands in the mounted user environment.
 if ! command -v codex >/dev/null 2>&1; then
-  curl -fsSL https://chatgpt.com/codex/install.sh | sh
+  curl -fsSL https://chatgpt.com/codex/install.sh | sh || true  # do not fail if there are URL resolutions with codex
 fi
 # Run via uv to avoid relying on updated PATH in this shell
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
