@@ -7,7 +7,7 @@ import SteeringDemo from './SteeringDemo'
 
 const TABS = [
   { id: 'main', label: 'Main dashboard (features + atlas + WebLogos)' },
-  { id: 'steering', label: 'Causal steering (Decode-gLM-style)' },
+  { id: 'steering', label: 'Causal steering' },
 ]
 
 const styles = {
@@ -75,9 +75,9 @@ export default function Preview() {
           <div style={styles.wrap}>
             <div style={styles.title}>Causal steering of SAE features</div>
             <div style={styles.subtitle}>
-              Pick a position, pick a feature, drag the clamp. Replicates Hutchinson et al. 2025
-              (Decode-gLM) — features that genuinely represent biological concepts move predictions
-              toward biologically meaningful outputs; unrelated features don't.
+              Pick a position, pick a feature, drag the clamp. Features that genuinely represent
+              biological concepts move predictions toward biologically meaningful outputs;
+              unrelated features don't.
             </div>
             <SteeringDemo />
           </div>

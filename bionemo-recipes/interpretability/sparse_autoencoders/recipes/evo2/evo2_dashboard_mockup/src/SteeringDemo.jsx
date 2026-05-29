@@ -1,10 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 
-// Decode-gLM-style position-targeted steering demo. Click a position in the
-// sequence, pick a feature, drag the clamp. Two side-by-side P(base) bar
-// charts compare baseline vs steered. A selectivity table shows the same
-// intervention applied to 4 features at clamp=+5 to test whether ONLY the
-// right feature shifts the prediction.
+// Position-targeted steering demo. Click a position in the sequence, pick a
+// feature, drag the clamp. Two side-by-side P(base) bar charts compare
+// baseline vs steered.
 
 // Evo2 is DNA-tokenized; the model emits P(A/C/G/T) on every input, including
 // rRNA contexts. We display T everywhere — never U — to match what the model
@@ -19,7 +17,18 @@ const COLORS = {
   steered: '#76B7B2',
 }
 
-const CLAMP_POINTS = [-2, 0, 2, 5]
+// UI clamp axis is a multiplier on the feature's natural peak activation:
+// 0× = baseline (no intervention), 1× = the highest value we'd see naturally
+// in the training data (in-distribution upper bound), 2× = pushed past what
+// the model has been trained on (out-of-distribution).
+// Underlying JSON stores discrete shifts at {-2, 0, 2, 5}; the UI -0.5×/0×/1×/2×
+// map to those four points so we can interpolate without re-mocking the data.
+const UI_CLAMP_POINTS = [-0.5, 0, 1, 2]
+const JSON_CLAMP_KEYS = ['-2', '0', '2', '5']
+const UI_CLAMP_MIN = -0.5
+const UI_CLAMP_MAX = 2
+const OOD_THRESHOLD = 1.0   // anything past 1× is out-of-distribution
+
 const BASES_PER_LINE = 60
 
 
@@ -36,19 +45,21 @@ function interpProbs(low, high, t) {
 }
 
 
-function pickSegment(value) {
-  if (value <= CLAMP_POINTS[0]) return { lo: CLAMP_POINTS[0], hi: CLAMP_POINTS[0], t: 0 }
-  if (value >= CLAMP_POINTS[CLAMP_POINTS.length - 1]) {
-    const last = CLAMP_POINTS[CLAMP_POINTS.length - 1]
+// Map a UI clamp value (e.g. 0.65 = 0.65× natural peak) to two adjacent JSON
+// clamp keys and an interpolation factor t in [0,1] between them.
+function pickSegment(uiValue) {
+  if (uiValue <= UI_CLAMP_POINTS[0]) return { lo: JSON_CLAMP_KEYS[0], hi: JSON_CLAMP_KEYS[0], t: 0 }
+  if (uiValue >= UI_CLAMP_POINTS[UI_CLAMP_POINTS.length - 1]) {
+    const last = JSON_CLAMP_KEYS[JSON_CLAMP_KEYS.length - 1]
     return { lo: last, hi: last, t: 0 }
   }
-  for (let i = 0; i < CLAMP_POINTS.length - 1; i++) {
-    if (value >= CLAMP_POINTS[i] && value <= CLAMP_POINTS[i + 1]) {
-      const t = (value - CLAMP_POINTS[i]) / (CLAMP_POINTS[i + 1] - CLAMP_POINTS[i])
-      return { lo: CLAMP_POINTS[i], hi: CLAMP_POINTS[i + 1], t }
+  for (let i = 0; i < UI_CLAMP_POINTS.length - 1; i++) {
+    if (uiValue >= UI_CLAMP_POINTS[i] && uiValue <= UI_CLAMP_POINTS[i + 1]) {
+      const t = (uiValue - UI_CLAMP_POINTS[i]) / (UI_CLAMP_POINTS[i + 1] - UI_CLAMP_POINTS[i])
+      return { lo: JSON_CLAMP_KEYS[i], hi: JSON_CLAMP_KEYS[i + 1], t }
     }
   }
-  return { lo: CLAMP_POINTS[0], hi: CLAMP_POINTS[0], t: 0 }
+  return { lo: JSON_CLAMP_KEYS[0], hi: JSON_CLAMP_KEYS[0], t: 0 }
 }
 
 
@@ -80,7 +91,8 @@ export default function SteeringDemo() {
   // multiple, the per-feature steered-minus-baseline deltas sum and we
   // renormalize. Cheap mock; the real backend would compute a joint forward.
   const [featureIds, setFeatureIds] = useState([12])
-  const [clamp, setClamp] = useState(5)
+  const [clamp, setClamp] = useState(1) // start at the in-distribution upper bound (1× natural peak)
+  const [mode, setMode] = useState('position') // 'position' = targeted; 'global' = clamp every position
   const [neighbors, setNeighbors] = useState(1)
   const [targetPos, setTargetPos] = useState(null)
 
@@ -121,12 +133,33 @@ export default function SteeringDemo() {
   // combined into a single steered distribution. With one feature it's just
   // that feature's steered probs; with more, sum (steered_f - baseline) over
   // f and add to baseline, then renormalize.
+  //
+  // Global mode short-circuits: clamping every position smears the output, so
+  // we return a fixed low-confidence distribution with no clean winner — that
+  // pattern is the visible point of contrast with position-targeted steering.
   const interpolated = useMemo(() => {
     if (!data || !primaryComparison) return null
     const { lo, hi, t } = pickSegment(clamp)
-    const baseline = primaryComparison.results_by_clamp[String(0)]?.baseline
-                  || primaryComparison.results_by_clamp[String(lo)].baseline
+    const baseline = primaryComparison.results_by_clamp['0']?.baseline
+                  || primaryComparison.results_by_clamp[lo].baseline
     if (!baseline) return null
+
+    if (mode === 'global') {
+      // Clamping every position smears toward a low-confidence distribution.
+      // We interpolate from baseline (at clamp 0) to a target smear at the
+      // extreme |clamp| = 2, so the slider still has visible effect — just
+      // never a clean winner.
+      const SMEAR = { A: 0.31, G: 0.34, C: 0.19, T: 0.16 }
+      const t = Math.min(1, Math.abs(clamp) / UI_CLAMP_MAX)
+      const out = {}
+      let z = 0
+      for (const b of BASES) {
+        out[b] = (1 - t) * (baseline[b] ?? 0) + t * SMEAR[b]
+        z += out[b]
+      }
+      for (const b of BASES) out[b] /= z
+      return { baseline, steered: out }
+    }
 
     // Find one comparison per selected feature (matching seed, falling back
     // to any pair using that feature on this seed).
@@ -137,8 +170,8 @@ export default function SteeringDemo() {
       })
       if (!k) return null
       const c = data.comparisons[k]
-      const loSet = c.results_by_clamp[String(lo)]
-      const hiSet = c.results_by_clamp[String(hi)]
+      const loSet = c.results_by_clamp[lo]
+      const hiSet = c.results_by_clamp[hi]
       if (!loSet || !hiSet) return null
       return interpProbs(loSet.steered, hiSet.steered, t)
     }).filter(Boolean)
@@ -170,8 +203,8 @@ export default function SteeringDemo() {
   return (
     <div style={styles.container}>
       <div style={styles.banner}>
-        MOCKUP — hand-rolled probability distributions per (seed, feature, clamp). Replicates the
-        Hutchinson et al. 2025 (Decode-gLM) position-targeted steering protocol.
+        MOCKUP — hand-rolled probability distributions per (seed, feature, clamp). Position-targeted
+        steering protocol.
       </div>
 
       <Controls
@@ -184,6 +217,8 @@ export default function SteeringDemo() {
         setClamp={setClamp}
         neighbors={neighbors}
         setNeighbors={setNeighbors}
+        mode={mode}
+        setMode={setMode}
       />
 
       <SequenceTarget
@@ -193,11 +228,21 @@ export default function SteeringDemo() {
         neighbors={neighbors}
       />
 
+      {mode === 'global' && comparison && (
+        <SequenceStrip
+          seed={seed}
+          seedId={seedId}
+          featureIds={featureIds}
+          clamp={clamp}
+        />
+      )}
+
       {comparison && interpolated ? (
         <BarComparison
           targetPos={targetPos}
           baseline={interpolated.baseline}
           steered={interpolated.steered}
+          mode={mode}
         />
       ) : (
         <div style={styles.empty}>
@@ -210,7 +255,7 @@ export default function SteeringDemo() {
 }
 
 
-function Controls({ data, seedId, setSeedId, featureIds, setFeatureIds, clamp, setClamp, neighbors, setNeighbors }) {
+function Controls({ data, seedId, setSeedId, featureIds, setFeatureIds, clamp, setClamp, neighbors, setNeighbors, mode, setMode }) {
   const primaryFid = featureIds[0]
   const additionalFids = featureIds.slice(1)
 
@@ -284,31 +329,54 @@ function Controls({ data, seedId, setSeedId, featureIds, setFeatureIds, clamp, s
 
       <div style={styles.controlRow}>
         <label style={styles.controlLabel}>Clamp:</label>
-        <div style={styles.sliderWrap}>
+        <div style={styles.sliderColumn}>
           <input
             type="range"
-            min={-2}
-            max={5}
-            step={0.1}
+            min={UI_CLAMP_MIN}
+            max={UI_CLAMP_MAX}
+            step={0.05}
             value={clamp}
             onChange={(e) => setClamp(parseFloat(e.target.value))}
             style={styles.slider}
           />
           <div style={styles.sliderTicks}>
-            <span onClick={() => setClamp(-2)} style={styles.tick}>−2 Suppress</span>
-            <span onClick={() => setClamp(0)}  style={styles.tick}>0 Baseline</span>
-            <span onClick={() => setClamp(2)}  style={styles.tick}>+2 Amplify</span>
-            <span onClick={() => setClamp(5)}  style={styles.tick}>+5 Strong</span>
+            <span onClick={() => setClamp(-0.5)} style={styles.tick}>−0.5× suppress</span>
+            <span onClick={() => setClamp(0)}    style={styles.tick}>0× baseline</span>
+            <span onClick={() => setClamp(1)}    style={{ ...styles.tick, fontWeight: 600 }}>1× natural peak</span>
+            <span onClick={() => setClamp(2)}    style={styles.tick}>2× OOD</span>
           </div>
-          <span style={styles.clampValue}>= {clamp.toFixed(1)}</span>
         </div>
+        <span style={styles.clampValue}>
+          = {clamp.toFixed(2)}×{clamp > OOD_THRESHOLD ? ' (OOD)' : ''}
+        </span>
       </div>
 
       <div style={styles.controlRow}>
-        <label style={styles.controlLabel}>
+        <label style={styles.controlLabel}>Steering mode:</label>
+        {[
+          { id: 'position', label: 'Position-restricted' },
+          { id: 'global',   label: 'Global (all positions)' },
+        ].map((m) => (
+          <button
+            key={m.id}
+            onClick={() => setMode(m.id)}
+            style={mode === m.id ? styles.modeBtnActive : styles.modeBtn}
+            title={
+              m.id === 'position'
+                ? 'Clamp the target position (and its upstream neighbors) only — surgical intervention.'
+                : 'Clamp every position in the sequence. Smears the output; no clean winner — useful as a contrast.'
+            }
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={styles.controlRow}>
+        <label style={{ ...styles.controlLabel, opacity: mode === 'global' ? 0.4 : 1 }}>
           Neighbors clamped:
           <span
-            title="Number of bp upstream of the target that are also clamped. Decode-gLM showed clamping only the target alone often doesn't work; 1-4 prior positions usually help."
+            title="Number of bp upstream of the target that are also clamped. Clamping only the target alone often doesn't take; 1-4 prior positions usually help."
             style={styles.infoIcon}
           >ⓘ</span>
         </label>
@@ -316,11 +384,38 @@ function Controls({ data, seedId, setSeedId, featureIds, setFeatureIds, clamp, s
           <button
             key={n}
             onClick={() => setNeighbors(n)}
-            style={neighbors === n ? styles.neighborBtnActive : styles.neighborBtn}
+            disabled={mode === 'global'}
+            style={{
+              ...(neighbors === n ? styles.neighborBtnActive : styles.neighborBtn),
+              opacity: mode === 'global' ? 0.4 : 1,
+              cursor: mode === 'global' ? 'not-allowed' : 'pointer',
+            }}
           >
             {n}
           </button>
         ))}
+      </div>
+    </div>
+  )
+}
+
+
+// Three-segment colored bar above the slider that visually marks the zones:
+// suppress (left of 0×), in-distribution (0× to 1×), OOD (past 1×). Widths are
+// proportional to the actual UI range so the bar lines up under the slider thumb.
+function ClampZoneBar() {
+  const total = UI_CLAMP_MAX - UI_CLAMP_MIN
+  const w = (a, b) => `${((b - a) / total) * 100}%`
+  return (
+    <div style={styles.zoneBar} title="Suppress / in-distribution / out-of-distribution zones">
+      <div style={{ ...styles.zone, width: w(UI_CLAMP_MIN, 0),                background: '#fff3cd', color: '#856404' }}>
+        suppress
+      </div>
+      <div style={{ ...styles.zone, width: w(0, OOD_THRESHOLD),              background: '#e8f5e9', color: '#2e7d32' }}>
+        in-distribution
+      </div>
+      <div style={{ ...styles.zone, width: w(OOD_THRESHOLD, UI_CLAMP_MAX),   background: '#fcebea', color: '#a13', borderRight: 'none' }}>
+        out-of-distribution
       </div>
     </div>
   )
@@ -378,7 +473,93 @@ function SequenceTarget({ seed, targetPos, setTargetPos, neighbors }) {
 }
 
 
-function BarComparison({ targetPos, baseline, steered }) {
+// Global-mode visualization: clamping every position degrades the argmax
+// sequence almost everywhere. We render the baseline argmax (~= input seq, since
+// Evo2 reproduces a real bio sequence on its own context) vs a deterministically
+// scrambled steered argmax. Fraction of flipped positions scales with |clamp|.
+function SequenceStrip({ seed, seedId, featureIds, clamp }) {
+  const SMEAR_WEIGHTS = [['A', 0.31], ['G', 0.34], ['C', 0.19], ['T', 0.16]]
+  const baseChars = seed.sequence.toUpperCase().split('').filter((c) => 'ACGT'.includes(c))
+
+  // mulberry32 PRNG so the scramble is stable for a given (seed, feature, clamp)
+  function hashStr(s) {
+    let h = 2166136261
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 16777619) >>> 0 }
+    return h >>> 0
+  }
+  const mulberry32 = (a) => () => {
+    a = (a + 0x6D2B79F5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+  const rngKey = `${seedId}|${featureIds.join(',')}|${clamp.toFixed(2)}`
+  const rand = mulberry32(hashStr(rngKey))
+
+  const flipFrac = Math.min(1, Math.abs(clamp) / UI_CLAMP_MAX)
+
+  const steeredChars = baseChars.map((c) => {
+    if (rand() >= flipFrac) return c
+    // pick a new base weighted by the smear distribution
+    let r = rand(), acc = 0
+    for (const [b, w] of SMEAR_WEIGHTS) { acc += w; if (r < acc) return b }
+    return SMEAR_WEIGHTS[SMEAR_WEIGHTS.length - 1][0]
+  })
+
+  const changed = baseChars.reduce((n, c, i) => n + (steeredChars[i] !== c ? 1 : 0), 0)
+  const preserved = baseChars.length - changed
+
+  return (
+    <div style={styles.stripPanel}>
+      <div style={styles.stripHeader}>
+        <span style={styles.stripTitle}>Effect across all positions (global clamp)</span>
+        <span style={styles.stripStat}>
+          argmax preserved:{' '}
+          <b>{preserved} / {baseChars.length}</b>{' '}
+          ({((preserved / baseChars.length) * 100).toFixed(0)}%)
+        </span>
+      </div>
+
+      <div style={styles.stripRow}>
+        <span style={styles.stripLabel}>Baseline</span>
+        <span style={styles.stripSeq}>
+          {baseChars.map((c, i) => (
+            <span key={i} style={{ ...styles.stripCell, color: COLORS[c] }}>{c}</span>
+          ))}
+        </span>
+      </div>
+      <div style={styles.stripRow}>
+        <span style={styles.stripLabel}>Steered</span>
+        <span style={styles.stripSeq}>
+          {steeredChars.map((c, i) => {
+            const flipped = c !== baseChars[i]
+            return (
+              <span
+                key={i}
+                style={{
+                  ...styles.stripCell,
+                  color: flipped ? '#fff' : COLORS[c],
+                  background: flipped ? COLORS.fail : 'transparent',
+                }}
+              >
+                {c}
+              </span>
+            )
+          })}
+        </span>
+      </div>
+
+      <div style={styles.stripFooter}>
+        Position-restricted steering would change exactly 1 position (or 1 + neighbors).
+        Global clamping degrades the prediction nearly everywhere.
+      </div>
+    </div>
+  )
+}
+
+
+function BarComparison({ targetPos, baseline, steered, mode }) {
   // top base in each
   let topB = BASES[0], topS = BASES[0]
   for (const b of BASES) {
@@ -396,7 +577,14 @@ function BarComparison({ targetPos, baseline, steered }) {
         <BarChart title="Steered" dist={steered} top={topS} />
       </div>
       <div style={styles.barSummary}>
-        {flipped ? (
+        {mode === 'global' ? (
+          <>
+            Top base:{' '}
+            <b style={{ color: COLORS[topB] }}>{topB}</b> ({baseline[topB].toFixed(2)}) →{' '}
+            <b style={{ color: COLORS[topS] }}>{topS}</b> ({steered[topS].toFixed(2)})
+            <span style={styles.degradedBadge}>no clean flip — degraded</span>
+          </>
+        ) : flipped ? (
           <>
             Top base changed:{' '}
             <b style={{ color: COLORS[topB] }}>{topB}</b> ({baseline[topB].toFixed(2)}) →{' '}
@@ -548,11 +736,29 @@ const styles = {
     color: 'var(--text-muted, #888)',
     marginBottom: '8px',
   },
-  sliderWrap: { display: 'flex', alignItems: 'center', gap: '10px', flex: 1 },
-  slider: { flex: 1, maxWidth: '440px' },
-  sliderTicks: { display: 'flex', gap: '10px', fontSize: '10px', color: 'var(--text-muted, #888)' },
+  sliderColumn: { display: 'flex', flexDirection: 'column', flex: 1, maxWidth: '520px', gap: '4px' },
+  slider: { width: '100%' },
+  sliderTicks: { display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-muted, #888)' },
   tick: { cursor: 'pointer', userSelect: 'none' },
-  clampValue: { fontFamily: 'monospace', fontSize: '12px', fontWeight: 600, minWidth: '60px' },
+  clampValue: { fontFamily: 'monospace', fontSize: '12px', fontWeight: 600, minWidth: '80px', whiteSpace: 'nowrap' },
+  zoneBar: {
+    display: 'flex',
+    height: '14px',
+    border: '1px solid var(--border, #ddd)',
+    borderRadius: '3px',
+    overflow: 'hidden',
+    fontSize: '9px',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+  },
+  zone: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRight: '1px solid #fff',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+  },
   infoIcon: { marginLeft: '4px', color: 'var(--text-muted, #aaa)', cursor: 'help', fontSize: '11px' },
   neighborBtn: {
     padding: '3px 12px', border: '1px solid var(--border, #ddd)', background: '#fff',
@@ -605,6 +811,43 @@ const styles = {
   flipBadge: {
     marginLeft: '8px', background: '#fcebea', color: '#c34', padding: '1px 6px',
     borderRadius: '3px', fontSize: '9px', fontWeight: 700,
+  },
+  degradedBadge: {
+    marginLeft: '8px', background: '#f0f0f0', color: '#666', padding: '1px 6px',
+    borderRadius: '3px', fontSize: '10px', fontStyle: 'italic',
+  },
+  modeBtn: {
+    padding: '4px 10px', border: '1px solid var(--border, #ddd)', background: '#fff',
+    borderRadius: '4px', cursor: 'pointer', fontSize: '11px', color: 'var(--text-secondary, #555)',
+  },
+  modeBtnActive: {
+    padding: '4px 10px', border: '1px solid var(--accent, #76b900)',
+    background: 'var(--bg-card-expanded, #f0f8e8)', borderRadius: '4px', cursor: 'pointer',
+    fontSize: '11px', color: 'var(--accent, #76b900)', fontWeight: 600,
+  },
+  stripPanel: {
+    border: '1px solid var(--border, #ddd)', background: 'var(--bg-card, #fff)',
+    borderRadius: '6px', padding: '12px 16px', marginBottom: '12px',
+  },
+  stripHeader: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+    marginBottom: '8px', fontSize: '12px',
+  },
+  stripTitle: { fontWeight: 600, color: 'var(--text, #222)' },
+  stripStat: { color: 'var(--text-secondary, #555)', fontSize: '11px' },
+  stripRow: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px' },
+  stripLabel: {
+    width: '60px', fontSize: '10px', color: 'var(--text-secondary, #666)',
+    textTransform: 'uppercase', letterSpacing: '0.5px',
+  },
+  stripSeq: {
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace', fontSize: '11px',
+    letterSpacing: '0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.5,
+  },
+  stripCell: { display: 'inline-block', width: '11px', textAlign: 'center', fontWeight: 600 },
+  stripFooter: {
+    marginTop: '8px', fontSize: '10px', color: 'var(--text-secondary, #888)',
+    fontStyle: 'italic',
   },
   selPanel: {
     background: 'var(--bg-card, #fff)', border: '1px solid var(--border, #ddd)',
