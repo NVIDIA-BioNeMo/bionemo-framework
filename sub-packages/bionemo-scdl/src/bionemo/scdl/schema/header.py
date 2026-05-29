@@ -407,6 +407,38 @@ class FeatureIndexInfo:
         return self.__str__()
 
 
+class ChunkedInfo:
+    """Chunking metadata for CHUNKED_MEMMAP backend."""
+
+    def __init__(self, chunk_size: int, num_chunks: int, total_rows: int):
+        """Initialize chunked info."""
+        self.chunk_size = chunk_size
+        self.num_chunks = num_chunks
+        self.total_rows = total_rows
+
+    def get_chunk_for_row(self, global_idx: int) -> Tuple[int, int]:
+        """Return (chunk_id, local_idx) for a global row index."""
+        if global_idx < 0 or global_idx >= self.total_rows:
+            raise IndexError(f"Row index {global_idx} out of range [0, {self.total_rows})")
+        return global_idx // self.chunk_size, global_idx % self.chunk_size
+
+    def serialize(self, codec: BinaryHeaderCodec) -> bytes:
+        """Serialize to binary format."""
+        return (
+            codec.pack_uint32(self.chunk_size)
+            + codec.pack_uint32(self.num_chunks)
+            + codec.pack_uint64(self.total_rows)
+        )
+
+    @classmethod
+    def deserialize(cls, codec: BinaryHeaderCodec, data: bytes, offset: int = 0) -> Tuple["ChunkedInfo", int]:
+        """Deserialize from binary data. Returns (ChunkedInfo, bytes_consumed)."""
+        chunk_size = codec.unpack_uint32(data[offset : offset + 4])
+        num_chunks = codec.unpack_uint32(data[offset + 4 : offset + 8])
+        total_rows = codec.unpack_uint64(data[offset + 8 : offset + 16])
+        return cls(chunk_size=chunk_size, num_chunks=num_chunks, total_rows=total_rows), 16
+
+
 class SCDLHeader:
     """Header for a SCDL archive following the official schema specification.
 
@@ -423,6 +455,7 @@ class SCDLHeader:
         backend: Backend = Backend.MEMMAP_V0,
         arrays: Optional[List[ArrayInfo]] = None,
         feature_indices: Optional[List[FeatureIndexInfo]] = None,
+        chunked_info: Optional["ChunkedInfo"] = None,
     ):
         """Initialize SCDL header.
 
@@ -431,12 +464,14 @@ class SCDLHeader:
             backend: Storage backend type
             arrays: List of arrays in the archive
             feature_indices: Optional list of feature indices in the archive
+            chunked_info: Optional chunking metadata for CHUNKED_MEMMAP backend
         """
         self.version = version or CurrentSCDLVersion()
         self.endianness = Endianness.NETWORK  # Always network byte order per spec
         self.backend = backend
         self.arrays = arrays or []
         self.feature_indices = feature_indices or []
+        self.chunked_info = chunked_info
 
         # Create codec with network byte order
         self._codec = BinaryHeaderCodec(self.endianness)
@@ -524,6 +559,13 @@ class SCDLHeader:
             # Feature index descriptors (variable size)
             for feature_index in self.feature_indices:
                 data += feature_index.serialize(self._codec)
+
+            # Chunked info (optional, for CHUNKED_MEMMAP backend)
+            if self.chunked_info is not None:
+                data += self._codec.pack_uint8(1)  # has_chunked_info = true
+                data += self.chunked_info.serialize(self._codec)
+            else:
+                data += self._codec.pack_uint8(0)  # has_chunked_info = false
 
             return data
 
@@ -617,7 +659,22 @@ class SCDLHeader:
                         feature_indices.append(feature_index)
                         offset += bytes_consumed
 
-            header = cls(version=version, backend=backend, arrays=arrays, feature_indices=feature_indices)
+            # Read chunked info (optional, for backwards compatibility)
+            chunked_info = None
+            if offset < len(data):
+                has_chunked_info = codec.unpack_uint8(data[offset : offset + 1])
+                offset += 1
+                if has_chunked_info:
+                    chunked_info, bytes_consumed = ChunkedInfo.deserialize(codec, data, offset)
+                    offset += bytes_consumed
+
+            header = cls(
+                version=version,
+                backend=backend,
+                arrays=arrays,
+                feature_indices=feature_indices,
+                chunked_info=chunked_info,
+            )
             return header
 
         except HeaderSerializationError:

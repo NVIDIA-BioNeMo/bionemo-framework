@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -41,6 +42,7 @@ from bionemo.scdl.util.memmap_utils import (
     determine_dtype,
     smallest_uint_dtype,
 )
+from bionemo.scdl.util.partition_scdl import partition_scdl
 from bionemo.scdl.util.scdl_constants import FLOAT_ORDER, INT_ORDER, FileNames, Mode, NeighborSamplingStrategy
 
 
@@ -128,6 +130,8 @@ class SingleCellMemMapDataset(SingleCellRowDataset):
         self.data_path: str = data_path
         self.header: SCDLHeader = None
         self.mode: Mode = mode
+        self._is_chunked: bool = False
+        self._chunks: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         self.paginated_load_cutoff = paginated_load_cutoff
         self.load_block_row_size = load_block_row_size
         self.var_feature_index_name = var_feature_index_name
@@ -436,10 +440,16 @@ class SingleCellMemMapDataset(SingleCellRowDataset):
             List[np.ndarray]: optional, corresponding variable (column) features.
             List[np.ndarray]: optional, corresponding observed (row) features.
         """
-        start = self.row_index[index]
-        end = self.row_index[index + 1]
-        values = self.data[start:end]
-        columns = self.col_index[start:end]
+        if self._is_chunked:
+            chunk_id, local_idx = self.header.chunked_info.get_chunk_for_row(index)
+            data, rowptr, colptr = self._chunks[chunk_id]
+            start, end = rowptr[local_idx], rowptr[local_idx + 1]
+            values, columns = data[start:end], colptr[start:end]
+        else:
+            start = self.row_index[index]
+            end = self.row_index[index + 1]
+            values = self.data[start:end]
+            columns = self.col_index[start:end]
         ret = (values, columns)
         var_features = (
             self._var_feature_index.lookup(index, select_features=var_feature_names)[0]
@@ -685,37 +695,52 @@ class SingleCellMemMapDataset(SingleCellRowDataset):
                     raise ValueError(f"Array name {FileNames[array_info.name].value} not found in dtypes")
                 self.dtypes[FileNames[array_info.name].value] = array_info.dtype.numpy_dtype_string
 
-        # Metadata is required, so we must check if it exists and fail if not.
-        if not os.path.exists(f"{self.data_path}/{FileNames.METADATA.value}"):
-            raise FileNotFoundError(
-                f"Error: the metadata file {self.data_path}/{FileNames.METADATA.value} does not exist."
-            )
+        # Load metadata if exists
+        metadata_path = f"{self.data_path}/{FileNames.METADATA.value}"
+        if os.path.exists(metadata_path):
+            with open(metadata_path, Mode.READ_APPEND.value) as mfi:
+                self.metadata = json.load(mfi)
 
-        with open(f"{self.data_path}/{FileNames.METADATA.value}", Mode.READ_APPEND.value) as mfi:
-            self.metadata = json.load(mfi)
-
+        # Load feature indices
         if os.path.exists(f"{self.data_path}/{FileNames.VAR_FEATURES.value}"):
             self._var_feature_index = VariableFeatureIndex.load(f"{self.data_path}/{FileNames.VAR_FEATURES.value}")
-        elif os.path.exists(
-            f"{self.data_path}/{FileNames.FEATURES.value}"
-        ):  # Backward compatibility with old features file
+        elif os.path.exists(f"{self.data_path}/{FileNames.FEATURES.value}"):
             self._var_feature_index = VariableFeatureIndex.load(f"{self.data_path}/{FileNames.FEATURES.value}")
         if os.path.exists(f"{self.data_path}/{FileNames.OBS_FEATURES.value}"):
             self._obs_feature_index = ObservedFeatureIndex.load(f"{self.data_path}/{FileNames.OBS_FEATURES.value}")
-        # mmap the existing arrays
-        self.data = self._load_mmap_file_if_exists(
-            f"{self.data_path}/{FileNames.DATA.value}", self.dtypes[f"{FileNames.DATA.value}"]
-        )
-        self.row_index = self._load_mmap_file_if_exists(
-            f"{self.data_path}/{FileNames.ROWPTR.value}", dtype=self.dtypes[f"{FileNames.ROWPTR.value}"]
-        )
-        self.col_index = self._load_mmap_file_if_exists(
-            f"{self.data_path}/{FileNames.COLPTR.value}", dtype=self.dtypes[f"{FileNames.COLPTR.value}"]
-        )
 
-        # Load neighbor data
-        if self.load_neighbors:
-            self._load_neighbor_memmaps()
+        # Load data arrays - chunked vs monolithic
+        if self.header is not None and self.header.backend == Backend.CHUNKED_MEMMAP_V0:
+            self._is_chunked = True
+            self._load_chunk_memmaps()
+        else:
+            self.data = self._load_mmap_file_if_exists(
+                f"{self.data_path}/{FileNames.DATA.value}", self.dtypes[f"{FileNames.DATA.value}"]
+            )
+            self.row_index = self._load_mmap_file_if_exists(
+                f"{self.data_path}/{FileNames.ROWPTR.value}", dtype=self.dtypes[f"{FileNames.ROWPTR.value}"]
+            )
+            self.col_index = self._load_mmap_file_if_exists(
+                f"{self.data_path}/{FileNames.COLPTR.value}", dtype=self.dtypes[f"{FileNames.COLPTR.value}"]
+            )
+            if self.load_neighbors:
+                self._load_neighbor_memmaps()
+
+    def _load_chunk_memmaps(self) -> None:
+        """Preload all chunk memmaps (lazy - just file handles, no RAM)."""
+        for chunk_id in range(self.header.chunked_info.num_chunks):
+            chunk_path = Path(self.data_path) / f"chunk_{chunk_id:05d}"
+            self._chunks.append(
+                (
+                    np.memmap(chunk_path / FileNames.DATA.value, dtype=self.dtypes[FileNames.DATA.value], mode="r"),
+                    np.memmap(
+                        chunk_path / FileNames.ROWPTR.value, dtype=self.dtypes[FileNames.ROWPTR.value], mode="r"
+                    ),
+                    np.memmap(
+                        chunk_path / FileNames.COLPTR.value, dtype=self.dtypes[FileNames.COLPTR.value], mode="r"
+                    ),
+                )
+            )
 
     def _write_metadata(self) -> None:
         with open(f"{self.data_path}/{FileNames.METADATA.value}", f"{Mode.CREATE.value}") as mfi:
@@ -1218,6 +1243,8 @@ class SingleCellMemMapDataset(SingleCellRowDataset):
             ValueError if the length of the number of rows in the feature
             index does not correspond to the number of stored rows.
         """
+        if self._is_chunked:
+            return self.header.chunked_info.total_rows
         if len(self._var_feature_index) > 0 and self._var_feature_index.number_of_rows() != self.row_index.size - 1:
             raise ValueError(
                 f"""The number of rows in the feature index {self._var_feature_index.number_of_rows()}
@@ -1445,3 +1472,32 @@ class SingleCellMemMapDataset(SingleCellRowDataset):
             mode=Mode.READ_APPEND.value,
         )
         self.save()
+
+    def to_chunked(
+        self, output_path: Optional[str] = None, chunk_size: int = 100_000, delete_original: bool = False
+    ) -> "SingleCellMemMapDataset":
+        """Convert this dataset to a chunked format for efficient remote access.
+
+        Args:
+            output_path: Path where the chunked dataset will be created. If None, replaces in-place.
+            chunk_size: Number of rows per chunk (default: 100,000).
+            delete_original: If True and output_path is set, delete the original after conversion.
+
+        Returns:
+            A new SingleCellMemMapDataset instance pointing to the chunked data.
+        """
+        if self._is_chunked:
+            raise ValueError("Dataset is already chunked")
+
+        src = Path(self.data_path)
+        if output_path is None:
+            # In-place: partition to temp, then swap
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir) / "chunked"
+                partition_scdl(src, tmp_path, chunk_size=chunk_size)
+                shutil.rmtree(src)
+                shutil.move(str(tmp_path), str(src))
+            return SingleCellMemMapDataset(str(src))
+
+        partition_scdl(src, Path(output_path), chunk_size=chunk_size, delete_original=delete_original)
+        return SingleCellMemMapDataset(output_path)

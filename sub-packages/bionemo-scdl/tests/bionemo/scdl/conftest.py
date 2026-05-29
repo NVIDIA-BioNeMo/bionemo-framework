@@ -205,13 +205,24 @@ def make_small_and_large_h5ads():
 
 @pytest.fixture
 def make_h5ad_with_raw(make_random_csr):
-    """Factory to create an h5ad with uniquely randomized data for the fields .raw.X and .X"""
+    """Factory to create an h5ad with uniquely randomized data for .raw.X, .X, obs, and var."""
 
     def _make(tmp_path):
-        X = make_random_csr(total_nnz=100, n_cols=50, seed=42)
-        X_raw = make_random_csr(total_nnz=100, n_cols=50, seed=43)
+        n_rows, n_cols = 100, 50
+        X = make_random_csr(total_nnz=n_rows, n_cols=n_cols, seed=42)
+        X_raw = make_random_csr(total_nnz=n_rows, n_cols=n_cols, seed=43)
+
+        obs = pd.DataFrame(
+            {"cell_type": [f"type_{i % 3}" for i in range(n_rows)]},
+            index=[f"cell_{i}" for i in range(n_rows)],
+        )
+        var = pd.DataFrame(
+            {"gene_name": [f"gene_{i}" for i in range(n_cols)]},
+            index=[f"ENSG{i:08d}" for i in range(n_cols)],
+        )
+
         h = tmp_path / "var.h5ad"
-        ad.AnnData(X=X, var=pd.DataFrame(index=np.arange(X.shape[1])), raw={"X": X_raw}).write_h5ad(h)
+        ad.AnnData(X=X, obs=obs, var=var, raw={"X": X_raw}).write_h5ad(h)
         return h
 
     return _make

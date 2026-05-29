@@ -163,6 +163,7 @@ class Backend(IntEnum):
     """
 
     MEMMAP_V0 = 1
+    CHUNKED_MEMMAP_V0 = 2  # Chunked memmap for large datasets with remote access support
 
 
 class Mode(str, Enum):
