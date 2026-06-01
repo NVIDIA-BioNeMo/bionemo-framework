@@ -95,10 +95,6 @@ def main(cfg) -> None:
             hybrid_fsdp_group=device_mesh["hsdp"].get_group(),
             # Load the model on device in shards to avoid OOM. Requires device("meta")-init for model.
             init_model_with_meta_device=cfg.fsdp.init_model_with_meta_device,
-            # Reduce gradients in FP32.
-            grad_reduce_in_fp32=cfg.fsdp.grad_reduce_in_fp32,
-            # Store distributed optimization state in FP32.
-            preserve_fp32_weights=cfg.fsdp.preserve_fp32_weights,
             # Sync model parameters and gradients each step. Allows for param and gradient mods after BWD
             # pass, but deactivates compute-communication overlap going into the subsequent training step.
             sync_model_each_microbatch=True,

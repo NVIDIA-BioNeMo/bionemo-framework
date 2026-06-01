@@ -53,8 +53,6 @@ fsdp:
     - torch.nn.LayerNorm
     - torch.nn.Linear
   outer_dp_sharding_strategy: 1
-  grad_reduce_in_fp32: false
-  preserve_fp32_weights: true
 
 training:
   steps: 500
