@@ -146,6 +146,248 @@ class HyenaInferenceContext(StaticInferenceContext):
                 delattr(self, key)
 
 
+# =============================================================================
+# Dynamic-inference Hyena state packing
+# =============================================================================
+
+
+class _PackedHyenaSlotStateDict(dict):
+    """``id(module)`` -> packed-slot view map for Hyena recurrent state.
+
+    Hyena ops read/write recurrent state through ``*_filter_state_dict`` attributes keyed
+    by ``id(module)``. This dict preserves that API while routing registered ids into
+    sub-slice views of the live ``DynamicInferenceContext`` Mamba state buffers:
+    ``mamba_conv_states[layer, slot]`` for the projection FIR ring and
+    ``mamba_ssm_states[layer, slot]`` for the layer mixer state. Unregistered ids fall
+    back to plain dict storage.
+    """
+
+    def __init__(self, kind: str):
+        super().__init__()
+        self._kind = kind
+        # id(module) -> view tensor (a sub-slice of the packed slot buffer).
+        self._views: dict = {}
+
+    def register(self, module_id: int, view: "torch.Tensor") -> None:
+        """Register the packed-slot sub-slice view that backs ``module_id``."""
+        self._views[module_id] = view
+
+    def __setitem__(self, module_id, state):
+        view = self._views.get(module_id)
+        if view is None or state is None:
+            # Unregistered owner, or an explicit None clear (re-prefill seed wipe).
+            super().__setitem__(module_id, state)
+            return
+        if state.data_ptr() != view.data_ptr():
+            # Prefill seed, or a realloc step branch returning a NEW tensor: copy into the
+            # packed view. The in-place step branch returns the view itself -> no-op copy.
+            if state.shape == view.shape:
+                view.copy_(state)
+            else:
+                # Short prefill can seed a FIR ring smaller than the allocated slot. Right-align
+                # the available tail so decode can use the fixed-size in-place ring immediately.
+                assert state.shape[:-1] == view.shape[:-1] and state.shape[-1] <= view.shape[-1], (
+                    f"packed {self._kind} seed shape {tuple(state.shape)} incompatible with ring view "
+                    f"{tuple(view.shape)} (only the FIR ring last dim may be shorter)."
+                )
+                view.zero_()
+                view[..., view.shape[-1] - state.shape[-1] :].copy_(state)
+        super().__setitem__(module_id, view)
+
+    def reset_for_new_request(self) -> None:
+        """Drop dict entries so ``.get(id)`` returns None and the caller re-prefills."""
+        super().clear()
+
+
+def build_evo2_mamba_inference_state_config(model, *, conv_dtype=None, ssm_dtype=None):
+    """Build the mcore Mamba state config used by Evo2 dynamic inference.
+
+    Evo2 Hyena layers expose two recurrent state slots per layer, matching the two slots
+    that ``DynamicInferenceContext`` allocates for hybrid Mamba models: ``conv_states``
+    for the projection FIR ring and ``ssm_states`` for the layer mixer state. The
+    ``HyenaStack`` provides the uniform packed shapes and layer type list that mcore uses
+    to allocate those buffers and map layer numbers to state slots.
+
+    The slot dtypes default to fp32 because Hyena decode recurrences run in fp32 and update
+    the packed sub-slice views in place.
+
+    Args:
+        model: The Evo2 ``HyenaModel``.
+        conv_dtype: Override for the conv slot dtype (default ``torch.float32``).
+        ssm_dtype: Override for the ssm slot dtype (default ``torch.float32``).
+
+    Returns:
+        A ``MambaInferenceStateConfig`` ready to pass as
+        ``InferenceConfig(mamba_inference_state_config=...)``.
+    """
+    from megatron.core.inference.config import (
+        MambaInferenceStateConfig,  # lazy: heavy mcore import — keep evo2_provider importable without the full inference stack
+    )
+
+    decoder = model.decoder if hasattr(model, "decoder") else model
+    conv_states_shape, ssm_states_shape = decoder.mamba_state_shapes_per_request()
+    layer_type_list = decoder.layer_type_list  # mcore symbols, set in HyenaStack.__init__
+    return MambaInferenceStateConfig(
+        layer_type_list=list(layer_type_list),
+        conv_states_shape=tuple(conv_states_shape),
+        ssm_states_shape=tuple(ssm_states_shape),
+        conv_states_dtype=conv_dtype or torch.float32,
+        ssm_states_dtype=ssm_dtype or torch.float32,
+    )
+
+
+def make_evo2_dynamic_inference_context_cls():
+    """Return mcore's ``DynamicInferenceContext`` class for Evo2 decode.
+
+    Evo2 constrains each standalone decode context to the active request count and enables
+    decode-only CUDA graph dimensions, so the graph path does not need an Evo2-specific
+    context subclass. Keeping the exact mcore type also preserves mcore's CUDA graph
+    argument checks without runtime compatibility hooks.
+
+    Returns:
+        The mcore ``DynamicInferenceContext`` class.
+    """
+    from megatron.core.inference.contexts.dynamic_context import (
+        DynamicInferenceContext,  # lazy: heavy mcore import; keep evo2_provider importable without the full inference stack
+    )
+
+    return DynamicInferenceContext
+
+
+def compute_evo2_paged_kv_buffer_size_gb(
+    model_config,
+    *,
+    mamba_state_config,
+    max_sequence_length: int,
+    max_requests: int,
+    block_size_tokens: int = 256,
+    safety_blocks: int = 2,
+) -> float:
+    """Compute a right-sized ``buffer_size_gb`` for one Evo2 dynamic context.
+
+    ``DynamicInferenceContext`` derives its KV block count from ``buffer_size_gb``. For
+    hybrid models in the installed mcore version, the no-``mamba_memory_ratio`` path uses
+    ``buffer_size_bytes // (block_size_bytes + mamba_states_memory_per_request)``. This
+    helper mirrors that arithmetic and returns the smallest buffer that covers
+    ``ceil(max_sequence_length / block_size_tokens) + 1 dummy + safety_blocks`` KV blocks.
+
+    Args:
+        model_config: The Evo2 ``HyenaModel`` transformer config.
+        mamba_state_config: The ``MambaInferenceStateConfig`` produced by
+            :func:`build_evo2_mamba_inference_state_config`.
+        max_sequence_length: Prompt plus generation length to allocate for.
+        max_requests: The context's ``max_requests``.
+        block_size_tokens: KV block size used by the context.
+        safety_blocks: Extra KV blocks beyond the requested sequence length.
+
+    Returns:
+        The ``buffer_size_gb`` value to pass to ``InferenceConfig``.
+    """
+    # --- Per-partition attention geometry (mcore dynamic_context.py:285-299). ---
+    num_attention_heads = getattr(model_config, "num_query_groups", None) or model_config.num_attention_heads
+    kv_channels = getattr(model_config, "kv_channels", None) or (
+        model_config.hidden_size // model_config.num_attention_heads
+    )
+    projection_size = kv_channels * num_attention_heads
+    head_dim = projection_size // num_attention_heads
+    tp_size = int(getattr(model_config, "tensor_model_parallel_size", 1) or 1)
+    heads_per_partition = num_attention_heads // tp_size if num_attention_heads >= tp_size else 1
+
+    # --- Layer-type counts from the mamba state config's layer_type_list. ---
+    # Symbols.ATTENTION layers need paged KV; the Hyena ("mamba"-slotted) layers do NOT (they hold
+    # only the conv/ssm recurrent-state slots). Counting from layer_type_list keeps this correct
+    # under any (truncated) hybrid_override_pattern.
+    from megatron.core.ssm.mamba_hybrid_layer_allocation import (  # lazy: heavy mcore import — keep evo2_provider importable without the full inference stack
+        Symbols as _McoreSymbols,
+    )
+
+    layer_type_list = list(mamba_state_config.layer_type_list)
+    num_attention_layers = sum(1 for s in layer_type_list if s == _McoreSymbols.ATTENTION)
+    num_mamba_layers = sum(1 for s in layer_type_list if s == _McoreSymbols.MAMBA)
+
+    # --- block_size_bytes (mcore dynamic_context.py:376-383). ---
+    kv_dtype_size_bytes = model_config.params_dtype.itemsize
+    block_size_bytes = (
+        kv_dtype_size_bytes * 2 * num_attention_layers * block_size_tokens * heads_per_partition * head_dim
+    )
+
+    # --- mamba_states_memory_per_request (mcore dynamic_context.py:386-394). ---
+    conv_bytes = math.prod(mamba_state_config.conv_states_shape) * mamba_state_config.conv_states_dtype.itemsize
+    ssm_bytes = math.prod(mamba_state_config.ssm_states_shape) * mamba_state_config.ssm_states_dtype.itemsize
+    mamba_per_request = (conv_bytes + ssm_bytes) * num_mamba_layers
+
+    # --- Target KV block count: requested sequence + dummy block + safety. ---
+    target_blocks = math.ceil(int(max_sequence_length) / block_size_tokens) + 1 + int(safety_blocks)
+    target_blocks = max(2, target_blocks)  # mcore floors block_count at 2 (active + dummy)
+
+    # --- Invert mcore's hybrid block-count formula for the no-mamba-ratio path. ---
+    total_bytes = target_blocks * (block_size_bytes + mamba_per_request)
+    return (total_bytes + 1) / (1024**3)
+
+
+def bind_hyena_packed_views_to_dynamic_context(model, dyn_ctx, *, request_slot: int):
+    """Bind Hyena state-dict entries to a live ``DynamicInferenceContext`` Mamba slot.
+
+    ``DynamicInferenceContext`` allocates ``mamba_conv_states`` and ``mamba_ssm_states``
+    from the Evo2 Mamba state config. This function installs the Hyena ``*_filter_state_dict``
+    dictionaries that route each layer's existing state writes into the assigned request slot:
+    the projection FIR ring uses the conv slot, and the layer mixer state uses the leading
+    sub-slice of the ssm slot.
+
+    It must run after the request has been added and after ``initialize_all_tensors`` so the
+    mamba state buffers and request slot are available. The current standalone path binds one
+    request slot at a time; batched decode would need per-row state gathers in the Hyena step
+    kernels.
+
+    Args:
+        model: The Evo2 ``HyenaModel``.
+        dyn_ctx: A live ``DynamicInferenceContext`` built with the Evo2 mamba state config.
+        request_slot: The mamba state slot assigned to the active request.
+
+    Returns:
+        The installed ``_PackedHyenaSlotStateDict`` objects.
+    """
+    decoder = model.decoder if hasattr(model, "decoder") else model
+    _conv_shape, _ssm_shape, per_layer = decoder.hyena_state_shapes_per_request()
+
+    conv_states = dyn_ctx.mamba_conv_states  # (num_mamba_layers, max_requests, *conv_shape)
+    ssm_states = dyn_ctx.mamba_ssm_states  # (num_mamba_layers, max_requests, *ssm_shape)
+    layer_map = dyn_ctx.layer_map  # global-0based -> per-type-local index
+
+    # One packed dict per state-dict bucket the Hyena ops use, installed on the live context.
+    packed: dict = {}
+    for kind in ("fir", "inner_fir", "iir"):
+        d = _PackedHyenaSlotStateDict(kind)
+        packed[kind] = d
+        object.__setattr__(dyn_ctx, f"{kind}_filter_state_dict", d)
+
+    # Iterate Hyena layers in the SAME order as ``per_layer`` (hyena_state_shapes_per_request
+    # walks ``decoder.layers`` skipping attention) and resolve each layer's mamba-local index via
+    # the context's layer_map so the conv/ssm sub-slice lands in the exact slot
+    # ``mamba_states_cache(layer_number)`` would return.
+    hyena_layers = [
+        layer
+        for layer in decoder.layers
+        if hasattr(layer, "mixer") and hasattr(layer.mixer, "hyena_state_shapes_per_request")
+    ]
+    assert len(hyena_layers) == len(per_layer), (
+        f"Hyena-layer/per-layer-shape count mismatch ({len(hyena_layers)} vs {len(per_layer)}); "
+        "hyena_state_shapes_per_request() and the layer walk disagree."
+    )
+    for layer, shapes in zip(hyena_layers, per_layer):
+        mamba_layer_idx = layer_map[layer.layer_number - 1]
+        # conv slot: whole per-(layer,request) row, reshaped to [B=1, *conv_shape] for the op.
+        conv_row = conv_states[mamba_layer_idx, request_slot]  # (*conv_shape)
+        conv_view = conv_row.unsqueeze(0)  # [1, *conv_shape] — STABLE alias (no copy)
+        packed["fir"].register(shapes.conv_owner_id, conv_view)
+        # ssm slot: leading sub-slice of the row, reshaped to [B=1, :width, :last_dim].
+        w, last = shapes.ssm_shape
+        ssm_view = ssm_states[mamba_layer_idx, request_slot, :w, :last].unsqueeze(0)  # [1, w, last]
+        packed[shapes.ssm_kind].register(shapes.ssm_owner_id, ssm_view)
+
+    return list(packed.values())
+
+
 def get_batch(
     data_iterator: Iterable, cfg: ConfigContainer, use_mtp: bool = False, *, pg_collection
 ) -> tuple[
@@ -821,5 +1063,6 @@ __all__ = [
     "HyenaNV40bModelProvider",
     "HyenaNVTestModelProvider",
     "HyenaTestModelProvider",
+    "compute_evo2_paged_kv_buffer_size_gb",
     "infer_model_type",
 ]

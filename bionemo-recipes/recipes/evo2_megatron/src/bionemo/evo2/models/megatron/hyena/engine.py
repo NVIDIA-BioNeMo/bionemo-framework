@@ -134,7 +134,9 @@ def parallel_fir(
 
     fir_state = None
     if compute_state:
-        fir_state = u[..., -fir_length + 1 :]
+        # Persistent fp32 buffer so step_fir's ``.to(float32)`` is a no-op and
+        # the in-place ring-buffer update preserves the dynamic-context alias.
+        fir_state = u[..., -fir_length + 1 :].to(torch.float32).contiguous()
     return z, fir_state
 
 
@@ -205,9 +207,12 @@ def step_fir(*, u, fir_state, weight, bias=None, gated_bias=False, flip_filter=F
 
     # Update the state
     if cache_size < filter_length - 1:
+        # Growing the cache when the prompt is shorter than the FIR filter.
         fir_state = torch.cat([fir_state, u[..., None]], dim=-1)
     else:
-        fir_state = torch.roll(fir_state, -1, dims=2)
+        # In-place ring-buffer shift on the persistent fp32 buffer. The ``torch.roll``
+        # temporary is copied back into the dynamic-context state slot.
+        fir_state.copy_(torch.roll(fir_state, -1, dims=2))
         fir_state[..., -1] = u
 
     return y.to(input_dtype), fir_state
@@ -219,7 +224,9 @@ def step_iir(*, x2, x1, v, D, residues, poles, iir_state):  # noqa: N803
     poles = torch.exp(poles)  # poles arg contains log_poles
     poles = poles[..., 0][None]  # squeeze dummy seqlen dim and add dummy batch dim
     residues = residues[None]  # add dummy batch dim
-    iir_state = poles * iir_state + x1v[..., None]
+    # In-place recurrence on the persistent IIR state buffer. Same math as the
+    # reallocating update: ``iir_state = poles * iir_state + x1v[..., None]``.
+    iir_state.mul_(poles).add_(x1v[..., None])
 
     res_state = torch.sum(residues * iir_state, dim=-1)
     y = x2 * (res_state + D * x1v)

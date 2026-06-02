@@ -23,8 +23,9 @@ import torch
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.identity_op import IdentityOp
-from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.module import GraphableMegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import deprecate_inference_params
@@ -46,8 +47,14 @@ class HyenaLayerSubmodules:
     mlp_bda: Union[ModuleSpec, type] = IdentityOp
 
 
-class HyenaLayer(MegatronModule):
-    """Top level Hyena Layer."""
+class HyenaLayer(GraphableMegatronModule):
+    """Top level Hyena Layer.
+
+    Subclasses :class:`GraphableMegatronModule` so Hyena layers can participate in
+    mcore's per-layer local CUDA graph capture during inference decode. The graph machinery
+    only activates when the model is built with ``cuda_graph_impl='local'``; otherwise
+    this behaves exactly like the previous ``MegatronModule`` subclass.
+    """
 
     def __init__(
         self,
@@ -101,6 +108,39 @@ class HyenaLayer(MegatronModule):
         for layer in [self.mlp, self.mlp_bda, self.hyena_bda]:
             if hasattr(layer, "set_layer_number"):
                 layer.set_layer_number(self.layer_number)
+
+    def create_mcore_cudagraph_manager(self, config):
+        """Register this Hyena layer for local CUDA graphs.
+
+        Mirrors :meth:`MambaLayer.create_mcore_cudagraph_manager`: an empty
+        ``cuda_graph_scope`` captures the whole layer, while ``CudaGraphScope.mamba``
+        can be used by callers that only want the recurrent/mixer scope.
+        """
+        from megatron.core.transformer.cuda_graphs import CudaGraphManager  # lazy: heavy mcore import
+
+        if not self.config.cuda_graph_scope or CudaGraphScope.mamba in (self.config.cuda_graph_scope or []):
+            self.cudagraph_manager = CudaGraphManager(config)
+
+    def _should_call_local_cudagraph(self, *args, **kwargs):
+        """Check whether this Hyena layer should use mcore local CUDA graphs."""
+        if (
+            hasattr(self, "cudagraph_manager")
+            and kwargs.get("inference_context") is None
+            and not torch.is_inference_mode_enabled()
+        ):
+            return True
+        if (
+            not self.training
+            and hasattr(self, "cudagraph_manager")
+            and kwargs.get("attention_mask") is None
+            and kwargs.get("inference_context") is not None
+            and (not self.config.cuda_graph_scope or CudaGraphScope.mamba in self.config.cuda_graph_scope)
+        ):
+            context = kwargs["inference_context"]
+            if context.is_static_batching():
+                return bool(context.is_decode_only())
+            return bool(context.using_cuda_graph_this_step())
+        return False
 
     @property
     def bias_dropout_add_exec_handler(self):

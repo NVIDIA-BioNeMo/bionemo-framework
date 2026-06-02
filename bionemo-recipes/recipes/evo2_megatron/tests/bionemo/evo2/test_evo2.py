@@ -578,7 +578,7 @@ def test_batch_generate_coding_sequences(
     expected_matchpercents: list[float],
     fp8: bool,
 ):
-    """Test generation on coding sequences using MCore inference infrastructure.
+    """Test generation on coding sequences through the Evo2 dynamic-inference endpoint.
 
     This test validates that the model can generate reasonable coding sequence
     continuations, checking for proper stop codon placement and sequence identity.
@@ -630,7 +630,7 @@ def test_batch_generate_coding_sequences(
         # Extract prompts for generation
         prompts = [split[0] for split in seq_prompts]
 
-        # Setup MCore inference engine with batch size matching number of prompts
+        # Setup the public Evo2 generation endpoint; generation is driven by the native dynamic path.
         batch_size = len(prompts) // 2
         components = setup_inference_engine(
             ckpt_dir=mbridge_ckpt_path,
@@ -640,7 +640,7 @@ def test_batch_generate_coding_sequences(
             random_seed=42,
         )
 
-        # Generate all sequences - engine handles iteration internally
+        # Generate all sequences through the public endpoint.
         results = generate(
             components,
             prompts=prompts,
@@ -697,7 +697,7 @@ def test_batch_generate_coding_sequences(
 
 
 # =============================================================================
-# MBridge-based generation tests using HyenaInferenceContext
+# MBridge-based generation tests using the public Evo2 dynamic-inference endpoint
 # =============================================================================
 
 
@@ -744,14 +744,14 @@ def test_batch_generate_mbridge(
     expected_matchpercents: list[float],
     fp8: bool,
 ):
-    """Test autoregressive generation using MCore inference infrastructure.
+    """Test autoregressive generation through the Evo2 dynamic-inference endpoint.
 
     This test validates that the model can generate reasonable continuations
-    of DNA sequences using the StaticInferenceEngine and TextGenerationController.
+    of DNA sequences using the same setup_inference_engine/generate API exposed by the standalone `infer_evo2` CLI.
 
-    Note: Hyena/Evo2 SSM state caching currently only supports batch size 1,
-    so prompts are processed sequentially. The MCore inference engine handles
-    this internally through legacy mode.
+    Note: setup_inference_engine wires the model onto the native dynamic path,
+    so this test exercises request creation, Hyena state binding, and decode
+    through the same endpoint used by the standalone CLI.
 
     Uses the same expected values as the original NeMo test_batch_generate.
     """
@@ -795,8 +795,8 @@ def test_batch_generate_mbridge(
         prompts = [split[0] for split in seq_splits]
         targets = [split[1] for split in seq_splits]
 
-        # Setup MCore inference engine
-        # Note: max_batch_size=1 due to Hyena SSM state constraints, but engine handles iteration
+        # Setup the public Evo2 generation endpoint.
+        # max_batch_size=1 keeps this memory-heavy test bounded.
         components = setup_inference_engine(
             ckpt_dir=mbridge_ckpt_path,
             max_seq_length=8192,
@@ -805,7 +805,7 @@ def test_batch_generate_mbridge(
             random_seed=42,
         )
 
-        # Generate all sequences - engine handles iteration internally with max_batch_size=1
+        # Generate all sequences through the public endpoint.
         results = generate(
             components,
             prompts=prompts,
