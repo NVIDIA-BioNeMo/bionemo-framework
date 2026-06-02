@@ -42,6 +42,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
 
 logger = logging.getLogger(__name__)
 
+
 try:
     from transformer_engine.common.recipe import DelayedScaling, Format
 except ImportError:
@@ -117,7 +118,6 @@ class HyenaMixer(MegatronModule):
         self.fast_conv_proj = self.hyena_config.fast_conv_proj
         self.fast_conv_mixer = self.hyena_config.fast_conv_mixer
 
-        # Use b2b causal conv1d
         self.use_subquadratic_ops = self.transformer_config.use_subquadratic_ops
 
         # Per attention head and per partition values.
@@ -198,8 +198,8 @@ class HyenaMixer(MegatronModule):
             )
 
             if self.use_subquadratic_ops:
-                # Create a wrapper module that doesn't register parameters
-                # Use the existing weights from the original model
+                # The B2B kernel is guarded in hyena_utils and fails early if the local CUDA stack
+                # cannot run subquadratic_ops_torch correctly.
                 self.b2b_kernel = B2BCausalConv1dModule(
                     self.hyena_proj_conv,
                     self.mixer,
@@ -229,8 +229,8 @@ class HyenaMixer(MegatronModule):
             )
 
             if self.use_subquadratic_ops and self.operator_type == "hyena_medium_conv":
-                # Create a wrapper module that doesn't register parameters
-                # Use the existing weights from the original model
+                # The B2B kernel is guarded in hyena_utils and fails early if the local CUDA stack
+                # cannot run subquadratic_ops_torch correctly.
                 self.b2b_kernel = B2BCausalConv1dModule(
                     self.hyena_proj_conv,
                     self.mixer,
@@ -312,8 +312,8 @@ class HyenaMixer(MegatronModule):
             "hyena_short_conv",
             "hyena_medium_conv",
         ]
-        # b2b runs during training (no inference_context) or during prefill (no FIR cache yet).
-        # During decode (cache populated, L=1) we fall back to the regular per-token step path.
+        # B2B runs during training (no inference_context) or during prefill (no FIR cache yet).
+        # During decode, fall back to the regular per-token step path.
         is_prefill = inference_context is not None and id(self.hyena_proj_conv) not in getattr(
             inference_context, "fir_filter_state_dict", {}
         )

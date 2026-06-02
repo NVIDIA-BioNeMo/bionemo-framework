@@ -14,7 +14,6 @@
 # limitations under the License.
 
 
-# conftest.py
 import copy
 import gc
 import os

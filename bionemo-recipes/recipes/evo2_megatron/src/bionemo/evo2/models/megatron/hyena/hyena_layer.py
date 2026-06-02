@@ -108,8 +108,10 @@ class HyenaLayer(MegatronModule):
         if self.training:
             return torch.enable_grad
         else:
-            # Validation, Test, Inference, Etc.
-            return torch.inference_mode
+            # torch.inference_mode marks outputs as inference tensors. Those flags
+            # persist after leaving the context and can break downstream autograd or
+            # torch.library custom ops that consume frozen model outputs.
+            return torch.no_grad
 
     def forward(
         self,

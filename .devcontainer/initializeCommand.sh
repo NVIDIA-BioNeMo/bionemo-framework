@@ -8,6 +8,7 @@ mkdir -p ~/.gnupg
 mkdir -p ~/.config
 mkdir -p ~/.cursor
 mkdir -p ~/.claude
+mkdir -p ~/.codex
 [ ! -f ~/.netrc ] && touch ~/.netrc
 
 [ ! -f ~/.bash_history_devcontainer ] && touch ~/.bash_history_devcontainer

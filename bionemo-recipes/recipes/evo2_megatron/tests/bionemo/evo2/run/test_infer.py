@@ -51,6 +51,11 @@ PRETEST_ENV = copy.deepcopy(os.environ)
 # Note: mbridge_checkpoint_path fixture is provided by conftest.py at session scope
 
 
+def _xfail_if_unsupported_subquadratic_ops(result: subprocess.CompletedProcess, use_subquadratic_ops: bool) -> None:
+    if use_subquadratic_ops and "failed a CUDA self-test" in result.stderr:
+        pytest.xfail("subquadratic_ops_torch CUDA kernels are unsupported in this environment")
+
+
 def _read_jsonl_results(output_file: Path) -> list[dict]:
     """Read JSONL output file and return parsed records."""
     records = []
@@ -342,6 +347,7 @@ def run_infer_subprocess(
         env=env,
     )
 
+    _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
     assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     assert output_file.exists(), "Output file was not created"
 
@@ -388,6 +394,126 @@ def _write_prompts_jsonl(prompt_file: Path, prompts: list[tuple[str, str]]) -> N
     """Write a list of (id, prompt) pairs into a JSONL file."""
     with open(prompt_file, "w") as f:
         f.writelines(json.dumps({"id": prompt_id, "prompt": prompt_text}) + "\n" for prompt_id, prompt_text in prompts)
+
+
+@pytest.fixture(
+    params=[False, True],
+    ids=["causal-conv1d", "subquadratic-ops"],
+)
+def infer_use_subquadratic_ops(request):
+    """Whether infer should use subquadratic Hyena kernels."""
+    return request.param
+
+
+def _run_infer_prompt_file(
+    *,
+    mbridge_checkpoint_path: Path,
+    prompt_file: Path,
+    output_file: Path,
+    max_batch_size: int,
+    use_subquadratic_ops: bool,
+) -> dict[str, dict]:
+    open_port = find_free_network_port()
+    cmd = [
+        "torchrun",
+        "--nproc_per_node",
+        "1",
+        "--nnodes",
+        "1",
+        "--master_port",
+        str(open_port),
+        "-m",
+        "bionemo.evo2.run.infer",
+        "--ckpt-dir",
+        str(mbridge_checkpoint_path),
+        "--prompt-file",
+        str(prompt_file),
+        "--max-new-tokens",
+        "1",
+        "--output-file",
+        str(output_file),
+        "--temperature",
+        "1.0",
+        "--top-k",
+        "1",
+        "--seed",
+        "1234",
+        "--max-batch-size",
+        str(max_batch_size),
+        "--max-seq-length",
+        "512",
+        "--return-log-probs",
+    ]
+    if use_subquadratic_ops:
+        cmd.append("--use-subquadratic-ops")
+
+    result = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=512,
+        env=copy.deepcopy(PRETEST_ENV),
+    )
+    _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
+    assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    records = _read_jsonl_results(output_file)
+    return {record["id"]: record for record in records}
+
+
+def _completion_logprobs(record: dict) -> torch.Tensor:
+    logprobs = record.get("logprobs", {}).get("completion_logprobs")
+    assert logprobs is not None, f"Missing completion logprobs in record: {record}"
+    tensor = torch.as_tensor(logprobs, dtype=torch.float32).flatten()
+    assert tensor.numel() == 1
+    return tensor
+
+
+@pytest.mark.timeout(512)
+@pytest.mark.slow
+def test_infer_evo2_short_prefill_is_prefix_invariant_across_batch_padding(
+    mbridge_checkpoint_path,
+    tmp_path,
+    infer_use_subquadratic_ops: bool,
+):
+    """A short prefill should generate the same next token alone or in a padded batch."""
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Inference prefill prefix-invariance test requires a GPU")
+
+    short_prompt = "ACGTACGTAA"
+    padding_prompt = ("GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACGAGGTC" * 4)[:256]
+
+    alone_prompt_file = tmp_path / "short_alone_prompts.jsonl"
+    padded_prompt_file = tmp_path / "short_padded_prompts.jsonl"
+    _write_prompts_jsonl(alone_prompt_file, [("short", short_prompt)])
+    _write_prompts_jsonl(padded_prompt_file, [("padding", padding_prompt), ("short", short_prompt)])
+
+    alone_records = _run_infer_prompt_file(
+        mbridge_checkpoint_path=mbridge_checkpoint_path,
+        prompt_file=alone_prompt_file,
+        output_file=tmp_path / "alone_output.jsonl",
+        max_batch_size=1,
+        use_subquadratic_ops=infer_use_subquadratic_ops,
+    )
+    padded_records = _run_infer_prompt_file(
+        mbridge_checkpoint_path=mbridge_checkpoint_path,
+        prompt_file=padded_prompt_file,
+        output_file=tmp_path / "padded_output.jsonl",
+        max_batch_size=2,
+        use_subquadratic_ops=infer_use_subquadratic_ops,
+    )
+
+    assert set(alone_records) == {"short"}
+    assert set(padded_records) == {"padding", "short"}
+    assert padded_records["short"]["prompt"] == short_prompt
+    assert alone_records["short"]["completion"] == padded_records["short"]["completion"]
+
+    torch.testing.assert_close(
+        _completion_logprobs(alone_records["short"]),
+        _completion_logprobs(padded_records["short"]),
+        rtol=2e-2,
+        atol=5e-2,
+    )
 
 
 def run_infer_subprocess_parallel(
@@ -524,11 +650,11 @@ def test_identical_prompts_should_be_identical(mbridge_checkpoint_path, tmp_path
 def test_subquadratic_ops_matches_baseline(mbridge_checkpoint_path, tmp_path):
     """Greedy generation with --use-subquadratic-ops must match the standard path.
 
-    This is the end-to-end correctness check for the subq-ops inference path:
-    Phase 1 routes engine.parallel_fir through subq-ops kernels during prefill,
-    Phase 2 fuses proj+mixer convs via b2b_causal_conv1d during prefill and
-    populates FIR caches for the subsequent decode steps. With greedy decoding
-    (top_k=1) and the same seed, both paths must produce identical output.
+    This is the end-to-end correctness check for the subq-ops inference path.
+    The subq path uses guarded subquadratic kernels. If the local CUDA/GPU
+    combination cannot run those kernels correctly, the guard raises before
+    invalid outputs can propagate. With greedy decoding (top_k=1) and the same
+    seed, supported subq kernels must produce identical output.
     """
     output_baseline = tmp_path / "output_baseline.jsonl"
     output_subq = tmp_path / "output_subq.jsonl"

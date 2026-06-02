@@ -59,6 +59,7 @@ Usage (Python API):
 
 import argparse
 import gc
+import inspect
 import json
 import logging
 import os
@@ -77,7 +78,14 @@ from megatron.bridge.training.checkpointing import (
 )
 from megatron.bridge.training.config import DistributedInitConfig, RNGConfig
 from megatron.bridge.training.mixed_precision import get_mixed_precision_config
-from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
+
+
+try:
+    from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
+except ImportError:
+    from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
+        HuggingFaceTokenizer as _HuggingFaceTokenizer,
+    )
 from megatron.bridge.training.utils.checkpoint_utils import (
     file_exists,
     get_checkpoint_run_config_filename,
@@ -91,21 +99,102 @@ from megatron.core.inference.engines.static_engine import StaticInferenceEngine
 from megatron.core.inference.model_inference_wrappers.abstract_model_inference_wrapper import (
     AbstractModelInferenceWrapper,
 )
-from megatron.core.inference.model_inference_wrappers.inference_wrapper_config import (
-    InferenceWrapperConfig,
-)
+
+
+try:
+    from megatron.core.inference.model_inference_wrappers.inference_wrapper_config import (
+        InferenceWrapperConfig,
+    )
+except ImportError:
+
+    @dataclass
+    class InferenceWrapperConfig:
+        """Compatibility shim for MCore versions that removed InferenceWrapperConfig."""
+
+        hidden_size: int
+        inference_max_requests: int
+        inference_max_seq_length: int
+        inference_batch_times_seqlen_threshold: int
+        params_dtype: torch.dtype
+        padded_vocab_size: int
+        nccl_all_reduce_for_prefill: bool = False
+        moe_pad_experts_for_cuda_graph_inference: bool = False
+
+        def add_attributes(self, attributes: dict[str, Any]) -> None:
+            """Match the old MCore config helper used by Evo2TextGenerationController."""
+            for name, value in attributes.items():
+                setattr(self, name, value)
+
+
 from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_model_config
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 from bionemo.evo2.run.text_generation_controller import Evo2TextGenerationController
 
 
 logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _register_bionemo_target_prefix() -> None:
+    try:
+        from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
+
+        register_allowed_target_prefix("bionemo.")
+    except ImportError:
+        pass
+
+
+_WRAPPER_INIT_ACCEPTS_CONFIG = (
+    "inference_wrapper_config" in inspect.signature(AbstractModelInferenceWrapper.__init__).parameters
+)
+
+
+class _TextGenerationTokenizerAdapter:
+    """Expose the tokenizer methods expected by MCore's static text-generation path."""
+
+    def __init__(self, tokenizer: _HuggingFaceTokenizer):
+        self._tokenizer = tokenizer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tokenizer, name)
+
+    @property
+    def vocab_size(self) -> int:
+        return self._tokenizer.vocab_size
+
+    @property
+    def bos(self) -> Optional[int]:
+        return getattr(self._tokenizer, "bos", getattr(self._tokenizer, "bos_id", None))
+
+    @property
+    def eod(self) -> Optional[int]:
+        return getattr(self._tokenizer, "eod", None)
+
+    def tokenize(self, text: str) -> list[int]:
+        if hasattr(self._tokenizer, "tokenize"):
+            return self._tokenizer.tokenize(text)
+        return self._tokenizer.text_to_ids(text)
+
+    def detokenize(self, tokens: list[int], skip_special_tokens: bool = True) -> str:
+        if hasattr(self._tokenizer, "detokenize"):
+            return self._tokenizer.detokenize(tokens, skip_special_tokens=skip_special_tokens)
+        return self._tokenizer.ids_to_text(tokens)
+
+    def offsets(self, tokens: list[int], text: str) -> list[int]:
+        if hasattr(self._tokenizer, "offsets"):
+            return self._tokenizer.offsets(tokens, text)
+        offsets = []
+        position = 0
+        for token in tokens:
+            offsets.append(position)
+            position += len(self.detokenize([token], skip_special_tokens=False))
+        return offsets
 
 
 # =============================================================================
@@ -235,7 +324,11 @@ class Evo2ModelInferenceWrapper(AbstractModelInferenceWrapper):
             inference_wrapper_config: Configuration with hidden size, vocab size, etc.
             inference_context: Context for managing state and sequence offsets.
         """
-        super().__init__(model, inference_wrapper_config, inference_context)
+        self.inference_wrapper_config = inference_wrapper_config
+        if _WRAPPER_INIT_ACCEPTS_CONFIG:
+            super().__init__(model, inference_wrapper_config, inference_context)
+        else:
+            super().__init__(model, inference_context)
 
     def prep_inference_input(self, prompts_tokens: torch.Tensor) -> Dict[str, Any]:
         """Prepare the inference input data.
@@ -402,6 +495,7 @@ def setup_inference_engine(
         raise FileNotFoundError(f"run_config.yaml not found at {run_config_filename}")
 
     run_config = read_run_config(run_config_filename)
+    _register_bionemo_target_prefix()
     model_provider = instantiate(run_config["model"])
     logger.info(f"Instantiated model provider: {type(model_provider).__name__}")
 
@@ -438,6 +532,7 @@ def setup_inference_engine(
         tokenizer = _HuggingFaceTokenizer(tokenizer_dir)
     else:
         tokenizer = _HuggingFaceTokenizer(DEFAULT_HF_TOKENIZER_MODEL_PATH)
+    tokenizer = _TextGenerationTokenizerAdapter(tokenizer)
 
     model_provider.vocab_size = tokenizer.vocab_size
     model_provider.should_pad_vocab = True
@@ -462,6 +557,8 @@ def setup_inference_engine(
         dist_config=dist_config,
     )
     logger.info("Initialized distributed environment")
+    if use_subquadratic_ops:
+        ensure_subquadratic_ops_supported()
 
     # -------------------------------------------------------------------------
     # Step 5: Create model and load weights
