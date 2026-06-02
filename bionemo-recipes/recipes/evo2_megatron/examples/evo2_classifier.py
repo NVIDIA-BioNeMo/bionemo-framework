@@ -68,7 +68,6 @@ from megatron.bridge.training.config import (
 from megatron.bridge.training.mixed_precision import get_mixed_precision_config
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.state import GlobalState
-from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
 from megatron.bridge.training.utils.checkpoint_utils import (
     get_checkpoint_run_config_filename,
     read_run_config,
@@ -77,6 +76,7 @@ from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
+from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import HuggingFaceTokenizer
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.spec_utils import ModuleSpec
 from torch import Tensor
@@ -315,15 +315,15 @@ class Evo2ClassifierDataset(Dataset):
         self,
         sequences: Sequence[str],
         labels: Sequence[int],
-        tokenizer: _HuggingFaceTokenizer,
+        tokenizer: HuggingFaceTokenizer,
         seq_length: int,
         pad_token_id: Optional[int] = None,
     ) -> None:
         """Tokenize once into pre-allocated tensors so ``__getitem__`` is just a slice."""
         if pad_token_id is None:
             try:
-                pad_token_id = tokenizer.pad
-            except NotImplementedError:
+                pad_token_id = tokenizer.pad_id
+            except (NotImplementedError, AttributeError):
                 pad_token_id = None
             if pad_token_id is None:
                 pad_token_id = 1
@@ -378,7 +378,7 @@ class Evo2ClassifierDatasetProvider(DatasetProvider):
 
     def build_datasets(self, context: DatasetBuildContext) -> tuple[Optional[Any], Optional[Any], Optional[Any]]:
         """Tokenize the JSONL splits into :class:`Evo2ClassifierDataset` objects."""
-        tokenizer = context.tokenizer if context.tokenizer is not None else _HuggingFaceTokenizer(self.tokenizer_path)
+        tokenizer = context.tokenizer if context.tokenizer is not None else HuggingFaceTokenizer(self.tokenizer_path)
 
         def _build(path: Optional[str]) -> Optional[Evo2ClassifierDataset]:
             if path is None:
@@ -706,7 +706,7 @@ def _cleanup_inference_distributed() -> None:
 
 def _build_classifier_from_checkpoint(
     trained_ckpt_dir: Path,
-) -> tuple[list[nn.Module], _HuggingFaceTokenizer, int]:
+) -> tuple[list[nn.Module], HuggingFaceTokenizer, int]:
     """Rebuild a trained classifier model from a saved checkpoint.
 
     Reads the ``run_config.yaml`` saved alongside the trained checkpoint to
@@ -750,9 +750,9 @@ def _build_classifier_from_checkpoint(
     # -------------------------------------------------------------------------
     tokenizer_dir = resolved_ckpt_dir / "tokenizer"
     if tokenizer_dir.exists():
-        tokenizer = _HuggingFaceTokenizer(str(tokenizer_dir))
+        tokenizer = HuggingFaceTokenizer(str(tokenizer_dir))
     else:
-        tokenizer = _HuggingFaceTokenizer(DEFAULT_HF_TOKENIZER_MODEL_PATH_512)
+        tokenizer = HuggingFaceTokenizer(DEFAULT_HF_TOKENIZER_MODEL_PATH_512)
 
     model_provider.vocab_size = tokenizer.vocab_size
     model_provider.should_pad_vocab = True
