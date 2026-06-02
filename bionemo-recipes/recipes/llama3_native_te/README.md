@@ -8,7 +8,7 @@ training. This recipe is configured for genomic sequences using a custom nucleot
 
 This folder contains an independent, minimal training example. It does not depend on any other code in the top-level
 bionemo-framework repository. You can download a zipped directory of this folder alone by clicking
-[here](https://download-directory.github.io?url=https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/llama3_native_te&filename=llama3-native-te).
+[here](https://download-directory.github.io?url=https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/llama3_native_te&filename=llama3-native-te).
 
 ### How to deploy this recipe on cloud providers
 

@@ -41,4 +41,4 @@ This will install the project in editable mode, allowing you to make changes and
 
 ## Examples
 
-Please see examples of all interpolants in the [examples directory](https://github.com/NVIDIA/bionemo-framework/tree/main/sub-packages/bionemo-moco/examples).
+Please see examples of all interpolants in the [examples directory](./examples).

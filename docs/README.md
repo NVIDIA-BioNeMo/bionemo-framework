@@ -2,7 +2,7 @@
 
 ## Viewing the current documentation on github pages
 
-The documentation should be viewable at [https://nvidia.github.io/bionemo-framework/](https://nvidia.github.io/bionemo-framework/).
+The documentation should be viewable at [https://nvidia-bionemo.github.io/bionemo-framework/](https://nvidia-bionemo.github.io/bionemo-framework/).
 
 ## Previewing the documentation locally
 

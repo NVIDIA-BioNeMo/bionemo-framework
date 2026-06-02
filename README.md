@@ -6,8 +6,8 @@
 <div align="left">
 
 [![Click here to deploy.](https://uohmivykqgnnbiouffke.supabase.co/storage/v1/object/public/landingpage/brevdeploynavy.svg)](https://console.brev.dev/launchable/deploy/now?launchableID=env-2pPDA4sJyTuFf3KsCv5KWRbuVlU)
-[![Docs Build](https://img.shields.io/github/actions/workflow/status/NVIDIA/bionemo-framework/pages/pages-build-deployment?label=docs-build)](https://nvidia.github.io/bionemo-framework)
-[![Test Status](https://github.com/NVIDIA/bionemo-framework/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA/bionemo-framework/actions/workflows/unit-tests.yml)
+[![Docs Build](https://img.shields.io/github/actions/workflow/status/NVIDIA/bionemo-framework/pages/pages-build-deployment?label=docs-build)](https://nvidia-bionemo.github.io/bionemo-framework)
+[![Test Status](https://github.com/NVIDIA-BioNeMo/bionemo-framework/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA-BioNeMo/bionemo-framework/actions/workflows/unit-tests.yml)
 [![Latest Tag](https://img.shields.io/github/v/tag/NVIDIA/bionemo-framework?label=latest-version)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/containers/bionemo-framework/tags)
 [![codecov](https://codecov.io/gh/NVIDIA/bionemo-framework/branch/main/graph/badge.svg?token=XqhegdZRqB)](https://codecov.io/gh/NVIDIA/bionemo-framework)
 
@@ -55,8 +55,8 @@ cd bionemo-framework/bionemo-recipes/recipes/esm2_native_te/
 - 02/23/2026 [Mixtral MoE model](bionemo-recipes/models/mixtral/) with TE `GroupedLinear` for efficient parallel expert computation, FP8/FP4 support, and HF conversion.
 - 02/13/2026 [ESM2 PEFT recipe](bionemo-recipes/recipes/esm2_peft_te/) for LoRA fine-tuning with sequence packing support.
 - 01/14/2026 [Llama3 Context Parallelism](bionemo-recipes/recipes/llama3_native_te/README.md#performance-benchmarks) — scaling Llama 3 70B to 144K context on 36x GB300 NVL36 with ~65% MFU.
-- 10/27/2025 [CodonFM recipe](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/codonfm_ptl_te) released! This is an accelerated version of the original [research codebase](https://github.com/NVIDIA-Digital-Bio/CodonFM) with [scientific preprint](https://research.nvidia.com/labs/dbr/assets/data/manuscripts/nv-codonfm-preprint.pdf).
-- 09/01/2025 [bionemo-recipes](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes) goes live! Lightweight and portable examples with state-of-the-art training performance you can riff on to meet your needs.
+- 10/27/2025 [CodonFM recipe](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/codonfm_ptl_te) released! This is an accelerated version of the original [research codebase](https://github.com/NVIDIA-Digital-Bio/CodonFM) with [scientific preprint](https://research.nvidia.com/labs/dbr/assets/data/manuscripts/nv-codonfm-preprint.pdf).
+- 09/01/2025 [bionemo-recipes](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes) goes live! Lightweight and portable examples with state-of-the-art training performance you can riff on to meet your needs.
 
 ## Code Overview
 
@@ -114,7 +114,7 @@ BioNeMo Framework is part of a larger ecosystem of NVIDIA Biopharma products. Ge
 
 ## Documentation Resources
 
-- **Official Documentation:** Guides, API references, and troubleshooting for the framework are documented on our [official documentation](https://docs.nvidia.com/bionemo-framework/latest/). Nightly builds of this documentation are available on [BioNeMo Framework GitHub Pages](https://nvidia.github.io/bionemo-framework/)
+- **Official Documentation:** Guides, API references, and troubleshooting for the framework are documented on our [official documentation](https://docs.nvidia.com/bionemo-framework/latest/). Nightly builds of this documentation are available on [BioNeMo Framework GitHub Pages](https://nvidia-bionemo.github.io/bionemo-framework/)
 
 - **🚧 In-Progress Documentation 🚧:** `bionemo-recipes` documentation is currently work in progress, however the recipes are meant to be self-documented and easy to understand—we suggest you throw them into your favorite genai code assistant!
 

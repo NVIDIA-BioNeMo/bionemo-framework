@@ -4,10 +4,10 @@ hide:
 ---
 
 !!! warning "Documentation revamp is in progress."
-These docs are currently being refactored as we consolidate 5D Parallelism Training code with [bionemo-recipes](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes). The best source of documentation today is the module READMEs + your favorite genai assistant.
+These docs are currently being refactored as we consolidate 5D Parallelism Training code with [bionemo-recipes](./main/recipes/). The best source of documentation today is the module READMEs + your favorite genai assistant.
 
 !!! note "5D Parallel Models Moved to bionemo-recipes"
-Training and model implementation code for ESM-2, AMPLIFY, Geneformer, and Evo2 now lives in [bionemo-recipes](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes). For active training and fine-tuning workflows, refer to the relevant directories in `bionemo-recipes/models/` and `bionemo-recipes/recipes/`. Model cards and checkpoint information remain available in these docs.
+Training and model implementation code for ESM-2, AMPLIFY, Geneformer, and Evo2 now lives in [bionemo-recipes](./main/recipes/). For active training and fine-tuning workflows, refer to the relevant directories in `bionemo-recipes/models/` and `bionemo-recipes/recipes/`. Model cards and checkpoint information remain available in these docs.
 
 <p>
   <strong>NVIDIA BioNeMo Framework</strong> is a collection of programming tools, libraries, and models for computational drug discovery.

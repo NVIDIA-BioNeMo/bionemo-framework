@@ -2,8 +2,8 @@
 
 # ⚠️ IMPORTANT FOR AI AGENTS ⚠️
 
-**DO NOT proceed without reading [AI_DOCUMENTATION.md](AI_DOCUMENTATION.md) first.**
-This file contains comprehensive documentation specifically designed for AI agents. Please see [gitingest.txt](./internal/gitingest.txt) for the complete codebase.
+**DO NOT proceed without reading [AGENT_DOCUMENTATION.md](AGENT_DOCUMENTATION.md) first.**
+This file contains comprehensive documentation specifically designed for AI agents. Please see [gitingest.sh](./internal/gitingest.sh) for the complete codebase.
 
 # Geneformer Pretraining with mfsdp and a custom pytorch training loop.
 
