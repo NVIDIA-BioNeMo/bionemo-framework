@@ -20,10 +20,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F  # noqa: N812
 
 from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     B2BCausalConv1dModule,
     ExchangeOverlappingRegionsCausal,
+    ParallelCausalDepthwiseConv1d,
     _get_inverse_zigzag_indices,
     _get_zigzag_indices,
     divide,
@@ -35,6 +37,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     wang_init_method,
     zigzag_get_overlapping_patches,
 )
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 
 
 class MockProcessGroup:
@@ -118,6 +121,30 @@ class MockMixer(torch.nn.Module):
 def mock_b2b_causal_conv1d(x, weight_proj, weight_mixer, skip_bias):
     """Mock implementation of b2b_causal_conv1d that returns only the tensor for test slicing."""
     return x
+
+
+@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.causal_conv1d_fn")
+@patch("bionemo.evo2.models.megatron.hyena.hyena_utils.causal_conv1d")
+def test_parallel_causal_depthwise_conv1d_uses_subquadratic_fast_conv(
+    mock_subq_causal_conv1d, mock_fast_causal_conv1d
+):
+    """Fast projection conv should honor use_subquadratic_ops."""
+    mock_subq_causal_conv1d.side_effect = lambda x, weight: torch.zeros_like(x)
+    x = torch.randn(2, 4, 8)
+    module = types.SimpleNamespace(
+        kernel_size=3,
+        short_conv_weight=torch.ones(4, 3),
+        group_dim=1,
+        pg_collection=types.SimpleNamespace(cp=None),
+        use_fast_causal_conv=True,
+        use_subquadratic_ops=True,
+    )
+
+    y = ParallelCausalDepthwiseConv1d.forward(module, x, _use_cp=False)
+
+    assert y.shape == x.shape
+    mock_subq_causal_conv1d.assert_called_once()
+    mock_fast_causal_conv1d.assert_not_called()
 
 
 @pytest.mark.parametrize("operator_type", ["hyena_short_conv", "hyena_medium_conv"])
@@ -294,6 +321,66 @@ def test_b2b_causal_conv1d_effective_padding_size():
     assert b2b_module.effective_pad_size == expected_pad_size
 
 
+def test_b2b_causal_conv1d_module_matches_sequential_reference():
+    """Document the isolated B2B CUDA kernel behavior before relying on the fused path."""
+    if not torch.cuda.is_available():
+        pytest.skip("B2B causal conv isolation test requires CUDA")
+    try:
+        ensure_subquadratic_ops_supported()
+    except RuntimeError as e:
+        pytest.xfail(str(e))
+
+    torch.manual_seed(1234)
+    batch_size = 2
+    hidden_size = 4
+    seq_len = 16
+    proj_kernel_size = 3
+    mixer_kernel_size = 7
+    device = torch.device("cuda")
+
+    x = torch.randn(batch_size, 3 * hidden_size, seq_len, device=device)
+    proj_weight = torch.randn(3 * hidden_size, proj_kernel_size, device=device)
+    mixer_weight = torch.randn(hidden_size, mixer_kernel_size, device=device)
+    bias = torch.randn(hidden_size, device=device)
+
+    proj_conv = torch.nn.Module()
+    proj_conv.kernel_size = proj_kernel_size
+    proj_conv.short_conv_weight = proj_weight
+    proj_conv.group_dim = 1
+
+    mixer = torch.nn.Module()
+    mixer.use_conv_bias = True
+    mixer.group_dim = 1
+    mixer.conv_bias = bias
+    mixer.short_conv = torch.nn.Module()
+    mixer.short_conv.kernel_size = mixer_kernel_size
+    mixer.short_conv.short_conv_weight = mixer_weight.unsqueeze(1)
+
+    b2b_module = B2BCausalConv1dModule(
+        proj_conv,
+        mixer,
+        operator_type="hyena_short_conv",
+        pg_collection=MockProcessGroupCollection(),
+    )
+
+    fused = b2b_module(x).float()
+    projected = F.conv1d(
+        F.pad(x.float(), (proj_kernel_size - 1, 0)),
+        proj_weight.float().flip(-1).unsqueeze(1),
+        groups=3 * hidden_size,
+    )
+    x1, x2, v = projected[:, ::3], projected[:, 1::3], projected[:, 2::3]
+    z = x2 * v
+    mixed = F.conv1d(
+        F.pad(z, (mixer_kernel_size - 1, 0)),
+        mixer_weight.float().flip(-1).unsqueeze(1),
+        groups=hidden_size,
+    )
+    reference = x1 * (mixed + bias.float()[None, :, None] * z)
+
+    torch.testing.assert_close(fused, reference, rtol=1e-4, atol=1e-4)
+
+
 def test_zigzag_get_overlapping_patches():  # noqa: D103
     # Test the actual output of zigzag_get_overlapping_patches
     data = torch.arange(8).reshape(2, 4)  # shape [2, 4]
@@ -448,6 +535,27 @@ def test_fftconv_func():
     output_short = fftconv_func(u, k_short, D, dropout_mask, gelu=True, bidirectional=False)
     assert isinstance(output_short, torch.Tensor)
     assert output_short.shape == u.shape
+
+
+def test_fftconv_func_bidirectional_is_prefix_invariant_when_filter_is_longer_than_input():
+    """Bidirectional FFT convolution should not alias short prefixes when the filter is long."""
+    torch.manual_seed(1234)
+    batch_size = 2
+    short_len = 5
+    long_len = 64
+    hidden_size = 4
+    filter_len = 64
+
+    u_short = torch.randn(batch_size, hidden_size, short_len)
+    u_long = torch.zeros(batch_size, hidden_size, long_len)
+    u_long[..., :short_len] = u_short
+    k = torch.randn(1, 2 * hidden_size, filter_len)
+    D = torch.randn(hidden_size)  # noqa: N806
+
+    short_out = fftconv_func(u_short, k, D, None, gelu=False, bidirectional=True)
+    long_out = fftconv_func(u_long, k, D, None, gelu=False, bidirectional=True)[..., :short_len]
+
+    torch.testing.assert_close(short_out, long_out, rtol=1e-5, atol=1e-5)
 
 
 def test_fftconv_func_high_dimensional_input():

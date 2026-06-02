@@ -5,7 +5,7 @@
 rm -f /usr/local/lib/python*/dist-packages/transformer_engine-*.dist-info/direct_url.json
 export UV_LOCK_TIMEOUT=900  # increase to 15 minutes (900 seconds), adjust as needed
 export UV_LINK_MODE=copy
-uv venv --system-site-packages
+uv venv --clear --system-site-packages
 
 # 2. Activate the environment
 source .venv/bin/activate
@@ -38,8 +38,8 @@ for pkg_dir in "$RECIPE_ROOT/../../../sub-packages/bionemo-recipeutils" "$RECIPE
     fi
 done
 
-# 6. Install the recipe with all remaining dependencies
-uv pip install -c pip-constraints.txt -e . --no-build-isolation
+# 6. Install the recipe with all remaining dependencies, including test extras
+uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
 
 # 7. Restore original pyproject.toml (the edit was only needed for uv resolution)
 mv pyproject.toml.ci_bak pyproject.toml

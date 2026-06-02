@@ -18,8 +18,10 @@
 
 
 import math
+import sys
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Callable, Iterable, Literal, Optional, Type
 
 import torch
@@ -35,6 +37,7 @@ from megatron.bridge.training.losses import masked_next_token_loss
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
+from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core import parallel_state
 from megatron.core.inference.contexts import StaticInferenceContext
@@ -51,6 +54,33 @@ from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig as _Hyen
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import get_hyena_stack_spec
 from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel as MCoreHyenaModel
 from bionemo.evo2.models.megatron.hyena.hyena_utils import hyena_no_weight_decay_cond
+
+
+def _patch_megatron_dataset_helper_compile() -> None:
+    """Skip Megatron's runtime helper build when a wheel already ships the extension."""
+    from megatron.core.datasets import utils as dataset_utils
+
+    original_compile_helpers = dataset_utils.compile_helpers
+    if getattr(original_compile_helpers, "_evo2_prebuilt_helper_guard", False):
+        guarded_compile_helpers = original_compile_helpers
+    else:
+
+        def guarded_compile_helpers() -> None:
+            datasets_dir = Path(dataset_utils.__file__).resolve().parent
+            if not (datasets_dir / "Makefile").exists() and list(datasets_dir.glob("helpers_cpp*.so")):
+                return None
+            return original_compile_helpers()
+
+        guarded_compile_helpers._evo2_prebuilt_helper_guard = True
+        dataset_utils.compile_helpers = guarded_compile_helpers
+
+    bridge_initialize = sys.modules.get("megatron.bridge.training.initialize")
+    if bridge_initialize is not None:
+        bridge_initialize.compile_helpers = guarded_compile_helpers
+
+
+_patch_megatron_dataset_helper_compile()
+register_allowed_target_prefix("bionemo.evo2.")
 
 
 def get_vocab_size(*args, **kwargs):
@@ -306,7 +336,7 @@ class HyenaModelProvider(TransformerConfig, ModelProviderMixin[MCoreHyenaModel])
     apply_rope_fusion: bool = True
     make_vocab_size_divisible_by: int = 128
     gated_linear_unit: bool = True
-    fp32_residual_connection: bool = True
+    fp32_residual_connection: bool = False
     normalization: str = "RMSNorm"
     add_bias_linear: bool = False
     hidden_dropout: float = 0.0

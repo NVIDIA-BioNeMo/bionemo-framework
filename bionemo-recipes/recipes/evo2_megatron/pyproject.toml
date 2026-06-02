@@ -24,9 +24,10 @@ dependencies = [
     "causal_conv1d",
     "nv-grouped-gemm",
     "megatron-core",
-    "nvidia-resiliency-ext",
+    # nvidia-resiliency-ext is pulled transitively by megatron-bridge.
     "emerging_optimizers",
     "subquadratic-ops-torch-cu13",
+    "email-validator",
 
     # These are dependencies for examples only, but are useful for actually doing analyses with this model
     "biopython",
@@ -35,7 +36,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = []
+test = [
+    "pytest>=8.0",
+]
 
 [project.scripts]
 torchrun = "torch.distributed.run:main"
@@ -88,22 +91,29 @@ override-dependencies = [
     "triton; sys_platform == 'never'",
     "transformer-engine; sys_platform == 'never'",
     "transformer-engine[pytorch]; sys_platform == 'never'",
+    # Avoid alpha Pydantic releases; langchain imports pulled by nvidia-resiliency-ext are not compatible.
+    "pydantic>=2.12,<2.14",
+    # Avoid optional log-pattern-mining dependency conflicts from nvidia-resiliency-ext.
+    "logsage; sys_platform == 'never'",
+    "drain3; sys_platform == 'never'",
 ]
 
 [tool.uv.sources]
 # Shared recipe utilities (framework-agnostic)
 # External dependencies with specific git tags/commits
-causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = "v1.5.4" }
+# 1.6.1 fixes a custom-op no-storage failure in no-grad/frozen forward paths.
+causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = "v1.6.1" }
 nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v1.1.4.post6" }
 
 # Internal dependencies
 bionemo-recipeutils = { git = "https://github.com/NVIDIA/bionemo-framework.git", branch = "main", subdirectory = "sub-packages/bionemo-recipeutils" }
 bionemo-core = { git = "https://github.com/NVIDIA/bionemo-framework.git", branch = "main", subdirectory = "sub-packages/bionemo-core" }
-nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext.git", rev = "54f85fe422d296cf04ea524130014bd3a2c3add1" }
+# nvidia-resiliency-ext is intentionally left to Megatron-Bridge so the transitive pin stays consistent.
 
-# Megatron Bundle. This points to a version that still supports the deprecated no_weight_decay_cond field until the API for an alternative has been finalized.
-megatron-bridge = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", rev = "549e3cb970c170b1d7a86d021261efe05e8a5d9f" }
-megatron-core = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", rev = "549e3cb970c170b1d7a86d021261efe05e8a5d9f", subdirectory = "3rdparty/Megatron-LM" }
+# Megatron Bundle. MCore is sourced from the same Megatron-Bridge release tag.
+megatron-bridge = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", tag = "v0.4.1" }
+megatron-core = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", tag = "v0.4.1", subdirectory = "3rdparty/Megatron-LM" }
 
 [tool.uv.extra-build-dependencies]
 warp-lang = ["wheel_stub"]
+nvidia-resiliency-ext = ["poetry_dynamic_versioning"]

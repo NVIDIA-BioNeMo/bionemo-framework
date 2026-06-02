@@ -10,9 +10,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=requirements.txt,target=/workspace/requirements.txt \
     PIP_CONSTRAINT= pip install -r /workspace/requirements.txt
 
+# Sandboxed agent CLIs use these helpers on Linux.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    uidmap \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
+
 USER ubuntu
-RUN curl https://cursor.com/install -fsS | bash  # Install cursor-agent CLI tool
-RUN curl -fsSL https://claude.ai/install.sh | bash  # Install Claude CLI tool
+RUN curl https://cursor.com/install -fsS | bash || true  # Install cursor-agent CLI tool
+RUN curl -fsSL https://claude.ai/install.sh | bash || true # Install Claude CLI tool
 RUN uv tool install pre-commit --with pre-commit-uv --force-reinstall
 ENV PATH="/home/ubuntu/.local/bin:${PATH}"
