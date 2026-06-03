@@ -276,6 +276,7 @@ class Evo2NativeDynamicComponents:
     forward_model: torch.nn.Module
     hyena_model: torch.nn.Module
     max_seq_length: int
+    evo2_seed: int
     cuda_graphs_enabled: bool
     cuda_graph_manager_count: int
 
@@ -302,6 +303,7 @@ def _setup_native_dynamic_components(
     model: torch.nn.Module,
     raw_model: torch.nn.Module,
     max_seq_length: int,
+    evo2_seed: int,
     cuda_graphs_enabled: bool,
 ) -> Evo2NativeDynamicComponents:
     """Prepare the standalone HyenaModel to decode on an Evo2 dynamic context.
@@ -344,6 +346,7 @@ def _setup_native_dynamic_components(
         forward_model=model,
         hyena_model=hyena_model,
         max_seq_length=max_seq_length,
+        evo2_seed=evo2_seed,
         cuda_graphs_enabled=cuda_graphs_enabled,
         cuda_graph_manager_count=cuda_graph_manager_count,
     )
@@ -593,6 +596,7 @@ def setup_inference_engine(
         model=model,
         raw_model=raw_model,
         max_seq_length=max_seq_length,
+        evo2_seed=random_seed,
         cuda_graphs_enabled=cuda_graphs_enabled,
     )
     return Evo2InferenceComponents(
@@ -786,7 +790,7 @@ def _generate_native_dynamic(
     eff_top_k = max(0, int(top_k))
     eff_top_p = float(top_p) if (top_p and top_p > 0 and eff_top_k == 0) else 0.0
     sampling_rng = torch.Generator(device=device)
-    sampling_rng.manual_seed(int(getattr(tokenizer, "_evo2_seed", 0)) or 1234)
+    sampling_rng.manual_seed(int(nd.evo2_seed))
 
     results: List[_NativeDynamicResult] = []
     for prompt in prompts:
@@ -1254,10 +1258,6 @@ def infer(
         random_seed=random_seed,
         use_subquadratic_ops=use_subquadratic_ops,
     )
-    # Thread the resolved seed into the native sampler RNG (read off the tokenizer handle in
-    # _generate_native_dynamic).
-    components.tokenizer._evo2_seed = random_seed
-
     mem_after_setup_gb = torch.cuda.max_memory_allocated() / (1024**3)
     logger.info(f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB")
 
