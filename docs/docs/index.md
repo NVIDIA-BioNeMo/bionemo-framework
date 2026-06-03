@@ -54,7 +54,7 @@ Training and model implementation code for ESM-2, AMPLIFY, Geneformer, and Evo2 
     <hr />
     <p>Access comprehensive documentation on BioNeMo's sub-packages, functions, and classes.</p>
     <p>
-      <a href="main/references/API_reference/bionemo/core/api/" class="md-button md-button">API Reference</a>
+      <a href="main/references/API_reference/" class="md-button md-button">API Reference</a>
     </p>
   </div>
 

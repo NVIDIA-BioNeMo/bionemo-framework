@@ -145,7 +145,7 @@ We compared the convergence of this Llama3 recipe (with FSDP2) against NeMo 2.0
 implementation on the DCLM Baseline 1.0 dataset. See [Training on Natural Language Data (Lingua
 Reproduction)](#lingua-reproduction) for more details. The figure above shows similar loss convergence and step time to
 the NeMo 2.0 training example, and the following table shows downstream performance on various tasks using the
-[lm-eval](github.com/eleutherai/lm-evaluation-harness) library. The variation in training step time every 10,000 steps
+[lm-eval](https://github.com/eleutherai/lm-evaluation-harness) library. The variation in training step time every 10,000 steps
 are due checkpointing, further work will be done to improve training step time stability.
 
 | name                | arc_challenge | arc_easy | boolq | copa | hella_swag | piqa  | winogrande |

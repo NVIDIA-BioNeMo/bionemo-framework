@@ -96,7 +96,7 @@
 ### New Features
 
 - Adds support for AMPLIFY [doi:10.1101/2024.09.23.614603](https://doi.org/10.1101/2024.09.23.614603) pre-training and inference, offering a 70% speedup over the xformers-based attention backend with similar final perplexity values at 1M pre-training steps. (4.23 for 120M, 3.05 for 350M). The model is fully compatible with existing weights on HuggingFace.
-- Adds alpha support for [LoRA fine-tuning to for ESM2 models](../../models/ESM-2/#lora-fine-tuning-performace). Inference and fine-tuning are enabled along with resumption from a checkpoint.
+- Adds alpha support for [LoRA fine-tuning to for ESM2 models](../../../models/ESM-2/#lora-fine-tuning-performace). Inference and fine-tuning are enabled along with resumption from a checkpoint.
 
 ### Updates & Improvements
 

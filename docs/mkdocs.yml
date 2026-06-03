@@ -1,7 +1,7 @@
 site_name: BioNeMo
 site_url: https://nvidia-bionemo.github.io/bionemo-framework
-repo_url: https://github.com/NVIDIA/bionemo-framework
-repo_name: NVIDIA/bionemo-framework
+repo_url: https://github.com/NVIDIA-BioNeMo/bionemo-framework
+repo_name: NVIDIA-BioNeMo/bionemo-framework
 
 theme:
   name: "material"
@@ -125,14 +125,14 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/NVIDIA/bionemo-framework
+      link: https://github.com/NVIDIA-BioNeMo/bionemo-framework
   version:
     provider: mike
     default: latest
     alias: true
   docker_url: nvcr.io/nvidia/clara/bionemo-framework
   docker_tag: nightly
-  github_url: https://github.com/NVIDIA/bionemo-framework
+  github_url: https://github.com/NVIDIA-BioNeMo/bionemo-framework
 
 copyright: |
   &copy; Copyright 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
