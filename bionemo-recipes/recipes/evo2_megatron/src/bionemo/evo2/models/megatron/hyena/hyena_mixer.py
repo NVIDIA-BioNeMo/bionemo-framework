@@ -43,6 +43,42 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _dynamic_context_real_token_count(inference_context, padded_token_count: int) -> int:
+    """Return real active tokens in a dynamic-context flattened token batch."""
+    if inference_context is None:
+        return padded_token_count
+    is_static_batching = getattr(inference_context, "is_static_batching", None)
+    if is_static_batching is None or is_static_batching():
+        return padded_token_count
+
+    active_token_count = getattr(inference_context, "active_token_count", padded_token_count)
+    if torch.is_tensor(active_token_count):
+        if active_token_count.numel() != 1:
+            return padded_token_count
+        active_token_count = active_token_count.item()
+    try:
+        active_token_count = int(active_token_count)
+    except (TypeError, ValueError):
+        return padded_token_count
+    return max(1, min(active_token_count, padded_token_count))
+
+
+def _slice_padded_dynamic_context_tokens(features: torch.Tensor, inference_context) -> tuple[torch.Tensor, int]:
+    """Drop dynamic-context dummy token rows before Hyena recurrent state updates."""
+    padded_token_count = int(features.shape[-1])
+    real_token_count = _dynamic_context_real_token_count(inference_context, padded_token_count)
+    if real_token_count == padded_token_count:
+        return features, padded_token_count
+    return features[..., :real_token_count].contiguous(), padded_token_count
+
+
+def _pad_padded_dynamic_context_tokens(z: torch.Tensor, padded_token_count: int) -> torch.Tensor:
+    """Restore MCore's padded token width after Hyena recurrent computation."""
+    if z.shape[-1] >= padded_token_count:
+        return z
+    return F.pad(z, (0, padded_token_count - z.shape[-1]))
+
+
 try:
     from transformer_engine.common.recipe import DelayedScaling, Format
 except ImportError:
@@ -397,6 +433,7 @@ class HyenaMixer(MegatronModule):
             features = subquadratic_ops_rearrange(features, bhl_to_lbh=False)
         else:
             features = rearrange(features, "l b d -> b d l").contiguous()
+        features, padded_dynamic_token_count = _slice_padded_dynamic_context_tokens(features, inference_context)
 
         is_b2b_eligible = self.use_subquadratic_ops and self.operator_type in [
             "hyena_short_conv",
@@ -421,6 +458,7 @@ class HyenaMixer(MegatronModule):
             )
             z = self.mixer(x1, x2, v, _hyena_use_cp=_proj_use_cp, inference_context=inference_context)
 
+        z = _pad_padded_dynamic_context_tokens(z, padded_dynamic_token_count)
         if self.use_subquadratic_ops:
             z = subquadratic_ops_rearrange(z, bhl_to_lbh=True)
         else:

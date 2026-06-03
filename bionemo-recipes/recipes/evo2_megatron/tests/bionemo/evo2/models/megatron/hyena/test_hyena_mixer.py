@@ -19,7 +19,11 @@ import torch
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaTestModelProvider
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spec_no_te
-from bionemo.evo2.models.megatron.hyena.hyena_mixer import HyenaMixer
+from bionemo.evo2.models.megatron.hyena.hyena_mixer import (
+    HyenaMixer,
+    _pad_padded_dynamic_context_tokens,
+    _slice_padded_dynamic_context_tokens,
+)
 
 from ....utils import distributed_model_parallel_state
 
@@ -82,6 +86,45 @@ def _create_hyena_mixer(
         layer_number=1,
         operator_type=operator_type,
     )
+
+
+class _FakeDynamicContext:
+    def __init__(self, active_token_count: int, *, static: bool = False):
+        self.active_token_count = active_token_count
+        self._static = static
+
+    def is_static_batching(self) -> bool:
+        return self._static
+
+
+def test_slice_padded_dynamic_context_tokens_keeps_only_real_rows() -> None:
+    features = torch.arange(1 * 3 * 4, dtype=torch.float32).reshape(1, 3, 4)
+
+    sliced, padded_token_count = _slice_padded_dynamic_context_tokens(features, _FakeDynamicContext(2))
+
+    assert padded_token_count == 4
+    assert sliced.shape == (1, 3, 2)
+    torch.testing.assert_close(sliced, features[..., :2])
+
+
+def test_slice_padded_dynamic_context_tokens_keeps_static_width() -> None:
+    features = torch.arange(1 * 3 * 4, dtype=torch.float32).reshape(1, 3, 4)
+
+    sliced, padded_token_count = _slice_padded_dynamic_context_tokens(features, _FakeDynamicContext(2, static=True))
+
+    assert padded_token_count == 4
+    assert sliced.shape == features.shape
+    torch.testing.assert_close(sliced, features)
+
+
+def test_pad_padded_dynamic_context_tokens_restores_dummy_width() -> None:
+    z = torch.ones((1, 3, 2), dtype=torch.float32)
+
+    padded = _pad_padded_dynamic_context_tokens(z, 4)
+
+    assert padded.shape == (1, 3, 4)
+    torch.testing.assert_close(padded[..., :2], z)
+    torch.testing.assert_close(padded[..., 2:], torch.zeros((1, 3, 2)))
 
 
 @skip_if_no_gpu
