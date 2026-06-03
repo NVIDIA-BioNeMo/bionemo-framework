@@ -73,4 +73,4 @@ To run unit tests, execute:
 pytest -v .
 ```
 
-To build wheels for different Python, Linux, and system architecture configurations, run the [BioNeMo Sub-Package GitHub Actions Workflow (bionemo-subpackage-ci.yml)](https://github.com/NVIDIA/bionemo-framework/blob/main/.github/workflows/bionemo-subpackage-ci.yml)
+To build wheels for different Python, Linux, and system architecture configurations, run the [BioNeMo Sub-Package GitHub Actions Workflow (bionemo-subpackage-ci.yml)](https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/.github/workflows/bionemo-subpackage-ci.yml)

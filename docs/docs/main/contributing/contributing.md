@@ -156,7 +156,7 @@ Changes that affect model training accuracy or compute performance should be tes
 Developer workflow for _external_ code contributions is as follows:
 
 1. External developers must first [fork](https://help.github.com/en/articles/fork-a-repo) the
-   [upstream](https://github.com/NVIDIA/bionemo-framework/tree/main) BioNeMo OSS repository
+   [upstream](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main) BioNeMo OSS repository
    and use the `main` branch as base.
 
 2. Clone the forked repository and push changes to the personal fork.
@@ -291,7 +291,7 @@ To publish your sub-package via "Trusted Publishing" to PyPI, you can follow the
   - Required: Input a comma-separated list of sub-packages you want to test and/or publish into `subpackages`.
     - For example, `bionemo-moco,bionemo-scdl,bionemo-webdatamodule`. The sub-packages will be tested and published in separate parallel environments.
   - Optional: Set `test` to `true` if you want to test your sub-package. (Default: `true`)
-    - Sub-packages that require pre- or post- installation steps may require modification of the `install-and-test` job in [`bionemo-framework/.github/workflows/bionemo-subpackage-ci.yml`](https://github.com/NVIDIA/bionemo-framework/blob/main/.github/workflows/bionemo-subpackage-ci.yml).
+    - Sub-packages that require pre- or post- installation steps may require modification of the `install-and-test` job in [`bionemo-framework/.github/workflows/bionemo-subpackage-ci.yml`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/.github/workflows/bionemo-subpackage-ci.yml).
       - Supported `pyproject.toml` Optional Dependencies: \[ `te` \]
   - Optional: Set `publish` to `true` if you want to publish to Test PyPI or PyPI. (Default: `false`)
     - Pre-Requisite: [BioNeMo Publishing to PyPI](#publishing-to-pypi)

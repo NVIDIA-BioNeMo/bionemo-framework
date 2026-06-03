@@ -8,7 +8,7 @@ training. This recipe is configured for genomic sequences using a custom nucleot
 
 This folder contains an independent, minimal training example. It does not depend on any other code in the top-level
 bionemo-framework repository. You can download a zipped directory of this folder alone by clicking
-[here](https://download-directory.github.io?url=https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/llama3_native_te&filename=llama3-native-te).
+[here](https://download-directory.github.io?url=https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/llama3_native_te&filename=llama3-native-te).
 
 ### How to deploy this recipe on cloud providers
 
@@ -145,7 +145,7 @@ We compared the convergence of this Llama3 recipe (with FSDP2) against NeMo 2.0
 implementation on the DCLM Baseline 1.0 dataset. See [Training on Natural Language Data (Lingua
 Reproduction)](#lingua-reproduction) for more details. The figure above shows similar loss convergence and step time to
 the NeMo 2.0 training example, and the following table shows downstream performance on various tasks using the
-[lm-eval](github.com/eleutherai/lm-evaluation-harness) library. The variation in training step time every 10,000 steps
+[lm-eval](https://github.com/eleutherai/lm-evaluation-harness) library. The variation in training step time every 10,000 steps
 are due checkpointing, further work will be done to improve training step time stability.
 
 | name                | arc_challenge | arc_easy | boolq | copa | hella_swag | piqa  | winogrande |

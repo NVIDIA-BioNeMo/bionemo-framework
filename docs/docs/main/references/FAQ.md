@@ -20,10 +20,10 @@ BioNeMo Framework is distributed as a Docker container through NVIDIA NGC. To do
 and data assets, you will need a free NVIDIA NGC account.
 
 Alternatively, you can install individual sub-packages from within BioNeMo Framework by following the corresponding
-README pages the [BioNeMo Framework GitHub](https://github.com/NVIDIA/bionemo-framework). Please note that this is a
+README pages the [BioNeMo Framework GitHub](https://github.com/NVIDIA-BioNeMo/bionemo-framework). Please note that this is a
 beta feature and may require some additional effort to install seamlessly. We are actively working on testing this
 functionality and expect it will be a fully supported feature in future releases. You can review our
-[release notes](https://docs.nvidia.com/bionemo-framework/latest/user-guide/appendix/releasenotes-fw/) to stay up to
+[release notes](../about/releasenotes-fw.md) to stay up to
 date on our releases.
 
 ### How do I update BioNeMo Framework to the latest version?
@@ -54,7 +54,7 @@ For more information about external contributions, refer to the [Contributing](.
 ### How do I report bugs or suggest new features?
 
 To report a bug or suggest a new feature, open an issue on the
-[BioNeMo Framework GitHub site](https://github.com/NVIDIA/bionemo-framework/issues). For the fastest turnaround,
+[BioNeMo Framework GitHub site](https://github.com/NVIDIA-BioNeMo/bionemo-framework/issues). For the fastest turnaround,
 thoroughly describe your issue, including any steps and/or _minimal_ data sets necessary to reproduce (when possible),
 as well as the expected behavior.
 

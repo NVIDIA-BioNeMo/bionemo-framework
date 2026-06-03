@@ -8,7 +8,7 @@ Lightning. Other BioNeMo component libraries obtain their PyTorch dependencies v
 
 ## Developer Setup
 
-After following the setup specified in the [README](https://github.com/NVIDIA/bionemo-framework/blob/main/README.md),
+After following the setup specified in the [README](../../README.md),
 you may install this project's code in your environment via executing:
 
 ```bash

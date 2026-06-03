@@ -93,7 +93,7 @@ The BioNeMo Framework container is supported on cloud-based GPU instances throug
 **NVIDIA GPU-Optimized Virtual Machine Image (VMI)**, available for
 [AWS](https://aws.amazon.com/marketplace/pp/prodview-7ikjtg3um26wq#pdp-pricing),
 [GCP](https://console.cloud.google.com/marketplace/product/nvidia-ngc-public/nvidia-gpu-optimized-vmi),
-[Azure](https://azuremarketplace.microsoft.com/en-us/marketplace/apps/nvidia.ngc_azure_17_11?tab=overview), and
+[Azure](https://docs.nvidia.com/ngc/ngc-deploy-public-cloud/ngc-azure/index.html), and
 [OCI](https://cloudmarketplace.oracle.com/marketplace/en_US/listing/165104541).
 NVIDIA VMIs are built on Ubuntu and provide a standardized operating system environment across cloud infrastructure for
 running NVIDIA GPU-accelerated software. These images are pre-configured with software dependencies, such as NVIDIA GPU

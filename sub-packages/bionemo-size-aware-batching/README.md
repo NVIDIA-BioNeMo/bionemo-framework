@@ -70,7 +70,7 @@ ______________________________________________________________________
   ensuring that the total size of each batch does not exceed a specified maximum.
 - [**SizeAwareBatchSampler**](#sampler.SizeAwareBatchSampler): A class that batches elements of varying sizes while
   ensuring that the total size of each batch does not exceed a specified maximum.
-- [**BucketBatchSampler**](#BucketBatchSampler): A class that groups elements of varying sizes based on predefined
+- [**BucketBatchSampler**](#sampler.BucketBatchSampler): A class that groups elements of varying sizes based on predefined
   bucket ranges, and create batches with elements from each bucket to ensure that each batch has elements with
   homogeneous sizes.
 

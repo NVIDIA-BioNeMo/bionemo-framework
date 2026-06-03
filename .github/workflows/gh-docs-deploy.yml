@@ -28,7 +28,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r docs/requirements.txt
       - name: Build site
-        run: mkdocs build
+        run: mkdocs build --strict
+        working-directory: docs
+      - name: Check internal links
+        run: python scripts/check_internal_links.py site
         working-directory: docs
       - name: Configure Git Credentials
         if: github.event_name == 'push'

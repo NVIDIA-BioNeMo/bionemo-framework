@@ -8,12 +8,12 @@ and train/test splits are available.
 ## Training with bionemo-recipes
 
 Active ESM-2 training code lives in
-[`bionemo-recipes/recipes/esm2_native_te`](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_native_te).
+[`bionemo-recipes/recipes/esm2_native_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_native_te).
 See the recipe README for setup instructions, supported training scripts (`train_ddp.py`,
 `train_fsdp2.py`), and benchmark results.
 
 An Accelerate-based variant is also available at
-[`bionemo-recipes/recipes/esm2_accelerate_te`](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_accelerate_te).
+[`bionemo-recipes/recipes/esm2_accelerate_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_accelerate_te).
 
 ## Model Convergence
 
