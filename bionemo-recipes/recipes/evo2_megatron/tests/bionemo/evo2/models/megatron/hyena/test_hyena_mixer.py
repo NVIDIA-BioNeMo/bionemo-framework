@@ -98,6 +98,7 @@ class _FakeDynamicContext:
 
 
 def test_slice_padded_dynamic_context_tokens_keeps_only_real_rows() -> None:
+    """Dynamic-context dummy token rows are excluded before Hyena recurrence."""
     features = torch.arange(1 * 3 * 4, dtype=torch.float32).reshape(1, 3, 4)
 
     sliced, padded_token_count = _slice_padded_dynamic_context_tokens(features, _FakeDynamicContext(2))
@@ -108,6 +109,7 @@ def test_slice_padded_dynamic_context_tokens_keeps_only_real_rows() -> None:
 
 
 def test_slice_padded_dynamic_context_tokens_keeps_static_width() -> None:
+    """Static contexts keep the full input width."""
     features = torch.arange(1 * 3 * 4, dtype=torch.float32).reshape(1, 3, 4)
 
     sliced, padded_token_count = _slice_padded_dynamic_context_tokens(features, _FakeDynamicContext(2, static=True))
@@ -118,6 +120,7 @@ def test_slice_padded_dynamic_context_tokens_keeps_static_width() -> None:
 
 
 def test_pad_padded_dynamic_context_tokens_restores_dummy_width() -> None:
+    """Hyena mixer output is padded back to MCore's graph width."""
     z = torch.ones((1, 3, 2), dtype=torch.float32)
 
     padded = _pad_padded_dynamic_context_tokens(z, 4)
