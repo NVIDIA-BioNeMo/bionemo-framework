@@ -692,9 +692,13 @@ def test_subquadratic_ops_with_cuda_graph_matches_baseline(
     The reference is the simplest path: standard kernels with CUDA graphs OFF (``cuda_graph_impl=none``).
     Greedy decoding (top_k=1) + a fixed seed make generation deterministic, so each of the four
     combinations of {standard, subq-ops} x {eager, local CUDA graphs} must produce byte-identical output.
-    This covers the otherwise-untested combination of fused subquadratic-ops prefill together with
-    CUDA-graphed decode. The subq path uses guarded kernels: if this GPU cannot run them,
-    ``run_infer_subprocess`` xfails (via the CUDA self-test guard) instead of producing invalid output.
+
+    subquadratic-ops kernels cannot be captured into a CUDA graph (they SIGSEGV during capture), so
+    ``setup_inference_engine`` makes them mutually exclusive: requesting both forces eager decode
+    (``cuda_graph_impl='none'``) with a warning. Hence the ``[True, 'local']`` case runs subq-ops
+    eagerly rather than crashing, and must still match the baseline. The subq path uses guarded
+    kernels: if this GPU cannot run them, ``run_infer_subprocess`` xfails (via the CUDA self-test
+    guard) instead of producing invalid output.
     """
     baseline = run_infer_subprocess(
         mbridge_checkpoint_path,

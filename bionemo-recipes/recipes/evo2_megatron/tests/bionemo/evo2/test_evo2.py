@@ -858,8 +858,10 @@ def test_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path:
 
     Mirrors :func:`test_batch_generate_mbridge` (1b-bf16, greedy) but enables ``use_subquadratic_ops``
     so the b2b causal-conv1d prefill and fft/causal-conv1d FIR kernels are exercised end-to-end on the
-    native dynamic (CUDA-graphed) decode path. This gives accuracy coverage for the subquadratic-ops
-    path through the dynamic engine, not just the default conv path. It xfails on hardware where the
+    native dynamic decode path. Because subquadratic-ops kernels cannot be captured into a CUDA graph,
+    ``setup_inference_engine`` forces ``cuda_graph_impl='none'`` (eager decode) when they are enabled.
+    This gives accuracy coverage for the subquadratic-ops path through the dynamic engine, not just the
+    default conv path. It xfails on hardware where the
     prebuilt subquadratic kernels fail their CUDA self-test (unsupported PTX/toolchain), matching the
     other subquadratic tests in this recipe.
     """

@@ -499,6 +499,24 @@ def setup_inference_engine(
         >>> components = setup_inference_engine(Path("/path/to/checkpoint"), max_batch_size=4)
         >>> results = generate(components, prompts=["ATCG", "GCTA"], max_new_tokens=100)
     """
+    # subquadratic_ops_torch ships prebuilt CUDA kernels that cannot be captured into a CUDA graph
+    # (launching one during capture crashes the process with SIGSEGV in cuLaunchKernel), and Evo2 is
+    # all-Hyena so every graph-captured decode layer would hit one. They are therefore mutually
+    # exclusive. Honor the explicit use_subquadratic_ops opt-in by forcing eager decode. Note the
+    # default (cuda_graph_impl="local", use_subquadratic_ops=False) is the fast path: CUDA-graphed
+    # decode is ~1.4-3.7x faster than subquadratic-ops here, which only helps at very long prefill.
+    if use_subquadratic_ops and cuda_graph_impl != "none":
+        logger.warning(
+            "use_subquadratic_ops=True is incompatible with CUDA-graphed decode "
+            "(cuda_graph_impl=%r): the prebuilt subquadratic_ops_torch kernels cannot be captured "
+            "into a CUDA graph and crash with SIGSEGV during capture. Forcing cuda_graph_impl='none' "
+            "(eager decode) so the requested subquadratic-ops can run. Prefer the default "
+            "cuda_graph_impl='local' + use_subquadratic_ops=False unless you need subquadratic-ops "
+            "for very long prefill.",
+            cuda_graph_impl,
+        )
+        cuda_graph_impl = "none"
+
     # -------------------------------------------------------------------------
     # Step 1: Load configuration from checkpoint
     # -------------------------------------------------------------------------
