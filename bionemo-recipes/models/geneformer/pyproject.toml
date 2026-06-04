@@ -16,6 +16,7 @@ dependencies = [
     "nemo_toolkit[lightning]==2.4.0",
     "fiddle",
     "megatron-core",
+    "nvidia-resiliency-ext>=0.6.0",
     "pytest",
     "requests",
     "hydra-core",
