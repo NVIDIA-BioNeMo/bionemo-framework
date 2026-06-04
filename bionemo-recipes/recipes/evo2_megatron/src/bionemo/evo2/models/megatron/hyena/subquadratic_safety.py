@@ -150,16 +150,19 @@ def ensure_subquadratic_b2b_causal_conv1d_supported(device_index: int | None = N
 
     actual = subq_b2b_causal_conv1d(x, proj_weight, mixer_weight, bias)
 
+    # subquadratic_ops_torch.b2b_causal_conv1d uses the weight[-1] == current-tap convention
+    # (same as its causal_conv1d), so the reference convs must NOT flip the weights. Flipping
+    # them produces a spurious ~0.6 relative mismatch that wrongly trips the self-test.
     projected = F.conv1d(
         F.pad(x, (proj_kernel_size - 1, 0)),
-        proj_weight.flip(-1).unsqueeze(1),
+        proj_weight.unsqueeze(1),
         groups=3 * hidden_size,
     )
     x1, x2, v = projected[:, ::3], projected[:, 1::3], projected[:, 2::3]
     z = x2 * v
     mixed = F.conv1d(
         F.pad(z, (mixer_kernel_size - 1, 0)),
-        mixer_weight.flip(-1).unsqueeze(1),
+        mixer_weight.unsqueeze(1),
         groups=hidden_size,
     )
     expected = x1 * (mixed + bias[None, :, None] * z)

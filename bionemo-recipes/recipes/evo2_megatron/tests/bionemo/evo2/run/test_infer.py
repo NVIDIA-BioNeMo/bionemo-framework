@@ -298,6 +298,7 @@ def run_infer_subprocess(
     top_k: int = 1,
     seed: int = 42,
     use_subquadratic_ops: bool = False,
+    cuda_graph_impl: str | None = None,
     max_seq_length: int | None = None,
     block_size_tokens: int | None = None,
     return_log_probs: bool = False,
@@ -317,6 +318,8 @@ def run_infer_subprocess(
         top_k: Top-k sampling parameter (1 for greedy)
         seed: Random seed for reproducibility
         use_subquadratic_ops: Pass --use-subquadratic-ops to the CLI.
+        cuda_graph_impl: If set, pass --cuda-graph-impl ("local" = mcore per-layer decode graphs,
+            "none" = eager decode). Defaults to the CLI default ("local") when None.
         max_seq_length: If set, pass --max-seq-length (caps the per-context allocation).
         block_size_tokens: If set, pass --inference-dynamic-batching-block-size (paged-KV block size).
             The CLI default is 256; pin it explicitly when a test depends on the block boundary.
@@ -355,6 +358,8 @@ def run_infer_subprocess(
     ]
     if use_subquadratic_ops:
         cmd.append("--use-subquadratic-ops")
+    if cuda_graph_impl is not None:
+        cmd.extend(["--cuda-graph-impl", str(cuda_graph_impl)])
     if max_seq_length is not None:
         cmd.extend(["--max-seq-length", str(max_seq_length)])
     if block_size_tokens is not None:
@@ -677,44 +682,48 @@ def test_identical_prompts_should_be_identical(mbridge_checkpoint_path, tmp_path
     )
 
 
-def test_subquadratic_ops_matches_baseline(mbridge_checkpoint_path, tmp_path):
-    """Greedy generation with --use-subquadratic-ops must match the standard path.
+@pytest.mark.parametrize("cuda_graph_impl", ["none", "local"])
+@pytest.mark.parametrize("use_subquadratic_ops", [False, True])
+def test_subquadratic_ops_with_cuda_graph_matches_baseline(
+    mbridge_checkpoint_path, tmp_path, use_subquadratic_ops, cuda_graph_impl
+):
+    """Every (subq-ops x CUDA-graph) combination matches the eager, non-subq baseline.
 
-    This is the end-to-end correctness check for the subq-ops inference path.
-    The subq path uses guarded subquadratic kernels. If the local CUDA/GPU
-    combination cannot run those kernels correctly, the guard raises before
-    invalid outputs can propagate. With greedy decoding (top_k=1) and the same
-    seed, supported subq kernels must produce identical output.
+    The reference is the simplest path: standard kernels with CUDA graphs OFF (``cuda_graph_impl=none``).
+    Greedy decoding (top_k=1) + a fixed seed make generation deterministic, so each of the four
+    combinations of {standard, subq-ops} x {eager, local CUDA graphs} must produce byte-identical output.
+    This covers the otherwise-untested combination of fused subquadratic-ops prefill together with
+    CUDA-graphed decode. The subq path uses guarded kernels: if this GPU cannot run them,
+    ``run_infer_subprocess`` xfails (via the CUDA self-test guard) instead of producing invalid output.
     """
-    output_baseline = tmp_path / "output_baseline.jsonl"
-    output_subq = tmp_path / "output_subq.jsonl"
-
-    generated_baseline = run_infer_subprocess(
+    baseline = run_infer_subprocess(
         mbridge_checkpoint_path,
         prompt=PROMPT_1,
-        output_file=output_baseline,
+        output_file=tmp_path / "output_baseline.jsonl",
         max_new_tokens=20,
         temperature=1.0,
         top_k=1,
         seed=42,
         use_subquadratic_ops=False,
+        cuda_graph_impl="none",
     )
-
-    generated_subq = run_infer_subprocess(
+    variant = run_infer_subprocess(
         mbridge_checkpoint_path,
         prompt=PROMPT_1,
-        output_file=output_subq,
+        output_file=tmp_path / "output_variant.jsonl",
         max_new_tokens=20,
         temperature=1.0,
         top_k=1,
         seed=42,
-        use_subquadratic_ops=True,
+        use_subquadratic_ops=use_subquadratic_ops,
+        cuda_graph_impl=cuda_graph_impl,
     )
 
-    assert len(generated_baseline) > 0, "Baseline generation produced empty output"
-    assert len(generated_subq) > 0, "Subq-ops generation produced empty output"
-    assert generated_baseline == generated_subq, (
-        f"Subq-ops path diverged from baseline:\nBaseline: {generated_baseline}\nSubq-ops: {generated_subq}"
+    assert baseline["completion"], "Baseline generation produced empty output"
+    assert variant["completion"], "Variant generation produced empty output"
+    assert variant["completion"] == baseline["completion"], (
+        f"subq_ops={use_subquadratic_ops}, cuda_graph_impl={cuda_graph_impl} diverged from the "
+        f"eager non-subq baseline:\n  baseline={baseline['completion']!r}\n  variant ={variant['completion']!r}"
     )
 
 

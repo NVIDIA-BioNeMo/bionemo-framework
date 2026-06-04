@@ -380,20 +380,27 @@ def _setup_native_dynamic_components(
     )
 
 
-def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int) -> bool:
+def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int, cuda_graph_impl: str = "local") -> bool:
     """Enable mcore local CUDA graphs for Evo2 dynamic inference when supported.
 
     This mirrors Megatron's ``cuda_graph_impl=local`` setup, but applies it directly to the
     provider loaded from the checkpoint because this recipe does not use Megatron's global arg
     parser. Empty ``cuda_graph_scope`` means per-layer local graph capture for every graphable
     layer; Evo2's HyenaLayer follows the same convention as mcore's MambaLayer.
+
+    ``cuda_graph_impl="none"`` disables graph capture entirely (decode runs eager) -- useful for
+    debugging and for tests that need an un-graphed reference to compare against.
     """
+    if cuda_graph_impl == "none":
+        if rank == 0:
+            logger.info("[evo2-native-cg] CUDA graphs disabled (cuda_graph_impl='none'); decode runs eager")
+        return False
     if not hasattr(model_provider, "cuda_graph_impl"):
         if rank == 0:
             logger.warning("[evo2-native-cg] model provider has no cuda_graph_impl; CUDA graphs disabled")
         return False
 
-    model_provider.cuda_graph_impl = "local"
+    model_provider.cuda_graph_impl = cuda_graph_impl
     model_provider.cuda_graph_scope = []
     os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
     if rank == 0:
@@ -454,6 +461,7 @@ def setup_inference_engine(
     vortex_style_fp8: bool = False,
     random_seed: int = 1234,
     use_subquadratic_ops: bool = False,
+    cuda_graph_impl: str = "local",
 ) -> Evo2InferenceComponents:
     """Setup the Evo2 native dynamic-inference engine and related components.
 
@@ -481,6 +489,8 @@ def setup_inference_engine(
         use_subquadratic_ops: Use fused subquadratic-ops kernels (b2b causal
             conv1d in prefill, fft_causal_conv1d / causal_conv1d in
             parallel_fir).
+        cuda_graph_impl: ``"local"`` (default) captures mcore per-layer CUDA graphs for decode;
+            ``"none"`` disables graph capture (eager decode), mainly for debugging / reference runs.
 
     Returns:
         Evo2InferenceComponents containing all inference components.
@@ -519,7 +529,9 @@ def setup_inference_engine(
     # static-batching, so flash_decode (which asserts static batching, attention.py) MUST be off.
     model_provider.flash_decode = False
     model_provider.use_subquadratic_ops = use_subquadratic_ops
-    cuda_graphs_enabled = _configure_native_dynamic_cuda_graphs(model_provider, rank=int(os.environ.get("RANK", "0")))
+    cuda_graphs_enabled = _configure_native_dynamic_cuda_graphs(
+        model_provider, rank=int(os.environ.get("RANK", "0")), cuda_graph_impl=cuda_graph_impl
+    )
     if cuda_graphs_enabled and getattr(model_provider, "recompute_granularity", None):
         logger.info("Disabling activation recompute for inference CUDA graphs")
         model_provider.recompute_granularity = None
@@ -1420,6 +1432,13 @@ def parse_args() -> argparse.Namespace:
         "but has no effect on per-token decode throughput.",
     )
     ap.add_argument(
+        "--cuda-graph-impl",
+        choices=["none", "local"],
+        default="local",
+        help="CUDA-graph mode for dynamic decode: 'local' (mcore per-layer graphs, default) or 'none' "
+        "(eager decode, no graph capture). 'none' is mainly for debugging / un-graphed reference runs.",
+    )
+    ap.add_argument(
         "--enable-chunked-prefill",
         action="store_true",
         default=False,
@@ -1506,6 +1525,7 @@ def infer(
     max_seq_length_num_prompts: int = _DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS,
     max_batch_size: int = 1,
     use_subquadratic_ops: bool = False,
+    cuda_graph_impl: str = "local",
     enable_chunked_prefill: bool = False,
     inference_dynamic_batching_max_tokens: Optional[int] = None,
     inference_dynamic_batching_block_size: int = 256,
@@ -1539,6 +1559,8 @@ def infer(
         max_batch_size: Maximum batch size for inference. The inference engine pre-allocates
             GPU memory proportional to this value. For large models, only 1 may fit.
         use_subquadratic_ops: Use fused subquadratic-ops kernels in the inference path.
+        cuda_graph_impl: ``"local"`` (default) uses mcore per-layer decode CUDA graphs; ``"none"``
+            runs decode eagerly (no graph capture) -- mainly for debugging / un-graphed reference runs.
         enable_chunked_prefill: Split prompts across multiple prefill forwards when needed.
         inference_dynamic_batching_max_tokens: Optional dynamic-context per-step token budget.
         inference_dynamic_batching_block_size: Paged-KV block size for dynamic inference.
@@ -1564,6 +1586,7 @@ def infer(
         vortex_style_fp8=vortex_style_fp8,
         random_seed=random_seed,
         use_subquadratic_ops=use_subquadratic_ops,
+        cuda_graph_impl=cuda_graph_impl,
     )
     mem_after_setup_gb = torch.cuda.max_memory_allocated() / (1024**3)
     logger.info(f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB")
@@ -1709,6 +1732,7 @@ def main() -> None:
         max_seq_length_num_prompts=args.max_seq_length_num_prompts,
         max_batch_size=args.max_batch_size,
         use_subquadratic_ops=args.use_subquadratic_ops,
+        cuda_graph_impl=args.cuda_graph_impl,
         enable_chunked_prefill=args.enable_chunked_prefill,
         inference_dynamic_batching_max_tokens=args.inference_dynamic_batching_max_tokens,
         inference_dynamic_batching_block_size=args.inference_dynamic_batching_block_size,

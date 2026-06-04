@@ -25,11 +25,9 @@ from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
 try:
     from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
     from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d as _subq_fft_causal_conv1d
-    from subquadratic_ops_torch.rearrange import rearrange as _subq_rearrange
 except ImportError as _subq_import_error:
     _subq_causal_conv1d = None
     _subq_fft_causal_conv1d = None
-    _subq_rearrange = None
     _subq_error_msg = f"subquadratic_ops_torch not available: {_subq_import_error}"
 
 
@@ -84,10 +82,11 @@ def parallel_fir(
     if use_subquadratic_ops and _subq_fft_causal_conv1d is None:
         raise ImportError(_subq_error_msg)
 
-    if use_subquadratic_ops:
-        u = _subq_rearrange(u.transpose(0, 1), bhl_to_lbh=False)
-    else:
-        u = rearrange(u, "b l d -> b d l")
+    # Layout to [B, D, L]. We deliberately do NOT use the subquadratic-ops rearrange kernel here even
+    # when use_subquadratic_ops is set: it is a training-tuned custom kernel and is slower than a plain
+    # einops/transpose for this inference layout op. The subq win is in the compute kernels below
+    # (fft_causal_conv1d / causal_conv1d), not in the rearrange.
+    u = rearrange(u, "b l d -> b d l")
 
     if fir_length >= 128:
         if use_subquadratic_ops:
