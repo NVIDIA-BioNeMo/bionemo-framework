@@ -589,10 +589,11 @@ class GenerateRequest(BaseModel):
     prompt: str = ""
     organism: str = "None (raw DNA)"
     tag: Optional[str] = None  # custom phylo prefix; overrides `organism` when set
-    features: list[FeatureClamp] = []  # one or more features to clamp simultaneously
+    features: list[FeatureClamp] = []  # zero or more features to clamp; [] = plain generation
     n_tokens: int = 120
     temperature: float = 1.0
     top_k: int = 0
+    compare_baseline: bool = False  # also return an unsteered sample for side-by-side
 
 
 @app.get("/features")
@@ -616,9 +617,7 @@ def generate(req: GenerateRequest):
 
     sae = _STATE["sae"]
     tok = _STATE["tokenizer"]
-    clamps = req.features or []
-    if not clamps:
-        raise HTTPException(status_code=400, detail="Provide at least one feature to clamp (features: [{feature_id, strength}])")
+    clamps = req.features or []  # may be empty -> plain (unsteered) generation
     for c in clamps:
         if not (0 <= int(c.feature_id) < _STATE["n_features"]):
             raise HTTPException(status_code=400, detail=f"feature_id {c.feature_id} out of range [0,{_STATE['n_features']})")
@@ -653,27 +652,34 @@ def generate(req: GenerateRequest):
             target = float(c.strength)  # clamp this feature's activation directly to `strength`
             specs.append((enc_f, b_f, dec_f, target))
             feat_meta.append({"id": f, "label": _STATE["labels"].get(f), "strength": float(c.strength)})
-        hook_fn = _clamp_hook(specs, pre_bias, len(ids))  # additive, continuation-only
+        hook_fn = _clamp_hook(specs, pre_bias, len(ids)) if specs else None  # additive, continuation-only
 
-        # Identical cache-free machinery for both; the additive clamp hook is the only difference.
-        base_ids = _autoregress(gen_model, ids, n_tokens, req.temperature, req.top_k, allowed)
-        steer_ids = _autoregress(
+        # Main generation: steered if any features were given, else a plain sample.
+        main_ids = _autoregress(
             gen_model, ids, n_tokens, req.temperature, req.top_k, allowed,
-            hook_layer=hook_layer, hook_fn=hook_fn,
+            hook_layer=(hook_layer if hook_fn else None), hook_fn=hook_fn,
         )
+        # Baseline (unsteered) only when explicitly requested AND we actually clamped.
+        base_ids = None
+        if req.compare_baseline and specs:
+            base_ids = _autoregress(gen_model, ids, n_tokens, req.temperature, req.top_k, allowed)
 
-    base_dna = _detok(base_ids)
-    steer_dna = _detok(steer_ids)
-    return {
+    main_dna = _detok(main_ids)
+    resp = {
         "prompt": dna,
         "organism": req.organism,
         "tag": tag,
         "tag_len": len(tag),
         "n_tokens": n_tokens,
         "features": feat_meta,
-        "baseline": {"sequence": base_dna, "activations": _feature_tracks(base_dna, fids)},
-        "steered": {"sequence": steer_dna, "activations": _feature_tracks(steer_dna, fids)},
+        "steered": bool(specs),
+        "generation": {"sequence": main_dna, "activations": _feature_tracks(main_dna, fids)},
+        "baseline": None,
     }
+    if base_ids is not None:
+        base_dna = _detok(base_ids)
+        resp["baseline"] = {"sequence": base_dna, "activations": _feature_tracks(base_dna, fids)}
+    return resp
 
 
 if __name__ == "__main__":

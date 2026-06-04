@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { useHealth, postJSON, getJSON, activationColor, BASE_COLORS, cleanDNA } from './backend'
+import { useHealth, postJSON, getJSON, activationColor, legendGradient, cleanDNA } from './backend'
 
 // Sequence inspector: paste DNA -> per-base SAE activations from the live backend
 // (/annotate). DNA-only display; absolute 0->max coloring (clear -> green).
@@ -113,6 +113,7 @@ function Result({ result }) {
         layer {result.layer} · organism {result.organism}
         {result.tag_len > 0 ? ` · phylo tag (${result.tag_len} bp) stripped` : ''}
       </div>
+      <Legend label="SAE activation (Viridis)" note="each feature scaled to its own max" />
       {result.features.map((f) => <FeatureHeatmap key={f.feature_id} feature={f} tagLen={tagLen} bases={bases} />)}
     </div>
   )
@@ -136,6 +137,10 @@ function FeatureHeatmap({ feature, tagLen, bases }) {
 }
 
 export function Heat({ bases, acts, max, lines }) {
+  // Per-cell letter color so text stays legible across the Viridis ramp: dark
+  // text on the light (high-activation) end, light text on the dark/empty end.
+  const dark = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  const empty = dark ? '#dcdcdc' : '#333'
   return (
     <div style={S.heatBody}>
       {lines.map((start) => (
@@ -145,14 +150,29 @@ export function Heat({ bases, acts, max, lines }) {
             {bases.slice(start, start + BASES_PER_LINE).map((b, j) => {
               const idx = start + j
               const a = acts[idx] ?? 0
+              const t = max > 0 ? Math.min(1, a / max) : 0
+              const letter = a <= 0 || t < 0.02 ? empty : t > 0.45 ? '#0a0a0a' : '#f4f4f4'
               return (
                 <span key={idx} title={`pos ${idx + 1}: ${a.toFixed(3)}`}
-                  style={{ background: activationColor(a, max), color: BASE_COLORS[b] || 'var(--text)' }}>{b}</span>
+                  style={{ background: activationColor(a, max), color: letter }}>{b}</span>
               )
             })}
           </span>
         </div>
       ))}
+    </div>
+  )
+}
+
+// Viridis colorbar legend.
+export function Legend({ label = 'SAE activation', note }) {
+  return (
+    <div style={S.legend}>
+      <span style={S.legendLabel}>{label}</span>
+      <span>low</span>
+      <span style={{ ...S.legendBar, background: legendGradient() }} />
+      <span>high</span>
+      {note && <span style={S.legendNote}>{note}</span>}
     </div>
   )
 }
@@ -273,4 +293,8 @@ export const S = {
   heatLine: { display: 'flex', gap: '8px', alignItems: 'baseline' },
   heatIdx: { color: 'var(--text-muted)', fontSize: '11px', minWidth: '40px', textAlign: 'right', whiteSpace: 'pre' },
   heatSeq: { letterSpacing: '1px', wordBreak: 'break-all' },
+  legend: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: 'var(--text-muted)' },
+  legendLabel: { fontWeight: 600, color: 'var(--text-secondary)' },
+  legendBar: { width: '160px', height: '10px', borderRadius: '3px', border: '1px solid var(--border)' },
+  legendNote: { fontStyle: 'italic' },
 }

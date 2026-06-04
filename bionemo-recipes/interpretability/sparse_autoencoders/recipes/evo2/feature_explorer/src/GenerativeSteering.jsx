@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useHealth, postJSON, getJSON, cleanDNA } from './backend'
-import { BackendBanner, OrganismField, FeaturePicker, resolveFeatureId, Heat, Row } from './SequenceInspector'
+import { BackendBanner, OrganismField, FeaturePicker, resolveFeatureId, Row } from './SequenceInspector'
 
 // Generative steering: autoregressively generate DNA from Evo2 while ADDITIVELY
 // clamping one or more SAE features (picked by name) on the generated
@@ -19,6 +19,7 @@ export default function GenerativeSteering() {
   const [rows, setRows] = useState([{ q: '', strength: 4 }])
   const [nTokens, setNTokens] = useState(120)
   const [temperature, setTemperature] = useState(1.0)
+  const [compareBaseline, setCompareBaseline] = useState(false)
 
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -45,6 +46,7 @@ export default function GenerativeSteering() {
         features: clamps.map((c) => ({ feature_id: c.id, strength: c.strength })),
         n_tokens: Number(nTokens),
         temperature: Number(temperature),
+        compare_baseline: compareBaseline,
       }
       setResult(await postJSON('/generate', body))
     } catch (e) {
@@ -55,7 +57,7 @@ export default function GenerativeSteering() {
     }
   }
 
-  const canRun = clamps.length > 0 && health.status === 'ready' && !busy
+  const canRun = health.status === 'ready' && !busy // clamps optional — [] = plain generation
 
   return (
     <div style={S.wrap}>
@@ -90,9 +92,17 @@ export default function GenerativeSteering() {
           </span>
         </Row>
 
+        <Row label="Baseline:">
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+            <input type="checkbox" checked={compareBaseline} onChange={(e) => setCompareBaseline(e.target.checked)} disabled={clamps.length === 0} />
+            also generate an unsteered baseline to compare
+          </label>
+          <span style={S.help}>{clamps.length === 0 ? '(no clamp — single plain generation)' : 'off by default; doubles generation time'}</span>
+        </Row>
+
         <div style={S.actions}>
           <button onClick={generate} disabled={!canRun} style={{ ...S.primary, opacity: canRun ? 1 : 0.5 }}>
-            {busy ? 'Generating…' : `Generate (clamp ${clamps.length} feature${clamps.length === 1 ? '' : 's'})`}
+            {busy ? 'Generating…' : clamps.length ? `Generate (clamp ${clamps.length} feature${clamps.length === 1 ? '' : 's'})` : 'Generate (no clamp)'}
           </button>
           {health.status !== 'ready' && <span style={S.down}>× backend {health.status === 'offline' ? 'down' : 'loading'}</span>}
           {error && <span style={S.down}>× {error}</span>}
@@ -124,33 +134,33 @@ function Formula() {
 }
 
 function SteerResult({ result }) {
-  const feats = result.features
-  const maxByFid = {}
-  for (const f of feats) {
-    const b = result.baseline.activations[f.id] || []
-    const s = result.steered.activations[f.id] || []
-    maxByFid[f.id] = Math.max(0, ...b, ...s)
-  }
+  const feats = result.features || []
+  const gen = result.generation
+  const base = result.baseline
   const mean = (a) => (a && a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0)
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-      <div style={S.resultMeta}>
-        Clamped {feats.length} feature{feats.length === 1 ? '' : 's'} on the generated continuation ({result.organism}).
-        Mean activation baseline → steered:&nbsp;
-        {feats.map((f) => (
-          <span key={f.id} style={{ marginRight: '12px' }}>
-            <b>#{f.id} {f.label}</b> {mean(result.baseline.activations[f.id]).toFixed(3)} →{' '}
-            <b style={{ color: 'var(--accent)' }}>{mean(result.steered.activations[f.id]).toFixed(3)}</b> (clamp {f.strength})
-          </span>
-        ))}
-      </div>
-      <SteerBlock title="Baseline (no steering)" seq={result.baseline.sequence} activations={result.baseline.activations} feats={feats} maxByFid={maxByFid} />
-      <SteerBlock title="Steered" seq={result.steered.sequence} activations={result.steered.activations} feats={feats} maxByFid={maxByFid} />
+      {feats.length ? (
+        <div style={S.resultMeta}>
+          Clamped {feats.length} feature{feats.length === 1 ? '' : 's'} on the generated continuation ({result.organism}).&nbsp;
+          {feats.map((f) => (
+            <span key={f.id} style={{ marginRight: '12px' }}>
+              <b>#{f.id} {f.label}</b> mean <b style={{ color: 'var(--accent)' }}>{mean(gen.activations[f.id]).toFixed(3)}</b>
+              {base ? ` (baseline ${mean(base.activations[f.id]).toFixed(3)})` : ''} @ clamp {f.strength}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div style={S.resultMeta}>Unsteered generation · {result.organism} · {gen.sequence.length} bp.</div>
+      )}
+      <SteerBlock title={feats.length ? 'Steered generation' : 'Generation'} seq={gen.sequence} />
+      {base && <SteerBlock title="Baseline (unsteered)" seq={base.sequence} />}
     </div>
   )
 }
 
-function SteerBlock({ title, seq, activations, feats, maxByFid }) {
+// Plain DNA readout — black monospace text on a light panel (no activation colormap).
+function SteerBlock({ title, seq }) {
   const bases = [...seq]
   const lines = []
   for (let i = 0; i < bases.length; i += BASES_PER_LINE) lines.push(i)
@@ -158,12 +168,14 @@ function SteerBlock({ title, seq, activations, feats, maxByFid }) {
   return (
     <div style={S.block}>
       <div style={S.blockHead}><span style={S.blockTitle}>{title}</span><span style={S.blockMeta}>{bases.length} bp · GC {gc.toFixed(0)}%</span></div>
-      {feats.map((f) => (
-        <div key={f.id} style={{ marginBottom: '8px' }}>
-          <div style={S.trackLabel}>#{f.id} {f.label}</div>
-          <Heat bases={bases} acts={activations[f.id] || []} max={maxByFid[f.id]} lines={lines} />
-        </div>
-      ))}
+      <div style={S.seqReadout}>
+        {lines.map((start) => (
+          <div key={start} style={S.seqLine}>
+            <span style={S.seqIdx}>{String(start + 1).padStart(5, ' ')}</span>
+            <span style={S.seqText}>{bases.slice(start, start + BASES_PER_LINE).join('')}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -191,4 +203,8 @@ const S = {
   blockTitle: { fontSize: '13px', fontWeight: 600, color: 'var(--text-heading)' },
   blockMeta: { marginLeft: 'auto', fontFamily: 'monospace', fontSize: '11px', color: 'var(--text-secondary)' },
   trackLabel: { fontSize: '11px', color: 'var(--text-tertiary)', fontFamily: 'monospace', marginBottom: '2px' },
+  seqReadout: { background: '#ffffff', border: '1px solid #e0e0e0', borderRadius: '6px', padding: '8px 10px', fontFamily: 'ui-monospace, Menlo, monospace', fontSize: '13px', lineHeight: 1.7 },
+  seqLine: { display: 'flex', gap: '8px', alignItems: 'baseline' },
+  seqIdx: { color: '#999', fontSize: '11px', minWidth: '40px', textAlign: 'right', whiteSpace: 'pre' },
+  seqText: { color: '#111', letterSpacing: '1px', wordBreak: 'break-all' },
 }

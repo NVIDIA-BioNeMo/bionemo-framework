@@ -36,21 +36,38 @@ export function useHealth(pollMs = 4000) {
   return health
 }
 
-// Activation -> background color, absolute 0->max. No (or negligible) activation
-// is fully clear; real activation ramps clear -> green and saturates toward `max`.
-// Theme-aware: dark-green on the light theme, brighter green on the dark theme so
-// the high end stays legible against the background.
+// Viridis — the de-facto perceptually-uniform scientific colormap (matplotlib default).
+const VIRIDIS = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]]
+const _l = (a, b, t) => Math.round(a + (b - a) * t)
+
+export function viridis(t) {
+  t = Math.max(0, Math.min(1, t))
+  const n = VIRIDIS.length - 1
+  const x = t * n
+  const i = Math.min(n - 1, Math.floor(x))
+  const f = x - i
+  const a = VIRIDIS[i]
+  const b = VIRIDIS[i + 1]
+  return [_l(a[0], b[0], f), _l(a[1], b[1], f), _l(a[2], b[2], f)]
+}
+
+// CSS gradient for the legend bar.
+export function legendGradient() {
+  return (
+    'linear-gradient(90deg,' +
+    VIRIDIS.map((c, i) => `rgb(${c[0]},${c[1]},${c[2]}) ${Math.round((100 * i) / (VIRIDIS.length - 1))}%`).join(',') +
+    ')'
+  )
+}
+
+// Activation -> Viridis color, absolute 0->max. Alpha ramps in so zero activation
+// is fully clear (no fill) and intensity rises toward `max`.
 export function activationColor(value, max) {
   if (!(max > 0) || value <= 0) return 'transparent'
   const t = Math.max(0, Math.min(1, value / max))
-  if (t < 0.03) return 'transparent' // keep the floor clean — only real activation shows
-  const dark = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
-  const lo = dark ? [46, 92, 46] : [221, 242, 210] // near-clear green
-  const hi = dark ? [126, 217, 87] : [9, 74, 22] // saturated -> dark green
-  const r = Math.round(lo[0] + (hi[0] - lo[0]) * t)
-  const g = Math.round(lo[1] + (hi[1] - lo[1]) * t)
-  const b = Math.round(lo[2] + (hi[2] - lo[2]) * t)
-  return `rgba(${r}, ${g}, ${b}, ${(0.18 + 0.82 * t).toFixed(3)})`
+  if (t < 0.02) return 'transparent'
+  const [r, g, b] = viridis(t)
+  return `rgba(${r}, ${g}, ${b}, ${(0.22 + 0.78 * t).toFixed(3)})`
 }
 
 export function cleanDNA(raw) {
