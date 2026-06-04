@@ -1014,24 +1014,35 @@ class ParallelHyenaOperator(nn.Module):
                 compute_state=inference_context is not None,
             )
             # y = rearrange(y, "b d l -> b l d")
-        else:
-            # Decode path: handle arbitrary batch size
-            # Input shapes: [b, d, l] where l=1 during decode
-            x1 = rearrange(x1, "b d l -> (b l) d")
-            x2 = rearrange(x2, "b d l -> (b l) d")
-            v = rearrange(v, "b d l -> (b l) d")
-            x1, x2 = x2, x1  # TODO: figure why it is swapped
-            y, iir_state = engine.step_iir(
-                x2=x2,
-                x1=x1,
-                v=v,
-                D=bias,  # torch.Size([4096])
-                residues=self.filter.R,  # torch.Size([4096, 16])
-                poles=poles,  # torch.Size([4096, 16, 1])
+        elif L == 1:
+            # Ordinary single-token decode: exact O(d) modal step (the CUDA-graphed path). x1/x2 stay
+            # swapped per the single-step convention.
+            y_t, iir_state = engine.step_iir(
+                x2=x1[:, :, 0],  # swapped: step_iir's x2 receives x1
+                x1=x2[:, :, 0],
+                v=v[:, :, 0],
+                D=bias,
+                residues=self.filter.R,
+                poles=poles,
                 iir_state=iir_state,
             )
-            y = rearrange(y, "b d -> b 1 d")
-            y = y.to(dtype=x1.dtype)
+            update_filter_state("iir", state=iir_state)
+            return y_t.unsqueeze(-1).to(dtype=x1.dtype)  # [B, d, 1]
+        else:
+            # Multi-token chunked-prefill continuation: one vectorized block step threads the IIR modal
+            # state over the L tokens (equivalent to looping the single-step path; eager, not graphed).
+            # step_iir's block path returns [B, d, L] directly, so skip the [b l d -> b d l] rearrange.
+            y, iir_state = engine.step_iir(
+                x2=x1,  # swapped: step_iir's x2 receives x1
+                x1=x2,
+                v=v,
+                D=bias,
+                residues=self.filter.R,
+                poles=poles,
+                iir_state=iir_state,
+            )
+            update_filter_state("iir", state=iir_state)
+            return y.to(dtype=x1.dtype)  # [B, d, L]
         update_filter_state("iir", state=iir_state)
         return rearrange(y, "b l d -> b d l")  # b l d
 
@@ -1071,10 +1082,21 @@ class ParallelHyenaOperator(nn.Module):
             )
             y = rearrange(y, "b d l -> b l d")
             y = y * x1
+        elif L == 1:
+            # Ordinary single-token decode: exact single-step inner FIR (the CUDA-graphed path).
+            y_t, fir_state = engine.step_fir(
+                u=u[:, 0],
+                fir_state=fir_state,
+                weight=h,
+                bias=bias,
+                gated_bias=self.kernel_size >= 128,  # aka: only for medium filter
+                flip_filter=self.kernel_size >= 128,  # aka: only for medium filter
+            )
+            y = (x1[:, 0] * y_t).unsqueeze(1)  # [B, 1, d]
         else:
-            u = rearrange(u, "b 1 d -> b d")
-            x1 = rearrange(x1, "b 1 d  -> b d")
-            y, fir_state = engine.step_fir(
+            # Multi-token chunked-prefill continuation: one vectorized block step threads the inner FIR
+            # ring over the L tokens (equivalent to looping the single-step path; eager, not graphed).
+            y_blk, fir_state = engine.step_fir(
                 u=u,
                 fir_state=fir_state,
                 weight=h,
@@ -1082,8 +1104,7 @@ class ParallelHyenaOperator(nn.Module):
                 gated_bias=self.kernel_size >= 128,  # aka: only for medium filter
                 flip_filter=self.kernel_size >= 128,  # aka: only for medium filter
             )
-            y = x1 * y
-            y = rearrange(y, "b d -> b 1 d")
+            y = x1 * y_blk  # [B, L, d]
         update_filter_state("inner_fir", state=fir_state)
         return rearrange(y, "b l d -> b d l")  # b l d
 
@@ -1720,17 +1741,16 @@ class ParallelCausalDepthwiseConv1dWithState(ParallelCausalDepthwiseConv1d):
                 compute_state=inference_context is not None,
                 use_subquadratic_ops=self.use_subquadratic_ops,
             )
+        elif L == 1:
+            # Ordinary single-token decode: the exact O(D) single-step recurrence (this is the path
+            # the per-layer CUDA decode graph captures, so it must stay bit-identical).
+            z_t, fir_state = engine.step_fir(u=u[:, 0], fir_state=fir_state, weight=weight, bias=None)
+            z_pre = z_t.unsqueeze(-1)  # [B, D, 1]
         else:
-            if len(u.shape) > 2:
-                u = u[:, -1]
-
-            z_pre, fir_state = engine.step_fir(
-                u=u,
-                fir_state=fir_state,
-                weight=weight,
-                bias=None,
-            )
-            z_pre = rearrange(z_pre, "b d -> b d 1")
+            # Multi-token chunked-prefill continuation: one vectorized block step threads the FIR ring
+            # over the L tokens (equivalent to looping the single-step path; runs eagerly, not graphed).
+            z_blk, fir_state = engine.step_fir(u=u, fir_state=fir_state, weight=weight, bias=None)
+            z_pre = z_blk.transpose(1, 2)  # [B, L, D] -> [B, D, L]
         update_filter_state("fir", state=fir_state)
         return z_pre
 

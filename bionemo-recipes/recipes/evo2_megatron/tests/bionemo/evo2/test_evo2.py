@@ -713,7 +713,13 @@ def test_batch_generate_coding_sequences(
             id="1b-bf16_bf16",
             marks=pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI due to slow speed"),
         ),
-        pytest.param("evo2/1b-8k-bf16:1.0", [96.8, 29.7, 76.6, 71.6], True, id="1b-bf16_fp8"),
+        # Full fp8 (fp8 on ALL TE linears) is exercised AT INFERENCE on the bf16 checkpoint. It runs
+        # via mcore's fp8 token-padding (prepare_model_for_fp8_inference in setup_inference_engine) but
+        # quantizing every linear degrades the highly-conserved seq[0] (~96.6% in bf16 -> ~82.8%); the
+        # other sequences are essentially unchanged. These golden values reflect full-fp8 inference.
+        pytest.param("evo2/1b-8k-bf16:1.0", [82.8, 32.4, 73.0, 71.2], True, id="1b-bf16_fp8"),
+        # The 1b-8k checkpoint is fp8-sensitive and only works as vortex-style fp8 (bf16 recipe + fp8 on
+        # just the hyena dense_projection), which preserves accuracy at inference (~96.4% on seq[0]).
         pytest.param(
             "evo2/1b-8k:1.0",
             [96.8, 29.7, 76.6, 71.6],
@@ -773,6 +779,13 @@ def test_batch_generate_mbridge(
         pytest.skip(f"Skipping {ckpt_name} - FP8 not supported on {device_info} ({compute_capability})")
 
     num_tokens_to_generate = 500  # Match original test
+    # Precision modes covered by the (ckpt, fp8) params, run at inference (not just at conversion):
+    #   * bf16            -> bf16_mixed,  no fp8                (id "1b-bf16_bf16")
+    #   * full fp8        -> fp8 on ALL TE linears             (id "1b-bf16_fp8", bf16 checkpoint)
+    #   * vortex-style fp8 -> bf16 recipe + fp8 only on the    (id "1b_fp8", the fp8-required 1b-8k ckpt)
+    #                         hyena dense_projection
+    # The 1b-8k checkpoint is fp8-sensitive and only works as vortex-style fp8 (a bf16 recipe with a
+    # very small number of fp8 layers); the bf16 checkpoint tolerates full fp8.
     vortex_style_fp8 = ckpt_name == "evo2/1b-8k:1.0" and fp8
     mixed_precision_recipe = "bf16_with_fp8_current_scaling_mixed" if fp8 and not vortex_style_fp8 else "bf16_mixed"
 
@@ -797,12 +810,16 @@ def test_batch_generate_mbridge(
 
         # Setup the public Evo2 generation endpoint.
         # max_batch_size=1 keeps this memory-heavy test bounded.
+        # Run inference at the SAME precision the checkpoint was converted with (the prior version
+        # always inferred in bf16, so the fp8 ids never actually exercised fp8 at generation time).
         components = setup_inference_engine(
             ckpt_dir=mbridge_ckpt_path,
             max_seq_length=8192,
             max_batch_size=1,  # 1 because this test takes more memory.
             tensor_parallel_size=1,
             random_seed=42,
+            mixed_precision_recipe=mixed_precision_recipe,
+            vortex_style_fp8=vortex_style_fp8,
         )
 
         # Generate all sequences through the public endpoint.

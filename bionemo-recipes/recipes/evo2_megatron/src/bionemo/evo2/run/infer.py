@@ -616,6 +616,21 @@ def setup_inference_engine(
         )
     logger.info("Weights loaded successfully")
 
+    # FP8 TE GEMMs require the token (leading) dim to be a multiple of 8/16, but the dynamic engine
+    # decodes one token per request -> a [1, hidden] input fails TE's assert_dim_for_fp8_exec. When the
+    # precision recipe enables fp8 across ALL TE linears (e.g. "bf16_with_fp8_current_scaling_mixed"),
+    # wrap each one so it pads the token dimension up to the fp8 alignment and unpads the output
+    # (mcore's Fp8Padding/Fp8Unpadding). The wrapper is a no-op outside an active fp8 autocast, so bf16
+    # layers are unaffected. This must run before CUDA-graph capture (the warmup) so the captured decode
+    # graph includes the padding. The vortex-style path uses a bf16 recipe (only its dense_projection is
+    # fp8, via te_compat's own padding linear), so getattr(mp_config, "fp8") is falsy there and we do not
+    # double-wrap it.
+    if getattr(mp_config, "fp8", None):
+        from megatron.core.fp8_utils import prepare_model_for_fp8_inference
+
+        logger.info("FP8 recipe active: padding all TE linear layers for fp8 inference (token alignment)")
+        prepare_model_for_fp8_inference(raw_model)
+
     # Wrap with Float16Module
     model = Float16Module(model_provider, raw_model)
 

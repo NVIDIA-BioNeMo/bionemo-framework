@@ -50,7 +50,7 @@ from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge
 
-from ..utils import find_free_network_port
+from ..utils import check_fp8_support, find_free_network_port
 
 
 # Capture environment at import time (consistent with test_predict.py)
@@ -299,6 +299,7 @@ def run_infer_subprocess(
     seed: int = 42,
     use_subquadratic_ops: bool = False,
     max_seq_length: int | None = None,
+    block_size_tokens: int | None = None,
     return_log_probs: bool = False,
     extra_args: list[str] | None = None,
 ):
@@ -317,6 +318,8 @@ def run_infer_subprocess(
         seed: Random seed for reproducibility
         use_subquadratic_ops: Pass --use-subquadratic-ops to the CLI.
         max_seq_length: If set, pass --max-seq-length (caps the per-context allocation).
+        block_size_tokens: If set, pass --inference-dynamic-batching-block-size (paged-KV block size).
+            The CLI default is 256; pin it explicitly when a test depends on the block boundary.
         return_log_probs: Pass --return-log-probs (logprobs included in the JSONL record).
         extra_args: Additional CLI arguments appended to the infer command.
 
@@ -354,6 +357,8 @@ def run_infer_subprocess(
         cmd.append("--use-subquadratic-ops")
     if max_seq_length is not None:
         cmd.extend(["--max-seq-length", str(max_seq_length)])
+    if block_size_tokens is not None:
+        cmd.extend(["--inference-dynamic-batching-block-size", str(block_size_tokens)])
     if return_log_probs:
         cmd.append("--return-log-probs")
     if extra_args:
@@ -1150,14 +1155,21 @@ def test_hyena_inference_context_different_sequence_lengths():
 # prompt-shorter-than-the-medium-FIR-ring behavior. Greedy decoding (top_k=1) keeps the
 # assertions deterministic.
 
-# A long DNA prompt (> block_size_tokens=256) that forces multi-block paged-KV prefill.
+# Paged-KV block size for the multi-block prefill test below. It also happens to be the CLI/engine
+# default, but the test pins it explicitly (passing --inference-dynamic-batching-block-size) so the
+# "prompt spans more than one block" premise cannot be silently broken by a future change to the default.
+KV_BLOCK_SIZE_TOKENS = 256
+
+# A long DNA prompt (> KV_BLOCK_SIZE_TOKENS) that forces a multi-block paged-KV prefill.
 LONG_DNA_PROMPT = (
     "GAATAGGAACAGCTCCGGTCTACAGCTCCCAGCGTGAGCGACGCAGAAGACGGTGATTTCTGCATTTCCATCTGAGGTACCGGGTTCATCTCACTAGG"
     "GAGTGCCAGACAGTGGGCGCAGGCCAGTGTGTGTGCGCACCGTGCGCGAGCCGAAGCAGGGCGAGGCATTGCCTCACCTGGGAAGCGCAAGGGGTCAG"
     "GGAGTTCCCTTTCCGAGTCAAAGAAAGGGGTGACGGACGCACCTGGAAAATCGGGTCACTCCCACCCGAATATTGCGCTTTTCAGACCGGCTTAAGAA"
     "ACGGCGCACCACGAGACTATATCCCACAC"
 )
-assert len(LONG_DNA_PROMPT) > 256, "LONG_DNA_PROMPT must exceed block_size_tokens=256 to cover >1 KV block"
+assert len(LONG_DNA_PROMPT) > KV_BLOCK_SIZE_TOKENS, (
+    f"LONG_DNA_PROMPT must exceed block_size_tokens={KV_BLOCK_SIZE_TOKENS} to cover >1 KV block"
+)
 
 DNA_BASES = set("ACGTacgtNn")
 
@@ -1187,16 +1199,22 @@ def test_native_dynamic_runs(mbridge_checkpoint_path, tmp_path):
 
 
 def test_native_dynamic_full_prefill_multi_block(mbridge_checkpoint_path, tmp_path):
-    """A prompt longer than block_size_tokens (256) prefills as one multi-block request.
+    """A prompt longer than the paged-KV block size prefills as one multi-block request.
 
-    Without --enable-chunked-prefill, the whole prompt is enqueued as one prefill chunk that
-    uses multiple 256-token KV blocks. The first forward processes all prompt tokens, and
-    last_token_logits selects the true final position before decode begins.
+    The block size is pinned explicitly (``--inference-dynamic-batching-block-size``) and the prompt
+    exceeds it, so with no ``--enable-chunked-prefill`` the whole prompt is enqueued as a single
+    prefill chunk whose KV spans ``ceil(n_prompt / block_size) >= 2`` paged blocks. The first forward
+    processes all prompt tokens, and last_token_logits selects the true final position before decode.
+    Pinning the block size (rather than relying on the default) is what makes this a multi-block test.
     """
     if torch.cuda.device_count() < 1:
         pytest.skip("Native dynamic-engine test requires a GPU")
+    block_size_tokens = KV_BLOCK_SIZE_TOKENS
     n_prompt_tokens = len(LONG_DNA_PROMPT)
-    assert n_prompt_tokens > 256
+    assert n_prompt_tokens > block_size_tokens, (
+        f"LONG_DNA_PROMPT ({n_prompt_tokens} tokens) must exceed block_size_tokens={block_size_tokens} "
+        "to span more than one KV block"
+    )
     record = run_infer_subprocess(
         mbridge_checkpoint_path,
         prompt=LONG_DNA_PROMPT,
@@ -1206,8 +1224,9 @@ def test_native_dynamic_full_prefill_multi_block(mbridge_checkpoint_path, tmp_pa
         top_k=1,
         seed=42,
         max_seq_length=512,
+        block_size_tokens=block_size_tokens,
     )
-    # The whole prompt must have been prefilled (multi-block) and 20 tokens generated.
+    # The whole prompt must have been prefilled (KV spanning >1 block) and 20 tokens generated.
     assert record["usage"]["prompt_tokens"] == n_prompt_tokens, (
         f"prompt_tokens {record['usage']['prompt_tokens']} != {n_prompt_tokens}; multi-block "
         "prefill did not enqueue the full prompt"
@@ -1241,6 +1260,124 @@ def test_native_dynamic_chunked_prefill_cli_multi_chunk(mbridge_checkpoint_path,
     assert record["usage"]["prompt_tokens"] == n_prompt_tokens
     assert record["usage"]["completion_tokens"] == 4
     assert _is_dna_completion(record["completion"]), f"non-DNA completion: {record['completion']!r}"
+
+
+def test_native_dynamic_chunked_prefill_matches_full_prefill(mbridge_checkpoint_path, tmp_path):
+    """Chunked prefill yields the same greedy continuation as single-shot (full) prefill.
+
+    This is the prefix-invariance idea (same prompt -> same completion two ways) applied to chunked
+    prefill: prefilling the whole prompt in one forward vs splitting it across multiple prefill
+    forwards (``--enable-chunked-prefill`` with a per-step token budget below the prompt length) must
+    produce identical tokens under greedy decoding, since chunked prefill is only a memory-bounded way
+    to compute the same prefill. The existing chunked-prefill test only checks it runs and emits DNA;
+    this one pins the equivalence to full prefill. It guards the Hyena chunked-prefill fix: the FIR/IIR
+    recurrent state is threaded across chunks by stepping each chunk's tokens through step_fir/step_iir
+    (hyena_utils.ParallelCausalDepthwiseConv1dWithState.forward / forward_long / forward_medium); before
+    that fix, chunk 1+ was misclassified as a single decode step and the output degenerated.
+    """
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Native dynamic-engine test requires a GPU")
+
+    n_prompt_tokens = len(LONG_DNA_PROMPT)
+    chunk_max_tokens = 128
+    # Force at least two prefill chunks with a non-trivial final chunk (>1 token).
+    assert n_prompt_tokens > 2 * chunk_max_tokens, (
+        f"LONG_DNA_PROMPT ({n_prompt_tokens} tokens) must exceed 2*chunk_max_tokens={2 * chunk_max_tokens} "
+        "to exercise multiple prefill chunks"
+    )
+
+    full = run_infer_subprocess(
+        mbridge_checkpoint_path,
+        prompt=LONG_DNA_PROMPT,
+        output_file=tmp_path / "full_prefill.jsonl",
+        max_new_tokens=20,
+        temperature=1.0,
+        top_k=1,  # greedy -> deterministic
+        seed=42,
+        max_seq_length=512,
+    )
+    chunked = run_infer_subprocess(
+        mbridge_checkpoint_path,
+        prompt=LONG_DNA_PROMPT,
+        output_file=tmp_path / "chunked_prefill.jsonl",
+        max_new_tokens=20,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        max_seq_length=512,
+        extra_args=[
+            "--enable-chunked-prefill",
+            "--inference-dynamic-batching-max-tokens",
+            str(chunk_max_tokens),
+        ],
+    )
+
+    # Both prefilled the full prompt; chunked must reproduce the single-shot greedy continuation.
+    assert full["usage"]["prompt_tokens"] == n_prompt_tokens == chunked["usage"]["prompt_tokens"]
+    assert full["usage"]["completion_tokens"] == 20 == chunked["usage"]["completion_tokens"]
+    assert _is_dna_completion(full["completion"]), f"non-DNA full-prefill completion: {full['completion']!r}"
+    assert chunked["completion"] == full["completion"], (
+        "chunked prefill diverged from full prefill:\n"
+        f"  full   ={full['completion']!r}\n"
+        f"  chunked={chunked['completion']!r}"
+    )
+
+
+def test_native_dynamic_full_fp8_runs_with_and_without_chunked_prefill(mbridge_checkpoint_path, tmp_path):
+    """Full fp8 inference (fp8 on every TE linear) runs both with full and with chunked prefill.
+
+    Confirms the fp8 token-padding path (``prepare_model_for_fp8_inference``, applied in
+    ``setup_inference_engine`` when the recipe turns on fp8) coexists with (a) the multi-block /
+    chunked-prefill Hyena block-step and (b) the CUDA-graphed single-token decode. Greedy full vs
+    chunked fp8 completions need NOT be bit-identical: current-scaling fp8 derives each GEMM's scale
+    from its own activation amax, which differs between a whole-prompt prefill and per-chunk prefills.
+    So this pins that BOTH configurations run and emit a valid DNA completion of the requested length
+    (not that they match) -- the bf16 equivalence above already pins the exact full==chunked behavior.
+    """
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Native dynamic-engine test requires a GPU")
+    is_fp8_supported, compute_capability, device_info = check_fp8_support(torch.cuda.current_device())
+    if not is_fp8_supported:
+        pytest.skip(f"FP8 not supported on {device_info} ({compute_capability})")
+
+    n_prompt_tokens = len(LONG_DNA_PROMPT)
+    chunk_max_tokens = 128
+    assert n_prompt_tokens > 2 * chunk_max_tokens, (
+        f"LONG_DNA_PROMPT ({n_prompt_tokens} tokens) must exceed 2*chunk_max_tokens={2 * chunk_max_tokens}"
+    )
+    fp8_args = ["--mixed-precision-recipe", "bf16_with_fp8_current_scaling_mixed"]
+
+    full = run_infer_subprocess(
+        mbridge_checkpoint_path,
+        prompt=LONG_DNA_PROMPT,
+        output_file=tmp_path / "fp8_full_prefill.jsonl",
+        max_new_tokens=20,
+        temperature=1.0,
+        top_k=1,  # greedy
+        seed=42,
+        max_seq_length=512,
+        extra_args=fp8_args,
+    )
+    chunked = run_infer_subprocess(
+        mbridge_checkpoint_path,
+        prompt=LONG_DNA_PROMPT,
+        output_file=tmp_path / "fp8_chunked_prefill.jsonl",
+        max_new_tokens=20,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        max_seq_length=512,
+        extra_args=fp8_args
+        + ["--enable-chunked-prefill", "--inference-dynamic-batching-max-tokens", str(chunk_max_tokens)],
+    )
+    for label, rec in (("full", full), ("chunked", chunked)):
+        assert rec["usage"]["prompt_tokens"] == n_prompt_tokens, (
+            f"{label} fp8 prefill enqueued {rec['usage']['prompt_tokens']} != {n_prompt_tokens}"
+        )
+        assert rec["usage"]["completion_tokens"] == 20, (
+            f"{label} fp8 generated {rec['usage']['completion_tokens']} != 20 tokens"
+        )
+        assert _is_dna_completion(rec["completion"]), f"non-DNA {label} fp8 completion: {rec['completion']!r}"
 
 
 def test_native_dynamic_single_token_decode(mbridge_checkpoint_path, tmp_path):
