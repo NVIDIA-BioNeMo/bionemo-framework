@@ -832,3 +832,220 @@ def test_batch_generate_mbridge(
         assert all(mp >= 0.90 * ep for mp, ep in zip(match_percents, expected_matchpercents)), (
             f"Expected at least 90% of {matchperc_print_expected=}, got {matchperc_print=}"
         )
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.slow
+def test_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path: Path):
+    """Second-half match accuracy through the dynamic engine with the fused subquadratic-ops kernels.
+
+    Mirrors :func:`test_batch_generate_mbridge` (1b-bf16, greedy) but enables ``use_subquadratic_ops``
+    so the b2b causal-conv1d prefill and fft/causal-conv1d FIR kernels are exercised end-to-end on the
+    native dynamic (CUDA-graphed) decode path. This gives accuracy coverage for the subquadratic-ops
+    path through the dynamic engine, not just the default conv path. It xfails on hardware where the
+    prebuilt subquadratic kernels fail their CUDA self-test (unsupported PTX/toolchain), matching the
+    other subquadratic tests in this recipe.
+    """
+    from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
+    from bionemo.evo2.run.infer import generate, setup_inference_engine
+
+    ckpt_name = "evo2/1b-8k-bf16:1.0"
+    expected_matchpercents = [96.8, 29.7, 76.6, 71.6]
+
+    assert len(sequences) > 0
+    try:
+        _ = determine_memory_requirement_and_skip_if_not_met(
+            ckpt_name, test_name="test_batch_generate_mbridge_subquadratic_ops"
+        )
+    except KeyError:
+        gb_available = torch.cuda.mem_get_info()[0] / 1024**3
+        if gb_available < 16:
+            pytest.skip(f"Insufficient GPU memory: {gb_available:.1f}GB available, need at least 16GB")
+
+    # Skip-as-xfail when the prebuilt subquadratic kernels do not pass their CUDA self-test here.
+    try:
+        ensure_subquadratic_ops_supported(torch.cuda.current_device())
+    except Exception as exc:
+        pytest.xfail(f"subquadratic_ops kernels unsupported on this device: {exc}")
+
+    num_tokens_to_generate = 500
+    with distributed_model_parallel_state(), torch.no_grad():
+        nemo2_ckpt_path = load(ckpt_name)
+        mbridge_ckpt_dir = run_nemo2_to_mbridge(
+            nemo2_ckpt_dir=nemo2_ckpt_path,
+            tokenizer_path=DEFAULT_HF_TOKENIZER_MODEL_PATH_512,
+            mbridge_ckpt_dir=tmp_path / "mbridge_checkpoint",
+            model_size="evo2_1b_base",
+            seq_length=8192,
+            mixed_precision_recipe="bf16_mixed",
+            vortex_style_fp8=False,
+        )
+        mbridge_ckpt_path = mbridge_ckpt_dir / "iter_0000001"
+
+        seq_splits = [mid_point_split(seq=seq, num_tokens=num_tokens_to_generate, fraction=0.5) for seq in sequences]
+        prompts = [split[0] for split in seq_splits]
+        targets = [split[1] for split in seq_splits]
+
+        # use_subquadratic_ops=True routes prefill/FIR through the fused subquadratic kernels.
+        components = setup_inference_engine(
+            ckpt_dir=mbridge_ckpt_path,
+            max_seq_length=8192,
+            max_batch_size=1,
+            tensor_parallel_size=1,
+            random_seed=42,
+            use_subquadratic_ops=True,
+        )
+        results = generate(
+            components,
+            prompts=prompts,
+            max_new_tokens=num_tokens_to_generate,
+            temperature=1.0,
+            top_k=1,  # Greedy for determinism
+        )
+
+        match_percents = [
+            calculate_sequence_identity(target, (result.generated_text if result else "")) or 0.0
+            for result, target in zip(results, targets)
+        ]
+        for i, mp in enumerate(match_percents):
+            logger.info(
+                f"{ckpt_name} subquadratic seq[{i}] identity: {mp:.1f}% expected: {expected_matchpercents[i]:.1f}%"
+            )
+
+        assert len(match_percents) == len(expected_matchpercents)
+        matchperc_print = [f"{mp:.1f}%" for mp in match_percents]
+        matchperc_print_expected = [f"{ep:.1f}%" for ep in expected_matchpercents]
+        assert all(mp >= 0.90 * ep for mp, ep in zip(match_percents, expected_matchpercents)), (
+            f"Expected at least 90% of {matchperc_print_expected=}, got {matchperc_print=}"
+        )
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.slow
+def test_native_dynamic_multi_batch_reuses_engine(tmp_path: Path):
+    """The dynamic engine serves many generate() batches through ONE persistent CUDA-graphed context.
+
+    ``setup_inference_engine`` builds a single dynamic context and captures the per-layer decode CUDA
+    graphs once (warmup). This test drives several ``generate`` calls of differing prompt counts and
+    lengths through that one engine and asserts (a) no CUDA-graph argument mismatch / crash across
+    calls and (b) greedy determinism: re-running an earlier batch yields byte-identical output. Both
+    only hold if the persistent context and its captured graph are correctly reused across calls --
+    i.e. it guards the regression where a fresh per-prompt context broke graph replay, and the
+    capture-on-first-real-prompt bug that corrupted the first generated sequence.
+    """
+    from bionemo.evo2.run.infer import generate, setup_inference_engine
+
+    ckpt_name = "evo2/1b-8k-bf16:1.0"
+    try:
+        _ = determine_memory_requirement_and_skip_if_not_met(
+            ckpt_name, test_name="test_native_dynamic_multi_batch_reuses_engine"
+        )
+    except KeyError:
+        gb_available = torch.cuda.mem_get_info()[0] / 1024**3
+        if gb_available < 16:
+            pytest.skip(f"Insufficient GPU memory: {gb_available:.1f}GB available, need at least 16GB")
+
+    # Batches of differing sizes/lengths; batch_a is repeated last to check cross-call determinism.
+    batch_a = ["ACGTACGTACGTACGTACGT" * 4, "TTACGGGCATTACGGGCATT" * 3]
+    batch_b = ["ACGTACGTACGTACGTACGT" * 30]  # a single, longer prompt routed through the same engine
+
+    with distributed_model_parallel_state(), torch.no_grad():
+        nemo2_ckpt_path = load(ckpt_name)
+        mbridge_ckpt_dir = run_nemo2_to_mbridge(
+            nemo2_ckpt_dir=nemo2_ckpt_path,
+            tokenizer_path=DEFAULT_HF_TOKENIZER_MODEL_PATH_512,
+            mbridge_ckpt_dir=tmp_path / "mbridge_checkpoint",
+            model_size="evo2_1b_base",
+            seq_length=8192,
+            mixed_precision_recipe="bf16_mixed",
+            vortex_style_fp8=False,
+        )
+        components = setup_inference_engine(
+            ckpt_dir=mbridge_ckpt_dir / "iter_0000001",
+            max_seq_length=8192,
+            max_batch_size=2,
+            tensor_parallel_size=1,
+            random_seed=42,
+        )
+
+        def _generate_texts(prompts: list[str]) -> list[str]:
+            results = generate(components, prompts=prompts, max_new_tokens=30, temperature=1.0, top_k=1)
+            return [result.generated_text for result in results]
+
+        out_a1 = _generate_texts(batch_a)
+        out_b = _generate_texts(batch_b)  # a different batch through the same persistent engine
+        out_a2 = _generate_texts(batch_a)  # repeat of the first batch
+
+        assert len(out_a1) == 2 and len(out_b) == 1 and len(out_a2) == 2
+        assert all(len(text) > 0 for text in out_a1 + out_b + out_a2), "a generate() batch produced 0 tokens"
+        assert out_a1 == out_a2, f"cross-call nondeterminism with the reused engine:\n{out_a1}\n{out_a2}"
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.slow
+def test_native_dynamic_auto_max_seq_length_and_grow(tmp_path: Path):
+    """Prompt-based auto ``max_seq_length`` that GROWS on demand for a later, larger prompt.
+
+    With no manual ``max_seq_length`` the engine sizes its persistent (CUDA-graph-pinned) context to
+    the prompt it first sees — longest prompt + ``max_new_tokens`` + headroom — rather than a fixed
+    8k / GPU-memory heuristic. A later, longer prompt does not fail: because mcore has no in-place
+    resize, the engine rebuilds the context at a larger size and re-captures the CUDA graphs once,
+    then keeps generating. A subsequent shorter prompt reuses the (now larger) context without
+    shrinking and reproduces the earlier output, proving the rebuild + re-capture stays correct.
+    This guards the auto-sizing and the grow-by-rebuild + graph-recapture path.
+    """
+    from bionemo.evo2.run.infer import generate, setup_inference_engine
+
+    ckpt_name = "evo2/1b-8k-bf16:1.0"
+    try:
+        _ = determine_memory_requirement_and_skip_if_not_met(
+            ckpt_name, test_name="test_native_dynamic_auto_max_seq_length_and_grow"
+        )
+    except KeyError:
+        gb_available = torch.cuda.mem_get_info()[0] / 1024**3
+        if gb_available < 16:
+            pytest.skip(f"Insufficient GPU memory: {gb_available:.1f}GB available, need at least 16GB")
+
+    short_prompt = "ACGT" * 10  # ~40 tokens
+    long_prompt = "ACGT" * 200  # ~800 tokens -> forces a grow of the auto budget
+    max_new_tokens = 20
+
+    with distributed_model_parallel_state(), torch.no_grad():
+        nemo2_ckpt_path = load(ckpt_name)
+        mbridge_ckpt_dir = run_nemo2_to_mbridge(
+            nemo2_ckpt_dir=nemo2_ckpt_path,
+            tokenizer_path=DEFAULT_HF_TOKENIZER_MODEL_PATH_512,
+            mbridge_ckpt_dir=tmp_path / "mbridge_checkpoint",
+            model_size="evo2_1b_base",
+            seq_length=8192,
+            mixed_precision_recipe="bf16_mixed",
+            vortex_style_fp8=False,
+        )
+        # No max_seq_length => auto-size from prompts (and grow on demand).
+        components = setup_inference_engine(
+            ckpt_dir=mbridge_ckpt_dir / "iter_0000001",
+            max_batch_size=1,
+            tensor_parallel_size=1,
+            random_seed=42,
+        )
+        nd = components.native_dynamic
+        assert nd.max_seq_length is None and nd.max_seq_length_is_auto
+
+        r_short = generate(components, prompts=[short_prompt], max_new_tokens=max_new_tokens, temperature=1.0, top_k=1)
+        initial_msl = len(components.tokenizer.tokenize(short_prompt)) + max_new_tokens + 8  # headroom
+        assert nd.max_seq_length == initial_msl, (nd.max_seq_length, initial_msl)
+        assert r_short[0].generated_length > 0
+
+        # A larger prompt GROWS the context (rebuild + CUDA-graph re-capture), no error, still generates.
+        r_long = generate(components, prompts=[long_prompt], max_new_tokens=max_new_tokens, temperature=1.0, top_k=1)
+        grown_msl = nd.max_seq_length
+        assert grown_msl > initial_msl
+        assert grown_msl >= len(components.tokenizer.tokenize(long_prompt)) + max_new_tokens + 8
+        assert r_long[0].generated_length > 0
+
+        # A later shorter prompt reuses the grown context (no shrink) and reproduces the earlier output.
+        r_short2 = generate(
+            components, prompts=[short_prompt], max_new_tokens=max_new_tokens, temperature=1.0, top_k=1
+        )
+        assert nd.max_seq_length == grown_msl
+        assert r_short2[0].generated_text == r_short[0].generated_text

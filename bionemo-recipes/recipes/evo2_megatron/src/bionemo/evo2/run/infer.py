@@ -228,6 +228,21 @@ def _resolve_int(cli_val: Optional[int], env_var: str, auto_default: Optional[in
     return auto_default
 
 
+# Small slack added on top of (prompt_len + max_new_tokens) when auto-sizing the context, matching the
+# headroom the per-prompt path historically used.
+_AUTO_MAX_SEQ_LENGTH_HEADROOM = 8
+
+# Default number of leading prompts scanned to auto-size max_seq_length when no manual value is given.
+# Tokenizing this many prompt strings is cheap; prompts beyond it are validated lazily and error loudly
+# (naming the --max-seq-length to set) if one needs a larger context. Pass 0 to scan every prompt.
+_DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS = 50
+
+
+def _auto_max_seq_length_for(prompt_token_count: int, max_new_tokens: int) -> int:
+    """Context length needed to fully serve a prompt of ``prompt_token_count`` tokens + its generation."""
+    return int(prompt_token_count) + int(max_new_tokens) + _AUTO_MAX_SEQ_LENGTH_HEADROOM
+
+
 def _prune_caches() -> None:
     """Run ``gc.collect()`` and ``torch.cuda.empty_cache()`` to free fragmented memory.
 
@@ -275,10 +290,22 @@ class Evo2NativeDynamicComponents:
     mamba_state_config: Any
     forward_model: torch.nn.Module
     hyena_model: torch.nn.Module
-    max_seq_length: int
+    # Engine sequence-length budget. ``None`` means "auto": resolved from the prompts (longest prompt
+    # + max_new_tokens + headroom) the first time generation runs, then frozen for the engine lifetime
+    # (the CUDA-graphed context cannot grow). A concrete value is a manual cap that supersedes auto.
+    max_seq_length: Optional[int]
     evo2_seed: int
     cuda_graphs_enabled: bool
     cuda_graph_manager_count: int
+    # Persistent dynamic context, built lazily on the first generate() call and reused across all
+    # subsequent calls so the per-layer CUDA graphs (captured once during warmup) stay valid. Keyed
+    # by the context-affecting generate() options so it is rebuilt only if those change.
+    shared_dyn_ctx: Optional[Any] = None
+    shared_dyn_ctx_key: Optional[tuple] = None
+    # True when ``max_seq_length`` was auto-sized from prompts (vs a manual cap). In auto mode a prompt
+    # that needs more than the frozen budget is a hard error (the context cannot grow); in manual mode
+    # the request just stops early on overflow, as before.
+    max_seq_length_is_auto: bool = False
 
 
 # =============================================================================
@@ -302,7 +329,7 @@ def _setup_native_dynamic_components(
     *,
     model: torch.nn.Module,
     raw_model: torch.nn.Module,
-    max_seq_length: int,
+    max_seq_length: Optional[int],
     evo2_seed: int,
     cuda_graphs_enabled: bool,
 ) -> Evo2NativeDynamicComponents:
@@ -310,9 +337,9 @@ def _setup_native_dynamic_components(
 
     This disables sequence parallelism for the Evo2 model, builds the exact-rounding
     ``DynamicInferenceContext`` subclass, and creates the Mamba state config that lets mcore
-    allocate Hyena recurrent state in its dynamic state buffers. Per-prompt contexts are built
-    lazily in :func:`_generate_native_dynamic` so each request can be sized to its prompt and
-    requested generation length.
+    allocate Hyena recurrent state in its dynamic state buffers. A single dynamic context is built
+    lazily in :func:`_generate_native_dynamic`, sized to the longest prompt plus the requested
+    generation length, and reused (reset) across prompts so CUDA-graph capture stays valid.
     """
     rank = int(os.environ.get("RANK", "0"))
     hyena_model = _unwrap_hyena_model(model)
@@ -349,6 +376,7 @@ def _setup_native_dynamic_components(
         evo2_seed=evo2_seed,
         cuda_graphs_enabled=cuda_graphs_enabled,
         cuda_graph_manager_count=cuda_graph_manager_count,
+        max_seq_length_is_auto=max_seq_length is None,
     )
 
 
@@ -417,7 +445,7 @@ def _force_exit_after_cuda_graph_inference() -> None:
 def setup_inference_engine(
     ckpt_dir: Path,
     *,
-    max_seq_length: int = 8192,
+    max_seq_length: Optional[int] = None,
     max_batch_size: int = 1,
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -436,7 +464,12 @@ def setup_inference_engine(
 
     Args:
         ckpt_dir: Path to MBridge checkpoint directory.
-        max_seq_length: Maximum sequence length for generation.
+        max_seq_length: Engine sequence-length budget for the persistent dynamic context. ``None``
+            (default) auto-sizes it from the prompts at the first :func:`generate` call (longest
+            prompt + ``max_new_tokens`` + headroom); a concrete value is a manual cap that supersedes
+            auto-sizing. The context is CUDA-graph-pinned, so the budget cannot change in place — in
+            auto mode a later prompt that needs more triggers a one-time rebuild + graph re-capture at
+            a larger size; a manual cap never grows (an over-long prompt then just stops early).
         max_batch_size: Maximum batch size for inference.
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
@@ -742,6 +775,184 @@ def _sample_from_logits(
     return sampled
 
 
+def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx: Any, device: torch.device) -> None:
+    """Capture the per-layer decode CUDA graph(s) up front on a throwaway request.
+
+    mcore captures each per-layer decode CUDA graph lazily on the first decode step that matches the
+    graph's batch dimensions, and that capture runs warmup iterations of the layer forward. For Evo2
+    those warmup iterations advance the in-place Hyena recurrent state, so if capture happened on the
+    first *real* prompt's decode it would corrupt that prompt's output (later prompts, whose decode
+    just replays the captured graph, are unaffected). mcore's ``DynamicInferenceEngine`` avoids this
+    by capturing graphs up front in ``create_cuda_graphs()`` with throwaway requests; the standalone
+    Evo2 loop does the equivalent here.
+
+    Unlike a plain attention model, the captured decode graph must read and write the Hyena recurrent
+    state through the packed mamba-slot views, so the throwaway request is *prefilled* first (binding
+    those views and seeding the recurrent state, which selects the decode code path) and then decoded
+    a couple of steps to trigger and replay capture. The context is reset afterwards, discarding the
+    throwaway state; the captured graph (held on the model's layers) is then reused by every real
+    prompt. Only the public context primitives the real decode loop already uses are exercised here,
+    so this does not depend on mcore's internal cuda-graph-warmup helpers.
+    """
+    from megatron.core.inference.inference_request import DynamicInferenceRequest
+
+    forward_model = nd.forward_model
+    hyena_model = nd.hyena_model
+    rank = int(os.environ.get("RANK", "0"))
+
+    # A short throwaway prompt is enough: the decode CUDA graph shape is independent of prompt length.
+    n_warmup_prompt_tokens = max(1, min(8, int(dyn_ctx.max_tokens)))
+    try:
+        with torch.inference_mode():
+            req = DynamicInferenceRequest(
+                request_id=0,
+                prompt_tokens=torch.zeros(n_warmup_prompt_tokens, dtype=torch.int64, device=device),
+                sampling_params=SamplingParams(num_tokens_to_generate=8, termination_id=-1),
+            )
+            dyn_ctx.add_request(req, prefill_chunk_length=n_warmup_prompt_tokens)
+            slot = int(dyn_ctx.mamba_metadata.request_to_mamba_state_idx[0].item())
+            bind_hyena_packed_views_to_dynamic_context(hyena_model, dyn_ctx, request_slot=slot)
+            # One prefill forward (eager; not graphed) seeds the Hyena recurrent state, then two decode
+            # forwards: the first triggers graph capture, the second replays it so any capture/replay
+            # mismatch surfaces here rather than on a user prompt.
+            for _step in range(3):
+                dyn_ctx.initialize_attention_state()
+                input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
+                try:
+                    from megatron.core.inference.utils import InferenceMode
+
+                    inference_mode_context = InferenceMode.active()
+                except ImportError:
+                    inference_mode_context = contextlib.nullcontext()
+                with inference_mode_context:
+                    forward_model(
+                        input_ids,
+                        position_ids,
+                        None,
+                        inference_context=dyn_ctx,
+                        runtime_gather_output=True,
+                    )
+                dyn_ctx.update_requests(
+                    torch.ones(1, dtype=torch.bool, device=device),
+                    torch.zeros(1, dtype=torch.int64, device=device),
+                )
+    finally:
+        dyn_ctx.reset()
+    if rank == 0:
+        logger.info("[evo2-native-cg] captured decode CUDA graph(s) via throwaway warmup request")
+
+
+def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
+    """Drop all captured per-layer CUDA graphs so the next warmup re-captures at the new context size.
+
+    Needed to "grow" the dynamic context (mcore has no in-place resize): a larger context is a new
+    object with a longer ``rotary_pos_emb``, so graphs captured against the previous one must go.
+    mcore's module-level ``delete_cuda_graphs()`` resets the global record, each runner's recorded
+    graph, and the shared mempool — but it does NOT clear each layer ``CudaGraphManager``'s per-instance
+    ``cudagraph_runners`` / ``inference_cudagraphs_lookup_table``, so a stale runner would still be
+    found and replayed against the new context (raising "CUDA graph argument mismatch"). We clear those
+    per-manager structures first; with the global ``cudagraph_created`` flag also reset, the next decode
+    creates a fresh runner and captures at the current shape. Done defensively so a future mcore that
+    renames these internals degrades to a clear capture-time error rather than silent misbehavior.
+    """
+    for module in nd.hyena_model.modules():
+        mgr = getattr(module, "cudagraph_manager", None)
+        if mgr is None:
+            continue
+        if hasattr(mgr, "cudagraph_runners"):
+            mgr.cudagraph_runners = []
+        lookup_table = getattr(mgr, "inference_cudagraphs_lookup_table", None)
+        if lookup_table is not None:
+            lookup_table.clear()
+
+    from megatron.core.transformer.cuda_graphs import delete_cuda_graphs
+
+    delete_cuda_graphs()
+
+
+def _get_or_build_shared_dynamic_context(
+    nd: Evo2NativeDynamicComponents,
+    *,
+    block_size_tokens: int,
+    max_tokens: Optional[int],
+    enable_chunked_prefill: bool,
+    device: torch.device,
+) -> Any:
+    """Return the engine's persistent dynamic context, building (and graph-warming) it on first use.
+
+    A single context is reused for the whole engine lifetime so the per-layer CUDA graphs captured
+    during warmup stay valid across every prompt and every :func:`generate` call (mcore keys decode
+    graphs by the context object plus a ``rotary_pos_emb`` tensor whose length equals
+    ``max_sequence_length``, so both must stay constant). This mirrors mcore's
+    ``DynamicInferenceEngine``, which holds one context and feeds many requests through it.
+
+    It is rebuilt only when (a) the context-affecting options change, or (b) the engine budget
+    ``nd.max_seq_length`` has grown beyond the cached context (auto mode grows on demand). mcore has
+    no in-place resize, so "grow" means building a new, larger context; any graphs captured against
+    the old one are dropped first via :func:`_reset_layer_cuda_graphs` and re-captured by the warmup.
+    """
+    from megatron.core.inference.config import InferenceConfig
+
+    ctx_key = (
+        int(block_size_tokens),
+        None if max_tokens is None else int(max_tokens),
+        bool(enable_chunked_prefill),
+    )
+    cached = nd.shared_dyn_ctx
+    if (
+        cached is not None
+        and nd.shared_dyn_ctx_key == ctx_key
+        and int(cached.max_sequence_length) >= int(nd.max_seq_length)
+    ):
+        # Reuse the persistent context (it is big enough); reset() returns it to a clean state without
+        # freeing the CUDA-graph-referenced buffers (it is explicitly designed for reuse-after-capture).
+        cached.reset()
+        return cached
+
+    # First build, config change, or grow. Drop any graphs captured against the previous context
+    # object so a stale graph can never be replayed against the new (larger) one.
+    if cached is not None and nd.cuda_graphs_enabled:
+        _reset_layer_cuda_graphs(nd)
+
+    hyena_model = nd.hyena_model
+    # max_requests is kept tp-divisible (max(tp,1)); the per-context exact rounder still decodes the
+    # single active request as ONE row. Size to the engine's full max_seq_length so the persistent
+    # context (and its constant rotary length) can serve any prompt across any batch.
+    tp = int(getattr(hyena_model.config, "tensor_model_parallel_size", 1) or 1)
+    max_requests = max(tp, 1)
+    msl = int(nd.max_seq_length)
+    buf_gb = compute_evo2_paged_kv_buffer_size_gb(
+        hyena_model.config,
+        mamba_state_config=nd.mamba_state_config,
+        max_sequence_length=msl,
+        max_requests=max_requests,
+        block_size_tokens=block_size_tokens,
+        safety_blocks=2,
+    )
+    dyn_ctx = nd.ctx_cls(
+        model_config=hyena_model.config,
+        inference_config=InferenceConfig(
+            max_sequence_length=msl,
+            buffer_size_gb=buf_gb,
+            mamba_inference_state_config=nd.mamba_state_config,
+            max_requests=max_requests,
+            max_tokens=max_tokens,
+            block_size_tokens=block_size_tokens,
+            unified_memory_level=0,
+            enable_chunked_prefill=enable_chunked_prefill,
+            num_cuda_graphs=1 if nd.cuda_graphs_enabled else None,
+            use_cuda_graphs_for_non_decode_steps=False,
+        ),
+    )
+    dyn_ctx.materialize_only_last_token_logits = False
+    dyn_ctx.initialize_all_tensors()
+    if nd.cuda_graphs_enabled:
+        _warmup_native_dynamic_cuda_graphs(nd, dyn_ctx, device)
+    nd.shared_dyn_ctx = dyn_ctx
+    nd.shared_dyn_ctx_key = ctx_key
+    return dyn_ctx
+
+
 def _generate_native_dynamic(
     components: Evo2InferenceComponents,
     prompts: List[str],
@@ -757,7 +968,8 @@ def _generate_native_dynamic(
 ) -> List[_NativeDynamicResult]:
     """Drive standalone Evo2 (text→DNA) generation through the native mcore dynamic engine.
 
-    One mcore ``DynamicInferenceContext`` per prompt, driven through the request lifecycle:
+    A single mcore ``DynamicInferenceContext`` is reused across prompts, driven through the request
+    lifecycle once per prompt:
     ``add_request`` -> :func:`bind_hyena_packed_views_to_dynamic_context` ->
     ``initialize_attention_state`` -> model forward -> sample on the LM-head logits ->
     ``update_requests``. Standalone Evo2 has its own output layer (``post_process=True``), so
@@ -770,7 +982,6 @@ def _generate_native_dynamic(
     prefill chunk length.
     """
     # lazy: heavy mcore imports — pull the full dynamic-inference stack only when generating.
-    from megatron.core.inference.config import InferenceConfig
     from megatron.core.inference.contexts.dynamic_context import (
         BlockOverflowError,
         MaxSequenceLengthOverflowError,
@@ -793,60 +1004,83 @@ def _generate_native_dynamic(
     sampling_rng.manual_seed(int(nd.evo2_seed))
 
     results: List[_NativeDynamicResult] = []
-    for prompt in prompts:
-        prompt_token_ids = list(tokenizer.tokenize(prompt))
-        n_prompt = len(prompt_token_ids)
-        # Size the context to cover prompt + generation (+ small headroom). max_requests is kept
-        # tp-divisible (max(tp,1)); the per-context exact rounder decodes the single request as ONE
-        # row regardless. buffer_size_gb is auto-sized for the prompt plus generated tokens.
-        tp = int(getattr(hyena_model.config, "tensor_model_parallel_size", 1) or 1)
-        max_requests = max(tp, 1)
-        msl = min(nd.max_seq_length, n_prompt + max_new_tokens + 8)
-        if msl < n_prompt + 1:
-            msl = n_prompt + max_new_tokens + 8
-        block_size_tokens = int(inference_dynamic_batching_block_size)
-        if block_size_tokens <= 0:
-            raise ValueError(f"inference_dynamic_batching_block_size must be positive, got {block_size_tokens}")
-        max_tokens = inference_dynamic_batching_max_tokens
-        if max_tokens is not None:
-            max_tokens = int(max_tokens)
-            if max_tokens <= 0:
-                raise ValueError(f"inference_dynamic_batching_max_tokens must be positive, got {max_tokens}")
-            if n_prompt > max_tokens and not enable_chunked_prefill:
-                raise ValueError(
-                    f"Prompt has {n_prompt} tokens but inference_dynamic_batching_max_tokens={max_tokens}. "
-                    "Increase --inference-dynamic-batching-max-tokens or pass --enable-chunked-prefill."
-                )
-        buf_gb = compute_evo2_paged_kv_buffer_size_gb(
-            hyena_model.config,
-            mamba_state_config=nd.mamba_state_config,
-            max_sequence_length=msl,
-            max_requests=max_requests,
-            block_size_tokens=block_size_tokens,
-            safety_blocks=2,
-        )
-        dyn_ctx = nd.ctx_cls(
-            model_config=hyena_model.config,
-            inference_config=InferenceConfig(
-                max_sequence_length=msl,
-                buffer_size_gb=buf_gb,
-                mamba_inference_state_config=nd.mamba_state_config,
-                max_requests=max_requests,
-                max_tokens=max_tokens,
-                block_size_tokens=block_size_tokens,
-                unified_memory_level=0,
-                enable_chunked_prefill=enable_chunked_prefill,
-                num_cuda_graphs=1 if nd.cuda_graphs_enabled else None,
-                use_cuda_graphs_for_non_decode_steps=False,
-            ),
-        )
-        if n_prompt > dyn_ctx.max_tokens and not enable_chunked_prefill:
+    if not prompts:
+        return results
+
+    # Tokenize every prompt up front so the token-budget checks below run before any generation and
+    # so the shared context's max-token budget can be validated against the longest prompt.
+    tokenized_prompts: List[List[int]] = [list(tokenizer.tokenize(prompt)) for prompt in prompts]
+    max_n_prompt = max(len(toks) for toks in tokenized_prompts)
+
+    block_size_tokens = int(inference_dynamic_batching_block_size)
+    if block_size_tokens <= 0:
+        raise ValueError(f"inference_dynamic_batching_block_size must be positive, got {block_size_tokens}")
+    max_tokens = inference_dynamic_batching_max_tokens
+    if max_tokens is not None:
+        max_tokens = int(max_tokens)
+        if max_tokens <= 0:
+            raise ValueError(f"inference_dynamic_batching_max_tokens must be positive, got {max_tokens}")
+        if max_n_prompt > max_tokens and not enable_chunked_prefill:
             raise ValueError(
-                f"Prompt has {n_prompt} tokens but the dynamic context max token budget is {dyn_ctx.max_tokens}. "
+                f"Longest prompt has {max_n_prompt} tokens but inference_dynamic_batching_max_tokens={max_tokens}. "
                 "Increase --inference-dynamic-batching-max-tokens or pass --enable-chunked-prefill."
             )
-        dyn_ctx.materialize_only_last_token_logits = False
-        dyn_ctx.initialize_all_tensors()
+
+    # Resolve the engine sequence-length budget. In auto mode (max_seq_length=None at setup) it is
+    # sized from the prompts on first use and then GROWS on demand: a later prompt that needs more
+    # triggers a one-time rebuild of the dynamic context at a larger size (mcore has no in-place
+    # resize) with a CUDA-graph re-capture, instead of failing. A manual --max-seq-length is a fixed
+    # cap that supersedes auto-sizing and never grows (an over-long prompt then just stops early, as
+    # before). The CLI may pre-size nd.max_seq_length from a prompt sample (_resolve_prompt_auto...).
+    needed_max_seq_length = _auto_max_seq_length_for(max_n_prompt, max_new_tokens)
+    if nd.max_seq_length is None:
+        nd.max_seq_length = needed_max_seq_length
+        if rank == 0:
+            logger.info(
+                "[evo2-native] auto-sized max_seq_length=%d (longest prompt=%d + max_new_tokens=%d + headroom=%d)",
+                nd.max_seq_length,
+                max_n_prompt,
+                max_new_tokens,
+                _AUTO_MAX_SEQ_LENGTH_HEADROOM,
+            )
+    elif nd.max_seq_length_is_auto and needed_max_seq_length > nd.max_seq_length:
+        # Grow to cover this prompt, rounded up to a whole KV block so a small bump doesn't re-trigger
+        # a rebuild on the very next slightly-longer prompt. _get_or_build_... rebuilds + re-captures.
+        grown_max_seq_length = -(-needed_max_seq_length // block_size_tokens) * block_size_tokens
+        if rank == 0:
+            logger.info(
+                "[evo2-native] growing max_seq_length %d -> %d to fit a larger prompt (%d tokens); this "
+                "rebuilds the dynamic context and re-captures CUDA graphs once. Pass --max-seq-length to "
+                "pin a fixed size and avoid regrows.",
+                nd.max_seq_length,
+                grown_max_seq_length,
+                max_n_prompt,
+            )
+        nd.max_seq_length = grown_max_seq_length
+
+    # One persistent dynamic context for the whole engine, reused across every prompt AND every
+    # generate() call (mcore's DynamicInferenceEngine pattern: one context fed many requests). This is
+    # required for CUDA-graph correctness — the per-layer decode graph, captured once during warmup,
+    # freezes the context object identity and the rotary_pos_emb shape (== max_sequence_length), so the
+    # same object and shape must be presented on every later decode step regardless of prompt or batch.
+    # reset() (called between prompts in the loop below, and on reuse) returns the context to a clean
+    # state without freeing the graph-referenced buffers.
+    dyn_ctx = _get_or_build_shared_dynamic_context(
+        nd,
+        block_size_tokens=block_size_tokens,
+        max_tokens=max_tokens,
+        enable_chunked_prefill=enable_chunked_prefill,
+        device=device,
+    )
+    if max_n_prompt > dyn_ctx.max_tokens and not enable_chunked_prefill:
+        raise ValueError(
+            f"Longest prompt has {max_n_prompt} tokens but the dynamic context max token budget is "
+            f"{dyn_ctx.max_tokens}. Increase --inference-dynamic-batching-max-tokens or pass "
+            "--enable-chunked-prefill."
+        )
+
+    for prompt_token_ids in tokenized_prompts:
+        n_prompt = len(prompt_token_ids)
 
         generated_ids: List[int] = []
         generated_logprobs: List[float] = []
@@ -1141,8 +1375,18 @@ def parse_args() -> argparse.Namespace:
         "--max-seq-length",
         type=int,
         default=None,
-        help="Max sequence length. When omitted, resolved as: "
-        "EVO2_MAX_SEQ_LEN env var > auto-detected from GPU memory and model size.",
+        help="Max sequence length (a manual cap; supersedes auto-sizing). When omitted, resolved as: "
+        "EVO2_MAX_SEQ_LEN env var > auto-sized from the prompt token lengths (longest sampled prompt "
+        "+ --max-new-tokens). The dynamic context is CUDA-graph-pinned and cannot grow once set.",
+    )
+    ap.add_argument(
+        "--max-seq-length-num-prompts",
+        type=int,
+        default=_DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS,
+        help="When --max-seq-length is auto (omitted), size the context from the longest of the first "
+        f"N prompts (default {_DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS}; pass 0 to scan all prompts). A "
+        "longer prompt beyond the first N grows the context on demand (one-time rebuild + CUDA-graph "
+        "re-capture); set --max-seq-length to pin a fixed size and avoid regrows.",
     )
     ap.add_argument(
         "--max-batch-size",
@@ -1183,6 +1427,50 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
+def _resolve_prompt_auto_max_seq_length(
+    components: Evo2InferenceComponents,
+    prompt_texts: List[str],
+    *,
+    max_new_tokens: int,
+    num_prompts: Optional[int] = None,
+) -> int:
+    """Auto-size the engine's initial ``max_seq_length`` from prompt token lengths.
+
+    Sizes the persistent dynamic context to cover the longest of the first ``num_prompts`` prompts
+    (``None`` or ``<= 0`` = all) plus the generation budget, using the engine tokenizer. Only the
+    sampled prompts are tokenized here. A prompt beyond the sample that needs more is NOT a failure:
+    :func:`_generate_native_dynamic` grows the context on demand (rebuild + CUDA-graph re-capture).
+    Scanning a small leading sample just keeps startup cheap on large files and usually picks the
+    final size in one shot. Sets and returns ``nd.max_seq_length``.
+    """
+    nd = components.native_dynamic
+    tokenizer = components.tokenizer
+    scan_all = num_prompts is None or int(num_prompts) <= 0
+    sample = prompt_texts if scan_all else prompt_texts[: int(num_prompts)]
+    auto_msl = max(_auto_max_seq_length_for(len(tokenizer.tokenize(text)), max_new_tokens) for text in sample)
+    nd.max_seq_length = auto_msl
+    if int(os.environ.get("RANK", "0")) == 0:
+        if scan_all or len(sample) >= len(prompt_texts):
+            logger.info(
+                "[evo2-native] auto-sized max_seq_length=%d from all %d prompt(s) "
+                "(longest + max_new_tokens=%d + headroom=%d)",
+                auto_msl,
+                len(prompt_texts),
+                max_new_tokens,
+                _AUTO_MAX_SEQ_LENGTH_HEADROOM,
+            )
+        else:
+            logger.info(
+                "[evo2-native] auto-sized max_seq_length=%d from the first %d of %d prompt(s); a longer "
+                "later prompt will grow the context on demand (set --max-seq-length to pin a fixed size, "
+                "or --max-seq-length-num-prompts 0 to scan all prompts up front)",
+                auto_msl,
+                len(sample),
+                len(prompt_texts),
+            )
+    return auto_msl
+
+
 def infer(
     prompts: List[Dict[str, str]],
     ckpt_dir: Path,
@@ -1199,7 +1487,8 @@ def infer(
     output_file: Optional[Path] = None,
     mixed_precision_recipe: Optional[str] = None,
     vortex_style_fp8: bool = False,
-    max_seq_length: int = 8192,
+    max_seq_length: Optional[int] = None,
+    max_seq_length_num_prompts: int = _DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS,
     max_batch_size: int = 1,
     use_subquadratic_ops: bool = False,
     enable_chunked_prefill: bool = False,
@@ -1228,7 +1517,10 @@ def infer(
         mixed_precision_recipe: Override mixed precision recipe.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
-        max_seq_length: Maximum sequence length.
+        max_seq_length: Manual sequence-length cap (supersedes auto-sizing; never grows). ``None``
+            (default) auto-sizes the engine from the prompt token lengths and grows on demand.
+        max_seq_length_num_prompts: When auto-sizing, size from the longest of the first N prompts
+            (``<= 0`` = all). A longer later prompt grows the context on demand rather than erroring.
         max_batch_size: Maximum batch size for inference. The inference engine pre-allocates
             GPU memory proportional to this value. For large models, only 1 may fit.
         use_subquadratic_ops: Use fused subquadratic-ops kernels in the inference path.
@@ -1260,6 +1552,19 @@ def infer(
     )
     mem_after_setup_gb = torch.cuda.max_memory_allocated() / (1024**3)
     logger.info(f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB")
+
+    # Auto-size the engine's sequence-length budget from the prompts unless a manual value was given.
+    # Manual --max-seq-length supersedes (setup stored it; this only runs in auto mode). We size from
+    # the longest of the first --max-seq-length-num-prompts prompts here so the budget reflects the
+    # whole run (not just the first batch); prompts beyond that sample are validated per-batch in
+    # _generate_native_dynamic, which fails loudly with the exact --max-seq-length to set.
+    if max_seq_length is None and prompts:
+        _resolve_prompt_auto_max_seq_length(
+            components,
+            [entry["prompt"] for entry in prompts],
+            max_new_tokens=max_new_tokens,
+            num_prompts=max_seq_length_num_prompts,
+        )
 
     all_records: List[Dict[str, Any]] = []
     total_prompt_tokens = 0
@@ -1361,7 +1666,9 @@ def main() -> None:
     args = parse_args()
 
     # --- Resolve settings: CLI arg > env var > auto-detected default ---
-    max_seq_length = _resolve_int(args.max_seq_length, "EVO2_MAX_SEQ_LEN", _detect_max_seq_length(args.ckpt_dir))
+    # Manual --max-seq-length (or EVO2_MAX_SEQ_LEN) supersedes; otherwise None => auto-size from the
+    # prompts in infer() (which is tighter than the GPU-memory heuristic for typical short prompts).
+    max_seq_length = _resolve_int(args.max_seq_length, "EVO2_MAX_SEQ_LEN", None)
 
     if args.prompt_file is not None:
         prompts = _read_prompts_jsonl(args.prompt_file)
@@ -1384,6 +1691,7 @@ def main() -> None:
         mixed_precision_recipe=args.mixed_precision_recipe,
         vortex_style_fp8=args.vortex_style_fp8,
         max_seq_length=max_seq_length,
+        max_seq_length_num_prompts=args.max_seq_length_num_prompts,
         max_batch_size=args.max_batch_size,
         use_subquadratic_ops=args.use_subquadratic_ops,
         enable_chunked_prefill=args.enable_chunked_prefill,
