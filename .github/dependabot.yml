@@ -2,21 +2,61 @@ version: 2
 
 updates:
   - package-ecosystem: "gitsubmodule"
-    schedule:
-        interval: "weekly"
     directory: "/"
     target-branch: "main"
+    schedule:
+      interval: "weekly"
     open-pull-requests-limit: 2
     reviewers:
       - "pstjohn"
       - "jstjohn"
+
   - package-ecosystem: "docker"
     directory: "/"
     target-branch: "main"
-    open-pull-requests-limit: 1
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 1
     reviewers:
       - "pstjohn"
       - "dorotat-nv"
       - "trvachov"
+
+  - package-ecosystem: "uv"
+    directories:
+      - "/bionemo-recipes/**"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      all-dependencies:
+        patterns: ["*"]
+    reviewers:
+      - "pstjohn"
+
+  - package-ecosystem: "pip"
+    directories:
+      - "/bionemo-recipes/**"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      all-dependencies:
+        patterns: ["*"]
+    reviewers:
+      - "pstjohn"
+
+  - package-ecosystem: "npm"
+    directories:
+      - "/bionemo-recipes/**"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      all-dependencies:
+        patterns: ["*"]
+    reviewers:
+      - "pstjohn"
