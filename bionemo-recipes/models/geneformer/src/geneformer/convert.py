@@ -20,7 +20,6 @@ Adapted from ESM2 conversion pattern using NeMo's io.apply_transforms.
 
 import torch
 from accelerate import init_empty_weights
-from nemo.lightning import io
 from torch import nn
 from transformers import BertConfig
 from transformers import BertForMaskedLM as HFBertForMaskedLM
@@ -75,6 +74,8 @@ def convert_geneformer_hf_to_te(model_hf: nn.Module, **config_kwargs) -> nn.Modu
     Returns:
         nn.Module: The Transformer Engine model.
     """
+    from nemo.lightning import io
+
     te_config = TEBertConfig(**model_hf.config.to_dict(), **config_kwargs)
     te_config.use_te_layers = True  # Enable TE layers
     te_config.fuse_qkv_params = True  # Enable fused QKV parameters
@@ -82,11 +83,13 @@ def convert_geneformer_hf_to_te(model_hf: nn.Module, **config_kwargs) -> nn.Modu
     with init_empty_weights():
         model_te = BertForMaskedLM(te_config)
 
+    pack_qkv_weight, pack_qkv_bias, _, _ = _make_transforms()
+
     output_model = io.apply_transforms(
         model_hf,
         model_te,
         mapping,
-        [_pack_qkv_weight, _pack_qkv_bias],  # Use transforms for fused QKV parameters
+        [pack_qkv_weight, pack_qkv_bias],  # Use transforms for fused QKV parameters
         state_dict_ignored_entries=["cls.predictions.decoder.weight", "cls.predictions.decoder.bias"],
     )
 
@@ -124,6 +127,8 @@ def convert_geneformer_te_to_hf(model_te: nn.Module, **config_kwargs) -> nn.Modu
     for key in te_specific_keys:
         hf_config_dict.pop(key, None)
 
+    from nemo.lightning import io
+
     hf_config = BertConfig(**hf_config_dict, **config_kwargs)
 
     with init_empty_weights():
@@ -143,11 +148,13 @@ def convert_geneformer_te_to_hf(model_te: nn.Module, **config_kwargs) -> nn.Modu
             ]
         )
 
+    _, _, unpack_qkv_weight, unpack_qkv_bias = _make_transforms()
+
     output_model = io.apply_transforms(
         model_te,
         model_hf,
         reverse_mapping,
-        [_unpack_qkv_weight, _unpack_qkv_bias],
+        [unpack_qkv_weight, unpack_qkv_bias],
         state_dict_ignored_entries=[
             "cls.predictions.decoder.weight",
             "cls.predictions.decoder.bias",
@@ -160,15 +167,7 @@ def convert_geneformer_te_to_hf(model_te: nn.Module, **config_kwargs) -> nn.Modu
     return output_model
 
 
-@io.state_transform(
-    source_key=(
-        "bert.encoder.layer.*.attention.self.query.weight",
-        "bert.encoder.layer.*.attention.self.key.weight",
-        "bert.encoder.layer.*.attention.self.value.weight",
-    ),
-    target_key="bert.encoder.layer.*.self_attention.qkv.weight",
-)
-def _pack_qkv_weight(ctx: io.TransformCTX, query, key, value):
+def _pack_qkv_weight_impl(ctx, query, key, value):
     """Pack the QKV weights into fused TE format."""
     concat_weights = torch.cat((query, key, value), dim=0)  # [3 * num_heads * head_dim, input_dim]
     input_shape = concat_weights.size()
@@ -180,15 +179,7 @@ def _pack_qkv_weight(ctx: io.TransformCTX, query, key, value):
     return concat_weights
 
 
-@io.state_transform(
-    source_key=(
-        "bert.encoder.layer.*.attention.self.query.bias",
-        "bert.encoder.layer.*.attention.self.key.bias",
-        "bert.encoder.layer.*.attention.self.value.bias",
-    ),
-    target_key="bert.encoder.layer.*.self_attention.qkv.bias",
-)
-def _pack_qkv_bias(ctx: io.TransformCTX, query, key, value):
+def _pack_qkv_bias_impl(ctx, query, key, value):
     """Pack the QKV biases into fused TE format."""
     # Input shapes: query, key, value each have shape [num_heads * head_dim]
     # Example: [768] for 12 heads with 64-dim heads
@@ -218,15 +209,7 @@ def _pack_qkv_bias(ctx: io.TransformCTX, query, key, value):
     return concat_biases
 
 
-@io.state_transform(
-    source_key="bert.encoder.layer.*.self_attention.qkv.weight",
-    target_key=(
-        "bert.encoder.layer.*.attention.self.query.weight",
-        "bert.encoder.layer.*.attention.self.key.weight",
-        "bert.encoder.layer.*.attention.self.value.weight",
-    ),
-)
-def _unpack_qkv_weight(ctx: io.TransformCTX, qkv_weight):
+def _unpack_qkv_weight_impl(ctx, qkv_weight):
     """Unpack the fused QKV weight into separate query, key, and value weights."""
     np = ctx.source.config.num_attention_heads
 
@@ -251,15 +234,7 @@ def _unpack_qkv_weight(ctx: io.TransformCTX, qkv_weight):
     return query, key, value
 
 
-@io.state_transform(
-    source_key="bert.encoder.layer.*.self_attention.qkv.bias",
-    target_key=(
-        "bert.encoder.layer.*.attention.self.query.bias",
-        "bert.encoder.layer.*.attention.self.key.bias",
-        "bert.encoder.layer.*.attention.self.value.bias",
-    ),
-)
-def _unpack_qkv_bias(ctx: io.TransformCTX, qkv_bias):
+def _unpack_qkv_bias_impl(ctx, qkv_bias):
     """Unpack the fused QKV bias into separate query, key, and value biases."""
     np = ctx.source.config.num_attention_heads
 
@@ -282,3 +257,75 @@ def _unpack_qkv_bias(ctx: io.TransformCTX, qkv_bias):
     value = value.view(-1)  # [num_heads * head_dim]
 
     return query, key, value
+
+
+def _make_transforms():
+    """Create the QKV state transforms lazily.
+
+    The ``io.state_transform`` decorator requires importing ``nemo.lightning``, which pulls in a
+    megatron-core import chain. Building the transforms inside this helper keeps that import out of
+    module scope so importing ``geneformer.convert`` stays cheap and free of heavy side effects.
+
+    Returns:
+        A tuple ``(pack_qkv_weight, pack_qkv_bias, unpack_qkv_weight, unpack_qkv_bias)`` of
+        ``io.state_transform`` objects ready for ``io.apply_transforms``.
+    """
+    from nemo.lightning import io
+
+    pack_qkv_weight = io.state_transform(
+        source_key=(
+            "bert.encoder.layer.*.attention.self.query.weight",
+            "bert.encoder.layer.*.attention.self.key.weight",
+            "bert.encoder.layer.*.attention.self.value.weight",
+        ),
+        target_key="bert.encoder.layer.*.self_attention.qkv.weight",
+    )(_pack_qkv_weight_impl)
+
+    pack_qkv_bias = io.state_transform(
+        source_key=(
+            "bert.encoder.layer.*.attention.self.query.bias",
+            "bert.encoder.layer.*.attention.self.key.bias",
+            "bert.encoder.layer.*.attention.self.value.bias",
+        ),
+        target_key="bert.encoder.layer.*.self_attention.qkv.bias",
+    )(_pack_qkv_bias_impl)
+
+    unpack_qkv_weight = io.state_transform(
+        source_key="bert.encoder.layer.*.self_attention.qkv.weight",
+        target_key=(
+            "bert.encoder.layer.*.attention.self.query.weight",
+            "bert.encoder.layer.*.attention.self.key.weight",
+            "bert.encoder.layer.*.attention.self.value.weight",
+        ),
+    )(_unpack_qkv_weight_impl)
+
+    unpack_qkv_bias = io.state_transform(
+        source_key="bert.encoder.layer.*.self_attention.qkv.bias",
+        target_key=(
+            "bert.encoder.layer.*.attention.self.query.bias",
+            "bert.encoder.layer.*.attention.self.key.bias",
+            "bert.encoder.layer.*.attention.self.value.bias",
+        ),
+    )(_unpack_qkv_bias_impl)
+
+    return pack_qkv_weight, pack_qkv_bias, unpack_qkv_weight, unpack_qkv_bias
+
+
+class _RawTransform:
+    """Lightweight stand-in exposing the raw transform function via ``.transform``.
+
+    Some tests access ``_unpack_qkv_weight.transform`` to exercise the tensor-reshaping logic
+    directly without depending on ``nemo.lightning``. This mirrors the attribute that the real
+    ``io.state_transform`` object provides, without importing nemo at module scope.
+    """
+
+    def __init__(self, fn):
+        self.transform = fn
+
+    def __call__(self, *args, **kwargs):
+        return self.transform(*args, **kwargs)
+
+
+# Backward-compatible module-level handles for the raw unpack logic.
+_unpack_qkv_weight = _RawTransform(_unpack_qkv_weight_impl)
+_unpack_qkv_bias = _RawTransform(_unpack_qkv_bias_impl)
