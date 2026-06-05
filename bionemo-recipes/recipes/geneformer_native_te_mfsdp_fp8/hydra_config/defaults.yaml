@@ -31,9 +31,6 @@ training:
     zero_dp_strategy: "optim_grads_params"
     calculate_per_token_loss: false
     init_model_with_meta_device: true
-    check_for_nan_in_grad: true
-    grad_reduce_in_fp32: false
-    preserve_fp32_weights: true
     overlap_grad_reduce: true
     overlap_param_gather: true
     sync_model_each_microbatch: true

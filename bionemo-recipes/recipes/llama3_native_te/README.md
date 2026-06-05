@@ -1,14 +1,14 @@
 # TransformerEngine-accelerated Llama 3 training with native PyTorch training loop
 
 This folder demonstrates how to train TE-accelerated Llama 3 with a native PyTorch training loop, including sequence
-packing and FP8 precision, using fully sharded data parallel (FSDP) for distributed training. This recipe is configured
-for genomic sequences using a custom nucleotide tokenizer.
+packing, FP8/MXFP8/NVFP4 precision with layer-wise control, using fully sharded data parallel (FSDP) for distributed
+training. This recipe is configured for genomic sequences using a custom nucleotide tokenizer.
 
 ## How to use this recipe
 
 This folder contains an independent, minimal training example. It does not depend on any other code in the top-level
 bionemo-framework repository. You can download a zipped directory of this folder alone by clicking
-[here](https://download-directory.github.io?url=https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/llama3_native_te&filename=llama3-native-te).
+[here](https://download-directory.github.io?url=https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/llama3_native_te&filename=llama3-native-te).
 
 ### How to deploy this recipe on cloud providers
 
@@ -16,9 +16,9 @@ bionemo-framework repository. You can download a zipped directory of this folder
 
 ## Supported Models and Training Features
 
-| Model                                    | BF16 | FP8<sup>[1]</sup> | THD Input Format | FP8 with THD Input Format | MXFP8<sup>[2]</sup> | Context Parallelism | Tensor Parallelism |
-| ---------------------------------------- | ---- | ----------------- | ---------------- | ------------------------- | ------------------- | ------------------- | ------------------ |
-| [Llama 3](../../models/llama3/README.md) | ✅   | ✅                | ✅               | ✅                        | ✅                  | ✅                  | 🚧                 |
+| Model                                    | BF16 | FP8<sup>[1]</sup> | MXFP8<sup>[2]</sup> | NVFP4<sup>[3]</sup> | THD Input Format | Context Parallelism | Tensor Parallelism |
+| ---------------------------------------- | ---- | ----------------- | ------------------- | ------------------- | ---------------- | ------------------- | ------------------ |
+| [Llama 3](../../models/llama3/README.md) | ✅   | ✅                | ✅                  | ✅                  | ✅               | ✅                  | 🚧                 |
 
 ✅: Supported <br/>
 🚧: Under development <br/>
@@ -26,6 +26,7 @@ bionemo-framework repository. You can download a zipped directory of this folder
 
 \[1\]: Requires [compute capability](https://developer.nvidia.com/cuda-gpus) 9.0 and above (Hopper+) <br/>
 \[2\]: Requires [compute capability](https://developer.nvidia.com/cuda-gpus) 10.0 and 10.3 (Blackwell), 12.0 support pending <br/>
+\[3\]: Requires [compute capability](https://developer.nvidia.com/cuda-gpus) 10.0 and above (Blackwell+) <br/>
 
 ### Installing Dependencies
 
@@ -64,17 +65,85 @@ def compute_model_pflops(seq_len, global_batch_size, step_time_s):
     return model_flops / 1e15
 ```
 
+### Low precision performance benchmarks
+
+![Performance Benchmarks Low Precision](../../../docs/docs/assets/images/llama3/llama3_8gpu_tflops.png)
+In the above plot we can see the performance increases as we lower the precision of our transformer layers across the 1B and 8B variant of LLAMA3.
+
+#### MXFP8 vs BF16 throughput on Llama-3.1 (Lingua / DCLM)
+
+We benchmarked MXFP8 (`MXFP8BlockScaling`, E4M3) against the BF16 baseline using the Lingua / DCLM training setup on NVIDIA Blackwell GPUs. All runs use TransformerEngine, fused AdamW with FP32 master weights, and THD sequence packing.
+
+<p align="center">
+  <img src="../../../docs/docs/assets/images/llama3/lingua-8b-vs-70b-mxfp8-uplift.png" alt="MXFP8 throughput uplift over BF16 on Llama-3.1-8B vs 70B (single B300 node)" width="100%" />
+</p>
+
+**Key finding:** plain MXFP8 over BF16 gives roughly the same ~30% throughput uplift on both 8B and 70B. Quantized model init (`qinit`) adds essentially nothing on 8B (+0.8 pp) but **adds ~10 percentage points on 70B (+9.7 pp)** — the per-layer quantize/dequantize work saved by qinit scales with depth (80 vs 32 transformer layers). On 70B, MXFP8 + qinit delivers a **+38.4% throughput gain over BF16** on a single B300 node.
+
+<details>
+<summary><strong>Single-node detail: per-model 3-way comparisons</strong></summary>
+
+The per-model charts below show the 3-way (BF16 / MXFP8 no-qinit / MXFP8 + qinit) comparison underlying the headline figure above.
+
+**Llama-3.1-8B** (1 node / 8× B300 SXM6 AC, mbs=4, grad_acc=1, gbs = 32 seqs / 262k tokens, seq_len = 8192):
+
+<p align="center">
+  <img src="../../../docs/docs/assets/images/llama3/lingua-8b-mxfp8-1node.png" alt="Llama-3.1-8B MXFP8 vs BF16 throughput (single-node 3-way)" width="100%" />
+</p>
+
+On a single B300 node, **MXFP8 + qinit (+31.1%) and MXFP8 without qinit (+30.4%) deliver essentially the same throughput gain over BF16**. At this layer count the per-layer quantize/dequantize saving qinit provides is small; the speedup comes mainly from the FP8 GEMMs themselves. Averaged over global step ∈ [500, 990].
+
+**Llama-3.1-70B** (1 node / 8× B300 SXM6 AC, mbs=1, grad_acc=1, cp=2, dp=4, gbs = 4 seqs / ≈34k packed tokens, seq_len = 8192):
+
+<p align="center">
+  <img src="../../../docs/docs/assets/images/llama3/lingua-70b-mxfp8-1node.png" alt="Llama-3.1-70B MXFP8 vs BF16 throughput (single-node 3-way)" width="100%" />
+</p>
+
+On a single B300 node, **MXFP8 + qinit (+39.4%) pulls ahead of MXFP8 without qinit (+28.7%) — a ~10 percentage point gap that doesn't appear at 8B**. With 80 transformer layers, the per-step quantize/dequantize work avoided by qinit (the FP8 weight is already in compute format, so no on-the-fly cast every forward and backward) adds up to a meaningful throughput gain over the no-qinit path. Averaged over global step ∈ [500, 990]. We also separately measured `preserve_high_precision_init_val=True` (HPIV) and found it within 1% of the qinit-without-HPIV throughput, so HPIV's startup-time master-weight seeding is essentially free at steady state.
+
+</details>
+
+<details>
+<summary><strong>Multi-node throughput (B200, production-scale runs)</strong></summary>
+
+We also measured MXFP8 + qinit throughput at scale, on multi-node B200 with longer Lingua DCLM runs to confirm the single-node findings hold in production conditions.
+
+**Llama-3.1-8B** (8 nodes / 64× B200, mbs=2, grad_acc=2, global batch = 256 seqs, seq_len = 8192):
+
+<p align="center">
+  <img src="../../../docs/docs/assets/images/llama3/lingua-7b-mxfp8-multinode.png" alt="Llama-3.1-8B MXFP8 vs BF16 throughput (multi-node)" width="100%" />
+</p>
+
+MXFP8 + qinit reaches **22,517 unpadded tokens / s / GPU vs 17,644 for BF16 — a +27.6% throughput gain (×1.28 speedup, −21.7% step time)**. Averaged over global step ∈ [500, 1000].
+
+**Llama-3.1-70B** (4 nodes / 32× B200, cp=2, dp=16, mbs=1, grad_acc=1, gbs = 16 seqs, seq_len = 8192):
+
+<p align="center">
+  <img src="../../../docs/docs/assets/images/llama3/lingua-70b-mxfp8-multinode.png" alt="Llama-3.1-70B MXFP8 vs BF16 throughput (multi-node)" width="100%" />
+</p>
+
+MXFP8 + qinit reaches **2,725 unpadded tokens / s / GPU vs 1,972 for BF16 — a +38.2% throughput gain (×1.40 speedup, −27.6% step time)**. Averaged over global step ∈ [100, 490]. The larger relative gain on 70B vs 8B at scale matches the size-dependent pattern shown in the single-node headline above.
+
+</details>
+
+Wandb runs:
+
+- Single-node 8B — [BF16](https://wandb.ai/clara-discovery/lingua-7b/runs/lingua_7b_bf16_mbs4_1n_bia) / [MXFP8 + qinit](https://wandb.ai/clara-discovery/lingua-7b/runs/lingua_7b_mxfp8_qinit_mbs4_1n_bia) / [MXFP8 (no qinit)](https://wandb.ai/clara-discovery/lingua-7b/runs/lingua_7b_mxfp8_no_qinit_mbs4_1n_bia)
+- Single-node 70B (1k steps) — [BF16](https://wandb.ai/clara-discovery/lingua-70b/runs/lingua_70b_bf16_mbs1_1n_1k_bia) / [MXFP8 + qinit](https://wandb.ai/clara-discovery/lingua-70b/runs/lingua_70b_mxfp8_qinit_mbs1_1n_1k_bia) / [MXFP8 + qinit + HPIV](https://wandb.ai/clara-discovery/lingua-70b/runs/lingua_70b_mxfp8_qinit_hpiv_mbs1_1n_1k_bia) / [MXFP8 (no qinit)](https://wandb.ai/clara-discovery/lingua-70b/runs/lingua_70b_mxfp8_no_qinit_mbs1_1n_1k_bia)
+- Multi-node 8B — [BF16](https://wandb.ai/clara-discovery/lingua-7b/runs/lingua-7b-bf16-baseline) / [MXFP8 + qinit](https://wandb.ai/clara-discovery/lingua-7b/runs/lingua_7b_mxfp8_qinit_v6_te_main_8n_prenyx)
+- Multi-node 70B — [BF16](https://wandb.ai/clara-discovery/lingua-70b/runs/lingua_70b_bf16_thd_fusedadam_4n_cp2_bia) / [MXFP8 + qinit](https://wandb.ai/clara-discovery/lingua-70b/runs/lingua_70b_mxfp8_qinit_thd_fusedadam_4n_cp2_bia)
+
 ### Convergence Benchmarks
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/lingua-1b-loss-curve.png" alt="Llama 3 Lingua 1B Loss Curve" width="49%" />
-  <img src="../../../docs/docs/assets/images/recipes/lingua-1b-step-time.png" alt="Llama 3 Lingua 1B Step Time" width="49%" />
+  <img src="../../../docs/docs/assets/images/llama3/lingua-1b-loss-curve.png" alt="Llama 3 Lingua 1B Loss Curve" width="49%" />
+  <img src="../../../docs/docs/assets/images/llama3/lingua-1b-step-time.png" alt="Llama 3 Lingua 1B Step Time" width="49%" />
 </p>
 
-We compared the convergence of this Llama3 recipe (with FSDP2) against
-[NeMo 2.0](https://github.com/NVIDIA-NeMo/NeMo) and the [facebookresearch/lingua](https://github.com/facebookresearch/lingua)
+We compared the convergence of this Llama3 recipe (with FSDP2) against NeMo 2.0
+(https://github.com/NVIDIA-NeMo/NeMo) and the [facebookresearch/lingua](https://github.com/facebookresearch/lingua)
 implementation on the DCLM Baseline 1.0 dataset. See [Training on Natural Language Data (Lingua
-Reproduction)](#training-on-natural-language-data-lingua-reproduction) for more details. The figure above shows similar loss convergence and step time to
+Reproduction)](#lingua-reproduction) for more details. The figure above shows similar loss convergence and step time to
 the NeMo 2.0 training example, and the following table shows downstream performance on various tasks using the
 [lm-eval](https://github.com/eleutherai/lm-evaluation-harness) library. The variation in training step time every 10,000 steps
 are due checkpointing, further work will be done to improve training step time stability.
@@ -87,6 +156,10 @@ are due checkpointing, further work will be done to improve training step time s
 
 Models were trained on 64 NVIDIA H100 GPUs with a micro batch size of 4 and a context length of 4096 for 60,000 steps.
 Training was performed with BF16 precision.
+
+### Low Precision convergence benchmarks
+
+For the multi-node 8B run on DCLM, the MXFP8 + quantized init training loss tracks the BF16 baseline to within ~0.1% over 60k steps, confirming the throughput gains above come with no measurable convergence regression. A small additional improvement is observed when keeping the first and last transformer layers in BF16 while running all other layers in MXFP8 (configurable via `fp8_layers`).
 
 ### Distributed Training
 
@@ -127,10 +200,10 @@ batch size while running on a smaller number of GPUs.
 python train_fsdp2.py --config-name L0_sanity grad_acc_steps=2
 ```
 
-### FP8 Training
+### Quantized Training (FP8 / MXFP8 / NVFP4)
 
 To run training with FP8, enable it by overriding the `fp8_config.enabled=true` configuration parameter. Additional FP8
-configuration parameters, including switching to `MXFP8BlockScaling`, can be set via the hydra configuration.
+configuration parameters, including switching to `MXFP8BlockScaling`, can be set using the hydra configuration.
 
 ```bash
 python train_fsdp2.py --config-name L0_sanity fp8_config.enabled=true
@@ -150,24 +223,60 @@ python train_fsdp2.py --config-name L0_sanity \
 
 #### FP8 Debugging
 
-We also provide a mechanism to receive tensor data related to FP8 layers during training which may include activations, weights and gradients.
+```bash
+python train_fsdp2.py --config-name L0_sanity fp4_config.enabled=true
+```
 
-To enable this please select the following config options.
+Note: This feature is available for the `train_ddp` and the `train_fsdp2` scripts. NVFP4 stats logging is not yet
+supported and will be enabled in a future TransformerEngine release; FP8/MXFP8 stats logging works today.
+
+Additional recipe parameters (e.g., switching to `MXFP8BlockScaling`) can be set via the hydra configuration.
+
+#### Layer-Wise Precision
+
+You can control which transformer layers use FP8 or FP4 by specifying 1-indexed layer numbers via `fp8_layers` and
+`fp4_layers`. Layers not assigned to either format will run in BF16.
+
+For example, to run layers 1-3 in FP8, layers 4-6 in FP4, and the rest in BF16 on a model with more than 6 layers:
+
+```bash
+python train_fsdp2.py --config-name L0_sanity \
+  fp8_config.enabled=true \
+  fp4_config.enabled=true \
+  'fp8_layers=[1,2,3]' \
+  'fp4_layers=[4,5,6]'
+```
+
+When both `fp8_config` and `fp4_config` are enabled but only one layer list is provided, the other format automatically
+claims the remaining layers. For example, if `fp8_layers=[1,2,3]` is set and `fp4_config.enabled=true` with no
+`fp4_layers`, then layers 4 through N will default to FP4.
+
+#### Quantization Stats Debugging
+
+We provide a mechanism to log tensor statistics (activations, weights, gradients) for quantized layers during training.
+When layer-wise precision is used, the stats config is automatically updated so that only the relevant layers are
+tracked.
+
+To enable stats logging:
 
 ```bash
 python train_fsdp2.py \
-  fp8_stats_config.enabled=True \
-  fp8_stats_config.fp8_log_dir=./logs/fp8_stats_logs_dummy \
-  fp8_stats_config.fp8_stats_file=./fp8_debugging_stats.yaml \
-  fp8_config.enabled=True
+  quant_stats_config.enabled=true \
+  quant_stats_config.quant_log_dir=./logs/quant_stats \
+  quant_stats_config.quant_stats_file=./fp8_debugging_stats.yaml \
+  fp8_config.enabled=true
 ```
 
-Note: This feature is available for the `train_ddp` and the `train_fsdp2` scripts.
+Note: This feature is available for the `train_ddp` and the `train_fsdp2` scripts. NVFP4 stats logging is not yet
+supported and will be enabled in a future TransformerEngine release; FP8/MXFP8 stats logging works today.
 
-The config file structure [fp8_debugging_stats.yaml](fp8_debugging_stats.yaml) is explained in the [NVIDIA Transformer Engine config file documentation](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/debug/2_config_file_structure.html) in more detail. Below we will cover some very basic elements of the file structure.
+The config file structure [fp8_debugging_stats.yaml](fp8_debugging_stats.yaml) is explained in the
+[NVIDIA Transformer Engine config file documentation](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/debug/2_config_file_structure.html)
+in more detail.
 
-This comes as a performance cost that is dependent on the `freq` parameter mentioned above. `freq=1` collects stats on every step which in our
-experiments caused a ~29% decrease in throughput (executed on a single RTX 5090). We recommend using `freq>=10` to reduce this performance hit.
+Stats collection has a performance cost dependent on the `freq` parameter in the config file. `freq=1` collects stats
+on every step which in our experiments caused a ~29% decrease in throughput (executed on a single RTX 5090). We
+recommend using `freq>=10` to reduce this performance hit.
 
 ### Sequence Packing (THD input format)
 
@@ -217,7 +326,7 @@ python train_fsdp2.py --config-name L0_sanity \
   dataset.load_dataset_kwargs.path=/path/to/download/directory
 ```
 
-## Training on Natural Language Data (Lingua Reproduction)
+## Training on Natural Language Data (Lingua Reproduction) {#lingua-reproduction}
 
 We provide a configuration to reproduce the Llama-3.2-1B training experiments from [Meta
 Lingua](https://github.com/facebookresearch/lingua), using the [DCLM Baseline

@@ -29,14 +29,17 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import hydra
+import nvdlfw_inspect.api as debug_api
 import nvtx
 import torch
 import transformer_engine.pytorch
 from omegaconf import DictConfig, OmegaConf
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor
 from torch.optim import AdamW
 from transformer_engine.common.recipe import Format
+from transformer_engine.pytorch.optimizers import FusedAdam
 
 from checkpoint import (
     _ckpt_futures,
@@ -50,11 +53,37 @@ from dataset import create_bshd_dataloader, create_thd_dataloader
 from distributed_config import DistributedConfig
 from modeling_llama_te import NVLlamaConfig, NVLlamaForCausalLM
 from perf_logger import PerfLogger
+from quantization import initialize_quant_stats_logging, resolve_layer_precision
 from scheduler import get_cosine_annealing_schedule_with_warmup
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _init_master_weights_from_high_precision(
+    optimizer: FusedAdam, model: torch.nn.Module, device: torch.device
+) -> None:
+    """Initialize optimizer master weights from high-precision init values.
+
+    When quantized_model_init is used with preserve_high_precision_init_val=True, each FP8 parameter
+    stores the original BF16 init values in CPU memory. This function initializes optimizer state
+    for all parameters, then overwrites master weights for quantized params with the preserved
+    high-precision values instead of dequantized FP8 values.
+    """
+    count = 0
+    for name, param in model.named_parameters():
+        optimizer.initialize_state(param, store_param_remainders=False)
+        local = param._local_tensor if isinstance(param, DTensor) else param
+        if hasattr(local, "get_high_precision_init_val"):
+            hp_val = local.get_high_precision_init_val()
+            if hp_val is not None:
+                optimizer.set_scaled_state(param, "master_param", hp_val.to(device=device, dtype=torch.float32))
+                local.clear_high_precision_init_val()
+                count += 1
+                logger.debug("Seeded master weight for %s from high-precision init val", name)
+    if count > 0:
+        logger.info("Initialized %d master weight(s) from high-precision init values", count)
 
 
 @hydra.main(config_path="hydra_config", config_name="L0_sanity_cp", version_base="1.2")
@@ -79,21 +108,60 @@ def main(args: DictConfig) -> float | None:
     logger.info("Created device mesh: %s", device_mesh)
 
     # --- Model Configuration ---
-    # Create quantization recipes -- only used if FP8/FP4 is enabled in the config.
+    config = NVLlamaConfig.from_pretrained(
+        args.config_name_or_path,
+        dtype=torch.bfloat16,
+        **args.config_kwargs,
+    )
+
+    # Resolve layer-wise quantization assignments and store on config.
+    layer_precision = resolve_layer_precision(
+        num_layers=config.num_hidden_layers,
+        fp8_enabled=args.fp8_config.enabled,
+        fp4_enabled=args.fp4_config.enabled,
+        fp8_layers=OmegaConf.to_container(args.fp8_layers, resolve=True) if args.fp8_layers is not None else None,
+        fp4_layers=OmegaConf.to_container(args.fp4_layers, resolve=True) if args.fp4_layers is not None else None,
+    )
+    config.layer_precision = layer_precision
+
+    if args.quant_stats_config.enabled:
+        initialize_quant_stats_logging(
+            quant_stats_file=args.quant_stats_config.quant_stats_file,
+            quant_log_dir=args.quant_stats_config.quant_log_dir,
+            rank=dist_config.rank,
+            layer_precision=layer_precision,
+        )
+
+    # Create quantization recipes -- these are only used if FP8/FP4 is enabled in the config.
     fp8_recipe = None
+    fp4_recipe = None
     if args.fp8_config.enabled:
         fp8_recipe = hydra.utils.get_class(args.fp8_config.fp8_recipe)(
             fp8_format=Format[args.fp8_config.fp8_format], **args.fp8_config.fp8_recipe_kwargs
         )
-
-    fp4_recipe = None
     if args.fp4_config.enabled:
-        fp4_recipe = hydra.utils.get_class(args.fp4_config.fp4_recipe)(**args.fp4_config.fp4_recipe_kwargs)
+        fp4_recipe = hydra.utils.get_class(args.fp4_config.fp4_recipe)(
+            fp4_format=Format[args.fp4_config.fp4_format], **args.fp4_config.fp4_recipe_kwargs
+        )
+
+    if args.fp8_config.quantized_model_init_kwargs.get("enabled", False) and not (
+        args.fp8_config.enabled or args.fp4_config.enabled
+    ):
+        raise ValueError(
+            "fp8_config.quantized_model_init_kwargs.enabled=true requires fp8_config.enabled=true or "
+            "fp4_config.enabled=true. Enable at least one quantization format to use quantized model initialization."
+        )
 
     # --- Model Initialization ---
-    config = NVLlamaConfig.from_pretrained(args.config_name_or_path, dtype=torch.bfloat16, **args.config_kwargs)
-
-    with torch.device("meta") if args.use_meta_device else nullcontext():
+    # Optionally use transformer engine to initialize only fp8 versions of weights by setting
+    # `fp8_config.quantized_model_init_kwargs.enabled` to `True`, as opposed to using the default where both bfloat16
+    # and fp8 versions of weights are kept.
+    with (
+        torch.device("meta") if args.use_meta_device else nullcontext(),
+        transformer_engine.pytorch.quantized_model_init(
+            recipe=fp8_recipe, **args.fp8_config.quantized_model_init_kwargs
+        ),
+    ):
         model = NVLlamaForCausalLM(config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
 
     logger.info("Initialized Model:\n%s", model)
@@ -115,13 +183,28 @@ def main(args: DictConfig) -> float | None:
             torch.cuda.Stream(),
         )
 
+    # Attach quantization recipes to the model (layer precision is already on config).
+    model.model.set_recipes(fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
+
     if args.use_meta_device:
         # TE layers require special handling to initialize the weights from the meta device.
         model.init_empty_weights()
 
+    # Assign names to layers so debug API can identify them
+    if args.quant_stats_config.enabled:
+        debug_api.infer_and_assign_layer_names(model)
+
     # --- Optimizer & Scheduler ---
     # Convert OmegaConf to regular dict to avoid serialization issues (BIONEMO-2873).
-    optimizer = AdamW(model.parameters(), **OmegaConf.to_container(args.adamw_kwargs, resolve=True))  # type: ignore
+    adamw_kwargs = OmegaConf.to_container(args.adamw_kwargs, resolve=True)
+    if args.use_fp32_master_weights:
+        # TE FusedAdam maintains FP32 master copies of BF16 params internally.
+        # 'fused' kwarg is not used by TE's FusedAdam (it's always fused).
+        adamw_kwargs.pop("fused", None)
+        optimizer = FusedAdam(model.parameters(), master_weights=True, **adamw_kwargs)  # type: ignore
+        logger.info("Using TE FusedAdam with FP32 master weights")
+    else:
+        optimizer = AdamW(model.parameters(), **adamw_kwargs)  # type: ignore
     scheduler = get_cosine_annealing_schedule_with_warmup(optimizer, **args.lr_scheduler_kwargs)
 
     if args.use_torch_compile:
@@ -177,6 +260,11 @@ def main(args: DictConfig) -> float | None:
         start_step = 0
         epoch = 0
 
+        if args.use_fp32_master_weights and args.fp8_config.quantized_model_init_kwargs.get(
+            "preserve_high_precision_init_val", False
+        ):
+            _init_master_weights_from_high_precision(optimizer, model, device)
+
     perf_logger = PerfLogger(dist_config, args, start_step=start_step)
 
     gc.collect()
@@ -192,10 +280,9 @@ def main(args: DictConfig) -> float | None:
 
             micro_step += 1
 
-            # Forward pass with mixed precision.
+            # Forward pass - quantization autocast is handled inside the model via set_recipes().
             with nvtx.annotate("Forward pass", color="green"):
-                with transformer_engine.pytorch.autocast(enabled=args.fp8_config.enabled, recipe=fp8_recipe):
-                    outputs = model(**batch)
+                outputs = model(**batch)
 
             # Backward pass - scale loss by grad_acc_steps for proper gradient averaging
             loss = outputs.loss / args.grad_acc_steps

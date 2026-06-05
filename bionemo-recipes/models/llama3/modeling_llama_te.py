@@ -52,6 +52,7 @@ class NVLlamaConfig(LlamaConfig):
     #   "thd"  = Total tokens (packed/unpadded), Head, Dimension (sequence packing format)
     attn_input_format: str = "thd"
     self_attn_mask_type: str = "padding_causal"
+    layer_precision: list[str | None] | None = None
 
     def __init__(
         self,
@@ -217,10 +218,53 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
         self.rotary_emb = RotaryPositionEmbedding(config.hidden_size // config.num_attention_heads)
         self.rotary_emb.inv_freq = LlamaRotaryEmbedding(config=config).inv_freq
 
+        self._fp8_recipe: transformer_engine.common.recipe.Recipe | None = None
+        self._fp4_recipe: transformer_engine.common.recipe.Recipe | None = None
+
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def set_recipes(
+        self,
+        fp8_recipe: transformer_engine.common.recipe.Recipe | None = None,
+        fp4_recipe: transformer_engine.common.recipe.Recipe | None = None,
+    ) -> None:
+        """Attach quantization recipe objects for per-layer autocast.
+
+        Recipes are not serializable and must be set at runtime after model creation
+        and sharding (FSDP/DDP) but before training. The per-layer precision
+        assignments are read from ``self.config.layer_precision``.
+
+        Args:
+            fp8_recipe: The FP8 recipe instance (e.g., MXFP8BlockScaling), or None.
+            fp4_recipe: The FP4 recipe instance (e.g., NVFP4BlockScaling), or None.
+        """
+        self._fp8_recipe = fp8_recipe
+        self._fp4_recipe = fp4_recipe
+
+    def get_layer_autocast(self, layer_number: int):
+        """Return the appropriate TE autocast context manager for a given layer.
+
+        The context interacts with the outer FP8 autocast in the training script:
+        - FP8 layer: nullcontext() -- lets the outer FP8 autocast take effect.
+        - FP4 layer: te.pytorch.autocast(enabled=True, recipe=fp4_recipe) -- overrides to FP4.
+        - BF16 layer: te.pytorch.autocast(enabled=False) -- disables quantized compute.
+
+        Args:
+            layer_number: The 0-indexed layer number.
+
+        Returns:
+            A context manager for the layer's quantization mode.
+        """
+        precision = self.config.layer_precision[layer_number] if self.config.layer_precision is not None else None
+        if precision == "fp8":
+            return nullcontext()
+        elif precision == "fp4":
+            return transformer_engine.pytorch.autocast(enabled=True, recipe=self._fp4_recipe)
+        else:
+            return transformer_engine.pytorch.autocast(enabled=False)
 
     def forward(
         self,
@@ -298,12 +342,14 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
             if te_rope_emb.dtype != torch.float32:
                 warnings.warn("Rotary embeddings should be in float32 for optimal performance.", UserWarning)
 
-        with self.get_autocast_context(None, outer=True):
-            for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+        # Outer FP8 autocast enables FP8 compute for the decoder stack. Per-layer overrides (FP4, BF16) are handled
+        # by get_layer_autocast(), which nests inside this context.
+        with transformer_engine.pytorch.autocast(enabled=self._fp8_recipe is not None, recipe=self._fp8_recipe):
+            for layer_number, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
                 if output_hidden_states:
                     all_hidden_states = (*all_hidden_states, hidden_states)
 
-                with self.get_autocast_context(layer_idx):
+                with self.get_layer_autocast(layer_number):
                     hidden_states = decoder_layer(
                         hidden_states,
                         attention_mask=None if self.config.attn_input_format == "thd" else attention_mask,
@@ -363,8 +409,10 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
 
         if init and self.config.use_quantized_model_init:
             if precision in ("fp8", "fp4"):
-                return transformer_engine.pytorch.quantized_model_init(recipe=recipe)
-            return nullcontext()
+                return transformer_engine.pytorch.quantized_model_init(
+                    recipe=recipe, preserve_high_precision_init_val=True
+                )
+            return transformer_engine.pytorch.quantized_model_init(enabled=False)
 
         if precision == "fp8":
             if recipe is None:
@@ -583,6 +631,11 @@ class HFInferenceParams(InferenceParams):
             return 0
         return max(self.sequences.values())
 
+    @property
+    def is_compileable(self) -> bool:
+        """Required by HuggingFace transformers generate() auto-compile check."""
+        return False
+
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorder the cache based on the beam indices."""
         if isinstance(self.cache_manager, PagedKVCacheManager):
@@ -591,8 +644,3 @@ class HFInferenceParams(InferenceParams):
             updated_key_cache = key_cache.index_select(0, beam_idx)
             updated_value_cache = value_cache.index_select(0, beam_idx)
             self.cache_manager.cache[layer_number] = (updated_key_cache, updated_value_cache)
-
-    @property
-    def is_compileable(self) -> bool:
-        """Return False as this cache is not compatible with torch.compile."""
-        return False

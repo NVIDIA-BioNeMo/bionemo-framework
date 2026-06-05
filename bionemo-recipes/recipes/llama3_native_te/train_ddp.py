@@ -42,9 +42,9 @@ from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from checkpoint import load_checkpoint_ddp, save_checkpoint_ddp, save_final_model_ddp, should_save_checkpoint
 from dataset import create_bshd_dataloader, create_thd_dataloader
 from distributed_config import DistributedConfig
-from fp8_debugging import initialize_fp8_debugging
 from modeling_llama_te import NVLlamaConfig, NVLlamaForCausalLM
 from perf_logger import PerfLogger
+from quantization import initialize_quant_stats_logging, resolve_layer_precision
 from scheduler import get_cosine_annealing_schedule_with_warmup
 
 
@@ -66,37 +66,78 @@ def main(args: DictConfig) -> float | None:
     torch.distributed.init_process_group(backend="nccl", device_id=device)
     torch.cuda.set_device(dist_config.local_rank)
 
-    # TE Debug feature logging
-    if args.fp8_stats_config.enabled:
-        initialize_fp8_debugging(dist_config, **args.fp8_stats_config, fp8_enabled=args.fp8_config.enabled)
-
     # Create a device mesh for DDP. While this isn't strictly necessary, it mirrors the device mesh we create for FSDP2.
     device_mesh = init_device_mesh("cuda", mesh_shape=(dist_config.world_size,), mesh_dim_names=("dp",))
 
+    if args.use_te:
+        config_class = NVLlamaConfig
+        model_class = NVLlamaForCausalLM
+    else:
+        config_class = LlamaConfig
+        model_class = LlamaForCausalLM
+
     # --- Model Configuration ---
-    # Create quantization recipes -- only used if FP8/FP4 is enabled in the config.
+    config = config_class.from_pretrained(args.config_name_or_path, dtype=torch.bfloat16, **args.config_kwargs)
+
+    # Resolve layer-wise quantization assignments and store on config.
+    layer_precision = resolve_layer_precision(
+        num_layers=config.num_hidden_layers,
+        fp8_enabled=args.fp8_config.enabled,
+        fp4_enabled=args.fp4_config.enabled,
+        fp8_layers=OmegaConf.to_container(args.fp8_layers, resolve=True) if args.fp8_layers is not None else None,
+        fp4_layers=OmegaConf.to_container(args.fp4_layers, resolve=True) if args.fp4_layers is not None else None,
+    )
+    config.layer_precision = layer_precision
+
+    if args.quant_stats_config.enabled:
+        initialize_quant_stats_logging(
+            quant_stats_file=args.quant_stats_config.quant_stats_file,
+            quant_log_dir=args.quant_stats_config.quant_log_dir,
+            rank=dist_config.rank,
+            layer_precision=layer_precision,
+        )
+
+    # Create quantization recipes -- these are only used if FP8/FP4 is enabled in the config.
     fp8_recipe = None
+    fp4_recipe = None
     if args.fp8_config.enabled:
         fp8_recipe = hydra.utils.get_class(args.fp8_config.fp8_recipe)(
             fp8_format=Format[args.fp8_config.fp8_format], **args.fp8_config.fp8_recipe_kwargs
         )
-
-    fp4_recipe = None
     if args.fp4_config.enabled:
-        fp4_recipe = hydra.utils.get_class(args.fp4_config.fp4_recipe)(**args.fp4_config.fp4_recipe_kwargs)
+        fp4_recipe = hydra.utils.get_class(args.fp4_config.fp4_recipe)(
+            fp4_format=Format[args.fp4_config.fp4_format], **args.fp4_config.fp4_recipe_kwargs
+        )
+
+    if args.fp8_config.quantized_model_init_kwargs.get("enabled", False) and not (
+        args.fp8_config.enabled or args.fp4_config.enabled
+    ):
+        raise ValueError(
+            "fp8_config.quantized_model_init_kwargs.enabled=true requires fp8_config.enabled=true or "
+            "fp4_config.enabled=true. Enable at least one quantization format to use quantized model initialization."
+        )
 
     # --- Model Initialization ---
-    if args.use_te:
-        config = NVLlamaConfig.from_pretrained(args.config_name_or_path, dtype=torch.bfloat16, **args.config_kwargs)
-        model = NVLlamaForCausalLM(config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
-    else:
-        config = LlamaConfig.from_pretrained(args.config_name_or_path, dtype=torch.bfloat16, **args.config_kwargs)
-        model = LlamaForCausalLM(config)
+    # Optionally use transformer engine to initialize only fp8 versions of weights by setting
+    # `fp8_config.quantized_model_init_kwargs.enabled` to `True`, as opposed to using the default where both bfloat16
+    # and fp8 versions of weights are kept.
+    with transformer_engine.pytorch.quantized_model_init(
+        recipe=fp8_recipe, **args.fp8_config.quantized_model_init_kwargs
+    ):
+        model = (
+            model_class(config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
+            if model_class is NVLlamaForCausalLM
+            else model_class(config)
+        )
 
     logger.info("Initialized Model:\n%s", model)
 
+    # Attach quantization recipes to the model (layer precision is already on config).
+    if isinstance(model, NVLlamaForCausalLM):
+        model.model.set_recipes(fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
+
     # --- Distributed Wrapping (DDP) ---
-    if args.fp8_stats_config.enabled:
+    if args.quant_stats_config.enabled:
         debug_api.infer_and_assign_layer_names(model)
 
     model = model.to(device=device)
@@ -157,9 +198,8 @@ def main(args: DictConfig) -> float | None:
             micro_step += 1
             # DDP requires no_sync to skip all-reduce until the last microbatch in the accumulation window.
             with model.no_sync() if micro_step % args.grad_acc_steps != 0 else nullcontext():
-                # Forward pass with mixed precision.
-                with transformer_engine.pytorch.autocast(enabled=args.fp8_config.enabled, recipe=fp8_recipe):
-                    outputs = model(**batch)
+                # Forward pass - quantization autocast is handled inside the model via set_recipes().
+                outputs = model(**batch)
 
                 # Backward pass - scale loss by grad_acc_steps for proper gradient averaging
                 loss = outputs.loss / args.grad_acc_steps

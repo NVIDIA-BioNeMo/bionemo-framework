@@ -271,5 +271,5 @@ python -m bionemo.scdl.simple_benchmark.scdl_speedtest --generate-baseline -i <p
 
 ## Support
 
-For support, please [file an issue in the BioNeMo Framework GitHub repository](https://github.com/NVIDIA/bionemo-framework/issues).
+For support, please [file an issue in the BioNeMo Framework GitHub repository](https://github.com/NVIDIA-BioNeMo/bionemo-framework/issues).
 This code will be updated and refactored once a general benchmarking framework is in place.

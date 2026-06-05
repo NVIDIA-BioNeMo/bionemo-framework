@@ -22,6 +22,7 @@ from typing import Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # noqa: N812
 from einops import rearrange
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
@@ -40,6 +41,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
 
 
 logger = logging.getLogger(__name__)
+
 
 try:
     from transformer_engine.common.recipe import DelayedScaling, Format
@@ -116,7 +118,6 @@ class HyenaMixer(MegatronModule):
         self.fast_conv_proj = self.hyena_config.fast_conv_proj
         self.fast_conv_mixer = self.hyena_config.fast_conv_mixer
 
-        # Use b2b causal conv1d
         self.use_subquadratic_ops = self.transformer_config.use_subquadratic_ops
 
         # Per attention head and per partition values.
@@ -197,8 +198,8 @@ class HyenaMixer(MegatronModule):
             )
 
             if self.use_subquadratic_ops:
-                # Create a wrapper module that doesn't register parameters
-                # Use the existing weights from the original model
+                # The B2B kernel is guarded in hyena_utils and fails early if the local CUDA stack
+                # cannot run subquadratic_ops_torch correctly.
                 self.b2b_kernel = B2BCausalConv1dModule(
                     self.hyena_proj_conv,
                     self.mixer,
@@ -228,8 +229,8 @@ class HyenaMixer(MegatronModule):
             )
 
             if self.use_subquadratic_ops and self.operator_type == "hyena_medium_conv":
-                # Create a wrapper module that doesn't register parameters
-                # Use the existing weights from the original model
+                # The B2B kernel is guarded in hyena_utils and fails early if the local CUDA stack
+                # cannot run subquadratic_ops_torch correctly.
                 self.b2b_kernel = B2BCausalConv1dModule(
                     self.hyena_proj_conv,
                     self.mixer,
@@ -307,14 +308,20 @@ class HyenaMixer(MegatronModule):
         else:
             features = rearrange(features, "l b d -> b d l").contiguous()
 
-        if (
-            self.use_subquadratic_ops
-            and self.operator_type in ["hyena_short_conv", "hyena_medium_conv"]
-            and inference_context is None
-        ):
-            # todo: support inference_context for b2b_kernel
-            # Use the B2BCausalConv1dModule wrapper with the existing weights from the original model
+        is_b2b_eligible = self.use_subquadratic_ops and self.operator_type in [
+            "hyena_short_conv",
+            "hyena_medium_conv",
+        ]
+        # B2B runs during training (no inference_context) or during prefill (no FIR cache yet).
+        # During decode, fall back to the regular per-token step path.
+        is_prefill = inference_context is not None and id(self.hyena_proj_conv) not in getattr(
+            inference_context, "fir_filter_state_dict", {}
+        )
+
+        if is_b2b_eligible and (inference_context is None or is_prefill):
             z = self.b2b_kernel(features, _use_cp=_proj_use_cp)
+            if is_prefill:
+                self._populate_b2b_inference_state(features, inference_context)
         else:
             features = self.hyena_proj_conv(
                 features, _use_cp=_proj_use_cp, inference_context=inference_context
@@ -330,3 +337,59 @@ class HyenaMixer(MegatronModule):
             z = rearrange(z, "b d l -> l b d").contiguous()
         y, bias = self.dense(z)
         return y, bias
+
+    def _populate_b2b_inference_state(self, features, inference_context):
+        """Populate FIR state for proj_conv and mixer after a b2b prefill.
+
+        The b2b kernel doesn't expose its post-projection intermediate, but subsequent
+        decode steps need (a) the proj_conv input tail and (b) the tail of `x2 * v`
+        — the gated stream that mixer's short_conv operates on. We get (b) by running
+        a windowed proj_conv on just the last (K_proj + K_mixer - 2) input positions.
+        """
+        proj_kernel_size = self.hyena_proj_conv.kernel_size
+
+        # (a) proj_conv FIR state: input tail in [B, D, K_proj-1]
+        proj_state = features[..., -(proj_kernel_size - 1) :].contiguous()
+        proj_dict = getattr(inference_context, "fir_filter_state_dict", {})
+        proj_dict[id(self.hyena_proj_conv)] = proj_state
+        setattr(inference_context, "fir_filter_state_dict", proj_dict)
+
+        # (b) mixer FIR state: tail of (x2 * v), the gated post-projection stream
+        if self.operator_type == "hyena_short_conv":
+            mixer_kernel_size = self.mixer.short_conv.kernel_size
+        else:  # hyena_medium_conv
+            mixer_kernel_size = self.mixer.kernel_size
+
+        tail_in_len = proj_kernel_size + mixer_kernel_size - 2
+        if features.shape[-1] < tail_in_len:
+            tail_in = F.pad(features, (tail_in_len - features.shape[-1], 0))
+        else:
+            tail_in = features[..., -tail_in_len:].contiguous()
+
+        # Reuse the cached transformed weight from get_weight() (lru_cache'd).
+        proj_weight = self.hyena_proj_conv.get_weight()
+
+        intermediate = F.conv1d(
+            F.pad(tail_in.to(torch.float32), (proj_kernel_size - 1, 0)),
+            proj_weight,
+            bias=None,
+            stride=1,
+            padding=0,
+            groups=tail_in.shape[1],
+        )[..., -(mixer_kernel_size - 1) :].to(features.dtype)
+
+        x1, x2, v = rearrange(intermediate, "b (g dg p) l -> b (g dg) p l", p=3, g=self.num_groups_per_tp_rank).unbind(
+            dim=2
+        )
+        mixer_input_tail = (x2 * v).contiguous()  # [B, D, K_mixer-1]
+
+        if self.operator_type == "hyena_short_conv":
+            mixer_state_owner_id = id(self.mixer.short_conv)
+            mixer_dict_key = "fir_filter_state_dict"
+        else:  # hyena_medium_conv
+            mixer_state_owner_id = id(self.mixer)
+            mixer_dict_key = "inner_fir_filter_state_dict"
+
+        mixer_dict = getattr(inference_context, mixer_dict_key, {})
+        mixer_dict[mixer_state_owner_id] = mixer_input_tail
+        setattr(inference_context, mixer_dict_key, mixer_dict)

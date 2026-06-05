@@ -206,6 +206,18 @@ class AMPLIFY(AMPLIFYPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def get_input_embeddings(self):
+        """Get the input embeddings of the model."""
+        return self.encoder
+
+    def set_input_embeddings(self, value: nn.Embedding):
+        """Set the input embeddings of the model.
+
+        Args:
+            value (nn.Embedding): The input embeddings.
+        """
+        self.encoder = value
+
     def forward(
         self,
         input_ids,
@@ -287,6 +299,18 @@ class AMPLIFYForMaskedLM(AMPLIFYPreTrainedModel):
             self.decoder = transformer_engine.pytorch.Linear(
                 config.hidden_size, config.vocab_size, params_dtype=config.dtype
             )
+
+    def get_input_embeddings(self):
+        """Get the input embeddings of the model."""
+        return self.amplify.get_input_embeddings()
+
+    def set_input_embeddings(self, value: nn.Embedding):
+        """Set the input embeddings of the model.
+
+        Args:
+            value (nn.Embedding): The input embeddings.
+        """
+        self.amplify.set_input_embeddings(value)
 
     def forward(
         self,

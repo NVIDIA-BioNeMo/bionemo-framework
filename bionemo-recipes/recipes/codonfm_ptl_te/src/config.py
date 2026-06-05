@@ -37,6 +37,7 @@ from src.utils.fsdp_config import get_fsdp_strategy
 from src.utils.grad_norm_callback import GradientNormLogger
 from src.utils.pred_writer import PredWriter
 from src.utils.scheduler import linear_scheduler_with_warmup_lr_lambda
+from src.utils.throughput_logger import ThroughputLogger
 from src.utils.timer import StepTimingCallback
 
 
@@ -133,8 +134,9 @@ def get_callbacks_config(args: Any) -> Dict[str, fdl.Config]:
         ),
         "model_summary": fdl.Config(ModelSummary, max_depth=-1),
         "lr_monitor": fdl.Config(LearningRateMonitor, logging_interval="step", log_weight_decay=True),
-        "grad_norm_callback": fdl.Config(GradientNormLogger, log_every_n_steps=100),
-        "timer_callback": fdl.Config(StepTimingCallback, log_every_n_steps=100, mode="train"),
+        "grad_norm_callback": fdl.Config(GradientNormLogger, log_every_n_steps=args.log_every_n_steps),
+        "timer_callback": fdl.Config(StepTimingCallback, log_every_n_steps=args.log_every_n_steps, mode="train"),
+        "throughput_callback": fdl.Config(ThroughputLogger, log_every_n_steps=args.log_every_n_steps, warmup_steps=40),
     }
     if args.mode == "eval":
         callbacks["pred_writer"] = fdl.Config(
@@ -204,6 +206,7 @@ def get_data_config(args: Any) -> fdl.Config:
         persistent_workers=False,
         world_size=args.num_nodes * args.num_gpus,
         is_evaluation=args.mode == "eval",
+        max_tokens_per_batch=getattr(args, "max_tokens_per_batch", None),
     )
 
 
@@ -250,6 +253,12 @@ MODEL_ARCHITECTURES: Dict[str, Dict[str, Any]] = {
         "intermediate_size": 8192,
         "num_attention_heads": 16,
         "num_hidden_layers": 18,
+    },
+    "encodon_5b": {
+        "hidden_size": 4096,
+        "intermediate_size": 16384,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 24,
     },
     "encodon_10b": {
         "hidden_size": 5120,
@@ -318,6 +327,7 @@ def get_model_config(args: Any) -> fdl.Config:
             model_path=args.checkpoint_path,
             task_type=args.task_type,
             use_transformer_engine=args.use_transformer_engine,
+            attn_input_format=args.attn_input_format,
         )
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
@@ -354,6 +364,8 @@ def get_trainer_config(args: Any) -> Dict[str, Any]:
         sync_batchnorm=False,
         accumulate_grad_batches=args.gradient_accumulation_steps,
     )
+    if getattr(args, "max_tokens_per_batch", None) is not None:
+        trainer_kwargs["use_distributed_sampler"] = False
     if args.check_val_every_n_epoch:
         trainer_kwargs["check_val_every_n_epoch"] = args.check_val_every_n_epoch
     else:

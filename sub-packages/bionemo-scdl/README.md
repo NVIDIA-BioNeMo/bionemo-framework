@@ -226,9 +226,9 @@ convert_h5ad_to_scdl --data-path hdf5s --save-path example_dataset [--data-dtype
 
 The runtime is examined on the Tahoe 100M dataset, which contains over 100 million rows. On this dataset, there is either a 12× or 53× speedup depending on the machine used.
 
-![Throughput](https://raw.githubusercontent.com/NVIDIA/bionemo-framework/pbinder/scdl_add_to_edawson/sub-packages/bionemo-scdl/assets/tahoe_throughput.png)
+![Throughput](./assets/tahoe_throughput.png)
 
-To replicate this on your machine, see: [Tahoe 100M Profiling](https://github.com/NVIDIA/bionemo-framework/blob/main/sub-packages/bionemo-scdl/simple-benchmark/README.md#tahoe-100m) section.
+To replicate this on your machine, see: [Tahoe 100M Profiling](./simple-benchmark/README.md#tahoe-100m) section.
 
 ## Using Neighbor Information in Single Cell Datasets
 

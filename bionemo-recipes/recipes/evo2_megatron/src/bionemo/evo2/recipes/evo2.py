@@ -36,6 +36,7 @@ from bionemo.evo2.data.evo2_dataset_provider import Evo2DatasetProvider
 from bionemo.evo2.data.evo2_mock_dataset_provider import MockEvo2DatasetProvider
 from bionemo.evo2.data.megatron.hyena.evo2_dataset import Evo2Dataset, Evo2DatasetPadEodLossMask
 from bionemo.evo2.data.sharded_eden_dataset_provider import ShardedEdenDatasetProvider
+from bionemo.evo2.models.evo2_lora import Evo2LoRA
 from bionemo.evo2.models.evo2_provider import (
     Hyena1bModelProvider,
     HyenaModelProvider,
@@ -89,6 +90,12 @@ class Evo2CommonKwargs(TypedDict, total=False):
     comm_overlap_config: CommOverlapConfig | None
     pad_eod_loss_mask: bool
     no_weight_decay_embeddings: bool
+    lora_finetune: bool
+    lora_alpha: int
+    lora_dim: int
+    lora_dropout: float
+    lora_target_modules: list[str]
+    lora_skip_freeze_modules: list[str]
 
 
 def evo2_1b_pretrain_config(**user_kwargs: Unpack[Evo2CommonKwargs]) -> ConfigContainer:
@@ -159,6 +166,12 @@ def _evo2_common(
     comm_overlap_config: CommOverlapConfig | None = None,
     no_weight_decay_embeddings: bool = False,
     pad_eod_loss_mask: bool = False,
+    lora_finetune: bool = False,
+    lora_alpha: int = 32,
+    lora_dim: int = 16,
+    lora_dropout: float = 0.1,
+    lora_target_modules: list[str] = ["dense_projection", "linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"],
+    lora_skip_freeze_modules: list[str] = [],
 ) -> ConfigContainer:
     """Create a pre-training configuration for Mamba 2.x models.
 
@@ -233,6 +246,17 @@ def _evo2_common(
         min_lr=min_lr,
     )
 
+    if lora_finetune:
+        peft = Evo2LoRA(
+            target_modules=lora_target_modules,
+            dim=lora_dim,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            skip_freeze_modules=lora_skip_freeze_modules,
+        )
+    else:
+        peft = None
+
     cfg = ConfigContainer(
         model=model_cfg,
         train=TrainingConfig(
@@ -289,6 +313,7 @@ def _evo2_common(
         rng=RNGConfig(seed=seed),
         comm_overlap=comm_overlap_config,
         mixed_precision=precision_config,
+        peft=peft,
     )
 
     return cfg

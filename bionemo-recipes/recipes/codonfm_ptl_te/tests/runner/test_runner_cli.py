@@ -93,8 +93,10 @@ def test_runner_finetune_args_propagation(mock_finetune, mock_build, mock_get_co
         "/out",
         "--checkpoints_dir",
         "/out/ckpts",
-        "--checkpoint_path",
+        "--pretrained_ckpt_path",
         "/pretrained/initial.ckpt",
+        "--train_batch_size",
+        "16",
     ]
     if use_te:
         argv.append("--use_transformer_engine")
@@ -136,6 +138,8 @@ def test_runner_pretrain_dispatch(mock_train, mock_build, mock_get_config, monke
         "/out",
         "--checkpoints_dir",
         "/out/ckpts",
+        "--train_batch_size",
+        "16",
     ]
     if use_te:
         argv.append("--use_transformer_engine")
@@ -176,6 +180,8 @@ def test_runner_eval_dispatch(mock_evaluate, mock_build, mock_get_config, monkey
         "/out/ckpts",
         "--checkpoint_path",
         "/ckpt/model.ckpt",
+        "--val_batch_size",
+        "16",
     ]
     if use_te:
         argv.append("--use_transformer_engine")
@@ -268,11 +274,15 @@ def test_runner_finetune_thd_not_supported_with_te(monkeypatch):
         "/out",
         "--checkpoints_dir",
         "/out/ckpts",
-        "--checkpoint_path",
+        "--pretrained_ckpt_path",
         "/pretrained/model.ckpt",
         "--attn_input_format",
         "thd",
         "--use_transformer_engine",
+        "--train_batch_size",
+        "16",
+        "--val_batch_size",
+        "16",
     ]
     monkeypatch.setenv("WANDB_API_KEY", "")
     with patch.object(sys, "argv", argv):

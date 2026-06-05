@@ -30,7 +30,7 @@ and training scripts.
 | ESM2   | ✓   | ✓     | ✗     |
 | LLAMA3 | ✓   | ✓     | ✗     |
 
-To gather FP8 statistics for analysis, refer to the model-specific documentation (e.g., [ESM2 FP8 Debugging](../esm2_native_te/README.md#fp8-debugging)) or add these arguments to your training command:
+To gather FP8 statistics for analysis, refer to the model-specific documentation (e.g., [ESM2 quantized training](../esm2_native_te/README.md#quantized-training-fp8-mxfp8-nvfp4)) or add these arguments to your training command:
 
 ```python
 python train_fsdp2.py \

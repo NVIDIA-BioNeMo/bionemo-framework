@@ -59,6 +59,7 @@ Usage (Python API):
 
 import argparse
 import gc
+import inspect
 import json
 import logging
 import os
@@ -70,10 +71,21 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
-from megatron.bridge.training.checkpointing import _load_model_weights_from_checkpoint
+from megatron.bridge.training.checkpointing import (
+    _generate_model_state_dict,
+    _load_model_weights_from_checkpoint,
+    apply_peft_adapter_filter_to_state_dict,
+)
 from megatron.bridge.training.config import DistributedInitConfig, RNGConfig
 from megatron.bridge.training.mixed_precision import get_mixed_precision_config
-from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
+
+
+try:
+    from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
+except ImportError:
+    from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
+        HuggingFaceTokenizer as _HuggingFaceTokenizer,
+    )
 from megatron.bridge.training.utils.checkpoint_utils import (
     file_exists,
     get_checkpoint_run_config_filename,
@@ -81,27 +93,108 @@ from megatron.bridge.training.utils.checkpoint_utils import (
 )
 from megatron.bridge.utils.common_utils import get_world_size_safe
 from megatron.bridge.utils.instantiate_utils import instantiate
-from megatron.core import parallel_state
+from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.inference.contexts import StaticInferenceContext
 from megatron.core.inference.engines.static_engine import StaticInferenceEngine
 from megatron.core.inference.model_inference_wrappers.abstract_model_inference_wrapper import (
     AbstractModelInferenceWrapper,
 )
-from megatron.core.inference.model_inference_wrappers.inference_wrapper_config import (
-    InferenceWrapperConfig,
-)
+
+
+try:
+    from megatron.core.inference.model_inference_wrappers.inference_wrapper_config import (
+        InferenceWrapperConfig,
+    )
+except ImportError:
+
+    @dataclass
+    class InferenceWrapperConfig:
+        """Compatibility shim for MCore versions that removed InferenceWrapperConfig."""
+
+        hidden_size: int
+        inference_max_requests: int
+        inference_max_seq_length: int
+        inference_batch_times_seqlen_threshold: int
+        params_dtype: torch.dtype
+        padded_vocab_size: int
+        nccl_all_reduce_for_prefill: bool = False
+        moe_pad_experts_for_cuda_graph_inference: bool = False
+
+        def add_attributes(self, attributes: dict[str, Any]) -> None:
+            """Match the old MCore config helper used by Evo2TextGenerationController."""
+            for name, value in attributes.items():
+                setattr(self, name, value)
+
+
 from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_model_config
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 from bionemo.evo2.run.text_generation_controller import Evo2TextGenerationController
 
 
 logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _register_bionemo_target_prefix() -> None:
+    try:
+        from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
+
+        register_allowed_target_prefix("bionemo.")
+    except ImportError:
+        pass
+
+
+_WRAPPER_INIT_ACCEPTS_CONFIG = (
+    "inference_wrapper_config" in inspect.signature(AbstractModelInferenceWrapper.__init__).parameters
+)
+
+
+class _TextGenerationTokenizerAdapter:
+    """Expose the tokenizer methods expected by MCore's static text-generation path."""
+
+    def __init__(self, tokenizer: _HuggingFaceTokenizer):
+        self._tokenizer = tokenizer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tokenizer, name)
+
+    @property
+    def vocab_size(self) -> int:
+        return self._tokenizer.vocab_size
+
+    @property
+    def bos(self) -> Optional[int]:
+        return getattr(self._tokenizer, "bos", getattr(self._tokenizer, "bos_id", None))
+
+    @property
+    def eod(self) -> Optional[int]:
+        return getattr(self._tokenizer, "eod", None)
+
+    def tokenize(self, text: str) -> list[int]:
+        if hasattr(self._tokenizer, "tokenize"):
+            return self._tokenizer.tokenize(text)
+        return self._tokenizer.text_to_ids(text)
+
+    def detokenize(self, tokens: list[int], skip_special_tokens: bool = True) -> str:
+        if hasattr(self._tokenizer, "detokenize"):
+            return self._tokenizer.detokenize(tokens, skip_special_tokens=skip_special_tokens)
+        return self._tokenizer.ids_to_text(tokens)
+
+    def offsets(self, tokens: list[int], text: str) -> list[int]:
+        if hasattr(self._tokenizer, "offsets"):
+            return self._tokenizer.offsets(tokens, text)
+        offsets = []
+        position = 0
+        for token in tokens:
+            offsets.append(position)
+            position += len(self.detokenize([token], skip_special_tokens=False))
+        return offsets
 
 
 # =============================================================================
@@ -231,7 +324,11 @@ class Evo2ModelInferenceWrapper(AbstractModelInferenceWrapper):
             inference_wrapper_config: Configuration with hidden size, vocab size, etc.
             inference_context: Context for managing state and sequence offsets.
         """
-        super().__init__(model, inference_wrapper_config, inference_context)
+        self.inference_wrapper_config = inference_wrapper_config
+        if _WRAPPER_INIT_ACCEPTS_CONFIG:
+            super().__init__(model, inference_wrapper_config, inference_context)
+        else:
+            super().__init__(model, inference_context)
 
     def prep_inference_input(self, prompts_tokens: torch.Tensor) -> Dict[str, Any]:
         """Prepare the inference input data.
@@ -354,6 +451,7 @@ def setup_inference_engine(
     vortex_style_fp8: bool = False,
     random_seed: int = 1234,
     prompt_segmentation_threshold: Optional[int] = None,
+    use_subquadratic_ops: bool = False,
 ) -> Evo2InferenceComponents:
     """Setup the Evo2 inference engine and related components.
 
@@ -375,6 +473,9 @@ def setup_inference_engine(
             segmented during prefill to reduce peak memory. The first segment
             runs as a normal prefill; remaining tokens are processed one at a
             time before generation begins.
+        use_subquadratic_ops: Use fused subquadratic-ops kernels (b2b causal
+            conv1d in prefill, fft_causal_conv1d / causal_conv1d in
+            parallel_fir).
 
     Returns:
         Evo2InferenceComponents containing all inference components.
@@ -394,6 +495,7 @@ def setup_inference_engine(
         raise FileNotFoundError(f"run_config.yaml not found at {run_config_filename}")
 
     run_config = read_run_config(run_config_filename)
+    _register_bionemo_target_prefix()
     model_provider = instantiate(run_config["model"])
     logger.info(f"Instantiated model provider: {type(model_provider).__name__}")
 
@@ -408,6 +510,7 @@ def setup_inference_engine(
     model_provider.sequence_parallel = False
 
     model_provider.flash_decode = True
+    model_provider.use_subquadratic_ops = use_subquadratic_ops
 
     if vortex_style_fp8:
         model_provider.vortex_style_fp8 = True
@@ -429,6 +532,7 @@ def setup_inference_engine(
         tokenizer = _HuggingFaceTokenizer(tokenizer_dir)
     else:
         tokenizer = _HuggingFaceTokenizer(DEFAULT_HF_TOKENIZER_MODEL_PATH)
+    tokenizer = _TextGenerationTokenizerAdapter(tokenizer)
 
     model_provider.vocab_size = tokenizer.vocab_size
     model_provider.should_pad_vocab = True
@@ -453,6 +557,8 @@ def setup_inference_engine(
         dist_config=dist_config,
     )
     logger.info("Initialized distributed environment")
+    if use_subquadratic_ops:
+        ensure_subquadratic_ops_supported()
 
     # -------------------------------------------------------------------------
     # Step 5: Create model and load weights
@@ -462,12 +568,35 @@ def setup_inference_engine(
 
     raw_model = model_provider.provide().eval().cuda()
 
-    logger.info(f"Loading weights from: {resolved_ckpt_dir}")
-    _load_model_weights_from_checkpoint(
-        checkpoint_path=str(resolved_ckpt_dir),
-        model=[raw_model],
-        dist_ckpt_strictness="ignore_all",
-    )
+    # A LoRA finetune checkpoint only contains adapter tensors; the base weights live in
+    # run_config["checkpoint"]["pretrained_checkpoint"]. Detect via the top-level `peft:`
+    # section (same signal `peft_pre_wrap_hook` uses during training).
+    peft_node = run_config.get("peft")
+    if peft_node is not None:
+        # pretrained_checkpoint may point at a training-output parent containing iter_*; resolve.
+        resolved_pretrained_dir = resolve_checkpoint_path(Path(run_config["checkpoint"]["pretrained_checkpoint"]))
+        logger.info(f"PEFT checkpoint detected. Loading base weights from: {resolved_pretrained_dir}")
+        _load_model_weights_from_checkpoint(
+            checkpoint_path=str(resolved_pretrained_dir),
+            model=[raw_model],
+            dist_ckpt_strictness="ignore_all",
+        )
+
+        logger.info("Applying PEFT adapter structure to base model")
+        peft_cfg = instantiate(peft_node)
+        raw_model = peft_cfg(raw_model, training=False)
+
+        logger.info(f"Loading adapter weights from: {resolved_ckpt_dir}")
+        sharded_sd = apply_peft_adapter_filter_to_state_dict(_generate_model_state_dict([raw_model], {}), peft_cfg)
+        loaded = dist_checkpointing.load(sharded_sd, str(resolved_ckpt_dir), strict="ignore_all")
+        raw_model.load_state_dict(loaded["model"], strict=False)
+    else:
+        logger.info(f"Loading weights from: {resolved_ckpt_dir}")
+        _load_model_weights_from_checkpoint(
+            checkpoint_path=str(resolved_ckpt_dir),
+            model=[raw_model],
+            dist_ckpt_strictness="ignore_all",
+        )
     logger.info("Weights loaded successfully")
 
     # Wrap with Float16Module
@@ -781,6 +910,14 @@ def parse_args() -> argparse.Namespace:
         "generation begins. Useful for long prompts that would otherwise OOM. "
         "Also settable via EVO2_PST env var.",
     )
+    ap.add_argument(
+        "--use-subquadratic-ops",
+        action="store_true",
+        default=False,
+        help="Use fused subquadratic-ops CUDA kernels (b2b causal conv1d in prefill, "
+        "fft_causal_conv1d / causal_conv1d in parallel_fir). Speeds up prompt processing "
+        "but has no effect on per-token decode throughput.",
+    )
 
     return ap.parse_args()
 
@@ -804,6 +941,7 @@ def infer(
     max_seq_length: int = 8192,
     max_batch_size: int = 1,
     prompt_segmentation_threshold: Optional[int] = None,
+    use_subquadratic_ops: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run autoregressive text generation with Evo2 using MCore inference.
 
@@ -831,6 +969,7 @@ def infer(
             GPU memory proportional to this value. For large models, only 1 may fit.
         prompt_segmentation_threshold: If set, prompts longer than this are segmented
             during prefill to reduce peak memory.
+        use_subquadratic_ops: Use fused subquadratic-ops kernels in the inference path.
 
     Returns:
         List of JSONL-serialisable result dicts.
@@ -851,6 +990,7 @@ def infer(
         vortex_style_fp8=vortex_style_fp8,
         random_seed=random_seed,
         prompt_segmentation_threshold=prompt_segmentation_threshold,
+        use_subquadratic_ops=use_subquadratic_ops,
     )
 
     mem_after_setup_gb = torch.cuda.max_memory_allocated() / (1024**3)
@@ -976,6 +1116,7 @@ def main() -> None:
         max_seq_length=max_seq_length,
         max_batch_size=args.max_batch_size,
         prompt_segmentation_threshold=prompt_segmentation_threshold,
+        use_subquadratic_ops=args.use_subquadratic_ops,
     )
 
 

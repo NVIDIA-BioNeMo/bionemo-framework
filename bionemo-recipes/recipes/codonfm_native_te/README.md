@@ -195,4 +195,4 @@ e.g., `python train_fsdp2.py fp8_config.enabled=true`. For verbose logging, use 
 
 ## License
 
-Refer to [LICENSE](../../LICENSE).
+Refer to the [bionemo-recipes LICENSE](https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/bionemo-recipes/LICENSE).

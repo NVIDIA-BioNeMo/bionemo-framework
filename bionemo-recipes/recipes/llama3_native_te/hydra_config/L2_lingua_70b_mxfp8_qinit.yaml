@@ -1,0 +1,23 @@
+# Lingua 70B MXFP8 with quantized model init (all layers FP8) + CP=2.
+# Quantized model init stores only FP8 weights (no BF16 copies), saving memory.
+# FP32 master weights are maintained in FusedAdam optimizer.
+# BSHD format (no sequence packing) — required for CP.
+# Requires Blackwell GPUs (GB200/B300) for hardware MXFP8 support.
+
+defaults:
+  - L2_lingua_70b
+  - _self_
+
+# All layers in FP8 (no FL1 exclusion) — compatible with quantized_model_init.
+fp8_config:
+  enabled: true
+  fp8_recipe: transformer_engine.common.recipe.MXFP8BlockScaling
+  fp8_format: E4M3
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: true
+    preserve_high_precision_init_val: true
+
+wandb:
+  name: lingua-70b-mxfp8-qinit-cp2
+  id: lingua-70b-mxfp8-qinit-cp2

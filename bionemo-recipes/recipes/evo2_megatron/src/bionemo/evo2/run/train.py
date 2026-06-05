@@ -35,10 +35,11 @@ from megatron.bridge.training.gpt_step import forward_step as gpt_forward_step
 from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.pretrain import pretrain
-from megatron.bridge.utils.common_utils import get_rank_safe
+from megatron.bridge.utils.common_utils import get_local_rank_preinit, get_rank_safe
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import MODEL_OPTIONS, hyena_forward_step, infer_model_type
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
 
 
@@ -407,11 +408,20 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Use the faster, but maybe less accurate fused form of cross entropy, "
         "which also has bf16 grads internally.",
     )  # DONE
-    parser.add_argument(
-        "--no-fp32-residual-connection",
+    fp32_residual_group = parser.add_mutually_exclusive_group(required=False)
+    fp32_residual_group.add_argument(
+        "--fp32-residual-connection",
+        dest="fp32_residual_connection",
         action="store_true",
-        default=False,
-        help="If set, turn off fp32 residual connections which may be faster but may impact accuracy.",
+        default=None,
+        help="Enable fp32 residual connections. Defaults to the selected model provider setting.",
+    )
+    fp32_residual_group.add_argument(
+        "--no-fp32-residual-connection",
+        dest="fp32_residual_connection",
+        action="store_false",
+        default=None,
+        help="Disable fp32 residual connections. Defaults to the selected model provider setting.",
     )  # DONE
     parser.add_argument(
         "--debug-ddp-parity-freq",
@@ -594,9 +604,6 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     #     help="Disable saving the last checkpoint.",
     # )  # TODO implement
     # parser.add_argument(
-    #     "--lora-finetune", action="store_true", help="Use LoRA fine-tuning", default=False
-    # )  # TODO implement
-    # parser.add_argument(
     #     "--lora-checkpoint-path", type=str, default=None, help="LoRA checkpoint path"
     # )  # TODO implement
     parser.add_argument(
@@ -618,18 +625,6 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         default=False,
         help="Enable CUDA memory cleanup before validation to prevent initialization errors.",
     )  # DONE
-    parser.add_argument(
-        "--lora-alpha",
-        type=int,
-        default=None,
-        help="Alpha parameter for LoRA fine-tuning.",
-    )  # TODO implement
-    parser.add_argument(
-        "--lora-dim",
-        type=int,
-        default=None,
-        help="Dim parameter for LoRA fine-tuning.",
-    )  # TODO implement
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -670,6 +665,44 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     mutex_hf_tokenizer_group.add_argument(
         "--hf-tokenizer-model-name", type=str, help="Name of a remote HF tokenizer model."
     )  # DONE
+
+    # LoRA
+    parser.add_argument(
+        "--lora-finetune",
+        action="store_true",
+        default=False,
+        help="Use LoRA fine-tuning.",
+    )
+    parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=32,
+        help="Alpha parameter for LoRA fine-tuning.",
+    )
+    parser.add_argument(
+        "--lora-dim",
+        type=int,
+        default=16,
+        help="Dim parameter for LoRA fine-tuning.",
+    )
+    parser.add_argument(
+        "--lora-dropout",
+        type=float,
+        default=0.1,
+        help="Dropout parameter for LoRA fine-tuning.",
+    )
+    parser.add_argument(
+        "--lora-target-modules",
+        type=lambda s: [m.strip() for m in s.split(",")],
+        default=["dense_projection", "dense", "linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"],
+        help="Target modules for LoRA fine-tuning, as a comma-separated list.",
+    )
+    parser.add_argument(
+        "--lora-skip-freeze-modules",
+        type=lambda s: [m.strip() for m in s.split(",")],
+        default=[],
+        help="Skip freeze modules for LoRA fine-tuning, as a comma-separated list.",
+    )
 
     return parser.parse_args(args=args)
 
@@ -794,6 +827,14 @@ def train(args: argparse.Namespace) -> None:
     if args.no_weight_decay_embeddings:
         recipe_kwargs["no_weight_decay_embeddings"] = True
 
+    # LoRA
+    recipe_kwargs["lora_finetune"] = args.lora_finetune
+    recipe_kwargs["lora_alpha"] = args.lora_alpha
+    recipe_kwargs["lora_dim"] = args.lora_dim
+    recipe_kwargs["lora_dropout"] = args.lora_dropout
+    recipe_kwargs["lora_target_modules"] = args.lora_target_modules
+    recipe_kwargs["lora_skip_freeze_modules"] = args.lora_skip_freeze_modules
+
     # 2. Generate Base Configuration
     cfg: ConfigContainer = pretrain_config(**recipe_kwargs)
 
@@ -827,11 +868,11 @@ def train(args: argparse.Namespace) -> None:
         cfg.model.seq_len_interpolation_factor = args.seq_len_interpolation_factor
     cfg.model.calculate_per_token_loss = not args.no_calculate_per_token_loss
     model_type = infer_model_type(args.model_size)
-    if model_type != "hyena" and not args.no_fp32_residual_connection:
+    if args.fp32_residual_connection is not None:
+        cfg.model.fp32_residual_connection = args.fp32_residual_connection
+    if model_type != "hyena" and cfg.model.fp32_residual_connection:
         logger.info("Disabling fp32_residual_connection for non-Hyena model (not compatible with TE layers)")
         cfg.model.fp32_residual_connection = False
-    else:
-        cfg.model.fp32_residual_connection = not args.no_fp32_residual_connection
     cfg.model.cross_entropy_loss_fusion = args.cross_entropy_loss_fusion
     # cfg.model.cuda_graph_impl = "local" # or "transformer_engine"
     # cfg.model.cuda_graph_scope = "full_iteration"
@@ -854,7 +895,9 @@ def train(args: argparse.Namespace) -> None:
     if args.num_layers:
         cfg.model.num_layers = args.num_layers
     if args.use_subquadratic_ops:
-        # TODO assert that it is installed
+        if torch.cuda.is_available():
+            torch.cuda.set_device(get_local_rank_preinit())
+        ensure_subquadratic_ops_supported()
         cfg.model.use_subquadratic_ops = True
 
     if args.no_activation_checkpointing:

@@ -139,8 +139,12 @@ def make_two_datasets(make_random_csr):
 
         h1 = tmp_path / "var1.h5ad"
         h2 = tmp_path / "var2.h5ad"
-        ad.AnnData(X=None, var=pd.DataFrame(index=np.arange(X1.shape[1])), raw={"X": X1}).write_h5ad(h1)
-        ad.AnnData(X=None, var=pd.DataFrame(index=np.arange(X2.shape[1])), raw={"X": X2}).write_h5ad(h2)
+        ad.AnnData(
+            obs=pd.DataFrame(index=range(X1.shape[0])), var=pd.DataFrame(index=np.arange(X1.shape[1])), raw={"X": X1}
+        ).write_h5ad(h1)
+        ad.AnnData(
+            obs=pd.DataFrame(index=range(X2.shape[0])), var=pd.DataFrame(index=np.arange(X2.shape[1])), raw={"X": X2}
+        ).write_h5ad(h2)
 
         ds1 = SingleCellMemMapDataset(tmp_path / "var_ds1", h5ad_path=h1, data_dtype=dtype1)
         ds2 = SingleCellMemMapDataset(tmp_path / "var_ds2", h5ad_path=h2, data_dtype=dtype2)
@@ -164,6 +168,7 @@ def make_small_and_large_h5ads():
         indices_small_vals = np.array([0, 11, 5, 7], dtype=np.int64)
         indptr_small_vals = np.array([0, 0, 2, 2, 4], dtype=np.int64)
         X_small = ad.AnnData(
+            obs=pd.DataFrame(index=range(n_rows_small)),
             var=pd.DataFrame(index=np.arange(n_cols_small)),
             raw={
                 "X": sp.csr_matrix(
@@ -180,6 +185,7 @@ def make_small_and_large_h5ads():
         indices_large_vals = np.array([10, 65_537], dtype=np.int64)
         indptr_large_vals = np.array([0, 1, 1, 2], dtype=np.int64)
         X_large = ad.AnnData(
+            obs=pd.DataFrame(index=range(n_rows_large)),
             var=pd.DataFrame(index=np.arange(n_cols_large)),
             raw={
                 "X": sp.csr_matrix(

@@ -58,6 +58,7 @@ class PredWriter(BasePredictionWriter):
         self.merge_on_epoch_end = merge_on_epoch_end
         self.delete_after_merge = delete_after_merge
         self.predictions_buffer = []
+        self._last_batch_idx = -1
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _convert_predictions(self, prediction):
@@ -186,10 +187,14 @@ class PredWriter(BasePredictionWriter):
         """
         prediction = self._convert_predictions(prediction)
         self.predictions_buffer.append(prediction)
+        self._last_batch_idx = batch_idx
         if len(self.predictions_buffer) >= self.caching_interval:
-            adjusted_batch_idx = (
-                trainer.datamodule.init_consumed_samples // trainer.datamodule.global_batch_size + batch_idx
-            )
+            if trainer.datamodule.global_batch_size is not None:
+                adjusted_batch_idx = (
+                    trainer.datamodule.init_consumed_samples // trainer.datamodule.global_batch_size + batch_idx
+                )
+            else:
+                adjusted_batch_idx = batch_idx
             self._save_predictions(trainer, adjusted_batch_idx)
 
     def on_predict_epoch_end(self, trainer, pl_module):
@@ -204,9 +209,12 @@ class PredWriter(BasePredictionWriter):
             pl_module: The Lightning module (unused).
         """
         if len(self.predictions_buffer) > 0:
-            consumed_samples = trainer.datamodule.calc_consumed_samples()
-            batch_idx = consumed_samples // trainer.datamodule.global_batch_size
-            adjusted_batch_idx = batch_idx + int((consumed_samples % trainer.datamodule.global_batch_size) > 0)
+            if trainer.datamodule.global_batch_size is not None:
+                consumed_samples = trainer.datamodule.calc_consumed_samples()
+                batch_idx = consumed_samples // trainer.datamodule.global_batch_size
+                adjusted_batch_idx = batch_idx + int((consumed_samples % trainer.datamodule.global_batch_size) > 0)
+            else:
+                adjusted_batch_idx = self._last_batch_idx + 1
             self._save_predictions(trainer, adjusted_batch_idx)
 
         trainer.strategy.barrier()

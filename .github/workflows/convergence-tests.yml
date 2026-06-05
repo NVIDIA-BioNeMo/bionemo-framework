@@ -32,16 +32,32 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "0 8 * * 1,3" # Mon/Wed at 1am PST (esm2)
-    - cron: "0 8 * * 2,4" # Tue/Thu at 1am PST (codonfm)
+    - cron: "0 8 * * 0" # Sun 00:00 PST (Sat night midnight), bi-weekly gated in job
 
 jobs:
+  # GitHub cron has no native bi-weekly, so gate on even ISO week number.
+  gate-biweekly:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [ $((10#$(date -u +%V) % 2)) -eq 0 ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
   submit-lepton-jobs:
+    needs: gate-biweekly
+    if: needs.gate-biweekly.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Mon/Wed runs esm2, Tue/Thu runs codonfm
-        model_config: ${{ github.event_name == 'schedule' && github.event.schedule == '0 8 * * 2,4' && fromJSON('["codonfm_ptl_te"]') || github.event_name == 'schedule' && github.event.schedule == '0 8 * * 1,3' && fromJSON('["esm2_native_te_650m", "esm2_native_te_15b"]') || fromJSON(format('["{0}"]', github.event.inputs.model_config)) }}
+        model_config: ${{ github.event_name == 'schedule' && fromJSON('["esm2_native_te_650m", "esm2_native_te_15b", "codonfm_ptl_te"]') || fromJSON(format('["{0}"]', github.event.inputs.model_config)) }}
       fail-fast: false
     steps:
       - name: Checkout

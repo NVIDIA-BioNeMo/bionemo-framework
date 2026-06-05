@@ -69,10 +69,13 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from megatron.bridge.data.samplers import build_pretraining_data_loader
-from megatron.bridge.training.checkpointing import _load_model_weights_from_checkpoint
+from megatron.bridge.training.checkpointing import (
+    _generate_model_state_dict,
+    _load_model_weights_from_checkpoint,
+    apply_peft_adapter_filter_to_state_dict,
+)
 from megatron.bridge.training.config import DistributedInitConfig, RNGConfig
 from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES, get_mixed_precision_config
-from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
 from megatron.bridge.training.utils.checkpoint_utils import (
     file_exists,
     get_checkpoint_run_config_filename,
@@ -86,15 +89,24 @@ from megatron.bridge.utils.common_utils import (
     get_world_size_safe,
 )
 from megatron.bridge.utils.instantiate_utils import instantiate
-from megatron.core import parallel_state, tensor_parallel
+from megatron.core import dist_checkpointing, parallel_state, tensor_parallel
 from megatron.core.num_microbatches_calculator import init_num_microbatches_calculator
 from megatron.core.tensor_parallel.mappings import _gather_along_last_dim
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_batch_on_this_cp_rank
 from torch import Tensor
 
+
+try:
+    from megatron.bridge.training.tokenizers.tokenizer import _HuggingFaceTokenizer
+except ImportError:
+    from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
+        HuggingFaceTokenizer as _HuggingFaceTokenizer,
+    )
+
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.data.fasta_dataset import SimpleFastaDataset
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.recipeutils.inference.collation import batch_collator
 
 
@@ -652,7 +664,6 @@ def _predict_step(
     if not parallel_state.is_pipeline_last_stage():
         return None
 
-    # Forward pass
     output_tensor = model(
         input_ids=batch["tokens"],
         position_ids=batch["position_ids"],
@@ -1032,10 +1043,9 @@ def predict(
                 f"Valid range: -{original_num_layers} to {original_num_layers - 1}."
             )
 
-        # Set the model to use fewer layers and skip post-processing (output heads)
+        # Set the model to use fewer layers and skip post-processing (output heads).
         model_provider.num_layers = target_num_layers
         model_provider.post_process = False
-
         # Also truncate the hybrid_override_pattern if it exists, since it must match num_layers
         if hasattr(model_provider, "hybrid_override_pattern") and model_provider.hybrid_override_pattern is not None:
             original_pattern = model_provider.hybrid_override_pattern
@@ -1081,6 +1091,8 @@ def predict(
         dist_config=dist_config,
     )
     logger.info("Initialized distributed environment")
+    if use_subquadratic_ops:
+        ensure_subquadratic_ops_supported()
 
     # -------------------------------------------------------------------------
     # Step 5: Create model and load weights
@@ -1117,12 +1129,36 @@ def predict(
     else:
         logger.warning("Could not determine number of layers from model structure")
 
-    logger.info(f"Loading weights from: {resolved_ckpt_dir}")
-    _load_model_weights_from_checkpoint(
-        checkpoint_path=str(resolved_ckpt_dir),
-        model=model,
-        dist_ckpt_strictness="ignore_all",
-    )
+    peft_section = run_config.get("peft")
+    if peft_section is not None:
+        pretrained_ckpt = resolve_checkpoint_path(Path(run_config["checkpoint"]["pretrained_checkpoint"]))
+        logger.info(f"Loading base model weights from: {pretrained_ckpt}")
+        _load_model_weights_from_checkpoint(
+            checkpoint_path=str(pretrained_ckpt),
+            model=model,
+            dist_ckpt_strictness="ignore_all",
+        )
+
+        unwrapped = [m.module for m in model]
+        peft_cfg = instantiate(peft_section)
+        peft_cfg(unwrapped, training=False)
+
+        logger.info(f"Loading adapter weights from: {resolved_ckpt_dir}")
+        sharded_sd = _generate_model_state_dict(unwrapped, {})
+        sharded_sd = apply_peft_adapter_filter_to_state_dict(sharded_sd, peft_cfg)
+        loaded = dist_checkpointing.load(sharded_sd, str(resolved_ckpt_dir), strict="ignore_all")
+        if len(unwrapped) == 1:
+            unwrapped[0].load_state_dict(loaded["model"], strict=False)
+        else:
+            for i, inner in enumerate(unwrapped):
+                inner.load_state_dict(loaded[f"model{i}"], strict=False)
+    else:
+        logger.info(f"Loading weights from: {resolved_ckpt_dir}")
+        _load_model_weights_from_checkpoint(
+            checkpoint_path=str(resolved_ckpt_dir),
+            model=model,
+            dist_ckpt_strictness="ignore_all",
+        )
     logger.info("Weights loaded successfully")
 
     # -------------------------------------------------------------------------
@@ -1248,6 +1284,12 @@ def predict(
 def main() -> None:
     """CLI entry point for Evo2 prediction."""
     args = parse_args()
+    try:
+        from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
+
+        register_allowed_target_prefix("bionemo.")
+    except ImportError:
+        pass
     predict(
         fasta_path=args.fasta,
         ckpt_dir=args.ckpt_dir,

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM nvcr.io/nvidia/pytorch:26.03-py3
+FROM nvcr.io/nvidia/pytorch:26.04-py3
 
 # uv is pre-installed in the nvcr.io/nvidia/pytorch base image.
 # If using a base image without uv, uncomment the following line:
@@ -20,6 +20,9 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # 3. Create the venv with access to system packages (Torch, TE, etc.)
 # We create it one level up (/workspace/.venv) to keep it out of the source dir
 RUN uv venv --system-site-packages --seed $VIRTUAL_ENV
+
+# FIXME: Pin warp-lang<1.13.0 until subquadratic-ops is compatible with warp 1.13+
+RUN uv pip install 'warp-lang<1.13.0'
 
 # 4. Pin transformer_engine to the version pre-installed in the base image.
 # Without this constraint uv may try to upgrade or rebuild TE, which breaks the build.

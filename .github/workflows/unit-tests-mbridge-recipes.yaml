@@ -25,6 +25,7 @@ jobs:
       any_changed: ${{ steps.changed-files.outputs.any_changed }}
       all_changed_files: ${{ steps.changed-files.outputs.all_changed_files }}
       dirs: ${{ steps.set-dirs.outputs.dirs }}
+      labels: ${{ steps.set-dirs.outputs.labels }}
 
     steps:
       - id: get-pr-info
@@ -113,10 +114,18 @@ jobs:
             map({
               dir: .,
               name: (. | sub("^bionemo-recipes/"; "")),
-              image: "svcbionemo023/bionemo-framework:pytorch26.03-py3-squashed"
+              image: "svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed"
             })
           ')
           echo "dirs=$DIRS_WITH_IMAGES" >> $GITHUB_OUTPUT
+
+          # Emit PR labels as a JSON array so downstream jobs can gate on ciflow:* labels.
+          if [[ "$PR_INFO" != "null" && "$PR_INFO" != "" ]]; then
+            LABELS=$(echo "$PR_INFO" | jq -c '[.labels[]?.name]' 2>/dev/null || echo "[]")
+          else
+            LABELS="[]"
+          fi
+          echo "labels=$LABELS" >> $GITHUB_OUTPUT
 
       - name: Show output
         run: |
@@ -195,17 +204,83 @@ jobs:
           fi
           pytest -v .
 
+  run-tests-notebooks:
+    needs: changed-dirs
+    runs-on: linux-amd64-gpu-l4-latest-1
+    # Mirrors the framework workflow's notebook-trigger pattern (label-only on PRs,
+    # auto on merge_group + nightly schedule). Currently scoped to evo2_megatron --
+    # the only megatron recipe with example notebooks.
+    if: |
+        contains(needs.changed-dirs.outputs.dirs, 'bionemo-recipes/recipes/evo2_megatron') &&
+        (
+          (github.event_name == 'schedule') ||
+          (github.event_name == 'merge_group') ||
+          contains(fromJSON(needs.changed-dirs.outputs.labels || '[]'), 'ciflow:all-recipes') ||
+          contains(fromJSON(needs.changed-dirs.outputs.labels || '[]'), 'ciflow:notebooks')
+        )
+    name: "mbridge-notebook-tests (evo2_megatron)"
+    container:
+      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+      options: --shm-size=16G
+      env:
+        CI: true
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_HOME: /cache/huggingface
+        BIONEMO_DATA_SOURCE: ngc
+
+    steps:
+      - name: Show GPU info
+        run: nvidia-smi
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@main
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            bionemo-recipes/recipes/evo2_megatron
+            sub-packages/bionemo-recipeutils
+            sub-packages/bionemo-core
+          sparse-checkout-cone-mode: false
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: /cache/huggingface
+          key: ${{ runner.os }}-huggingface-evo2_megatron-notebooks-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-huggingface-evo2_megatron-notebooks-
+            ${{ runner.os }}-huggingface-evo2_megatron-
+            ${{ runner.os }}-huggingface-
+
+      - name: Install dependencies
+        working-directory: bionemo-recipes/recipes/evo2_megatron
+        run: |
+          bash .ci_build.sh
+          source .ci_test_env.sh
+          pip install nbval
+
+      - name: Run notebook tests
+        working-directory: bionemo-recipes/recipes/evo2_megatron
+        run: |
+          source .ci_test_env.sh
+          FAST_CI_MODE=1 pytest -v -s --nbval-lax -x -p no:python \
+            examples/lora-fine-tuning-tutorial.ipynb
+
   verify-mbridge-recipe-tests:
-    needs: unit-tests
+    needs:
+      - changed-dirs
+      - unit-tests
+      - run-tests-notebooks
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Check unit-tests matrix status
+      - name: Check test job statuses
         run: |
-          if [[ "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "cancelled" ]]; then
-            echo "Some mbridge unit-tests matrix jobs have failed or been cancelled!"
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "Some mbridge test jobs have failed or been cancelled!"
             exit 1
           else
-            echo "All mbridge unit-tests matrix jobs have completed successfully or were skipped!"
+            echo "All mbridge test jobs have completed successfully or were skipped!"
             exit 0
           fi

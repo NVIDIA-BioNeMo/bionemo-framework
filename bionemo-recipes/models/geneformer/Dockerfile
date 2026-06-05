@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:26.03-py3
+FROM nvcr.io/nvidia/pytorch:26.04-py3
 WORKDIR /workspace/bionemo
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip \

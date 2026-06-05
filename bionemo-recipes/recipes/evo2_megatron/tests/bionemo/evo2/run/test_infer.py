@@ -51,6 +51,11 @@ PRETEST_ENV = copy.deepcopy(os.environ)
 # Note: mbridge_checkpoint_path fixture is provided by conftest.py at session scope
 
 
+def _xfail_if_unsupported_subquadratic_ops(result: subprocess.CompletedProcess, use_subquadratic_ops: bool) -> None:
+    if use_subquadratic_ops and "failed a CUDA self-test" in result.stderr:
+        pytest.xfail("subquadratic_ops_torch CUDA kernels are unsupported in this environment")
+
+
 def _read_jsonl_results(output_file: Path) -> list[dict]:
     """Read JSONL output file and return parsed records."""
     records = []
@@ -284,6 +289,7 @@ def run_infer_subprocess(
     temperature: float = 1.0,
     top_k: int = 1,
     seed: int = 42,
+    use_subquadratic_ops: bool = False,
 ):
     """Helper function to run inference as a subprocess.
 
@@ -295,6 +301,7 @@ def run_infer_subprocess(
         temperature: Sampling temperature
         top_k: Top-k sampling parameter (1 for greedy)
         seed: Random seed for reproducibility
+        use_subquadratic_ops: Pass --use-subquadratic-ops to the CLI.
 
     Returns:
         The generated completion text from the first JSONL record
@@ -326,6 +333,8 @@ def run_infer_subprocess(
         "--seed",
         str(seed),
     ]
+    if use_subquadratic_ops:
+        cmd.append("--use-subquadratic-ops")
 
     env = copy.deepcopy(PRETEST_ENV)
 
@@ -338,6 +347,7 @@ def run_infer_subprocess(
         env=env,
     )
 
+    _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
     assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     assert output_file.exists(), "Output file was not created"
 
@@ -384,6 +394,126 @@ def _write_prompts_jsonl(prompt_file: Path, prompts: list[tuple[str, str]]) -> N
     """Write a list of (id, prompt) pairs into a JSONL file."""
     with open(prompt_file, "w") as f:
         f.writelines(json.dumps({"id": prompt_id, "prompt": prompt_text}) + "\n" for prompt_id, prompt_text in prompts)
+
+
+@pytest.fixture(
+    params=[False, True],
+    ids=["causal-conv1d", "subquadratic-ops"],
+)
+def infer_use_subquadratic_ops(request):
+    """Whether infer should use subquadratic Hyena kernels."""
+    return request.param
+
+
+def _run_infer_prompt_file(
+    *,
+    mbridge_checkpoint_path: Path,
+    prompt_file: Path,
+    output_file: Path,
+    max_batch_size: int,
+    use_subquadratic_ops: bool,
+) -> dict[str, dict]:
+    open_port = find_free_network_port()
+    cmd = [
+        "torchrun",
+        "--nproc_per_node",
+        "1",
+        "--nnodes",
+        "1",
+        "--master_port",
+        str(open_port),
+        "-m",
+        "bionemo.evo2.run.infer",
+        "--ckpt-dir",
+        str(mbridge_checkpoint_path),
+        "--prompt-file",
+        str(prompt_file),
+        "--max-new-tokens",
+        "1",
+        "--output-file",
+        str(output_file),
+        "--temperature",
+        "1.0",
+        "--top-k",
+        "1",
+        "--seed",
+        "1234",
+        "--max-batch-size",
+        str(max_batch_size),
+        "--max-seq-length",
+        "512",
+        "--return-log-probs",
+    ]
+    if use_subquadratic_ops:
+        cmd.append("--use-subquadratic-ops")
+
+    result = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=512,
+        env=copy.deepcopy(PRETEST_ENV),
+    )
+    _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
+    assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    records = _read_jsonl_results(output_file)
+    return {record["id"]: record for record in records}
+
+
+def _completion_logprobs(record: dict) -> torch.Tensor:
+    logprobs = record.get("logprobs", {}).get("completion_logprobs")
+    assert logprobs is not None, f"Missing completion logprobs in record: {record}"
+    tensor = torch.as_tensor(logprobs, dtype=torch.float32).flatten()
+    assert tensor.numel() == 1
+    return tensor
+
+
+@pytest.mark.timeout(512)
+@pytest.mark.slow
+def test_infer_evo2_short_prefill_is_prefix_invariant_across_batch_padding(
+    mbridge_checkpoint_path,
+    tmp_path,
+    infer_use_subquadratic_ops: bool,
+):
+    """A short prefill should generate the same next token alone or in a padded batch."""
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Inference prefill prefix-invariance test requires a GPU")
+
+    short_prompt = "ACGTACGTAA"
+    padding_prompt = ("GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACGAGGTC" * 4)[:256]
+
+    alone_prompt_file = tmp_path / "short_alone_prompts.jsonl"
+    padded_prompt_file = tmp_path / "short_padded_prompts.jsonl"
+    _write_prompts_jsonl(alone_prompt_file, [("short", short_prompt)])
+    _write_prompts_jsonl(padded_prompt_file, [("padding", padding_prompt), ("short", short_prompt)])
+
+    alone_records = _run_infer_prompt_file(
+        mbridge_checkpoint_path=mbridge_checkpoint_path,
+        prompt_file=alone_prompt_file,
+        output_file=tmp_path / "alone_output.jsonl",
+        max_batch_size=1,
+        use_subquadratic_ops=infer_use_subquadratic_ops,
+    )
+    padded_records = _run_infer_prompt_file(
+        mbridge_checkpoint_path=mbridge_checkpoint_path,
+        prompt_file=padded_prompt_file,
+        output_file=tmp_path / "padded_output.jsonl",
+        max_batch_size=2,
+        use_subquadratic_ops=infer_use_subquadratic_ops,
+    )
+
+    assert set(alone_records) == {"short"}
+    assert set(padded_records) == {"padding", "short"}
+    assert padded_records["short"]["prompt"] == short_prompt
+    assert alone_records["short"]["completion"] == padded_records["short"]["completion"]
+
+    torch.testing.assert_close(
+        _completion_logprobs(alone_records["short"]),
+        _completion_logprobs(padded_records["short"]),
+        rtol=2e-2,
+        atol=5e-2,
+    )
 
 
 def run_infer_subprocess_parallel(
@@ -514,6 +644,47 @@ def test_identical_prompts_should_be_identical(mbridge_checkpoint_path, tmp_path
         f"Identical prompts with same seed and greedy decoding produced different outputs:\n"
         f"Run 1: {generated_1}\n"
         f"Run 2: {generated_2}"
+    )
+
+
+def test_subquadratic_ops_matches_baseline(mbridge_checkpoint_path, tmp_path):
+    """Greedy generation with --use-subquadratic-ops must match the standard path.
+
+    This is the end-to-end correctness check for the subq-ops inference path.
+    The subq path uses guarded subquadratic kernels. If the local CUDA/GPU
+    combination cannot run those kernels correctly, the guard raises before
+    invalid outputs can propagate. With greedy decoding (top_k=1) and the same
+    seed, supported subq kernels must produce identical output.
+    """
+    output_baseline = tmp_path / "output_baseline.jsonl"
+    output_subq = tmp_path / "output_subq.jsonl"
+
+    generated_baseline = run_infer_subprocess(
+        mbridge_checkpoint_path,
+        prompt=PROMPT_1,
+        output_file=output_baseline,
+        max_new_tokens=20,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        use_subquadratic_ops=False,
+    )
+
+    generated_subq = run_infer_subprocess(
+        mbridge_checkpoint_path,
+        prompt=PROMPT_1,
+        output_file=output_subq,
+        max_new_tokens=20,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        use_subquadratic_ops=True,
+    )
+
+    assert len(generated_baseline) > 0, "Baseline generation produced empty output"
+    assert len(generated_subq) > 0, "Subq-ops generation produced empty output"
+    assert generated_baseline == generated_subq, (
+        f"Subq-ops path diverged from baseline:\nBaseline: {generated_baseline}\nSubq-ops: {generated_subq}"
     )
 
 
@@ -894,6 +1065,56 @@ def test_savanna_to_mbridge_inference_accuracy_7b(mbridge_checkpoint_7b_from_sav
     assert all(mp >= 0.90 * ep for mp, ep in zip(match_percents, expected_matchpercents)), (
         f"Expected at least 90% of {matchperc_print_expected=}, got {matchperc_print=}"
     )
+
+
+@pytest.mark.timeout(512)
+@pytest.mark.slow
+def test_different_results_with_without_peft(tmp_path, mbridge_checkpoint_path, lora_finetune_checkpoint):
+    """Greedy-generate from the base ckpt vs. the LoRA ckpt and assert the logprobs differ."""
+    env = copy.deepcopy(PRETEST_ENV)
+    # 64-char prompt for FP8 divisibility.
+    prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
+
+    def _run_infer(ckpt: Path, output_file: Path) -> dict:
+        port = find_free_network_port()
+        cmd = [
+            "torchrun",
+            "--nproc_per_node",
+            "1",
+            "--nnodes",
+            "1",
+            "--master_port",
+            str(port),
+            "-m",
+            "bionemo.evo2.run.infer",
+            "--ckpt-dir",
+            str(ckpt),
+            "--prompt",
+            prompt,
+            "--max-new-tokens",
+            "10",
+            "--temperature",
+            "1.0",
+            "--top-k",
+            "1",
+            "--seed",
+            "0",
+            "--return-log-probs",
+            "--output-file",
+            str(output_file),
+        ]
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=300, env=env)
+        assert r.returncode == 0, f"infer_evo2 failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+        with open(output_file) as f:
+            return json.loads(f.readline())
+
+    base = _run_infer(mbridge_checkpoint_path, tmp_path / "out_base.jsonl")
+    lora = _run_infer(lora_finetune_checkpoint, tmp_path / "out_lora.jsonl")
+
+    base_lp = base["logprobs"]["completion_logprobs"]
+    lora_lp = lora["logprobs"]["completion_logprobs"]
+    assert len(base_lp) == len(lora_lp), f"Different completion lengths: {len(base_lp)} vs {len(lora_lp)}"
+    assert base_lp != lora_lp, "LoRA adapter had no effect on completion logprobs"
 
 
 class TestHyenaInferenceContext:

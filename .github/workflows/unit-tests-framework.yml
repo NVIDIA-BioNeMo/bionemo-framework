@@ -232,7 +232,7 @@ jobs:
       )
     name: "unit-tests (${{ matrix.pkg.name }})"
     container:
-      image: svcbionemo023/bionemo-framework:pytorch26.03-py3-squashed
+      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
       options: --shm-size=16G
       env:
         CI: true
@@ -329,7 +329,7 @@ jobs:
         )
     name: "slow-tests (${{ matrix.pkg.name }})"
     container:
-      image: svcbionemo023/bionemo-framework:pytorch26.03-py3-squashed
+      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
       options: --shm-size=16G
       env:
         CI: true
@@ -405,7 +405,7 @@ jobs:
         )
     name: "notebook-tests (${{ matrix.pkg.name }})"
     container:
-      image: svcbionemo023/bionemo-framework:pytorch26.03-py3-squashed
+      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
       options: --shm-size=16G
       env:
         CI: true

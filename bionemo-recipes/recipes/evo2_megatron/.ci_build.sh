@@ -5,16 +5,19 @@
 rm -f /usr/local/lib/python*/dist-packages/transformer_engine-*.dist-info/direct_url.json
 export UV_LOCK_TIMEOUT=900  # increase to 15 minutes (900 seconds), adjust as needed
 export UV_LINK_MODE=copy
-uv venv --system-site-packages
+uv venv --clear --system-site-packages
 
 # 2. Activate the environment
 source .venv/bin/activate
 
-# 3. Install build requirements and pin transformer_engine
+# 3. Pin warp-lang<1.13.0 (subquadratic-ops-torch 0.2.0 uses wp.context removed in 1.13)
+uv pip install 'warp-lang<1.13.0'
+
+# 4. Install build requirements and pin transformer_engine
 pip freeze | grep transformer_engine > pip-constraints.txt
 uv pip install -r build_requirements.txt --no-build-isolation
 
-# 4. Pre-install local sub-packages if checked out by CI.
+# 5. Pre-install local sub-packages if checked out by CI.
 #    pyproject.toml references bionemo-recipeutils and bionemo-core from git (main).
 #    In CI, the workflow sparse-checks them out alongside this recipe so we can test
 #    against the PR's changes. But if the sub-packages don't exist on main yet (e.g.
@@ -35,8 +38,8 @@ for pkg_dir in "$RECIPE_ROOT/../../../sub-packages/bionemo-recipeutils" "$RECIPE
     fi
 done
 
-# 5. Install the recipe with all remaining dependencies
-uv pip install -c pip-constraints.txt -e . --no-build-isolation
+# 6. Install the recipe with all remaining dependencies, including test extras
+uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
 
-# 6. Restore original pyproject.toml (the edit was only needed for uv resolution)
+# 7. Restore original pyproject.toml (the edit was only needed for uv resolution)
 mv pyproject.toml.ci_bak pyproject.toml

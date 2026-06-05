@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM nvcr.io/nvidia/pytorch:26.03-py3
+FROM nvcr.io/nvidia/pytorch:26.04-py3
 
 # uv is pre-installed in the nvcr.io/nvidia/pytorch base image.
 # If using a base image without uv, uncomment the following line:

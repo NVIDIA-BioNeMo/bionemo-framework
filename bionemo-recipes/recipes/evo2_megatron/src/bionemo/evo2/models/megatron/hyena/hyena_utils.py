@@ -32,6 +32,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint, sharded_state_dict_default
 from torch.autograd.function import Function
 
+from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 
 
@@ -50,10 +51,14 @@ except ImportError:
 
 
 try:
-    from subquadratic_ops_torch.b2b_causal_conv1d import b2b_causal_conv1d
-    from subquadratic_ops_torch.causal_conv1d import causal_conv1d
-    from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d
+    from subquadratic_ops_torch.b2b_causal_conv1d import b2b_causal_conv1d as _subq_b2b_causal_conv1d
+    from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
+    from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d as _subq_fft_causal_conv1d
     from subquadratic_ops_torch.implicit_filter import implicit_filter
+
+    causal_conv1d = _subq_causal_conv1d
+    b2b_causal_conv1d = _subq_b2b_causal_conv1d
+    fft_causal_conv1d = _subq_fft_causal_conv1d
 except ImportError as e:
     msg_causal_conv1d = f"Problem importing subquadratic_ops: {e}. causal_conv1d is not available."
     msg_b2b_causal_conv1d = f"Problem importing subquadratic_ops: {e}. b2b_causal_conv1d is not available."
@@ -451,10 +456,19 @@ def hyena_no_weight_decay_cond_with_embeddings(name, param):
     return ("embedding" in name) or hyena_no_weight_decay_cond(name, param)
 
 
-def fftconv_func(u, k, D, dropout_mask, gelu=True, k_rev=None, bidirectional=False, use_subquadratic_ops=False):  # noqa: N803
+def fftconv_func(
+    u,
+    k,
+    D,  # noqa: N803
+    dropout_mask,
+    gelu=True,
+    k_rev=None,
+    bidirectional=False,
+    use_subquadratic_ops=False,
+):
     """Apply a 1D convolution to the input sequence u using the filter k and the shortcut D."""
     seqlen = u.shape[-1]
-    fft_size = 2 * seqlen
+    fft_size = linear_causal_fft_size(seqlen, k.shape[-1])
 
     # check if k is less than seqlen -- subquadratic_ops input does not need padding
     if not use_subquadratic_ops and k.shape[-1] < seqlen:
@@ -632,6 +646,8 @@ class ImplicitModalFilter(nn.Module):
 
         return h, None
 
+    # Keep this eager. The short-prefill prefix-invariance tests in tests/bionemo/evo2/run
+    # cover the prior torch.compile regression with dynamic filter lengths and custom ops.
     def filter(self, L, *args, **kwargs):  # noqa: N803
         """Get t and the convolution filter for t and the requested sequence length."""
         if self._cp_size > 1:
@@ -754,7 +770,7 @@ class ExplicitSingleDecayFilter(nn.Module):
         """
         return self.filter(L, *args, **kwargs)
 
-    @torch.compile(mode="max-autotune")
+    # Keep this eager for the same short-prefill prefix-invariance reproducer as ImplicitModalFilter.filter.
     def filter(self, L, *args, **kwargs):  # noqa: N803
         """Compute the filter as a function of h and decay for the requested sequence length."""
         h = self.h[:, :L]
@@ -783,23 +799,19 @@ def small_init_init_method(dim):
     Improving the Normalization of Self-Attention - Nguyen, T. & Salazar, J. (2010), using a normal distribution.
     """
     std = math.sqrt(2 / (5 * dim))
-
-    def init_(tensor):
-        res = torch.nn.init.normal_(tensor, mean=0.0, std=std)
-        return res
-
-    return init_
+    # Return functools.partial instead of a nested closure so the resulting callable has an
+    # importable qualified name. Closures get serialized as `...<locals>.init_` in run_config.yaml
+    # and cannot be re-instantiated during inference/checkpoint load.
+    return partial(torch.nn.init.normal_, mean=0.0, std=std)
 
 
 def wang_init_method(n_layers, dim):
     """Initialize the weights of the model using the Wang initialization method."""
     std = 2 / n_layers / math.sqrt(dim)
-
-    def init_(tensor):
-        res = torch.nn.init.normal_(tensor, mean=0.0, std=std)
-        return res
-
-    return init_
+    # Return functools.partial instead of a nested closure so the resulting callable has an
+    # importable qualified name. Closures get serialized as `...<locals>.init_` in run_config.yaml
+    # and cannot be re-instantiated during inference/checkpoint load.
+    return partial(torch.nn.init.normal_, mean=0.0, std=std)
 
 
 def get_init_method(init_method_name, num_layers, hidden_size):
@@ -1055,6 +1067,7 @@ class ParallelHyenaOperator(nn.Module):
                 L=L,
                 fir_length=self.kernel_size,  # self.short_filter_length,
                 compute_state=inference_context is not None,
+                use_subquadratic_ops=self.use_subquadratic_ops,
             )
             y = rearrange(y, "b d l -> b l d")
             y = y * x1
@@ -1456,10 +1469,10 @@ class ParallelCausalDepthwiseConv1d(nn.Module):
         else:
             x = F.pad(x, (pad_size, 0))
 
-        # subquadratic_ops causal_conv1d is only applied to the projection conv of Hyena LI layer
-        # Projection conv is fused with SE/MR layers (B2BCausalConv1dModule)
+        # subquadratic_ops causal_conv1d is only applied to the projection conv of Hyena LI layer.
+        # Projection conv is fused with SE/MR layers by B2BCausalConv1dModule when available.
         if self.use_fast_causal_conv:  # hyena_proj_conv case
-            if self.use_subquadratic_ops:  # hyena_proj_conv of LI layer when subquadratic_ops is enabled
+            if self.use_subquadratic_ops:
                 y = causal_conv1d(x, weight)[..., pad_size:]
             else:
                 y = causal_conv1d_fn(x, weight, bias=None, activation=None)[..., pad_size:]
@@ -1660,12 +1673,16 @@ class ParallelCausalDepthwiseConv1dWithState(ParallelCausalDepthwiseConv1d):
         self.get_weight = lru_cache(maxsize=1)(self._get_weight)
 
     def _get_weight(self):
-        """Expand and cache the convolution weight, freeing the raw parameter."""
+        """Expand and cache the convolution weight in inference-friendly form."""
+        # previously deleted self._parameters["short_conv_weight"] here as a
+        # memory micro-optimization, but the raw param is also read directly by
+        # B2BCausalConv1dModule on every prefill call. With subq-ops enabled in
+        # inference, the second prompt's b2b call fails after decode triggers
+        # this method on the first prompt
         weight = self.short_conv_weight
         if len(weight.shape) == 2:
             weight = weight.unsqueeze(1)
         weight = weight.repeat_interleave(self.group_dim, dim=0).to(torch.float32)
-        del self._parameters["short_conv_weight"]
         return weight
 
     def forward(self, x, inference_context=None, _use_cp=True):  # noqa: D102
@@ -1701,6 +1718,7 @@ class ParallelCausalDepthwiseConv1dWithState(ParallelCausalDepthwiseConv1d):
                 gated_bias=False,
                 fir_length=self.kernel_size,  # self.short_filter_length,
                 compute_state=inference_context is not None,
+                use_subquadratic_ops=self.use_subquadratic_ops,
             )
         else:
             if len(u.shape) > 2:

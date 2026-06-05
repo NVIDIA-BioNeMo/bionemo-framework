@@ -26,6 +26,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spec_no_te
 from bionemo.evo2.models.megatron.hyena.hyena_mixer import HyenaMixer
 from bionemo.evo2.models.megatron.hyena.hyena_utils import ImplicitModalFilter
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 
 from ....utils import distributed_model_parallel_state
 
@@ -254,6 +255,10 @@ def test_subquadratic_ops_kernel(  # noqa: D103
     # Skip bf16 with short convolution due to numerical instability
     if test_config.params_dtype == torch.bfloat16 and operator_type == "hyena_short_conv":
         pytest.skip("bf16 with short convolution is skipped due to numerical instability")
+    try:
+        ensure_subquadratic_ops_supported()
+    except RuntimeError as e:
+        pytest.xfail(str(e))
 
     with distributed_model_parallel_state():
         # Create both models inside the same distributed context

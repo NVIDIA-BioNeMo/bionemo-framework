@@ -67,12 +67,12 @@ torchrun --nproc-per-node 2 --no-python \
   --use-subquadratic-ops
 ```
 
-> **Tip:** The `--use-subquadratic-ops` flag enables a fused back-to-back
-> causal convolution CUDA kernel for the Hyena short-conv layers. This
-> provides a meaningful speed-up for training and prediction and is
-> recommended for all production runs. It does not apply to autoregressive
-> inference (`infer_evo2`). There is a one-time compilation cost on first
-> use.
+> **Tip:** The `--use-subquadratic-ops` flag enables fused subquadratic-ops
+> CUDA kernels (`b2b_causal_conv1d` for proj+mixer fusion in prefill,
+> `fft_causal_conv1d` / `causal_conv1d` inside `engine.parallel_fir`). It
+> applies to training, batch prediction (`predict_evo2`), and the prefill
+> phase of autoregressive inference (`infer_evo2`); per-token decode is
+> already in optimal recurrent form and is unaffected.
 
 ### Autoregressive generation (`infer_evo2`)
 
@@ -97,6 +97,9 @@ Options:
 - `--top-k` / `--top-p` — top-k or nucleus sampling (0 = disabled).
 - `--tensor-parallel-size` — tensor parallelism for large models (default: 1).
 - `--max-seq-length` — maximum sequence length (default: 8192).
+- `--use-subquadratic-ops` — use fused subquadratic-ops kernels for prefill
+  (b2b causal conv, FFT/causal conv1d in `parallel_fir`). Recommended when
+  processing many prompts in one process.
 
 ### Batch sequence scoring (`predict_evo2`)
 
@@ -266,6 +269,173 @@ Options:
 - `--mixed-precision-recipe` — precision recipe (default: `bf16_mixed`). NOTE for checkpoints sensitive to FP8 and Hopper you need to run with `--mixed-precision-recipe bf16-mixed` and also supply the `--vortex-style-fp8` option for prediction/inference, you should not use the fp8 recipe for those models, as they are sensitive to the exact FP8 configuration they were trained with in savanna, see the [table under the section on available nvidia checkpoints for download from NGC](#available-models-in-ngc-currently-nemo-format-so-first-convert-to-mbridge).
 - `--verbose` / `-v` — enable debug logging.
 
+## LoRA Fine-tuning
+
+`Evo2LoRA` is a LoRA variant built on top of the Megatron Bridge PEFT stack. It
+freezes the entire base model and attaches low-rank adapter matrices to the
+modules you specify, with an optional escape hatch to keep selected modules
+fully trainable.
+
+> **End-to-end example:** see [`examples/lora-fine-tuning-tutorial.ipynb`](examples/lora-fine-tuning-tutorial.ipynb)
+> for a runnable walkthrough that fine-tunes the 1B checkpoint for splice-site
+> classification, including a head-only baseline for comparison.
+
+### Basic usage
+
+Add `--lora-finetune` to any `train_evo2` command alongside a checkpoint:
+
+```bash
+torchrun --nproc-per-node 2 --no-python \
+  train_evo2 \
+  --hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 \
+  --model-size evo2_1b_base --max-steps 500 --eval-interval 100 \
+  --eval-iters 3 --mock-data \
+  --micro-batch-size 4 --global-batch-size 8 --seq-length 1024 \
+  --mixed-precision-recipe bf16_mixed \
+  --result-dir lora_run \
+  --finetune-ckpt-dir $CKPT_OUT_DIR \
+  --lora-finetune \
+  --lora-dim 16 \
+  --lora-alpha 32 \
+  --lora-dropout 0.1 \
+  --lora-target-modules "dense_projection,linear_qkv,linear_proj,linear_fc1,linear_fc2"
+```
+
+### LoRA configuration flags
+
+| Flag                         | Default    | Description                                                                                  |
+| ---------------------------- | ---------- | -------------------------------------------------------------------------------------------- |
+| `--lora-finetune`            | *(absent)* | Presence flag. Pass to enable LoRA fine-tuning; omit for standard fine-tuning.               |
+| `--lora-dim`                 | `16`       | Rank `r` of the low-rank decomposition                                                       |
+| `--lora-alpha`               | `32`       | Scaling factor α; effective scale = α/r                                                      |
+| `--lora-dropout`             | `0.1`      | Dropout applied to the LoRA path                                                             |
+| `--lora-target-modules`      | see below  | Comma-separated list of module short-names to attach LoRA adapters to                        |
+| `--lora-skip-freeze-modules` | `""`       | Comma-separated list of module short-names to leave **fully trainable** (no LoRA, no freeze) |
+
+**Default `--lora-target-modules`:** `dense_projection,dense,linear_qkv,linear_proj,linear_fc1,linear_fc2`
+
+These cover the dense projection inside each Hyena mixer (`dense_projection`,
+`dense`) and the four standard transformer MLP/attention projections
+(`linear_qkv`, `linear_proj`, `linear_fc1`, `linear_fc2`).
+
+### Module name matching
+
+Both `--lora-target-modules` and `--lora-skip-freeze-modules` use the same
+two-level matching syntax:
+
+- **Short name** — matches any module whose immediate attribute name equals the
+  pattern, regardless of depth (e.g. `"mixer"` matches
+  `model.layers.3.mixer`).
+- **Wildcard path** — if the pattern contains `*`, it is matched against the
+  full dotted path using `*` as a substring wildcard (e.g.
+  `"*.layers.0.*.mixer"` matches only layer 0).
+
+A module that matches `--lora-target-modules` will have its base weights frozen
+and LoRA adapter matrices attached. A module that matches
+`--lora-skip-freeze-modules` is left entirely unfrozen — its full weight is
+trainable — and no LoRA adapter is applied. If a module matches **both** lists,
+`Evo2LoRA` raises a `ValueError` at startup.
+
+### Weight tying and shared embeddings
+
+Evo2 models default to `share_embeddings_and_output_weights=True`. Under this
+setting, the vocabulary embedding table and the output projection **share the
+same weight tensor**: `embedding.word_embeddings.weight` owns the data and
+`output_layer` allocates no weight of its own (`output_layer.weight is None`).
+The output layer receives the embedding weight as a runtime argument during the
+forward pass.
+
+This has direct consequences when you try to apply LoRA or control freezing on
+these layers.
+
+**Constraint on `--lora-target-modules`:** `word_embeddings` is a
+`VocabParallelEmbedding` and does not support LoRA adapters in Megatron Bridge.
+Including it in `--lora-target-modules` always raises a `ValueError`, regardless
+of `share_embeddings_and_output_weights`. `output_layer` is a
+`ColumnParallelLinear` and *does* support LoRA, but only when
+`share_embeddings_and_output_weights=False`; when weight tying is enabled
+`output_layer.weight` is `None` and there is no independent weight tensor to
+attach an adapter to.
+
+**Design principle for `--lora-skip-freeze-modules`:** `Evo2LoRA` treats weight
+tying as a contract that must be honoured in full. Any configuration that would
+change the trainability of only one side of a tied pair is rejected with an error
+rather than silently producing asymmetric behaviour.
+
+#### `--lora-target-modules` and weight tying
+
+| `share_embeddings_and_output_weights` | `--lora-target-modules` includes                          | Behavior                                                                 |
+| :-----------------------------------: | --------------------------------------------------------- | ------------------------------------------------------------------------ |
+|                Either                 | `word_embeddings` (alone or combined with `output_layer`) | **Error.** `VocabParallelEmbedding` does not support LoRA adapters.      |
+|                `True`                 | `output_layer` only                                       | **Error.** `output_layer.weight` is `None` when weight tying is enabled. |
+|                `False`                | `output_layer` only                                       | Valid — LoRA adapter on the independent output projection.               |
+
+#### `--lora-skip-freeze-modules` and weight tying
+
+| `share_embeddings_and_output_weights` | `--lora-skip-freeze-modules` includes | Behavior                                                                                                                                                                                                                                                                                                                                                                               |
+| :-----------------------------------: | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|                `False`                | `word_embeddings` only                | Embedding weight is fully trainable. Output projection is frozen unless also listed.                                                                                                                                                                                                                                                                                                   |
+|                `False`                | `output_layer` only                   | Output projection weight is fully trainable. Embedding is frozen unless also listed.                                                                                                                                                                                                                                                                                                   |
+|                `False`                | both                                  | Both weights are fully trainable.                                                                                                                                                                                                                                                                                                                                                      |
+|                `True`                 | `word_embeddings` only                | **Error.** Listing only one side of a tied pair breaks the weight-tying invariant. Both must be listed together.                                                                                                                                                                                                                                                                       |
+|                `True`                 | `output_layer` only                   | **Error.** Listing only one side of a tied pair breaks the weight-tying invariant. Both must be listed together.                                                                                                                                                                                                                                                                       |
+|                `True`                 | both                                  | Accepted. The shared weight (owned by `word_embeddings`) is unfrozen, so both the embedding lookup and the output projection train via the same tensor. **Note:** because `output_layer` allocates no weight of its own, gradient flow through the output projection path back to the shared tensor is a TODO item and may not be fully wired in all pipeline-parallel configurations. |
+
+#### Recommendations
+
+- **Default (vocabulary weights frozen, LoRA on inner layers):** omit both
+  embedding/output modules from both flags. The default `--lora-target-modules`
+  does not touch either layer.
+- **Apply LoRA to the output projection (untied models only):** list
+  `output_layer` in `--lora-target-modules` and set
+  `share_embeddings_and_output_weights=False` in the model config.
+- **Fully fine-tune the vocabulary weight alongside LoRA on inner layers:**
+  list **both** `word_embeddings` and `output_layer` in
+  `--lora-skip-freeze-modules`.
+  ```
+  --lora-skip-freeze-modules "word_embeddings,output_layer"
+  ```
+- **Never put `word_embeddings` in `--lora-target-modules`** — `VocabParallelEmbedding`
+  does not support LoRA adapters and will raise a `ValueError`.
+- **Never list only one of the two tied layers in `--lora-skip-freeze-modules`
+  when `share_embeddings_and_output_weights=True`** — the invariant is that tied
+  weights are always treated as a unit, and any asymmetric configuration will
+  raise an error.
+
+### Running inference on a LoRA checkpoint
+
+A LoRA training checkpoint contains only adapter tensors — the base model weights
+are not duplicated. Point `--ckpt-dir` at the LoRA `iter_*` directory as usual:
+
+```bash
+torchrun --nproc_per_node 1 --no-python \
+  infer_evo2 \
+  --ckpt-dir </path/to/lora_run/checkpoints/> \
+  --prompt "ATCGATCGATCGATCG" \
+  --max-new-tokens 200
+```
+
+```bash
+torchrun --nproc_per_node 1 --no-python \
+  predict_evo2 \
+  --fasta <path/to/fasta/sequences> \
+  --ckpt-dir </path/to/lora_run/checkpoints/> \
+  --output-dir ./predictions
+```
+
+When `infer_evo2` / `predict_evo2` detect a `peft` section in the checkpoint's
+`run_config.yaml`, they:
+
+1. load dense base weights from `checkpoint.pretrained_checkpoint` (the same
+   value that was supplied during LoRA training),
+2. apply the stored PEFT config (`run_config["peft"]`) to graft `LoRALinear`
+   wrappers onto the base modules,
+3. load only the adapter tensors from `--ckpt-dir`.
+
+No merge step is required. The base checkpoint referenced by
+`pretrained_checkpoint` must still exist on disk at the path recorded in
+`run_config.yaml`.
+
 ## Exporting to Vortex format
 
 Vortex is ARC Institute's inference format for Evo2 Hyena models, used by the
@@ -343,10 +513,11 @@ checkpoint.
 
 The `examples/` directory contains Jupyter notebooks demonstrating common workflows:
 
-| Notebook                     | Description                                            |
-| ---------------------------- | ------------------------------------------------------ |
-| `zeroshot_brca1.ipynb`       | Zero-shot BRCA1 variant effect prediction with Evo2 1B |
-| `fine-tuning-tutorial.ipynb` | Fine-tune the 1B checkpoint on human chromosomes       |
+| Notebook                          | Description                                                                                                            |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `zeroshot_brca1.ipynb`            | Zero-shot BRCA1 variant effect prediction with Evo2 1B                                                                 |
+| `fine-tuning-tutorial.ipynb`      | Fine-tune the 1B checkpoint on human chromosomes                                                                       |
+| `lora-fine-tuning-tutorial.ipynb` | LoRA fine-tune the 1B checkpoint for splice-site classification, with a head-only baseline for trainable-param savings |
 
 ## Docker build
 

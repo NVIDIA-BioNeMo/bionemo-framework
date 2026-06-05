@@ -95,8 +95,8 @@ jobs:
           # Currently, AMPLIFY is the only folder that needs a custom base image, since we have to support both TE and
           # xformers-based models for golden value testing. The rest of the models use the default pytorch image.
 
-          # This uses a squashed version of the pytorch:26.03-py3 image, generated with `docker-squash
-          # nvcr.io/nvidia/pytorch:26.03-py3 -t svcbionemo023/bionemo-framework:pytorch26.03-py3-squashed --output
+          # This uses a squashed version of the pytorch:26.04-py3 image, generated with `docker-squash
+          # nvcr.io/nvidia/pytorch:26.04-py3 -t svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed --output
           # type=registry,compression=zstd,force-compression=true,oci-mediatypes=true,compression-level=15` and pushed
           # to the dockerhub registry. Our github actions are able to cache image pulls from dockerhub but not nvcr, so
           # hopefully this cuts down slightly on CI time at the expense of having a slightly in-directed image location.
@@ -109,8 +109,8 @@ jobs:
                 if . == "bionemo-recipes/models/amplify" then
                   "svcbionemo023/bionemo-framework:amplify-model-devcontainer-082025"
                 else
-                  # "nvcr.io/nvidia/pytorch:26.03-py3"
-                  "svcbionemo023/bionemo-framework:pytorch26.03-py3-squashed"
+                  # "nvcr.io/nvidia/pytorch:26.04-py3"
+                  "svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed"
                 end
               )
             })

@@ -14,9 +14,11 @@
 # limitations under the License.
 
 
-# conftest.py
+import copy
 import gc
 import os
+import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,8 @@ import torch
 from bionemo.core.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
+
+from .utils import find_free_network_port, is_a6000_gpu
 
 
 def get_device_and_memory_allocated() -> str:
@@ -139,3 +143,43 @@ def mbridge_checkpoint_path(mbridge_checkpoint_1b_8k_bf16) -> Path:
         Path to the MBridge checkpoint iteration directory
     """
     return mbridge_checkpoint_1b_8k_bf16
+
+
+@pytest.fixture(scope="session")
+def lora_finetune_checkpoint(mbridge_checkpoint_1b_8k_bf16, tmp_path_factory) -> Path:
+    """Session-scoped LoRA-finetuned checkpoint produced from ``mbridge_checkpoint_1b_8k_bf16``.
+
+    Runs ``train_evo2 --lora-finetune`` for 2 steps with mock data so downstream tests
+    can exercise PEFT-aware load paths (infer/predict) against a checkpoint whose adapter
+    weights differ from their init values. Shared across test files to avoid doing the
+    finetune more than once per session.
+
+    Returns:
+        Path to the ``iter_0000002/`` directory of the LoRA adapter checkpoint.
+    """
+    num_steps = 2
+    result_dir = tmp_path_factory.mktemp("lora_finetune_session") / "lora_finetune"
+    env = copy.deepcopy(os.environ)
+    if is_a6000_gpu():
+        env["NCCL_P2P_DISABLE"] = "1"
+
+    port = find_free_network_port()
+    cmd = (
+        f"torchrun --nproc-per-node 1 --no-python --master_port {port} "
+        f"train_evo2 --finetune-ckpt-dir {mbridge_checkpoint_1b_8k_bf16.parent} "
+        f"--lora-finetune --lora-dim 8 --lora-alpha 16 "
+        f"--lora-target-modules linear_qkv,linear_proj,linear_fc1,linear_fc2 "
+        f"--hf-tokenizer-model-path {DEFAULT_HF_TOKENIZER_MODEL_PATH_512} "
+        f"--model-size evo2_1b_base --max-steps {num_steps} --eval-interval {num_steps} --eval-iters 1 "
+        f"--mock-data --result-dir {result_dir} --mixed-precision-recipe bf16_mixed "
+        f"--micro-batch-size 1 --global-batch-size 1 --seq-length 512 "
+        f"--ckpt-format torch_dist --log-interval 1 --decay-steps 100 --warmup-steps 1 "
+        f"--seed 42 --dataset-seed 33 --disable-tensorboard-logger"
+    )
+    result = subprocess.run(
+        shlex.split(cmd), check=False, capture_output=True, text=True, cwd=result_dir.parent, env=env
+    )
+    assert result.returncode == 0, f"LoRA finetune fixture failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    lora_ckpt = result_dir / "evo2" / "checkpoints" / f"iter_{num_steps:07d}"
+    assert lora_ckpt.exists(), f"Expected LoRA checkpoint at {lora_ckpt}"
+    return lora_ckpt

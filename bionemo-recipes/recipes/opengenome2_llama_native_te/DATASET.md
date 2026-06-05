@@ -162,6 +162,7 @@ TO 'output' (FORMAT PARQUET, PER_THREAD_OUTPUT true, FILE_SIZE_BYTES '200MB');
 ```yaml
 dataset:
   load_dataset_kwargs:
+    data_files: null
     path: "/path/to/your/resharded_parquet_dir"
     split: "train"
     streaming: true

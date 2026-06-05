@@ -17,6 +17,7 @@ from typing import Tuple
 
 import anndata as ad
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.sparse as sp
 
@@ -112,7 +113,7 @@ def big_int_h5ad(tmp_path, big_h5ad_data):
     """Create and return the path to an h5ad with large values/columns for dtype promotion tests."""
     d = big_h5ad_data
     X = sp.csr_matrix((d["data"].astype(np.uint32), d["indices"], d["indptr"]), shape=(d["n_rows"], d["n_cols"]))
-    a = ad.AnnData(X=None, raw={"X": X})
+    a = ad.AnnData(obs=pd.DataFrame(index=range(d["n_rows"])), raw={"X": X})
     h5ad_path = tmp_path / "big_dtype.h5ad"
     a.write_h5ad(h5ad_path)
     return h5ad_path
@@ -123,7 +124,7 @@ def big_float_h5ad(tmp_path, big_h5ad_data):
     """Create and return the path to an h5ad with large values/columns for dtype promotion tests."""
     d = big_h5ad_data
     X = sp.csr_matrix((d["data"].astype("float32"), d["indices"], d["indptr"]), shape=(d["n_rows"], d["n_cols"]))
-    a = ad.AnnData(X=None, raw={"X": X})
+    a = ad.AnnData(obs=pd.DataFrame(index=range(d["n_rows"])), raw={"X": X})
     h5ad_path = tmp_path / "big_dtype.h5ad"
     a.write_h5ad(h5ad_path)
     return h5ad_path

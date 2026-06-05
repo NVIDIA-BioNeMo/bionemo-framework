@@ -270,6 +270,13 @@ def _check_matchrate(*, ckpt_name, matchrate, assert_matchrate=True):
             "evo2/1b-8k-bf16:1.0", [96.27, 67.93, 77.50, 80.30], False, True, id="1b-8k-bf16-subquadratic-ops"
         ),
         pytest.param(
+            "evo2/1b-8k-bf16:1.0",
+            [96.27, 67.93, 77.50, 80.30],
+            True,
+            True,
+            id="1b-8k-bf16-subquadratic-ops-flash",
+        ),
+        pytest.param(
             "evo2/1b-8k:1.0",
             [96.27, 67.93, 77.50, 80.30],
             False,
@@ -310,8 +317,6 @@ def test_forward_manual(
 
     is_fp8_supported, compute_capability, device_info = check_fp8_support(torch.cuda.current_device())
     skip = "evo2/1b-8k:" in ckpt_name and not is_fp8_supported
-    if subquadratic_ops and flash_decode:
-        pytest.skip(f"Skipping {ckpt_name} because subquadratic ops and flash decode are not supported together")
     vortex_style_fp8 = is_fp8_supported and ("bf16" not in ckpt_name or "7b" not in ckpt_name)
     if skip:
         # This checkpoint is sensitive to FP8, so we skip it if it is not supported on the current device.

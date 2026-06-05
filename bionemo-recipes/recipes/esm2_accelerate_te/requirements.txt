@@ -7,3 +7,4 @@ torchmetrics
 transformer_engine[pytorch]
 transformers
 wandb
+pytest

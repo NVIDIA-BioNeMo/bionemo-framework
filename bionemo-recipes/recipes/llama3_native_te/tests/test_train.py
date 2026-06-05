@@ -439,6 +439,59 @@ def test_sanity_fsdp2_cp(tmp_path, recipe_path):
     assert torch.isfinite(torch.tensor(final_loss)), f"Final loss {final_loss} is not finite"
 
 
+def test_sanity_convergence_fsdp2_te_fused_adam(tmp_path, recipe_path):
+    """Test FSDP2 training with TE FusedAdam for FP32 master weights.
+
+    This test validates:
+    - FusedAdam optimizer initializes correctly with FSDP2-wrapped model
+    - Training converges with FP32 master weights maintained by FusedAdam
+    - FusedAdam handles FP32 master weights at the optimizer level (no MixedPrecisionPolicy needed)
+    """
+    with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
+        sanity_config = compose(
+            config_name="L0_sanity",
+            overrides=[
+                f"+wandb.dir={tmp_path}",
+                f"checkpoint.ckpt_dir={tmp_path}",
+                "checkpoint.resume_from_checkpoint=false",
+                "use_fp32_master_weights=true",
+            ],
+        )
+
+    final_loss = main_fsdp2(sanity_config)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    assert final_loss < 8.0, f"Final loss {final_loss} is too high, expected < 8.0"
+
+
+def test_sanity_convergence_fsdp2_te_fused_adam_fp8(tmp_path, recipe_path):
+    """Test FSDP2 + FusedAdam + FP8 training.
+
+    This test validates FusedAdam works correctly alongside FP8 quantization,
+    matching the approach used in the lingua 7B MXFP8 experiment config.
+    """
+    with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
+        sanity_config = compose(
+            config_name="L0_sanity",
+            overrides=[
+                f"+wandb.dir={tmp_path}",
+                f"checkpoint.ckpt_dir={tmp_path}",
+                "checkpoint.resume_from_checkpoint=false",
+                "use_fp32_master_weights=true",
+                "fp8_config.enabled=true",
+                "use_sequence_packing=true",
+                "config_kwargs.attn_input_format=thd",
+            ],
+        )
+
+    final_loss = main_fsdp2(sanity_config)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    assert final_loss < 8.0, f"Final loss {final_loss} is too high, expected < 8.0"
+
+
 @requires_fp8
 def test_sanity_ddp_fp8_stats_logging(tmp_path, recipe_path):
     """Test that FP8 stats logging creates the expected log files."""
@@ -452,8 +505,8 @@ def test_sanity_ddp_fp8_stats_logging(tmp_path, recipe_path):
                 f"checkpoint.ckpt_dir={tmp_path}",
                 "+dataset.pad_sequences_to_be_divisible_by=16",
                 "fp8_config.enabled=true",
-                "fp8_stats_config.enabled=true",
-                f"fp8_stats_config.fp8_log_dir={fp8_log_dir}",
+                "quant_stats_config.enabled=true",
+                f"quant_stats_config.quant_log_dir={fp8_log_dir}",
                 "num_train_steps=4",
             ],
         )
@@ -493,8 +546,8 @@ def test_sanity_fsdp2_fp8_stats_logging(tmp_path, recipe_path):
                 f"checkpoint.ckpt_dir={tmp_path}",
                 "fp8_config.enabled=true",
                 "+dataset.pad_sequences_to_be_divisible_by=16",
-                "fp8_stats_config.enabled=true",
-                f"fp8_stats_config.fp8_log_dir={fp8_log_dir}",
+                "quant_stats_config.enabled=true",
+                f"quant_stats_config.quant_log_dir={fp8_log_dir}",
                 "num_train_steps=4",
             ],
         )
@@ -505,6 +558,65 @@ def test_sanity_fsdp2_fp8_stats_logging(tmp_path, recipe_path):
     assert fp8_log_dir.exists()
     assert (fp8_log_dir / "rank_0" / "nvdlfw_inspect_logs" / "nvdlfw_inspect_globalrank-0.log").exists()
     assert (fp8_log_dir / "rank_0" / "nvdlfw_inspect_statistics_logs" / "nvdlfw_inspect_globalrank-0.log").exists()
+
+
+@requires_fp8
+def test_sanity_ddp_fp8_partial_layers_stats_logging(tmp_path, recipe_path):
+    """Test DDP training with layer-wise FP8 stats (layers 1-3 only)."""
+    quant_log_dir = tmp_path / "quant_stats_logs"
+
+    with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
+        sanity_config = compose(
+            config_name="L0_sanity",
+            overrides=[
+                f"+wandb_init_args.dir={tmp_path}",
+                f"checkpoint.ckpt_dir={tmp_path}",
+                "+dataset.pad_sequences_to_be_divisible_by=16",
+                "fp8_config.enabled=true",
+                "fp8_layers=[1,2,3]",
+                "quant_stats_config.enabled=true",
+                f"quant_stats_config.quant_log_dir={quant_log_dir}",
+                "num_train_steps=4",
+            ],
+        )
+
+    main_ddp(sanity_config)
+
+    # Verify the log directory structure was created
+    assert quant_log_dir.exists(), "Quant log directory was not created"
+    assert (quant_log_dir / "rank_0").exists(), "rank_0 directory was not created"
+    assert (quant_log_dir / "rank_0" / "nvdlfw_inspect_logs").exists(), "nvdlfw_inspect_logs directory was not created"
+    assert (quant_log_dir / "rank_0" / "nvdlfw_inspect_statistics_logs").exists(), (
+        "nvdlfw_inspect_statistics_logs directory was not created"
+    )
+
+
+@requires_fp8
+def test_sanity_fsdp2_fp8_partial_layers_stats_logging(tmp_path, recipe_path):
+    """Test FSDP2 training with layer-wise FP8 stats (layers 1-3 only)."""
+    quant_log_dir = tmp_path / "quant_stats_logs"
+
+    with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
+        sanity_config = compose(
+            config_name="L0_sanity",
+            overrides=[
+                f"+wandb_init_args.dir={tmp_path}",
+                f"checkpoint.ckpt_dir={tmp_path}",
+                "+dataset.pad_sequences_to_be_divisible_by=16",
+                "fp8_config.enabled=true",
+                "fp8_layers=[1,2,3]",
+                "quant_stats_config.enabled=true",
+                f"quant_stats_config.quant_log_dir={quant_log_dir}",
+                "num_train_steps=4",
+            ],
+        )
+
+    main_fsdp2(sanity_config)
+
+    # Verify log structure
+    assert quant_log_dir.exists()
+    assert (quant_log_dir / "rank_0" / "nvdlfw_inspect_logs" / "nvdlfw_inspect_globalrank-0.log").exists()
+    assert (quant_log_dir / "rank_0" / "nvdlfw_inspect_statistics_logs" / "nvdlfw_inspect_globalrank-0.log").exists()
 
 
 def run_train_cmd(cmd, recipe_path):

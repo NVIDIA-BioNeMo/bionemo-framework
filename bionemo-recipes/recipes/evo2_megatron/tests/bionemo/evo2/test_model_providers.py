@@ -15,6 +15,8 @@
 
 """Tests for model provider instantiation, naming, and checkpoint converters."""
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -22,6 +24,7 @@ from bionemo.evo2.models.evo2_provider import (
     HYENA_MODEL_OPTIONS,
     MODEL_OPTIONS,
     Hyena1bModelProvider,
+    _patch_megatron_dataset_helper_compile,
     infer_model_type,
 )
 from bionemo.evo2.utils.checkpoint.mbridge_to_vortex import _split_fc1, mbridge_to_vortex_state_dict
@@ -61,6 +64,46 @@ def test_infer_model_type_unknown():
     """Verify infer_model_type raises ValueError for unknown model keys."""
     with pytest.raises(ValueError, match="Unknown model size"):
         infer_model_type("nonexistent_model")
+
+
+@pytest.mark.parametrize(
+    ("has_makefile", "has_prebuilt_extension", "expected_original_calls"),
+    [
+        (False, True, 0),
+        (True, True, 1),
+        (False, False, 1),
+    ],
+)
+def test_megatron_dataset_helper_compile_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    has_makefile: bool,
+    has_prebuilt_extension: bool,
+    expected_original_calls: int,
+):
+    """Skip Megatron's runtime make step only when a prebuilt helper extension exists."""
+    from megatron.bridge.training import initialize as bridge_initialize
+    from megatron.core.datasets import utils as dataset_utils
+
+    calls = []
+
+    def original_compile_helpers():
+        calls.append("called")
+
+    if has_makefile:
+        (tmp_path / "Makefile").write_text("all:\n")
+    if has_prebuilt_extension:
+        (tmp_path / "helpers_cpp.cpython-312-x86_64-linux-gnu.so").touch()
+
+    monkeypatch.setattr(dataset_utils, "__file__", str(tmp_path / "utils.py"))
+    monkeypatch.setattr(dataset_utils, "compile_helpers", original_compile_helpers)
+    monkeypatch.setattr(bridge_initialize, "compile_helpers", original_compile_helpers)
+
+    _patch_megatron_dataset_helper_compile()
+
+    dataset_utils.compile_helpers()
+    assert bridge_initialize.compile_helpers is dataset_utils.compile_helpers
+    assert len(calls) == expected_original_calls
 
 
 def _make_mock_savanna_sd(pattern: str) -> dict[str, torch.Tensor]:

@@ -290,8 +290,12 @@ class EncodonTEPL(LightningModule):
             cu_seq_lens_k=batch_data[MetadataFields.CU_SEQ_LENS_K]
             if MetadataFields.CU_SEQ_LENS_K in batch_data
             else None,
-            max_len_q=batch_data[MetadataFields.MAX_LENGTH_Q] if MetadataFields.MAX_LENGTH_Q in batch_data else None,
-            max_len_k=batch_data[MetadataFields.MAX_LENGTH_K] if MetadataFields.MAX_LENGTH_K in batch_data else None,
+            max_length_q=batch_data[MetadataFields.MAX_LENGTH_Q]
+            if MetadataFields.MAX_LENGTH_Q in batch_data
+            else None,
+            max_length_k=batch_data[MetadataFields.MAX_LENGTH_K]
+            if MetadataFields.MAX_LENGTH_K in batch_data
+            else None,
         )
         return output
 

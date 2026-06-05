@@ -19,6 +19,10 @@ import torch
 from src.data.metadata import MetadataFields
 
 
+_waste_history: list[float] = []
+_expected_padded_length: int | None = None
+
+
 def thd_collate_fn(batch):
     """Collate function for MLM that mimics PyTorch's default_collate behavior.
 
@@ -47,6 +51,14 @@ def _pt_flatten_collate(features: list[dict[str, list[int]]]):
     Returns:
         Dictionary containing the flattened features.
     """
+    global _expected_padded_length  # noqa: PLW0603
+    padded_length = len(features[0][MetadataFields.INPUT_IDS])
+    if _expected_padded_length is None:
+        _expected_padded_length = padded_length
+    assert padded_length == _expected_padded_length, (
+        f"padded_length changed: expected {_expected_padded_length}, got {padded_length}"
+    )
+
     # Unpad everything.
     for feature in features:
         feature[MetadataFields.INPUT_IDS] = feature[MetadataFields.INPUT_IDS][feature[MetadataFields.ATTENTION_MASK]]
@@ -54,9 +66,19 @@ def _pt_flatten_collate(features: list[dict[str, list[int]]]):
         feature[MetadataFields.INPUT_MASK] = feature[MetadataFields.INPUT_MASK][feature[MetadataFields.ATTENTION_MASK]]
 
     is_labels_provided = MetadataFields.LABELS in features[0]
-    sample_lengths = [
-        len(sample[MetadataFields.INPUT_IDS]) for sample in features
-    ]  # This is just gonna be the max len == 2048.
+    sample_lengths = [len(sample[MetadataFields.INPUT_IDS]) for sample in features]
+
+    bshd_tokens = len(features) * padded_length
+    thd_tokens = sum(sample_lengths)
+    batch_waste = 1.0 - thd_tokens / bshd_tokens
+    _waste_history.append(batch_waste)
+    avg_waste = sum(_waste_history) / len(_waste_history)
+    print(
+        f"[THD collate] batch waste: {batch_waste:.1%} "
+        f"| running avg: {avg_waste:.1%} "
+        f"| tokens {thd_tokens}/{bshd_tokens} "
+        f"| seq lens: {sample_lengths}"
+    )
 
     batch = {}
     batch[MetadataFields.MAX_LENGTH_Q] = batch[MetadataFields.MAX_LENGTH_K] = max(sample_lengths)

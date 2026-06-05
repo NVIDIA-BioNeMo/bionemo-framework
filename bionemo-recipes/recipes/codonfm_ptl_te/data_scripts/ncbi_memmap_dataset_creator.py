@@ -17,6 +17,7 @@
 import argparse
 import json
 import os
+import sys
 from multiprocessing import Pool, cpu_count
 
 import numpy as np
@@ -24,6 +25,8 @@ import polars as pl
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
+
+sys.path.append("/workspace/codonfm")
 from src.tokenizer import Tokenizer
 
 

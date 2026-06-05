@@ -26,7 +26,7 @@ which may also contribute to its lower test performance.
 
 | Model                      | Step / checkpoint | Train loss | Mean Test loss | Mean Test Perplexity |
 | -------------------------- | ----------------- | ---------- | -------------- | -------------------- |
-| LlaMA3 Recipe (OG2 7B)     | 182313            | 0.95       | 0.92           | 2.50                 |
+| LlaMA3 Recipe (OG2 7B)     | 182313            | 0.9444     | 0.9204         | 2.51                 |
 | Megatron baseline (OG2 7B) | 182313            | 1.01       | 1.019          | 2.80                 |
 
 > **Evaluation methodology:** Test losses are average NLL (negative log-likelihood) computed using
@@ -98,7 +98,7 @@ As seen in the table and chart below, using THD with our recipe provides ~80-85%
 ## How to use this recipe
 
 This folder contains an independent, minimal training example. It does not depend on any other code in the top-level bionemo-framework repository. You can download a zipped directory of this folder alone by clicking
-[here](https://download-directory.github.io?url=https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/opengenome2_llama_native_te&filename=opengenome2-llama-native-te).
+[here](https://download-directory.github.io?url=https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/opengenome2_llama_native_te&filename=opengenome2-llama-native-te).
 
 ## Supported Models and Training Features
 

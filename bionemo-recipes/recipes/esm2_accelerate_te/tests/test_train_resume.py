@@ -18,11 +18,20 @@ import re
 import shutil
 from pathlib import Path
 
+import pytest
+import torch
 from hydra import compose, initialize_config_dir
 
 import train
 
 
+requires_gpu = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Test requires a GPU",
+)
+
+
+@requires_gpu
 def test_train_can_resume_from_checkpoint(monkeypatch, tmp_path: Path):
     """Test that train.py runs successfully with sanity config and creates expected outputs."""
 

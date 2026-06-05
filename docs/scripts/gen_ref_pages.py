@@ -40,6 +40,7 @@ SUPPORT_FILE_SUFFIXES = {
     ".cfg",
     ".conf",
     ".csv",
+    ".fasta",
     ".gif",
     ".ini",
     ".jpeg",
@@ -59,17 +60,22 @@ SUPPORT_FILE_SUFFIXES = {
 }
 SUPPORT_FILE_NAMES = {"Dockerfile", "LICENSE", "Makefile", "requirements.txt"}
 SKIP_SUPPORT_DIRS = {"assets", "examples", "notebooks", ".venv", "__pycache__", ".pytest_cache"}
+GITHUB_BLOB_BASE = "https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main"
 
 
-def _rewrite_relative_links(source: Path, dest: Path, root: Path, text: str) -> str:
+def _rewrite_relative_links(
+    source: Path, dest: Path, root: Path, text: str, rendered_markdown_links: bool = False
+) -> str:
     """Rewrite relative links so they resolve correctly from the docs-tree destination.
 
-    Handles two path families that commonly appear in imported recipe READMEs:
+    Handles path families that commonly appear in imported READMEs:
 
     * Paths resolving under ``docs/docs/`` (shared assets, images) are rewritten
       relative to the docs-tree root so they reach the correct asset.
     * Paths resolving under ``bionemo-recipes/`` are rewritten relative to the
       ``main/recipes/`` subtree so cross-recipe links keep working.
+    * Paths from sub-package READMEs to examples, notebooks, and assets are
+      rewritten to the generated docs locations where those files are copied.
 
     All other relative links (e.g. to ``ci/scripts/``) are left untouched.
 
@@ -78,6 +84,8 @@ def _rewrite_relative_links(source: Path, dest: Path, root: Path, text: str) -> 
         dest: Destination path in the generated docs tree (relative to docs root).
         root: Repository root directory (absolute).
         text: Markdown content to process.
+        rendered_markdown_links: Whether Markdown links are already in rendered
+            HTML context, as with Markdown cells inside notebooks.
 
     Returns:
         Markdown text with rewritten relative links.
@@ -98,9 +106,35 @@ def _rewrite_relative_links(source: Path, dest: Path, root: Path, text: str) -> 
 
     docs_docs_dir = root / "docs" / "docs"
     recipes_dir = root / "bionemo-recipes"
+    sub_packages_dir = root / "sub-packages"
 
-    def _make_rewriter(ref_dir: str):
+    source_package_name = None
+    try:
+        source_package_name = source.resolve().relative_to(sub_packages_dir.resolve()).parts[0]
+    except (IndexError, ValueError):
+        pass
+
+    def _make_rewriter(ref_dir: str, rendered_links: bool = False):
         """Return a rewrite function that computes paths relative to *ref_dir*."""
+
+        def _final_link(target: str, append_trailing_slash: bool, suffix: str) -> str:
+            if rendered_links:
+                target_path = Path(target)
+                is_directory_url = False
+                if target_path.name in ("index.md", "README.md"):
+                    target = target_path.parent.as_posix()
+                    is_directory_url = True
+                elif target_path.suffix in {".md", ".ipynb"}:
+                    target = target_path.with_suffix("").as_posix()
+                    is_directory_url = True
+
+                new_rel = Path(os.path.relpath(target, ref_dir)).as_posix()
+                if is_directory_url and not new_rel.endswith("/"):
+                    new_rel += "/"
+                return new_rel + suffix
+
+            new_rel = Path(os.path.relpath(target, ref_dir)).as_posix()
+            return new_rel + ("/" if append_trailing_slash else "") + suffix
 
         def _rewrite(rel_path: str) -> str:
             if not rel_path or rel_path.startswith(
@@ -127,31 +161,71 @@ def _rewrite_relative_links(source: Path, dest: Path, root: Path, text: str) -> 
             except (ValueError, OSError):
                 return rel_path
 
+            if not resolved.exists() and resolved.suffix == "":
+                markdown_file = resolved.with_suffix(".md")
+                if markdown_file.exists():
+                    resolved = markdown_file
+
             # docs/docs/... -> docs tree root
             try:
                 rel_to_docs = resolved.relative_to(docs_docs_dir)
                 target = rel_to_docs.as_posix()
-                new_rel = Path(os.path.relpath(target, ref_dir)).as_posix()
-                return new_rel + ("/" if trailing_slash else "") + suffix
+                return _final_link(target, trailing_slash, suffix)
             except ValueError:
                 pass
 
             # bionemo-recipes/... -> main/recipes/...
             try:
                 rel_to_recipes = resolved.relative_to(recipes_dir)
+                if resolved.suffix == ".md" and "src" in rel_to_recipes.parts:
+                    repo_rel = resolved.relative_to(root).as_posix()
+                    return f"{GITHUB_BLOB_BASE}/{repo_rel}" + suffix
+
                 target = "main/recipes/" + rel_to_recipes.as_posix()
                 if target.endswith("/README.md"):
                     target = target[:-10] + "/index.md"
-                new_rel = Path(os.path.relpath(target, ref_dir)).as_posix()
-                return new_rel + ("/" if trailing_slash else "") + suffix
+                return _final_link(target, trailing_slash, suffix)
             except ValueError:
                 pass
+
+            # sub-packages/<package>/examples/... -> main/examples/<package>/examples/...
+            # sub-packages/<package>/notebooks/... -> main/examples/<package>/notebooks/...
+            # sub-packages/<package>/assets/... -> main/developer-guide/<package>/assets/...
+            try:
+                rel_to_subpackages = resolved.relative_to(sub_packages_dir)
+                package_name = rel_to_subpackages.parts[0]
+                package_path = rel_to_subpackages.parts[1:]
+
+                target = None
+                if package_path and package_path[0] in ("examples", "notebooks"):
+                    target = "main/examples/" + package_name + "/" + Path(*package_path).as_posix()
+                elif package_path and package_path[0] == "assets":
+                    target = "main/developer-guide/" + package_name + "/" + Path(*package_path).as_posix()
+                elif package_path and package_path[0] == "README.md":
+                    target = f"main/developer-guide/{package_name}/{package_name}-Overview.md"
+
+                if target is not None:
+                    append_trailing_slash = trailing_slash
+                    if resolved.is_dir():
+                        target += "/index.md"
+                        append_trailing_slash = False
+                    return _final_link(target, append_trailing_slash, suffix)
+            except ValueError:
+                pass
+
+            if source_package_name is not None:
+                try:
+                    repo_rel = resolved.relative_to(root).as_posix()
+                    github_path_type = "tree" if trailing_slash or resolved.is_dir() else "blob"
+                    return f"{GITHUB_BLOB_BASE.replace('/blob/', f'/{github_path_type}/')}/{repo_rel}" + suffix
+                except ValueError:
+                    pass
 
             return rel_path
 
         return _rewrite
 
-    rewrite_md = _make_rewriter(dest_dir_md)
+    rewrite_md = _make_rewriter(dest_dir_html if rendered_markdown_links else dest_dir_md, rendered_markdown_links)
     rewrite_html = _make_rewriter(dest_dir_html)
 
     # Markdown images and links: ![alt](path) and [text](path)
@@ -176,7 +250,9 @@ def _rewrite_relative_links(source: Path, dest: Path, root: Path, text: str) -> 
     return text
 
 
-def _sanitize_imported_text(source: Path, dest: Path, root: Path, text: str) -> str:
+def _sanitize_imported_text(
+    source: Path, dest: Path, root: Path, text: str, rendered_markdown_links: bool = False
+) -> str:
     """Apply docs-specific cleanups and link rewriting to imported Markdown files.
 
     Args:
@@ -184,6 +260,8 @@ def _sanitize_imported_text(source: Path, dest: Path, root: Path, text: str) -> 
         dest: Destination path in the generated docs tree.
         root: Repository root directory.
         text: Source file contents.
+        rendered_markdown_links: Whether Markdown links are rendered directly
+            from this text instead of being rewritten by MkDocs.
 
     Returns:
         Sanitized Markdown content with correct relative links.
@@ -194,10 +272,24 @@ def _sanitize_imported_text(source: Path, dest: Path, root: Path, text: str) -> 
         if heading_idx != -1:
             text = text[heading_idx:]
 
+    # The macros plugin parses `{#id}` as a Jinja comment start before
+    # attr_list can turn it into a heading id. Preserve the anchor explicitly.
+    text = re.sub(
+        r"(?m)^(#{1,6}\s+.+?)\s+\{#([A-Za-z0-9_.:-]+)\}\s*$",
+        r'<a id="\2"></a>' + "\n" + r"\1",
+        text,
+    )
+
     recipes_dir = root / "bionemo-recipes"
+    sub_packages_dir = root / "sub-packages"
     try:
         source.resolve().relative_to(recipes_dir.resolve())
-        text = _rewrite_relative_links(source, dest, root, text)
+        text = _rewrite_relative_links(source, dest, root, text, rendered_markdown_links)
+    except ValueError:
+        pass
+    try:
+        source.resolve().relative_to(sub_packages_dir.resolve())
+        text = _rewrite_relative_links(source, dest, root, text, rendered_markdown_links)
     except ValueError:
         pass
 
@@ -250,6 +342,16 @@ def copy_notebook_file(source: Path, dest: Path, root: Path, log_message: str) -
 
     for cell in notebook.get("cells", []):
         cell.setdefault("metadata", {})
+        if cell.get("cell_type") == "markdown":
+            source_text = cell.get("source", "")
+            if isinstance(source_text, list):
+                text = "".join(source_text)
+                cell["source"] = _sanitize_imported_text(
+                    source, dest, root, text, rendered_markdown_links=True
+                ).splitlines(keepends=True)
+            elif isinstance(source_text, str):
+                cell["source"] = _sanitize_imported_text(source, dest, root, source_text, rendered_markdown_links=True)
+
         if cell.get("cell_type") == "code":
             cell.setdefault("outputs", [])
             cell.setdefault("execution_count", None)
@@ -272,7 +374,22 @@ def copy_notebook_file(source: Path, dest: Path, root: Path, log_message: str) -
     mkdocs_gen_files.set_edit_path(dest, source.relative_to(root))
 
 
-def copy_docs_from_dir(source_dir: Path, dest_dir: Path, root: Path, log_prefix: str) -> None:
+def write_directory_index(dest_dir: Path, title: str, entries: list[Path]) -> None:
+    """Write a simple index page for a generated documentation directory."""
+    if not entries:
+        return
+
+    index_file = dest_dir / "index.md"
+    with mkdocs_gen_files.open(index_file, "w") as fd:
+        fd.write(f"# {title}\n\n")
+        for entry in sorted(entries):
+            label = entry.stem.replace("_", " ").replace("-", " ").title()
+            fd.write(f"- [{label}]({entry.relative_to(dest_dir).as_posix()})\n")
+
+    logger.info("Added generated index: %s", index_file)
+
+
+def copy_docs_from_dir(source_dir: Path, dest_dir: Path, root: Path, log_prefix: str) -> list[Path]:
     """Copy Markdown and notebook files from a directory tree.
 
     Args:
@@ -280,16 +397,32 @@ def copy_docs_from_dir(source_dir: Path, dest_dir: Path, root: Path, log_prefix:
         dest_dir (Path): Destination directory in the generated docs tree.
         root (Path): Repository root for edit-path calculation.
         log_prefix (str): Prefix used in log messages.
+
+    Returns:
+        Paths copied into the generated docs tree.
     """
+    copied_docs: list[Path] = []
+    has_directory_index = False
+
     for path in sorted(source_dir.rglob("*")):
         if not path.is_file() or path.suffix not in {".md", ".ipynb"}:
             continue
 
         dest_file = dest_dir / path.relative_to(source_dir)
+        if dest_file.parent == dest_dir and dest_file.name in {"index.md", "README.md"}:
+            has_directory_index = True
+
         if path.suffix == ".ipynb":
             copy_notebook_file(path, dest_file, root, f"{log_prefix}: {dest_file}")
         else:
             copy_text_file(path, dest_file, root, f"{log_prefix}: {dest_file}")
+        copied_docs.append(dest_file)
+
+    if copied_docs and not has_directory_index:
+        title = source_dir.name.replace("_", " ").replace("-", " ").title()
+        write_directory_index(dest_dir, title, copied_docs)
+
+    return copied_docs
 
 
 def copy_assets_dir(source_dir: Path, dest_dir: Path, log_prefix: str) -> None:
@@ -322,7 +455,10 @@ def _should_copy_support_file(path: Path) -> bool:
     if any(part in SKIP_SUPPORT_DIRS for part in path.parts[:-1]):
         return False
 
-    if path.name == "README.md" or path.suffix in {".ipynb", ".md"}:
+    if path.name == "README.md":
+        return len(path.parts) > 1
+
+    if path.suffix in {".ipynb", ".md"}:
         return False
 
     if path.name.startswith("."):
@@ -333,7 +469,41 @@ def _should_copy_support_file(path: Path) -> bool:
     )
 
 
-def copy_support_files(source_dir: Path, dest_dir: Path, log_prefix: str) -> None:
+def _should_write_support_index(relative_dir: Path) -> bool:
+    """Return whether a copied support directory should get a generated index."""
+    parts = relative_dir.parts
+    return parts in {
+        (),
+        ("config",),
+        ("hydra_config",),
+        ("hydra_config", "model"),
+        ("esm2",),
+    }
+
+
+def write_support_directory_indexes(dest_dir: Path, copied_files: list[Path], explicit_index_dirs: set[Path]) -> None:
+    """Write index pages for support-only directories copied into docs."""
+    directories: set[Path] = set(explicit_index_dirs)
+    for copied_file in copied_files:
+        relative_dir = copied_file.parent.relative_to(dest_dir)
+        if _should_write_support_index(relative_dir):
+            directories.add(copied_file.parent)
+
+    for directory in sorted(directories, key=lambda p: len(p.parts), reverse=True):
+        if directory in explicit_index_dirs:
+            continue
+
+        entries: list[Path] = []
+        for copied_file in copied_files:
+            if copied_file.parent == directory and copied_file.name != "index.md":
+                entries.append(copied_file)
+
+        child_dirs = {child_dir for child_dir in directories if child_dir.parent == directory}
+        entries.extend(child_dir / "index.md" for child_dir in sorted(child_dirs))
+        write_directory_index(directory, directory.name.replace("_", " ").replace("-", " ").title(), entries)
+
+
+def copy_support_files(source_dir: Path, dest_dir: Path, root: Path, log_prefix: str) -> None:
     """Mirror linked support files into the generated docs tree.
 
     This keeps repo-relative links to scripts, configs, and tests working after
@@ -342,8 +512,12 @@ def copy_support_files(source_dir: Path, dest_dir: Path, log_prefix: str) -> Non
     Args:
         source_dir (Path): Directory to mirror from.
         dest_dir (Path): Destination directory in the generated docs tree.
+        root (Path): Repository root for edit-path calculation.
         log_prefix (str): Prefix used in log messages.
     """
+    copied_files: list[Path] = []
+    explicit_index_dirs: set[Path] = set()
+
     for path in sorted(source_dir.rglob("*")):
         if not path.is_file():
             continue
@@ -352,8 +526,16 @@ def copy_support_files(source_dir: Path, dest_dir: Path, log_prefix: str) -> Non
         if not _should_copy_support_file(relative_path):
             continue
 
-        dest_file = dest_dir / relative_path
-        copy_binary_file(path, dest_file, f"{log_prefix}: {dest_file}")
+        if relative_path.name == "README.md":
+            dest_file = dest_dir / relative_path.parent / "index.md"
+            explicit_index_dirs.add(dest_file.parent)
+            copy_text_file(path, dest_file, root, f"{log_prefix}: {dest_file}")
+        else:
+            dest_file = dest_dir / relative_path
+            copy_binary_file(path, dest_file, f"{log_prefix}: {dest_file}")
+        copied_files.append(dest_file)
+
+    write_support_directory_indexes(dest_dir, copied_files, explicit_index_dirs)
 
 
 def generate_api_reference() -> None:
@@ -405,11 +587,16 @@ def get_subpackage_notebooks(sub_package: Path, root: Path) -> None:
     dest_root = Path("main/examples") / sub_package.name
     copy_assets_dir(sub_package / "assets", dest_root / "assets", "Added sub-package tutorial asset")
 
+    example_sections: list[Path] = []
     for docs_dir_name in ("examples", "notebooks"):
         docs_dir = sub_package / docs_dir_name
         if docs_dir.exists():
             dest_dir = dest_root / docs_dir_name
-            copy_docs_from_dir(docs_dir, dest_dir, root, "Added sub-package example")
+            copied_docs = copy_docs_from_dir(docs_dir, dest_dir, root, "Added sub-package example")
+            if copied_docs:
+                example_sections.append(dest_dir / "index.md")
+
+    write_directory_index(dest_root, f"{sub_package.name} Examples", example_sections)
 
 
 def get_subpackage_readmes(sub_package: Path, root: Path) -> None:
@@ -519,10 +706,16 @@ def get_recipe_examples(recipe_item: Path, root: Path) -> None:
     dest_root = Path("main/examples") / dest_name
     copy_assets_dir(recipe_item / "assets", dest_root / "assets", "Added recipe tutorial asset")
 
+    example_sections: list[Path] = []
     for docs_dir_name in ("examples", "notebooks"):
         docs_dir = recipe_item / docs_dir_name
         if docs_dir.exists():
-            copy_docs_from_dir(docs_dir, dest_root / docs_dir_name, root, "Added recipe tutorial")
+            dest_dir = dest_root / docs_dir_name
+            copied_docs = copy_docs_from_dir(docs_dir, dest_dir, root, "Added recipe tutorial")
+            if copied_docs:
+                example_sections.append(dest_dir / "index.md")
+
+    write_directory_index(dest_root, f"{dest_name} Examples", example_sections)
 
 
 def get_subpackage_assets(sub_package: Path, root: Path) -> None:
@@ -570,7 +763,7 @@ def get_recipes_assets(recipes_dir: Path, root: Path) -> None:
 
             dest_dir = Path("main/recipes") / subdir / item.name
             copy_assets_dir(item / "assets", dest_dir / "assets", "Added recipe asset")
-            copy_support_files(item, dest_dir, "Added recipe support file")
+            copy_support_files(item, dest_dir, root, "Added recipe support file")
 
 
 def generate_pages() -> None:

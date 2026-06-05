@@ -25,6 +25,11 @@ import torch
 import train
 
 
+requires_gpu = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Test requires a GPU",
+)
+
 requires_multi_gpu = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.device_count() < 2,
     reason="Test requires at least 2 GPUs",

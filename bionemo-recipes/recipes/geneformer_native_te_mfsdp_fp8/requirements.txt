@@ -8,3 +8,4 @@ tqdm
 transformer_engine
 transformers<5.0
 wandb
+pytest

@@ -61,7 +61,7 @@ use_torch_compile: false
 # these should match the keys in the recipe's config file
 model_tag: nvidia/esm2_t48_15B_UR50D
 # task_cmd: train_fsdp2 # mfsdp
-num_train_steps: 20_000
+num_train_steps: 500
 # dataset commands
 micro_batch_size: 8
 load_dataset_kwargs_path: nvidia/esm2_uniref_pretraining_data

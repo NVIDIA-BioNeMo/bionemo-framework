@@ -7,3 +7,4 @@ einops
 wandb
 tqdm
 datasets
+pytest

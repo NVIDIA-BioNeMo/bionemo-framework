@@ -146,7 +146,7 @@ you need to make sure that the appropriate gather operations are occurring for y
 
 ##### Context Parallelism
 
-[Context parallelism](https://docs.nvidia.com/megatron-core/developer-guide/latest/api-guide/context_parallel.html)
+[Context parallelism](https://docs.nvidia.com/megatron-core/developer-guide/latest/user-guide/features/context_parallel.html)
 extends sequence parallelism by also parallelizing the attention mechanism itself, similar to
 [Ring Attention](https://arxiv.org/abs/2310.01889). In general, if you are using a transformer, context parallelism is
 going to perform better than sequence parallelism for very long input sequences. That said, due to the necessity of

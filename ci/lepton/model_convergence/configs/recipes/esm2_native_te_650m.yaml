@@ -32,6 +32,8 @@ framework: native # native, accelerate
 precision: bf16 # likely bf16 or fp8
 te_enabled: true
 fp8_enabled: false
+fp8_recipe: ""
+fp8_format: ""
 # thd_enabled: false
 
 # Catchall for additional features/configs
@@ -90,6 +92,28 @@ products:
     micro_batch_size: 48
     wandb_name: "esm2_native_650m__fsdp2__thd__${now:%Y%m%d-%H%M%S}__${gitsha:}"
     job_name: "esm2-native-650m-fsdp2-thd"
+  # TE bshd perf, FSDP2, FP8
+  - config: L1_650M
+    task_cmd: train_fsdp2
+    parallelism_strategy: fsdp2
+    thd_enabled: false
+    fp8_enabled: true
+    fp8_recipe: transformer_engine.common.recipe.Float8BlockScaling
+    fp8_format: E4M3
+    micro_batch_size: 48
+    wandb_name: "esm2_native_650m__fsdp2__fp8__${now:%Y%m%d-%H%M%S}__${gitsha:}"
+    job_name: "esm2-native-650m-fsdp2-fp8"
+  # TE thd perf, FSDP2, FP8
+  - config: L1_650M
+    task_cmd: train_fsdp2
+    parallelism_strategy: fsdp2
+    thd_enabled: true
+    fp8_enabled: true
+    fp8_recipe: transformer_engine.common.recipe.Float8BlockScaling
+    fp8_format: E4M3
+    micro_batch_size: 48
+    wandb_name: "esm2_native_650m__fsdp2__thd__fp8__${now:%Y%m%d-%H%M%S}__${gitsha:}"
+    job_name: "esm2-native-650m-fsdp2-thd-fp8"
   # OSS Convergence Baseline
   # - config: L1_650M
   #   model_tag: facebook/esm2_t33_650M_UR50D
@@ -137,4 +161,6 @@ run_script: |
     checkpoint.resume_from_checkpoint=${resume_from_checkpoint} \
     +checkpoint.save_checkpoints=${save_checkpoints} \
     +checkpoint.use_distributed_checkpoint_fsdp2=${use_distributed_checkpoint_fsdp2} \
-    fp8_config.enabled=${fp8_enabled}
+    fp8_config.enabled=${fp8_enabled} \
+    fp8_config.fp8_recipe=${fp8_recipe} \
+    fp8_config.fp8_format=${fp8_format}

@@ -8,3 +8,4 @@ tqdm
 transformer_engine[pytorch]
 transformers
 wandb
+pytest

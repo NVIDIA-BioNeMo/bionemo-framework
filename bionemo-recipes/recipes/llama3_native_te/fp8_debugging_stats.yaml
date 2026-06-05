@@ -2,7 +2,7 @@ example_fp8_tensor_stat_collection:
     enabled: True
     layers:
         # Match the actual linear layers within attention that support FP8 stats
-        layer_types: [layernorm_qkv]
+        layer_types: [layernorm_qkv, proj, fc1, fc2]
     transformer_engine:
         LogFp8TensorStats:
             enabled: True
@@ -16,3 +16,8 @@ example_fp8_tensor_stat_collection:
             - tensor: weight
               stats: [underflows%, scale_inv_min, scale_inv_max, mse]
               freq: 10
+        LogTensorStats:
+          enabled: True
+          stats: [max, min, mean, std, l1_norm]
+          tensors: [dgrad, wgrad]
+          freq: 1
