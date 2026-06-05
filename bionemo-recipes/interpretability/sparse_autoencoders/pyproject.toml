@@ -32,4 +32,4 @@ where = ["."]
 include = []
 
 [tool.uv.workspace]
-members = ["sae", "recipes/esm2"]
+members = ["sae", "recipes/esm2", "recipes/nemotron"]

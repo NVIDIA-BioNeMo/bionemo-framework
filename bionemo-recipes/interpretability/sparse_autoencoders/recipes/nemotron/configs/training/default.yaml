@@ -1,0 +1,14 @@
+# Default training configuration
+lr: 3e-4
+n_epochs: 10
+max_steps: null  # If set, stop after this many optimizer steps (overrides n_epochs duration)
+batch_size: 4096
+log_interval: 100
+shuffle: true
+num_workers: 0
+pin_memory: false
+max_grad_norm: null
+
+# LR scaling per OpenAI paper: lr ∝ 1/sqrt(hidden_dim)
+lr_scale_with_latents: false
+lr_reference_hidden_dim: 2048

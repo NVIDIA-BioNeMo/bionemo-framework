@@ -13,19 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SAE architecture implementations."""
+"""Data loading utilities for Nemotron SAE training."""
 
-from .base import SparseAutoencoder
-from .moe import MoESAE
-from .relu_l1 import ReLUSAE
-from .topk import TopKSAE
-from .topk_tp import ShardedTopKSAE
+from .fineweb import load_fineweb
 
 
-__all__ = [
-    "MoESAE",
-    "ReLUSAE",
-    "ShardedTopKSAE",
-    "SparseAutoencoder",
-    "TopKSAE",
-]
+__all__ = ["load_fineweb"]

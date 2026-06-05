@@ -1,0 +1,19 @@
+# TopK SAE configuration
+type: topk
+expansion_factor: 4
+top_k: 32
+
+# Input normalization (project to unit sphere after centering)
+normalize_input: false
+
+# Auxiliary loss for dead latents (optional)
+auxk: 0  # 0 = disabled, set to integer (e.g., 256) to enable
+auxk_coef: 0.03125  # 1/32
+dead_tokens_threshold: 10000
+
+# Pre-bias initialization
+init_pre_bias: false
+
+# Decoder implementation: "dense" (default) or "triton" (sparse kernel; required to
+# scale hidden_dim to ~1M+ without OOM). Weights/checkpoints are identical either way.
+decoder_impl: dense

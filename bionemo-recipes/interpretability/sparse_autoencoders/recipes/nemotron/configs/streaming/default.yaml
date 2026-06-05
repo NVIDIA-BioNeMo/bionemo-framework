@@ -1,0 +1,20 @@
+# Producer-consumer activation streaming (sae.streaming).
+#
+# OFF by default: train.py reads a cached activation store written by extract.py.
+# When enabled=true, train.py loads Nemotron and streams activations on the fly
+# (background producer thread -> bounded queue -> SAE Trainer), so no activations
+# are written to disk (only checkpoints). Memory is bounded by queue_size.
+#
+# Note: streaming has no fixed length, so non-constant LR schedules need
+# training.lr_decay_steps set explicitly (otherwise decay is skipped).
+enabled: false
+queue_size: 8           # max activation chunks buffered (memory cap / backpressure)
+shuffle_buffer_size: 0  # 0 = producer order; >0 = buffer-shuffle this many tokens
+drop_last: false        # drop the final partial batch
+
+# Multi-GPU parallel extraction (producer side). Empty -> one replica via
+# device_map="auto". A list of GPU indices loads one model replica per GPU, all
+# feeding the queue in parallel. Under torchrun (parallel.dp_size>1) these GPUs
+# and the text are split across ranks while the SAE trains via DDP on cuda:{rank}.
+# Example 6-extract / 2-train: torchrun --nproc_per_node=2 with extract_devices=[2,3,4,5,6,7].
+extract_devices: []

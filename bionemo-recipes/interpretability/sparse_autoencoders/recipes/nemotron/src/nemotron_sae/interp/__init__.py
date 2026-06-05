@@ -13,19 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SAE architecture implementations."""
+"""Auto-interpretation utilities for Nemotron features."""
 
-from .base import SparseAutoencoder
-from .moe import MoESAE
-from .relu_l1 import ReLUSAE
-from .topk import TopKSAE
-from .topk_tp import ShardedTopKSAE
+from .format import TEXT_PROMPT_TEMPLATE, create_text_formatter
 
 
-__all__ = [
-    "MoESAE",
-    "ReLUSAE",
-    "ShardedTopKSAE",
-    "SparseAutoencoder",
-    "TopKSAE",
-]
+__all__ = ["TEXT_PROMPT_TEMPLATE", "create_text_formatter"]

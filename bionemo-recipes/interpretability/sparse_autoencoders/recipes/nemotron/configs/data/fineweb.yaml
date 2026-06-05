@@ -1,0 +1,6 @@
+# FineWeb data configuration
+source: fineweb
+split: train
+max_samples: 10000
+min_length: 50
+subset: sample-10BT

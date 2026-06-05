@@ -13,19 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SAE architecture implementations."""
+"""Nemotron model wrappers."""
 
-from .base import SparseAutoencoder
-from .moe import MoESAE
-from .relu_l1 import ReLUSAE
-from .topk import TopKSAE
-from .topk_tp import ShardedTopKSAE
+from .nemotron import NemotronModel
 
 
-__all__ = [
-    "MoESAE",
-    "ReLUSAE",
-    "ShardedTopKSAE",
-    "SparseAutoencoder",
-    "TopKSAE",
-]
+__all__ = ["NemotronModel"]

@@ -13,19 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SAE architecture implementations."""
+"""Nemotron SAE: Sparse Autoencoders for Nemotron-3-Nano language model.
 
-from .base import SparseAutoencoder
-from .moe import MoESAE
-from .relu_l1 import ReLUSAE
-from .topk import TopKSAE
-from .topk_tp import ShardedTopKSAE
+This package provides tools for training and analyzing sparse autoencoders
+on Nemotron-3-Nano activations, including model wrappers, data loading
+utilities, and auto-interpretation helpers.
+"""
+
+from .data import load_fineweb
+from .eval import evaluate_nemotron_loss_recovered
+from .interp import TEXT_PROMPT_TEMPLATE, create_text_formatter
+from .models import NemotronModel
 
 
 __all__ = [
-    "MoESAE",
-    "ReLUSAE",
-    "ShardedTopKSAE",
-    "SparseAutoencoder",
-    "TopKSAE",
+    "TEXT_PROMPT_TEMPLATE",
+    "NemotronModel",
+    "create_text_formatter",
+    "evaluate_nemotron_loss_recovered",
+    "load_fineweb",
 ]
