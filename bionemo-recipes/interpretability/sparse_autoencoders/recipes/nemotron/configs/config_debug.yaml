@@ -1,0 +1,49 @@
+# Debug config - small run for testing the pipeline
+defaults:
+  - model: topk
+  - data: fineweb
+  - training: default
+  - streaming: default
+  - _self_
+
+seed: 42
+device: null
+
+activations:
+  model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  layer: 39
+  batch_size: 2
+  max_length: 512
+  cache_dir: .cache/activations/nemotron_debug
+
+data:
+  max_samples: 100
+  min_length: 50
+
+model:
+  expansion_factor: 2
+  top_k: 16
+
+training:
+  lr: 3e-4
+  n_epochs: 1
+  batch_size: 256
+
+eval:
+  enabled: true
+  max_samples: 20
+  run_loss_recovered: true
+  loss_recovered_n_sequences: 10
+
+output_dir: outputs/debug
+
+wandb:
+  enabled: true
+  project: sae_nemotron_recipe
+  group: "nemotron__${model.type}"
+  job_type: debug
+  run_name: "exp${model.expansion_factor}x__k${model.top_k}__auxk_${model.auxk}__L${activations.layer}"
+
+checkpoint:
+  dir: null
+  steps: null

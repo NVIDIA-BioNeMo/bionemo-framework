@@ -1,0 +1,52 @@
+# @package _global_
+# Baseline: TopK k=32, 8x expansion on Nemotron layer 39
+# Run with: python scripts/train.py +experiments=topk_k32_8x
+defaults:
+  - override /model: topk
+  - override /data: fineweb
+  - override /training: default
+  - _self_
+
+seed: 42
+device: null
+
+activations:
+  model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  layer: 39
+  batch_size: 4
+  max_length: 2048
+
+data:
+  max_samples: 10000
+  min_length: 50
+
+model:
+  expansion_factor: 8
+  top_k: 32
+  normalize_input: true
+  auxk: 0
+  init_pre_bias: true
+
+training:
+  lr: 3e-4
+  n_epochs: 5
+  batch_size: 4096
+
+eval:
+  enabled: true
+  max_samples: 200
+  run_loss_recovered: true
+  loss_recovered_n_sequences: 100
+
+output_dir: outputs/experiments/k32_8x
+
+wandb:
+  enabled: true
+  project: sae_nemotron_recipe
+  group: "nemotron__${model.type}"
+  job_type: experiment
+  run_name: "exp${model.expansion_factor}x__k${model.top_k}__auxk_${model.auxk}__L${activations.layer}"
+
+checkpoint:
+  dir: null
+  steps: null

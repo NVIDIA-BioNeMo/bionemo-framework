@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nemotron-sae"
+version = "0.1.0"
+description = "Sparse Autoencoders for Nemotron-3-Nano language model"
+requires-python = ">=3.10"
+dependencies = [
+    "sae",
+    "torch>=2.0",
+    "numpy>=1.20",
+    "tqdm>=4.60",
+    "transformers>=4.44,<5.0",
+    "huggingface-hub>=0.25,<1.0",
+    "datasets>=2.14",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+]
+
+# Nemotron's Mamba-2 layers require CUDA-only packages.
+# Install on your GPU server: pip install mamba-ssm causal-conv1d
+
+[project.optional-dependencies]
+viz = [
+    "umap-learn>=0.5",
+    "hdbscan>=0.8",
+    "pyarrow>=10.0",
+]
+autointerp = [
+    "anthropic>=0.25",
+    "openai>=1.0",
+]
+tracking = ["wandb>=0.15"]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+sae = { workspace = true }
