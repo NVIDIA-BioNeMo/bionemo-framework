@@ -20,6 +20,7 @@ separating training logic from the SAE model architecture.
 """
 
 import contextlib
+import itertools
 import math
 import os
 from dataclasses import dataclass, field
@@ -69,6 +70,9 @@ class TrainingConfig:
         lr_schedule: LR schedule after warmup ('constant', 'cosine', 'linear')
         lr_min: Minimum LR for decay schedules
         lr_decay_steps: Total steps for LR decay (None = use full training duration)
+        max_steps: Stop after this many optimizer steps (None = run all n_epochs).
+            When set, epochs loop until the step budget is reached, so it controls
+            duration directly (useful for streaming, which has no fixed length).
     """
 
     lr: float = 3e-4
@@ -89,6 +93,7 @@ class TrainingConfig:
     lr_schedule: str = "constant"
     lr_min: float = 0.0
     lr_decay_steps: Optional[int] = None
+    max_steps: Optional[int] = None
 
 
 @dataclass
@@ -560,25 +565,32 @@ class Trainer:
         if self.config.lr_decay_steps is not None:
             self._total_decay_steps = self.config.lr_decay_steps
         elif self.config.lr_schedule != "constant":
-            # Estimate total optimizer steps from dataloader length
-            try:
-                batches_per_epoch = len(self.dataloader)
-                steps_per_epoch = batches_per_epoch // accum_steps
-                total_steps = steps_per_epoch * self.config.n_epochs
-                self._total_decay_steps = max(0, total_steps - self.config.warmup_steps)
-            except TypeError:
-                self._total_decay_steps = 0
-                self._print_rank0(
-                    "WARNING: Cannot compute decay steps for streaming dataloader. "
-                    "Set lr_decay_steps explicitly or use lr_schedule='constant'."
-                )
+            if self.config.max_steps is not None:
+                # max_steps gives an exact budget (works for streaming too)
+                self._total_decay_steps = max(0, self.config.max_steps - self.config.warmup_steps)
+            else:
+                # Estimate total optimizer steps from dataloader length
+                try:
+                    batches_per_epoch = len(self.dataloader)
+                    steps_per_epoch = batches_per_epoch // accum_steps
+                    total_steps = steps_per_epoch * self.config.n_epochs
+                    self._total_decay_steps = max(0, total_steps - self.config.warmup_steps)
+                except TypeError:
+                    self._total_decay_steps = 0
+                    self._print_rank0(
+                        "WARNING: Cannot compute decay steps for streaming dataloader. "
+                        "Set lr_decay_steps or max_steps explicitly, or use lr_schedule='constant'."
+                    )
         else:
             self._total_decay_steps = 0
 
         remaining_info = ""
         if resume_from is not None:
             remaining_info = f" (resuming from epoch {self.current_epoch})"
-        self._print_rank0(f"\nTraining SAE for {self.config.n_epochs} epochs{remaining_info}...")
+        if self.config.max_steps is not None:
+            self._print_rank0(f"\nTraining SAE for up to {self.config.max_steps:,} steps{remaining_info}...")
+        else:
+            self._print_rank0(f"\nTraining SAE for {self.config.n_epochs} epochs{remaining_info}...")
         try:
             self._print_rank0(f"Batches per epoch: ~{len(self.dataloader)}")
         except TypeError:
@@ -606,8 +618,17 @@ class Trainer:
             self._print_rank0(f"Resuming from epoch {start_epoch}, step {self.global_step}")
 
         epoch_losses = []
+        max_steps = self.config.max_steps
+        # When max_steps is set, loop epochs indefinitely until the step budget is
+        # reached (so duration is controlled by steps, which also works for streaming).
+        epoch_iter = (
+            itertools.count(start_epoch) if max_steps is not None else range(start_epoch, self.config.n_epochs)
+        )
+        reached_max_steps = False
 
-        for epoch in range(start_epoch, self.config.n_epochs):
+        for epoch in epoch_iter:
+            if reached_max_steps:
+                break
             self.current_epoch = epoch
             batch_losses = []
 
@@ -722,8 +743,12 @@ class Trainer:
 
                 self.global_step += 1
 
+                if max_steps is not None and self.global_step >= max_steps:
+                    reached_max_steps = True
+                    break
+
             # Epoch complete
-            avg_loss = np.mean(batch_losses)
+            avg_loss = np.mean(batch_losses) if batch_losses else float("nan")
             epoch_losses.append(avg_loss)
 
             # Print progress (only if no perf_logger, as it handles printing)

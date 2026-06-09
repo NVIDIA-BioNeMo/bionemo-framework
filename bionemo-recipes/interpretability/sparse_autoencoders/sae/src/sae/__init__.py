@@ -48,7 +48,7 @@ from .analysis import (
     save_cluster_labels,
     save_feature_atlas,
 )
-from .architectures import MoESAE, ReLUSAE, SparseAutoencoder, TopKSAE
+from .architectures import MoESAE, ReLUSAE, ShardedTopKSAE, SparseAutoencoder, TopKSAE
 from .autointerp import (
     DEFAULT_PROMPT_TEMPLATE,
     TOKEN_PROMPT_TEMPLATE,
@@ -80,8 +80,10 @@ from .eval import (
     evaluate_sae,
     evaluate_sparsity,
 )
+from .kernels import HAS_TRITON, TritonDecoderAutograd
 from .perf_logger import PerfLogger
 from .process_group_manager import ProcessGroupManager
+from .streaming import StreamingActivationDataset, StreamingConfig, make_streaming_dataloader
 from .training import ParallelConfig, Trainer, TrainingConfig, WandbConfig
 from .utils import get_device, set_seed
 
@@ -90,6 +92,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DEFAULT_PROMPT_TEMPLATE",
+    "HAS_TRITON",
     "TOKEN_PROMPT_TEMPLATE",
     "ActivationStore",
     "ActivationStoreConfig",
@@ -117,14 +120,18 @@ __all__ = [
     "PerfLogger",
     "ProcessGroupManager",
     "ReLUSAE",
+    "ShardedTopKSAE",
     "SparseAutoencoder",
     "SparsityMetrics",
+    "StreamingActivationDataset",
+    "StreamingConfig",
     "TokenActivationCollector",
     "TokenExample",
     "TopExample",
     "TopKSAE",
     "Trainer",
     "TrainingConfig",
+    "TritonDecoderAutograd",
     "WandbConfig",
     "build_cluster_label_prompt",
     "compute_cluster_centroids",
@@ -140,6 +147,7 @@ __all__ = [
     "get_device",
     "launch_dashboard",
     "load_activations",
+    "make_streaming_dataloader",
     "save_activations",
     "save_cluster_labels",
     "save_feature_atlas",
