@@ -22,6 +22,7 @@ Reference: https://github.com/openai/sparse_autoencoder
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -59,6 +60,14 @@ class TopKSAE(SparseAutoencoder):
         auxk: Number of auxiliary latents for dead latent loss (None = disabled)
         auxk_coef: Coefficient for auxiliary loss (default: 1/32)
         dead_tokens_threshold: Tokens of inactivity before latent is considered dead (default 10M per Gao et al.)
+        aggregate_loss: If False (default), reduce the FVU and AuxK losses per-token (the
+            previous mean-of-per-row ratios). If True, use a single batch-level
+            ``mse.mean() / var.mean()`` ratio, which stops rare high-variance tokens from
+            being down-weighted (and thus their latents dying).
+        dead_count_global: If True, accumulate dead-latent inactivity counts across all DDP
+            ranks (total tokens = micro-batch x world_size); if False (default), count this
+            rank's micro-batch only. True makes the dead-threshold / AuxK revival fire on time
+            under data parallelism.
         init_encoder_from_decoder: If True, initialize encoder weights as transpose
             of decoder weights. From OpenAI paper: this + AuxK → nearly 0% dead latents.
     """
@@ -72,6 +81,8 @@ class TopKSAE(SparseAutoencoder):
         auxk: Optional[int] = None,
         auxk_coef: float = 1 / 32,
         dead_tokens_threshold: int = 10_000_000,
+        aggregate_loss: bool = False,
+        dead_count_global: bool = False,
         init_encoder_from_decoder: bool = True,
         init_pre_bias: bool = True,
         decoder_impl: str = "dense",
@@ -94,6 +105,12 @@ class TopKSAE(SparseAutoencoder):
         if decoder_impl not in ("dense", "triton"):
             raise ValueError(f"decoder_impl must be 'dense' or 'triton', got {decoder_impl!r}")
         self.decoder_impl = decoder_impl
+        # False (default = previous per-token reduction) | True (batch-level aggregate FVU/auxk
+        # ratio; opt in to fix dead latents starved by the per-token ratio on rare high-var tokens).
+        self.aggregate_loss = aggregate_loss
+        # False (default = previous per-rank count) | True (count inactivity in TOTAL tokens,
+        # x world_size, so dead-latent revival fires on time under DDP; opt in).
+        self.dead_count_global = dead_count_global
 
         # Pre-bias (subtracted from normalized input, added to output before denorm)
         self.pre_bias = nn.Parameter(torch.zeros(input_dim))
@@ -125,6 +142,8 @@ class TopKSAE(SparseAutoencoder):
             "auxk": self.auxk,
             "auxk_coef": self.auxk_coef,
             "dead_tokens_threshold": self.dead_tokens_threshold,
+            "aggregate_loss": self.aggregate_loss,
+            "dead_count_global": self.dead_count_global,
         }
 
     def _init_encoder_from_decoder(self) -> None:
@@ -288,8 +307,17 @@ class TopKSAE(SparseAutoencoder):
         # Check which latents were active (any sample in batch had activation > threshold)
         active_mask = (codes.abs() > 1e-3).any(dim=0)  # [hidden_dim]
 
-        # Reset counter for active latents, increment by token count for inactive
-        n_tokens = codes.shape[0]
+        # dead_count_global=True increments by GLOBAL tokens, not this rank's micro-batch:
+        # each of the world_size ranks processes codes.shape[0] tokens per step, so the
+        # inactivity counter must advance by codes.shape[0] * world_size to match
+        # dead_tokens_threshold's intended units (total training tokens). The default
+        # (per-rank count) makes the threshold (and auxk revival) trigger world_size x too
+        # late under DDP. The trainer's all_reduce(MIN) preserves "fired on any rank => reset".
+        if self.dead_count_global and dist.is_available() and dist.is_initialized():
+            world_size = dist.get_world_size()
+        else:
+            world_size = 1
+        n_tokens = codes.shape[0] * world_size
         self.stats_last_nonzero = torch.where(
             active_mask, torch.zeros_like(self.stats_last_nonzero), self.stats_last_nonzero + n_tokens
         )
@@ -331,25 +359,38 @@ class TopKSAE(SparseAutoencoder):
         # Decode auxiliary latents using only dead decoder columns (avoids full-width matmul)
         recon_aux = F.linear(codes_aux, self.decoder.weight[:, dead_indices], self.decoder.bias)
 
-        # Target is the residual (what primary reconstruction missed)
-        # Work in normalized space for the aux loss
+        # Target is the residual (what primary reconstruction missed).
+        # The corrected residual is x - recon (the actual reconstruction error). The legacy
+        # non-normalized form `x - recon + pre_bias` simplifies to `x - decoder(codes)`, whose
+        # norm is dominated by ||pre_bias|| rather than the actual error, weakening the aux
+        # gradient by ~(||pre_bias|| / ||error||)^2. Gated on aggregate_loss so False
+        # reproduces the previous auxk loss end-to-end; True uses the fix.
         if self.normalize_input and norm_info is not None:
-            # Normalize x to match the space where encoding happened
+            # Normalize x to match the space where encoding happened (already correct in both modes)
             x_norm = (x - norm_info["mu"]) / norm_info["std"]
             # Reuse codes from forward pass instead of re-encoding (or a precomputed
             # normalized recon, e.g. from the sparse/triton decode path).
             if recon_norm is None:
                 recon_norm = self.decoder(codes) + self.pre_bias
             residual = x_norm - recon_norm.detach()
+        elif not self.aggregate_loss:
+            residual = x - recon.detach() + self.pre_bias.detach()  # legacy (previous behavior)
         else:
-            residual = x - recon.detach() + self.pre_bias.detach()
+            residual = x - recon.detach()  # corrected: the true reconstruction error
 
-        # Normalized MSE: MSE / variance of target
-        mse = (recon_aux - residual).pow(2).mean(dim=-1)  # [batch]
-        target_var = residual.pow(2).mean(dim=-1)  # [batch]
-
-        # Avoid division by zero, use nan_to_num like OpenAI
-        normalized_mse = (mse / (target_var + 1e-8)).mean()
+        # AuxK normalized MSE: how much of the residual the dead latents recover. Default
+        # (aggregate_loss=False) is the legacy per-token ratio (mse_t / target_var_t), which
+        # up-weights already-well-reconstructed (small residual) tokens and down-weights the
+        # big missed structure dead latents should grab — mis-targeting revival and letting
+        # dead latents persist. aggregate_loss=True aggregates over the whole batch instead.
+        if not self.aggregate_loss:
+            mse = (recon_aux - residual).pow(2).mean(dim=-1)
+            target_var = residual.pow(2).mean(dim=-1)
+            normalized_mse = (mse / (target_var + 1e-8)).mean()
+        else:
+            mse = (recon_aux - residual).pow(2).mean()
+            target_var = residual.pow(2).mean()
+            normalized_mse = mse / (target_var + 1e-8)
 
         return normalized_mse
 
@@ -433,13 +474,19 @@ class TopKSAE(SparseAutoencoder):
         # Update dead latent stats
         self._update_dead_latent_stats(codes)
 
-        # Primary reconstruction loss (FVU: fraction of variance unexplained)
-        # Center by pre_bias (learned per-dim mean) so denominator reflects
-        # actual signal variance, consistent with var_exp metric
-        mse = (recon - x).pow(2).mean(dim=-1)  # [batch]
-        x_centered = x - self.pre_bias
-        x_var = x_centered.pow(2).mean(dim=-1)  # [batch]
-        recon_loss = (mse / (x_var + 1e-8)).mean()
+        # Primary reconstruction loss (FVU: fraction of variance unexplained), centered by
+        # pre_bias to match the reported var_exp metric. Default (aggregate_loss=False) is the
+        # legacy per-token ratio mean_t(mse_t / x_var_t), which over-weights low-variance tokens
+        # and down-weights rare high-variance ones, starving the latents specialized on them.
+        # aggregate_loss=True uses a single batch-level mse.mean() / var.mean() ratio instead.
+        if not self.aggregate_loss:
+            mse = (recon - x).pow(2).mean(dim=-1)
+            x_var = (x - self.pre_bias).pow(2).mean(dim=-1)
+            recon_loss = (mse / (x_var + 1e-8)).mean()
+        else:
+            mse = (recon - x).pow(2).mean()
+            x_var = (x - self.pre_bias).pow(2).mean()
+            recon_loss = mse / (x_var + 1e-8)
 
         # Sparsity metric (for logging)
         l0 = (codes != 0).float().sum(dim=-1).mean()
