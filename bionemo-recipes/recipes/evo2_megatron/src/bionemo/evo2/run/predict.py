@@ -314,6 +314,105 @@ def initialize_inference_distributed(
         )
 
 
+def load_model_to_layer(
+    checkpoint_dir,
+    layer: Optional[int] = None,
+    *,
+    full: bool = False,
+):
+    """Load an Evo2 model from a checkpoint directory for activation extraction or generation.
+
+    The single shared loader used by the SAE recipes (streaming extraction, the inference
+    engine, and the dashboard backend) so the layer-truncation logic lives in exactly one
+    place instead of being copy-pasted into each.
+
+    Args:
+        checkpoint_dir: Evo2 checkpoint directory (resolved via ``resolve_checkpoint_path``).
+        layer: layer whose hidden states to expose (negative counts from the end). Required
+            when ``full=False``; ignored when ``full=True``.
+        full: if False (default), truncate to ``layer`` with ``post_process=False`` so a
+            forward returns hidden states at that layer (to feed an SAE). If True, keep all
+            layers + the LM head (logits) for generation.
+
+    Returns:
+        ``(model_module, tokenizer)``.
+    """
+    if not full and layer is None:
+        raise ValueError("layer is required when full=False")
+
+    resolved = resolve_checkpoint_path(Path(checkpoint_dir))
+    run_config = read_run_config(get_checkpoint_run_config_filename(str(resolved)))
+    mp = instantiate(run_config["model"])
+    mp.tensor_model_parallel_size = 1
+    mp.pipeline_model_parallel_size = 1
+    mp.context_parallel_size = 1
+    mp.sequence_parallel = False
+
+    mp_value = run_config.get("mixed_precision")
+    if isinstance(mp_value, str):
+        mp_config = get_mixed_precision_config(mp_value)
+    elif mp_value is not None:
+        mp_config = instantiate(mp_value)
+    else:
+        mp_config = get_mixed_precision_config("bf16_mixed")
+    mp_config.finalize()
+    mp_config.setup(mp)
+
+    tok_dir = resolved / "tokenizer"
+    tokenizer = (
+        _HuggingFaceTokenizer(tok_dir) if tok_dir.exists() else _HuggingFaceTokenizer(DEFAULT_HF_TOKENIZER_MODEL_PATH)
+    )
+    mp.vocab_size = tokenizer.vocab_size
+    mp.should_pad_vocab = True
+
+    if full:
+        mp.post_process = True
+        if hasattr(mp, "enable_cuda_graph"):
+            mp.enable_cuda_graph = False  # graph capture conflicts with residual-stream hooks
+    else:
+        original_num_layers = mp.num_layers
+        target = original_num_layers + layer + 1 if layer < 0 else layer + 1
+        if target <= 0 or target > original_num_layers:
+            raise ValueError(f"layer={layer} invalid for {original_num_layers}-layer model")
+        mp.num_layers = target
+        mp.post_process = False
+        if getattr(mp, "hybrid_override_pattern", None) and len(mp.hybrid_override_pattern) > target:
+            mp.hybrid_override_pattern = mp.hybrid_override_pattern[:target]
+        if target == 1 and getattr(mp, "remove_activation_post_first_layer", False):
+            mp.remove_activation_post_first_layer = False
+
+    # Required by provide_distributed_model() on BOTH paths (truncated and full).
+    # initialize_inference_distributed is idempotent (it no-ops if torch.distributed /
+    # model-parallel state is already set up), so loading the full model after a
+    # truncated load in the same process is safe.
+    rng_config = instantiate(run_config["rng"]) if run_config.get("rng") else RNGConfig(seed=1234)
+    dist_config = instantiate(run_config["dist"]) if run_config.get("dist") else DistributedInitConfig()
+    initialize_inference_distributed(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        context_parallel_size=1,
+        micro_batch_size=1,
+        global_batch_size=1,
+        rng_config=rng_config,
+        dist_config=dist_config,
+    )
+
+    mp.finalize()
+    model = mp.provide_distributed_model(
+        ddp_config=None,
+        wrap_with_ddp=False,
+        data_parallel_random_init=False,
+        bf16=mp_config.bf16,
+        fp16=mp_config.fp16,
+        mixed_precision_wrapper=Float16Module if (mp_config.bf16 or mp_config.fp16) else None,
+    )
+    for m in model:
+        m.eval()
+    _load_model_weights_from_checkpoint(checkpoint_path=str(resolved), model=model, dist_ckpt_strictness="ignore_all")
+    logger.info("Evo2 loaded (full=%s, layer=%s)", full, layer)
+    return model[0], tokenizer
+
+
 # =============================================================================
 # Context Parallelism Utilities
 # =============================================================================
