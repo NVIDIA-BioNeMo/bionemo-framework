@@ -358,6 +358,24 @@ class Evo2SAE:
         codes = self.encode(dna)
         return {int(f): [round(float(v), 4) for v in codes[:, int(f)].tolist()] for f in fids}
 
+    def top_features(self, codes: torch.Tensor, tag_len: int = 0, k: int = 8) -> list[dict]:
+        """Top-k features by per-base max activation over the DNA region (excluding the tag).
+
+        `codes` is [S, n_features] from `encode`/`encode_batch`; `tag_len` skips the leading
+        phylo-tag tokens (ignored if it would drop the whole sequence). Returns the strictly
+        positive features as [{feature_id, label, max_activation}], used by the CLI and server.
+        """
+        if codes.shape[0] == 0:
+            return []
+        region = codes[tag_len:] if codes.shape[0] > tag_len else codes
+        per = region.max(dim=0).values
+        idx = per.topk(min(int(k), per.numel())).indices.tolist()
+        return [
+            {"feature_id": int(i), "label": self.labels.get(int(i)), "max_activation": round(float(per[i]), 4)}
+            for i in idx
+            if per[i].item() > 0
+        ]
+
     # ------------------------------------------------------------------ generate
     def _clamp_hook(self, specs, pre_bias, prompt_len):
         """Build a forward hook that additively clamps SAE features on the residual.

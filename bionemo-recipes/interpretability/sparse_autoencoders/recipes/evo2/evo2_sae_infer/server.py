@@ -6,12 +6,19 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """FastAPI server over the Evo2SAE engine — the live backend the viz talks to.
 
 Endpoints: /health, /features, /annotate (per-base activations for a pasted
 sequence), /generate (autoregressive generation + optional SAE-feature clamp).
-This is a thin layer; all model work lives in `core.Evo2SAE`."""
+This is a thin layer; all model work lives in `core.Evo2SAE`.
+"""
 
 from __future__ import annotations
 
@@ -19,17 +26,19 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .core import Evo2SAE, clean_dna
 
+
 logger = logging.getLogger("evo2_sae_infer.server")
 
 
 class AnnotateRequest(BaseModel):
+    """Request body for /annotate (top-k feature scan or an explicit feature pick)."""
+
     sequence: str
     organism: str = "None (raw DNA)"
     tag: Optional[str] = None
@@ -40,11 +49,15 @@ class AnnotateRequest(BaseModel):
 
 
 class FeatureClamp(BaseModel):
+    """A single SAE-feature steering clamp (feature id + target strength)."""
+
     feature_id: int
     strength: float = 1.0
 
 
 class GenerateRequest(BaseModel):
+    """Request body for /generate (autoregressive generation + optional SAE-feature clamps)."""
+
     prompt: str = ""
     organism: str = "None (raw DNA)"
     tag: Optional[str] = None
@@ -87,7 +100,9 @@ def build_app(engine: Evo2SAE) -> FastAPI:
     def features():
         if not engine.ready:
             raise HTTPException(503, "Backend not ready")
-        rows = [{"id": int(f), "label": lab, "natural_peak": engine.peaks.get(int(f))} for f, lab in engine.labels.items()]
+        rows = [
+            {"id": int(f), "label": lab, "natural_peak": engine.peaks.get(int(f))} for f, lab in engine.labels.items()
+        ]
         rows.sort(key=lambda r: r["id"])
         return rows
 
@@ -106,28 +121,36 @@ def build_app(engine: Evo2SAE) -> FastAPI:
         codes = engine.encode(full)  # [S, n_features], lock held inside
         if codes.shape[0] < tag_len:
             tag_len = 0
-        dna_codes = codes[tag_len:]
         if req.mode == "pick":
             ids = req.feature_ids or ([req.feature_id] if req.feature_id is not None else [])
             if not ids:
                 raise HTTPException(400, "mode='pick' requires feature_ids")
             chosen = [int(i) for i in ids]
         else:
-            per = dna_codes.max(dim=0).values
             k = max(1, min(int(req.k), 64))
-            chosen = [int(i) for i in torch.topk(per, min(k, per.numel())).indices.tolist() if per[i].item() > 0]
+            chosen = [ft["feature_id"] for ft in engine.top_features(codes, tag_len=tag_len, k=k)]
         feats = []
         for fid in chosen:
             col = codes[:, fid]
-            feats.append({
-                "feature_id": fid,
-                "label": engine.labels.get(fid),
-                "max_activation": float(col[tag_len:].max().item()) if codes.shape[0] > tag_len else float(col.max().item()),
-                "activations": [round(float(v), 4) for v in col.tolist()],
-            })
+            feats.append(
+                {
+                    "feature_id": fid,
+                    "label": engine.labels.get(fid),
+                    "max_activation": float(col[tag_len:].max().item())
+                    if codes.shape[0] > tag_len
+                    else float(col.max().item()),
+                    "activations": [round(float(v), 4) for v in col.tolist()],
+                }
+            )
         return {
-            "sequence": dna, "organism": req.organism, "tag": tag, "tag_len": tag_len,
-            "bases": list(full), "n_tokens": codes.shape[0], "layer": engine.layer, "features": feats,
+            "sequence": dna,
+            "organism": req.organism,
+            "tag": tag,
+            "tag_len": tag_len,
+            "bases": list(full),
+            "n_tokens": codes.shape[0],
+            "layer": engine.layer,
+            "features": feats,
         }
 
     @app.post("/generate")
@@ -136,10 +159,14 @@ def build_app(engine: Evo2SAE) -> FastAPI:
             raise HTTPException(503, "Backend not ready")
         try:
             return engine.generate(
-                prompt=req.prompt, organism=req.organism, tag=req.tag,
+                prompt=req.prompt,
+                organism=req.organism,
+                tag=req.tag,
                 features=[f.model_dump() for f in req.features],
-                n_tokens=req.n_tokens, temperature=req.temperature,
-                top_k=req.top_k, compare_baseline=req.compare_baseline,
+                n_tokens=req.n_tokens,
+                temperature=req.temperature,
+                top_k=req.top_k,
+                compare_baseline=req.compare_baseline,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
