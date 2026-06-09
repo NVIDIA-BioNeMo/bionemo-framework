@@ -364,16 +364,19 @@ def test_b2b_causal_conv1d_module_matches_sequential_reference():
     )
 
     fused = b2b_module(x).float()
+    # subquadratic_ops_torch.b2b_causal_conv1d uses the same causal-conv
+    # convention as subquadratic_ops_torch.causal_conv1d: weight[-1] is the
+    # current-position tap. Do not flip the direct-convolution reference.
     projected = F.conv1d(
         F.pad(x.float(), (proj_kernel_size - 1, 0)),
-        proj_weight.float().flip(-1).unsqueeze(1),
+        proj_weight.float().unsqueeze(1),
         groups=3 * hidden_size,
     )
     x1, x2, v = projected[:, ::3], projected[:, 1::3], projected[:, 2::3]
     z = x2 * v
     mixed = F.conv1d(
         F.pad(z, (mixer_kernel_size - 1, 0)),
-        mixer_weight.float().flip(-1).unsqueeze(1),
+        mixer_weight.float().unsqueeze(1),
         groups=hidden_size,
     )
     reference = x1 * (mixed + bias.float()[None, :, None] * z)

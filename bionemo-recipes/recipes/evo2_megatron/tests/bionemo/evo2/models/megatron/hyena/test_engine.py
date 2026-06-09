@@ -125,3 +125,98 @@ def test_parallel_fir_short_cuda_path_matches_torch_depthwise_conv1d(use_subquad
 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(state, u_bdl[..., -(kernel_size - 1) :])
+
+
+@pytest.mark.parametrize("flip_filter", [False, True], ids=["noflip", "flip"])
+@pytest.mark.parametrize("gated_bias", [False, True], ids=["plainbias", "gatedbias"])
+def test_step_fir_block_matches_per_token_loop(flip_filter, gated_bias):
+    """The vectorized block step_fir (multi-token chunk) equals looping the single-token step_fir.
+
+    Guards the chunked-prefill FIR fast path: a [B, L, D] block must thread the FIR ring identically
+    to stepping the L tokens one at a time (the proven decode primitive), so block and loop agree on
+    both the per-position output and the final ring state.
+    """
+    torch.manual_seed(0)
+    batch, channels, kernel_size, seq_len = 2, 8, 5, 7  # ring (cache) size = kernel_size - 1
+    weight = torch.randn(channels, 1, kernel_size)
+    bias = torch.randn(channels)
+    u = torch.randn(batch, seq_len, channels)
+    ring0 = torch.randn(batch, channels, kernel_size - 1)
+
+    ring = ring0.clone()
+    ys = []
+    for t in range(seq_len):
+        y_t, ring = engine.step_fir(
+            u=u[:, t].clone(),
+            fir_state=ring,
+            weight=weight.clone(),
+            bias=bias,
+            gated_bias=gated_bias,
+            flip_filter=flip_filter,
+        )
+        ys.append(y_t)
+    y_loop = torch.stack(ys, dim=1)  # [B, L, D]
+
+    ring_block = ring0.clone()
+    y_block, ring_block = engine.step_fir(
+        u=u.clone(),
+        fir_state=ring_block,
+        weight=weight.clone(),
+        bias=bias,
+        gated_bias=gated_bias,
+        flip_filter=flip_filter,
+    )
+
+    torch.testing.assert_close(y_block, y_loop, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(ring_block, ring, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("act_dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_step_iir_block_matches_per_token_loop(act_dtype):
+    """The vectorized block step_iir (multi-token chunk) equals looping the single-token step_iir.
+
+    Guards the chunked-prefill IIR fast path: a [B, d, L] block must thread the (real-pole) modal
+    state identically to stepping the L tokens one at a time, agreeing on both output and final state.
+    The bf16 case mirrors real inference (bf16 activations + residues/D, fp32 state + log-poles) and
+    guards the einsum dtype-mismatch a fp32-only test misses (the recurrence must run in fp32).
+    """
+    torch.manual_seed(0)
+    batch, channels, order, seq_len = 2, 8, 4, 7
+    log_poles = -(torch.rand(channels, order, 1) * 2.0 + 0.02)  # fp32; exp(.) gives real stable poles in (0, 1)
+    # Activations + residues/D arrive in the activation dtype at inference; the IIR state stays fp32.
+    residues = torch.randn(channels, order).to(act_dtype)
+    decay_bias = torch.randn(channels).to(act_dtype)
+    x1 = torch.randn(batch, channels, seq_len).to(act_dtype)
+    x2 = torch.randn(batch, channels, seq_len).to(act_dtype)
+    v = torch.randn(batch, channels, seq_len).to(act_dtype)
+    state0 = torch.randn(batch, channels, order)  # fp32 persistent state
+
+    state = state0.clone()
+    ys = []
+    for t in range(seq_len):
+        y_t, state = engine.step_iir(
+            x2=x2[:, :, t].clone(),
+            x1=x1[:, :, t].clone(),
+            v=v[:, :, t].clone(),
+            D=decay_bias,
+            residues=residues.clone(),
+            poles=log_poles.clone(),
+            iir_state=state,
+        )
+        ys.append(y_t)
+    y_loop = torch.stack(ys, dim=-1)  # [B, d, L]
+
+    state_block = state0.clone()
+    y_block, state_block = engine.step_iir(
+        x2=x2.clone(),
+        x1=x1.clone(),
+        v=v.clone(),
+        D=decay_bias,
+        residues=residues.clone(),
+        poles=log_poles.clone(),
+        iir_state=state_block,
+    )
+
+    rtol, atol = (2e-2, 2e-2) if act_dtype == torch.bfloat16 else (1e-4, 1e-4)
+    torch.testing.assert_close(y_block, y_loop, rtol=rtol, atol=atol)
+    torch.testing.assert_close(state_block, state, rtol=rtol, atol=atol)

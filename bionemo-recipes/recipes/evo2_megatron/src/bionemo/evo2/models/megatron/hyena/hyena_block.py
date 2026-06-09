@@ -208,6 +208,23 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
             else:
                 assert True, "unexpected layer_type"
             self.layers.append(layer)
+
+        # Per-(pipeline-rank) layer-type list in the SAME local order as ``self.layers``,
+        # expressed in mcore's hybrid-allocation symbols so it is drop-in for
+        # ``MambaInferenceStateConfig.from_model`` (which reads ``decoder.layer_type_list`` and
+        # routes ``Symbols.MAMBA``/``Symbols.ATTENTION`` to the mamba/KV slots — see
+        # ``megatron/core/inference/config.py:56`` and ``dynamic_context.py:339``). Every Hyena
+        # operator (short/medium/long) is a single recurrent "mamba"-slotted layer, so all three
+        # Evo2 symbols (S/D/H) map to ``Symbols.MAMBA`` ("M") and attention ("*") stays ATTENTION.
+        # Dynamic inference uses this to map Evo2 Hyena layers onto mcore's Mamba state
+        # slots and attention layers onto paged-KV slots. Training does not read it.
+        from megatron.core.ssm.mamba_hybrid_layer_allocation import (  # lazy: heavy mcore import — keep hyena_block importable in CPU unit tests/CLI
+            Symbols as _McoreSymbols,
+        )
+
+        self.layer_type_list = [
+            _McoreSymbols.MAMBA if sym in HYENA_LAYER_MAP else _McoreSymbols.ATTENTION for sym in layer_type_list
+        ]
         if self.post_process and self.post_layer_norm:
             # Final layer norm before output.
             self.final_norm = TENorm(
@@ -231,6 +248,75 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
         forward_step_func
         """
         self.input_tensor = input_tensor
+
+    def hyena_state_shapes_per_request(self):
+        """Common (conv, ssm) per-request decode-state shapes across all Hyena layers.
+
+        The Hyena analog of mcore's ``decoder.mamba_state_shapes_per_request()`` (consumed by
+        ``MambaInferenceStateConfig.from_model`` at ``megatron/core/inference/config.py:58``).
+        The dynamic context allocates exactly ONE ``(conv_states_shape, ssm_states_shape)`` for
+        all Hyena ("mamba"-slotted) layers — buffers are ``(num_layers, max_requests, *shape)``
+        (``dynamic_context.py:744``) — so this returns a UNIFORM pair that all Hyena layers fit:
+
+        * **conv_states_shape** — the ``hyena_proj_conv`` FIR ring shape. Asserted identical
+          across every Hyena layer (it is: same proj geometry per TP rank). If a future
+          override pattern mixed proj widths this assert would fire (a real, important finding
+          rather than silent corruption).
+        * **ssm_states_shape** — the per-type mixer state padded to the elementwise MAX over
+          all Hyena layers: ``(max(width), max(last_dim))`` where ``last_dim`` is
+          ``K_short-1`` / ``K_medium-1`` / ``order`` per type. Each layer writes into the
+          leading sub-slice ``[:width, :last_dim]`` of its slot; the unused tail stays zero and
+          is never read (``engine.step_fir``/``step_iir`` index by the live state's own shape).
+
+        Returns:
+            Tuple ``(conv_states_shape, ssm_states_shape, per_layer)`` where ``per_layer`` is a
+            list of :class:`~bionemo.evo2.models.megatron.hyena.hyena_mixer.HyenaMixerStateShapes`
+            in layer order (Hyena layers only), used by the packed-slot adapter to know each
+            layer's exact (un-padded) sub-slice + owner ids. ``conv/ssm`` shapes are
+            per-request (no batch / max_requests dim).
+
+        Raises:
+            ValueError: if there are no Hyena layers on this rank, or if the per-layer
+                ``hyena_proj_conv`` conv shapes are not identical (the uniformity invariant
+                the single-shape allocation depends on).
+        """
+        per_layer = []
+        conv_shapes = set()
+        ssm_widths = []
+        ssm_last_dims = []
+        for layer in self.layers:
+            if not hasattr(layer, "mixer") or not hasattr(layer.mixer, "hyena_state_shapes_per_request"):
+                continue  # attention layer (or any non-Hyena layer): no recurrent Hyena state
+            shapes = layer.mixer.hyena_state_shapes_per_request()
+            per_layer.append(shapes)
+            conv_shapes.add(tuple(shapes.conv_shape))
+            ssm_widths.append(shapes.ssm_shape[0])
+            ssm_last_dims.append(shapes.ssm_shape[1])
+
+        if not per_layer:
+            raise ValueError("hyena_state_shapes_per_request(): no Hyena layers found on this rank")
+        if len(conv_shapes) != 1:
+            raise ValueError(
+                "Option-A packing requires a uniform hyena_proj_conv state shape across Hyena "
+                f"layers, but found {sorted(conv_shapes)}. The dynamic context allocates one "
+                "conv_states_shape for all layers; per-layer conv widths are unsupported."
+            )
+        conv_states_shape = next(iter(conv_shapes))
+        ssm_states_shape = (max(ssm_widths), max(ssm_last_dims))
+        return conv_states_shape, ssm_states_shape, per_layer
+
+    def mamba_state_shapes_per_request(self):
+        """``(conv_states_shape, ssm_states_shape)`` — drop-in for mcore's Mamba accessor.
+
+        Signature/return match ``megatron.core.ssm.mamba_mixer`` ``decoder.mamba_state_shapes_per_request()``
+        (the 2-tuple ``MambaInferenceStateConfig.from_model`` consumes at
+        ``megatron/core/inference/config.py:58``) so a ``DynamicInferenceContext`` built for Evo2
+        allocates its two per-(layer,request) slots from the SAME uniform Hyena shapes the
+        Option-A packing uses. Delegates to :meth:`hyena_state_shapes_per_request` and drops the
+        per-layer detail (only needed by the packed-slot adapter, not by the context allocator).
+        """
+        conv_states_shape, ssm_states_shape, _ = self.hyena_state_shapes_per_request()
+        return conv_states_shape, ssm_states_shape
 
     def _select_layers_for_pipeline_parallel(self, layer_type_list):
         pipeline_rank = self.pg_collection.pp.rank() if self.pg_collection.pp is not None else 0

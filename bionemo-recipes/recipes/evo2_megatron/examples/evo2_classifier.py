@@ -72,7 +72,7 @@ from megatron.bridge.training.utils.checkpoint_utils import (
     get_checkpoint_run_config_filename,
     read_run_config,
 )
-from megatron.bridge.utils.instantiate_utils import instantiate
+from megatron.bridge.utils.instantiate_utils import instantiate, register_allowed_target_prefix
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
@@ -95,6 +95,15 @@ from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_c
 
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+# This example is launched as ``evo2_classifier.py`` (e.g. ``torchrun ... evo2_classifier.py``), so
+# the providers defined below are serialized into a trained checkpoint's run_config with a
+# ``_target_`` of ``evo2_classifier.<Provider>``. Megatron-Bridge's ``instantiate`` only resolves
+# targets under an allow-listed module prefix, so register this module's prefix here (mirroring
+# ``bionemo.evo2.`` in evo2_provider.py). Without it, rebuilding the model at predict time in
+# ``_build_classifier_from_checkpoint`` raises InstantiationException.
+register_allowed_target_prefix("evo2_classifier.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

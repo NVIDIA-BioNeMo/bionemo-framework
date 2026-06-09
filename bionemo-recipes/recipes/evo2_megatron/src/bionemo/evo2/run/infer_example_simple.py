@@ -19,11 +19,11 @@
 """Simple autoregressive generation example for Evo2 models.
 
 This module provides a straightforward implementation of autoregressive text generation
-that directly calls the model forward pass without using the full MCore inference
+that directly calls the model forward pass without using the native dynamic-inference
 infrastructure. This is useful for:
 
 1. Understanding how autoregressive generation works at a low level
-2. Debugging and testing model behavior
+2. Debugging and testing direct model-forward behavior
 3. Custom generation workflows that don't fit the MCore API
 
 For production use, prefer the MCore-based inference in `bionemo.evo2.run.infer`.
@@ -63,7 +63,7 @@ def generate_tokens_simple(
     Unlike the MCore-based inference in `bionemo.evo2.run.infer`, this function:
     - Directly calls model.forward() instead of using inference wrappers
     - Manually manages sequence_len_offset and decode_mode
-    - Does not use TextGenerationController or StaticInferenceEngine
+    - Does not use the native dynamic-inference request lifecycle
 
     Args:
         model: The Evo2 model (typically Float16Module wrapped).
@@ -92,8 +92,8 @@ def generate_tokens_simple(
         >>> print(tokens)  # [65, 84, 67, 71, ...]  (continues the pattern)
 
     Note:
-        For production use, prefer `bionemo.evo2.run.infer.generate()` which uses
-        the MCore inference infrastructure with proper batching, sampling, and
+        For production use, prefer `bionemo.evo2.run.infer.generate()` which uses the
+        native MCore dynamic-inference path with proper sampling, request lifecycle, and
         distributed support.
     """
     device = prompt_tokens.device

@@ -25,11 +25,9 @@ from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
 try:
     from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
     from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d as _subq_fft_causal_conv1d
-    from subquadratic_ops_torch.rearrange import rearrange as _subq_rearrange
 except ImportError as _subq_import_error:
     _subq_causal_conv1d = None
     _subq_fft_causal_conv1d = None
-    _subq_rearrange = None
     _subq_error_msg = f"subquadratic_ops_torch not available: {_subq_import_error}"
 
 
@@ -84,10 +82,11 @@ def parallel_fir(
     if use_subquadratic_ops and _subq_fft_causal_conv1d is None:
         raise ImportError(_subq_error_msg)
 
-    if use_subquadratic_ops:
-        u = _subq_rearrange(u.transpose(0, 1), bhl_to_lbh=False)
-    else:
-        u = rearrange(u, "b l d -> b d l")
+    # Layout to [B, D, L]. We deliberately do NOT use the subquadratic-ops rearrange kernel here even
+    # when use_subquadratic_ops is set: it is a training-tuned custom kernel and is slower than a plain
+    # einops/transpose for this inference layout op. The subq win is in the compute kernels below
+    # (fft_causal_conv1d / causal_conv1d), not in the rearrange.
+    u = rearrange(u, "b l d -> b d l")
 
     if fir_length >= 128:
         if use_subquadratic_ops:
@@ -134,7 +133,9 @@ def parallel_fir(
 
     fir_state = None
     if compute_state:
-        fir_state = u[..., -fir_length + 1 :]
+        # Persistent fp32 buffer so step_fir's ``.to(float32)`` is a no-op and
+        # the in-place ring-buffer update preserves the dynamic-context alias.
+        fir_state = u[..., -fir_length + 1 :].to(torch.float32).contiguous()
     return z, fir_state
 
 
@@ -194,6 +195,25 @@ def step_fir(*, u, fir_state, weight, bias=None, gated_bias=False, flip_filter=F
     fir_state = fir_state.to(torch.float32)
     bias = bias.to(torch.float32) if bias is not None else None
 
+    if u.dim() == 3:
+        # ---- Vectorized block step: one causal depthwise conv over ``[ring || u]``. ----
+        # ``u`` is a multi-token chunked-prefill continuation of shape [B, L, D]; returns [B, L, D].
+        # This threads the FIR ring exactly as looping the single-token recurrence (below) over the L
+        # tokens would, but in a single conv. ``weight`` (already sliced/flipped to ``cache_size + 1``
+        # taps above) is the cross-correlation kernel, so conv position t computes ``h0*u_t + Σ ring*h``
+        # with the ring supplying the left context that ``parallel_fir``'s zero padding lacks. Assumes a
+        # full ring (``cache_size == filter_length - 1``), which holds after the first prefill chunk.
+        B, L, D = u.shape  # noqa: N806
+        u_dl = u.transpose(1, 2)  # [B, D, L]
+        padded = torch.cat([fir_state, u_dl], dim=-1)  # [B, D, cache_size + L]
+        kernel = weight.transpose(0, 1).contiguous()  # [D, 1, cache_size + 1]
+        y = F.conv1d(padded, kernel, groups=D)  # [B, D, L]
+        if bias is not None:
+            y = y + (bias[None, :, None] * u_dl if gated_bias else bias[None, :, None])
+        # Ring <- last cache_size positions of [ring || u]; copy_ keeps the dynamic-context alias.
+        fir_state.copy_(padded[..., -cache_size:])
+        return y.transpose(1, 2).to(input_dtype), fir_state
+
     h0, h = weight[..., -1], weight[..., :-1]
     y = h0 * u + torch.sum(fir_state * h, dim=-1)
 
@@ -205,23 +225,61 @@ def step_fir(*, u, fir_state, weight, bias=None, gated_bias=False, flip_filter=F
 
     # Update the state
     if cache_size < filter_length - 1:
+        # Growing the cache when the prompt is shorter than the FIR filter.
         fir_state = torch.cat([fir_state, u[..., None]], dim=-1)
     else:
-        fir_state = torch.roll(fir_state, -1, dims=2)
+        # In-place ring-buffer shift on the persistent fp32 buffer. The ``torch.roll``
+        # temporary is copied back into the dynamic-context state slot.
+        fir_state.copy_(torch.roll(fir_state, -1, dims=2))
         fir_state[..., -1] = u
 
     return y.to(input_dtype), fir_state
 
 
 def step_iir(*, x2, x1, v, D, residues, poles, iir_state):  # noqa: N803
-    """Steps forward IIR filters in the architecture."""
-    x1v = x1 * v
-    poles = torch.exp(poles)  # poles arg contains log_poles
-    poles = poles[..., 0][None]  # squeeze dummy seqlen dim and add dummy batch dim
-    residues = residues[None]  # add dummy batch dim
-    iir_state = poles * iir_state + x1v[..., None]
+    """Steps forward IIR filters in the architecture.
 
-    res_state = torch.sum(residues * iir_state, dim=-1)
+    Single-token (``x1``/``x2``/``v`` of shape ``[B, d]``): the original O(d) diagonal recurrence
+    ``iir_state = poles * iir_state + x1*v``; ``y = x2 * (Σ residues*iir_state + D*x1*v)``.
+
+    Block (``[B, d, L]``, used for a multi-token chunked-prefill continuation): the same real diagonal
+    recurrence evaluated over all L tokens in one vectorized pass, advancing ``iir_state`` by L. This
+    equals looping the single-token step L times (the poles are real here — see ``get_logp``). Writing
+    ``x1v_t = x1_t*v_t`` and ``h₋₁ = iir_state``, the state is ``h_t,n = poleₙ^{t+1}·h₋₁,n + Σ_{k≤t}
+    poleₙ^{t-k}·x1v_k``, so ``Σₙ residueₙ·h_t = (x1v * g)_t + Σₙ residueₙ·poleₙ^{t+1}·h₋₁,n`` where the
+    modal impulse response ``g_m = Σₙ residueₙ·poleₙ^m`` gives the zero-state part as a causal conv.
+    """
+    poles = torch.exp(poles)  # poles arg contains log_poles
+    poles = poles.squeeze(-1)  # [d, n] (drop the dummy seqlen dim; squeeze only removes a size-1 dim)
+
+    if x1.dim() == 3:
+        # ---- Vectorized block step over L tokens (real poles; FFT-free). ----
+        # The recurrence runs in fp32 (matching the persistent iir_state buffer); residues/D arrive in
+        # the activation dtype (e.g. bf16), so cast them. einsum requires matching operand dtypes,
+        # unlike the single-token ``residues * iir_state`` below which promotes implicitly.
+        x1v = (x1 * v).to(torch.float32)  # [B, d, L]
+        residues = residues.to(torch.float32)
+        decay = D.to(torch.float32)
+        B, d, L = x1v.shape  # noqa: N806
+        steps = torch.arange(L, device=x1v.device, dtype=torch.float32)  # [L]
+        # Modal impulse response g_m = Σ_n residue_n * pole_n^m, m = 0..L-1.
+        g = torch.einsum("dn,dnl->dl", residues, poles[..., None] ** steps)  # [d, L]
+        # Zero-state response = causal conv of x1v with g (left-pad so output position t sees k<=t).
+        zs_res = F.conv1d(F.pad(x1v, (L - 1, 0)), g.flip(-1).unsqueeze(1), groups=d)  # [B, d, L]
+        # Carried-state decay: Σ_n residue_n * pole_n^{t+1} * h₋₁,n.
+        carried = torch.einsum("bdn,dnl->bdl", residues * iir_state, poles[..., None] ** (steps + 1))
+        y = x2 * (zs_res + carried + decay[None, :, None] * x1v)  # [B, d, L]
+        # Advance state by L: h_{L-1},n = pole_n^L * h₋₁,n + Σ_k pole_n^{L-1-k} * x1v_k.
+        h_zs = torch.einsum("bdl,dnl->bdn", x1v, poles[..., None] ** (L - 1 - steps))  # [B, d, n]
+        iir_state.copy_((poles**L) * iir_state + h_zs)  # in-place to keep the dynamic-context alias
+        return y, iir_state
+
+    # ---- Single token (unchanged): in-place O(d) recurrence on the persistent IIR state buffer. ----
+    x1v = x1 * v
+    poles_b = poles[None]  # [1, d, n]
+    residues_b = residues[None]  # [1, d, n]
+    iir_state.mul_(poles_b).add_(x1v[..., None])
+    res_state = torch.sum(residues_b * iir_state, dim=-1)
     y = x2 * (res_state + D * x1v)
     return y, iir_state
 

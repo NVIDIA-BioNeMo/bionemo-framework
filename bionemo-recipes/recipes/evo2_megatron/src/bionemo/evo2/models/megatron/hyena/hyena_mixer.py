@@ -43,6 +43,42 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _dynamic_context_real_token_count(inference_context, padded_token_count: int) -> int:
+    """Return real active tokens in a dynamic-context flattened token batch."""
+    if inference_context is None:
+        return padded_token_count
+    is_static_batching = getattr(inference_context, "is_static_batching", None)
+    if is_static_batching is None or is_static_batching():
+        return padded_token_count
+
+    active_token_count = getattr(inference_context, "active_token_count", padded_token_count)
+    if torch.is_tensor(active_token_count):
+        if active_token_count.numel() != 1:
+            return padded_token_count
+        active_token_count = active_token_count.item()
+    try:
+        active_token_count = int(active_token_count)
+    except (TypeError, ValueError):
+        return padded_token_count
+    return max(1, min(active_token_count, padded_token_count))
+
+
+def _slice_padded_dynamic_context_tokens(features: torch.Tensor, inference_context) -> tuple[torch.Tensor, int]:
+    """Drop dynamic-context dummy token rows before Hyena recurrent state updates."""
+    padded_token_count = int(features.shape[-1])
+    real_token_count = _dynamic_context_real_token_count(inference_context, padded_token_count)
+    if real_token_count == padded_token_count:
+        return features, padded_token_count
+    return features[..., :real_token_count].contiguous(), padded_token_count
+
+
+def _pad_padded_dynamic_context_tokens(z: torch.Tensor, padded_token_count: int) -> torch.Tensor:
+    """Restore MCore's padded token width after Hyena recurrent computation."""
+    if z.shape[-1] >= padded_token_count:
+        return z
+    return F.pad(z, (0, padded_token_count - z.shape[-1]))
+
+
 try:
     from transformer_engine.common.recipe import DelayedScaling, Format
 except ImportError:
@@ -89,6 +125,30 @@ class HyenaMixerSubmodules:
 
     dense_projection: Union[ModuleSpec, type] = None
     dense: Union[ModuleSpec, type] = None
+
+
+@dataclass
+class HyenaMixerStateShapes:
+    """Per-request recurrent decode-state layout for one Hyena mixer.
+
+    Returned by :meth:`HyenaMixer.hyena_state_shapes_per_request`. Describes the two
+    recurrent states every Hyena layer carries during decode, which dynamic inference packs
+    into the context's two Mamba slots:
+
+    * ``conv_*`` — the ``hyena_proj_conv`` FIR ring (uniform across all Hyena layer types).
+    * ``ssm_*`` — the operator's single mixer state, whose shape/kind varies by operator
+      type (``fir`` for short, ``inner_fir`` for medium, ``iir`` for long).
+
+    ``*_owner_id`` are the ``id(module)`` keys the Hyena ops use to index their
+    ``*_filter_state_dict`` (see ``hyena_utils.update_filter_state``/``get_filter_state``);
+    the packed-slot adapter routes those exact ids to the dynamic context slots.
+    """
+
+    conv_shape: tuple  # (proj_channels, K_proj - 1)
+    conv_owner_id: int  # id(self.hyena_proj_conv)
+    ssm_shape: tuple  # (width, K_mixer - 1) for FIR, or (width, order) for IIR
+    ssm_kind: str  # "fir" | "inner_fir" | "iir"  -> the *_filter_state_dict bucket
+    ssm_owner_id: int  # id(mixer.short_conv) for short, else id(mixer)
 
 
 class HyenaMixer(MegatronModule):
@@ -277,6 +337,72 @@ class HyenaMixer(MegatronModule):
 
         return sharded_state_dict
 
+    def hyena_state_shapes_per_request(self) -> "HyenaMixerStateShapes":
+        """Per-request recurrent decode-state shapes for this Hyena mixer.
+
+        The Hyena analog of :meth:`megatron.core.ssm.mamba_mixer.MambaMixer.mamba_state_shapes_per_request`
+        (mcore ``mamba_mixer.py:1195``). Every Hyena layer — regardless of operator type
+        (``hyena_short_conv`` / ``hyena_medium_conv`` / ``hyena``) — carries **exactly two**
+        recurrent states during decode, mirroring Mamba's ``(conv_state, ssm_state)`` slots:
+
+        1. **conv slot** — the FIR ring buffer of ``self.hyena_proj_conv`` (the shared input
+           projection conv present in *all* Hyena layer types). Stored eagerly under
+           ``inference_context.fir_filter_state_dict[id(self.hyena_proj_conv)]`` with shape
+           ``(B, proj_channels, K_proj-1)`` (see ``hyena_utils.ParallelCausalDepthwiseConv1dWithState.forward``
+           and ``engine.parallel_fir``). Per-request shape (drop B): ``(proj_channels, K_proj-1)``.
+
+        2. **ssm slot** — the operator's single mixer state, which *differs in shape and kind*
+           by operator type:
+             * ``hyena_short_conv``: FIR ring of ``mixer.short_conv``, key ``fir`` keyed by
+               ``id(mixer.short_conv)``, shape ``(width, K_short-1)``.
+             * ``hyena_medium_conv``: FIR ring of the operator, key ``inner_fir`` keyed by
+               ``id(mixer)``, shape ``(width, K_medium-1)``.
+             * ``hyena`` (long): the IIR pole-recurrence of the operator, key ``iir`` keyed by
+               ``id(mixer)``, shape ``(width, order)``. NOTE: in *this* Evo2 implementation the
+               IIR state is **real fp32, not complex** — the poles ``p``/``gamma`` are real
+               params and ``engine.step_iir`` does ``exp(real_log_poles) * iir_state`` (real),
+               while the prefill seed ``engine.prefill_via_modal_fft`` explicitly drops the
+               imaginary part via ``.to(torch.float32)`` (engine.py:281). So NO 2x-real
+               expansion is needed; ``order`` real slots suffice.
+
+        Both states are kept fp32 because the decode recurrences in ``engine.step_fir`` and
+        ``engine.step_iir`` run in fp32. The caller (:meth:`HyenaStack.hyena_state_shapes_per_request`)
+        pads each layer's mixer state up to a common ``ssm_states_shape`` so the dynamic
+        context can allocate one uniform shape across all Hyena ("mamba") layers.
+
+        Returns:
+            HyenaMixerStateShapes with this layer's conv/ssm per-request shapes + the
+            owner ids + the state-dict key for the ssm slot.
+        """
+        proj_channels = self.hyena_proj_conv.short_conv_weight.shape[0] * self.hyena_proj_conv.group_dim
+        conv_shape = (proj_channels, self.hyena_proj_conv.kernel_size - 1)
+
+        if self.operator_type == "hyena_short_conv":
+            width = self.mixer.short_conv.d_model
+            ssm_shape = (width, self.mixer.short_conv.kernel_size - 1)
+            ssm_kind = "fir"
+            ssm_owner = self.mixer.short_conv
+        elif self.operator_type == "hyena_medium_conv":
+            width = self.mixer.width_per_tp_group
+            ssm_shape = (width, self.mixer.kernel_size - 1)
+            ssm_kind = "inner_fir"
+            ssm_owner = self.mixer
+        elif self.operator_type == "hyena":
+            width = self.mixer.width_per_tp_group
+            ssm_shape = (width, self.hyena_config.hyena_filter_order)
+            ssm_kind = "iir"
+            ssm_owner = self.mixer
+        else:
+            raise ValueError(f"Unsupported operator_type for native dynamic inference: {self.operator_type}")
+
+        return HyenaMixerStateShapes(
+            conv_shape=conv_shape,
+            conv_owner_id=id(self.hyena_proj_conv),
+            ssm_shape=ssm_shape,
+            ssm_kind=ssm_kind,
+            ssm_owner_id=id(ssm_owner),
+        )
+
     def forward(self, x, layer_past=None, inference_context=None, _hyena_use_cp=True):
         """Applies the Hyena sequence mixing operation to input embeddings.
 
@@ -307,6 +433,7 @@ class HyenaMixer(MegatronModule):
             features = subquadratic_ops_rearrange(features, bhl_to_lbh=False)
         else:
             features = rearrange(features, "l b d -> b d l").contiguous()
+        features, padded_dynamic_token_count = _slice_padded_dynamic_context_tokens(features, inference_context)
 
         is_b2b_eligible = self.use_subquadratic_ops and self.operator_type in [
             "hyena_short_conv",
@@ -331,6 +458,7 @@ class HyenaMixer(MegatronModule):
             )
             z = self.mixer(x1, x2, v, _hyena_use_cp=_proj_use_cp, inference_context=inference_context)
 
+        z = _pad_padded_dynamic_context_tokens(z, padded_dynamic_token_count)
         if self.use_subquadratic_ops:
             z = subquadratic_ops_rearrange(z, bhl_to_lbh=True)
         else:
@@ -349,7 +477,9 @@ class HyenaMixer(MegatronModule):
         proj_kernel_size = self.hyena_proj_conv.kernel_size
 
         # (a) proj_conv FIR state: input tail in [B, D, K_proj-1]
-        proj_state = features[..., -(proj_kernel_size - 1) :].contiguous()
+        # fp32 persistent buffer so step_fir's ``.to(float32)`` is a no-op and the
+        # in-place ring-buffer shift preserves the dynamic-context alias.
+        proj_state = features[..., -(proj_kernel_size - 1) :].to(torch.float32).contiguous()
         proj_dict = getattr(inference_context, "fir_filter_state_dict", {})
         proj_dict[id(self.hyena_proj_conv)] = proj_state
         setattr(inference_context, "fir_filter_state_dict", proj_dict)
@@ -381,7 +511,7 @@ class HyenaMixer(MegatronModule):
         x1, x2, v = rearrange(intermediate, "b (g dg p) l -> b (g dg) p l", p=3, g=self.num_groups_per_tp_rank).unbind(
             dim=2
         )
-        mixer_input_tail = (x2 * v).contiguous()  # [B, D, K_mixer-1]
+        mixer_input_tail = (x2 * v).to(torch.float32).contiguous()  # [B, D, K_mixer-1]
 
         if self.operator_type == "hyena_short_conv":
             mixer_state_owner_id = id(self.mixer.short_conv)
