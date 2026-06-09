@@ -332,18 +332,25 @@ class ActivationStore:
         rank: int = 0,
         world_size: int = 1,
         max_shards: Optional[int] = None,
+        mix_shards: int = 1,
     ) -> DataLoader:
         """Get a streaming DataLoader that reads one shard at a time from disk.
 
-        Each rank gets a disjoint slice of shards. Peak RAM per rank is ~1 shard.
+        Each rank gets a disjoint slice of shards. Peak RAM per rank is ~mix_shards shards.
 
         Args:
             batch_size: Batch size for training
-            shuffle: Whether to shuffle shard order and within-shard data
+            shuffle: Whether to shuffle within-shard (and within-buffer) data
             seed: Random seed for reproducibility
             rank: This rank's index (0-indexed)
             world_size: Total number of ranks
             max_shards: Limit total shards used (for subsampling). None = all.
+            mix_shards: How many shards to blend together. 1 (default) = previous behavior
+                (one shard at a time, contiguous per-rank slice, no global shuffle). >1
+                globally shuffles the shard list before the per-rank split (so each rank gets
+                a cross-section — found needed for Evo2 training, where shards are kingdom-
+                ordered, to avoid an fvu cliff) AND buffers/mixes that many shards per batch
+                (at ~mix_shards shards of peak RAM).
 
         Returns:
             DataLoader yielding [batch_size, hidden_dim] tensors
@@ -357,8 +364,16 @@ class ActivationStore:
         if n_total > 1 and pq.read_metadata(last_shard_path).num_rows < shard_size:
             n_total -= 1
 
-        # Assign equal shards to each rank (drop remainder to keep DDP in sync)
+        # When mixing (mix_shards > 1), shuffle the shard list BEFORE splitting across ranks
+        # so each rank gets a random cross-section of the whole parquet, not a contiguous
+        # slice. Found needed for Evo2 training, where shards are sequence-ordered (e.g. all
+        # prok then all euk): a contiguous per-rank slice trains a rank on one kingdom then
+        # switches, causing an fvu cliff. Deterministic across ranks via the shared seed.
+        # mix_shards == 1 keeps the previous contiguous behavior. Then assign equal shards per
+        # rank (drop remainder to keep DDP in sync).
         all_indices = list(range(n_total))
+        if mix_shards > 1:
+            np.random.default_rng(seed if seed is not None else 0).shuffle(all_indices)
         per_rank = n_total // world_size
         my_indices = all_indices[rank * per_rank : (rank + 1) * per_rank]
 
@@ -368,10 +383,45 @@ class ActivationStore:
             batch_size=batch_size,
             shuffle=shuffle,
             seed=seed,
+            mix_shards=mix_shards,
         )
 
         # batch_size=None: dataset already yields pre-formed batches
         return DataLoader(dataset, batch_size=None, num_workers=0)
+
+    def sample(self, n: int, seed: int = 0, num_shards: int = 1) -> torch.Tensor:
+        """Return ~n activation rows for pre-bias (geometric-median) init.
+
+        Defaults to a single shard, i.e. the previous behavior. Set ``num_shards`` > 1 to
+        draw from that many random shards spanning the whole parquet: we found this needed
+        for Evo2 SAE training, where shards are written in corpus order (e.g. all prokaryota
+        then all eukaryota), so a single-shard sample biases the geometric-median pre-bias
+        toward one kingdom and worsens dead latents. Peak RAM ~one shard (each is sub-sampled
+        then freed before the next).
+
+        Args:
+            n: Number of activation rows to return.
+            seed: RNG seed for the shard/row sampling and the final permutation; sampling is
+                deterministic given this seed.
+            num_shards: Number of shards to sample across, clamped to ``[1, self.n_shards]``.
+                1 (default) = previous single-shard behavior; >1 spreads the sample.
+
+        Returns:
+            A float ``torch.Tensor`` of shape ``(n, D)`` of sampled pre-bias activation rows
+            (``torch.from_numpy`` on concatenated per-shard slices loaded via
+            ``self._load_shard``), deterministic for the given ``seed``.
+        """
+        rng = np.random.default_rng(seed)
+        k = min(self.n_shards, max(1, num_shards))
+        chosen = rng.choice(self.n_shards, size=k, replace=False)
+        per = -(-n // k)  # ceil(n / k)
+        parts = []
+        for i in chosen:
+            shard = self._load_shard(int(i))
+            take = min(per, len(shard))
+            parts.append(shard[rng.choice(len(shard), size=take, replace=False)])
+        rows = torch.from_numpy(np.concatenate(parts)).float()
+        return rows[torch.randperm(len(rows), generator=torch.Generator().manual_seed(seed))][:n]
 
     def get_dataloader(
         self,
@@ -491,12 +541,16 @@ class _StreamingBatchDataset(IterableDataset):
         batch_size: int = 4096,
         shuffle: bool = True,
         seed: Optional[int] = None,
+        mix_shards: int = 1,
     ):
         self.store = store
         self.shard_indices = shard_indices
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
+        # Shards to accumulate before flushing batches. >1 mixes rows across that
+        # many shards (true inter-shard shuffling) instead of one shard at a time.
+        self.mix_shards = max(1, mix_shards)
         self.max_batches = None  # Set externally to cap iteration (for DDP sync)
 
         # Approximate length: total tokens in assigned shards / batch_size
@@ -511,20 +565,29 @@ class _StreamingBatchDataset(IterableDataset):
             rng.shuffle(indices)
 
         buffer = None
+        shards_loaded = 0
         n_yielded = 0
-        for shard_idx in indices:
+        for shard_pos, shard_idx in enumerate(indices):
             shard = torch.from_numpy(self.store._load_shard(shard_idx)).float()
             if self.shuffle:
                 shard = shard[torch.randperm(len(shard))]
-
             buffer = torch.cat([buffer, shard]) if buffer is not None else shard
+            shards_loaded += 1
 
-            while len(buffer) >= self.batch_size:
-                if self.max_batches is not None and n_yielded >= self.max_batches:
-                    return
-                yield buffer[: self.batch_size]
-                buffer = buffer[self.batch_size :]
-                n_yielded += 1
+            # Flush only once mix_shards shards are buffered (or this is
+            # the last shard), shuffling the whole buffer first so each batch
+            # mixes rows from that many different parts of the parquet.
+            is_last = shard_pos == len(indices) - 1
+            if shards_loaded >= self.mix_shards or is_last:
+                if self.shuffle and self.mix_shards > 1:
+                    buffer = buffer[torch.randperm(len(buffer))]
+                while len(buffer) >= self.batch_size:
+                    if self.max_batches is not None and n_yielded >= self.max_batches:
+                        return
+                    yield buffer[: self.batch_size]
+                    buffer = buffer[self.batch_size :]
+                    n_yielded += 1
+                shards_loaded = 0
 
         # Yield remainder as a partial batch (skip if capped)
         if self.max_batches is None and buffer is not None and len(buffer) > 0:
