@@ -19,6 +19,8 @@
 import inspect
 import logging
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Literal, Set
 
@@ -211,14 +213,19 @@ def load_weights_sharded_inplace_nemo2_to_mcore(
     dist_checkpointing.load(sharded_state_dict, str(distributed_checkpoint_dir))
 
 
-@pytest.fixture
-def sequences():
-    """Fixture that returns a list of sequences from the prompts.csv file."""
+def _load_prompt_sequences() -> list[str]:
+    """Return the DNA prompts used by generation accuracy tests."""
     with (Path(__file__).parent / "data" / "prompts.csv").open(newline="") as f:
         from csv import DictReader
 
         reader = DictReader(f)
         return [row["Sequence"] for row in reader]
+
+
+@pytest.fixture
+def sequences():
+    """Fixture that returns a list of sequences from the prompts.csv file."""
+    return _load_prompt_sequences()
 
 
 @pytest.fixture
@@ -851,9 +858,58 @@ def test_batch_generate_mbridge(
         )
 
 
+_RUN_SUBQ_MBRIDGE_INPROCESS_ENV = "BIONEMO_EVO2_RUN_SUBQ_MBRIDGE_INPROCESS"
+
+
+def _run_subq_mbridge_test_subprocess(tmp_path: Path) -> None:
+    """Run the native-kernel subquadratic coverage in a child pytest process."""
+    env = os.environ.copy()
+    env[_RUN_SUBQ_MBRIDGE_INPROCESS_ENV] = "1"
+    node_id = f"{Path(__file__).resolve()}::test_batch_generate_mbridge_subquadratic_ops"
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-vv",
+        node_id,
+        "--basetemp",
+        str(tmp_path / "subpytest"),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1200,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"subquadratic MBridge subprocess timed out after {exc.timeout}s")
+
+    output = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    if result.returncode == 0:
+        if "XFAIL" in result.stdout or "xfailed" in result.stdout.lower():
+            pytest.xfail("subquadratic MBridge subprocess xfailed")
+        return
+
+    if "failed a CUDA self-test" in output or "subquadratic_ops kernels unsupported" in output:
+        pytest.xfail("subquadratic_ops_torch CUDA kernels are unsupported in this environment")
+
+    pytest.fail(f"subquadratic MBridge subprocess failed with returncode={result.returncode}:\n{output}")
+
+
 @pytest.mark.timeout(900)
 @pytest.mark.slow
-def test_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path: Path):
+def test_batch_generate_mbridge_subquadratic_ops(tmp_path: Path):
+    """Run subquadratic MBridge generation coverage in an isolated pytest subprocess."""
+    if os.environ.get(_RUN_SUBQ_MBRIDGE_INPROCESS_ENV) != "1":
+        _run_subq_mbridge_test_subprocess(tmp_path)
+        return
+    _run_batch_generate_mbridge_subquadratic_ops(_load_prompt_sequences(), tmp_path)
+
+
+def _run_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path: Path):
     """Second-half match accuracy through the dynamic engine with the fused subquadratic-ops kernels.
 
     Mirrors :func:`test_batch_generate_mbridge` (1b-bf16, greedy) but enables ``use_subquadratic_ops``
