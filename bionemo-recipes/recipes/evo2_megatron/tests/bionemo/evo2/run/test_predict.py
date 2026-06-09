@@ -807,3 +807,22 @@ def test_predict_evo2_embedding_with_log_probs_rejected(
     assert "Cannot use --output-log-prob-seqs with --embedding-layer" in result.stderr or (
         "Cannot use --output-log-prob-seqs with --embedding-layer" in result.stdout
     ), "Expected error message about incompatible options"
+
+
+def test_load_model_to_layer_requires_layer():
+    """`full=False` needs a layer; the guard fails fast before any checkpoint I/O (CPU)."""
+    from bionemo.evo2.run.predict import load_model_to_layer
+
+    with pytest.raises(ValueError, match="layer is required"):
+        load_model_to_layer("/nonexistent/ckpt", layer=None, full=False)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU to load Evo2")
+def test_load_model_to_layer_truncated(mbridge_checkpoint_path):
+    """Truncated load returns a usable (model, tokenizer) for hidden-state extraction."""
+    from bionemo.evo2.run.predict import load_model_to_layer
+
+    model, tokenizer = load_model_to_layer(mbridge_checkpoint_path, layer=2, full=False)
+    assert model is not None
+    assert tokenizer.vocab_size > 0
