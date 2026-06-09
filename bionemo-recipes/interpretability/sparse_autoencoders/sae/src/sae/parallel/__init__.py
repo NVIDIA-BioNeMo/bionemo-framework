@@ -13,19 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SAE architecture implementations."""
+"""Tensor-parallel building blocks for latent-sharded SAEs."""
 
-from .base import SparseAutoencoder
-from .moe import MoESAE
-from .relu_l1 import ReLUSAE
-from .topk import TopKSAE
-from .topk_tp import ShardedTopKSAE
+from .checkpoint import load_and_merge, save_sharded
+from .comms import all_gather_cat, all_reduce_sum, autograd_all_reduce_sum
+from .topk import GlobalTopK, dense_topk_reference, global_topk
+from .training import train_tp_loop
 
 
 __all__ = [
-    "MoESAE",
-    "ReLUSAE",
-    "ShardedTopKSAE",
-    "SparseAutoencoder",
-    "TopKSAE",
+    "GlobalTopK",
+    "all_gather_cat",
+    "all_reduce_sum",
+    "autograd_all_reduce_sum",
+    "dense_topk_reference",
+    "global_topk",
+    "load_and_merge",
+    "save_sharded",
+    "train_tp_loop",
 ]

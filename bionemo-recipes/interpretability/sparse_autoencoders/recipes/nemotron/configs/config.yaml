@@ -1,0 +1,52 @@
+# Main config - sets defaults for all config groups
+defaults:
+  - model: topk
+  - data: fineweb
+  - training: default
+  - streaming: default
+  - _self_
+
+# Global settings
+seed: 42
+device: null  # null = auto-detect (cuda > mps > cpu)
+
+# Activation extraction
+activations:
+  model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  layer: 39  # 3/4 depth of Nemotron (52 layers total)
+  batch_size: 4  # smaller for 30B model
+  max_length: 2048
+  cache_dir: null  # Activation store dir. Required by extract.py / train.py.
+  shard_size: 100000  # Activations per parquet shard (extract.py)
+
+# Weights & Biases
+wandb:
+  enabled: true
+  project: sae_nemotron_recipe
+  group: "nemotron__${model.type}"
+  job_type: train
+  run_name: "exp${model.expansion_factor}x__k${model.top_k}__auxk_${model.auxk}__L${activations.layer}"
+
+# Evaluation (scripts/eval.py)
+eval:
+  enabled: true
+  checkpoint: null           # Checkpoint .pt to eval; null -> checkpoint.dir/checkpoint_final.pt
+  max_samples: 200           # validation texts for reconstruction/sparsity
+  run_loss_recovered: true   # compute CE loss recovered (reloads the LM)
+  loss_recovered_n_sequences: 100
+
+# Parallelism for SAE training (both require torchrun --nproc_per_node=N):
+#   dp_size>1 -> data-parallel (DDP), shards the data (dense TopKSAE).
+#   tp_size>1 -> tensor-parallel, shards the latents across GPUs (ShardedTopKSAE),
+#                trains from a cache; needed to scale hidden_dim to ~1M+.
+parallel:
+  dp_size: 1
+  tp_size: 1
+
+# Output
+output_dir: outputs
+
+# Checkpointing
+checkpoint:
+  dir: null
+  steps: null

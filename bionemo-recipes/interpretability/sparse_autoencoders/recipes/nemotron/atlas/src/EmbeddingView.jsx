@@ -1,0 +1,334 @@
+import React, { useEffect, useRef } from 'react'
+import { EmbeddingViewMosaic } from 'embedding-atlas'
+
+// Color palette for categories (D3 category10 + extended)
+const CATEGORY_COLORS = [
+  "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+  "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+  "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+  "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5"
+]
+
+// Sequential color palette (NVIDIA brand)
+const SEQUENTIAL_COLORS = [
+  "#c359ef", "#9525C6", "#0046a4", "#0074DF", "#3f8500",
+  "#76B900", "#ef9100", "#F9C500", "#ff8181", "#EF2020"
+]
+
+// Default color for uniform coloring (NVIDIA green)
+const DEFAULT_COLOR = "#76b900"
+
+// Custom tooltip renderer
+class FeatureTooltip {
+  constructor(node, props) {
+    this.node = node
+    this.inner = document.createElement("div")
+    this.inner.style.cssText = `
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-family: 'NVIDIA Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      max-width: 300px;
+      color: var(--text);
+    `
+    this.node.appendChild(this.inner)
+    this.update(props)
+  }
+
+  update(props) {
+    const { tooltip } = props
+    if (!tooltip) {
+      this.inner.innerHTML = ""
+      return
+    }
+    const featureId = tooltip.identifier ?? ""
+    const label = tooltip.fields?.label ?? tooltip.text ?? ""
+    const logFreq = tooltip.fields?.log_frequency
+    const maxAct = tooltip.fields?.max_activation
+    const colorField = tooltip.fields?.color_field
+
+    this.inner.innerHTML = `
+      <div style="font-weight: bold; margin-bottom: 4px; color: var(--text-heading);">Feature #${featureId}</div>
+      <div style="color: var(--text-secondary); margin-bottom: 4px; font-size: 12px;">${label}</div>
+      ${colorField ? `<div style="color: var(--text-tertiary); font-size: 11px;">Category: ${colorField}</div>` : ""}
+      ${logFreq !== undefined ? `<div style="color: var(--text-tertiary); font-size: 11px;">Log Frequency: ${logFreq.toFixed(3)}</div>` : ""}
+      ${maxAct !== undefined ? `<div style="color: var(--text-tertiary); font-size: 11px;">Max Activation: ${maxAct.toFixed(2)}</div>` : ""}
+    `
+  }
+
+  destroy() {
+    this.inner.remove()
+  }
+}
+
+export default function EmbeddingView({ brush, categoryColumn, categoryColumns, onFeatureClick, highlightedFeatureId, viewportState, onViewportChange, labels, features, selectedCategory, darkMode, hiddenCategories }) {
+  const containerRef = useRef(null)
+  const viewRef = useRef(null)
+  const onFeatureClickRef = useRef(onFeatureClick)
+  const onViewportChangeRef = useRef(onViewportChange)
+
+  // Keep the callback refs updated
+  useEffect(() => {
+    onFeatureClickRef.current = onFeatureClick
+  }, [onFeatureClick])
+
+  useEffect(() => {
+    onViewportChangeRef.current = onViewportChange
+  }, [onViewportChange])
+
+  // Update selection and tooltip when highlightedFeatureId changes
+  useEffect(() => {
+    if (viewRef.current && highlightedFeatureId != null) {
+      // Find the feature data
+      const feature = features?.find(f => f.feature_id === highlightedFeatureId)
+
+      // Build tooltip fields
+      const fields = {
+        label: feature?.label || `Feature ${highlightedFeatureId}`,
+        log_frequency: feature?.log_frequency || feature?.activation_freq || 0,
+        max_activation: feature?.max_activation || 0,
+        color_field: null
+      }
+
+      // Add selected category metric if available
+      if (selectedCategory && selectedCategory !== 'none' && feature) {
+        const metricName = selectedCategory.replace(/_/g, ' ')
+        const metricValue = feature[selectedCategory]
+        if (metricValue !== undefined && metricValue !== null) {
+          fields.color_field = `${metricName}: ${typeof metricValue === 'number' ? metricValue.toFixed(3) : metricValue}`
+        }
+      }
+
+      // Construct tooltip object with feature data
+      const tooltipObj = {
+        identifier: highlightedFeatureId,
+        text: `Feature #${highlightedFeatureId}`,
+        x: feature?.x,
+        y: feature?.y,
+        fields: fields
+      }
+      // Clear previous selection first to avoid animated transition
+      viewRef.current.update({
+        selection: null,
+        tooltip: null
+      })
+      viewRef.current.update({
+        selection: [highlightedFeatureId],
+        tooltip: tooltipObj
+      })
+    } else if (viewRef.current && highlightedFeatureId == null) {
+      viewRef.current.update({
+        selection: null,
+        tooltip: null
+      })
+    }
+  }, [highlightedFeatureId, features, selectedCategory])
+
+  // Update viewport when viewportState changes (skip null to let auto-fit persist)
+  useEffect(() => {
+    if (viewRef.current && viewportState != null) {
+      viewRef.current.update({
+        viewportState: viewportState
+      })
+    }
+  }, [viewportState])
+
+  // Update color scheme when dark mode changes
+  useEffect(() => {
+    if (viewRef.current) {
+      viewRef.current.update({
+        config: { colorScheme: darkMode ? "dark" : "light" }
+      })
+    }
+  }, [darkMode])
+
+  // Update labels when they change
+  useEffect(() => {
+    if (viewRef.current && labels) {
+      console.log('[EmbeddingView] updating labels:', labels.length, labels.slice(0, 2))
+      viewRef.current.update({
+        labels: labels
+      })
+    }
+  }, [labels])
+
+  useEffect(() => {
+    if (!containerRef.current || !brush) return
+
+    // Clear previous view
+    if (viewRef.current) {
+      containerRef.current.innerHTML = ''
+    }
+
+    // Determine category column and colors
+    let categoryColName = null
+    let colors = Array(50).fill(DEFAULT_COLOR)
+    let additionalFields = {
+      label: "label",
+      log_frequency: "log_frequency",
+      max_activation: "max_activation",
+    }
+
+    if (categoryColumn && categoryColumn !== "none") {
+      const colInfo = categoryColumns?.find(c => c.name === categoryColumn)
+      if (colInfo) {
+        if (colInfo.type === 'sequential') {
+          // Sequential column - use binned version and sequential colors
+          categoryColName = `${categoryColumn}_bin`
+          colors = SEQUENTIAL_COLORS
+        } else if (colInfo.type === 'string') {
+          // Categorical string column
+          categoryColName = `${categoryColumn}_cat`
+          colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
+        } else {
+          // Integer categorical column
+          categoryColName = categoryColumn
+          colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
+        }
+        additionalFields.color_field = categoryColumn
+      }
+    }
+
+    const width = containerRef.current.clientWidth
+    const height = containerRef.current.clientHeight
+
+    try {
+      viewRef.current = new EmbeddingViewMosaic(
+        containerRef.current,
+        {
+          table: "features",
+          x: "x",
+          y: "y",
+          category: categoryColName,
+          text: "label",
+          identifier: "feature_id",
+          filter: brush,
+          rangeSelection: brush,
+          selection: highlightedFeatureId != null ? [highlightedFeatureId] : null,
+          viewportState: viewportState,
+          categoryColors: colors,
+          width: width,
+          height: height,
+          labels: labels || null,
+          config: {
+            mode: "points",
+            colorScheme: document.documentElement.classList.contains('dark') ? "dark" : "light",
+            autoLabelEnabled: false,
+          },
+          theme: {
+            brandingLink: {
+              text: "NVIDIA BioNeMo",
+              href: "https://github.com/NVIDIA/bionemo-framework",
+            },
+          },
+          additionalFields: additionalFields,
+          customTooltip: FeatureTooltip,
+          onSelection: (selection) => {
+            // selection is DataPoint[] | null
+            if (!onFeatureClickRef.current) return
+
+            if (selection && selection.length > 0) {
+              // Get the last clicked point (most recent selection)
+              const lastPoint = selection[selection.length - 1]
+              const featureId = lastPoint?.identifier ?? lastPoint
+              const x = lastPoint?.x
+              const y = lastPoint?.y
+              if (featureId != null) {
+                onFeatureClickRef.current(featureId, x, y)
+              }
+            } else {
+              // Clicked on empty canvas - clear selection
+              onFeatureClickRef.current(null)
+            }
+          },
+          onViewportState: (vp) => {
+            if (onViewportChangeRef.current && vp) {
+              onViewportChangeRef.current(vp)
+            }
+          },
+        }
+      )
+    } catch (err) {
+      console.warn('Error creating EmbeddingViewMosaic:', err)
+    }
+
+    return () => {
+      if (containerRef.current) {
+        containerRef.current.innerHTML = ''
+      }
+    }
+  }, [brush])
+
+  // Update category coloring in-place (without recreating the view)
+  useEffect(() => {
+    if (!viewRef.current) return
+
+    let categoryColName = null
+    const HIDDEN_COLOR = darkMode ? "#0a0a0a" : "#fafafa"
+    let colors = Array(50).fill(HIDDEN_COLOR)
+
+    if (categoryColumn && categoryColumn !== "none") {
+      const colInfo = categoryColumns?.find(c => c.name === categoryColumn)
+      if (colInfo) {
+        if (colInfo.type === 'sequential') {
+          categoryColName = `${categoryColumn}_bin`
+          colors = SEQUENTIAL_COLORS
+        } else if (colInfo.type === 'string') {
+          categoryColName = `${categoryColumn}_cat`
+          colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
+          // Map colors to match DENSE_RANK order, dim non-selected when filtering
+          if (hiddenCategories && hiddenCategories.size > 0 && features) {
+            const allCatNames = [...new Set(
+              features.map(f => f[categoryColumn]).filter(v => v != null)
+            )].sort()
+            colors = colors.map((c, i) => {
+              const name = allCatNames[i]
+              if (!name) return c
+              return !hiddenCategories.has(name) ? HIDDEN_COLOR : c
+            })
+          }
+        } else {
+          categoryColName = categoryColumn
+          colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
+        }
+      }
+    }
+
+    viewRef.current.update({
+      category: categoryColName,
+      categoryColors: colors,
+      selection: null,
+      tooltip: null,
+    })
+  }, [categoryColumn, categoryColumns, hiddenCategories])
+
+  // Handle resize
+  useEffect(() => {
+    const handleResize = () => {
+      if (viewRef.current && containerRef.current) {
+        const width = containerRef.current.clientWidth
+        const height = containerRef.current.clientHeight
+        viewRef.current.update({ width, height })
+      }
+    }
+
+    const resizeObserver = new ResizeObserver(handleResize)
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current)
+    }
+
+    return () => {
+      resizeObserver.disconnect()
+    }
+  }, [])
+
+  return (
+    <div
+      ref={containerRef}
+      style={{ width: '100%', height: '100%', minHeight: '300px' }}
+    />
+  )
+}

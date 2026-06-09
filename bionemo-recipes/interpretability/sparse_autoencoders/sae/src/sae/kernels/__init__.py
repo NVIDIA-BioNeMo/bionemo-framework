@@ -13,19 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SAE architecture implementations."""
+"""Sparse SAE kernels (Triton now; CUDA later) for scaling TopK SAEs.
 
-from .base import SparseAutoencoder
-from .moe import MoESAE
-from .relu_l1 import ReLUSAE
-from .topk import TopKSAE
-from .topk_tp import ShardedTopKSAE
+Public surface:
+    HAS_TRITON              -- whether Triton imported successfully
+    TritonDecoderAutograd   -- sparse TopK decode autograd Function
+    reference_decode        -- dense oracle used by tests
+"""
+
+from .reference import reference_decode, reference_sparse_dense_matmul
+from .triton_decoder import HAS_TRITON, TritonDecoderAutograd
 
 
 __all__ = [
-    "MoESAE",
-    "ReLUSAE",
-    "ShardedTopKSAE",
-    "SparseAutoencoder",
-    "TopKSAE",
+    "HAS_TRITON",
+    "TritonDecoderAutograd",
+    "reference_decode",
+    "reference_sparse_dense_matmul",
 ]

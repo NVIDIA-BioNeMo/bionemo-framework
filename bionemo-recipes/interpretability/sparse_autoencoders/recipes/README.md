@@ -40,6 +40,28 @@ python scripts/train.py --config-name config_production
 
 See `recipes/esm2/README.md` for detailed documentation.
 
+### Nemotron (`recipes/nemotron/`)
+
+Sparse Autoencoders for the NVIDIA Nemotron-3-Nano language model, trained on a large web-text corpus.
+
+**Features:**
+
+- Nemotron-3-Nano wrapper (hybrid Mamba-2 / MoE / GQA, multi-GPU bf16 loading)
+- FineWeb streaming text loader
+- Causal-LM loss-recovered evaluation
+- Conservative defaults with a ready-made 8x/16x/32x scaling ladder
+- Hydra-based training configs
+
+**Quick Start:**
+
+```bash
+cd recipes/nemotron
+python scripts/train.py --config-name config_debug   # smoke test
+python scripts/train.py                              # conservative default
+```
+
+See `recipes/nemotron/README.md` for detailed documentation.
+
 ## Recipe Philosophy
 
 Each recipe follows these principles:
