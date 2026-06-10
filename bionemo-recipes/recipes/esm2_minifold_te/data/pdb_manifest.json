@@ -1,0 +1,1172 @@
+{
+  "1UBQ": {
+    "sha256": "056f98710cb2b36f633c45e41902a02eb446e82871da21ff2dd44f74a56ca0f6",
+    "chain_id": "A",
+    "num_residues": 76,
+    "sequence_length": 76
+  },
+  "2GB1": {
+    "sha256": "83c8456bad4688e4be5b9057bf634cd5265a89313abd927290b8d66c4e0a2d5c",
+    "chain_id": "A",
+    "num_residues": 56,
+    "sequence_length": 56
+  },
+  "1PGA": {
+    "sha256": "e8d9e171a9ca2b7e66b10568bf6d0122da8450e57ad632a7b4c13c6a71f7edf2",
+    "chain_id": "A",
+    "num_residues": 56,
+    "sequence_length": 56
+  },
+  "1IGD": {
+    "sha256": "9180b720ccbae9095f558c4945e5de3642129b9b1be68d5c75f22a94bfe79ddb",
+    "chain_id": "A",
+    "num_residues": 61,
+    "sequence_length": 61
+  },
+  "1SHG": {
+    "sha256": "c278e2e544b120b060ee893094f4083add38db1dd421952b9ab1a98891a99dc1",
+    "chain_id": "A",
+    "num_residues": 57,
+    "sequence_length": 57
+  },
+  "1ENH": {
+    "sha256": "80c861fd8559f1a8842e0ae1de7d742aca803aabaf0b3107f93dab91d70e8ca5",
+    "chain_id": "A",
+    "num_residues": 54,
+    "sequence_length": 54
+  },
+  "1PIN": {
+    "sha256": "3060c3ca9dfff3af572d754a50c819eb400dfa0e9bf9065e72e1175f3814e375",
+    "chain_id": "A",
+    "num_residues": 153,
+    "sequence_length": 153
+  },
+  "1BDD": {
+    "sha256": "de2327fa385c168abae275b06e6f9d91228cb03b3e95c37d3646bc454ee9b91c",
+    "chain_id": "A",
+    "num_residues": 60,
+    "sequence_length": 60
+  },
+  "2PTL": {
+    "sha256": "fd758ef87543f7c29a5b451fd849b5a4693ed45acb0cb24fda60c5501538d43d",
+    "chain_id": "A",
+    "num_residues": 78,
+    "sequence_length": 78
+  },
+  "1K8M": {
+    "sha256": "37f623fb464c27e1b87623b25d037f8c520a087f151b94ab3bd61579860525d2",
+    "chain_id": "A",
+    "num_residues": 87,
+    "sequence_length": 87
+  },
+  "1MJC": {
+    "sha256": "2ce3a3b1694eb4a07930bcd4350892066ce6b064dffb495435427e645013d9f4",
+    "chain_id": "A",
+    "num_residues": 69,
+    "sequence_length": 69
+  },
+  "1RIS": {
+    "sha256": "a77dd016ec124f95442bca65cf11e30d3a884d1b3bb22157a647745dd78d2af9",
+    "chain_id": "A",
+    "num_residues": 97,
+    "sequence_length": 97
+  },
+  "2CI2": {
+    "sha256": "62c6ec30a5986404a30417f585b77c59d95b4f6029587c810b4b5d213d9727cc",
+    "chain_id": "I",
+    "num_residues": 65,
+    "sequence_length": 65
+  },
+  "1CSP": {
+    "sha256": "c23f6e4bf192bbd0c181da9a90f1942c51cb5660e23af1eb846356d5711c018f",
+    "chain_id": "A",
+    "num_residues": 67,
+    "sequence_length": 67
+  },
+  "1HRC": {
+    "sha256": "2ee756c54a501c49e1e63371548b4de3051b704f2153f8cfc15fa66c3585fecd",
+    "chain_id": "A",
+    "num_residues": 104,
+    "sequence_length": 104
+  },
+  "1LZ1": {
+    "sha256": "b7c3da2c7a54184fa768a2f51b56c4d7f4516854a4e77dbaa2528803a673cea0",
+    "chain_id": "A",
+    "num_residues": 130,
+    "sequence_length": 130
+  },
+  "2LZM": {
+    "sha256": "9fa81cd0454d37c53cd5046b96ef7d993a99c249e77a2da4dc3adf7cdc263d90",
+    "chain_id": "A",
+    "num_residues": 164,
+    "sequence_length": 164
+  },
+  "1RN1": {
+    "sha256": "c9afd184070c41ce71a3bf617a816d866dd22c877a2de9eb55c458b617f5bdbe",
+    "chain_id": "A",
+    "num_residues": 103,
+    "sequence_length": 103
+  },
+  "3LZT": {
+    "sha256": "e925f918c98540d51bc5b8a7aa6217d9b9726ebab8a48a6833221c95bdd24454",
+    "chain_id": "A",
+    "num_residues": 129,
+    "sequence_length": 129
+  },
+  "1AKE": {
+    "sha256": "01f41b1b42318a1a5df7f650dbab881677aa0e8d825f7c42dd26ae16a94c0948",
+    "chain_id": "A",
+    "num_residues": 214,
+    "sequence_length": 214
+  },
+  "4PTI": {
+    "sha256": "fc81f5dacdf5618e65b8ee7b02b72cd276c1e83f6082094c90a08041f0200b13",
+    "chain_id": "A",
+    "num_residues": 58,
+    "sequence_length": 58
+  },
+  "1BPI": {
+    "sha256": "bca455ebc267a5a756bdc998d257a2e3d04d6843c11fe1f3cfdcde88fd05a59c",
+    "chain_id": "A",
+    "num_residues": 58,
+    "sequence_length": 58
+  },
+  "1CTF": {
+    "sha256": "d4ac4412659fe599e14816d21232eb94c6a57a24a9f3965c773ccc260e57ec01",
+    "chain_id": "A",
+    "num_residues": 68,
+    "sequence_length": 68
+  },
+  "2ABD": {
+    "sha256": "1937b67a9cbeb42ddb2e74015cecbe230be5bb687bc8e3f549e8802a2d4334c5",
+    "chain_id": "A",
+    "num_residues": 86,
+    "sequence_length": 86
+  },
+  "1PHT": {
+    "sha256": "10fd4997efe2a9da3e474d696f9cd172cd00ca68c6b15ec87408386670fc885b",
+    "chain_id": "A",
+    "num_residues": 83,
+    "sequence_length": 83
+  },
+  "3ICB": {
+    "sha256": "6389449d31ef5bc5b1c2f25180b520f333544d71ff2f34ac20b5369ff746f261",
+    "chain_id": "A",
+    "num_residues": 75,
+    "sequence_length": 75
+  },
+  "1CDT": {
+    "sha256": "6649b9938358f786c78b72c42600fb354fc37ee416ed0ba58144f8cadb8b2bf5",
+    "chain_id": "A",
+    "num_residues": 60,
+    "sequence_length": 60
+  },
+  "1COA": {
+    "sha256": "4c3a0e08646b8e1f9611d84b5ada4069a6898a989733ec25d4a01867546c3443",
+    "chain_id": "I",
+    "num_residues": 64,
+    "sequence_length": 64
+  },
+  "1AHO": {
+    "sha256": "0169a6ec0c2f8883542b05a1df031ee56c608c925cd479deac8d307191953478",
+    "chain_id": "A",
+    "num_residues": 64,
+    "sequence_length": 64
+  },
+  "1MBN": {
+    "sha256": "835e78e22edcd1a23cb2f34625adf8818af654fd5494562038cc9fd5dcba8945",
+    "chain_id": "A",
+    "num_residues": 153,
+    "sequence_length": 153
+  },
+  "1YCC": {
+    "sha256": "d31ccf5c5429b83632dc0f2a63e470746d4bb167ec0cb50cc5e7fb43b86d34e8",
+    "chain_id": "A",
+    "num_residues": 107,
+    "sequence_length": 107
+  },
+  "2CPL": {
+    "sha256": "12495c509148a61158e66edf2a8394df3ab0f21f5ebe8a01cb7ee96cdc39950f",
+    "chain_id": "A",
+    "num_residues": 164,
+    "sequence_length": 164
+  },
+  "1LYZ": {
+    "sha256": "7d4eeceaeee0adf6946dd07903907066c3923e103797caee2d40318a1af3cad6",
+    "chain_id": "A",
+    "num_residues": 129,
+    "sequence_length": 129
+  },
+  "1RGE": {
+    "sha256": "ef32c3f2e7e10309afe098e416b0d0c83c76401c8c8bd2876c11c4f04b11a43e",
+    "chain_id": "A",
+    "num_residues": 96,
+    "sequence_length": 96
+  },
+  "3RUB": {
+    "sha256": "80db9d3ffa2c0a3613940061806b23c95baf386b29f503c1e26d4af286724b52",
+    "chain_id": "L",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1OVA": {
+    "sha256": "b10377f8705036247f62af11800e272312771abdc37e03d3ef41b35154db585d",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1LKI": {
+    "sha256": "3545830536d72bb491dc7e08c4850197e7406520a377177fff5e8bcb208e8214",
+    "chain_id": "A",
+    "num_residues": 172,
+    "sequence_length": 172
+  },
+  "1PLC": {
+    "sha256": "ff6dea63f20ee33eddffa2c7eaf599ab65562b92918feec0da49f7a282d48778",
+    "chain_id": "A",
+    "num_residues": 99,
+    "sequence_length": 99
+  },
+  "1TEN": {
+    "sha256": "8244778c8f2e85688274cc78da4e30a37505ffb860268864bb4ca325e02eaab2",
+    "chain_id": "A",
+    "num_residues": 90,
+    "sequence_length": 90
+  },
+  "1FNF": {
+    "sha256": "a49c2efaed3cb0fb774f3bdeb1a6473c211eb173939200976049e8d129cce9ad",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1TIT": {
+    "sha256": "9b53fbf0825333e210b4211c4e980ef498e7527407aaf87f80ea1960c95e2001",
+    "chain_id": "A",
+    "num_residues": 89,
+    "sequence_length": 89
+  },
+  "1WIT": {
+    "sha256": "33e4228a1027b6b3013ecf9281c08e3d893e54ec3fc779a2cef361b483f1022a",
+    "chain_id": "A",
+    "num_residues": 93,
+    "sequence_length": 93
+  },
+  "1THX": {
+    "sha256": "958dca9649ce1b5b53d16f296d147bf2c8559d6f2b61cb8d931f23b44ed041a2",
+    "chain_id": "A",
+    "num_residues": 108,
+    "sequence_length": 108
+  },
+  "1BKR": {
+    "sha256": "1f31d1c63c4a5c7bcd9793cf206828c463a4ea2ceb58a0782988140c6c0fb9c9",
+    "chain_id": "A",
+    "num_residues": 108,
+    "sequence_length": 108
+  },
+  "1CEX": {
+    "sha256": "09e73e24a2fa01fae6598bd673d049146f5fc8d5156dda14ed03cb040eccffec",
+    "chain_id": "A",
+    "num_residues": 197,
+    "sequence_length": 197
+  },
+  "1CHD": {
+    "sha256": "0bacad1fac9f61239fec8ce3181a9a491374bc81748afda25e298437154c7dd2",
+    "chain_id": "A",
+    "num_residues": 198,
+    "sequence_length": 198
+  },
+  "1CSE": {
+    "sha256": "b5d7e7db068b277ddc72eb753e4a7b0ec424b2194a2814c169e832345e601ade",
+    "chain_id": "E",
+    "num_residues": 274,
+    "sequence_length": 274
+  },
+  "1CYO": {
+    "sha256": "956ffa7dcda6a3b27c82146f1faaebbafbbd5b23f51497b280281761993a198c",
+    "chain_id": "A",
+    "num_residues": 88,
+    "sequence_length": 88
+  },
+  "1DTP": {
+    "sha256": "be00ea9dc45576074eb2a22855afca794c0cf070e33f8418ee67d6d751238a2a",
+    "chain_id": "A",
+    "num_residues": 190,
+    "sequence_length": 190
+  },
+  "1ECA": {
+    "sha256": "72ded9fcb3b89a9f6b36e9d5b1ad91986e2f5bae42d62edd0cbf71864b174a5c",
+    "chain_id": "A",
+    "num_residues": 136,
+    "sequence_length": 136
+  },
+  "1FAS": {
+    "sha256": "d36495d2ca3474f1bab1d37c5f7191e46e625d50515afbe5bb63ae6ac2e963fe",
+    "chain_id": "A",
+    "num_residues": 61,
+    "sequence_length": 61
+  },
+  "1FKB": {
+    "sha256": "a483de9e6db2c1f6119258fdfc68765bf308eee3aa5101b0e07199802bbda44d",
+    "chain_id": "A",
+    "num_residues": 107,
+    "sequence_length": 107
+  },
+  "1FLV": {
+    "sha256": "bd1ce960155ccfcad20579f84c6eb21c0fb561ce98f2346b34253f4018daed36",
+    "chain_id": "A",
+    "num_residues": 168,
+    "sequence_length": 168
+  },
+  "1GCI": {
+    "sha256": "c69c4b51df71b65f7ad4a49458af228a0261893c00ab6bab0200570a7d20c5b5",
+    "chain_id": "A",
+    "num_residues": 269,
+    "sequence_length": 269
+  },
+  "1GOF": {
+    "sha256": "2c324c80ee423dc0f507fa665aa892cd001bfa96d5509b9f3d6d0fac37dfaa39",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1HMR": {
+    "sha256": "fdc8e492a4e1d6b3baf64bb98b9b377c69ff268f8e67b36c1807b454f38baaf1",
+    "chain_id": "A",
+    "num_residues": 131,
+    "sequence_length": 131
+  },
+  "1IOB": {
+    "sha256": "241f339669a911f3c0c5c60a24d455c81e54827da90336b749a12ee09ad75c2e",
+    "chain_id": "A",
+    "num_residues": 153,
+    "sequence_length": 153
+  },
+  "1JBC": {
+    "sha256": "418c1e271bc77936bc2f74b0f1ad75b6f84b5accbe13082fe9b1cb30b427cdc2",
+    "chain_id": "A",
+    "num_residues": 237,
+    "sequence_length": 237
+  },
+  "1KPT": {
+    "sha256": "38dcb1d110760d87de6e5a0ae66b2cc7c38bcb7cdcf64eba5c0984fbc35bd001",
+    "chain_id": "A",
+    "num_residues": 105,
+    "sequence_length": 105
+  },
+  "1LAM": {
+    "sha256": "46e824c80fcd4640f8507ce5576a6c4d3a04b89c536dd43fc660b791aab4df0e",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1LEC": {
+    "sha256": "dce01b94d945c90104560dcc214501c7ffd76e4b3c20170c438602d3024b0456",
+    "chain_id": "A",
+    "num_residues": 242,
+    "sequence_length": 242
+  },
+  "1MLA": {
+    "sha256": "cfb1a6f6ff3775dc2174c8789168d8e44b7a91fe2063cb862feb0b74e74a4af3",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1NLS": {
+    "sha256": "d79c6bdf4e5f2abb8e21a3ca76a2dd8830144c7f69bc9c10b678b032bead979b",
+    "chain_id": "A",
+    "num_residues": 237,
+    "sequence_length": 237
+  },
+  "1OMP": {
+    "sha256": "8fc0436ac9314dce1c504e6016e1fc05d95f5b71faa245036efb6e3efe670b8f",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1PAZ": {
+    "sha256": "1df4918e56a9bde8705ad4ec394aea223fcb1739194ab72144f9dbc5008ddedc",
+    "chain_id": "A",
+    "num_residues": 120,
+    "sequence_length": 120
+  },
+  "1PBE": {
+    "sha256": "4fd1b3863f2317671b0cf68840b3b4235ad68e8182e226637c7b477cf59da865",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1PHP": {
+    "sha256": "642a85c990fe7c041bf8f7952c0d1fc97be6c14dde32f0c4bb61d6a77bd958bb",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1POH": {
+    "sha256": "279f526e0e1d75dc25ecac0e8d151d646eaeb92b985852499254ea9c42af6454",
+    "chain_id": "A",
+    "num_residues": 85,
+    "sequence_length": 85
+  },
+  "1PPL": {
+    "sha256": "dc97f5605b05b3f958e437a15b85ad297856c6df9f2dc7dc489b879759d70295",
+    "chain_id": "E",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1REC": {
+    "sha256": "c90edd6d537ba299f8d01e1d8dcb9e95da69a87ae99ecf5015dc7274a57df069",
+    "chain_id": "A",
+    "num_residues": 185,
+    "sequence_length": 185
+  },
+  "1REP": {
+    "sha256": "11c2ceefdca82572a3df10bc58efe1c123a36c7245708595282707e7282fdb66",
+    "chain_id": "C",
+    "num_residues": 214,
+    "sequence_length": 214
+  },
+  "1RTP": {
+    "sha256": "2d2b65f4e06b17465493be514883502267665aba9e73f1802e445389ed5b7bc8",
+    "chain_id": "1",
+    "num_residues": 109,
+    "sequence_length": 109
+  },
+  "1SAU": {
+    "sha256": "024803af2e2d8629d25d5b777e9358a8f16501966a1de7363ce7eba490d3e05f",
+    "chain_id": "A",
+    "num_residues": 114,
+    "sequence_length": 114
+  },
+  "1SBP": {
+    "sha256": "61889856ca53b6f7d7169df10ef4d9a91c92ef2969637df04e288240c02a7c92",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1SMR": {
+    "sha256": "6c5e25ff997e3683d6cf49fc5f3b3f27dfc7003d5d3a75df7133eeb29fe4a31a",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1STN": {
+    "sha256": "ebd8b4aa5b6d630a723e752013a6794f8636882db0d5d6064461be3c4be64ef9",
+    "chain_id": "A",
+    "num_residues": 136,
+    "sequence_length": 136
+  },
+  "1THB": {
+    "sha256": "db9535f33bec750d5e7525d7a999e4812ea799f3917595e0b92d3270307bdeee",
+    "chain_id": "A",
+    "num_residues": 141,
+    "sequence_length": 141
+  },
+  "1TON": {
+    "sha256": "ac8e747238603a572e2385483e9602d6bb04d384f1b54d5258fbc3643c700507",
+    "chain_id": "A",
+    "num_residues": 228,
+    "sequence_length": 228
+  },
+  "1TPK": {
+    "sha256": "e9cc5c5654ca78195bb70998166f89cdd2d4b72de2cda2414104c49b19fb730a",
+    "chain_id": "A",
+    "num_residues": 88,
+    "sequence_length": 88
+  },
+  "1TRB": {
+    "sha256": "580684c633c75f3b9ce3fb153823102e2abf27873af23310beded3bbec849235",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1VCC": {
+    "sha256": "7c23da5c418646b6b72aedec26506dd59198cb12140344df7548daf6f040455f",
+    "chain_id": "A",
+    "num_residues": 77,
+    "sequence_length": 77
+  },
+  "1WHI": {
+    "sha256": "73049e77254a1e4afc64032d75eb9da6db248eb83343e4102dc6837a7f882a7d",
+    "chain_id": "A",
+    "num_residues": 122,
+    "sequence_length": 122
+  },
+  "1XNB": {
+    "sha256": "cb1e11f6640c4aed0cdd5e5ef7724e1c4e3a5b3d6ee7ff0c084e7bcf8a0beb5e",
+    "chain_id": "A",
+    "num_residues": 185,
+    "sequence_length": 185
+  },
+  "2ACT": {
+    "sha256": "650139fdaa141b5b805f48c69b0431e3a07dd7f99779246ff7ce8accade45b35",
+    "chain_id": "A",
+    "num_residues": 217,
+    "sequence_length": 217
+  },
+  "2AIT": {
+    "sha256": "80d87df39d255c874e034d254237a49df39fdb5633855feff32c3406d35276cc",
+    "chain_id": "A",
+    "num_residues": 74,
+    "sequence_length": 74
+  },
+  "2AZA": {
+    "sha256": "284b1405b0f9032fa1bc0efe61ecf6842e35d24160d4eeb750c000aa7a243018",
+    "chain_id": "A",
+    "num_residues": 129,
+    "sequence_length": 129
+  },
+  "2CCY": {
+    "sha256": "d4d9f481a4ba4b2d5167b1c725b2a94673f3c1d54ea7f240340bc4c95e37e01a",
+    "chain_id": "A",
+    "num_residues": 127,
+    "sequence_length": 127
+  },
+  "2CDV": {
+    "sha256": "f4e14129ce13722542f4e53d79dd6ccb44c2c6a01a5fe8364c4c1f6e6aacc19f",
+    "chain_id": "A",
+    "num_residues": 107,
+    "sequence_length": 107
+  },
+  "2CMD": {
+    "sha256": "7f986ee1610d5b9a191af06699601e1e7110133d16f44b1d435fda9d59738ff5",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "2CTC": {
+    "sha256": "3beeef2681a45bff701a2841bf0f11e38b2944231aa08dd7c9c165f96df20d17",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "2END": {
+    "sha256": "d7437cb48150eca138e05e3c31e13a98220de9a197cca7e63601e16d6aecc54e",
+    "chain_id": "A",
+    "num_residues": 137,
+    "sequence_length": 137
+  },
+  "2FDN": {
+    "sha256": "f5c9d86e0a66f2579b572d1d4dd9de2cda65f57190850533d7e0a3814aa01875",
+    "chain_id": "A",
+    "num_residues": 55,
+    "sequence_length": 55
+  },
+  "2FCR": {
+    "sha256": "8268871fadab8dc5109ee75c90dd53c466c5d1de21e7e1b4a7c3d77f6a056cdc",
+    "chain_id": "A",
+    "num_residues": 173,
+    "sequence_length": 173
+  },
+  "2GBP": {
+    "sha256": "c9cd68018aa4480701bfd1f6240e65310d64b48d35f7cfea6aaf4ce3e7b030f2",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "2HMB": {
+    "sha256": "549c23e8c0ec6d830a865a25d5fc801fdea70fd071c8686ec400715020a07622",
+    "chain_id": "A",
+    "num_residues": 131,
+    "sequence_length": 131
+  },
+  "2LIV": {
+    "sha256": "d87320739a3f9439ebd625dffcf01ef816ffadd5d4f8de3f3d333bcb3ee48722",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "2MCM": {
+    "sha256": "e239c95e376ad6948e965bb4579ef9cc142ee2ed598075911a0ff3923aae2b78",
+    "chain_id": "A",
+    "num_residues": 112,
+    "sequence_length": 112
+  },
+  "2MHR": {
+    "sha256": "20b21394451b5d5145974b7eef17ef70ccdd5328e0583cb694155ea6d9706af1",
+    "chain_id": "A",
+    "num_residues": 118,
+    "sequence_length": 118
+  },
+  "2NLR": {
+    "sha256": "0563cea6fa76b4436d69936222447e6517f58b0201c0031e0490c8ff9d4902d4",
+    "chain_id": "A",
+    "num_residues": 222,
+    "sequence_length": 222
+  },
+  "2OHX": {
+    "sha256": "982373459270ff74905c9093e6e0110ee2ddc6b63f862b378b357c078f2ba37c",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "2PAB": {
+    "sha256": "be37980387a155ce1b94c84c103ea97cfddac1c56d2a18c36dea9a6d4ef56a7c",
+    "chain_id": "A",
+    "num_residues": 114,
+    "sequence_length": 114
+  },
+  "2PHY": {
+    "sha256": "54efd97c399de1531e42e63d69173a50538923028e05d02f9534575d9df2b3cb",
+    "chain_id": "A",
+    "num_residues": 125,
+    "sequence_length": 125
+  },
+  "2PLV": {
+    "sha256": "68beef5ef758bffa72e5183870954d87c1778dbc3122b8a70a15df85f47fcd59",
+    "chain_id": "1",
+    "num_residues": 288,
+    "sequence_length": 288
+  },
+  "2POR": {
+    "sha256": "dd6e8a757dbbe7865486e2d29f034ee7a6745cbbd043486bb3b4655115313484",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "2RBI": {
+    "sha256": "1ce9eef3dee319d9d6f171d97df1c96c1549513d2a7555f55abf80ccc89b3630",
+    "chain_id": "A",
+    "num_residues": 108,
+    "sequence_length": 108
+  },
+  "2RHE": {
+    "sha256": "8fc2ff50bdbdee76a8e77f96e673fd0fa7e707678b19dac99b1f616e1fbc2d19",
+    "chain_id": "A",
+    "num_residues": 114,
+    "sequence_length": 114
+  },
+  "2RSP": {
+    "sha256": "8cb202a43fbbfad8e663d801e11b87d53ee3ece93c607080b6338d2cd52ba6b9",
+    "chain_id": "A",
+    "num_residues": 115,
+    "sequence_length": 115
+  },
+  "2SAR": {
+    "sha256": "e5ce0c93e50596e04f057928b94c5946619364b50efd01c2e6f93ee502298d4c",
+    "chain_id": "A",
+    "num_residues": 96,
+    "sequence_length": 96
+  },
+  "2SAS": {
+    "sha256": "80ad5027d095876dc2ca07333f794a72548fcac9663c4689aae8f0180e64977c",
+    "chain_id": "A",
+    "num_residues": 185,
+    "sequence_length": 185
+  },
+  "2SNS": {
+    "sha256": "b962d4a4697f7efc79dfa5cb766c60c00bea03934dd6bb89117126d859cb791b",
+    "chain_id": "A",
+    "num_residues": 141,
+    "sequence_length": 141
+  },
+  "2SOD": {
+    "sha256": "6522ae7ad98a89e8530372b5e73063d0f60832fa32ddbf3d856c8ac1c76819ad",
+    "chain_id": "O",
+    "num_residues": 151,
+    "sequence_length": 151
+  },
+  "2SPC": {
+    "sha256": "9afb37cfc7ac9d958416425689c3ae634116e886bd9bf1689efbab94de5adad4",
+    "chain_id": "A",
+    "num_residues": 107,
+    "sequence_length": 107
+  },
+  "2TGI": {
+    "sha256": "1bf4c0308be73d594c9da7315dbdfbdd311d21aeeffc3d9f00c873db1ef70bfd",
+    "chain_id": "A",
+    "num_residues": 112,
+    "sequence_length": 112
+  },
+  "2TMA": {
+    "sha256": "bd6e988a1394de06a5a28487f039f3bf6728f17b34cf07fe444ccce55150e938",
+    "chain_id": "A",
+    "num_residues": 284,
+    "sequence_length": 284
+  },
+  "2TRX": {
+    "sha256": "c068dd829e81b10396cdf4eb13757aa0147f3645d4fea15556dacc19d6115485",
+    "chain_id": "A",
+    "num_residues": 108,
+    "sequence_length": 108
+  },
+  "3BLM": {
+    "sha256": "1afa52208746c3964756b6dbf37d1dbf6fbf4950077f0b705c1da94ff6919be3",
+    "chain_id": "A",
+    "num_residues": 257,
+    "sequence_length": 257
+  },
+  "3CHY": {
+    "sha256": "cc45affe443523897fa38068e31d88e21b37f13c493b0d0227e2d75a16e721b9",
+    "chain_id": "A",
+    "num_residues": 128,
+    "sequence_length": 128
+  },
+  "3CLA": {
+    "sha256": "6f7e191b0098a92c26da3ea26d9419d09ceafe15c8206663f7bcfeadceabd52c",
+    "chain_id": "A",
+    "num_residues": 213,
+    "sequence_length": 213
+  },
+  "3COX": {
+    "sha256": "c193f3452f870af407f89dbbdc8f49c71f1286fc5c413fbd402ea67830ba0be9",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "3DFR": {
+    "sha256": "c7bbf3fc5c6a95b8359232d4f7b14551520fac15affa779f9231b7ba8944e35e",
+    "chain_id": "A",
+    "num_residues": 162,
+    "sequence_length": 162
+  },
+  "3EBX": {
+    "sha256": "44568949895af9c2be2e0d1a2f9c7c6be26dd2218bf9b01c23180e822d09170e",
+    "chain_id": "A",
+    "num_residues": 62,
+    "sequence_length": 62
+  },
+  "3EST": {
+    "sha256": "24125292af7072189e3d56cfaf0ed3e4c62c9de8b8ff13f15474539d05be7d72",
+    "chain_id": "A",
+    "num_residues": 240,
+    "sequence_length": 240
+  },
+  "3GRS": {
+    "sha256": "58e59f31e7e6f800c78cefede5ccd990698541c11272171255b1712ccddbc2e7",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "3HTS": {
+    "sha256": "9e4bfadeff7919bfd55944b50830b2fc5f36e10b5c199b92fe0ca05928f4dcbd",
+    "chain_id": "B",
+    "num_residues": 82,
+    "sequence_length": 82
+  },
+  "3LYN": {
+    "sha256": "83be53a53f891eb9a881e5c92383117c15be03287045a7e1a1db496839a3e087",
+    "chain_id": "A",
+    "num_residues": 122,
+    "sequence_length": 122
+  },
+  "3MDS": {
+    "sha256": "3e5450e5cdeb553212caedf62aa231f499da51b3bdc35600efbebbd2f1cb259f",
+    "chain_id": "A",
+    "num_residues": 203,
+    "sequence_length": 203
+  },
+  "3PGK": {
+    "sha256": "8ef7ea7b5531afe7c59067bb0b3829b30872f399fcbb687970703336951c50f4",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "3PGM": {
+    "sha256": "f96bf5db04a2a9290d87572abd652c870b7826710849aa760a680b2d0a1e9144",
+    "chain_id": "A",
+    "num_residues": 230,
+    "sequence_length": 230
+  },
+  "3PRO": {
+    "sha256": "272d8cb627faec718dde3a6862e7b624ac046dfc5c9b5a1ec38948c162aef3bf",
+    "chain_id": "A",
+    "num_residues": 198,
+    "sequence_length": 198
+  },
+  "3SEB": {
+    "sha256": "01d620828663e2eb3bbb8e14ad14d1cf17503b123a9b16d3467950f52616a646",
+    "chain_id": "A",
+    "num_residues": 238,
+    "sequence_length": 238
+  },
+  "3SGB": {
+    "sha256": "61579665a2ba5eb732218bf33fd5176260b05132ccd75a762ca02f3bd60c25ae",
+    "chain_id": "E",
+    "num_residues": 185,
+    "sequence_length": 185
+  },
+  "3TGL": {
+    "sha256": "334cc39bd5f82e3f4c898a122ce6d673d0fc8d600246039c270581d17f6302e9",
+    "chain_id": "A",
+    "num_residues": 265,
+    "sequence_length": 265
+  },
+  "3TMS": {
+    "sha256": "f178bd9cb6b0266503b217f695cb2e55b07925d3daaf51c21a6ef6f61c047472",
+    "chain_id": "A",
+    "num_residues": 264,
+    "sequence_length": 264
+  },
+  "4BCL": {
+    "sha256": "8e2f02358340426ab0a019a5f416846a77a0e9293e24f414e72b50c3b6b64c13",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "4BLM": {
+    "sha256": "c1f0745811444e976b5b76bd30a4a049ff5632c83f936cf36c87a0c8c40b54e5",
+    "chain_id": "A",
+    "num_residues": 256,
+    "sequence_length": 256
+  },
+  "4CAM": {
+    "sha256": "2fc1dda18e01556c902e0ddefb8be47f8c1b9ab42fe19ead8cd334e59e11bb43",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "4CPA": {
+    "sha256": "f132396a9b7eba01011432c4bbc9b19cf8cefd9a7d0d4ed3967486d356c55208",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "4ENL": {
+    "sha256": "dcc642dedbd834bd8978c0a51a3088e685f2d596d15dd4d12a7256c044b4359f",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "4FGF": {
+    "sha256": "6f351d58dbf99fef876e6e2d6f663481510079461c7b0dab2aaa4204b5b4ba85",
+    "chain_id": "A",
+    "num_residues": 124,
+    "sequence_length": 124
+  },
+  "4GCR": {
+    "sha256": "64ed578776c9d837eef8716e72e09a1b8d613ce2e6d92feb0945ebaea465fe95",
+    "chain_id": "A",
+    "num_residues": 174,
+    "sequence_length": 174
+  },
+  "4HHB": {
+    "sha256": "6c977e3c48fcae60ef116dffff90ce2ae2dbc987f39c3f930d325361a1916812",
+    "chain_id": "A",
+    "num_residues": 141,
+    "sequence_length": 141
+  },
+  "4I1B": {
+    "sha256": "1ce778fd8d5bf97314d5c9db9f30a8b4bd836357309b03e2ee2e33a6ff57c635",
+    "chain_id": "A",
+    "num_residues": 151,
+    "sequence_length": 151
+  },
+  "4MDH": {
+    "sha256": "c1c86daefea7cfbda5ac5c2f563b8301b48e1a1f45c01d38e0bc44729975fab8",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "4PEP": {
+    "sha256": "78d09ed6269f6c59a9881f8af8c7e403f4506f0ca8e5a87120650cc9b20c9108",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "4PFK": {
+    "sha256": "02c89d9fad874855a9a501c5d20b71147be9969be745cf0d72c9cc27f688071f",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "5CPA": {
+    "sha256": "aae9d8720b41205a6aa8fa62ac15f65f6aeb95ffbeeb5298f6411d9705172891",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "5CYT": {
+    "sha256": "5f06660121b5792c8ca84722e4e697dc59459daef13315ccbcadb4dd2ac416fe",
+    "chain_id": "R",
+    "num_residues": 103,
+    "sequence_length": 103
+  },
+  "5LYZ": {
+    "sha256": "21e918fbc704f728de5fcc010b9ef82282c46d5967ee2f5dd194e71af9fdd245",
+    "chain_id": "A",
+    "num_residues": 129,
+    "sequence_length": 129
+  },
+  "5PTI": {
+    "sha256": "d39881b81af60445d9cb7ca59c6b4858a1efd989d5c404e99730c475b26fb55b",
+    "chain_id": "A",
+    "num_residues": 58,
+    "sequence_length": 58
+  },
+  "5RUB": {
+    "sha256": "8d3f3dbe1d9d7fd5406938383ec3b0a36c4cb799469485a1c7939c34683b97e4",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "5TIM": {
+    "sha256": "9cd03cc1a50c0903635c7182eeec0c2f83a711757d8e1b72b38414d1adcf586c",
+    "chain_id": "A",
+    "num_residues": 249,
+    "sequence_length": 249
+  },
+  "6ACN": {
+    "sha256": "d32459ba2616cf0b075cc97d40f9b716b77126882b61eb44aafc40e760336c93",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "6LDH": {
+    "sha256": "867ebfce0708705bf2aa2f33ec163e54a72eadb00b630bc6c9715c71f3213317",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "6TAA": {
+    "sha256": "e7e44313d3fdd0ed0b54f1d092bc3828123218ed2de97bb05f8cd0c04ccb97ee",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "7AAT": {
+    "sha256": "1b6d7b4916ad92ad19745c44f12a99f78e4d06a4778764f38d8345dfcd9b5574",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "7RSA": {
+    "sha256": "715cece1a426fbcf0d6b4e93a6810f700dd8b9455a2eb666be71aaddd21f2846",
+    "chain_id": "A",
+    "num_residues": 124,
+    "sequence_length": 124
+  },
+  "8ABP": {
+    "sha256": "b01a3ee74ccc9d37aa49541557828a5abe241277bbc94ea3add4b4daff241d21",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "8ADH": {
+    "sha256": "4c19677fd3dafe9d022560fc9341e86fe1b8f740dab97474c9ad8a30fcb1fb04",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "8ATC": {
+    "sha256": "99a62b081803171585b8495ebca53078a7947fff0d22dbf356246d78323cf1d6",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "8CAT": {
+    "sha256": "2cad7defe9aca4f63bcb2bbb43ee4197e7432e498f4b1493a3453fb19d2fa523",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "8DFR": {
+    "sha256": "68f429a3993d2533bff1c39af569ab91a28fa80334cacb18c1c0d8330ec32051",
+    "chain_id": "A",
+    "num_residues": 186,
+    "sequence_length": 186
+  },
+  "8TLN": {
+    "sha256": "d171b00a7aa7e5a2ddef1f8d2e59cf3da9418abf5ce04ca6ffe72f2c4395d1c1",
+    "chain_id": "E",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "9PAP": {
+    "sha256": "559172c930b0af8ba099733299905634f807d903a30bbfd758fe30aba1119850",
+    "chain_id": "A",
+    "num_residues": 211,
+    "sequence_length": 211
+  },
+  "1A2P": {
+    "sha256": "50b78c9c7e95c699e81610db9b140855762bbfb70a7dd821a0acef179d9e54d7",
+    "chain_id": "A",
+    "num_residues": 108,
+    "sequence_length": 108
+  },
+  "1A6M": {
+    "sha256": "ce6574d325b046f46803df49894524537d098dfeee1033e76e62133e941fd948",
+    "chain_id": "A",
+    "num_residues": 151,
+    "sequence_length": 151
+  },
+  "1A8D": {
+    "sha256": "76e862145f7c5b12905ca59e5883c5071368e835518506ec44d019a109ac0989",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1ADS": {
+    "sha256": "3c1e4bc84b8aab08749f5bc1d92d194d19f43ee3935f17fa471d81c828e1f2bb",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1AMP": {
+    "sha256": "72895144a61e07cca37953dfa16cfbfdef79f7dce44ea9b0f0b5472fc0da17ad",
+    "chain_id": "A",
+    "num_residues": 291,
+    "sequence_length": 291
+  },
+  "1AOZ": {
+    "sha256": "98827257d353a5e4a424c222d4f576225185e670014c1460a7cb3343d2f31761",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1ARB": {
+    "sha256": "68982c8f5542514d24079a7ac5c86de4c923b5c34796682a8a373b6d1e73e5d3",
+    "chain_id": "A",
+    "num_residues": 263,
+    "sequence_length": 263
+  },
+  "1AVH": {
+    "sha256": "b615b8450c413a18351e7fb8e1da296d3dd833412e6b2c0cd63ba4b436dd622b",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1B6C": {
+    "sha256": "179831a59b5f64876c98cae70d7d9db34bfe30d02d452d21502f568e2ae0f16e",
+    "chain_id": "A",
+    "num_residues": 107,
+    "sequence_length": 107
+  },
+  "1B8O": {
+    "sha256": "324c050ee767e77a7e71228ecccd352431b5787cd8db2efa788b1f5669e39204",
+    "chain_id": "A",
+    "num_residues": 280,
+    "sequence_length": 280
+  },
+  "1BCF": {
+    "sha256": "3bdb2a74848712617e912e80da92fa854bd61b1a09ba9c7b52964d99319c46ac",
+    "chain_id": "A",
+    "num_residues": 158,
+    "sequence_length": 158
+  },
+  "1BGF": {
+    "sha256": "f8366cd3103ddd924943019cf21708f024187852c7a76fad78e723f7fbfe4ce0",
+    "chain_id": "A",
+    "num_residues": 124,
+    "sequence_length": 124
+  },
+  "1BJ7": {
+    "sha256": "b7f42707c1f2e462120ba948b58baf740683520b03dcf47c5615ee8113ca8bea",
+    "chain_id": "A",
+    "num_residues": 150,
+    "sequence_length": 150
+  },
+  "1BKF": {
+    "sha256": "d6d0b8d27d16b012e9097cbb476b8f556309adb90e4a354e76278956056d72f7",
+    "chain_id": "A",
+    "num_residues": 107,
+    "sequence_length": 107
+  },
+  "1BM8": {
+    "sha256": "4ce229554c7ea27ca371cc8b2a6d4bf7a8fdf00f2a2a333274e4bba0f6c99e75",
+    "chain_id": "A",
+    "num_residues": 99,
+    "sequence_length": 99
+  },
+  "1BN6": {
+    "sha256": "f1843d1268d7da01319bad632ca1de330be2e3136bca1a79088ba6ff44592c9b",
+    "chain_id": "A",
+    "num_residues": 291,
+    "sequence_length": 291
+  },
+  "1BRS": {
+    "sha256": "1c98dcc3eac7ccb88657e3ab0f745121d7ddbd2fe11357c65dbaffdd5704f153",
+    "chain_id": "A",
+    "num_residues": 108,
+    "sequence_length": 108
+  },
+  "1BTL": {
+    "sha256": "932981534e5dd6abcdd02271935e055c74dff16486c991cd610c16c95b5a2b82",
+    "chain_id": "A",
+    "num_residues": 263,
+    "sequence_length": 263
+  },
+  "1BUO": {
+    "sha256": "edc39eb81e02bb9c6f34b27d274feb762b11c67cf0d3b369e9d07197574a4859",
+    "chain_id": "A",
+    "num_residues": 121,
+    "sequence_length": 121
+  },
+  "1BXO": {
+    "sha256": "213e2fa58d1db04fb1913623cbdd95e1b605e083986db9bc50b5ecd76ccf98d9",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1C1K": {
+    "sha256": "ff0bbde9638682f57dfa65feb1b28edfa42ec1fafda1a43de54e005cdfc16c93",
+    "chain_id": "A",
+    "num_residues": 217,
+    "sequence_length": 217
+  },
+  "1C52": {
+    "sha256": "0bd7845a19e139b8a4789c6eb29894970c381d1d8a81c9b8f8156816a796f238",
+    "chain_id": "A",
+    "num_residues": 131,
+    "sequence_length": 131
+  },
+  "1C75": {
+    "sha256": "7d24db3209948e3e4cb402d764320c4e551d4eeef5f5b6d05a641f07821a92b8",
+    "chain_id": "A",
+    "num_residues": 71,
+    "sequence_length": 71
+  },
+  "1C9O": {
+    "sha256": "960a42e2482b2081243646b260c391d0cfe4015da065dd214cec0e77e17e8a30",
+    "chain_id": "A",
+    "num_residues": 66,
+    "sequence_length": 66
+  },
+  "1CC8": {
+    "sha256": "cbcdf55e0accf725a1169b91567223c192d6212f2416b99ae185f9ead087f55e",
+    "chain_id": "A",
+    "num_residues": 72,
+    "sequence_length": 72
+  },
+  "1CEM": {
+    "sha256": "5aa0de834281b7f34ed4f01a4f6d7608852ced3b985937186de6cba298ff5e2a",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1CHN": {
+    "sha256": "cfd30d33db5bdfd05ce83bdb5859bb84a098d8c5204e8717ed2c0f8e2064f561",
+    "chain_id": "A",
+    "num_residues": 126,
+    "sequence_length": 126
+  },
+  "1CIU": {
+    "sha256": "0df4d846d01f0e135f1376b040d807a8fed486bb261a6f5ff132db2f08af8919",
+    "chain_id": "A",
+    "num_residues": 300,
+    "sequence_length": 300
+  },
+  "1CNV": {
+    "sha256": "3c29154c365ba25de2393888ada1267315b534d43041561fa75ca30689e004ab",
+    "chain_id": "A",
+    "num_residues": 283,
+    "sequence_length": 283
+  },
+  "1CQY": {
+    "sha256": "24081a1305ddd18db6c3ab64a9e4e8dd1e0b24bf67a86c64a6192164b6c9ec94",
+    "chain_id": "A",
+    "num_residues": 99,
+    "sequence_length": 99
+  },
+  "1CTJ": {
+    "sha256": "1613bc11939ef7495c4d750a63d39741fba01b7ff2ea6be930271117f5b57401",
+    "chain_id": "A",
+    "num_residues": 89,
+    "sequence_length": 89
+  },
+  "1CX1": {
+    "sha256": "6dc0858f9c94f01313741ef1d9415da6973336670b38b1c2180b0ddd9718d569",
+    "chain_id": "A",
+    "num_residues": 153,
+    "sequence_length": 153
+  }
+}

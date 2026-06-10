@@ -13,7 +13,9 @@
         "source=${localEnv:HOME}/.cursor,target=/home/ubuntu/.cursor,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.netrc,target=/home/ubuntu/.netrc,type=bind,consistency=cached",
-        "source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,readonly,type=bind,consistency=cached"
+        "source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,readonly,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/Projects/minifold,target=/workspaces/minifold,type=bind,consistency=cached"
+
     ],
     "postCreateCommand": ".devcontainer/postCreateCommand.sh",
     "initializeCommand": ".devcontainer/initializeCommand.sh",

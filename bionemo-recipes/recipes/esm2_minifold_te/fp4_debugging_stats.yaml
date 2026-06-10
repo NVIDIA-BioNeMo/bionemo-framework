@@ -1,0 +1,31 @@
+example_fp4_tensor_stat_collection:
+    enabled: True
+    layers:
+        # Match MiniFold te.Linear sublayers in FP4 blocks
+        layer_types: [pi, gi, po, go, fc1, fc2]
+    transformer_engine:
+        LogNvfp4TensorStats:
+            enabled: True
+            tensors_struct:
+            - tensor: activation
+              stats: [underflows%, mse]
+              freq: 1000
+            - tensor: gradient
+              stats: [underflows%, mse]
+              freq: 1000
+
+example_fp8_tensor_stat_collection:
+    enabled: True
+    layers:
+        # Match MiniFold te.Linear sublayers in FP8 blocks
+        layer_types: [pi, gi, po, go, fc1, fc2]
+    transformer_engine:
+        LogFp8TensorStats:
+            enabled: True
+            tensors_struct:
+            - tensor: activation
+              stats: [mxfp8_underflows%, mxfp8_scale_inv_min, mxfp8_scale_inv_max, mxfp8_mse]
+              freq: 1000
+            - tensor: gradient
+              stats: [mxfp8_underflows%, mxfp8_scale_inv_min, mxfp8_scale_inv_max, mxfp8_mse]
+              freq: 1000

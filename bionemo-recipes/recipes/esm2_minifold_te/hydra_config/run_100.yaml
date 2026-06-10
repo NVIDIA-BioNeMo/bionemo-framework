@@ -1,0 +1,83 @@
+# ESM2-MiniFold TE: 100-step exploratory run
+# 2x RTX 5090, frozen ESM-2 650M, synthetic data
+# Usage: torchrun --nproc_per_node=2 train_fsdp2.py --config-name run_100
+
+esm_model_name: facebook/esm2_t33_650M_UR50D
+
+num_train_steps: 100
+seed: 42
+
+model:
+  c_s: 1024
+  c_z: 128
+  num_blocks: 8
+  no_bins: 64
+  use_structure_module: false
+  num_recycling: 0
+
+dataset:
+  dataset_type: synthetic
+  micro_batch_size: 2
+  max_seq_length: 128
+  num_workers: 2
+  num_samples: 1000
+
+optimizer:
+  folding_lr: 1.0e-4
+  struct_lr: 1.0e-4
+  backbone_lr: 3.0e-5
+  betas: [0.9, 0.98]
+  eps: 1.0e-8
+  weight_decay: 0.01
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 10
+  num_training_steps: ${num_train_steps}
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: false
+  resume_from_checkpoint: false
+  save_every_n_steps: 0
+  max_checkpoints: 1
+
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+
+fp4_config:
+  enabled: false
+  fp4_recipe: transformer_engine.common.recipe.NVFP4BlockScaling
+  fp4_format: "E2M1"
+  fp4_recipe_kwargs: {}
+
+fp8_layers: null
+fp4_layers: null
+
+component_precision:
+  tri_proj: false      # TriangularUpdateTE input/output projections (pi, po te.Linear layers)
+  tri_gate: false      # TriangularUpdateTE sigmoid gates (gi, go te.Linear layers)
+  tri_einsum: "off"    # "off" = FP32 (default), "bf16" = ambient dtype (recommended)
+  tri_impl: "bmm"      # "einsum" = original path, "bmm" = batched GEMM, "fp8_bmm"/"fp8_cublaslt" = MXFP8 batched GEMM, "cublas_xbdnn" = optimized BF16 backend
+  ffn: true            # TransitionUpdateTE FFN (fc1, fc2 te.Linear layers)
+  struct_attn: false   # StructureModuleTE attention projections (proj, o_proj, g_proj te.Linear layers)
+  struct_ffn: false    # StructureModuleTE transition MLP (fc1, fc2 te.Linear layers)
+  seq_proj: false      # Sequence/pair feature projections (fc_s_1, fc_s_2, fc_z_1, fc_z_2, seq_to_pair te.Linear layers)
+  dist_head: false     # Distogram output head (fc_out_1, fc_out_2 te.Linear layers) — kept in model's base precision per MXFP8 paper
+
+quant_stats_config:
+  enabled: false
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: ./log_quant_stats
+  log_to_wandb: false
+  log_heatmap: false
+
+logger:
+  frequency: 5
+
+wandb_init_args:
+  project: esm2_minifold_te
+  name: run_100_650M_synthetic
+  mode: offline
