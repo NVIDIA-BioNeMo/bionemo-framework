@@ -1,0 +1,41 @@
+# Extended pilot configuration for LLAMA3 genomic training (500 steps)
+defaults:
+  - defaults
+
+# Slightly larger model for realistic testing (but still memory-safe)
+model_layers: 8   # Double the sanity test layers (still 1/4 of full model)
+hidden_size: 2048 # Keep reduced hidden size for memory safety
+
+dataset:
+  seq_length: 8192  # Full sequence length to test RoPE
+  batch_size: 1     # Conservative for memory
+  num_workers: 4    # More realistic data loading
+  stride: 7992      # EVO2-style: 8192 - 200 = 7992 (200bp overlap)
+
+# Extended training run
+num_train_steps: 500  # Extended run to see more learning dynamics
+micro_batch_size: 1   # Conservative for memory
+
+# Learning rate scheduler
+lr_scheduler_kwargs:
+  num_warmup_steps: 50  # 10% warmup
+  num_training_steps: ${num_train_steps}
+
+# Optimizer (slightly more conservative)
+adamw_kwargs:
+  lr: 2.0e-4  # Reduced from 4e-4 for stability
+  fused: true
+  betas: [0.9, 0.98]
+  eps: 1.0e-8
+  weight_decay: 0.1
+
+# Wandb config for extended testing
+wandb_init_args:
+  project: "llama3-genomic-pretraining"  
+  name: "l1-extended-8layers-500steps"
+  notes: "Extended test: 8-layer LLAMA3 with 500 steps, 8K context, ASCII tokenization"
+  tags: ["llama3", "genomic", "extended", "ascii-tokenizer", "dynamic-rope", "wip"]
+  mode: "online"
+
+
+
