@@ -39,7 +39,6 @@ class Evo2Dataset(GPTDataset):
 
     VALID_DNA_AND_DEGENERATE: ClassVar[set[int]] = {
         45,
-        45,
         65,
         66,
         67,
