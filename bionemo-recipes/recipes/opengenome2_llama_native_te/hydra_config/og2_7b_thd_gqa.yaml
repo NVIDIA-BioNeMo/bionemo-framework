@@ -59,21 +59,21 @@ use_meta_device: false
 # Sequence packing
 use_sequence_packing: true
 
-# Dataset
+# Dataset: pre-chunked parquet2 shards (globally shuffled)
 dataset:
   tokenizer_name_or_path: ./tokenizers/nucleotide_fast_tokenizer
   micro_batch_size: 2
-  num_workers: 1
+  num_workers: 8
   max_seq_length: 8192
   stride: 200
-  buffer_size: 50_000
+  buffer_size: 10_000
   mask_degenerate_bases: true
   uppercase_labels: false
   load_dataset_kwargs:
-    path: "json"
-    data_files: "/data/opengenome2/json/pretraining_or_both_phases/metagenomes/data_metagenomics_train_*.jsonl.gz"
+    path: "/data/opengenome2/parquet2"
+    data_files: null
     split: "train"
-    streaming: True
+    streaming: true
 
 # Training config
 num_train_steps: 182314

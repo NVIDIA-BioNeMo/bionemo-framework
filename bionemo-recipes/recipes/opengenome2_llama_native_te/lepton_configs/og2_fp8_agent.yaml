@@ -1,0 +1,39 @@
+defaults:
+  - _self_
+
+job_name: "og2-fp8-agent"
+node_group: "yo-bom-lepton-001"
+resource_shape: "gpu.8xh100-sxm"
+
+num_nodes: 6
+gpus_per_node: 8
+
+# Code paths on NFS
+repo_root: "/data/savithas/bionemo-framework"
+code_path: "/data/savithas/bionemo-framework/bionemo-recipes/recipes/opengenome2_llama_native_te"
+git_branch: "savitha/claude-lepton-dev-experiment"
+
+# Training config (OG2-7B FP8 Block Scaling)
+hydra_config: "og2_7b_thd_gqa_fp8"
+train_script: "train_fsdp2.py"
+num_train_steps: 182300
+
+# Agent config
+checkin_interval: 100
+promotion_strategy: "ends_in"
+workspace_root: "/data/savithas/agent_runs"
+checkpoint_root: "/data/savithas/checkpoints"
+
+# Claude Code config
+claude_model: "aws/anthropic/bedrock-claude-opus-4-6"
+anthropic_secret: "anthropic.nim.savithas"  # pragma: allowlist secret
+anthropic_base_url: "https://inference-api.nvidia.com"
+
+# WandB
+wandb_project: "opengenome2-7b"
+wandb_secret: "wandb.savithas"  # pragma: allowlist secret
+
+# Container
+container:
+  image: "nvcr.io/nvidia/pytorch:26.02-py3"
+  registry_auth: "lepton-nvidia-cvai-bnmo-trng"

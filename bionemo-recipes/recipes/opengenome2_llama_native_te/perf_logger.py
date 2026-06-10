@@ -99,7 +99,11 @@ class PerfLogger:
         self.grad_acc_step_count = 0
 
         # Whether to step debug_api.step() after each step
-        self.fp8_stats_enabled = args.fp8_stats_config.enabled
+        quant_stats_cfg = getattr(args, "quant_stats_config", None)
+        fp8_stats_cfg = getattr(args, "fp8_stats_config", None)
+        self.quant_stats_enabled = (quant_stats_cfg is not None and getattr(quant_stats_cfg, "enabled", False)) or (
+            fp8_stats_cfg is not None and getattr(fp8_stats_cfg, "enabled", False)
+        )
 
     @nvtx.annotate("PerfLogger.log_micro_step", color="pink")
     def log_micro_step(self, step: int, batch: dict[str, torch.Tensor], outputs: CausalLMOutputWithPast):
@@ -158,7 +162,7 @@ class PerfLogger:
             if self._profiler is not None:
                 self._profiler.step(step)
 
-            if self.fp8_stats_enabled and HAS_NVDLFW_INSPECT:
+            if self.quant_stats_enabled and HAS_NVDLFW_INSPECT:
                 debug_api.step()
 
             if step % self.logging_frequency == 0 and step > 0:
@@ -236,7 +240,7 @@ class PerfLogger:
         wandb.finish()
         self._progress_bar.close()
 
-        if self.fp8_stats_enabled and HAS_NVDLFW_INSPECT:
+        if self.quant_stats_enabled and HAS_NVDLFW_INSPECT:
             debug_api.end_debug()
 
 

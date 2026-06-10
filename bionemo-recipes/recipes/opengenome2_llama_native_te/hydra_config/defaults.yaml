@@ -18,10 +18,7 @@ use_weight_decay_grouping: true
 skip_embedding_weight_decay: true
 use_fp32_master_weights: true
 
-config_kwargs:
-  fp8_first_last_bf16: false
-  num_layers_at_start_in_bf16: 1
-  num_layers_at_end_in_bf16: 1
+config_kwargs: {}
 
 num_train_steps: ???
 grad_acc_steps: 1
@@ -65,6 +62,17 @@ fp8_config:
   quantized_model_init_kwargs:
     enabled: false
 
+# FP4 config
+fp4_config:
+  enabled: false
+  fp4_recipe: transformer_engine.common.recipe.NVFP4BlockScaling
+  fp4_format: "E2M1"
+  fp4_recipe_kwargs: {}
+
+# Layer-wise quantization: 1-indexed layer lists (null = all layers use the enabled format)
+fp8_layers: null
+fp4_layers: null
+
 # Optimizer config
 adamw_kwargs:
   lr: 3e-3
@@ -98,10 +106,10 @@ validation:
   num_batches: 10
   data_path: null
 
-fp8_stats_config:
+quant_stats_config:
   enabled: false
-  fp8_stats_file: ./fp8_debugging_stats.yaml
-  fp8_log_dir: ./log_fp8_stats
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: ./log_quant_stats
 
 profiler:
   enabled: false

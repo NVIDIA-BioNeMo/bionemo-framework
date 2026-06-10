@@ -1,0 +1,47 @@
+{
+  "step_5100": {
+    "perplexity": 3.3374,
+    "loss": 1.2052,
+    "unpadded_tokens_per_sec": 10538.7
+  },
+  "step_5200": {
+    "perplexity": 3.3256,
+    "loss": 1.2017,
+    "unpadded_tokens_per_sec": 10527.2
+  },
+  "step_5300": {
+    "perplexity": 3.3493,
+    "loss": 1.2087,
+    "unpadded_tokens_per_sec": 10520.4
+  },
+  "step_5400": {
+    "perplexity": 3.3755,
+    "loss": 1.2166,
+    "unpadded_tokens_per_sec": 10301.1
+  },
+  "step_5500": {
+    "perplexity": 3.3248,
+    "loss": 1.2014,
+    "unpadded_tokens_per_sec": 10754.5
+  },
+  "step_5600": {
+    "perplexity": 3.3476,
+    "loss": 1.2083,
+    "unpadded_tokens_per_sec": 10614.0
+  },
+  "step_5700": {
+    "perplexity": 3.3143,
+    "loss": 1.1982,
+    "unpadded_tokens_per_sec": 10669.2
+  },
+  "step_5800": {
+    "perplexity": 3.3342,
+    "loss": 1.2042,
+    "unpadded_tokens_per_sec": 10588.3
+  },
+  "step_5900": {
+    "perplexity": 3.3293,
+    "loss": 1.2028,
+    "unpadded_tokens_per_sec": 10685.3
+  }
+}

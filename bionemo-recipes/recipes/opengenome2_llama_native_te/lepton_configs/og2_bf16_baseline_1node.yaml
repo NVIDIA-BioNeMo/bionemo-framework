@@ -1,0 +1,39 @@
+defaults:
+  - _self_
+
+job_name: "og2-bf16-baseline-continuous"
+node_group: "yo-bom-lepton-001"
+resource_shape: "gpu.8xh100-sxm"
+
+num_nodes: 1
+gpus_per_node: 8
+
+# Code paths on NFS
+repo_root: "/data/savithas/bionemo-framework"
+code_path: "/data/savithas/bionemo-framework/bionemo-recipes/recipes/opengenome2_llama_native_te"
+git_branch: "savitha/claude-lepton-dev-experiment"
+
+# Training config
+hydra_config: "og2_7b_bf16_1k_from_5k"
+train_script: "train_fsdp2.py"
+
+# Resume from external 5k checkpoint (symlinked into ckpt_dir)
+resume_from:
+  external_checkpoint: "/data/savithas/checkpoints/og2-7b-fp32mw-orig-ws-w1-b50k"  # pragma: allowlist secret
+  step: 5000
+
+# Hydra CLI overrides (passed after --config-name)
+hydra_overrides:
+  checkpoint.ckpt_dir: "/data/savithas/checkpoints/og2-7b-bf16-baseline-continuous"
+  checkpoint.async_save: false
+  checkpoint.save_every_n_steps: 0
+  checkpoint.save_final_model: false
+  wandb.name: "og2-7b-bf16-baseline-continuous"
+
+# WandB
+wandb_secret: "wandb.savithas"  # pragma: allowlist secret
+
+# Container
+container:
+  image: "nvcr.io/nvidia/pytorch:26.02-py3"
+  registry_auth: "lepton-nvidia-cvai-bnmo-trng"

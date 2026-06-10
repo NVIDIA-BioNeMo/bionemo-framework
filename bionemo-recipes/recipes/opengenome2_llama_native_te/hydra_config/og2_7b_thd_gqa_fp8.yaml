@@ -15,7 +15,8 @@
 
 # OpenGenome2 7B - THD + GQA + FP8 + FP32 Master Weights
 #
-# Same as og2_7b_thd_gqa but with FP8 enabled (first/last layers in BF16 for stability).
+# Same as og2_7b_thd_gqa but with FP8 enabled.
+# First and last layers kept in BF16 for stability via fp8_layers list.
 # Uses Float8BlockScaling recipe with E4M3 format.
 #
 # Usage:
@@ -25,7 +26,7 @@ defaults:
   - og2_7b_thd_gqa
   - _self_
 
-# Enable FP8 first/last BF16 for numerical stability
+# Model architecture config
 config_kwargs:
   vocab_size: 256
   num_hidden_layers: 32
@@ -43,7 +44,9 @@ config_kwargs:
     low_freq_factor: 1.0
     high_freq_factor: 4.0
     original_max_position_embeddings: 8192
-  fp8_first_last_bf16: true
+
+# First/last layers in BF16 for numerical stability (layers 2-31 in FP8, 1-indexed)
+fp8_layers: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
 
 # FP8 configuration - Float8BlockScaling with E4M3 format
 fp8_config:
@@ -51,12 +54,9 @@ fp8_config:
   fp8_recipe: transformer_engine.common.recipe.Float8BlockScaling
   fp8_format: E4M3
   fp8_recipe_kwargs: {}
-  quantized_model_init_kwargs:
-    enabled: false
 
 dataset:
   micro_batch_size: 1
-  buffer_size: 500_000
 
 grad_acc_steps: 8
 

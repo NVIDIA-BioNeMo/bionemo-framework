@@ -37,8 +37,6 @@ fp8_config:
   fp8_recipe: transformer_engine.common.recipe.DelayedScaling
   fp8_format: "HYBRID"
   fp8_recipe_kwargs: {}
-  quantized_model_init_kwargs:
-    enabled: false
 
 # Dataset: pre-chunked globally shuffled shards
 dataset:

@@ -82,7 +82,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.distributed as dist
-import transformer_engine.pytorch
 from torch.distributed.checkpoint.state_dict_loader import load as dcp_load
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
@@ -395,8 +394,7 @@ def compute_per_sequence_log_probs(
         seq_names = batch["seq_name"]
 
         # Forward — no labels ⇒ model returns logits only, no loss
-        with transformer_engine.pytorch.fp8_autocast(enabled=False):
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
 
         logits = outputs.logits  # (B, S, V)
 

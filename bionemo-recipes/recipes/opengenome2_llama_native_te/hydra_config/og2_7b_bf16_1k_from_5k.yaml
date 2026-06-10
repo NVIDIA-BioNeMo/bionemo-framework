@@ -1,0 +1,53 @@
+# OpenGenome2 7B - BF16 baseline, 1000 steps from 5k checkpoint (1 node)
+#
+# Resumes from the existing 5k BF16 checkpoint and trains for 1000 more steps
+# (steps 5001-6000) in pure BF16. Single-node on Lepton (8x H100).
+# Used as the baseline reference for the FP8 precision agent demo.
+#
+# Usage:
+#   torchrun --nproc_per_node=8 train_fsdp2.py --config-name og2_7b_bf16_1k_from_5k \
+#     checkpoint.ckpt_dir=/data/savithas/checkpoints/og2-7b-bf16-baseline-1node
+
+defaults:
+  - og2_7b_thd_gqa
+  - _self_
+
+# Dataset: JSON metagenomes on Lepton NFS, 10k buffer, 8 workers
+dataset:
+  micro_batch_size: 1
+  buffer_size: 10_000
+  num_workers: 8
+  load_dataset_kwargs:
+    path: "json"
+    data_files: "/data/opengenome2/json/pretraining_or_both_phases/metagenomes/data_metagenomics_train_*.jsonl.gz"
+    data_dir: null
+    split: "train"
+    streaming: true
+
+# Train for 6000 total steps (resumes from 5001, runs 1000 new steps)
+num_train_steps: 6000
+grad_acc_steps: 8
+
+# FP8 disabled (all BF16)
+fp8_config:
+  enabled: false
+
+# Checkpoint: resume from existing 5k checkpoint
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 100
+  max_checkpoints: 5
+  async_save: true
+
+# Validation disabled for this short run
+validation:
+  enabled: false
+
+logger:
+  frequency: 1
+
+wandb:
+  name: og2-7b-bf16-baseline-1node-from-5k
+  project: llama3-metagenome-7b

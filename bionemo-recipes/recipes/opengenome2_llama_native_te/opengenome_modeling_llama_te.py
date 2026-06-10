@@ -18,7 +18,7 @@
 Extends the base NVLlama model (modeling_llama_te.py) with OG2-specific features:
 - Megatron-style scaled initialization for residual output layers (proj/fc2)
 - Spike-No-More embedding initialization (std=1.0)
-- FP8 training with configurable first/last layer BF16 override
+- Layer-wise FP8/FP4 quantization with per-layer autocast
 - RoPE theta fix for transformers >=5.0 compatibility
 
 The base modeling_llama_te.py is kept as an exact CI-synced copy of models/llama3/modeling_llama_te.py.
@@ -27,12 +27,14 @@ This file defines OG2-specific config and model classes that train_fsdp2.py impo
 
 import logging
 import math
+import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
-from typing import ClassVar, Unpack
+from typing import ClassVar, ContextManager, Unpack
 
 import torch
 import torch.nn as nn
+import transformer_engine.common.recipe
 import transformer_engine.pytorch
 import transformers
 from transformer_engine.pytorch.attention import InferenceParams
@@ -74,19 +76,38 @@ class NVLlamaConfig(LlamaConfig):
         use_megatron_scaled_init: Whether to use Megatron's scaled initialization
             for residual output layers (attention proj, MLP fc2).
             Scaled init uses std / sqrt(2 * num_layers) for these layers.
-        fp8_first_last_bf16: When True, keeps first and last N transformer layers
-            in bf16 for FP8 numerical stability. The lm_head is always kept in bf16.
-        num_layers_at_start_in_bf16: Number of layers at the start to keep in BF16.
-        num_layers_at_end_in_bf16: Number of layers at the end to keep in BF16.
     """
 
     attn_input_format: str = "thd"
     self_attn_mask_type: str = "padding_causal"
     embedding_init_std: float | None = None  # None means use initializer_range
     use_megatron_scaled_init: bool = False  # Use scaled init for proj/fc2 (std/sqrt(2*n))
-    fp8_first_last_bf16: bool = False  # Keep first/last transformer layers in bf16 for FP8 stability
-    num_layers_at_start_in_bf16: int = 1  # Number of layers at start to keep in BF16
-    num_layers_at_end_in_bf16: int = 1  # Number of layers at end to keep in BF16
+
+    def __init__(
+        self,
+        layer_precision: list[str | None] | None = None,
+        use_quantized_model_init: bool = False,
+        **kwargs,
+    ):
+        """Initialize the NVLlamaConfig with additional TE-related config options.
+
+        Args:
+            layer_precision: Per-layer quantization precision, a list of length ``num_hidden_layers``
+                where each element is ``"fp8"``, ``"fp4"``, or ``None`` (BF16 fallback). ``None``
+                (the default) means no quantization is configured.
+            use_quantized_model_init: Whether to use `quantized_model_init` for layer initialization.
+            **kwargs: Additional config options to pass to LlamaConfig.
+        """
+        super().__init__(**kwargs)
+        self.layer_precision = layer_precision
+        self.use_quantized_model_init = use_quantized_model_init
+
+        if layer_precision is not None:
+            if len(layer_precision) != self.num_hidden_layers:
+                raise ValueError(f"layer_precision must be a list of length {self.num_hidden_layers}")
+            for precision in layer_precision:
+                if precision not in {"fp8", "fp4", None}:
+                    raise ValueError(f'layer_precision element must be "fp8", "fp4", or None, got {precision!r}')
 
 
 class NVLlamaPreTrainedModel(PreTrainedModel):
@@ -245,12 +266,29 @@ class NVLlamaPreTrainedModel(PreTrainedModel):
 class NVLlamaModel(NVLlamaPreTrainedModel):
     """OpenGenome2 Llama3 model implemented in Transformer Engine."""
 
-    def __init__(self, config: LlamaConfig):
-        """Initialize the OG2 NVLlama model."""
+    def __init__(
+        self,
+        config: LlamaConfig,
+        fp8_recipe: transformer_engine.common.recipe.Recipe | None = None,
+        fp4_recipe: transformer_engine.common.recipe.Recipe | None = None,
+    ):
+        """Initialize the OG2 NVLlama model.
+
+        Args:
+            config: The configuration of the model.
+            fp8_recipe: The FP8 recipe for the model (used during init for quantized_model_init).
+            fp4_recipe: The FP4 recipe for the model (used during init for quantized_model_init).
+        """
         super().__init__(config)
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self._fp8_recipe: transformer_engine.common.recipe.Recipe | None = fp8_recipe
+        self._fp4_recipe: transformer_engine.common.recipe.Recipe | None = fp4_recipe
+
+        if self.config.layer_precision is None and fp8_recipe is not None:
+            warnings.warn("No layer precision provided, using FP8 recipe for all layers.", UserWarning)
+            self.config.layer_precision = ["fp8"] * self.config.num_hidden_layers
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx, dtype=config.dtype)
 
@@ -261,31 +299,32 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
         def _init_method(x):
             torch.nn.init.normal_(x, mean=0.0, std=config.initializer_range)
 
-        self.layers = nn.ModuleList(
-            [
-                transformer_engine.pytorch.TransformerLayer(
-                    hidden_size=config.hidden_size,
-                    ffn_hidden_size=config.intermediate_size,
-                    num_attention_heads=config.num_attention_heads,
-                    bias=False,
-                    layernorm_epsilon=config.rms_norm_eps,
-                    hidden_dropout=0,
-                    attention_dropout=0,
-                    fuse_qkv_params=True,
-                    qkv_weight_interleaved=True,
-                    normalization="RMSNorm",
-                    activation="swiglu",
-                    attn_input_format=config.attn_input_format,
-                    self_attn_mask_type=config.self_attn_mask_type,
-                    num_gqa_groups=config.num_key_value_heads,
-                    layer_number=layer_idx + 1,
-                    params_dtype=config.dtype,
-                    device="meta" if torch.get_default_device() == torch.device("meta") else "cuda",
-                    init_method=_init_method,
-                )
-                for layer_idx in range(config.num_hidden_layers)
-            ]
-        )
+        layers: list[transformer_engine.pytorch.TransformerLayer] = []
+        for layer_idx in range(config.num_hidden_layers):
+            with self.get_autocast_context(layer_idx, init=True):
+                layers += [
+                    transformer_engine.pytorch.TransformerLayer(
+                        hidden_size=config.hidden_size,
+                        ffn_hidden_size=config.intermediate_size,
+                        num_attention_heads=config.num_attention_heads,
+                        bias=False,
+                        layernorm_epsilon=config.rms_norm_eps,
+                        hidden_dropout=0,
+                        attention_dropout=0,
+                        fuse_qkv_params=True,
+                        qkv_weight_interleaved=True,
+                        normalization="RMSNorm",
+                        activation="swiglu",
+                        attn_input_format=config.attn_input_format,
+                        self_attn_mask_type=config.self_attn_mask_type,
+                        num_gqa_groups=config.num_key_value_heads,
+                        layer_number=layer_idx + 1,
+                        params_dtype=config.dtype,
+                        device="meta" if torch.get_default_device() == torch.device("meta") else "cuda",
+                        init_method=_init_method,
+                    )
+                ]
+        self.layers = nn.ModuleList(layers)
         self.norm = transformer_engine.pytorch.RMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
@@ -303,6 +342,65 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def set_recipes(
+        self,
+        fp8_recipe: transformer_engine.common.recipe.Recipe | None = None,
+        fp4_recipe: transformer_engine.common.recipe.Recipe | None = None,
+    ) -> None:
+        """Set quantization recipes after FSDP wrapping.
+
+        Recipes are not serializable, so they cannot be passed through FSDP's ``__init__``.
+        Call this after ``fully_shard()`` to attach recipes for the forward pass.
+
+        Args:
+            fp8_recipe: The FP8 recipe for the model.
+            fp4_recipe: The FP4 recipe for the model.
+        """
+        self._fp8_recipe = fp8_recipe
+        self._fp4_recipe = fp4_recipe
+
+    def get_autocast_context(self, layer_number: int | None, init: bool = False) -> ContextManager:
+        """Return the appropriate TE context manager for layer initialization.
+
+        Args:
+            layer_number: The 0-indexed layer number.
+            init: Whether to return a `quantized_model_init` context for layer initialization.
+        """
+        if self.config.layer_precision is None:
+            return nullcontext()
+
+        precision = self.config.layer_precision[layer_number]
+
+        if init and self.config.use_quantized_model_init:
+            if precision == "fp8":
+                return transformer_engine.pytorch.quantized_model_init(recipe=self._fp8_recipe)
+            if precision == "fp4":
+                return transformer_engine.pytorch.quantized_model_init(recipe=self._fp4_recipe)
+            return nullcontext()
+
+        return nullcontext()
+
+    def get_layer_autocast(self, layer_number: int) -> ContextManager:
+        """Return the appropriate TE autocast context manager for a given layer.
+
+        The context interacts with the outer FP8 autocast in the forward method:
+        - FP8 layer: nullcontext() -- lets the outer FP8 autocast take effect.
+        - FP4 layer: te.autocast(enabled=True, recipe=fp4_recipe) -- enables FP4 compute.
+        - BF16 layer: te.autocast(enabled=False) -- disables quantized compute.
+
+        Args:
+            layer_number: The 0-indexed layer number.
+
+        Returns:
+            A context manager for the layer's quantization mode.
+        """
+        precision = self.config.layer_precision[layer_number] if self.config.layer_precision is not None else None
+        if precision == "fp8":
+            return nullcontext()
+        if precision == "fp4":
+            return transformer_engine.pytorch.autocast(enabled=True, recipe=self._fp4_recipe)
+        return transformer_engine.pytorch.autocast(enabled=False)
 
     def forward(
         self,
@@ -370,32 +468,27 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
             te_rope_emb = self.rotary_emb(max_seq_len=self.config.max_position_embeddings)
             assert te_rope_emb.dtype == torch.float32, "RoPE embeddings should be float32 for optimal performance"
 
-        num_layers = self.config.num_hidden_layers
-        for layer_idx, decoder_layer in enumerate(self.layers[:num_layers]):
-            if output_hidden_states:
-                all_hidden_states = (*all_hidden_states, hidden_states)
+        # Outer FP8 autocast enables FP8 compute for the decoder stack. Per-layer overrides (BF16) are handled
+        # by get_layer_autocast(), which nests inside this context.
+        with transformer_engine.pytorch.autocast(enabled=self._fp8_recipe is not None, recipe=self._fp8_recipe):
+            for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+                if output_hidden_states:
+                    all_hidden_states = (*all_hidden_states, hidden_states)
 
-            # Optionally keep first and last N layers in bf16 for FP8 numerical stability
-            num_start_bf16 = getattr(self.config, "num_layers_at_start_in_bf16", 1)
-            num_end_bf16 = getattr(self.config, "num_layers_at_end_in_bf16", 1)
-            use_bf16_for_layer = getattr(self.config, "fp8_first_last_bf16", False) and (
-                layer_idx < num_start_bf16 or layer_idx >= num_layers - num_end_bf16
-            )
-
-            with transformer_engine.pytorch.autocast(enabled=False) if use_bf16_for_layer else nullcontext():
-                hidden_states = decoder_layer(
-                    hidden_states,
-                    attention_mask=None if self.config.attn_input_format == "thd" else attention_mask,
-                    rotary_pos_emb=te_rope_emb,
-                    inference_params=past_key_values,
-                    cu_seqlens_q=kwargs.get("cu_seq_lens_q", None),
-                    cu_seqlens_kv=kwargs.get("cu_seq_lens_k", None),
-                    cu_seqlens_q_padded=kwargs.get("cu_seq_lens_q_padded", None),
-                    cu_seqlens_kv_padded=kwargs.get("cu_seq_lens_k_padded", None),
-                    max_seqlen_q=kwargs.get("max_length_q", None),
-                    max_seqlen_kv=kwargs.get("max_length_k", None),
-                    pad_between_seqs=kwargs.get("pad_between_seqs", None),
-                )
+                with self.get_layer_autocast(layer_idx):
+                    hidden_states = decoder_layer(
+                        hidden_states,
+                        attention_mask=None if self.config.attn_input_format == "thd" else attention_mask,
+                        rotary_pos_emb=te_rope_emb,
+                        inference_params=past_key_values,
+                        cu_seqlens_q=kwargs.get("cu_seq_lens_q", None),
+                        cu_seqlens_kv=kwargs.get("cu_seq_lens_k", None),
+                        cu_seqlens_q_padded=kwargs.get("cu_seq_lens_q_padded", None),
+                        cu_seqlens_kv_padded=kwargs.get("cu_seq_lens_k_padded", None),
+                        max_seqlen_q=kwargs.get("max_length_q", None),
+                        max_seqlen_kv=kwargs.get("max_length_k", None),
+                        pad_between_seqs=kwargs.get("pad_between_seqs", None),
+                    )
 
         hidden_states = self.norm(hidden_states)
 
@@ -417,10 +510,21 @@ class NVLlamaForCausalLM(NVLlamaPreTrainedModel, transformers.GenerationMixin):
 
     _tied_weights_keys: ClassVar[dict[str, str]] = {"lm_head.weight": "model.embed_tokens.weight"}
 
-    def __init__(self, config):
-        """Initialize the OG2 NVLlamaForCausalLM model."""
+    def __init__(
+        self,
+        config,
+        fp8_recipe: transformer_engine.common.recipe.Recipe | None = None,
+        fp4_recipe: transformer_engine.common.recipe.Recipe | None = None,
+    ):
+        """Initialize the OG2 NVLlamaForCausalLM model.
+
+        Args:
+            config: The configuration of the model.
+            fp8_recipe: The FP8 recipe for the model.
+            fp4_recipe: The FP4 recipe for the model.
+        """
         super().__init__(config)
-        self.model = NVLlamaModel(config)
+        self.model = NVLlamaModel(config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
         self.vocab_size = config.vocab_size
         with transformer_engine.pytorch.quantized_model_init(enabled=False):
             self.lm_head = transformer_engine.pytorch.Linear(

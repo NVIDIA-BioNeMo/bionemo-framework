@@ -1,0 +1,21 @@
+defaults:
+  - og2_fp8_agent
+  - _self_
+
+# Warm-start from fl4 (first/last 4 layers BF16) 5K checkpoint
+# Strategy: ends_in, rounds 1-4 already done
+
+job_name: "og2-fp8-ends-in-fl4-5k"
+promotion_strategy: "ends_in"
+wandb_project: "llama3-metagenome-7b"
+
+warm_start:
+  enabled: true
+  external_checkpoint: "/data/savithas/checkpoints/og2-7b-fp8-refactor-bf16-fl4-fp32mw"  # pragma: allowlist secret
+  lkg_step: 5000
+  # Layers 5-28 in FP8, layers 1-4 and 29-32 in BF16 (1-indexed)
+  fp8_layers: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+  demotion_round: 4
+  # ends_in pointers: next demotion would be layers 5 and 28
+  bottom_ptr: 5
+  top_ptr: 28

@@ -1,0 +1,43 @@
+# Agent control plane configuration
+#
+# Enable the AI-in-the-loop FP8 debugger by adding `agent.enabled=true` to
+# your Hydra overrides. The agent sidecar job writes interventions to
+# `control_file`; the training loop polls it every `poll_every_n_steps`.
+#
+# Usage:
+#   torchrun ... train_fsdp2.py --config-name og2_7b_thd_gqa_fp8 agent.enabled=true
+
+agent:
+  enabled: false
+
+  # Shared NFS paths for agent <-> training communication
+  control_file: /data/agent/control.yaml
+  metrics_file: /data/agent/metrics.jsonl
+  journal_file: /data/agent/journal.jsonl
+
+  # How often the training loop checks for new control-plane instructions
+  poll_every_n_steps: 1
+
+  # Minimum steps between successive Tier-1 interventions (observe before acting)
+  cooldown_steps: 500
+
+  # Safety bounds for Tier-1 hot-reload parameters [min, max]
+  bounds:
+    learning_rate: [0.0, 1.0]
+    grad_clip_norm: [0.1, 100.0]
+    logging_frequency: [1, 10000]
+
+  # --- Agent daemon settings (used by agent_daemon.py, not the training loop) ---
+  # Monitor loop poll interval in seconds
+  monitor_interval_seconds: 30
+
+  # Anomaly detection thresholds
+  loss_spike_threshold_pct: 50.0
+  grad_norm_spike_multiplier: 3.0
+  nan_halt: true
+
+  # Tier-2 restart limits
+  max_tier2_restarts: 3
+
+  # Start in observation-only mode (no interventions until toggled)
+  observation_only: true

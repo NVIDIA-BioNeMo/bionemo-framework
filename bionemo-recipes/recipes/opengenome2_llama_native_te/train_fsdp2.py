@@ -20,7 +20,7 @@ Supports:
 - Megatron-style scaled initialization for residual output layers
 - Spike-No-More embedding initialization (std=1.0)
 - Weight decay grouping (skip bias and 1D params)
-- FP8 training with configurable first/last layer BF16 override
+- Layer-wise FP8/FP4 quantization via resolve_layer_precision()
 - Validation with per-token and per-batch loss metrics
 - Checkpoint resume with LenientLoadPlanner for missing TE keys
 """
@@ -43,8 +43,6 @@ try:
 except ImportError:
     debug_api = None
     HAS_NVDLFW_INSPECT = False
-import transformer_engine
-import transformer_engine.pytorch
 from omegaconf import DictConfig, OmegaConf
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
@@ -62,10 +60,10 @@ from checkpoint import (
 )
 from dataset import create_bshd_dataloader, create_thd_dataloader
 from distributed_config import DistributedConfig
-from fp8_debugging import initialize_fp8_debugging
 from opengenome_modeling_llama_te import NVLlamaConfig, NVLlamaForCausalLM
 from optimizer import get_parameter_groups_with_weight_decay
 from perf_logger import PerfLogger
+from quantization import initialize_quant_stats_logging, resolve_layer_precision
 from scheduler import get_cosine_annealing_schedule_with_warmup
 from validation import run_validation
 
@@ -110,16 +108,25 @@ def main(args: DictConfig) -> float | None:
     seed = getattr(args, "seed", 42)
     set_seed(seed)
 
-    # TE Debug feature logging - MUST be done BEFORE FSDP wrapping
-    if args.fp8_stats_config.enabled:
-        initialize_fp8_debugging(dist_config, **args.fp8_stats_config, fp8_enabled=args.fp8_config.enabled)
+    # Quant stats logging is initialized later, after layer_precision is resolved.
 
     device_mesh = init_device_mesh("cuda", mesh_shape=(dist_config.world_size,), mesh_dim_names=("dp",))
 
-    # Create an FP8 recipe -- this is only used if FP8 is enabled in the config.
-    fp8_recipe = hydra.utils.get_class(args.fp8_config.fp8_recipe)(
-        fp8_format=Format[args.fp8_config.fp8_format], **args.fp8_config.fp8_recipe_kwargs
-    )
+    # Create FP8 recipe -- only used if FP8 is enabled in the config.
+    fp8_recipe = None
+    if args.fp8_config.enabled:
+        fp8_recipe = hydra.utils.get_class(args.fp8_config.fp8_recipe)(
+            fp8_format=Format[args.fp8_config.fp8_format], **args.fp8_config.fp8_recipe_kwargs
+        )
+
+    # Create FP4 recipe -- only used if FP4 is enabled in the config.
+    fp4_recipe = None
+    fp4_config = getattr(args, "fp4_config", None)
+    fp4_enabled = fp4_config is not None and getattr(fp4_config, "enabled", False)
+    if fp4_enabled:
+        fp4_recipe = hydra.utils.get_class(fp4_config.fp4_recipe)(
+            **OmegaConf.to_container(fp4_config.fp4_recipe_kwargs, resolve=True)
+        )
 
     if args.use_te:
         config_class = NVLlamaConfig
@@ -155,7 +162,52 @@ def main(args: DictConfig) -> float | None:
         config_kwargs["use_megatron_scaled_init"] = True
         logger.info("Megatron scaled init enabled: proj/fc2 use std/sqrt(2*num_layers)")
 
+    # Handle quantized model init for FP8 layers
+    quantized_init_cfg = getattr(args.fp8_config, "quantized_model_init_kwargs", None)
+    if quantized_init_cfg is not None and getattr(quantized_init_cfg, "enabled", False):
+        config_kwargs["use_quantized_model_init"] = True
+        logger.info("Quantized model init enabled for FP8 layers")
+
     config = config_class.from_pretrained(args.config_name_or_path, dtype=model_dtype, **config_kwargs)
+
+    # Resolve layer-wise quantization precision (FP8/FP4/BF16) from config
+    fp8_layers_cfg = getattr(args, "fp8_layers", None)
+    fp4_layers_cfg = getattr(args, "fp4_layers", None)
+
+    def _parse_layers_cfg(cfg):
+        """Parse layer config from OmegaConf list or CLI string like '[1,2,3]'."""
+        if cfg is None:
+            return None
+        if isinstance(cfg, str):
+            import ast
+
+            return ast.literal_eval(cfg.strip("'\""))
+        return OmegaConf.to_container(cfg, resolve=True)
+
+    layer_precision = resolve_layer_precision(
+        num_layers=config.num_hidden_layers,
+        fp8_enabled=args.fp8_config.enabled,
+        fp4_enabled=fp4_enabled,
+        fp8_layers=_parse_layers_cfg(fp8_layers_cfg),
+        fp4_layers=_parse_layers_cfg(fp4_layers_cfg),
+    )
+    config.layer_precision = layer_precision
+    logger.info(f"Layer precision: {layer_precision}")
+
+    # Initialize quant stats logging (debug API) BEFORE model creation.
+    # TEDebugState.initialize() is called during TE module __init__ and checks if debug_api
+    # is already initialized. If not, it sets debug_enabled=False permanently.
+    quant_stats_config = getattr(args, "quant_stats_config", None)
+    if quant_stats_config is not None and getattr(quant_stats_config, "enabled", False):
+        if HAS_NVDLFW_INSPECT:
+            initialize_quant_stats_logging(
+                quant_stats_file=quant_stats_config.quant_stats_file,
+                quant_log_dir=quant_stats_config.quant_log_dir,
+                rank=dist_config.rank,
+                layer_precision=layer_precision,
+            )
+        else:
+            logger.warning("quant_stats_config.enabled=True but nvdlfw_inspect is not installed, skipping")
 
     # Log initialization settings
     std = getattr(config, "initializer_range", 0.02)
@@ -168,13 +220,11 @@ def main(args: DictConfig) -> float | None:
         f"embedding_std={embedding_init_std}"
     )
 
-    with (
-        torch.device("meta") if args.use_meta_device else nullcontext(),
-        transformer_engine.pytorch.quantized_model_init(
-            recipe=fp8_recipe, **args.fp8_config.quantized_model_init_kwargs
-        ),
-    ):
-        model = model_class(config)
+    with torch.device("meta") if args.use_meta_device else nullcontext():
+        if args.use_te:
+            model = model_class(config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
+        else:
+            model = model_class(config)
 
     logger.info("Initialized Model:\n%s", model)
 
@@ -198,6 +248,10 @@ def main(args: DictConfig) -> float | None:
         fully_shard(layer, mesh=device_mesh["dp"], mp_policy=mp_policy)
     fully_shard(model, mesh=device_mesh["dp"], mp_policy=mp_policy)
 
+    # Set recipes after FSDP wrapping (recipes are not serializable through FSDP init)
+    if args.use_te:
+        model.model.set_recipes(fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe)
+
     # If using meta device, move sharded weights to cuda and initialize parameters.
     # WARNING: meta-device init breaks Megatron-style scaled init for proj/fc2.
     # Use use_meta_device=false when using use_megatron_scaled_init or spike_no_more_embedding_init.
@@ -207,8 +261,8 @@ def main(args: DictConfig) -> float | None:
         model.to_empty(device=device)
         model.apply(model._init_weights)
 
-    # Assign names to layers so debug API can identify them
-    if args.fp8_stats_config.enabled and HAS_NVDLFW_INSPECT:
+    # Assign layer names for debug API (must happen after model creation)
+    if quant_stats_config is not None and getattr(quant_stats_config, "enabled", False) and HAS_NVDLFW_INSPECT:
         debug_api.infer_and_assign_layer_names(model)
 
     # Create optimizer
@@ -311,8 +365,7 @@ def main(args: DictConfig) -> float | None:
 
             micro_step += 1
 
-            with transformer_engine.pytorch.autocast(enabled=args.fp8_config.enabled, recipe=fp8_recipe):
-                outputs = model(**batch)
+            outputs = model(**batch)
 
             loss = outputs.loss / args.grad_acc_steps
             loss.backward()

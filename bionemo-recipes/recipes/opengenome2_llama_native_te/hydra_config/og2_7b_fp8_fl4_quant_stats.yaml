@@ -1,0 +1,24 @@
+# OpenGenome2 7B - FP8 Block Scaling, FL4 (first/last 4 layers BF16)
+# Quant stats logging enabled to diagnose fl2 vs fl4 convergence difference.
+# Resume from step 15000 checkpoint.
+#
+# Layers 5-28 in FP8 (1-indexed), layers 1-4 and 29-32 in BF16.
+
+defaults:
+  - og2_7b_thd_gqa_fp8
+  - _self_
+
+# FL4: layers 5-28 in FP8 (1-indexed), layers 1-4 and 29-32 in BF16
+fp8_layers: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+
+# Enable quant stats logging
+quant_stats_config:
+  enabled: true
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: /data/savithas/checkpoints/og2-7b-fp8-fl4-quant-stats/quant_logs
+
+num_train_steps: 182314
+
+wandb:
+  name: og2-7b-fp8-fl4-quant-stats-15k
+  project: llama3-metagenome-7b
