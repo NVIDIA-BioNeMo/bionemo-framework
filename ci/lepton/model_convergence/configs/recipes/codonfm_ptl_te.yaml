@@ -15,15 +15,7 @@ gpu_type: h100-sxm
 resource_shape: "${device_type}.${num_devices}x${gpu_type}"
 
 job_name: "${sanitize:codonfm_ptl_test}8gpu"
-branch: jwilber/codon-fm-ci
-
-############################################################
-# Container Runtime
-# Defines the base Docker image and registry auth needed
-############################################################
-container:
-  image: nvcr.io/nvidian/cvai_bnmo_trng/codon_fm_te_bnmo_10292025_multinode
-  registry_auth: lepton-nvidia-nvcrio-jonathan
+branch: main
 
 ############################################################
 # kratos info: where to log data
@@ -83,26 +75,6 @@ dataset_name: CodonMemmapDataset
 split_name_prefix: nopathogen
 attn_input_format: thd
 collate_fn: thd
-
-############################################################
-# Checkout Script
-# Standardized script to clone the BioNeMo repository and install
-# dependencies before the training run starts. Child configs can
-# inherit and reuse this logic without modification.
-############################################################
-checkout_script: |
-  cd /workspace/codonfm
-  git clone https://github.com/NVIDIA/bionemo-framework.git
-  cd bionemo-framework
-  if [ -n "${commit_sha}" ]; then
-    echo "Checking out commit: ${commit_sha}"
-    git checkout "${commit_sha}"
-  elif [ "${branch}" != "main" ]; then
-    echo "Checking out branch: ${branch}"
-    git checkout "${branch}"
-  fi
-  cd bionemo-recipes/recipes/${recipe_subdir}
-  pip install -e .
 
 ############################################################
 # run script
