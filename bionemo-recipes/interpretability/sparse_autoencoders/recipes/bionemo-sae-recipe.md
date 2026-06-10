@@ -128,11 +128,18 @@ These defaults reproduced the best Evo2-7B / layer-26 SAE (~21% dead, ~0.10 FVU)
 
 7. **`weights_only=True` (torch 2.6 default) breaks legacy checkpoints with numpy arrays** — buried in stderr, exit 0, empty output dir. `UnpicklingError: Unsupported global: numpy.core.multiarray._reconstruct`. Patch the upstream `torch.load(...)` to `weights_only=False` if the source is trusted. (For Evo2, the recipe assumes an MBridge checkpoint — conversion from savanna/nemo2 is a prerequisite, not recipe code.)
 
-### Model architecture
+### Model architecture / extraction (general principle → Evo2 example)
 
-08. **Hyena (evo2) fftconv OOMs on long sequences even at micro-batch=1** (FFT intermediates scale super-linearly). **Chunk inputs to the trained context** before extraction: evo2 1B → 8192 bp; 7B → context-extended (check release); 40B → 1M. Don't rely on the inference tool to truncate.
-09. `predict_evo2` takes **uncompressed FASTA only** (`<(zcat ...)` fails); but if your chunker already reads `.gz` → writes plain `.fasta`, no separate gunzip is needed.
-10. `--micro-batch-size 1` is often far from optimal once chunks are uniform/short — memory drops ~10×, raise it (chunking alone gave ~17× on Evo2 1B).
+These are **general principles**; the numbers are Evo2 examples — **measure them for your model** (see "Verify the perf claims" below), don't copy the constants.
+
+08. **Long sequences can blow up memory super-linearly on conv/FFT architectures → chunk inputs to the model's trained context before extraction.** *Evo2 example:* Hyena's fftconv OOMs even at micro-batch=1 (intermediates scale super-linearly); chunk to 1B → 8192 bp, 7B → context-extended (check release), 40B → 1M. Don't rely on the inference tool to truncate.
+09. **Check your predict CLI's input constraints (compression/format).** *Evo2 example:* `predict_evo2` takes uncompressed FASTA only (`<(zcat ...)` fails); but if your chunker already reads `.gz` → writes plain `.fasta`, no separate gunzip is needed.
+10. **micro-batch=1 is rarely optimal — once inputs are short/uniform, raise it.** *Evo2 example:* chunking dropped memory ~10× and gave ~17× per-batch speedup on Evo2 1B, so `--micro-batch-size` could be raised well past 1.
+
+**Verify the perf claims (don't trust the constants):** a few-minute single-GPU micro-benchmark —
+
+- **micro-batch sweep:** fix a chunked FASTA, run the extractor at `--micro-batch-size ∈ {1,4,8,16,32}`, log peak GPU mem (`torch.cuda.max_memory_allocated`) + throughput (tokens/s over fixed N). Find the largest mbs that fits + the throughput curve.
+- **seq-length sweep** (for #8): mbs=1, L ∈ {1k,8k,16k,32k}, log peak mem → see the blowup / OOM point for *your* architecture.
 
 ### Output format
 
