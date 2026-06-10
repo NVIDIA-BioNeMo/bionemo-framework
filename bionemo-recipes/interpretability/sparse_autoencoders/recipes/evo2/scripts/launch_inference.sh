@@ -15,10 +15,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RECIPE_DIR="$(cd "$HERE/.." && pwd)"  # recipes/evo2 — so the evo2_sae package imports
 
 VENV="${VENV:-/data/pbinder/bionemo-framework/bionemo-recipes/recipes/evo2_megatron/.venv}"
-export EVO2_CKPT_DIR="${EVO2_CKPT_DIR:-/data/interp/evo2/checkpoints/evo2_1b_base_mbridge}"
-export SAE_CKPT_PATH="${SAE_CKPT_PATH:-/data/interp/evo2/sae/v2_diverse/layer19_C13_nofilter/checkpoints/checkpoint_final.pt}"
-export FEATURE_ANNOTATIONS="${FEATURE_ANNOTATIONS:-/data/interp/evo2/sae_eval/dashboard_data/l19_C13_nofilter/feature_metadata.parquet}"
-export EMBEDDING_LAYER="${EMBEDDING_LAYER:-19}"
+export EVO2_CKPT_DIR="${EVO2_CKPT_DIR:-/data/interp/evo2/checkpoints/evo2_7b_mbridge}"
+export SAE_CKPT_PATH="${SAE_CKPT_PATH:-/data/interp/evo2/sae/v2_diverse/layer26_7B_ablate_normalize_input/checkpoints/checkpoint_final.pt}"
+export FEATURE_ANNOTATIONS="${FEATURE_ANNOTATIONS:-/data/interp/evo2/sae_eval/dashboard_data/l26_7B_normalize/feature_metadata.parquet}"
+export EMBEDDING_LAYER="${EMBEDDING_LAYER:-26}"
 
 if [[ ! -x "$VENV/bin/python" ]]; then
   echo "ERROR: evo2_megatron venv not found at $VENV (build it with the recipe's .ci_build.sh)" >&2
