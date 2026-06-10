@@ -16,6 +16,7 @@
 """Dataset and dataloader utilities for CodonFM pretraining."""
 
 import json
+import logging
 import random
 from pathlib import Path
 
@@ -25,6 +26,9 @@ import torch
 from distributed_config import DistributedConfig
 from tokenizer import CodonTokenizer
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
+
+
+logger = logging.getLogger(__name__)
 
 
 BASES = "ACGT"
@@ -250,6 +254,7 @@ class CodonTHDCollator:
         mlm_probability: float = 0.15,
         seed: int = 42,
         pad_to_multiple_of: int | None = None,
+        pad_sequences_to_be_divisible_by: int | None = None,
     ):
         """Initialize.
 
@@ -260,12 +265,18 @@ class CodonTHDCollator:
             seed: Random seed for reproducible masking.
             pad_to_multiple_of: If set, pad total tokens to a multiple of this value.
                 Required for FP8 (8), MXFP8 (16), or NVFP4 (32) with THD format.
+            pad_sequences_to_be_divisible_by: If set, each individual sequence is padded
+                to be divisible by this value. Used for context parallelism.
+                Cannot be used together with pad_to_multiple_of.
         """
+        if pad_sequences_to_be_divisible_by is not None and pad_to_multiple_of is not None:
+            raise ValueError("pad_sequences_to_be_divisible_by and pad_to_multiple_of cannot be used together")
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.mlm_probability = mlm_probability
         self.rng = random.Random(seed)
         self.pad_to_multiple_of = pad_to_multiple_of
+        self.pad_sequences_to_be_divisible_by = pad_sequences_to_be_divisible_by
 
     def __call__(self, batch: list[dict[str, str]]) -> dict[str, torch.Tensor]:
         """Collate a batch into THD packed format.
@@ -334,7 +345,7 @@ class CodonTHDCollator:
                 cu_seq_lens = torch.cat([cu_seq_lens, torch.tensor(pad_cu_lens, dtype=cu_seq_lens.dtype)])
                 max_length = max(max_length, min(remainder, self.max_seq_length))
 
-        return {
+        result = {
             "input_ids": input_ids,
             "labels": labels,
             "cu_seq_lens_q": cu_seq_lens,
@@ -342,6 +353,29 @@ class CodonTHDCollator:
             "max_length_q": max_length,
             "max_length_k": max_length,
         }
+
+        # Per-sequence padding for context parallelism: each sequence is padded individually
+        # so its length is divisible by pad_sequences_to_be_divisible_by.
+        if self.pad_sequences_to_be_divisible_by is not None:
+            from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+                pad_thd_sequences_for_cp,
+            )
+
+            input_ids_padded, labels_padded, cu_seqlens_padded = pad_thd_sequences_for_cp(
+                input_ids.squeeze(0),
+                labels.squeeze(0),
+                cu_seq_lens,
+                self.pad_sequences_to_be_divisible_by,
+                padding_token_id=self.tokenizer.pad_token_id,
+                padding_label_id=-100,
+            )
+            result["input_ids"] = input_ids_padded.unsqueeze(0)
+            result["labels"] = labels_padded.unsqueeze(0)
+            result["cu_seq_lens_q_padded"] = cu_seqlens_padded.to(torch.int32)
+            result["cu_seq_lens_k_padded"] = cu_seqlens_padded.to(torch.int32)
+            result["pad_between_seqs"] = True
+
+        return result
 
 
 def _create_dataset(data_path: str, max_seq_length: int, seed: int) -> Dataset:
@@ -480,3 +514,83 @@ def create_thd_dataloader(
     )
 
     return dataloader, sampler
+
+
+def create_cp_dataloader(
+    dist_config: DistributedConfig,
+    *,
+    cp_mesh: torch.distributed.device_mesh.DeviceMesh,
+    data_path: str,
+    micro_batch_size: int = 2,
+    max_seq_length: int = 512,
+    mlm_probability: float = 0.15,
+    num_workers: int = 1,
+    seed: int = 42,
+    pad_to_multiple_of: int | None = None,
+    pad_sequences_to_be_divisible_by: int | None = None,
+) -> tuple:
+    """Create a Context-parallel aware THD dataloader.
+
+    Wraps the THD dataloader with CP-aware collation and distribution across ranks.
+    Only CP rank 0 loads data; other ranks receive shards via scatter.
+
+    Args:
+        dist_config: Distributed configuration.
+        cp_mesh: The context parallel mesh.
+        data_path: Path to parquet file, memmap directory, or 'synthetic'.
+        micro_batch_size: Number of sequences to pack per batch.
+        max_seq_length: Maximum sequence length per sample.
+        mlm_probability: MLM masking probability.
+        num_workers: Number of dataloader workers.
+        seed: Random seed.
+        pad_to_multiple_of: Unused when pad_sequences_to_be_divisible_by is set.
+        pad_sequences_to_be_divisible_by: Per-sequence padding divisor for CP.
+            Defaults to cp_mesh.size() * 2 if not provided.
+
+    Returns:
+        Tuple of (ContextParallelDataLoaderWrapper, DistributedSampler or None).
+    """
+    from collator import ContextParallelDataLoaderWrapper, DataCollatorForContextParallel
+
+    # Ensure pad_sequences_to_be_divisible_by is set for CP
+    if pad_sequences_to_be_divisible_by is None:
+        logger.info("pad_sequences_to_be_divisible_by not provided, using cp_mesh.size() * 2")
+        pad_sequences_to_be_divisible_by = cp_mesh.size() * 2
+
+    if cp_mesh.get_local_rank() == 0:
+        tokenizer = CodonTokenizer()
+        dataset = _create_dataset(data_path, max_seq_length, seed)
+
+        sampler = DistributedSampler(
+            dataset,
+            rank=dist_config.rank,
+            num_replicas=dist_config.world_size,
+            seed=seed,
+        )
+
+        collator = CodonTHDCollator(
+            tokenizer=tokenizer,
+            max_seq_length=max_seq_length,
+            mlm_probability=mlm_probability,
+            pad_sequences_to_be_divisible_by=pad_sequences_to_be_divisible_by,
+        )
+
+        train_dataloader = DataLoader(
+            dataset,
+            sampler=sampler,
+            batch_size=micro_batch_size,
+            collate_fn=collator,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
+        # Wrap collator with CP-aware splitting
+        train_dataloader.collate_fn = DataCollatorForContextParallel(
+            collator=train_dataloader.collate_fn,
+            device_mesh=cp_mesh,
+        )
+    else:
+        train_dataloader = None
+        sampler = None
+
+    return ContextParallelDataLoaderWrapper(train_dataloader, cp_mesh), sampler

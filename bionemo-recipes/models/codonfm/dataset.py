@@ -162,6 +162,7 @@ class CodonTHDCollator:
         max_seq_length: int = 512,
         mlm_probability: float = 0.15,
         seed: int = 42,
+        pad_sequences_to_be_divisible_by: int | None = None,
     ):
         """Initialize.
 
@@ -170,11 +171,14 @@ class CodonTHDCollator:
             max_seq_length: Maximum sequence length per sample.
             mlm_probability: Probability of masking a token.
             seed: Random seed for reproducible masking.
+            pad_sequences_to_be_divisible_by: If set, each individual sequence is padded
+                to be divisible by this value. Used for context parallelism.
         """
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.mlm_probability = mlm_probability
         self.rng = random.Random(seed)
+        self.pad_sequences_to_be_divisible_by = pad_sequences_to_be_divisible_by
 
     def __call__(self, batch: list[dict[str, str]]) -> dict[str, torch.Tensor]:
         """Collate a batch into THD packed format.
@@ -216,14 +220,39 @@ class CodonTHDCollator:
         cu_seq_lens = torch.zeros(len(seq_lengths) + 1, dtype=torch.int32)
         cu_seq_lens[1:] = torch.cumsum(torch.tensor(seq_lengths, dtype=torch.int32), dim=0)
 
-        return {
-            "input_ids": torch.tensor(all_ids, dtype=torch.long).unsqueeze(0),
-            "labels": torch.tensor(all_labels, dtype=torch.long).unsqueeze(0),
+        input_ids = torch.tensor(all_ids, dtype=torch.long).unsqueeze(0)
+        labels_tensor = torch.tensor(all_labels, dtype=torch.long).unsqueeze(0)
+
+        result = {
+            "input_ids": input_ids,
+            "labels": labels_tensor,
             "cu_seq_lens_q": cu_seq_lens,
             "cu_seq_lens_k": cu_seq_lens,
             "max_length_q": max(seq_lengths),
             "max_length_k": max(seq_lengths),
         }
+
+        # Per-sequence padding for context parallelism
+        if self.pad_sequences_to_be_divisible_by is not None:
+            from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+                pad_thd_sequences_for_cp,
+            )
+
+            input_ids_padded, labels_padded, cu_seqlens_padded = pad_thd_sequences_for_cp(
+                input_ids.squeeze(0),
+                labels_tensor.squeeze(0),
+                cu_seq_lens,
+                self.pad_sequences_to_be_divisible_by,
+                padding_token_id=self.tokenizer.pad_token_id,
+                padding_label_id=-100,
+            )
+            result["input_ids"] = input_ids_padded.unsqueeze(0)
+            result["labels"] = labels_padded.unsqueeze(0)
+            result["cu_seq_lens_q_padded"] = cu_seqlens_padded.to(torch.int32)
+            result["cu_seq_lens_k_padded"] = cu_seqlens_padded.to(torch.int32)
+            result["pad_between_seqs"] = True
+
+        return result
 
 
 def create_bshd_dataloader(
