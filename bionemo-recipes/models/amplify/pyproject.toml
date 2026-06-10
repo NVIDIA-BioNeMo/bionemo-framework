@@ -17,7 +17,7 @@ dependencies = [
     "omegaconf",
     "pytest",
     "setuptools<82",
-    "torch==2.6.0a0+ecf3bae40a.nv25.01",
+    "torch==2.8.0",
     "transformer_engine[pytorch]",
     "transformers<5.0",                  # TODO(BIO-143): update AMPLIFY to support Transformers v5
     "xformers",
