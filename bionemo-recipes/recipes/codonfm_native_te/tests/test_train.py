@@ -130,15 +130,31 @@ def test_sanity_convergence_fsdp2_fp8(tmp_path, recipe_path):
     assert final_loss < 5.0, f"Final loss {final_loss} is too high"
 
 
-def test_sanity_convergence_fsdp2_fp32_master_weights(tmp_path, recipe_path):
-    """Test CodonFM with FP32 master weights."""
+def test_sanity_convergence_fsdp2_bf16_mixed(tmp_path, recipe_path):
+    """Test CodonFM with bf16-mixed precision (fp32 master weights + bf16 compute)."""
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
             config_name="L0_sanity",
             overrides=[
                 f"+wandb_init_args.dir={tmp_path}",
                 f"checkpoint.ckpt_dir={tmp_path}",
-                "use_fp32_master_weights=true",
+                "precision=bf16-mixed",
+            ],
+        )
+
+    final_loss = main_fsdp2(sanity_config)
+    assert final_loss < 5.0, f"Final loss {final_loss} is too high"
+
+
+def test_sanity_convergence_fsdp2_bf16(tmp_path, recipe_path):
+    """Test CodonFM with pure bf16 precision."""
+    with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
+        sanity_config = compose(
+            config_name="L0_sanity",
+            overrides=[
+                f"+wandb_init_args.dir={tmp_path}",
+                f"checkpoint.ckpt_dir={tmp_path}",
+                "precision=bf16",
             ],
         )
 

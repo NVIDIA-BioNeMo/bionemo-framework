@@ -35,6 +35,7 @@ from src.models.encodon_te_pl import EncodonTEPL
 from src.tokenizer import Tokenizer
 from src.utils.fsdp_config import get_fsdp_strategy
 from src.utils.grad_norm_callback import GradientNormLogger
+from src.utils.interval_step_timing import IntervalStepTimingCallback
 from src.utils.pred_writer import PredWriter
 from src.utils.scheduler import linear_scheduler_with_warmup_lr_lambda
 from src.utils.throughput_logger import ThroughputLogger
@@ -136,6 +137,7 @@ def get_callbacks_config(args: Any) -> Dict[str, fdl.Config]:
         "lr_monitor": fdl.Config(LearningRateMonitor, logging_interval="step", log_weight_decay=True),
         "grad_norm_callback": fdl.Config(GradientNormLogger, log_every_n_steps=args.log_every_n_steps),
         "timer_callback": fdl.Config(StepTimingCallback, log_every_n_steps=args.log_every_n_steps, mode="train"),
+        "interval_timer_callback": fdl.Config(IntervalStepTimingCallback, log_every_n_steps=args.log_every_n_steps),
         "throughput_callback": fdl.Config(ThroughputLogger, log_every_n_steps=args.log_every_n_steps, warmup_steps=40),
     }
     if args.mode == "eval":
