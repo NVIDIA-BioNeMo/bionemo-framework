@@ -1,0 +1,104 @@
+# @package _global_
+defaults:
+  - /base
+  - _self_
+
+############################################################
+# lepton job info
+############################################################
+node_group: yo-bom-lepton-001
+num_nodes: 1
+device_type: gpu
+num_devices: 2
+gpu_type: h100-sxm
+resource_shape: "${device_type}.${num_devices}x${gpu_type}"
+
+############################################################
+# recipe identifiers
+# mostly used for logging and observability
+############################################################
+recipe_subdir: geneformer_native_te_mfsdp_fp8
+model_type: geneformer
+variant: train # train, finetune
+
+# Core identifiers for filtering
+framework: native # native, accelerate
+precision: fp16 # likely bf16 or fp8
+te_enabled: true
+fp8_enabled: false
+thd_enabled: false
+
+# Catchall for additional features/configs
+extras: [] # e.g. [thd]
+
+############################################################
+# wandb info (total_gpus used for group name)
+############################################################
+# `total_gpus` calculated from lepton job info above
+total_gpus: ${multiply:${num_devices},${num_nodes}}
+
+wandb_init_args:
+  project: "test_convergence__recipes__${sanitize:${branch}}"
+  group: "${model_type}__${task_cmd}__${total_gpus}__${sanitize:${gpu_type}}"
+  job_type: "${recipe_subdir}"
+  name: null
+
+############################################################
+# task commands
+# shared across all products (if not explicitly overridden)
+############################################################
+
+# train specific commands
+task_cmd: train
+# model
+num_train_steps: 10_000
+micro_batch_size: 8
+use_te_layers: ${te_enabled}
+
+# training
+use_fp8: ${fp8_enabled}
+num_workers: 4
+mlm_probability: 0.15
+# checkpointing (must turn off)
+checkpoint_dir: null
+save_every_n_steps: 100
+resume_from_checkpoint: false
+
+############################################################
+# Each product is a different config to run, alongside
+# config-specific arguments. Must have a wandb_name`.
+############################################################
+products:
+  - config: 10m
+    use_mfsdp: false
+    parallelism_strategy: ddp
+    wandb_name: "${config}__${parallelism_strategy}__${now:%Y%m%d-%H%M%S}__${gitsha:}"
+    job_name: "${sanitize:geneformer-nat-${config}}-ddp"
+  - config: 10m
+    use_mfsdp: true
+    parallelism_strategy: mfsdp
+    wandb_name: "${config}__${parallelism_strategy}__${now:%Y%m%d-%H%M%S}__${gitsha:}"
+    job_name: "${sanitize:geneformer-nat-${config}}-mfsdp"
+
+############################################################
+# run script
+# This gets called right after `checkout_script` in the base config.
+############################################################
+run_script: |
+  torchrun ${task_cmd}.py \
+    --config-name ${config}.yaml \
+    training.num_train_steps=${num_train_steps} \
+    model.micro_batch_size=${micro_batch_size} \
+    model.use_te_layers=${use_te_layers} \
+    wandb_init_args.mode=${wandb_init_args.mode} \
+    wandb_init_args.project=${wandb_init_args.project} \
+    +wandb_init_args.group=${wandb_init_args.group} \
+    +wandb_init_args.job_type=${wandb_init_args.job_type} \
+    wandb_init_args.name=${wandb_name} \
+    training.use_mfsdp=${use_mfsdp} \
+    training.use_fp8=${use_fp8} \
+    training.num_workers=${num_workers} \
+    training.mlm_probability=${mlm_probability} \
+    training.checkpoint_dir=${checkpoint_dir} \
+    training.save_every_n_steps=${save_every_n_steps} \
+    training.resume_from_checkpoint=${resume_from_checkpoint}
