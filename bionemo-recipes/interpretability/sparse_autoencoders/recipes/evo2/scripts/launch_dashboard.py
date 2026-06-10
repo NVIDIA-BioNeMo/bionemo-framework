@@ -15,15 +15,13 @@
 
 """Launch the evo2 SAE feature-explorer dashboard on data you provide.
 
-Reads the precomputed atlas parquets from --data-dir (it does NOT generate them — that is a
-separate offline step), stages them into the dashboard's public/ dir, and starts Vite:
+Starts Vite for the dashboard. The Sequence-inspector and Generative-steering tabs call the
+live backend (start it separately: `scripts/launch_inference.sh serve`) and need no data here.
+The Feature-atlas tab is static — pass --data-dir with precomputed atlas parquets to populate
+it (this script does NOT generate them; that is a separate offline step):
 
-    python scripts/launch_dashboard.py --data-dir /path/to/dashboard_data
-
-The Feature-atlas tab is fully static (served from those parquets). The Sequence-inspector and
-Generative-steering tabs call the live backend — start it separately:
-
-    scripts/launch_inference.sh serve
+    python scripts/launch_dashboard.py                              # inspector + steering only
+    python scripts/launch_dashboard.py --data-dir /path/to/data     # + Feature atlas
 """
 
 import argparse
