@@ -328,8 +328,6 @@ class TestCodonFMModel(BaseModelTest):
 
         if te_attn_backend == "fused_attn" and torch.cuda.get_device_capability()[0] == 8:
             pytest.xfail("On Ada and Ampere, no THD implementation is available for fused attn.")
-        elif te_attn_backend == "fused_attn" and torch.cuda.get_device_capability()[0] == 12:
-            pytest.xfail("BIONEMO-2840: On sm120, the THD implementation is not available for fused attn.")
 
         golden_dir = Path(__file__).parent
         golden_sd_path = golden_dir / "golden_state_dict.safetensors"

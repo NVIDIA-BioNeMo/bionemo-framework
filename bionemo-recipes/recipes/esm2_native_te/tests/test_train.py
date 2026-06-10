@@ -364,12 +364,8 @@ def test_sanity_convergence_fsdp2_fp8_and_model_init(tmp_path, recipe_path):
     assert final_loss < 3.0, f"Final loss {final_loss} is too high"
 
 
-def test_sanity_convergence_fsdp2_thd(tmp_path, monkeypatch, recipe_path):
+def test_sanity_convergence_fsdp2_thd(tmp_path, recipe_path):
     """For FSDP2, we check that the script can run successfully with FP8 and check convergence."""
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
 
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
@@ -386,12 +382,8 @@ def test_sanity_convergence_fsdp2_thd(tmp_path, monkeypatch, recipe_path):
 
 
 @requires_fp8
-def test_sanity_convergence_fsdp2_thd_fp8(tmp_path, monkeypatch, recipe_path):
+def test_sanity_convergence_fsdp2_thd_fp8(tmp_path, recipe_path):
     """For FSDP2, we check that the script can run successfully with THD + FP8 and check convergence."""
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
 
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
@@ -408,12 +400,7 @@ def test_sanity_convergence_fsdp2_thd_fp8(tmp_path, monkeypatch, recipe_path):
     assert final_loss < 3.0, f"Final loss {final_loss} is too high"
 
 
-def test_sanity_ddp_thd(tmp_path, monkeypatch, recipe_path):
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-
+def test_sanity_ddp_thd(tmp_path, recipe_path):
     # For DDP, we only check that the script can run successfully with THD, not convergence.
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
@@ -429,12 +416,7 @@ def test_sanity_ddp_thd(tmp_path, monkeypatch, recipe_path):
     main_ddp(sanity_config)
 
 
-def test_sanity_mfsdp_thd(tmp_path, monkeypatch, recipe_path):
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-
+def test_sanity_mfsdp_thd(tmp_path, recipe_path):
     # For MFSDP, we only check that the script can run successfully with THD, not convergence.
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
@@ -451,12 +433,7 @@ def test_sanity_mfsdp_thd(tmp_path, monkeypatch, recipe_path):
 
 
 @requires_fp8
-def test_sanity_ddp_thd_fp8(tmp_path, monkeypatch, recipe_path):
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-
+def test_sanity_ddp_thd_fp8(tmp_path, recipe_path):
     # For DDP, we only check that the script can run successfully with THD, not convergence.
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
@@ -474,12 +451,7 @@ def test_sanity_ddp_thd_fp8(tmp_path, monkeypatch, recipe_path):
 
 
 @requires_fp8
-def test_sanity_mfsdp_thd_fp8(tmp_path, monkeypatch, recipe_path):
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-
+def test_sanity_mfsdp_thd_fp8(tmp_path, recipe_path):
     # For MFSDP, we only check that the script can run successfully with THD, not convergence.
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
@@ -571,12 +543,7 @@ def test_sanity_convergence_fsdp2_huggingface_model(tmp_path, recipe_path):
     assert final_loss < 3.0, f"Final loss {final_loss} is too high"
 
 
-def test_sanity_ddp_thd_token_packing(tmp_path, monkeypatch, recipe_path):
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-
+def test_sanity_ddp_thd_token_packing(tmp_path, recipe_path):
     # For DDP, we only check that the script can run successfully with THD, not convergence.
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
@@ -592,12 +559,7 @@ def test_sanity_ddp_thd_token_packing(tmp_path, monkeypatch, recipe_path):
     main_ddp(sanity_config)
 
 
-def test_sanity_mfsdp_thd_token_packing(tmp_path, monkeypatch, recipe_path):
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-
+def test_sanity_mfsdp_thd_token_packing(tmp_path, recipe_path):
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
             config_name="L0_sanity",
@@ -612,12 +574,7 @@ def test_sanity_mfsdp_thd_token_packing(tmp_path, monkeypatch, recipe_path):
     main_mfsdp(sanity_config)
 
 
-def test_sanity_fsdp2_thd_token_packing(tmp_path, monkeypatch, recipe_path):
-    if torch.cuda.get_device_capability() == (12, 0):
-        # TODO(BIONEMO-2840): On sm120, we need to set NVTE_FUSED_ATTN to 0 since TE will choose fused attn by default,
-        # but it's missing this THD implementation.
-        monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-
+def test_sanity_fsdp2_thd_token_packing(tmp_path, recipe_path):
     with initialize_config_dir(config_dir=str(recipe_path / "hydra_config"), version_base="1.2"):
         sanity_config = compose(
             config_name="L0_sanity",
