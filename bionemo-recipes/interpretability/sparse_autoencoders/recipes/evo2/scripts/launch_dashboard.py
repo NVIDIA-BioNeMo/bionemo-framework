@@ -64,7 +64,11 @@ def stage_dashboard_data(data_dir, public_dir) -> list[str]:
 def main():
     """Stage the provided dashboard data and start the Vite dev server."""
     ap = argparse.ArgumentParser(description="Launch the evo2 SAE feature-explorer dashboard")
-    ap.add_argument("--data-dir", required=True, help=f"Directory containing {', '.join(REQUIRED_PARQUETS)}")
+    ap.add_argument(
+        "--data-dir",
+        help=f"Directory with {', '.join(REQUIRED_PARQUETS)} for the Feature-atlas tab. "
+        "Omit to launch with the inspector + steering tabs only (which use the live backend).",
+    )
     ap.add_argument("--port", type=int, default=5176)
     ap.add_argument("--no-open", action="store_true", help="Don't open a browser")
     args = ap.parse_args()
@@ -72,8 +76,11 @@ def main():
     if not (DASHBOARD_DIR / "package.json").exists():
         sys.exit(f"dashboard not found at {DASHBOARD_DIR}")
 
-    staged = stage_dashboard_data(args.data_dir, DASHBOARD_DIR / "public")
-    print(f"staged {len(staged)} parquet(s) -> {DASHBOARD_DIR / 'public'}")
+    if args.data_dir:
+        staged = stage_dashboard_data(args.data_dir, DASHBOARD_DIR / "public")
+        print(f"staged {len(staged)} parquet(s) -> {DASHBOARD_DIR / 'public'}")
+    else:
+        print("no --data-dir: Feature-atlas tab will be empty; inspector + steering use the backend.")
 
     if not (DASHBOARD_DIR / "node_modules").exists():
         print("installing dashboard dependencies (npm install)...")
