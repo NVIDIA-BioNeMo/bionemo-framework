@@ -6,6 +6,6 @@ torch
 torchao!=0.14.0
 tqdm
 transformer_engine
-transformers<5.0
+transformers<6.0
 wandb
 pytest
