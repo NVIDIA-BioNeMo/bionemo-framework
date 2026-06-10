@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evo2-sae"
+version = "0.1.0"
+description = "Sparse Autoencoders for the Evo2 DNA language model"
+requires-python = ">=3.10"
+
+dependencies = [
+    "sae",
+    "torch>=2.0",
+    "numpy>=1.20",
+    "pyarrow>=23.0.0",
+]
+
+# No package code lives here yet — the recipe is just an entry-point for
+# scripts/ that depends on the shared `sae` workspace package. Declare no
+# packages so setuptools doesn't try to discover anything.
+[tool.setuptools]
+packages = []
+
+[tool.uv.sources]
+sae = { workspace = true }
