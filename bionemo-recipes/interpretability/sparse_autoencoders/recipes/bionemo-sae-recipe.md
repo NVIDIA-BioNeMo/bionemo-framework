@@ -16,12 +16,23 @@ extractor (model-specific) → ActivationStore parquet shards → train.py (univ
 
 - **Extractor** runs the model forward and **streams** layer-L activations *directly* into an `ActivationStore` — no intermediate `.pt` files. The clean pattern (see `evo2/scripts/extract.py`): reuse the model's existing `predict_<model>` CLI but **monkeypatch its per-batch writer** with one that appends `hidden[mask]` to `sae.activation_store.ActivationStore`. Model-specific (~150 lines).
 - **ActivationStore** (`sae/src/sae/activation_store.py`) is the universal on-disk format: a directory of `shard_{NNNNN}.parquet` + `metadata.json` (`{model_name, layer, hidden_dim, n_samples, n_shards, shard_size, n_sequences}`).
-- **train.py** loads via `sae.activation_store.load_activations(cache_dir)` and trains a TopK/ReLU SAE — **near-identical across recipes, but not a blind verbatim copy.** It must wire the opt-in training flags (`--aggregate-loss` / `--dead-count-global` / `--mix-shards` / `--presample-shards`). Start from a **current** recipe's `train.py` (codonfm/evo2 — they already wire them), then change only the docstring + `--wandb-project` default. **Copying an older train.py silently drops those flags → the losing config** (this is exactly how a "reproduce the winner" run quietly turns into a baseline run). Uses `--model-path` only for a cache-validation warning. (The copy-paste is a known smell; the intended end-state is a single shared train-CLI in `sae`.)
+- **train.py** loads via `sae.activation_store.load_activations(cache_dir)` and trains a TopK/ReLU SAE — **near-identical across recipes, but not a blind verbatim copy.** It must wire the opt-in training flags (`--aggregate-loss` / `--dead-count-global` / `--mix-shards` / `--presample-shards`). **On `main`, only `evo2/scripts/train.py` wires all four** — `codonfm` and `esm2` are `0/4` (precisely why this belongs in shared `sae`). So copy **evo2's**, then change only the docstring + `--wandb-project` default. **Copying an older train.py silently drops those flags → the losing config** (this is exactly how a "reproduce the winner" run quietly turns into a baseline run). Uses `--model-path` only for a cache-validation warning. (The copy-paste is a known smell; the intended end-state is a single shared train-CLI in `sae`.)
 - **eval** (`sae.eval`, universal): `reconstruction` (variance explained), `dead_latents` (%), `loss_recovered` (CE fidelity), and `probing` (per-feature AUROC / linear probes / domain-F1 over a labeled `ActivationBuffer`). Probing scoring is **CPU-only** — it reads saved buffers, no model.
 
 ## When this applies
 
 Bringing up an SAE on a new biological foundation model — Evo2, ESM2, CodonFM, Nemotron, Geneformer, etc. Scope is the full **extract → train → eval** pipeline. Per-model you write a thin **extractor** (and, for interpretability, **labelers**); everything downstream is shared.
+
+## Assumptions about the model (check these first)
+
+This skill assumes the model is **already integrated into bionemo** — i.e. there's a setup in `bionemo-recipes/recipes/` to build on. If one of these is false, that's upstream work, not part of the SAE recipe:
+
+1. **The model has an inference path in the repo** — a `predict_<model>` CLI under `bionemo-recipes/recipes/<model>_*/` (Megatron-style, like Evo2), or it's HF-native (`AutoModel.from_pretrained`, like ESM2). If neither exists, you must add the forward pass first.
+2. **You can pull hidden states at a chosen layer** — `[B, S, H]` via `--embedding-layer` (predict CLI) or `output_hidden_states` (HF).
+3. **The checkpoint loads in the available env** — an **MBridge directory** for Megatron models (convert in Step 0); `.safetensors`/HF otherwise. The Megatron path needs the NVIDIA pytorch container + TransformerEngine.
+4. **Known token↔position mapping** — to label/probe, each activation row must map back to a sequence position. Evo2 byte tokenizer = 1 char/token; CodonFM = 1 codon (3-mer)/token; ESM2 = 1 aa/token. Get this wrong and your labels are misaligned.
+5. **Activations are float (fp16/fp32), not bf16** — Arrow/NumPy can't store bf16; cast before `ActivationStore.append`.
+6. **Inputs are sequences you can chunk/feed** (FASTA/CSV), and you know the model's **trained context length**.
 
 ## Step 0 — get the model + data (and, for Megatron models, convert to MBridge)
 
@@ -79,7 +90,7 @@ recipes/<model>/
 └── scripts/
     ├── <model>.sh          # orchestrator: chunk → stream-extract → train
     ├── extract.py          # STREAMING: wraps predict_<model>, writes ActivationStore directly (NO .pt)
-    └── train.py            # near-verbatim from a CURRENT recipe (codonfm/evo2): MUST wire the opt-in flags; edit only docstring + wandb default
+    └── train.py            # near-verbatim from evo2/scripts/train.py (the ONLY recipe on main wiring all 4 opt-in flags); edit only docstring + wandb default
 ```
 
 ### 4. The streaming extractor
@@ -197,4 +208,4 @@ After training, run `sae.eval` on a **held-out** cache (same distribution, disjo
 | `codonfm/` | `extract.py` → custom inference class                                                                          | new model has its own checkpoint + forward code                   |
 | `evo2/`    | **streaming** `extract.py` — wraps `predict_evo2`, monkeypatches its writer to an `ActivationStore` (no `.pt`) | upstream already has a `predict_<model>` CLI; reuse it and stream |
 
-All share a near-identical `train.py` (current copies wire the opt-in flags) and the `ActivationStore` parquet contract — folding the duplicated train-CLI into a shared `sae` entrypoint is a planned follow-up.
+All share a near-identical `train.py` and the `ActivationStore` parquet contract — **but only evo2's currently wires the opt-in flags** (codonfm/esm2 lag), so copy evo2's. Folding the duplicated train-CLI into one shared `sae` entrypoint (so no recipe can drift) is the planned fix.
