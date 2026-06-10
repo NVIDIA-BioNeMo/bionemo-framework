@@ -1,0 +1,5 @@
+poetry-core
+poetry_dynamic_versioning  # build dep of nvidia-resiliency-ext (transitively pulled by megatron-bridge); needed in the venv because we install with --no-build-isolation
+grpcio-tools  # build dep of nvidia-resiliency-ext: its setup.py shells out to `python -m grpc_tools.protoc` to compile *.proto files; --no-build-isolation means we have to provide it in the venv up-front
+wheel_stub
+ninja  # should speed up causal-conv1d build

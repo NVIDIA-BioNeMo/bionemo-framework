@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OpenGenome2 7B - THD + GQA + FP8 + FP32 Master Weights
+#
+# Same as og2_7b_thd_gqa but with FP8 enabled (first/last layers in BF16 for stability).
+# Uses Float8BlockScaling recipe with E4M3 format.
+#
+# Usage:
+#   torchrun --nproc_per_node=8 train_fsdp2.py --config-name og2_7b_thd_gqa_fp8 ...
+
+defaults:
+  - og2_7b_thd_gqa
+  - _self_
+
+# Enable FP8 first/last BF16 for numerical stability
+config_kwargs:
+  vocab_size: 256
+  num_hidden_layers: 32
+  hidden_size: 4096
+  intermediate_size: 14336
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  max_position_embeddings: 8192
+  initializer_range: 0.02
+  attn_input_format: thd
+  rope_theta: 500000
+  rope_scaling:
+    rope_type: "llama3"
+    factor: 1.0
+    low_freq_factor: 1.0
+    high_freq_factor: 4.0
+    original_max_position_embeddings: 8192
+  fp8_first_last_bf16: true
+
+# FP8 configuration - Float8BlockScaling with E4M3 format
+fp8_config:
+  enabled: true
+  fp8_recipe: transformer_engine.common.recipe.Float8BlockScaling
+  fp8_format: E4M3
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: false
+
+dataset:
+  micro_batch_size: 1
+  buffer_size: 500_000
+
+grad_acc_steps: 8
+
+wandb:
+  name: og2_7b_thd_gqa_fp8
+  project: opengenome2-7b

@@ -1,0 +1,22 @@
+defaults:
+  - defaults
+  - _self_
+
+model_tag: "nvidia/AMPLIFY_350M"
+stop_after_n_steps: 1_000_000
+
+dataset:
+  max_seq_length: 512
+
+trainer:
+  learning_rate: 1e-3
+  adam_beta2: 0.95
+  lr_scheduler_type: "cosine_with_min_lr"
+  lr_scheduler_kwargs:
+    min_lr: 1e-4
+  warmup_steps: 1_000
+  max_steps: 1_000_000
+
+# WandB config
+wandb_init_args:
+  name: ???

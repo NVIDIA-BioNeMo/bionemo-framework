@@ -1,0 +1,55 @@
+defaults:
+  - defaults
+  - _self_
+
+# Training config
+model_tag: ./example_8m_checkpoint # E.g., nvidia/esm2_t6_8M_UR50D or facebook/esm2_t6_8M_UR50D
+use_pretrained: false
+num_train_steps: 250
+
+validation_interval: 50
+
+# We want this on in CI/CD to validate that the script runs successfully with torch.compile.
+use_torch_compile: true
+
+use_sequence_packing: false
+
+dataset:
+  tokenizer_name: ${model_tag}
+  micro_batch_size: 8
+  val_micro_batch_size: 128
+  num_workers: 1
+  max_seq_length: 1024
+  stride: 16
+  ss3_classification: true
+  load_dataset_kwargs:
+    path: "parquet"
+    split: "train"
+    data_files: "data/peft_sanity_dataset.parquet"
+
+# WandB config
+wandb_init_args:
+  name: "esm2_lora_example_8M_sanity"
+  project: "esm2_lora_sanity"
+  mode: "offline"
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 100
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: false
+
+logger:
+  frequency: 1
+
+lora:
+  r: 8
+  alpha: 16
+  target_modules:
+  - "layernorm_qkv"
+  # For 'facebook/esm2*' use:
+  # - "query"
+  # - "key"
+  # - "value"

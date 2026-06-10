@@ -1,0 +1,14 @@
+defaults:
+- defaults_infer
+- _self_
+
+model_tag: "nvidia/esm2_t6_8M_UR50D"
+base_model_config_dir: "<checkpoint.ckpt_dir>/train_ddp/final_model"
+
+output_file: preds.csv
+
+inference:
+  batch_size: 4   # tune based on GPU memory
+  max_seq_length: 1024
+  stride: 16
+  infer_overflowing_aas: true

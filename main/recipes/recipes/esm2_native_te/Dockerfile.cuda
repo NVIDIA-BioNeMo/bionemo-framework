@@ -1,0 +1,31 @@
+# An example, minimal Dockerfile to install dependencies in a fresh python environment with CUDA support. This image
+# ends up with two copies of CUDA libraries; the first is the one installed by the base image, and the second is brought
+# in when we pip install torch.
+
+FROM nvcr.io/nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
+
+ENV UV_LINK_MODE=copy
+SHELL ["/bin/bash", "-c"]
+
+# Install torch, transformer-engine, and flash-attn
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=from=ghcr.io/astral-sh/uv,source=/uv,target=/bin/uv \
+    <<EOF
+uv venv --python 3.12 --seed /workspace/.venv
+source /workspace/.venv/bin/activate
+uv pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu130
+uv pip install wheel packaging psutil
+pip install --no-build-isolation "flash-attn>=2.1.1,<=2.8.1"
+pip install --no-build-isolation transformer-engine[pytorch]==2.9.0
+EOF
+
+# Install recipe-specific dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=requirements.txt,target=/requirements.txt \
+    --mount=from=ghcr.io/astral-sh/uv,source=/uv,target=/bin/uv \
+    source /workspace/.venv/bin/activate && uv pip install -r /requirements.txt
+
+ENV PATH="/workspace/.venv/bin:$PATH"
+WORKDIR /workspace/bionemo

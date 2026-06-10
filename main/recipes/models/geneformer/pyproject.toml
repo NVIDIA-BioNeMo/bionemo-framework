@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geneformer"
+version = "0.0.1"
+description = "Geneformer TransformerEngine Model"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "accelerate",
+    "transformer_engine[pytorch]",
+    "transformers==4.51.3",
+    "lightning",
+    "nemo_toolkit[lightning]==2.4.0",
+    "fiddle",
+    "megatron-core",
+    "pytest",
+    "requests",
+    "hydra-core",
+    "omegaconf"
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.pytest.ini_options]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--color=yes",
+]

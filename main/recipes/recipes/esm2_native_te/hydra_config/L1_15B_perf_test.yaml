@@ -1,0 +1,26 @@
+defaults:
+  - defaults
+  - _self_
+
+# Training config
+config_name_or_path: nvidia/esm2_t48_15B_UR50D
+num_train_steps: 500
+
+dataset:
+  micro_batch_size: 12
+
+# WandB config
+wandb_init_args:
+  name: "esm2_t48_15B_UR50D_mfsdp_L1_perf"
+  project: "bionemo-recipes"
+
+# Optimizer config
+adamw_kwargs:
+  lr: 1.6e-4
+  weight_decay: 0.1
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 20_000
+
+checkpoint:
+  ckpt_dir: "checkpoints/esm2_t48_15B_UR50D_sanity"

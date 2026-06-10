@@ -1,0 +1,94 @@
+# Training config
+use_te: true # Whether to use TransformerEngine layers through NVLlamaForCausalLM (if false, use HF's LlamaForCausalLM)
+config_name_or_path: ??? # E.g., meta-llama/Llama-3.2-1B or ./model_configs/meta-llama/Llama-3.2-1B
+config_kwargs: {}
+
+num_train_steps: ???
+grad_acc_steps: 1 # Gradient accumulation steps - effective batch = micro_batch_size * num_gpus * grad_acc_steps
+
+use_meta_device: true
+
+# Whether to wrap the model in torch.compile. Note, this is currently not supported with mfsdp (BIONEMO-2977).
+# We leave this off by default since we don't see much of a performance improvement with TE layers.
+use_torch_compile: false
+
+use_sequence_packing: false
+
+dataset:
+  tokenizer_name_or_path: ??? # Set to the path of your tokenizer (e.g.,  meta-llama/Llama-3.1-8B or ./tokenizers/nucleotide_fast_tokenizer)
+  micro_batch_size: 8
+  num_workers: 1
+  max_seq_length: 8192 # Window size for genomic sequences
+  stride: 200 # Overlap for windowing
+  buffer_size: 500_000 # Shuffle buffer size
+  use_stateful_dataloader: false # Until https://github.com/pytorch/pytorch/pull/163102 is resolved with torchdata.
+  pad_sequences_to_be_divisible_by: null
+  load_dataset_kwargs:
+    path: ???
+    split: "train"
+    streaming: True
+
+# WandB config
+wandb:
+  name: ???
+  project: null # Optional: set to your wandb project name
+  id: null # Set to a fixed ID to resume the same run across restarts
+  resume: allow # "allow" resumes if id exists, else creates new run
+
+# TransformerEngine FP8 config. See
+# https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html for more information on
+# supported formats.
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: false # If this is set to true, fp8_config.enabled must also be set to true.
+
+fp4_config:
+  enabled: false
+  fp4_recipe: transformer_engine.common.recipe.NVFP4BlockScaling
+  fp4_format: "E2M1"
+  fp4_recipe_kwargs: {}
+
+# Optimizer config
+adamw_kwargs:
+  lr: 3e-3
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-5
+  weight_decay: 0.1
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 498_000
+  min_lr_ratio: 0.000001
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 50
+  max_checkpoints: 5 # Keep only the latest 5 checkpoints
+  async_save: true # Whether to save the checkpoint asynchronously, currently only supported with FSDP2.
+
+logger:
+  frequency: 100
+
+quant_stats_config:
+  enabled: false
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: ./log_quant_stats
+
+# Note: The layers are going to come in 1 indexed and we convert them to be 0 indexed at runtime.
+fp8_layers: null
+fp4_layers: null
+use_fp32_master_weights: null  # Use TE FusedAdam for FP32 master weights
+
+profiler:
+  enabled: false
+  start_step: 10
+  end_step: 15

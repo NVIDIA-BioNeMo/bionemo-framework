@@ -1,0 +1,29 @@
+defaults:
+  - defaults
+  - vit_base_patch16_224
+  - _self_
+
+model:
+  transformer_engine: true
+
+fsdp:
+  fsdp_unit_modules:
+    - transformer_engine.pytorch.TransformerLayer
+    - vit.PatchEmbed
+    - vit.AttentionPoolLatent
+    - torch.nn.LayerNorm
+    - torch.nn.Linear
+
+training:
+  checkpoint:
+    path: "./checkpoints/vit_te"
+    resume_from_metric: "-"   # + = Highest Metric (Score), - = Lowest Metric (Loss)
+
+inference:
+  checkpoint:
+    path: null
+    # Load a DCP->Torch converted checkpoint for inference without Megatron-FSDP.
+    # Otherwise, set this to "torch_dcp" if using Megatron-FSDP for inference.
+    # If the checkpoint was not trained with Megatron-FSDP, then set megatron_fsdp to false.
+    format: "torch"
+    megatron_fsdp: true

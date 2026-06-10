@@ -1,0 +1,40 @@
+defaults:
+  - defaults
+  - _self_
+
+# Training config
+config_name_or_path: ./model_configs/nvidia/esm2_t6_8M_UR50D
+num_train_steps: 250
+
+# We want this on in CI/CD to validate that the script runs successfully with torch.compile.
+use_torch_compile: true
+
+use_sequence_packing: false
+dataset:
+  tokenizer_name: ./tokenizers/esm2
+  micro_batch_size: 2
+  num_workers: 1
+  max_seq_length: 1024
+  use_stateful_dataloader: false # Until https://github.com/pytorch/pytorch/pull/163102 is resolved with torchdata.
+  load_dataset_kwargs:
+    path: "parquet"
+    split: "train"
+    data_files: "train.parquet"
+
+# WandB config
+wandb_init_args:
+  name: "esm2_t6_8M_UR50D_mfsdp_sanity"
+  mode: "offline"
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 100
+
+checkpoint:
+  ckpt_dir: null
+  resume_from_checkpoint: true
+  save_every_n_steps: 50
+  save_final_model: false
+
+logger:
+  frequency: 1

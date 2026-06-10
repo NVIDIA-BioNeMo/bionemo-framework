@@ -1,0 +1,12 @@
+model_tag: ???
+base_model_config_dir: ???
+peft_model_config_dir: ${base_model_config_dir}
+
+input_file: data/input_infer.fasta
+output_file: null
+
+inference:
+  batch_size: 4   # tune based on GPU memory
+  max_seq_length: 1024
+  stride: 16
+  infer_overflowing_aas: true

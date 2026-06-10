@@ -1,0 +1,109 @@
+# OpenGenome2 training defaults
+#
+# OG2-specific features enabled by default:
+# - Spike-No-More embedding initialization (std=1.0)
+# - Megatron-style scaled init for proj/fc2 layers
+# - Weight decay grouping (skip bias and 1D params)
+# - FP32 master weights
+# - Genomic masking (mask degenerate bases)
+
+# Training config
+use_te: true
+config_name_or_path: ???
+
+# OG2 initialization defaults
+spike_no_more_embedding_init: true
+use_megatron_scaled_init: true
+use_weight_decay_grouping: true
+skip_embedding_weight_decay: true
+use_fp32_master_weights: true
+
+config_kwargs:
+  fp8_first_last_bf16: false
+  num_layers_at_start_in_bf16: 1
+  num_layers_at_end_in_bf16: 1
+
+num_train_steps: ???
+grad_acc_steps: 1
+
+seed: 42
+
+# WARNING: meta-device init breaks Megatron-style scaled initialization (proj/fc2 std)
+# and Spike-No-More embedding init (std=1.0). Regular initialization (std=0.02) works fine.
+# Set to false when using use_megatron_scaled_init or spike_no_more_embedding_init.
+use_meta_device: false
+use_torch_compile: false
+use_sequence_packing: false
+
+dataset:
+  tokenizer_name_or_path: ???
+  micro_batch_size: 8
+  num_workers: 4
+  max_seq_length: 8192
+  stride: 200
+  buffer_size: 50_000
+  use_stateful_dataloader: false
+  pad_sequences_to_be_divisible_by: null
+  uppercase_labels: false
+  mask_degenerate_bases: true
+  load_dataset_kwargs:
+    path: ???
+    split: "train"
+    streaming: True
+
+# WandB config
+wandb:
+  name: ???
+  project: null
+
+# FP8 config
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: false
+
+# Optimizer config
+adamw_kwargs:
+  lr: 3e-3
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-5
+  weight_decay: 0.1
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 498_000
+  min_lr_ratio: 0.000001
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 50
+  max_checkpoints: 5
+  async_save: true
+
+logger:
+  frequency: 100
+
+# Validation config
+validation:
+  enabled: false
+  eval_interval: 500
+  num_batches: 10
+  data_path: null
+
+fp8_stats_config:
+  enabled: false
+  fp8_stats_file: ./fp8_debugging_stats.yaml
+  fp8_log_dir: ./log_fp8_stats
+
+profiler:
+  enabled: false
+  start_step: 10
+  end_step: 15

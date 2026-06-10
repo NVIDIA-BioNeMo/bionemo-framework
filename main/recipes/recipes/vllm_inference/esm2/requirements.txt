@@ -1,0 +1,11 @@
+accelerate
+datasets
+hydra-core
+jinja2
+megatron-fsdp
+omegaconf
+peft
+torch
+torchao!=0.14.0
+transformer_engine[pytorch]
+transformers

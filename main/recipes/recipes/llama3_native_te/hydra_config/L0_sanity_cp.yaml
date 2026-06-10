@@ -1,0 +1,11 @@
+defaults:
+  - L0_sanity
+  - _self_
+
+cp_size: 1
+
+use_sequence_packing: false
+
+config_kwargs:
+  attn_input_format: "bshd" # Alternatively "thd" on datacenter hardware.
+  self_attn_mask_type: "causal" # Alternatively "padding_causal" for THD inputs.

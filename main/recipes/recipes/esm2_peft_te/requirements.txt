@@ -1,0 +1,11 @@
+datasets
+hydra-core
+peft @ git+https://github.com/balvisio/peft.git@support-te-lora
+torch
+torchao!=0.14.0
+torchmetrics
+tqdm
+transformer_engine[pytorch]
+transformers
+wandb
+pytest

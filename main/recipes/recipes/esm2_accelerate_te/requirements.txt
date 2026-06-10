@@ -1,0 +1,10 @@
+accelerate @ git+https://github.com/huggingface/accelerate.git  # Until huggingface/accelerate#3852 is released.
+datasets
+deepspeed
+hydra-core
+torchao!=0.14.0
+torchmetrics
+transformer_engine[pytorch]
+transformers
+wandb
+pytest

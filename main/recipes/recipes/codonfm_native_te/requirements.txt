@@ -1,0 +1,12 @@
+hydra-core
+nvdlfw_inspect @ git+https://github.com/NVIDIA/nvidia-dlfw-inspect
+pyarrow
+pytest
+pyyaml
+safetensors
+torch
+torchmetrics
+transformers
+tqdm
+transformer_engine[pytorch]
+wandb

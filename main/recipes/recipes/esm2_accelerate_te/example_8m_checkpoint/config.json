@@ -1,0 +1,43 @@
+{
+  "architectures": [
+    "NVEsmForMaskedLM"
+  ],
+  "attention_probs_dropout_prob": 0.0,
+  "attn_input_format": "bshd",
+  "attn_mask_type": "padding",
+  "auto_map": {
+    "AutoConfig": "esm_nv.NVEsmConfig",
+    "AutoModel": "esm_nv.NVEsmModel",
+    "AutoModelForMaskedLM": "esm_nv.NVEsmForMaskedLM",
+    "AutoModelForTokenClassification": "esm_nv.NVEsmForTokenClassification"
+  },
+  "classifier_dropout": null,
+  "dtype": "float32",
+  "emb_layer_norm_before": false,
+  "encoder_activation": "gelu",
+  "esmfold_config": null,
+  "fuse_qkv_params": true,
+  "hidden_act": "gelu",
+  "hidden_dropout_prob": 0.0,
+  "hidden_size": 320,
+  "initializer_range": 0.02,
+  "intermediate_size": 1280,
+  "is_folding_model": false,
+  "layer_norm_eps": 1e-05,
+  "mask_token_id": 32,
+  "max_position_embeddings": 1026,
+  "max_seq_length": null,
+  "micro_batch_size": null,
+  "model_type": "nv_esm",
+  "num_attention_heads": 20,
+  "num_hidden_layers": 6,
+  "pad_token_id": 1,
+  "padded_vocab_size": 64,
+  "position_embedding_type": "rotary",
+  "qkv_weight_interleaved": true,
+  "token_dropout": true,
+  "transformers_version": "4.57.1",
+  "use_cache": true,
+  "vocab_list": null,
+  "vocab_size": 33
+}
