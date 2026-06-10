@@ -2,15 +2,17 @@ import React, { useEffect, useState } from 'react'
 import App from './App'
 import GenerativeSteering from './GenerativeSteering'
 import SequenceInspector from './SequenceInspector'
+import SequenceUMAPView from './SequenceUMAPView'
 import { Sun, Moon } from 'lucide-react'
 
-// Three-tab shell. The Feature atlas is the static-parquet explorer (works
-// offline); Generative steering and Sequence inspector both talk to the live
+// Four-tab shell. The Feature atlas is the static-parquet explorer (works offline);
+// Generative steering, Sequence inspector, and Sequence UMAP all talk to the live
 // backend (server.py) through the /api proxy.
 const TABS = [
   { id: 'atlas', label: 'Feature atlas' },
   { id: 'steering', label: 'Generative steering' },
   { id: 'inspector', label: 'Sequence inspector' },
+  { id: 'sequmap', label: 'Sequence UMAP' },
 ]
 
 export default function Dashboard() {
@@ -39,6 +41,7 @@ export default function Dashboard() {
         {tab === 'atlas' && <App />}
         {tab === 'steering' && <GenerativeSteering />}
         {tab === 'inspector' && <SequenceInspector />}
+        {tab === 'sequmap' && <SequenceUMAPView />}
       </div>
     </div>
   )
