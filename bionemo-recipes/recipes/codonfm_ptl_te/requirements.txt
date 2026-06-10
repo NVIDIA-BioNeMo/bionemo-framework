@@ -214,7 +214,7 @@ python-multipart==0.0.20
 pytorch-lightning==2.5.5
 PyYAML
 pyzmq==27.0.1
-ray==2.49.2
+ray==2.52.0
 referencing==0.36.2
 regex==2025.7.34
 requests==2.32.4
