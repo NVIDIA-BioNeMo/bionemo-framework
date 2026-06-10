@@ -1,0 +1,28 @@
+# Sanity test configuration for LLAMA3 genomic training  
+defaults:
+  - defaults
+
+# Reduced model architecture for memory constraints
+model_layers: 4   # Reduce from 32 to 4 layers for memory constraints
+hidden_size: 2048 # Reduce from 4096 to 2048 for memory constraints
+
+dataset:
+  seq_length: 8192  # 
+  batch_size: 1
+  num_workers: 0  # Single-threaded for debugging
+  stride: 7992  # EVO2-style: 8192 - 200 = 7992 (consistent 200bp overlap)
+
+# Quick training run
+num_train_steps: 25  # More steps to see continued learning
+
+# Learning rate scheduler
+lr_scheduler_kwargs:
+  num_warmup_steps: 2  # Minimal warmup for sanity test
+  num_training_steps: ${num_train_steps}
+
+# Wandb config for testing
+wandb_init_args:
+  project: "llama3-genomic-pretraining"  
+  name: "l0-sanity-test-ddp"
+  notes: "Sanity test for LLAMA3 genomic training pipeline with DDP"
+  tags: ["llama3", "genomic", "sanity-test", "ascii-tokenizer", "ddp"]
