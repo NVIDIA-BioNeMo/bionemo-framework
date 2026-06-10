@@ -58,16 +58,18 @@ curl localhost:8001/health
 
 ## 4. Dashboard
 
-The dashboard reads atlas parquets **you provide** (it does not generate them):
-
 ```bash
 cd ..   # recipes/evo2
-# DIR must hold features_atlas.parquet, feature_metadata.parquet, feature_examples.parquet
+# inspector + steering tabs only (use the live server from step 3 — no atlas data needed):
+"$VENV/bin/python" scripts/launch_dashboard.py
+# + Feature-atlas tab: pass a dir holding features_atlas/feature_metadata/feature_examples.parquet:
 "$VENV/bin/python" scripts/launch_dashboard.py --data-dir /path/to/dashboard_data
 ```
 
-The **Feature atlas** tab is static (served from those parquets); **Sequence inspector** and
-**Generative steering** call the server from step 3. See `feature_explorer/README.md`.
+**Sequence inspector** and **Generative steering** call the server from step 3, so they work
+with no atlas data. The **Feature atlas** tab needs the three parquets via `--data-dir`;
+producing them from a corpus is a separate offline step (not yet in-recipe). See
+`feature_explorer/README.md`.
 
 ## 5. Tests
 
