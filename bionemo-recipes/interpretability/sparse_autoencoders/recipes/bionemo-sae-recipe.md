@@ -21,7 +21,38 @@ extractor (model-specific) → ActivationStore parquet shards → train.py (univ
 
 ## When this applies
 
-Bringing up an SAE on a new biological foundation model — Evo2, ESM2, CodonFM, Nemotron, Geneformer, etc. A checkpoint (HF or local) is in hand. Scope is the full **extract → train → eval** pipeline. Per-model you write a thin **extractor** (and, for interpretability, **labelers**); everything downstream is shared.
+Bringing up an SAE on a new biological foundation model — Evo2, ESM2, CodonFM, Nemotron, Geneformer, etc. Scope is the full **extract → train → eval** pipeline. Per-model you write a thin **extractor** (and, for interpretability, **labelers**); everything downstream is shared.
+
+## Step 0 — get the model + data (and, for Megatron models, convert to MBridge)
+
+Before any extraction you need a **checkpoint in the format the model's `predict`/forward expects** and a **sequence corpus**. This is upstream of the recipe — don't bake it into `extract.py`.
+
+**Model checkpoint:**
+
+```bash
+# BioNeMo / Evo2 etc. live on NGC:
+ngc registry model download-version "nvidia/clara/<model>:<ver>" --dest ./checkpoints
+# HF-native models (ESM2, CodonFM/Encodon) on HuggingFace (use `hf`, not the deprecated huggingface-cli):
+hf download <org/repo> --local-dir ./checkpoints/<model>
+```
+
+**Convert to MBridge (Megatron models — e.g. Evo2):** `predict_evo2`/Megatron loads an **MBridge checkpoint *directory*** (has `latest_checkpointed_iteration.txt` + sharded weights), **not** a raw HF/savanna file. Convert first; the result is the `--ckpt-dir` you hand the extractor:
+
+```bash
+evo2_convert_savanna_to_mbridge \
+  --savanna-ckpt-path <hf-id-or-path> --mbridge-ckpt-dir <CKPT_DIR> \
+  --model-size <evo2_Nb> --tokenizer-path <tokenizer>
+# (or the nemo2 -> mbridge path if you have a nemo2 checkpoint)
+```
+
+- **Gotcha:** savanna conversion hits the torch-2.6 `weights_only=True` default → patch the converter's `torch.load(...)` to `weights_only=False` (trusted source); the failure is silent (exit 0, empty dir). See gotcha 7.
+- **HF models (esm2/codonfm) skip MBridge entirely** — they load directly from the `.safetensors`/checkpoint.
+
+**Data corpus:**
+
+- Pull the sequence set (Evo2 → OpenGenome2; protein → UniRef/etc.). **Verify the download** — HF README dir names are unreliable (OpenGenome2's `jsonl/` is really `json/`); check the tree + a nonzero file count (`curl -s "https://huggingface.co/api/datasets/<repo>/tree/main" | python3 -m json.tool`).
+- Decompress `.gz` if the predict CLI needs plain FASTA, and **chunk to the trained context** (gotcha 8) before extraction.
+- Grab a small subset (a few thousand sequences) first to smoke-test the whole pipeline.
 
 ## Steps
 
