@@ -11,7 +11,7 @@ dependencies = [
     "torch",
     "accelerate",
     "transformer_engine[pytorch]",
-    "transformers==4.51.3",
+    "transformers==4.53.0",
     "lightning",
     "nemo_toolkit[lightning]==2.4.0",
     "fiddle",
