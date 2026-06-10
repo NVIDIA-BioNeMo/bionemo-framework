@@ -16,7 +16,7 @@ extractor (model-specific) → ActivationStore parquet shards → train.py (univ
 
 - **Extractor** runs the model forward and **streams** layer-L activations *directly* into an `ActivationStore` — no intermediate `.pt` files. The clean pattern (see `evo2/scripts/extract.py`): reuse the model's existing `predict_<model>` CLI but **monkeypatch its per-batch writer** with one that appends `hidden[mask]` to `sae.activation_store.ActivationStore`. Model-specific (~150 lines).
 - **ActivationStore** (`sae/src/sae/activation_store.py`) is the universal on-disk format: a directory of `shard_{NNNNN}.parquet` + `metadata.json` (`{model_name, layer, hidden_dim, n_samples, n_shards, shard_size, n_sequences}`).
-- **train.py** loads via `sae.activation_store.load_activations(cache_dir)` and trains a TopK/ReLU SAE. **Identical across recipes — copy verbatim** (only the docstring differs); uses `--model-path` solely for a one-line cache-validation warning.
+- **train.py** loads via `sae.activation_store.load_activations(cache_dir)` and trains a TopK/ReLU SAE — **near-identical across recipes, but not a blind verbatim copy.** It must wire the opt-in training flags (`--aggregate-loss` / `--dead-count-global` / `--mix-shards` / `--presample-shards`). Start from a **current** recipe's `train.py` (codonfm/evo2 — they already wire them), then change only the docstring + `--wandb-project` default. **Copying an older train.py silently drops those flags → the losing config** (this is exactly how a "reproduce the winner" run quietly turns into a baseline run). Uses `--model-path` only for a cache-validation warning. (The copy-paste is a known smell; the intended end-state is a single shared train-CLI in `sae`.)
 - **eval** (`sae.eval`, universal): `reconstruction` (variance explained), `dead_latents` (%), `loss_recovered` (CE fidelity), and `probing` (per-feature AUROC / linear probes / domain-F1 over a labeled `ActivationBuffer`). Probing scoring is **CPU-only** — it reads saved buffers, no model.
 
 ## When this applies
@@ -48,7 +48,7 @@ recipes/<model>/
 └── scripts/
     ├── <model>.sh          # orchestrator: chunk → stream-extract → train
     ├── extract.py          # STREAMING: wraps predict_<model>, writes ActivationStore directly (NO .pt)
-    └── train.py            # COPY VERBATIM from any recipe (e.g. codonfm/scripts/train.py)
+    └── train.py            # near-verbatim from a CURRENT recipe (codonfm/evo2): MUST wire the opt-in flags; edit only docstring + wandb default
 ```
 
 ### 4. The streaming extractor
@@ -166,4 +166,4 @@ After training, run `sae.eval` on a **held-out** cache (same distribution, disjo
 | `codonfm/` | `extract.py` → custom inference class                                                                          | new model has its own checkpoint + forward code                   |
 | `evo2/`    | **streaming** `extract.py` — wraps `predict_evo2`, monkeypatches its writer to an `ActivationStore` (no `.pt`) | upstream already has a `predict_<model>` CLI; reuse it and stream |
 
-All share the same verbatim `train.py` and the `ActivationStore` parquet contract.
+All share a near-identical `train.py` (current copies wire the opt-in flags) and the `ActivationStore` parquet contract — folding the duplicated train-CLI into a shared `sae` entrypoint is a planned follow-up.
