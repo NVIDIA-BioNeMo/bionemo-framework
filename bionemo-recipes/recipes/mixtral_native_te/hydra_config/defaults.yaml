@@ -1,0 +1,91 @@
+# Training config
+use_te: true # Whether to use TransformerEngine layers through NVMixtralForCausalLM (if false, use HF's MixtralForCausalLM)
+config_name_or_path: ??? # E.g., ./model_configs/mixtral-8x1B or a HuggingFace model name
+config_kwargs: {} # Arguments to pass to the AutoConfig.from_pretrained method
+
+num_train_steps: ???
+grad_acc_steps: 1 # Gradient accumulation steps - effective batch = micro_batch_size * num_gpus * grad_acc_steps
+
+use_meta_device: true
+use_torch_compile: false
+use_sequence_packing: false
+
+# Expert parallelism: number of GPUs per expert-parallel group.
+# Must divide world_size evenly. Set > 1 to enable MoE expert parallelism.
+expert_parallel_size: 1
+# Token dispatcher for EP runs. Options: "alltoall" (NCCL, always available) or
+# "fused_deepep" (requires deep_ep + Triton). token_dispatcher_fallback controls
+# what happens when fused_deepep is unavailable: "alltoall" to fall back silently,
+# or "error" to raise immediately.
+token_dispatcher: alltoall
+token_dispatcher_fallback: error
+
+dataset:
+  tokenizer_name_or_path: ??? # Set to the path of your tokenizer (e.g., nvidia/Llama-3.1-8B-Instruct-FP8)
+  micro_batch_size: 2
+  num_workers: 1
+  max_seq_length: 4096 # Window size for text sequences
+  stride: 512 # Overlap for windowing
+  buffer_size: 500_000 # Shuffle buffer size
+  use_stateful_dataloader: false
+  pad_sequences_to_be_divisible_by: null
+  load_dataset_kwargs:
+    path: ???
+    split: "train"
+    streaming: true
+
+# WandB config
+wandb:
+  name: ???
+  project: null # Optional: set to your wandb project name
+
+# TransformerEngine FP8 config. See
+# https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html for more information on
+# supported formats.
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+
+fp4_config:
+  enabled: false
+  fp4_recipe: transformer_engine.common.recipe.NVFP4BlockScaling
+  fp4_format: "E2M1"
+  fp4_recipe_kwargs: {}
+
+# Optimizer config
+adamw_kwargs:
+  lr: 3e-3
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.033
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 498_000
+  min_lr_ratio: 0.000001
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 50
+  max_checkpoints: 5 # Keep only the latest 5 checkpoints
+  async_save: true # Whether to save the checkpoint asynchronously, currently only supported with FSDP2.
+
+logger:
+  frequency: 100
+
+fp8_stats_config:
+  enabled: false
+  fp8_stats_file: ./fp8_debugging_stats.yaml
+  fp8_log_dir: ./log_fp8_stats
+
+profiler:
+  enabled: false
+  start_step: 10
+  end_step: 15

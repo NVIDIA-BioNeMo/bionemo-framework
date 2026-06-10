@@ -924,11 +924,6 @@ class HFInferenceParams(InferenceParams):
             updated_value_cache = value_cache.index_select(0, beam_idx)
             self.cache_manager.cache[layer_number] = (updated_key_cache, updated_value_cache)
 
-    @property
-    def is_compileable(self) -> bool:
-        """Return False as this cache is not compatible with torch.compile."""
-        return False
-
 
 @torch.compile(fullgraph=True)
 def _build_expert_sort_indices(recv_counts: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

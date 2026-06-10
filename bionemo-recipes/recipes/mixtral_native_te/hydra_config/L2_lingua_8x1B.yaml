@@ -1,0 +1,57 @@
+# Config to match the Llama 3 Lingua 1B training recipe using Mixtral-8x1B architecture.
+
+defaults:
+  - defaults
+  - _self_
+
+config_name_or_path: ./model_configs/mixtral-8x1B
+
+config_kwargs:
+  attn_input_format: thd
+  self_attn_mask_type: padding_causal
+
+use_sequence_packing: true
+
+wandb:
+  name: mixtral-lingua-8x1B-te
+  project: null
+
+num_train_steps: 60_000
+
+dataset:
+  tokenizer_name_or_path: meta-llama/Meta-Llama-3-8B
+  micro_batch_size: 2
+  num_workers: 8
+  max_seq_length: 4096
+  stride: 512
+  buffer_size: 50_000
+  use_stateful_dataloader: false
+  load_dataset_kwargs:
+    path: "mlfoundations/dclm-baseline-1.0"
+    data_dir: "global-shard_01_of_10"
+    split: "train"
+    streaming: true
+
+adamw_kwargs:
+  lr: 0.003
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.033
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 5_000
+  num_decay_steps: 55_000
+  min_lr_ratio: 1e-6
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 10_000
+  async_save: true
+
+profiler:
+  enabled: false
+  start_step: 250
+  end_step: 260
