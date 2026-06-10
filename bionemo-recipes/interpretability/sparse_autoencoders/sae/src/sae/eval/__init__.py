@@ -22,6 +22,19 @@ from .loss_recovered import (
     compute_loss_recovered,
     evaluate_loss_recovered,
 )
+from .probing import (
+    ActivationBuffer,
+    auroc_all,
+    auroc_vec,
+    best_single_train_test,
+    decode_eval,
+    domain_f1,
+    fit_logreg,
+    fit_softmax,
+    macro_auroc,
+    split_indices,
+    standardize,
+)
 from .reconstruction import (
     ReconstructionMetrics,
     compute_reconstruction_metrics,
@@ -31,16 +44,27 @@ from .sparsity import SparsityMetrics, evaluate_sparsity
 
 
 __all__ = [
+    "ActivationBuffer",
     "DeadLatentStats",
     "DeadLatentTracker",
     "EvalResults",
     "LossRecoveredResult",
     "ReconstructionMetrics",
     "SparsityMetrics",
+    "auroc_all",
+    "auroc_vec",
+    "best_single_train_test",
     "compute_loss_recovered",
     "compute_reconstruction_metrics",
+    "decode_eval",
+    "domain_f1",
     "evaluate_loss_recovered",
     "evaluate_reconstruction",
     "evaluate_sae",
     "evaluate_sparsity",
+    "fit_logreg",
+    "fit_softmax",
+    "macro_auroc",
+    "split_indices",
+    "standardize",
 ]
