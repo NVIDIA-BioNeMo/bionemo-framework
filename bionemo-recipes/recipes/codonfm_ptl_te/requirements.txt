@@ -60,7 +60,7 @@ fastapi==0.117.1
 fastjsonschema==2.21.1
 fiddle==0.3.0
 filelock==3.18.0
-fonttools==4.59.0
+fonttools==4.61.0
 fqdn==1.5.1
 fsspec==2025.7.0
 gast==0.6.0
