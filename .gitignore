@@ -216,4 +216,7 @@ outputs/
 # Nsys profiles
 *.nsys-rep
 
+# Fern: generated Python API reference (`fern docs md generate`)
+fern/product-docs/
+
 .claude/

@@ -72,4 +72,4 @@ Set `DATA_SOURCE=ngc` for public resources, or `DATA_SOURCE=pbss` for internal N
 
 ## Advanced developer documentation
 
-For repository-wide development guidance, see the top-level \[README\]({{ github_url }}) and the package or recipe README in the directory you are modifying.
+For repository-wide development guidance, see the top-level \[README\](https://github.com/NVIDIA/bionemo-framework) and the package or recipe README in the directory you are modifying.

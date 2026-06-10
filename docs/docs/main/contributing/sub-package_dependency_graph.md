@@ -4,12 +4,12 @@ The script in `sub-packages/bionemo/fw/src/dependency_graph.py` generates a depe
 
 These are visualizations of the dependency graph from the pyproject.toml files:
 
-<img src="../../../assets/images/sub_package_graphs/dependency_graph_pyproject.png" alt="Dependency Graph" width="600">
+<img src="../../../assets/images/sub_package_graphs/dependency_graph_pyproject.png" alt="Dependency Graph" width="600" />
 
 Similarly from the tach.toml file:
 
-<img src="../../../assets/images/sub_package_graphs/dependency_graph_tach.png" alt="Dependency Graph" width="600">
+<img src="../../../assets/images/sub_package_graphs/dependency_graph_tach.png" alt="Dependency Graph" width="600" />
 
 And these are the dependencies from the file imports:
 
-<img src="../../../assets/images/sub_package_graphs/dependency_file_imports.png" alt="Dependency Graph" width="600">
+<img src="../../../assets/images/sub_package_graphs/dependency_file_imports.png" alt="Dependency Graph" width="600" />

@@ -19,37 +19,37 @@ Geneformer generates a dense representation of a scRNA cell by learning co-expre
 
 ### Model Architecture:
 
-**Architecture Type:** [Bidirectional Encoder Representations from Transformers (BERT)](https://arxiv.org/abs/1810.04805) <br>
-**Network Architecture:** [Geneformer](https://rdcu.be/ddrx0) <br>
+**Architecture Type:** [Bidirectional Encoder Representations from Transformers (BERT)](https://arxiv.org/abs/1810.04805) <br />
+**Network Architecture:** [Geneformer](https://rdcu.be/ddrx0) <br />
 
 ### Input:
 
-**Input Type(s):** Number (Row represents cell, containing gene names and single cell expression counts) <br>
-**Input Format(s):** Array [AnnData](https://anndata.readthedocs.io/en/latest/)<br>
-**Input Parameters:** 1D <br>
+**Input Type(s):** Number (Row represents cell, containing gene names and single cell expression counts) <br />
+**Input Format(s):** Array [AnnData](https://anndata.readthedocs.io/en/latest/)<br />
+**Input Parameters:** 1D <br />
 
 ### Output:
 
-**Output Type(s):** Vector (Dense Embedding Predictions)embeddings. <br>
-**Output Format:** NumPy <br>
-**Output Parameters:** 1D <br>
-**Other Properties Related to Output:** Numeric floating point vector (fp16, bf16, or fp32); geneformer-10M-240530 outputs 256 dimensional embeddings; geneformer-106M-240530 outputs 768 dimensional embeddings <br>
+**Output Type(s):** Vector (Dense Embedding Predictions)embeddings. <br />
+**Output Format:** NumPy <br />
+**Output Parameters:** 1D <br />
+**Other Properties Related to Output:** Numeric floating point vector (fp16, bf16, or fp32); geneformer-10M-240530 outputs 256 dimensional embeddings; geneformer-106M-240530 outputs 768 dimensional embeddings <br />
 
 ### Software Integration:
 
 **Runtime Engine(s):**
 
-- BioNeMo, TransformerEngine <br>
+- BioNeMo, TransformerEngine <br />
 
-**Supported Hardware Microarchitecture Compatibility:** <br>
+**Supported Hardware Microarchitecture Compatibility:** <br />
 
-- Ampere <br>
-- Hopper <br>
-- Volta <br>
+- Ampere <br />
+- Hopper <br />
+- Volta <br />
 
-**[Preferred/Supported] Operating System(s):** <br>
+**[Preferred/Supported] Operating System(s):** <br />
 
-- Linux <br>
+- Linux <br />
 
 ### Model Versions:
 
@@ -82,17 +82,17 @@ In this training split, we made sure that all "assay" and "tissue_general" label
 
 The 1% hold-out evaluation set was split further into a validation and test set. This final split was mostly done randomly by cell; however, we set aside a full dataset into the test split so that we could evaluate performance after training on a completely unseen dataset, including when monitoring the validation loss during training.
 
-**Link:** Datasets downloaded from [CZ CELLxGENE Discover - Cellular Visualization Tool (cziscience.com)](https://cellxgene.cziscience.com/) <br>
+**Link:** Datasets downloaded from [CZ CELLxGENE Discover - Cellular Visualization Tool (cziscience.com)](https://cellxgene.cziscience.com/) <br />
 **Data Collection Method by dataset**
 
-- [Human] <br>
+- [Human] <br />
 
 **Labeling Method by dataset**
 
-- Hybrid: Automated, Human <br>
+- Hybrid: Automated, Human <br />
 
 **Properties (Quantity, Dataset Descriptions, Sensor(s)):**
-23.64 million non-diseased and human-derived single cells were chosen from the CZI CELLxGENE census, which is characterized as follows: <br>
+23.64 million non-diseased and human-derived single cells were chosen from the CZI CELLxGENE census, which is characterized as follows: <br />
 
 - **Assay Bias:**
   - The vast majority of the dataset is one of the 10x genomics assays. Approximately 20M of the 26M cells are genomic assays, 4M are sci-RNA-seq, while remaining assays (microwell-seq, drop-seq, bd rhapsody, smart-seq, seq-well, and MARS-seq) represent small fractions of the full datasets.
@@ -110,25 +110,25 @@ Dataset was derived from a limited number of public sources where methods and pr
 ## Evaluation Dataset:
 
 Adamson et al 2016 PERTURB-seq dataset, accessed by Harvard dataverse.
-**Link:** [adamson.zip - Harvard Dataverse](https://dataverse.harvard.edu/file.xhtml?fileId=6154417) <br>
+**Link:** [adamson.zip - Harvard Dataverse](https://dataverse.harvard.edu/file.xhtml?fileId=6154417) <br />
 **Data Collection Method by dataset**
 
-- Human <br>
+- Human <br />
 
 **Labeling Method by dataset**
 
-- Automated - Molecular Barcoding <br>
+- Automated - Molecular Barcoding <br />
 
 **Properties (Quantity, Dataset Descriptions, Sensor(s)):** There are ~20k single cells, half of which represent unperturbed control samples, and the other half which contain an additional datatable containing the CRISPR knock-out targets for each cell.
 
-**Link:** [CZ CELLxGENE Discover - Cellular Visualization Tool (cziscience.com)](https://cellxgene.cziscience.com/) <br>
+**Link:** [CZ CELLxGENE Discover - Cellular Visualization Tool (cziscience.com)](https://cellxgene.cziscience.com/) <br />
 **Data Collection Method by dataset**
 
-- Human <br>
+- Human <br />
 
 **Labeling Method by dataset**
 
-- Hybrid: Automated, Human <br>
+- Hybrid: Automated, Human <br />
 
 **Properties (Quantity, Dataset Descriptions, Sensor(s)):**
 
@@ -136,12 +136,12 @@ Adamson et al 2016 PERTURB-seq dataset, accessed by Harvard dataverse.
 
 ### Inference:
 
-**Engine:** BioNeMo, TransformerEngine <br>
-**Test Hardware:** <br>
+**Engine:** BioNeMo, TransformerEngine <br />
+**Test Hardware:** <br />
 
-- Ampere <br>
-- Hopper <br>
-- Volta <br>
+- Ampere <br />
+- Hopper <br />
+- Volta <br />
 
 \*Additional description content may be included here
 

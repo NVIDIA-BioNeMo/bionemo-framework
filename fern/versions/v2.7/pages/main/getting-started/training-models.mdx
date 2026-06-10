@@ -1,0 +1,63 @@
+---
+title: "Training Models"
+description: ""
+---
+All actively supported model training workflows live in `bionemo-recipes`.
+
+## Where to look
+
+Use the README in the relevant recipe or model directory as the source of truth for setup and execution:
+
+| Workflow                      | Location                                                 |
+| ----------------------------- | -------------------------------------------------------- |
+| ESM-2 native PyTorch + TE     | `bionemo-recipes/recipes/esm2_native_te`                 |
+| ESM-2 with Accelerate + TE    | `bionemo-recipes/recipes/esm2_accelerate_te`             |
+| Geneformer + TE               | `bionemo-recipes/recipes/geneformer_native_te_mfsdp_fp8` |
+| Evo2 (Megatron Bridge)        | `bionemo-recipes/recipes/evo2_megatron`                  |
+| TE-optimized AMPLIFY model    | `bionemo-recipes/models/amplify`                         |
+| TE-optimized ESM-2 model      | `bionemo-recipes/models/esm2`                            |
+| TE-optimized Geneformer model | `bionemo-recipes/models/geneformer`                      |
+
+## Local workflow
+
+For most training workflows:
+
+1. Open the recipes devcontainer or use a compatible CUDA/PyTorch environment.
+2. `cd` into the model or recipe directory you want to work on.
+3. Install dependencies according to that directory's README.
+4. Run the documented training, fine-tuning, or notebook workflow from that directory.
+
+Examples:
+
+```bash
+cd bionemo-recipes/recipes/esm2_native_te
+pip install -r requirements.txt
+python train_ddp.py
+```
+
+```bash
+cd bionemo-recipes/recipes/evo2_megatron
+bash .ci_build.sh
+source ./.ci_test_env.sh
+train_evo2 --help
+```
+
+## Shared framework packages
+
+Some recipes depend on reusable libraries under `sub-packages`. Install them into your active environment with editable installs when developing locally:
+
+```bash
+uv pip install -e ./sub-packages/bionemo-core
+uv pip install -e ./sub-packages/bionemo-scdl
+uv pip install -e "./sub-packages/bionemo-recipeutils[basecamp]"
+```
+
+## Data and checkpoints
+
+The `download_bionemo_data` CLI remains the standard way to fetch supported BioNeMo datasets and checkpoints:
+
+```bash
+download_bionemo_data --list-resources
+```
+
+Set `DATA_SOURCE=ngc` for public resources, or `DATA_SOURCE=pbss` for internal NVIDIA workflows where applicable.

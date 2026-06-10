@@ -1,0 +1,17 @@
+/* match styles of llm_bot Chatbot icon */
+img.open-icon {
+  max-height: 20px !important;
+  max-width: 20px !important;
+}
+
+.open-icon {
+  border: none;
+  max-width: 22px;
+  margin-right: 8px;
+}
+
+/* tempoarily make invisible to test in production.
+  turn on in going md-container > md-main > md-contant > article */
+#chatbot > button {
+  display: block;
+}
