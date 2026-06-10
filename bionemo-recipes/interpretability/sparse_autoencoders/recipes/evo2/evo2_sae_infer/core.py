@@ -118,104 +118,22 @@ class Evo2SAE:
     # ------------------------------------------------------------------ loading
     def load(self) -> "Evo2SAE":
         """Load the truncated Evo2 model + SAE + feature labels (one-time, ~1 min)."""
+        from bionemo.evo2.run import predict as P
+
         _init_single_process_distributed()
-        self.model, self.tokenizer = self._load_evo2(full=False)
+        self.model, self.tokenizer = P.load_model_to_layer(self.evo2_ckpt_dir, self.layer, full=False)
         self.sae, self.n_features = self._load_sae()
         self.labels, self.peaks = self._load_feature_meta()
         self.ready = True
         logger.info("Evo2SAE ready: layer=%d n_features=%d n_labels=%d", self.layer, self.n_features, len(self.labels))
         return self
 
-    def _load_evo2(self, full: bool):
-        """Load the Evo2 model — truncated to `layer`, or the full model with the LM head.
-
-        full=False truncates to `layer` with post_process=False (hidden states only);
-        full=True keeps all layers + the LM head (logits) for generation.
-        """
-        from bionemo.evo2.run import predict as P
-
-        resolved = P.resolve_checkpoint_path(Path(self.evo2_ckpt_dir))
-        run_config = P.read_run_config(P.get_checkpoint_run_config_filename(str(resolved)))
-        mp = P.instantiate(run_config["model"])
-        mp.tensor_model_parallel_size = 1
-        mp.pipeline_model_parallel_size = 1
-        mp.context_parallel_size = 1
-        mp.sequence_parallel = False
-
-        mp_value = run_config.get("mixed_precision")
-        if isinstance(mp_value, str):
-            mp_config = P.get_mixed_precision_config(mp_value)
-        elif mp_value is not None:
-            mp_config = P.instantiate(mp_value)
-        else:
-            mp_config = P.get_mixed_precision_config("bf16_mixed")
-        mp_config.finalize()
-        mp_config.setup(mp)
-
-        tok_dir = resolved / "tokenizer"
-        tokenizer = (
-            P._HuggingFaceTokenizer(tok_dir)
-            if tok_dir.exists()
-            else P._HuggingFaceTokenizer(P.DEFAULT_HF_TOKENIZER_MODEL_PATH)
-        )
-        mp.vocab_size = tokenizer.vocab_size
-        mp.should_pad_vocab = True
-
-        if full:
-            mp.post_process = True
-            if hasattr(mp, "enable_cuda_graph"):
-                mp.enable_cuda_graph = False  # graph capture conflicts with the steering hook
-            # NB: do NOT set flash_decode — it makes the model require an inference_context on
-            # every forward, which breaks the cache-free path/fallback. Caching is driven by
-            # passing a HyenaInferenceContext (below); flash_decode is only a decode-kernel opt.
-        else:
-            original_num_layers = mp.num_layers
-            target = original_num_layers + self.layer + 1 if self.layer < 0 else self.layer + 1
-            if target <= 0 or target > original_num_layers:
-                raise ValueError(f"layer={self.layer} invalid for {original_num_layers}-layer model")
-            mp.num_layers = target
-            mp.post_process = False
-            if getattr(mp, "hybrid_override_pattern", None) and len(mp.hybrid_override_pattern) > target:
-                mp.hybrid_override_pattern = mp.hybrid_override_pattern[:target]
-            if target == 1 and getattr(mp, "remove_activation_post_first_layer", False):
-                mp.remove_activation_post_first_layer = False
-
-        if not full:
-            rng_config = P.instantiate(run_config["rng"]) if run_config.get("rng") else P.RNGConfig(seed=1234)
-            dist_config = P.instantiate(run_config["dist"]) if run_config.get("dist") else P.DistributedInitConfig()
-            P.initialize_inference_distributed(
-                tensor_model_parallel_size=1,
-                pipeline_model_parallel_size=1,
-                context_parallel_size=1,
-                micro_batch_size=1,
-                global_batch_size=1,
-                rng_config=rng_config,
-                dist_config=dist_config,
-            )
-
-        mp.finalize()
-        model = mp.provide_distributed_model(
-            ddp_config=None,
-            wrap_with_ddp=False,
-            data_parallel_random_init=False,
-            bf16=mp_config.bf16,
-            fp16=mp_config.fp16,
-            mixed_precision_wrapper=P.Float16Module if (mp_config.bf16 or mp_config.fp16) else None,
-        )
-        for m in model:
-            m.eval()
-        P._load_model_weights_from_checkpoint(
-            checkpoint_path=str(resolved), model=model, dist_ckpt_strictness="ignore_all"
-        )
-        logger.info("Evo2 loaded (full=%s, layer=%d)", full, self.layer)
-        if full:
-            return model[0]
-        return model[0], tokenizer
-
     def _ensure_gen_model(self):
-        """Lazily load the full model (LM head) for generation."""
+        """Lazily load the full model (LM head) for generation via the shared recipe loader."""
         if self.gen_model is None:
-            self.gen_model = self._load_evo2(full=True)
+            from bionemo.evo2.run import predict as P
+
+            self.gen_model, _ = P.load_model_to_layer(self.evo2_ckpt_dir, self.layer, full=True)
         return self.gen_model
 
     def _load_sae(self):
