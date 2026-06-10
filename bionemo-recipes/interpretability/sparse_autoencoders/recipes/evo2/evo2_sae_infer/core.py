@@ -26,11 +26,11 @@
 It has NO web dependency: the FastAPI server (`server.py`) and the batch CLI
 (`cli.py`) are thin wrappers over this class, and the viz backend imports it too.
 
-The heavy Evo2 machinery (Megatron model load, tokenizer, forward step) is reused
-verbatim from `bionemo.evo2.run.predict`, so tokenisation matches the
-activation-extraction pipeline the SAE was trained on. Generation is cache-free
-(a full forward per step) to keep the residual-stream steering hook valid; a
-KV/SSM-cached fast path can be added later and validated against this reference.
+The heavy Evo2 machinery is reused from the recipe: model loading via
+`predict.load_model_to_layer` and generation via `infer.setup_inference_engine` /
+`infer.generate` (run eager, `cuda_graph_impl="none"`, so the residual-stream steering
+hook applies). This module only adds the SAE layer: encode, feature labels, and the
+decode-only feature-clamp hook.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ class Evo2SAE:
         self.organism_tags = dict(organism_tags) if organism_tags else dict(DEFAULT_ORGANISM_TAGS)
 
         self.model = None  # truncated model (post_process=False) for activations
-        self.gen_model = None  # full model (post_process=True) for generation, lazy
+        self.gen_components = None  # recipe inference engine (full model) for generation, lazy
         self.tokenizer = None
         self.sae = None
         self.n_features = None
@@ -128,13 +128,19 @@ class Evo2SAE:
         logger.info("Evo2SAE ready: layer=%d n_features=%d n_labels=%d", self.layer, self.n_features, len(self.labels))
         return self
 
-    def _ensure_gen_model(self):
-        """Lazily load the full model (LM head) for generation via the shared recipe loader."""
-        if self.gen_model is None:
-            from bionemo.evo2.run import predict as P
+    def _ensure_engine(self):
+        """Lazily build the recipe's inference engine (eager/hookable) for generation.
 
-            self.gen_model, _ = P.load_model_to_layer(self.evo2_ckpt_dir, self.layer, full=True)
-        return self.gen_model
+        cuda_graph_impl="none" keeps decode eager so the residual-stream steering hook
+        takes effect (a CUDA-graph-captured decode would replay frozen ops and ignore it).
+        """
+        if self.gen_components is None:
+            from bionemo.evo2.run import infer as INF
+
+            self.gen_components = INF.setup_inference_engine(
+                Path(self.evo2_ckpt_dir), max_seq_length=self.max_seq_len, cuda_graph_impl="none"
+            )
+        return self.gen_components
 
     def _load_sae(self):
         ckpt = torch.load(self.sae_ckpt_path, map_location="cpu", weights_only=False)
@@ -189,17 +195,6 @@ class Evo2SAE:
         tok = self.tokenizer
         ids = tok.tokenize(text) if hasattr(tok, "tokenize") else tok.text_to_ids(text)
         return ids[: self.max_seq_len]
-
-    def detok(self, ids: list[int]) -> str:
-        """Detokenize token ids back to a cleaned DNA string."""
-        tok = self.tokenizer
-        for meth in ("detokenize", "ids_to_text"):
-            if hasattr(tok, meth):
-                try:
-                    return clean_dna(getattr(tok, meth)(ids))
-                except Exception:
-                    pass
-        return clean_dna("".join(chr(i) for i in ids if 0 <= i < 256))
 
     def resolve_tag(self, organism: str, tag: Optional[str]) -> Optional[str]:
         """Explicit custom `tag` wins; else look up the organism preset."""
@@ -295,128 +290,29 @@ class Evo2SAE:
         ]
 
     # ------------------------------------------------------------------ generate
-    def _clamp_hook(self, specs, pre_bias, prompt_len):
-        """Build a forward hook that additively clamps SAE features on the residual.
+    def _clamp_hook(self, specs, pre_bias):
+        """Forward hook that clamps SAE features on the residual during DECODE steps only.
 
-        Applied to the GENERATED continuation only (positions >= prompt_len):
-            h <- h + Σ_f (t_f - a_f(h)) · d_f
+        A decode step processes a single new token (sequence dim == 1); the prompt prefill
+        (sequence dim > 1) is left untouched, giving continuation-only steering through
+        `infer.generate`:  h <- h + Σ_f (t_f - a_f(h)) · d_f
         `specs` = list of (enc_f [H], b_f float, dec_f [H], target float).
         """
 
         def hook(_module, _inp, output):
             hs = output[0] if isinstance(output, tuple) else output  # [S, B, H]
+            if hs.shape[0] != 1:  # prefill (whole prompt) — leave untouched
+                return output
             x = hs.float()
             xc = x - pre_bias
             add = torch.zeros_like(x)
             for enc_f, b_f, dec_f, target in specs:
                 a = torch.relu(torch.matmul(xc, enc_f) + b_f)
                 add = add + (target - a).unsqueeze(-1) * dec_f
-            gen = (torch.arange(hs.shape[0], device=hs.device) >= prompt_len).view(-1, 1, 1)
-            new = (x + add * gen.to(x.dtype)).to(hs.dtype)
+            new = (x + add).to(hs.dtype)
             return (new, *output[1:]) if isinstance(output, tuple) else new
 
         return hook
-
-    @torch.no_grad()
-    def _autoregress(self, prompt_ids, n_tokens, temperature, top_k, allowed_ids, hook_layer=None, hook_fn=None):
-        """Cache-free autoregressive sampling restricted to `allowed_ids` (nucleotides)."""
-        cur = list(prompt_ids)
-        allowed = torch.tensor(allowed_ids, dtype=torch.long, device=self.device)
-        handle = (
-            hook_layer.register_forward_hook(hook_fn) if (hook_layer is not None and hook_fn is not None) else None
-        )
-        temp = float(temperature)
-        k = int(top_k)
-        try:
-            for _ in range(int(n_tokens)):
-                x = torch.tensor([cur], dtype=torch.long, device=self.device)
-                logits = self.gen_model(
-                    input_ids=x, position_ids=None, attention_mask=None, labels=None, runtime_gather_output=True
-                )
-                row = logits[0, -1, :].float()
-                nl = torch.full_like(row, float("-inf"))
-                nl[allowed] = row[allowed]
-                if temp > 0:
-                    nl = nl / temp
-                if k > 0:
-                    kth = torch.topk(nl, min(k, len(allowed_ids)))[0][..., -1, None]
-                    nl = torch.where(nl < kth, torch.full_like(nl, float("-inf")), nl)
-                nxt = (
-                    int(torch.multinomial(torch.softmax(nl, dim=-1), 1).item())
-                    if (temp > 0 and k != 1)
-                    else int(torch.argmax(nl).item())
-                )
-                cur.append(nxt)
-        finally:
-            if handle is not None:
-                handle.remove()
-        return cur[len(prompt_ids) :]
-
-    @torch.no_grad()
-    def _autoregress_cached(
-        self, prompt_ids, n_tokens, temperature, top_k, allowed_ids, hook_layer=None, hook_fn=None
-    ):
-        """KV + Hyena-SSM-cached autoregressive sampling (Megatron HyenaInferenceContext).
-
-        Prefill the prompt once (unsteered), then decode one token per step reusing the
-        attention KV cache and Hyena conv-state cache (O(n) vs the cache-free O(n^2)). The
-        steering hook is registered only for the decode steps, so each *generated* token's
-        layer-`layer` residual is clamped before it lands in the cache that later tokens
-        read — reproducing the cache-free continuation-only semantics exactly. `hook_fn`
-        must steer the whole chunk (build it with prompt_len=0). Restricted to allowed_ids.
-        """
-        from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
-
-        cur = list(prompt_ids)
-        allowed = torch.tensor(allowed_ids, dtype=torch.long, device=self.device)
-        temp, k, n_tokens = float(temperature), int(top_k), int(n_tokens)
-
-        ctx = HyenaInferenceContext(max_batch_size=1, max_sequence_length=len(cur) + n_tokens + 1)
-        ctx.reset()
-
-        def _forward(tok_list, start_pos):
-            x = torch.tensor([tok_list], dtype=torch.long, device=self.device)
-            pos = torch.arange(start_pos, start_pos + len(tok_list), dtype=torch.long, device=self.device).unsqueeze(0)
-            logits = self.gen_model(
-                input_ids=x,
-                position_ids=pos,
-                attention_mask=None,
-                inference_context=ctx,
-                runtime_gather_output=True,
-            )
-            ctx.increment_sequence_len_offset(len(tok_list))
-            return logits[0, -1, :].float()
-
-        def _sample(row):
-            nl = torch.full_like(row, float("-inf"))
-            nl[allowed] = row[allowed]
-            if temp > 0:
-                nl = nl / temp
-            if k > 0:
-                kth = torch.topk(nl, min(k, len(allowed_ids)))[0][..., -1, None]
-                nl = torch.where(nl < kth, torch.full_like(nl, float("-inf")), nl)
-            return (
-                int(torch.multinomial(torch.softmax(nl, dim=-1), 1).item())
-                if (temp > 0 and k != 1)
-                else int(torch.argmax(nl).item())
-            )
-
-        row = _forward(cur, 0)  # prefill the prompt (no steering — continuation only)
-        ctx.enable_decode_mode()
-        handle = (
-            hook_layer.register_forward_hook(hook_fn) if (hook_layer is not None and hook_fn is not None) else None
-        )
-        try:
-            for step in range(n_tokens):
-                nxt = _sample(row)
-                cur.append(nxt)
-                if step == n_tokens - 1:
-                    break
-                row = _forward([nxt], ctx.sequence_len_offset)  # decode step (steered by the hook)
-        finally:
-            if handle is not None:
-                handle.remove()
-        return cur[len(prompt_ids) :]
 
     def generate(
         self,
@@ -428,61 +324,62 @@ class Evo2SAE:
         temperature=1.0,
         top_k=0,
         compare_baseline=False,
-        use_cache=True,
     ) -> dict:
         """Autoregressively generate DNA, optionally clamping features on the continuation.
 
-        `features` = list of {"feature_id": int, "strength": float} (or []). Returns
+        `features` = list of {"feature_id": int, "strength": float} (or []). Generation runs
+        through the recipe's inference engine (`infer.generate`, eager so the hook applies);
+        steering is a decode-only forward hook on layer `layer`. Returns
         {generation:{sequence,activations}, baseline:..|None, features, steered}.
         """
         from megatron.core.utils import unwrap_model
+
+        from bionemo.evo2.run import infer as INF
 
         features = features or []
         resolved_tag = self.resolve_tag(organism, tag)
         if resolved_tag is None:
             raise ValueError(f"Unknown organism '{organism}' and no custom tag")
         dna = clean_dna(prompt)
-        ids = self.tokenize(resolved_tag + dna)
-        if not ids:
+        full_prompt = resolved_tag + dna
+        if not full_prompt:
             raise ValueError("Provide a prompt or pick an organism (need >=1 token to seed)")
         n_tokens = max(1, min(int(n_tokens), 400))
-        allowed = sorted({self.tokenize(b)[0] for b in "ACGT"})
         fids = [int(f["feature_id"]) for f in features]
 
         with self._lock:
-            gen_model = self._ensure_gen_model()
-            layers = unwrap_model(gen_model).decoder.layers
-            hook_layer = layers[self.layer]
+            comp = self._ensure_engine()
+            hook_layer = unwrap_model(comp.model).decoder.layers[self.layer]
             pre_bias = self.sae.pre_bias.detach().float().to(self.device)
             specs, feat_meta = [], []
             for f in features:
                 fid = int(f["feature_id"])
-                enc_f = self.sae.encoder.weight[fid].detach().float().to(self.device)
-                b_f = float(self.sae.latent_bias[fid].detach())
-                dec_f = self.sae.decoder.weight[:, fid].detach().float().to(self.device)
-                target = float(f.get("strength", 1.0))
-                specs.append((enc_f, b_f, dec_f, target))
-                feat_meta.append({"id": fid, "label": self.labels.get(fid), "strength": target})
-            # Cached decode (KV + Hyena SSM) by default; cache-free fallback via use_cache=False.
-            # The cached hook clamps the whole (1-token) decode chunk so it is built with
-            # prompt_len=0 and registered decode-only; the cache-free hook gates on position.
-            if use_cache:
-                run, hook_fn = self._autoregress_cached, (self._clamp_hook(specs, pre_bias, 0) if specs else None)
-            else:
-                run, hook_fn = self._autoregress, (self._clamp_hook(specs, pre_bias, len(ids)) if specs else None)
+                specs.append(
+                    (
+                        self.sae.encoder.weight[fid].detach().float().to(self.device),
+                        float(self.sae.latent_bias[fid].detach()),
+                        self.sae.decoder.weight[:, fid].detach().float().to(self.device),
+                        float(f.get("strength", 1.0)),
+                    )
+                )
+                feat_meta.append({"id": fid, "label": self.labels.get(fid), "strength": float(f.get("strength", 1.0))})
 
-            main_ids = run(
-                ids,
-                n_tokens,
-                temperature,
-                top_k,
-                allowed,
-                hook_layer=(hook_layer if hook_fn else None),
-                hook_fn=hook_fn,
-            )
-            base_ids = run(ids, n_tokens, temperature, top_k, allowed) if (compare_baseline and specs) else None
+            def _run(steer: bool) -> str:
+                handle = (
+                    hook_layer.register_forward_hook(self._clamp_hook(specs, pre_bias)) if (steer and specs) else None
+                )
+                try:
+                    out = INF.generate(
+                        comp, [full_prompt], max_new_tokens=n_tokens, temperature=temperature, top_k=top_k
+                    )
+                    return clean_dna(INF._unwrap_result(out[0]).generated_text)
+                finally:
+                    if handle is not None:
+                        handle.remove()
 
-        main_dna = self.detok(main_ids)
+            main_dna = _run(steer=True)
+            base_dna = _run(steer=False) if (compare_baseline and specs) else None
+
         resp = {
             "prompt": dna,
             "organism": organism,
@@ -494,7 +391,6 @@ class Evo2SAE:
             "generation": {"sequence": main_dna, "activations": self.feature_tracks(main_dna, fids)},
             "baseline": None,
         }
-        if base_ids is not None:
-            base_dna = self.detok(base_ids)
+        if base_dna is not None:
             resp["baseline"] = {"sequence": base_dna, "activations": self.feature_tracks(base_dna, fids)}
         return resp
