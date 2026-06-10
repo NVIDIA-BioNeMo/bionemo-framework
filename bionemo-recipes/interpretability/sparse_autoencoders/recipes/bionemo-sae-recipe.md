@@ -192,7 +192,7 @@ These are **general principles**; the numbers are Evo2 examples — **measure th
 After training, run `sae.eval` on a **held-out** cache (same distribution, disjoint instances):
 
 - `reconstruction` → variance explained; `dead_latents` → dead %; `loss_recovered` → CE fidelity (substitute the SAE recon at the layer-L hook).
-- For interpretability, build a labeled `ActivationBuffer` (per-token feature codes + concept labels + optional dense-residual twin) and run `sae.eval.probing` — per-feature AUROC, winner's-curse-corrected best-single, SAE-vs-dense probes, domain-F1. Labelers are **per-domain** (DNA / protein / codon); the scoring is shared.
+- For interpretability, build a labeled `ActivationBuffer` (per-token feature codes + concept labels + optional dense-residual twin) and run `sae.eval.probing` — per-feature AUROC, winner's-curse-corrected best-single, SAE-vs-dense probes, domain-F1. Labelers are **per-domain** (DNA / protein / codon); the scoring is shared. **Note:** `reconstruction` / `dead_latents` / `loss_recovered` are already in `sae.eval`; **`probing` is the newest module and lands with the eval recipe PR** — if it's not in your tree yet, that PR is the dependency.
 
 ## Verifying the recipe works (fastest → most confident)
 
