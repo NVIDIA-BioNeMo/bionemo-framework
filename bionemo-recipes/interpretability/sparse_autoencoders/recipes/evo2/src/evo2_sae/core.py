@@ -260,7 +260,11 @@ class Evo2SAE:
             "loss_mask": loss_mask,
             "seq_idx": torch.arange(b, dtype=torch.long, device=self.device),
         }
-        result = P._predict_step(model=self.model, batch=batch, output_embeddings=True)
+        # Evo2 runs bf16; TransformerEngine asserts param/input dtypes match unless inside an
+        # autocast region. predict()'s loop relies on this too, so wrap the direct _predict_step.
+        device_type = "cuda" if self.device.startswith("cuda") else "cpu"
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            result = P._predict_step(model=self.model, batch=batch, output_embeddings=True)
         hidden = result["hidden_embeddings"]  # [B, S, H]
         return [hidden[i, : lens[i]].float() for i in range(b)]
 
