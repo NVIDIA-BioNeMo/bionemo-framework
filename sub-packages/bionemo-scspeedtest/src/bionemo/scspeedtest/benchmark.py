@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import gc
+import platform
 import subprocess
 import time
 from dataclasses import dataclass
@@ -49,10 +50,13 @@ __all__ = [
 
 
 def _drop_caches():
-    """Helper function to drop system caches."""
     try:
-        print("Dropping caches")
-        subprocess.run(["sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"], check=True)
+        if platform.system() == "Darwin":
+            subprocess.call(["sync", "&&", "sudo", "purge"])
+        elif platform.system() == "Linux":
+            subprocess.call(["sudo", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"])
+        else:
+            raise Exception("Unsupported platform")
     except subprocess.CalledProcessError:
         print("⚠️ Warning: failed to drop caches — are you running with sudo?")
 
@@ -205,7 +209,8 @@ def run_benchmark(
         # Create a modified benchmark_iteration for this epoch
 
         result_tuple = measure_peak_memory_full(
-            lambda: benchmark_iteration_single_epoch(epoch, epoch == 0), multi_worker=dataloader.num_workers > 0
+            lambda: benchmark_iteration_single_epoch(epoch, epoch == 0),
+            multi_worker=hasattr(dataloader, "num_workers") and dataloader.num_workers > 0,
         )
         (
             (epoch_samples, epoch_batches, elapsed, warmup_samples, warmup_batches, warmup_time),
@@ -239,7 +244,7 @@ def run_benchmark(
         data_path=str(config.data_path) if config.data_path else None,
         max_time_seconds=config.max_time_seconds,
         shuffle=config.shuffle,
-        num_workers=dataloader.num_workers,
+        num_workers=getattr(dataloader, "num_workers", -1),
         # Instantiation metrics passed as kwargs
         **instantiation_kwargs,
         epoch_results=epoch_results,
