@@ -2,3 +2,6 @@ node_modules/
 package-lock.json
 dist/
 .vite/
+
+# generated dashboard data (build it from your SAE/annotations, do not commit)
+public/*.parquet
