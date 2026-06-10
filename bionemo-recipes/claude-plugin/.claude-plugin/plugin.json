@@ -1,0 +1,9 @@
+{
+  "name": "bionemo-recipes",
+  "version": "0.1.0",
+  "description": "Convert HuggingFace models to TransformerEngine, add FP8 support, set up distributed training — using NVIDIA BioNeMo Recipes as reference.",
+  "author": { "name": "NVIDIA BioNeMo Team" },
+  "repository": "https://github.com/NVIDIA/bionemo-framework",
+  "license": "Apache-2.0",
+  "keywords": ["transformerengine", "fp8", "fsdp", "distributed-training", "nvidia"]
+}
