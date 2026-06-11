@@ -150,61 +150,74 @@ def _compare_file_contents(source_file: Path, dest_file: Path, source_display: s
                 )
 
 
+def _iter_copied_tree_files(source_path: Path):
+    """Yield source files that should participate in copied-tree validation."""
+    for file in source_path.rglob("*"):
+        if file.is_dir():
+            continue
+        if "__pycache__" in file.parts or file.suffix == ".pyc":
+            continue
+        yield file
+
+
 SOURCE_TO_DESTINATION_MAP: dict[str, list[str]] = {
-    "bionemo-recipes/models/esm2/modeling_esm_te.py": [
-        "bionemo-recipes/recipes/esm2_native_te/modeling_esm_te.py",
-        "bionemo-recipes/recipes/esm2_peft_te/example_8m_checkpoint/esm_nv.py",
-        "bionemo-recipes/recipes/esm2_accelerate_te/example_8m_checkpoint/esm_nv.py",
-        "bionemo-recipes/recipes/vllm_inference/esm2/modeling_esm_te.py",
+    "recipes/evo2_megatron/src/bionemo/common": [
+        "recipes/eden_megatron/src/bionemo/common",
     ],
-    "bionemo-recipes/models/esm2/collator.py": [
-        "bionemo-recipes/models/llama3/collator.py",
-        "bionemo-recipes/models/mixtral/collator.py",
-        "bionemo-recipes/models/qwen/collator.py",
-        "bionemo-recipes/recipes/esm2_native_te/collator.py",
-        "bionemo-recipes/recipes/llama3_native_te/collator.py",
-        "bionemo-recipes/recipes/opengenome2_llama_native_te/collator.py",
-        "bionemo-recipes/recipes/esm2_peft_te/collator.py",
+    "models/esm2/modeling_esm_te.py": [
+        "recipes/esm2_native_te/modeling_esm_te.py",
+        "recipes/esm2_peft_te/example_8m_checkpoint/esm_nv.py",
+        "recipes/esm2_accelerate_te/example_8m_checkpoint/esm_nv.py",
+        "recipes/vllm_inference/esm2/modeling_esm_te.py",
     ],
-    "bionemo-recipes/models/esm2/state.py": [
-        "bionemo-recipes/models/amplify/src/amplify/state.py",
-        "bionemo-recipes/models/llama3/state.py",
-        "bionemo-recipes/models/mixtral/state.py",
-        "bionemo-recipes/models/qwen/state.py",
-        "bionemo-recipes/recipes/vllm_inference/esm2/state.py",
+    "models/esm2/collator.py": [
+        "models/llama3/collator.py",
+        "models/mixtral/collator.py",
+        "models/qwen/collator.py",
+        "recipes/esm2_native_te/collator.py",
+        "recipes/llama3_native_te/collator.py",
+        "recipes/opengenome2_llama_native_te/collator.py",
+        "recipes/esm2_peft_te/collator.py",
     ],
-    "bionemo-recipes/models/llama3/modeling_llama_te.py": [
-        "bionemo-recipes/recipes/llama3_native_te/modeling_llama_te.py",
-        "bionemo-recipes/recipes/opengenome2_llama_native_te/modeling_llama_te.py",
+    "models/esm2/state.py": [
+        "models/amplify/src/amplify/state.py",
+        "models/llama3/state.py",
+        "models/mixtral/state.py",
+        "models/qwen/state.py",
+        "recipes/vllm_inference/esm2/state.py",
     ],
-    "bionemo-recipes/models/llama3/nucleotide_fast_tokenizer": [
-        "bionemo-recipes/recipes/llama3_native_te/tokenizers/nucleotide_fast_tokenizer",
+    "models/llama3/modeling_llama_te.py": [
+        "recipes/llama3_native_te/modeling_llama_te.py",
+        "recipes/opengenome2_llama_native_te/modeling_llama_te.py",
     ],
-    "bionemo-recipes/models/esm2/convert.py": [
-        "bionemo-recipes/recipes/vllm_inference/esm2/convert.py",
+    "models/llama3/nucleotide_fast_tokenizer": [
+        "recipes/llama3_native_te/tokenizers/nucleotide_fast_tokenizer",
     ],
-    "bionemo-recipes/models/esm2/export.py": [
-        "bionemo-recipes/recipes/vllm_inference/esm2/export.py",
+    "models/esm2/convert.py": [
+        "recipes/vllm_inference/esm2/convert.py",
     ],
-    "bionemo-recipes/models/esm2/esm_fast_tokenizer": [
-        "bionemo-recipes/recipes/vllm_inference/esm2/esm_fast_tokenizer",
+    "models/esm2/export.py": [
+        "recipes/vllm_inference/esm2/export.py",
     ],
-    "bionemo-recipes/models/esm2/model_readme.template": [
-        "bionemo-recipes/recipes/vllm_inference/esm2/model_readme.template",
+    "models/esm2/esm_fast_tokenizer": [
+        "recipes/vllm_inference/esm2/esm_fast_tokenizer",
     ],
-    "bionemo-recipes/models/esm2/LICENSE": [
-        "bionemo-recipes/recipes/vllm_inference/esm2/LICENSE",
+    "models/esm2/model_readme.template": [
+        "recipes/vllm_inference/esm2/model_readme.template",
+    ],
+    "models/esm2/LICENSE": [
+        "recipes/vllm_inference/esm2/LICENSE",
     ],
     # CodonFM model -> recipe sync
-    "bionemo-recipes/models/codonfm/modeling_codonfm_te.py": [
-        "bionemo-recipes/recipes/codonfm_native_te/modeling_codonfm_te.py",
+    "models/codonfm/modeling_codonfm_te.py": [
+        "recipes/codonfm_native_te/modeling_codonfm_te.py",
     ],
     # Common test library - synced between models
-    "bionemo-recipes/models/esm2/tests/common": [
-        "bionemo-recipes/models/llama3/tests/common",
-        "bionemo-recipes/models/mixtral/tests/common",
-        "bionemo-recipes/models/qwen/tests/common",
-        "bionemo-recipes/models/codonfm/tests/common",
+    "models/esm2/tests/common": [
+        "models/llama3/tests/common",
+        "models/mixtral/tests/common",
+        "models/qwen/tests/common",
+        "models/codonfm/tests/common",
     ],
 }
 
@@ -245,11 +258,9 @@ def main():
             if args.fix:
                 if source_path.is_dir():
                     shutil.copytree(source, destination, dirs_exist_ok=True)
-                    for file in source_path.glob("*"):
-                        if file.is_dir():
-                            continue
-                        source_rel = str(Path(source) / file.name)
-                        _add_banner_to_file(destination_path / file.name, source_rel)
+                    for file in _iter_copied_tree_files(source_path):
+                        source_rel = file.relative_to(source_path)
+                        _add_banner_to_file(destination_path / source_rel, str(Path(source) / source_rel))
                 else:
                     shutil.copy(source, destination)
                     _add_banner_to_file(destination_path, source)
@@ -257,11 +268,9 @@ def main():
 
             else:
                 if source_path.is_dir():
-                    for file in source_path.glob("*"):
-                        # Skip directories when checking - they're copied recursively with copytree
-                        if file.is_dir():
-                            continue
-                        _compare_file_contents(file, destination_path / file.name, source)
+                    for file in _iter_copied_tree_files(source_path):
+                        source_rel = file.relative_to(source_path)
+                        _compare_file_contents(file, destination_path / source_rel, source)
                 else:
                     _compare_file_contents(source_path, destination_path, source)
 

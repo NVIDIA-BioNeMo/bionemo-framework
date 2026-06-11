@@ -1,169 +1,245 @@
-<div align="center">
-  <h1>BioNeMo Framework</h1>
-  <h4>GPU-optimized recipes & toolkits for training transformer models at scale with biological data</h4>
-</div>
+# BioNeMo Recipes
 
-<div align="left">
+BioNeMo Recipes provides an easy path for the biological foundation model training community to scale up transformer-based models efficiently. Rather than offering a batteries-included training framework, BioNeMo Recipes provide **model checkpoints** with TransformerEngine (TE) layers and **training recipes** that demonstrate how to achieve maximum throughput with popular open-source frameworks and fully sharded data parallel (FSDP) scale-out.
 
-[![Click here to deploy.](https://uohmivykqgnnbiouffke.supabase.co/storage/v1/object/public/landingpage/brevdeploynavy.svg)](https://console.brev.dev/launchable/deploy/now?launchableID=env-2pPDA4sJyTuFf3KsCv5KWRbuVlU)
-[![Docs Build](https://img.shields.io/github/actions/workflow/status/NVIDIA/bionemo-framework/pages/pages-build-deployment?label=docs-build)](https://nvidia-bionemo.github.io/bionemo-framework)
-[![Test Status](https://github.com/NVIDIA-BioNeMo/bionemo-framework/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA-BioNeMo/bionemo-framework/actions/workflows/unit-tests.yml)
-[![Latest Tag](https://img.shields.io/github/v/tag/NVIDIA/bionemo-framework?label=latest-version)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/containers/bionemo-framework/tags)
-[![codecov](https://codecov.io/gh/NVIDIA/bionemo-framework/branch/main/graph/badge.svg?token=XqhegdZRqB)](https://codecov.io/gh/NVIDIA/bionemo-framework)
+## Overview
 
-<div align="left">
+The biological AI community actively prototypes model architectures and needs tooling that prioritizes extensibility, interoperability, and ease-of-use, alongside performance. BioNeMo Recipes addresses this by offering:
 
-NVIDIA BioNeMo Framework is a comprehensive suite of programming tools, libraries, and models designed for digital biology. It accelerates the most time-consuming and costly stages of building and adapting biomolecular AI models by providing domain-specific, optimized model recipes and tooling that are easily integrated into GPU-based computational resources with state-of-the-art performance.
+- **Flexible scaling**: Scales from single-GPU prototyping to multi-node training without complex parallelism configurations
+- **Framework compatibility**: Works with popular frameworks like HuggingFace Accelerate, PyTorch Lightning, and vanilla PyTorch
+- **Performance optimization**: Leverages TransformerEngine and megatron-FSDP for state-of-the-art training efficiency
+- **Research-friendly**: Contains hackable and readable code that researchers can easily adapt for their experiments
+
+### Performance Benchmarks
 
 <p align="center">
-  <img src="docs/docs/assets/images/esm2/esm2_low_precision/esm2_15b_grouped_bars.png" width="600">
+  <img src="docs/docs/assets/images/esm2/esm2_native_te_benchmarks.svg" width="600">
   <br>
-  <em> Training benchmarks for ESM-2, a well known protein sequence model using the BERT architecture.</em>
+  <em> Training benchmarks for ESM-2 using the <code>esm2_native_te</code> recipe.</em>
 </p>
 
-## ⚡ Quick Start
+### Use Cases
 
-```bash
-# Try BioNeMo Recipes in Google Colab (Recommend A100, may be too slow or run out of memory on T4)
-# Copy paste into Google Colab cells
+The use cases of BioNeMO Recipes include:
 
-!git clone https://github.com/NVIDIA/bionemo-framework.git
-cd bionemo-framework/bionemo-recipes/recipes/esm2_native_te/
+- **Foundation Model Developers**: AI researchers and ML engineers developing novel biological foundation models who need to scale up prototypes efficiently
+- **Foundation Model Customizers**: Domain scientists looking to fine-tune existing models with proprietary data for drug discovery and biological research
 
-# Install transformer_engine[pytorch] from source, it takes a long time to install from PYPI
-!curl -L -o transformer_engine_torch-2.8.0-cp312-cp312-linux_x86_64.whl "https://drive.google.com/uc?export=download&id=1Oz6dkkIMahv3LN_fQhhQRolZ3m-sr9SF"
-!pip install --no-build-isolation transformer-engine transformer_engine_torch-2.8.0-cp312-cp312-linux_x86_64.whl
+## Supported Recipes and Models
 
-# Install dependencies
-!pip install -r requirements.txt
+| Directory                                                                                        | Description                                                                                                                   | FSDP         | BF16 | FP8<sup>[1]</sup> | THD | FP8 + THD | MXFP8<sup>[2]</sup> | NVFP4<sup>[2]</sup> | CP  |
+| ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | ------------ | ---- | ----------------- | --- | --------- | ------------------- | ------------------- | --- |
+| `models/amplify`,<br> [available on Hugging Face](https://huggingface.co/nvidia/AMPLIFY_350M)    | TE accelerated protein BERT, [Amgen](https://www.biorxiv.org/content/10.1101/2024.09.23.614603v1)                             | ✅           | ✅   | ❌                | ❌  | 🚧        | ❌                  | ❌                  | ❌  |
+| `models/esm2`,<br> [available on Hugging Face](https://huggingface.co/nvidia/esm2_t48_15B_UR50D) | TE accelerated protein BERT, [Meta](https://www.biorxiv.org/content/10.1101/2022.07.20.500902v1)                              | ✅           | ✅   | ✅                | ✅  | ✅        | ✅                  | 🚧                  | ✅  |
+| `models/llama3`                                                                                  | TE accelerated Llama 3, [Meta](https://www.llama.com/models/llama-3/)                                                         | ✅           | ✅   | ✅                | ✅  | 🚧        | 🚧                  | 🚧                  | 🚧  |
+| `recipes/`<br>`esm2_native_te`                                                                   | Recipe for `esm2/amplify` + native PyTorch                                                                                    | mFSDP, FSDP2 | ✅   | ✅                | ✅  | ✅        | ✅                  | 🚧                  | 🚧  |
+| `recipes/`<br>`llama3_native_te`                                                                 | Recipe for `llama3` + native PyTorch                                                                                          | FSDP2        | ✅   | ✅                | ✅  | 🚧        | 🚧                  | 🚧                  | 🚧  |
+| `recipes/`<br>`esm2_accelerate_te`                                                               | Recipe for `esm2/amplify` TE + HF Accelerate                                                                                  | 🚧           | ✅   | ✅                | 🚧  | ❌        | 🚧                  | 🚧                  | 🚧  |
+| `recipes/`<br>`codonfm_ptl_te`                                                                   | Recipe for [CodonFM](https://research.nvidia.com/labs/dbr/assets/data/manuscripts/nv-codonfm-preprint.pdf)'s Encodon using TE | 🚧           | ✅   | 🚧                | ✅  | 🚧        | 🚧                  | 🚧                  | 🚧  |
+| `recipes/`<br>`geneformer_native_te_mfsdp_fp8`                                                   | Recipe for geneformer HF model                                                                                                | mFSDP        | ✅   | 🚧                | 🚧  | 🚧        | 🚧                  | 🚧                  | 🚧  |
+| `recipes/`<br>`vit`                                                                              | Recipe for vision transformer                                                                                                 | mFSDP        | ✅   | 🚧                | 🚧  | 🚧        | 🚧                  | 🚧                  | 🚧  |
 
-# Run ESM2 Native Recipes with TE
-!python train_ddp.py
+✅: Supported <br/>
+🚧: Under development, will be supported soon <br/>
+❌: Not supported <br/>
+
+Abbreviations:
+
+- FSDP: Fully sharded data parallel. In this repository, we focus on pytorch native [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [megatron-FSDP](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core/distributed/fsdp/src) (mFSDP) support.
+- BF16: [brain-float 16](https://en.wikipedia.org/wiki/Bfloat16_floating-point_format), a common 16 bit float format for deep learning.
+- FP8<sup>[1]</sup>: [8-bit floating point](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html), a compact format for weights allowing for faster training and inference.
+- MXFP8<sup>[2]</sup>: [Multi Scale 8-bit floating point](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html), as compact as FP8 but with better numerical precision.
+- NVFP4<sup>[2]</sup>: [NVIDIA 4-bit floating point](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html#Beyond-FP8---training-with-NVFP4), faster than FP8, retaining accuracy using multi-scale.
+- THD: **T**otal **H**eads **D**imension, also known as ["sequence packing"](https://docs.nvidia.com/nemo-framework/user-guide/24.07/nemotoolkit/features/optimizations/sequence_packing.html#sequence-packing-for-sft-peft). A way to construct a batch with sequences of different lengths so there are no pads, which results in no compute wasted on computing attention for padding tokens. This is in contrast to **B**atch **S**equence **H**ead **D**imension (BSHD) format, which uses pads to create a rectangular batch.
+- CP: Context parallel, also known as sequence parallel. A way to distribute the memory required to process long sequences across multiple GPUs. For more information, refer to [context parallel](./recipes/context_parallel.md)
+
+\[1\]: Requires [compute capability](https://developer.nvidia.com/cuda-gpus) 9.0 and above (Hopper+) <br/>
+\[2\]: Requires [compute capability](https://developer.nvidia.com/cuda-gpus) 10.0 and 10.3 (Blackwell), 12.0 support pending <br/>
+
+## Repository Structure
+
+This repository contains three types of components:
+
+### Models (`models/`)
+
+Huggingface-compatible `PreTrainedModel` classes that use TransformerEngine layers internally. These are designed to be:
+
+- **Distributed through Hugging Face Hub**: Pre-converted checkpoints available at [huggingface.co/nvidia](https://huggingface.co/nvidia)
+- **Drop-in replacements**: Compatible with `AutoModel.from_pretrained()` without additional dependencies
+- **Performance optimized**: Leverage TransformerEngine features like FP8 training and context parallelism
+
+Example models include ESM-2, Geneformer, and AMPLIFY.
+
+### Recipes (`recipes/`)
+
+Self-contained training examples demonstrating best practices for scaling biological foundation models. Each recipe is a complete Docker container with:
+
+- **Framework examples**: Vanilla PyTorch, HuggingFace Accelerate, PyTorch Lightning
+- **Feature demonstrations**: FP8 training, megatron-FSDP, context parallelism, sequence packing
+- **Scaling strategies**: Single-GPU to multi-node training patterns
+- **Benchmarked performance**: Validated throughput and convergence metrics
+
+Recipes are **not pip-installable packages** but serve as reference implementations that users can adapt for their own research.
+
+### Interpretability (`interpretability/`)
+
+Research tools and workflows for inspecting biological foundation models, including sparse autoencoder training,
+feature analysis, and model behavior exploration.
+
+## Quick Start
+
+This section describe how you can get started with BioNeMo Recipes.
+
+### Loading Models
+
+Run the following to load the BioNeMo model.
+
+```python
+from transformers import AutoModel, AutoTokenizer
+
+# Load a BioNeMo model directly from Hugging Face
+model = AutoModel.from_pretrained("nvidia/AMPLIFY_120M")
+tokenizer = AutoTokenizer.from_pretrained("nvidia/AMPLIFY_120M")
 ```
 
-## Recent News
+### Running Recipes
 
-<p align="center">
-  <img src="docs/docs/assets/images/sae.png" width="600">
-  <br>
-  <em><a href="https://research.nvidia.com/labs/dbr/blog/sae/">Sparse autoencoder feature dashboard for CodonFM 1B</a>, showing learned latent features and their activations on protein sequences.</em>
-</p>
-
-- 03/13/2026 [Sparse Autoencoders for model interpretability](bionemo-recipes/interpretability/sparse_autoencoders/) — train and analyze SAEs on biological foundation models. Includes recipes for ESM2 and CodonFM with interactive feature dashboards.
-- 03/09/2026 [Qwen2.5 / Qwen3 model](bionemo-recipes/models/qwen/) with TE acceleration, FP8/MXFP8, KV-cache inference, and bidirectional HF checkpoint conversion.
-- 03/05/2026 [ESM2 NVFP4 and MXFP8](bionemo-recipes/recipes/esm2_native_te/README.md#low-precision-performance-benchmarks) low-precision training — up to **2,367 TFLOPS/GPU** on NVIDIA B300 at 15B scale with per-layer precision control.
-- 02/23/2026 [Mixtral MoE model](bionemo-recipes/models/mixtral/) with TE `GroupedLinear` for efficient parallel expert computation, FP8/FP4 support, and HF conversion.
-- 02/13/2026 [ESM2 PEFT recipe](bionemo-recipes/recipes/esm2_peft_te/) for LoRA fine-tuning with sequence packing support.
-- 01/14/2026 [Llama3 Context Parallelism](bionemo-recipes/recipes/llama3_native_te/README.md#performance-benchmarks) — scaling Llama 3 70B to 144K context on 36x GB300 NVL36 with ~65% MFU.
-- 10/27/2025 [CodonFM recipe](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/codonfm_ptl_te) released! This is an accelerated version of the original [research codebase](https://github.com/NVIDIA-Digital-Bio/CodonFM) with [scientific preprint](https://research.nvidia.com/labs/dbr/assets/data/manuscripts/nv-codonfm-preprint.pdf).
-- 09/01/2025 [bionemo-recipes](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes) goes live! Lightweight and portable examples with state-of-the-art training performance you can riff on to meet your needs.
-
-## Code Overview
-
-A core use-case of the BioNeMo Framework is to help digital biology scientists accelerate and scale their model training onto a compute cluster. This repository is organized around two complementary areas:
-
-1\. Self-contained models and recipes in [`bionemo-recipes`](./bionemo-recipes/). These examples show different training patterns for biological AI workloads, including native PyTorch, Hugging Face Accelerate, and [NVIDIA megatron-FSDP](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core/distributed/fsdp/src), with [NVIDIA TransformerEngine (TE)](https://github.com/NVIDIA/TransformerEngine) acceleration where appropriate.
-
-<details>
-<summary><b>(Click to expand) <code>bionemo-recipes</code> support matrix </b></summary>
-<small>
-
-| Directory                                      | Description                                                                                                                   | Support Status | 5D Parallel | Megatron-FSDP | TE     | Sequence Packing | FP8    | Context Parallelism |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------- | ----------- | ------------- | ------ | ---------------- | ------ | ------------------- |
-| `models/`<br>`amplify`                         | TE accelerated protein BERT, pushed to HuggingFace                                                                            | ✅ Active      | ❌          | ✅            | ✅     | 🚧 WIP           | ✅     | 🚧 WIP              |
-| `models/`<br>`esm2`                            | TE accelerated protein BERT, pushed to HuggingFace                                                                            | ✅ Active      | ❌          | ✅            | ✅     | ✅               | ✅     | ✅                  |
-| `models/`<br>`llama3`                          | TE accelerated Llama 3                                                                                                        | ✅ Active      | ❌          | 🚧 WIP        | ✅     | ✅               | ✅     | ✅                  |
-| `models/`<br>`geneformer`                      | TE accelerated single-cell BERT                                                                                               | 🚧 WIP         | ❌          | ✅            | 🚧 WIP | 🚧 WIP           | 🚧 WIP | 🚧 WIP              |
-| `recipes/`<br>`codonfm_ptl_te`                 | Recipe for [CodonFM](https://research.nvidia.com/labs/dbr/assets/data/manuscripts/nv-codonfm-preprint.pdf)'s Encodon using TE | ✅ Active      | ❌          | 🚧 WIP        | ✅     | ✅               | 🚧 WIP | 🚧 WIP              |
-| `recipes/`<br>`esm2_accelerate_te`             | Recipe for ESM2 TE + HF Accelerate                                                                                            | ✅ Active      | ❌          | 🚧 WIP        | ✅     | ❌               | ✅     | 🚧 WIP              |
-| `recipes/`<br>`esm2_native_te`                 | Recipe for ESM2 TE + native PyTorch                                                                                           | ✅ Active      | ❌          | ✅            | ✅     | ✅               | ✅     | ✅                  |
-| `recipes/`<br>`geneformer_native_te_mfsdp_fp8` | Recipe for Geneformer HF model                                                                                                | 🚧 WIP         | ❌          | ✅            | ✅     | ❌               | ✅     | 🚧 WIP              |
-| `recipes/`<br>`llama3_native_te`               | Recipe for Llama 3 TE + native PyTorch                                                                                        | ✅ Active      | ❌          | 🚧 WIP        | ✅     | ✅               | ✅     | ✅                  |
-| `models/`<br>`mixtral`                         | TE accelerated MoE model                                                                                                      | ✅ Active      | ❌          | 🚧 WIP        | ✅     | ✅               | ✅     | 🚧 WIP              |
-| `models/`<br>`qwen`                            | TE accelerated Qwen2.5/Qwen3                                                                                                  | ✅ Active      | ❌          | 🚧 WIP        | ✅     | ✅               | ✅     | 🚧 WIP              |
-| `recipes/`<br>`esm2_peft_te`                   | Recipe for ESM2 LoRA fine-tuning                                                                                              | ✅ Active      | ❌          | ❌            | ✅     | ✅               | 🚧 WIP | ❌                  |
-| `recipes/`<br>`evo2_megatron`                  | Recipe for Evo2 via Megatron Bridge                                                                                           | 🚧 WIP         | ❌          | ❌            | ✅     | ❌               | ✅     | ❌                  |
-| `recipes/`<br>`fp8_analysis`                   | FP8 training analyzer & heatmap tool                                                                                          | ✅ Active      | N/A         | N/A           | N/A    | N/A              | N/A    | N/A                 |
-| `recipes/`<br>`vit`                            | Recipe for Vision Transformer                                                                                                 | 🚧 WIP         | ❌          | ✅            | ✅     | ❌               | ✅     | 🚧 WIP              |
-
-</small>
-
-</details>
-
-2\. Reusable BioNeMo libraries in `sub-packages`. These packages are limited to utility functions and biological workflow support, such as shared core interfaces, dataset helpers, I/O, benchmarking, and recipe utilities. They are lightweight, individually installable, and may be used directly in `bionemo-recipes` or in standalone pipelines.
-
-<details>
-<summary><b>(Click to expand) <code>sub-packages</code> library overview</b></summary>
-<small>
-
-| Directory                     | Description                                                 | Typical Use                                   |
-| ----------------------------- | ----------------------------------------------------------- | --------------------------------------------- |
-| `bionemo-core`                | Core interfaces, shared data helpers, and PyTorch utilities | Shared foundation for BioNeMo libraries       |
-| `bionemo-recipeutils`         | Shared, framework-agnostic utilities and CLIs for recipes   | Used by multiple recipes                      |
-| `bionemo-moco`                | Molecular co-design utilities for generative workflows      | Standalone workflows and reusable components  |
-| `bionemo-noodles`             | High-performance FASTA I/O wrapper around `noodles`         | Sequence I/O utilities                        |
-| `bionemo-scdl`                | Single-cell dataset loading and conversion utilities        | Single-cell data workflows                    |
-| `bionemo-scspeedtest`         | Benchmarking utilities for single-cell dataloaders          | Benchmarking and evaluation                   |
-| `bionemo-size-aware-batching` | Memory-aware mini-batching utilities                        | Training and data-pipeline helper             |
-| `bionemo-webdatamodule`       | `WebDataset` data module utilities                          | Data loading helper for workflows and recipes |
-
-</small>
-</details>
-
-BioNeMo Framework is part of a larger ecosystem of NVIDIA Biopharma products. Get notified of new releases, bug fixes, critical security updates, and more for biopharma. [Subscribe.](https://www.nvidia.com/en-us/clara/biopharma/product-updates/)
-
-## Documentation Resources
-
-- **Official Documentation:** Guides, API references, and troubleshooting for the framework are documented on our [official documentation](https://docs.nvidia.com/bionemo-framework/latest/). Nightly builds of this documentation are available on [BioNeMo Framework GitHub Pages](https://nvidia-bionemo.github.io/bionemo-framework/)
-
-- **🚧 In-Progress Documentation 🚧:** `bionemo-recipes` documentation is currently work in progress, however the recipes are meant to be self-documented and easy to understand—we suggest you throw them into your favorite genai code assistant!
-
-## Local Development
-
-Full documentation on using the BioNeMo Framework is provided in our documentation:
-<https://docs.nvidia.com/bionemo-framework/latest/user-guide/>. We also publish a container image for the BioNeMo Framework on
-[NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/containers/bionemo-framework). To launch a pre-built container, you can use the brev.dev launchable [![ Click here to deploy.](https://uohmivykqgnnbiouffke.supabase.co/storage/v1/object/public/landingpage/brevdeploynavy.svg)](https://console.brev.dev/launchable/deploy/now?launchableID=env-2pPDA4sJyTuFf3KsCv5KWRbuVlU) or execute the following command:
+Build and run recipes with the following.
 
 ```bash
-docker run --rm -it \
-  --gpus=all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
-  nvcr.io/nvidia/clara/bionemo-framework:nightly \
-  /bin/bash
+# Navigate to a recipe
+cd recipes/esm2_native_te
+
+# Build and run
+docker build -t esm2_recipe .
+docker run --rm -it --gpus all esm2_recipe python train.py
 ```
 
-### Setting up a local development environment
+## Setting Up the Development Environment
 
-#### Build the Docker Image Locally
+1. Install pre-commit hooks:
 
-With a locally cloned repository, build the BioNeMo container using:
+   ```bash
+   pre-commit install
+   ```
+
+   Run hooks manually:
+
+   ```bash
+   pre-commit run --all-files
+   ```
+
+2. **Test your changes:**
+   Each model and recipe has its own build and test setup following this pattern:
+
+   ```bash
+   cd models/my_model  # or recipes/my_recipe
+   docker build . -t my_tag
+   docker run --rm -it --gpus all my_tag pytest -v .
+   ```
+
+## Coding Guidelines
+
+BioNeMo Recipes prioritize **readability and simplicity** over comprehensive feature coverage:
+
+- **KISS (Keep It Simple) over DRY (Don't Repeat Yourself)**: It's better to have clear, duplicated code than complex
+  abstractions
+- **One thing well**: Each recipe should demonstrate specific features clearly rather than trying to cover everything
+- **Self-contained**: Recipes cannot depend on cutting-edge code from other parts of the repository
+
+### Testing Strategy
+
+BioNeMo Recipes use a three-tier testing approach:
+
+#### L0 Tests (Pre-merge)
+
+- **Purpose**: Fast validation that code works
+- **Runtime**: \<10 minutes, single GPU
+- **Frequency**: Run automatically on PRs
+- **Scope**: Basic functionality, checkpoint creation/loading
+
+#### L1 Tests (Performance Monitoring)
+
+- **Purpose**: Performance benchmarking and partial convergence validation
+- **Runtime**: Up to 4 hours, up to 16 GPUs
+- **Frequency**: Nightly/weekly
+- **Scope**: Throughput metrics, scaling validation
+
+#### L2 Tests (Release Validation)
+
+- **Purpose**: Full convergence and large-scale validation
+- **Runtime**: Multiple days, hundreds of GPUs
+- **Frequency**: Monthly or before releases
+- **Scope**: Complete model convergence, cross-platform validation
+
+### Adding New Components
+
+With BioNeMo Recipes, you can add new components including models and recipes.
+
+#### Adding a New Model
+
+Models should be pip-installable packages that can export checkpoints to Hugging Face. Refer to the
+[models README](models/README.md) for detailed guidelines on:
+
+- Package structure and conventions
+- Checkpoint export procedures
+- Testing requirements
+- CI/CD integration
+
+#### Adding a New Recipe
+
+Recipes should be self-contained Docker environments demonstrating specific training patterns. Refer to
+the [recipes README](recipes/README.md) for guidance on:
+
+- Directory structure and naming
+- Hydra configuration management
+- Docker best practices
+- SLURM integration examples
+
+### CI/CD Contract
+
+All components must pass this basic validation:
 
 ```bash
-docker buildx build . -t my-container-tag
+docker build -t {component_tag} .
+docker run --rm -it --gpus all {component_tag} pytest -v .
 ```
 
-If you see an error message like `No file descriptors available (os error 24)`, add the option `--ulimit nofile=65535:65535` to the docker build command.
+#### Running CI/CD
 
-#### VSCode Devcontainer for Interactive Debugging
-
-We distribute a [development container](https://devcontainers.github.io/) configuration for vscode
-(`.devcontainer/devcontainer.json`) that simplifies the process of local testing and development for both `bionemo-recipes` and `sub-packages`. Opening the
-bionemo-framework folder with VSCode should prompt you to re-open the folder inside the devcontainer environment.
-
-Packages under `sub-packages` are not installed into that environment automatically. When working on one of them, install it into the active environment with an editable install, for example:
+To run the CI/CD pipeline locally, run the following command:
 
 ```bash
-uv pip install -e ./sub-packages/bionemo-core
-uv pip install -e ./sub-packages/bionemo-scdl
-uv pip install -e "./sub-packages/bionemo-recipeutils[basecamp]"
+./ci/build_and_test.py
 ```
 
-You can also use `pip install -e ...` if you prefer.
+### Performance Expectations
 
-> [!NOTE]
-> The first time you launch the devcontainer, it may take a long time to build the image. Building the image locally
-> (using the command shown above) will ensure that most of the layers are present in the local docker cache.
+We aim to provide the fastest available training implementations for biological foundation models, with documented benchmarks across NVIDIA hardware (A100, H100, H200, B100, B200, etc.).
 
-### More Examples
+## Contributing
 
-See the [tutorials pages](https://docs.nvidia.com/bionemo-framework/latest/user-guide/examples/bionemo-esm2/pretrain/)
-for example applications and getting started guides.
+We welcome contributions that advance the state of biological foundation model training. Ensure your contributions:
+
+- Follow our coding guidelines emphasizing clarity
+- Include appropriate tests (L0 minimum, L1/L2 as applicable)
+- Provide clear documentation and examples
+- Maintain compatibility with our supported frameworks
+
+For detailed contribution guidelines, refer to our individual component READMEs:
+
+- [Models Development Guide](models/README.md)
+- [Recipes Development Guide](recipes/README.md)
+
+## License
+
+This project is licensed under the terms described in [LICENSE/license.txt](LICENSE/license.txt).
+
+## Support
+
+For technical support and questions:
+
+- Check existing issues before opening a new one
+- Review our training recipes for implementation examples
+- Consult the TransformerEngine and megatron-FSDP documentation for underlying technologies

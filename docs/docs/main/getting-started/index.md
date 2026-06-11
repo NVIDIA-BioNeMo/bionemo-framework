@@ -1,64 +1,29 @@
 # Getting Started
 
-## Repository structure
+## Repository Structure
 
-BioNeMo Framework is organized around two complementary code areas:
+BioNeMo Recipes is organized around three root directories:
 
-- `bionemo-recipes`: self-contained models and ready-to-run training or inference recipes.
-- `sub-packages`: lightweight, reusable libraries for biological workflows, data handling, I/O, batching, benchmarking, and recipe support.
-
-Training code for actively supported models now lives in `bionemo-recipes`, not in `sub-packages`.
-
-### Current sub-packages
-
-- `sub-packages/bionemo-core`
-- `sub-packages/bionemo-moco`
-- `sub-packages/bionemo-noodles`
-- `sub-packages/bionemo-recipeutils`
-- `sub-packages/bionemo-scdl`
-- `sub-packages/bionemo-scspeedtest`
-- `sub-packages/bionemo-size-aware-batching`
-- `sub-packages/bionemo-webdatamodule`
+- `models/`: TransformerEngine-backed model implementations and export utilities.
+- `recipes/`: training, fine-tuning, inference, and convergence recipes.
+- `interpretability/`: interpretability workflows such as sparse autoencoders.
 
 Documentation source is stored in `docs/`.
 
-## Development environment
+## Local Development
 
-We recommend using the recipes devcontainer for both recipe and framework library development.
-
-When working on a package in `sub-packages`, install it into the active environment with an editable install:
+Start from the README in the model or recipe directory you are modifying:
 
 ```bash
-uv pip install -e ./sub-packages/bionemo-core
-uv pip install -e ./sub-packages/bionemo-scdl
-uv pip install -e "./sub-packages/bionemo-recipeutils[basecamp]"
+cd recipes/evo2_megatron
+bash .ci_build.sh
+pytest -v .
 ```
 
-You can also use `pip install -e ...` if you prefer.
+Many recipes are self-contained packages. Shared helper code used by the megatron recipes lives inside each package as `bionemo.common`.
 
-## Repository layout
+## Next Steps
 
-```text
-.
-├── bionemo-recipes/
-│   ├── models/
-│   └── recipes/
-├── sub-packages/
-│   ├── bionemo-core/
-│   ├── bionemo-moco/
-│   ├── bionemo-noodles/
-│   ├── bionemo-recipeutils/
-│   ├── bionemo-scdl/
-│   ├── bionemo-scspeedtest/
-│   ├── bionemo-size-aware-batching/
-│   └── bionemo-webdatamodule/
-├── docs/
-├── ci/
-└── Dockerfile
-```
-
-## Next steps
-
-- For model training and fine-tuning workflows, start in `bionemo-recipes/`.
-- For reusable libraries and workflow utilities, start in `sub-packages/`.
-- For local development details, see [Development](development.md).
+- For model implementations, start in `models/`.
+- For runnable workflows, start in `recipes/`.
+- For interpretability workflows, start in `interpretability/`.

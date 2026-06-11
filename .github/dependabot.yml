@@ -24,7 +24,9 @@ updates:
 
   - package-ecosystem: "uv"
     directories:
-      - "/bionemo-recipes/**"
+      - "/models/**"
+      - "/recipes/**"
+      - "/interpretability/**"
     target-branch: "main"
     schedule:
       interval: "weekly"
@@ -37,7 +39,9 @@ updates:
 
   - package-ecosystem: "pip"
     directories:
-      - "/bionemo-recipes/**"
+      - "/models/**"
+      - "/recipes/**"
+      - "/interpretability/**"
     target-branch: "main"
     schedule:
       interval: "weekly"
@@ -50,7 +54,9 @@ updates:
 
   - package-ecosystem: "npm"
     directories:
-      - "/bionemo-recipes/**"
+      - "/models/**"
+      - "/recipes/**"
+      - "/interpretability/**"
     target-branch: "main"
     schedule:
       interval: "weekly"
