@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bionemo-esm2"
+readme = "README.md"
+description = "BioNeMo ESM2 model."
+authors = [{ name = "BioNeMo Team", email = "bionemofeedback@nvidia.com" }]
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+dependencies = [
+    # internal
+    'bionemo-core',
+    'bionemo-llm',
+    # external
+]
+
+[project.optional-dependencies]
+test = ['bionemo-testing']
+te = [
+    # TE & Apex need to be installed after PyTorch, NVCC, and CUDA.
+    # TODO(@pstjohn, @cspades): Figure out how to do this without post-installation.
+    'transformer_engine[pytorch]',
+]
+
+[project.scripts]
+bionemo-esm2-train = "bionemo.esm2.run.main:main"
+bionemo-esm2-recipe = "bionemo.esm2.run.recipes:main"
+infer_esm2 = "bionemo.esm2.scripts.infer_esm2:infer_esm2_entrypoint"
+train_esm2 = "bionemo.esm2.scripts.train_esm2:train_esm2_entrypoint"
+finetune_esm2 = "bionemo.esm2.scripts.finetune_esm2:finetune_esm2_entrypoint"
+convert_esm2 = "bionemo.esm2.model.convert:app"
+
+# Make sure that the tokenizer files are included along with the python files during installation.
+[tool.setuptools.package-data]
+"bionemo.esm2" = ["data/tokenizer/*.json", "data/tokenizer/*.txt"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bionemo.*"]
+namespaces = true
+exclude = ["test*."]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.uv]
+cache-keys = [{ git = true }]

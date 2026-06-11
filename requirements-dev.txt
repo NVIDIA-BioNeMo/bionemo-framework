@@ -1,0 +1,8 @@
+ruff==0.9.10  # Needs to match the version of ruff used in .pre-commit-config.yaml.
+pre-commit==3.4.0
+virtualenv==20.26.6
+ipdb==0.13.11
+click==8.1.7
+tenacity==8.5.0
+tach>=0.9.0
+maturin==1.7.4

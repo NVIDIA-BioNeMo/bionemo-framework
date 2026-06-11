@@ -1,0 +1,45 @@
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bionemo-amplify"
+readme = "README.md"
+description = "A BioNeMo sub-package for training AMPLIFY models."
+authors = [{ name = "BioNeMo Team", email = "bionemofeedback@nvidia.com" }]
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+dependencies = [
+    # internal
+    'bionemo-core',
+    'bionemo-llm',
+    'bionemo-esm2',
+]
+
+[project.optional-dependencies]
+test = [
+    'bionemo-testing'
+]
+te = [
+    # TE & Apex need to be installed after PyTorch, NVCC, and CUDA.
+    # TODO(@pstjohn, @cspades): Figure out how to do this without post-installation.
+    'transformer_engine[pytorch]'
+]
+
+[project.scripts]
+train_amplify = "bionemo.amplify.train_amplify:app"
+infer_amplify = "bionemo.amplify.infer_amplify:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bionemo.*"]
+namespaces = true
+exclude = ["test*."]
+
+[tool.uv]
+cache-keys = [{ git = true }]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }

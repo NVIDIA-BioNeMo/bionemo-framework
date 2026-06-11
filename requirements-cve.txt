@@ -1,0 +1,11 @@
+onnx>=1.16.0
+setuptools>=78.1.1 # Addresses CVE https://github.com/advisories/GHSA-5rjg-fvgr-3xxf
+aiohttp>=3.9.4
+jupyterlab>=3.6.8
+jupyter_server>=2.14.1  # https://github.com/advisories/GHSA-hrw6-wg82-cm62
+Werkzeug>=3.0.3
+nltk>=3.9.1
+pillow>=11.3.0 # Addresses GHSA-xg8h-j46f-w952
+tornado>=6.5.0 # Addresses CVE https://github.com/advisories/GHSA-7cx3-6m66-7c5m
+wandb>=0.19.1 # Addresses CVE GHSA-v778-237x-gjrc
+pyfastx==1.1.0
