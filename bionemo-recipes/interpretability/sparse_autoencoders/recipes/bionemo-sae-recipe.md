@@ -108,7 +108,7 @@ No `.pt`, ~half the disk, no separate conversion pass. Under DDP each rank write
 
 ### 5. Launch the training
 
-The orchestrator (`<model>.sh`) chains chunk → extract → train. Launch with `torchrun`, `--dp-size` = #GPUs. **Always smoke first** (20–100 sequences → confirm loss drops), then the full run.
+The orchestrator (`<model>.sh`) chains chunk → extract → train. Launch with `torchrun`, `--dp-size` = #GPUs. **Always smoke first** (20–100 sequences → confirm loss drops), then the full run. The flags below are general; the numeric values are the **Evo2-7B/L26** example — re-tune per model (see "Training config" below).
 
 ```bash
 unset WANDB_API_KEY                  # a leaked key in the shared env overrides ~/.netrc — you'd log as someone else
@@ -137,9 +137,12 @@ Each long step needs an idempotency check on a sentinel the step itself produces
 
 **Caveat:** guards check existence, not provenance — `rm -rf` the output dir when the input FASTA / model / layer changes.
 
-## Known-good training config (and why)
+## Training config — which knobs to turn on (general) vs. their values (per-model)
 
-These defaults reproduced the best Evo2-7B / layer-26 SAE (~21% dead, ~0.10 FVU). All are **opt-in** in the `sae` package (defaults reproduce older behavior):
+Separate two things:
+
+- **The flags below are general** — turn them on for *any* model. They're all opt-in in the `sae` package (the defaults reproduce older, worse behavior), so a recipe that doesn't pass them silently trains the losing config.
+- **The values are not.** The numbers in the launch command (`--expansion-factor 16`, `--top-k 128`, `--auxk 2048`, `--mix-shards 10`, `--presample-shards 8`) are what reproduced the best **Evo2-7B / layer-26** SAE (~21% dead, ~0.10 FVU). **Re-tune per model:** expansion/top-k/auxk scale with `hidden_dim` and the sparsity you want; `--mix-shards`/`--presample-shards` only matter for a **corpus-ordered** cache — set both to `1` if your shards are already shuffled.
 
 | flag                   | why it matters                                                                                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
