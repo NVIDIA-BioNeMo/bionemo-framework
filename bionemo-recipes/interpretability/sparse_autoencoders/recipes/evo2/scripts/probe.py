@@ -20,7 +20,6 @@ this driver only knows how to build/load Evo2 buffers and pick label sets.
   probe.py auroc         --acts BUF --labels .. per-feature AUROC table
   probe.py linear        --acts BUF --labels .. SAE-vs-dense single + multi (disentanglement/distributed)
   probe.py codon-aa      --acts CODON_BUF       codon/AA decoders + family-disjoint, SAE vs dense
-  probe.py context       --acts BUF             biological-context vs string-match firing (feat 29244/33918)
   probe.py euk-f1        --fasta .. --gff ..    RefSeq gene-structure domain-F1 (needs the model)
   probe.py domain-eval   --fasta .. --track ..  user annotated dataset -> per-feature domain-F1 + AUROC vs
                                                 any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
@@ -114,29 +113,6 @@ def cmd_linear(a):  # noqa: D103
             ds, dm = den[n]
             row += f" | {ds:12.3f} {dm:11.3f} | {ss - ds:+7.3f}"
         print(row)
-
-
-def cmd_context(a):  # noqa: D103
-    z = np.load(a.acts, allow_pickle=True)
-    codes, labels = z["codes"], z["labels"]
-    idx = {n: i for i, n in enumerate(z["label_names"])}
-    P = codes.shape[0]
-
-    def lab(n):
-        return labels[:, idx[n]].astype(bool)
-
-    def rate(feat, m):
-        return (float((codes[:, feat][m] > 0).mean()), int(m.sum())) if m.sum() else (float("nan"), 0)
-
-    ATG, STOP, START, INF = lab("motif_ATG"), lab("motif_stop"), lab("cds_start"), lab("cds_frame_1")
-    print(f"baseline: 29244={rate(29244, np.ones(P, bool))[0]:.3f} 33918={rate(33918, np.ones(P, bool))[0]:.3f}")
-    for nm, f, motif, ctx, cl in [
-        ("29244 ATG", 29244, ATG, START, "real start"),
-        ("33918 STOP", 33918, STOP, INF, "in-frame"),
-    ]:
-        ra, na = rate(f, motif & ctx)
-        rb, nb = rate(f, motif & ~ctx)
-        print(f"{nm}: {cl} {ra:.3f}(n={na}) | other {rb:.3f}(n={nb}) | ratio {ra / max(rb, 1e-9):.2f}")
 
 
 def cmd_codon_aa(a):  # noqa: D103
@@ -334,7 +310,6 @@ def main():  # noqa: D103
     for name, fn, needs_labels in [
         ("auroc", cmd_auroc, True),
         ("linear", cmd_linear, True),
-        ("context", cmd_context, False),
         ("codon-aa", cmd_codon_aa, False),
     ]:
         p = sub.add_parser(name, parents=[common])

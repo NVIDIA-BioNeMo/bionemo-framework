@@ -116,17 +116,6 @@ def _last(ctx):
     return _dna_mask(ctx, d)
 
 
-@labeler("codon_pos_1")
-def _c1(ctx):
-    # frame-0 proxy (no CDS annotation): position 0 of each codon from seq start
-    return _dna_mask(ctx, np.arange(len(ctx.dna)) % 3 == 0)
-
-
-@labeler("codon_pos_3")
-def _c3(ctx):
-    return _dna_mask(ctx, np.arange(len(ctx.dna)) % 3 == 2)
-
-
 # --------------------------------------------------------------------- composition
 def _gc_window(dna: str, radius: int = 10) -> np.ndarray:
     arr = _bytes(dna)
@@ -229,12 +218,6 @@ def _kozak(ctx):
     return _dna_mask(ctx, out)
 
 
-@labeler("tss_proxy_tata", complex=True)
-def _tss(ctx):
-    # stricter canonical TATA box as a transcription-start proxy
-    return _dna_mask(ctx, _spans(ctx.dna, r"TATAAA"))
-
-
 @labeler("splice_donor", complex=True)
 def _sd(ctx):
     # 5' donor consensus GT(A/G)AGT — mark the GT
@@ -250,46 +233,10 @@ def _sa(ctx):
     return _dna_mask(ctx, out)
 
 
-def _orf(ctx, frame: int, win: int = 60):
-    d, n = ctx.dna, len(ctx.dna)
-    stops = {"TAA", "TAG", "TGA"}
-    out = np.zeros(n, bool)
-    for p in range(frame, n - 2, 3):
-        ok = True
-        for q in range(p, min(p + win, n - 2), 3):
-            if d[q : q + 3] in stops:
-                ok = False
-                break
-        if ok:
-            out[p] = True
-    return _dna_mask(ctx, out)
-
-
-@labeler("orf_frame_0_60bp", complex=True)
-def _orf0(ctx):
-    return _orf(ctx, 0)
-
-
-@labeler("orf_frame_1_60bp", complex=True)
-def _orf1(ctx):
-    return _orf(ctx, 1)
-
-
-@labeler("orf_frame_2_60bp", complex=True)
-def _orf2(ctx):
-    return _orf(ctx, 2)
-
-
 # --------------------------------------------------------------- sequence / norm level
 @labeler("is_prok")
 def _prok(ctx):
     return np.full(ctx.T, ctx.kingdom == "prok", dtype=bool)
-
-
-@labeler("is_euk_genic", complex=True)
-def _eukg(ctx):
-    # proxy: eukaryotic token. True "genic" needs a gene model — refine later.
-    return np.full(ctx.T, ctx.kingdom == "euk", dtype=bool)
 
 
 @labeler("is_sink_token", complex=True)
