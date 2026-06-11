@@ -294,30 +294,6 @@ class Evo2SAE:
         ]
 
     # ------------------------------------------------------------------ generate
-    def _clamp_hook(self, specs, pre_bias):
-        """Forward hook that clamps SAE features on the residual during DECODE steps only.
-
-        A decode step processes a single new token (sequence dim == 1); the prompt prefill
-        (sequence dim > 1) is left untouched, giving continuation-only steering through
-        `infer.generate`:  h <- h + Σ_f (t_f - a_f(h)) · d_f
-        `specs` = list of (enc_f [H], b_f float, dec_f [H], target float).
-        """
-
-        def hook(_module, _inp, output):
-            hs = output[0] if isinstance(output, tuple) else output  # [S, B, H]
-            if hs.shape[0] != 1:  # prefill (whole prompt) — leave untouched
-                return output
-            x = hs.float()
-            xc = x - pre_bias
-            add = torch.zeros_like(x)
-            for enc_f, b_f, dec_f, target in specs:
-                a = torch.relu(torch.matmul(xc, enc_f) + b_f)
-                add = add + (target - a).unsqueeze(-1) * dec_f
-            new = (x + add).to(hs.dtype)
-            return (new, *output[1:]) if isinstance(output, tuple) else new
-
-        return hook
-
     def generate(
         self,
         prompt="",
@@ -354,23 +330,16 @@ class Evo2SAE:
         with self._lock:
             comp = self._ensure_engine()
             hook_layer = unwrap_model(comp.model).decoder.layers[self.layer]
-            pre_bias = self.sae.pre_bias.detach().float().to(self.device)
-            specs, feat_meta = [], []
-            for f in features:
-                fid = int(f["feature_id"])
-                specs.append(
-                    (
-                        self.sae.encoder.weight[fid].detach().float().to(self.device),
-                        float(self.sae.latent_bias[fid].detach()),
-                        self.sae.decoder.weight[:, fid].detach().float().to(self.device),
-                        float(f.get("strength", 1.0)),
-                    )
-                )
-                feat_meta.append({"id": fid, "label": self.labels.get(fid), "strength": float(f.get("strength", 1.0))})
+            from sae.steering import clamp_hook
+
+            clamps = {int(f["feature_id"]): float(f.get("strength", 1.0)) for f in features}
+            feat_meta = [{"id": fid, "label": self.labels.get(fid), "strength": s} for fid, s in clamps.items()]
 
             def _run(steer: bool) -> str:
                 handle = (
-                    hook_layer.register_forward_hook(self._clamp_hook(specs, pre_bias)) if (steer and specs) else None
+                    hook_layer.register_forward_hook(clamp_hook(self.sae, clamps, decode_only=True))
+                    if (steer and clamps)
+                    else None
                 )
                 try:
                     out = INF.generate(
@@ -382,7 +351,7 @@ class Evo2SAE:
                         handle.remove()
 
             main_dna = _run(steer=True)
-            base_dna = _run(steer=False) if (compare_baseline and specs) else None
+            base_dna = _run(steer=False) if (compare_baseline and clamps) else None
 
         resp = {
             "prompt": dna,
@@ -391,7 +360,7 @@ class Evo2SAE:
             "tag_len": len(resolved_tag),
             "n_tokens": n_tokens,
             "features": feat_meta,
-            "steered": bool(specs),
+            "steered": bool(clamps),
             "generation": {"sequence": main_dna, "activations": self.feature_tracks(main_dna, fids)},
             "baseline": None,
         }

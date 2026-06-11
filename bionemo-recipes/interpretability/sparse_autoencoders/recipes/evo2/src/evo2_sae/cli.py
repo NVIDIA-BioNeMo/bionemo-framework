@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Evo2 SAE inference CLI — one engine, three modes.
+"""Evo2 SAE inference CLI — one engine, four modes.
 
     serve   : start the FastAPI server (one sequence at a time, interactive)
     encode  : annotate ONE sequence -> top features (stdout JSON)
     batch   : run a FASTA of MANY sequences -> parquet of per-sequence top features
+    generate: generate DNA, optionally steering SAE features (stdout JSON)
 
-All three build the same `Evo2SAE` engine; config comes from flags or env
+They all build the same `Evo2SAE` engine; config comes from flags or env
 (EVO2_CKPT_DIR / SAE_CKPT_PATH / FEATURE_ANNOTATIONS / EMBEDDING_LAYER).
 """
 
@@ -73,9 +74,21 @@ def _engine(args):
     )
 
 
+def _parse_clamps(clamps: list[str]) -> list[dict]:
+    """Parse repeated ``--clamp FEATURE_ID[:STRENGTH]`` args into [{feature_id, strength}].
+
+    Strength defaults to 1.0 if omitted (e.g. ``--clamp 29244:300`` or ``--clamp 29244``).
+    """
+    specs = []
+    for c in clamps:
+        fid, sep, strength = c.partition(":")
+        specs.append({"feature_id": int(fid), "strength": float(strength) if (sep and strength) else 1.0})
+    return specs
+
+
 def main():
     """Parse args and dispatch to the serve / encode / batch subcommand."""
-    ap = argparse.ArgumentParser(description="Evo2 SAE inference (serve | encode | batch)")
+    ap = argparse.ArgumentParser(description="Evo2 SAE inference (serve | encode | batch | generate)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     ps = sub.add_parser("serve", help="start the FastAPI inference server")
@@ -95,6 +108,23 @@ def main():
     pb.add_argument("--out", required=True)
     pb.add_argument("--top-k", type=int, default=16)
     pb.add_argument("--batch-size", type=int, default=8)
+
+    pg = sub.add_parser("generate", help="generate DNA, optionally steering SAE features")
+    _add_common(pg)
+    pg.add_argument("--prompt", default="", help="DNA to seed; steering applies to the continuation")
+    pg.add_argument("--organism", default="None (raw DNA)")
+    pg.add_argument(
+        "--clamp",
+        action="append",
+        default=[],
+        metavar="FEATURE_ID[:STRENGTH]",
+        help="clamp a feature on the continuation; repeatable (e.g. --clamp 29244:300). "
+        "Find feature ids with `encode`.",
+    )
+    pg.add_argument("--n-tokens", type=int, default=120)
+    pg.add_argument("--temperature", type=float, default=1.0)
+    pg.add_argument("--top-k", type=int, default=0)
+    pg.add_argument("--compare-baseline", action="store_true", help="also generate unsteered, for comparison")
 
     args = ap.parse_args()
 
@@ -140,6 +170,27 @@ def main():
         df = pd.DataFrame(rows)
         df.to_parquet(args.out, index=False)
         print(f"[batch] wrote {len(df)} rows for {len(seqs)} sequences -> {args.out}")
+
+    elif args.cmd == "generate":
+        out = eng.generate(
+            prompt=args.prompt,
+            organism=args.organism,
+            features=_parse_clamps(args.clamp),
+            n_tokens=args.n_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            compare_baseline=args.compare_baseline,
+        )
+        result = {
+            "prompt": out["prompt"],
+            "organism": out["organism"],
+            "steered": out["steered"],
+            "features": out["features"],
+            "sequence": out["generation"]["sequence"],
+        }
+        if out.get("baseline"):
+            result["baseline_sequence"] = out["baseline"]["sequence"]
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
