@@ -12,7 +12,7 @@ Node, a browser, and a few small Python packages for the mock.
 ## Run
 
 ```bash
-cd feature_explorer
+cd bionemo-recipes/interpretability/sparse_autoencoders/recipes/evo2/feature_explorer    # the dashboard dir (this README's parent)
 npm install
 npx playwright install chromium     # one-time browser download
 npm run test:e2e                    # boots mock_backend.py + Vite, runs the 4 smoke tests
@@ -26,5 +26,5 @@ npm run test:e2e                    # boots mock_backend.py + Vite, runs the 4 s
 - `npx playwright test --headed` — watch it drive the dashboard in a visible browser.
 - `npx playwright show-report` — HTML report (traces + screenshots) after a run.
 
-To just *click around* the dashboard with no GPU (not the test): run `python mock_backend.py`
-then `npm run dev`, and open the Vite URL.
+To just *click around* the dashboard with no GPU (not the test), from `bionemo-recipes/interpretability/sparse_autoencoders/recipes/evo2/feature_explorer`:
+run `python mock_backend.py` then `npm run dev`, and open the Vite URL.
