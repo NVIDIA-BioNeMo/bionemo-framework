@@ -13,6 +13,8 @@ dependencies = [
     "torch>=2.0",
     "numpy>=1.20",
     "pyarrow>=23.0.0",
+    "biopython>=1.80",  # genetic code / translation in labelers.py
+    "bioframe>=0.4",  # genomic-interval ops (GFF/BED parse, intron/UTR/overlap)
 ]
 
 # No package code lives here yet — the recipe is just an entry-point for

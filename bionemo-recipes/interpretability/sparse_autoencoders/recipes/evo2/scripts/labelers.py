@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from Bio.Data import CodonTable
+from Bio.Seq import Seq
 
 
 # name -> fn(ctx) -> np.ndarray[bool] of length T
@@ -278,21 +280,17 @@ def _cds_f3(ctx):
 
 _GENE_FINDER = None
 
-# Standard genetic code (NCBI translation table 1), codons in TCAG x TCAG x TCAG order.
-_BASES = "TCAG"
-_AA1 = "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
-CODON_TABLE = {
-    a + b + c: _AA1[i] for i, (a, b, c) in enumerate((x, y, z) for x in _BASES for y in _BASES for z in _BASES)
-}
+# Standard genetic code (NCBI translation table 1) via Biopython; codon -> amino acid ('*' = stop).
+_STD_CODE = CodonTable.unambiguous_dna_by_id[1]
+CODON_TABLE = {**_STD_CODE.forward_table, **dict.fromkeys(_STD_CODE.stop_codons, "*")}
 CODON_LIST = sorted(CODON_TABLE)  # 64 codons
 CODON_TO_IDX = {c: i for i, c in enumerate(CODON_LIST)}
 AA_LIST = sorted(set(CODON_TABLE.values()))  # 20 aa + '*' (stop)
 AA_TO_IDX = {a: i for i, a in enumerate(AA_LIST)}
-_COMP = str.maketrans("ACGTN", "TGCAN")
 
 
 def _revcomp(s):
-    return s.translate(_COMP)[::-1]
+    return str(Seq(s).reverse_complement())
 
 
 def predict_codons(dna: str):
