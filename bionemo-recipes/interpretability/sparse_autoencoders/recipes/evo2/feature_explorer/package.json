@@ -1,12 +1,13 @@
 {
-  "name": "evo2-dashboard-mockup",
+  "name": "evo2-sae-dashboard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@uwdata/mosaic-core": "^0.21.1",
@@ -19,6 +20,7 @@
     "umap-js": "^1.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.48.0",
     "@vitejs/plugin-react": "^4.2.0",
     "vite": "^5.0.0"
   }
