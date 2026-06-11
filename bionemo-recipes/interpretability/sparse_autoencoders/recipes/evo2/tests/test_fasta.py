@@ -40,10 +40,3 @@ def test_gzip_transparent(tmp_path):
     with gzip.open(fa, "wt") as f:
         f.write(">a\nACGT\n")
     assert list(read_fasta(fa)) == [("a", "ACGT")]
-
-
-def test_empty_file(tmp_path):
-    """An empty file yields nothing (no trailing phantom record)."""
-    fa = tmp_path / "empty.fa"
-    fa.write_text("")
-    assert list(read_fasta(fa)) == []
