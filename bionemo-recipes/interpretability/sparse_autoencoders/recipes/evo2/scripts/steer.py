@@ -15,27 +15,22 @@
 
 r"""Evo2 SAE steering harness — clamp features and measure the causal effect on generation.
 
-Uses ``sae.steering.clamp_hook`` (the shared delta-clamp) registered on the Evo2 decoder layer
-the SAE was trained on. Workflow: encode a sequence to find its active features, then for a
-**target** feature sweep the clamp strength (dose-response) and for **control** features apply
-the same clamp (selectivity), each time comparing the steered continuation to the baseline.
+Reuses ``Evo2SAE.generate`` — the same production path the server/CLI use — which clamps via
+the shared decode-only ``sae.steering`` hook. Workflow: encode a sequence to find its active
+features, then for a **target** feature sweep the clamp strength (dose-response) and for
+**control** features apply the same clamp (selectivity), comparing each steered continuation to
+the baseline. So the harness measures exactly the steering the product ships.
 
 GPU harness — run on an H100 with the inference engine available; this is not a CPU unit test.
 
     python steer.py --evo2-ckpt-dir <mbridge> --sae-checkpoint <sae.pt> --layer 26 \
         --sequence ATGGCC... --feature 29244 --controls 12345,54321 --strengths 0,50,100,200
-
-Note: ``sae.steering.clamp_hook`` clamps on *every* forward (prefill + decode), so it steers
-the prompt as well as the continuation. The decode-only ("continuation-only") variant lives in
-``evo2_sae.core.Evo2SAE._clamp_hook``; unifying the two onto ``sae.steering`` (with a
-``decode_only`` flag) is a planned follow-up.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -43,8 +38,6 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent / "src"))  # recipes/evo2/src -> evo2_sae package
 sys.path.insert(0, str(_HERE.parents[2] / "sae" / "src"))
-
-from sae.steering import steer  # noqa: E402
 
 
 def _divergence(a: str, b: str):
@@ -70,9 +63,7 @@ def main():
     p.add_argument("--device", default="cuda")
     a = p.parse_args()
 
-    from bionemo.evo2.run import infer as INF  # noqa: E402, I001, RUF100
-    from evo2_sae.core import Evo2SAE, clean_dna  # noqa: E402, RUF100
-    from megatron.core.utils import unwrap_model  # noqa: E402, RUF100
+    from evo2_sae.core import Evo2SAE  # noqa: E402, RUF100
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
 
@@ -89,16 +80,14 @@ def main():
     controls = [int(c) for c in a.controls.split(",") if c.strip()]
     strengths = [float(s) for s in a.strengths.split(",")]
 
-    # 2. The Evo2 decoder layer the SAE hooks + a clean (tag + DNA) prompt.
-    comp = eng._ensure_engine()
-    prompt = (eng.resolve_tag(a.organism, None) or "") + clean_dna(a.sequence)
-    layer_mod = unwrap_model(comp.model).decoder.layers[a.layer]
-
+    # 2. Steered generation reuses the production path: Evo2SAE.generate clamps the same
+    #    decode-only sae.steering hook the server/CLI use, so the harness measures the real thing.
     def gen(clamps):
-        ctx = steer(layer_mod, eng.sae, clamps) if clamps else nullcontext()
-        with ctx:
-            out = INF.generate(comp, [prompt], max_new_tokens=a.n_tokens, temperature=0.0, top_k=1)
-        return clean_dna(INF._unwrap_result(out[0]).generated_text)
+        feats = [{"feature_id": f, "strength": v} for f, v in clamps.items()]
+        out = eng.generate(
+            prompt=a.sequence, organism=a.organism, features=feats, n_tokens=a.n_tokens, temperature=0.0, top_k=1
+        )
+        return out["generation"]["sequence"]
 
     base = gen({})
     print(f"\nbaseline:  {base[:60]}")
