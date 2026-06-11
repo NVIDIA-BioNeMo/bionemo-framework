@@ -23,6 +23,7 @@ This is a thin layer; all model work lives in `core.Evo2SAE`.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -81,7 +82,8 @@ def build_app(engine: Evo2SAE) -> FastAPI:
         yield
 
     app = FastAPI(title="Evo2 SAE inference", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    allowed_origins = os.getenv("CORS_ORIGINS", "*").split(",")  # comma-separated; "*" by default (local backend)
+    app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["*"], allow_headers=["*"])
 
     @app.get("/health")
     def health():
@@ -121,6 +123,8 @@ def build_app(engine: Evo2SAE) -> FastAPI:
         codes = engine.encode(full)  # [S, n_features], lock held inside
         if codes.shape[0] < tag_len:
             tag_len = 0
+        if req.mode not in ("pick", "topk"):
+            raise HTTPException(400, f"Invalid mode {req.mode!r}: must be 'pick' or 'topk'")
         if req.mode == "pick":
             ids = req.feature_ids or ([req.feature_id] if req.feature_id is not None else [])
             if not ids:
