@@ -21,6 +21,9 @@ this driver only knows how to build/load Evo2 buffers and pick label sets.
   probe.py linear        --acts BUF --labels .. SAE-vs-dense single + multi (disentanglement/distributed)
   probe.py codon-aa      --acts CODON_BUF       codon/AA decoders + family-disjoint, SAE vs dense
   probe.py context       --acts BUF             biological-context vs string-match firing (feat 29244/33918)
+  probe.py euk-f1        --fasta .. --gff ..    RefSeq gene-structure domain-F1 (needs the model)
+  probe.py domain-eval   --fasta .. --track ..  user annotated dataset -> per-feature domain-F1 + AUROC vs
+                                                any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
   probe.py loss-recovered [...]                 fidelity via sae.eval.loss_recovered (needs the model)
 """  # noqa: D205
 
@@ -221,6 +224,81 @@ def cmd_euk(a):
         print(f"{c:8s} {bf:6.3f} {nl:6.3f} {bf / max(nl, 1e-9):6.2f} {float(lab[c].float().mean()):6.1%}")
 
 
+def _parse_track_spec(spec):
+    """Parse a ``--track NAME=PATH[:GFF_FEATURE]`` spec -> (name, path, feature_type|None)."""
+    name, rest = spec.split("=", 1)
+    ftype = None
+    if ":" in rest:
+        head, tail = rest.rsplit(":", 1)
+        if "/" not in tail and "." not in tail:  # a GFF feature type, not part of a path
+            rest, ftype = head, tail
+    return name, rest, ftype
+
+
+def cmd_domain_eval(a):
+    """User-supplied annotated dataset -> per-feature domain-F1 (prec/nt, recall/annotation) + AUROC.
+
+    Each ``--track NAME=PATH[:GFF_FEATURE]`` is one concept; its BED/GFF intervals are the
+    annotation instances (RefSeq/Rfam/JASPAR/ENCODE, or anything the user supplies). The SAE
+    annotates the windows, then per concept we report the best feature by instance-level
+    domain-F1 (precision-per-nt, recall-per-annotation) and — threshold-free — by AUROC.
+    """
+    from annot_tracks import label_windows, load_track, read_fasta_dict
+    from evo2_sae_infer.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
+    from sae.eval.probing import auroc_all, domain_f1
+
+    tracks = {}
+    for spec in a.track:
+        name, path, ftype = _parse_track_spec(spec)
+        tracks[name] = load_track(path, feature_type=ftype)
+    seqs = read_fasta_dict(a.fasta)
+    windows, stats = label_windows(seqs, tracks, a.seq_len, max_tokens=a.max_tokens)
+    concepts = stats["concepts"]
+
+    eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
+    F, adev = eng.n_features, a.auroc_device
+    tag_ids = eng.tokenize(DEFAULT_ORGANISM_TAGS.get(a.organism, ""))
+    tlen, tot = len(tag_ids), stats["tokens"]
+    code_buf = torch.zeros(tot, F, dtype=torch.float16, device=adev)
+    lab = {c: torch.zeros(tot, dtype=torch.bool, device=adev) for c in concepts}
+    inst = {c: torch.full((tot,), -1, dtype=torch.long, device=adev) for c in concepts}
+    filled = 0
+    for s0 in range(0, len(windows), a.batch_size):
+        batch = windows[s0 : s0 + a.batch_size]
+        with eng._lock:
+            for h, w in zip(eng._forward_hidden([tag_ids + eng.tokenize(w["dna"]) for w in batch]), batch):
+                if h.shape[0] == 0:
+                    continue
+                codes = eng.sae.encode(h.to(a.device))
+                take = min(len(w["dna"]), codes.shape[0] - tlen, tot - filled)
+                if take <= 0:
+                    continue
+                code_buf[filled : filled + take] = codes[tlen : tlen + take].to(torch.float16).to(adev)
+                for c in concepts:
+                    lab[c][filled : filled + take] = torch.from_numpy(w["labels"][c][:take]).to(adev)
+                    inst[c][filled : filled + take] = torch.from_numpy(w["instances"][c][:take].astype(np.int64)).to(
+                        adev
+                    )
+                filled += take
+    code_buf = code_buf[:filled]
+    for c in concepts:
+        lab[c], inst[c] = lab[c][:filled], inst[c][:filled]
+    fmax = code_buf.max(0).values.float()
+    au = auroc_all(code_buf.float().to(a.device), torch.stack([lab[c] for c in concepts], 1).to(a.device)).cpu()
+    print(f"encoded {filled} positions across {len(concepts)} concept(s)")
+    print(
+        f"{'concept':14s} {'%pos':>6s} {'#inst':>6s} | "
+        f"{'domF1':>6s} {'@thr':>5s} {'feat':>7s} | {'AUROC':>6s} {'feat':>7s}"
+    )
+    for i, c in enumerate(concepts):
+        f1, thr = domain_f1(code_buf, fmax, lab[c], inst[c])
+        bi, ai = int(f1.argmax()), int(au[:, i].argmax())
+        print(
+            f"{c:14s} {float(lab[c].float().mean()):6.1%} {stats['n_inst'][c]:6d} | "
+            f"{float(f1[bi]):6.3f} {float(thr[bi]):5.2f} {bi:7d} | {float(au[ai, i]):6.3f} {ai:7d}"
+        )
+
+
 def cmd_extract(a):  # noqa: D103
     from evo2_buffer import build_buffer, sample_sequences
     from evo2_sae_infer.core import Evo2SAE
@@ -286,6 +364,24 @@ def main():  # noqa: D103
     pk.add_argument("--batch-size", type=int, default=8)
     pk.add_argument("--auroc-device", default="cuda:1")
     pk.set_defaults(func=cmd_euk)
+    pd = sub.add_parser("domain-eval", parents=[common])
+    for arg in ["--evo2-ckpt-dir", "--sae-checkpoint", "--fasta"]:
+        pd.add_argument(arg, required=True)
+    pd.add_argument(
+        "--track",
+        action="append",
+        required=True,
+        metavar="NAME=PATH[:GFF_FEATURE]",
+        help="annotation track; BED or GFF intervals = instances of concept NAME. Repeatable "
+        "(e.g. --track exon=refseq.gff3:exon --track tfbs=jaspar.bed --track cCRE=encode.bed).",
+    )
+    pd.add_argument("--layer", type=int, required=True)
+    pd.add_argument("--organism", default="Human")
+    pd.add_argument("--max-tokens", type=int, default=160_000)
+    pd.add_argument("--seq-len", type=int, default=1024)
+    pd.add_argument("--batch-size", type=int, default=8)
+    pd.add_argument("--auroc-device", default="cuda:1")
+    pd.set_defaults(func=cmd_domain_eval)
     args = ap.parse_args()
     torch.set_grad_enabled(False)
     args.func(args)
