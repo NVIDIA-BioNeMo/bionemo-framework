@@ -79,6 +79,12 @@ def parse_args():
     pa_.add_argument("--sample-tokens", type=int, default=2_000_000, help="random tokens to sample from the store")
     pa_.add_argument("--batch-size", type=int, default=8192, help="SAE-encode batch (rows)")
     pa_.add_argument("--seed", type=int, default=0)
+    pa_.add_argument(
+        "--layout",
+        choices=["auto", "umap", "pca", "tsne"],
+        default="auto",
+        help="2-D layout: auto = umap if importable else pca (umap needs NumPy<=2.3; pca/tsne are numba-free)",
+    )
 
     pe = sub.add_parser("examples", help="feature_examples from a small FASTA (loads the 7B)")
     _add_sae_args(pe)
@@ -141,13 +147,57 @@ def _iter_sampled_activations(shards, sample_tokens, batch_size):
             yield torch.from_numpy(chunk).float()
 
 
+def _compute_layout(sae, args):
+    """2-D feature layout from the SAE decoder directions -> (x, y, method_used).
+
+    `--layout auto` uses UMAP when importable (codonfm-style, best clusters) and otherwise
+    falls back to PCA — so the atlas runs single-env: UMAP needs numba (NumPy <= 2.3), while
+    PCA/TSNE are numba-free and run in the megatron venv (NumPy 2.5). UMAP reads the decoder
+    itself; PCA/TSNE operate on the L2-normalized decoder columns.
+    """
+    import numpy as np
+
+    method = args.layout
+    if method == "auto":
+        try:
+            import umap  # noqa: F401
+
+            method = "umap"
+        except Exception:
+            method = "pca"
+            print("[atlas] umap-learn unavailable (NumPy/numba) — falling back to --layout pca")
+
+    if method == "umap":
+        from sae.analysis import compute_feature_umap
+
+        geom = compute_feature_umap(
+            sae, n_neighbors=args.umap_n_neighbors, min_dist=args.umap_min_dist, compute_clusters=False
+        )
+        return np.asarray(geom.umap_x), np.asarray(geom.umap_y), "umap"
+
+    # Numba-free paths operate on L2-normalized decoder columns (one per feature).
+    w = sae.decoder.weight.detach().cpu().float().numpy().T  # [n_features, dim]
+    w = w / (np.linalg.norm(w, axis=1, keepdims=True) + 1e-8)
+    if method == "tsne":
+        from sklearn.decomposition import PCA
+        from sklearn.manifold import TSNE
+
+        reduced = PCA(n_components=min(50, w.shape[1]), random_state=args.seed).fit_transform(w)
+        xy = TSNE(n_components=2, init="pca", random_state=args.seed).fit_transform(reduced)
+        return xy[:, 0], xy[:, 1], "tsne"
+
+    # pca (default fallback) — top-2 principal directions via torch.
+    _, _, v = torch.pca_lowrank(torch.from_numpy(w), q=2)
+    xy = (torch.from_numpy(w) @ v).numpy()
+    return xy[:, 0], xy[:, 1], "pca"
+
+
 def run_atlas(args):
     """features_atlas + feature_metadata from a random sample of the cached activation store."""
     import math
 
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from sae.analysis import compute_feature_umap
 
     sae, n_features, labels = _load_sae_only(args)
     shards = sorted(Path(args.activations_dir).glob("shard_*.parquet"))
@@ -181,10 +231,8 @@ def run_atlas(args):
     freq = (fire / total).cpu()
     peak = peak.cpu()
 
-    print("[atlas] computing UMAP layout from the SAE decoder...")
-    geom = compute_feature_umap(
-        sae, n_neighbors=args.umap_n_neighbors, min_dist=args.umap_min_dist, compute_clusters=False
-    )
+    x, y, used = _compute_layout(sae, args)
+    print(f"[atlas] layout: {used}")
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -200,8 +248,8 @@ def run_atlas(args):
     atlas = pa.table(
         {
             **cols,
-            "x": pa.array([float(v) for v in geom.umap_x], type=pa.float32()),
-            "y": pa.array([float(v) for v in geom.umap_y], type=pa.float32()),
+            "x": pa.array([float(v) for v in x], type=pa.float32()),
+            "y": pa.array([float(v) for v in y], type=pa.float32()),
             "log_frequency": pa.array([math.log10(v) if v > 0 else -10.0 for v in freq_l], type=pa.float32()),
         }
     )
