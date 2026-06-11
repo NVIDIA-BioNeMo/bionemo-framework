@@ -141,8 +141,8 @@ Each long step needs an idempotency check on a sentinel the step itself produces
 
 Separate two things:
 
-- **The flags below are general** — turn them on for *any* model. They're all opt-in in the `sae` package (the defaults reproduce older, worse behavior), so a recipe that doesn't pass them silently trains the losing config.
-- **The values are not.** The numbers in the launch command (`--expansion-factor 16`, `--top-k 128`, `--auxk 2048`, `--mix-shards 10`, `--presample-shards 8`) are what reproduced the best **Evo2-7B / layer-26** SAE (~21% dead, ~0.10 FVU). **Re-tune per model:** expansion/top-k/auxk scale with `hidden_dim` and the sparsity you want; `--mix-shards`/`--presample-shards` only matter for a **corpus-ordered** cache — set both to `1` if your shards are already shuffled.
+- **The flags are *available*, not mandatory.** All opt-in in `sae` (defaults = older behavior). Each fixes a specific failure mode we hit on **Evo2** — severe dead latents (`--normalize-input`, `--aggregate-loss`), a corpus/kingdom-ordered cache (`--mix-shards`, `--presample-shards`), and DDP dead-counting (`--dead-count-global`). They mattered a lot *there*. **They are not universally required: CodonFM trained a good SAE with none of them** (its `train.py` wires 0/4). So turn each on only if you actually hit the problem it fixes — don't cargo-cult them. *(The one place they're non-negotiable: **reproducing the Evo2 winner** — which is why copying an older, flag-less `train.py` into an Evo2 recipe silently gives the losing config.)*
+- **The values are model-specific.** The numbers in the launch command (`--expansion-factor 16`, `--top-k 128`, `--auxk 2048`, `--mix-shards 10`, `--presample-shards 8`) are what reproduced the best **Evo2-7B / layer-26** SAE (~21% dead, ~0.10 FVU). **Re-tune per model:** expansion/top-k/auxk scale with `hidden_dim` and the sparsity you want; `--mix-shards`/`--presample-shards` only matter for a **corpus-ordered** cache — set both to `1` if your shards are already shuffled.
 
 | flag                   | why it matters                                                                                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -179,7 +179,7 @@ These are **general principles**; the numbers are Evo2 examples — **measure th
 
 08. **Long sequences can blow up memory super-linearly on conv/FFT architectures → chunk inputs to the model's trained context before extraction.** *Evo2 example:* Hyena's fftconv OOMs even at micro-batch=1 (intermediates scale super-linearly); chunk to 1B → 8192 bp, 7B → context-extended (check release), 40B → 1M. Don't rely on the inference tool to truncate.
 09. **Check your predict CLI's input constraints (compression/format).** *Evo2 example:* `predict_evo2` takes uncompressed FASTA only (`<(zcat ...)` fails); but if your chunker already reads `.gz` → writes plain `.fasta`, no separate gunzip is needed.
-10. **micro-batch=1 is rarely optimal — once inputs are short/uniform, raise it.** *Evo2 example:* chunking dropped memory ~10× and gave ~17× per-batch speedup on Evo2 1B, so `--micro-batch-size` could be raised well past 1.
+10. **micro-batch=1 is rarely optimal — once inputs are short/uniform, raise it.** The specific figure (chunking dropping memory ~10× and a ~17× per-batch speedup on Evo2 1B) is an **unverified number inherited from an earlier extraction note** — we did *not* re-measure it. Treat it as a hypothesis and **measure your own** (below), don't quote it.
 
 **Verify the perf claims (don't trust the constants):** a few-minute single-GPU micro-benchmark —
 
