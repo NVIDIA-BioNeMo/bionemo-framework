@@ -26,7 +26,17 @@ three parquet files ``launch_dashboard.py --data-dir`` stages into ``public/``:
                              per-base activation track        -> the example cards
 
 The heavy lifting is reused, not reimplemented: ``encode_batch`` (engine) for the
-activations and ``sae.analysis.compute_feature_umap`` for the 2-D layout.
+activations and ``sae.analysis.compute_feature_umap`` for the 2-D layout. (Per-feature
+stats are computed locally from the SAE codes rather than via ``compute_feature_stats``,
+which wants raw pre-SAE activations — holding those for long DNA would not fit in memory.)
+
+This runs over a SMALL representative corpus (``--max-sequences``), not the full atlas
+corpus: the 7B pass is here only because the example cards need sequence-aligned
+activations, which the anonymous token-level training cache cannot provide.
+
+Feature *labels* are not produced here — they come from ``--feature-annotations`` (the
+feature-probing / label-producer pipeline, PR #1630) and are joined into the ``label``
+column; unlabeled features fall back to ``Feature N``. Users can further rename in-UI.
 
 Memory is bounded by a two-pass scheme (mirrors the codonfm generator): pass 1 keeps
 only the per-(sequence, feature) max to pick top examples; pass 2 re-encodes just the
@@ -59,9 +69,13 @@ def parse_args():
     p.add_argument("--layer", type=int, default=int(os.environ.get("EMBEDDING_LAYER", "26")))
     p.add_argument("--device", default=os.environ.get("DEVICE", "cuda"))
     p.add_argument("--max-seq-len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "8192")))
-    # Corpus + output.
-    p.add_argument("--fasta", required=True, help="FASTA corpus to characterize features over")
+    # Corpus + output. This is meant to be a SMALL, representative corpus (a few thousand seqs):
+    # we re-run the 7B over it only because the example cards need sequence-aligned activations,
+    # which the (anonymous, token-level) training activation cache can't provide. It is NOT the
+    # full atlas corpus — stats/UMAP need only a representative sample.
+    p.add_argument("--fasta", required=True, help="SMALL representative FASTA (a few thousand seqs)")
     p.add_argument("--output-dir", required=True, help="Directory to write the 3 parquets into")
+    p.add_argument("--max-sequences", type=int, default=4000, help="Cap sequences read from --fasta (keep it small)")
     p.add_argument("--organism", default="None (raw DNA)", help="Phylo-tag preset to prepend (default: raw DNA)")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--n-examples", type=int, default=6, help="Top examples per feature")
@@ -230,6 +244,8 @@ def main():
 
     ids, seqs = [], []
     for sid, seq in read_fasta(args.fasta):
+        if len(seqs) >= args.max_sequences:
+            break
         ids.append(sid)
         seqs.append(clean_dna(seq))
     if not seqs:
