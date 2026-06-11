@@ -166,24 +166,17 @@ def cmd_codon_aa(a):  # noqa: D103
 
 
 # ───────────────────────────────────────── model subcommands (need Evo2)
-def cmd_euk(a):
-    """Eukaryotic exon/intron/CDS domain-adjusted F1 vs shuffle null (chr21 FASTA+GFF)."""
-    from euk_windows import build_windows
-    from evo2_sae_infer.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
-    from sae.eval.probing import domain_f1
+def _encode_windows(eng, windows, tag_ids, lab_keys, inst_keys, tot, a):
+    """Stream tiled windows through the SAE -> (code_buf[filled,F], lab{k:bool}, inst{k:long}, fmax[F]).
 
-    eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
-    windows, stats, tot, _ = build_windows(a.fasta, a.gff, a.seq_len, a.max_tokens, seed=a.seed)
-    print(
-        f"windows={len(windows)} tokens={tot} genes={stats['genes']} exons={stats['exons']} introns={stats['introns']}"
-    )
-    F, adev = eng.n_features, a.auroc_device
-    tag_ids = eng.tokenize(DEFAULT_ORGANISM_TAGS.get(a.organism, ""))
-    tlen = len(tag_ids)
-    concepts = {"exon": "exon", "intron": "intron", "cds": "gene"}
-    code_buf = torch.zeros(tot, F, dtype=torch.float16, device=adev)
-    lab = {k: torch.zeros(tot, dtype=torch.bool, device=adev) for k in ("exon", "intron", "cds")}
-    inst = {k: torch.full((tot,), -1, dtype=torch.long, device=adev) for k in ("exon", "intron", "gene")}
+    Shared by euk-f1 and domain-eval: encodes each window (skipping the phylo-tag prefix) and
+    fills per-concept label masks (lab_keys) + instance ids (inst_keys). Buffers are trimmed to
+    the number of positions actually filled.
+    """
+    adev, tlen = a.auroc_device, len(tag_ids)
+    code_buf = torch.zeros(tot, eng.n_features, dtype=torch.float16, device=adev)
+    lab = {k: torch.zeros(tot, dtype=torch.bool, device=adev) for k in lab_keys}
+    inst = {k: torch.full((tot,), -1, dtype=torch.long, device=adev) for k in inst_keys}
     filled = 0
     for s0 in range(0, len(windows), a.batch_size):
         batch = windows[s0 : s0 + a.batch_size]
@@ -207,10 +200,29 @@ def cmd_euk(a):
     for d in (lab, inst):
         for k in d:
             d[k] = d[k][:filled]
-    fmax = code_buf.max(0).values.float()
+    fmax = code_buf.max(0).values.float() if filled else torch.zeros(eng.n_features, device=adev)
+    return code_buf, lab, inst, fmax
+
+
+def cmd_euk(a):
+    """Eukaryotic exon/intron/CDS domain-adjusted F1 vs shuffle null (chr21 FASTA+GFF)."""
+    from euk_windows import build_windows
+    from evo2_sae_infer.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
+    from sae.eval.probing import domain_f1
+
+    eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
+    windows, stats, tot, _ = build_windows(a.fasta, a.gff, a.seq_len, a.max_tokens, seed=a.seed)
+    print(
+        f"windows={len(windows)} tokens={tot} genes={stats['genes']} exons={stats['exons']} introns={stats['introns']}"
+    )
+    tag_ids = eng.tokenize(DEFAULT_ORGANISM_TAGS.get(a.organism, ""))
+    code_buf, lab, inst, fmax = _encode_windows(
+        eng, windows, tag_ids, ("exon", "intron", "cds"), ("exon", "intron", "gene"), tot, a
+    )
+    filled, adev = code_buf.shape[0], a.auroc_device
     g = torch.Generator(device=adev).manual_seed(a.seed)
     print(f"encoded {filled} positions\n{'concept':8s} {'domF1':>6s} {'null':>6s} {'ratio':>6s} {'%pos':>6s}")
-    for c, ic in concepts.items():
+    for c, ic in {"exon": "exon", "intron": "intron", "cds": "gene"}.items():
         f1, _ = domain_f1(code_buf, fmax, lab[c], inst[ic])
         order = torch.randperm(filled, generator=g, device=adev)
         f1n, _ = domain_f1(code_buf, fmax, lab[c][order], inst[ic][order])
@@ -250,36 +262,10 @@ def cmd_domain_eval(a):
     concepts = stats["concepts"]
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
-    F, adev = eng.n_features, a.auroc_device
     tag_ids = eng.tokenize(DEFAULT_ORGANISM_TAGS.get(a.organism, ""))
-    tlen, tot = len(tag_ids), stats["tokens"]
-    code_buf = torch.zeros(tot, F, dtype=torch.float16, device=adev)
-    lab = {c: torch.zeros(tot, dtype=torch.bool, device=adev) for c in concepts}
-    inst = {c: torch.full((tot,), -1, dtype=torch.long, device=adev) for c in concepts}
-    filled = 0
-    for s0 in range(0, len(windows), a.batch_size):
-        batch = windows[s0 : s0 + a.batch_size]
-        with eng._lock:
-            for h, w in zip(eng._forward_hidden([tag_ids + eng.tokenize(w["dna"]) for w in batch]), batch):
-                if h.shape[0] == 0:
-                    continue
-                codes = eng.sae.encode(h.to(a.device))
-                take = min(len(w["dna"]), codes.shape[0] - tlen, tot - filled)
-                if take <= 0:
-                    continue
-                code_buf[filled : filled + take] = codes[tlen : tlen + take].to(torch.float16).to(adev)
-                for c in concepts:
-                    lab[c][filled : filled + take] = torch.from_numpy(w["labels"][c][:take]).to(adev)
-                    inst[c][filled : filled + take] = torch.from_numpy(w["instances"][c][:take].astype(np.int64)).to(
-                        adev
-                    )
-                filled += take
-    code_buf = code_buf[:filled]
-    for c in concepts:
-        lab[c], inst[c] = lab[c][:filled], inst[c][:filled]
-    fmax = code_buf.max(0).values.float()
+    code_buf, lab, inst, fmax = _encode_windows(eng, windows, tag_ids, concepts, concepts, stats["tokens"], a)
     au = auroc_all(code_buf.float().to(a.device), torch.stack([lab[c] for c in concepts], 1).to(a.device)).cpu()
-    print(f"encoded {filled} positions across {len(concepts)} concept(s)")
+    print(f"encoded {code_buf.shape[0]} positions across {len(concepts)} concept(s)")
     print(
         f"{'concept':14s} {'%pos':>6s} {'#inst':>6s} | "
         f"{'domF1':>6s} {'@thr':>5s} {'feat':>7s} | {'AUROC':>6s} {'feat':>7s}"
