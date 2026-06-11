@@ -5,8 +5,8 @@
 #   ./launch_inference.sh encode  --sequence ATGC...  # annotate ONE sequence -> top features
 #   ./launch_inference.sh batch   --fasta in.fa --out out.parquet   # MANY sequences -> parquet
 #
-# Config via env (sensible defaults below): EVO2_CKPT_DIR, SAE_CKPT_PATH,
-# FEATURE_ANNOTATIONS, EMBEDDING_LAYER, DEVICE, PORT, CUDA_VISIBLE_DEVICES.
+# Config via env. Required: EVO2_CKPT_DIR, SAE_CKPT_PATH. Optional (have defaults):
+# FEATURE_ANNOTATIONS, EMBEDDING_LAYER (26), DEVICE, PORT, CUDA_VISIBLE_DEVICES.
 #
 # Requires the evo2_megatron recipe venv (provides bionemo.evo2 + megatron).
 set -euo pipefail
