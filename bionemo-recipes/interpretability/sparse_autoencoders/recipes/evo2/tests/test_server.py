@@ -119,3 +119,4 @@ def test_endpoints_503_until_ready():
     with TestClient(build_app(eng)) as c:
         assert c.get("/features").status_code == 503
         assert c.post("/annotate", json={"sequence": "ACGT"}).status_code == 503
+        assert c.post("/generate", json={"prompt": "ACGT", "organism": "None (raw DNA)"}).status_code == 503

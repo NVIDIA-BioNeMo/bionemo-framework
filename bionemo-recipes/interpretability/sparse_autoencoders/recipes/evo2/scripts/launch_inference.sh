@@ -14,10 +14,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RECIPE_DIR="$(cd "$HERE/.." && pwd)"  # recipes/evo2 — so the evo2_sae package imports
 
-VENV="${VENV:-/data/pbinder/bionemo-framework/bionemo-recipes/recipes/evo2_megatron/.venv}"
-export EVO2_CKPT_DIR="${EVO2_CKPT_DIR:-/data/interp/evo2/checkpoints/evo2_7b_mbridge}"
-export SAE_CKPT_PATH="${SAE_CKPT_PATH:-/data/interp/evo2/sae/v2_diverse/layer26_7B_ablate_normalize_input/checkpoints/checkpoint_final.pt}"
-export FEATURE_ANNOTATIONS="${FEATURE_ANNOTATIONS:-/data/interp/evo2/sae_eval/dashboard_data/l26_7B_normalize/feature_metadata.parquet}"
+# Required (no hardcoded defaults — supply your own paths via env):
+VENV="${VENV:?Set VENV to the evo2_megatron recipe .venv (provides bionemo.evo2 + megatron)}"
+export EVO2_CKPT_DIR="${EVO2_CKPT_DIR:?Set EVO2_CKPT_DIR to an Evo2 MBridge checkpoint directory}"
+export SAE_CKPT_PATH="${SAE_CKPT_PATH:?Set SAE_CKPT_PATH to a trained SAE checkpoint (.pt)}"
+# Optional: feature-label parquet (empty = features are unlabeled). Layer defaults to 26.
+export FEATURE_ANNOTATIONS="${FEATURE_ANNOTATIONS:-}"
 export EMBEDDING_LAYER="${EMBEDDING_LAYER:-26}"
 
 if [[ ! -x "$VENV/bin/python" ]]; then

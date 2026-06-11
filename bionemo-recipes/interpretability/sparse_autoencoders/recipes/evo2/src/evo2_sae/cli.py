@@ -32,29 +32,36 @@ import os
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--evo2-ckpt-dir",
-        default=os.environ.get("EVO2_CKPT_DIR", "/data/interp/evo2/checkpoints/evo2_1b_base_mbridge"),
-    )
-    p.add_argument(
-        "--sae-ckpt-path",
-        default=os.environ.get(
-            "SAE_CKPT_PATH", "/data/interp/evo2/sae/v2_diverse/layer19_C13_nofilter/checkpoints/checkpoint_final.pt"
-        ),
-    )
-    p.add_argument(
-        "--feature-annotations",
-        default=os.environ.get(
-            "FEATURE_ANNOTATIONS",
-            "/data/interp/evo2/sae_eval/dashboard_data/l19_C13_nofilter/feature_metadata.parquet",
-        ),
-    )
-    p.add_argument("--layer", type=int, default=int(os.environ.get("EMBEDDING_LAYER", "19")))
+    """Register the shared inference arguments (checkpoints, layer, device) on a parser.
+
+    Defaults come from env vars (``EVO2_CKPT_DIR``, ``SAE_CKPT_PATH``, ``FEATURE_ANNOTATIONS``,
+    ``EMBEDDING_LAYER``, ``DEVICE``, ``MAX_SEQ_LEN``); pass the flags to override. No hardcoded
+    paths — the checkpoints must be supplied via flag or env.
+
+    Args:
+        p: The argparse parser (or subparser) to add the shared arguments to.
+
+    Returns:
+        None. Mutates ``p`` in place.
+    """
+    p.add_argument("--evo2-ckpt-dir", default=os.environ.get("EVO2_CKPT_DIR"))
+    p.add_argument("--sae-ckpt-path", default=os.environ.get("SAE_CKPT_PATH"))
+    p.add_argument("--feature-annotations", default=os.environ.get("FEATURE_ANNOTATIONS"))
+    p.add_argument("--layer", type=int, default=int(os.environ.get("EMBEDDING_LAYER", "26")))
     p.add_argument("--device", default=os.environ.get("DEVICE", "cuda"))
     p.add_argument("--max-seq-len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "8192")))
 
 
 def _engine(args):
+    """Construct an Evo2SAE engine from parsed CLI args.
+
+    Args:
+        args: Parsed argparse namespace with ``evo2_ckpt_dir``, ``sae_ckpt_path``, ``layer``,
+            ``device``, ``max_seq_len``, ``feature_annotations``.
+
+    Returns:
+        An (unloaded) ``Evo2SAE`` instance — call ``.load()`` before use.
+    """
     from .core import Evo2SAE
 
     return Evo2SAE(
@@ -68,6 +75,15 @@ def _engine(args):
 
 
 def _read_fasta(path: str):
+    """Read a FASTA file (plain or gzipped) into parallel id/sequence lists.
+
+    Args:
+        path: Path to a FASTA file; a ``.gz`` suffix is read transparently.
+
+    Returns:
+        (ids, seqs): the header names and their concatenated sequences. A header with no
+        token after ``>`` (e.g. ``">"`` or ``"> "``) gets a generated ``seq_<n>`` id.
+    """
     seqs, ids = [], []
     name, parts = None, []
     opener = gzip.open if str(path).endswith(".gz") else open
@@ -78,7 +94,8 @@ def _read_fasta(path: str):
                 if name is not None:
                     seqs.append("".join(parts))
                     ids.append(name)
-                name, parts = line[1:].split()[0] if len(line) > 1 else f"seq_{len(ids)}", []
+                header = line[1:].strip().split()
+                name, parts = (header[0] if header else f"seq_{len(ids)}"), []
             else:
                 parts.append(line)
     if name is not None:
