@@ -303,7 +303,7 @@ export default function EmbeddingView({ brush, categoryColumn, categoryColumns, 
       selection: null,
       tooltip: null,
     })
-  }, [categoryColumn, categoryColumns, hiddenCategories])
+  }, [categoryColumn, categoryColumns, hiddenCategories, darkMode, features])
 
   // Handle resize
   useEffect(() => {

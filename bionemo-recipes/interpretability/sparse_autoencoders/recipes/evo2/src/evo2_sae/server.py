@@ -251,10 +251,10 @@ def build_app(engine: Evo2SAE) -> FastAPI:
         return {
             "G_b64": base64.b64encode(gmean.tobytes()).decode(),
             "Gmax_b64": base64.b64encode(gmax.tobytes()).decode(),
-            "nf": int(gmean.shape[1]),
-            "ng": int(gmean.shape[0]),
-            "meta": meta_out,
-            "stats": stats,
+            "n_features": int(gmean.shape[1]),
+            "n_genes": int(gmean.shape[0]),
+            "genes": meta_out,
+            "feature_stats": stats,
         }
 
     return app

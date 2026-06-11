@@ -106,10 +106,10 @@ def test_gene_embed_returns_decodable_matrix(client):
 
     genes = [{"symbol": "g1", "sequence": "ACGTACGT"}, {"symbol": "g2", "sequence": "TTTTGGGG"}]
     b = client.post("/gene_embed", json={"genes": genes, "min_firing": 1}).json()
-    assert {"G_b64", "Gmax_b64", "nf", "ng", "meta"} <= set(b)
-    assert b["ng"] == 2 and len(b["meta"]) == 2
+    assert {"G_b64", "Gmax_b64", "n_features", "n_genes", "genes"} <= set(b)
+    assert b["n_genes"] == 2 and len(b["genes"]) == 2
     g = np.frombuffer(base64.b64decode(b["G_b64"]), dtype=np.float32)
-    assert g.size == b["ng"] * b["nf"]  # [n_genes x n_features], the matrix the client UMAPs
+    assert g.size == b["n_genes"] * b["n_features"]  # [n_genes x n_features], the matrix the client UMAPs
 
 
 def test_endpoints_503_until_ready():

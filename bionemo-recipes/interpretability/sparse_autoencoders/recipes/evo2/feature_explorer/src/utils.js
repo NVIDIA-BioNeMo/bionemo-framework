@@ -7,7 +7,8 @@ export function getRegionLabel(example) {
   if (!example) return ''
   const sid = example.sequence_id || example.protein_id || ''
   if (example.start != null && example.end != null) {
-    return `${sid}:${example.start}-${example.end}`
+    const range = `${example.start}-${example.end}`
+    return sid ? `${sid}:${range}` : range
   }
   return sid
 }

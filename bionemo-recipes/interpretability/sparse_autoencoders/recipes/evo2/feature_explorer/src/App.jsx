@@ -168,9 +168,10 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
           : new URL(dataPath, window.location.origin).href
 
 
+        const safeUrl = parquetUrl.replace(/'/g, "''")  // escape quotes for the SQL string literal
         await vg.coordinator().exec(`
           CREATE TABLE features AS
-          SELECT * FROM read_parquet('${parquetUrl}')
+          SELECT * FROM read_parquet('${safeUrl}')
         `)
 
         // HDBSCAN assigns -1 to noise points; embedding-atlas casts category

@@ -94,6 +94,11 @@ def main():
         input("dashboard running — press Enter to stop.\n")
     finally:
         proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
 
 if __name__ == "__main__":
