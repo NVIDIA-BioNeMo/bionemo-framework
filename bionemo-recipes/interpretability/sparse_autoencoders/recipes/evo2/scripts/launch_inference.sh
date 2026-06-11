@@ -1,9 +1,13 @@
 #!/bin/bash
-# Launch the Evo2 SAE inference engine. One engine, three modes:
+# Launch the Evo2 SAE inference engine. One engine, four modes:
 #
 #   ./launch_inference.sh serve                       # live HTTP server on :8001 (viz backend)
 #   ./launch_inference.sh encode  --sequence ATGC...  # annotate ONE sequence -> top features
 #   ./launch_inference.sh batch   --fasta in.fa --out out.parquet   # MANY sequences -> parquet
+#   ./launch_inference.sh generate --prompt ATGC... --clamp 29244:300  # steer + generate DNA
+#
+# Steering loop: `encode` a sequence to find an active feature id, then
+# `generate --clamp ID:STRENGTH` (strength ~2-3x the feature's max_activation; repeat --clamp).
 #
 # Config via env. Required: EVO2_CKPT_DIR, SAE_CKPT_PATH. Optional (have defaults):
 # FEATURE_ANNOTATIONS, EMBEDDING_LAYER (26), DEVICE, PORT, CUDA_VISIBLE_DEVICES.
