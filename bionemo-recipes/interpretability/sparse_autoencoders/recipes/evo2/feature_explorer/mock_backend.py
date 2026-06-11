@@ -27,6 +27,7 @@ contract is real, the numbers are fake.
 
 import argparse
 import base64
+from pathlib import Path
 
 import numpy as np
 import uvicorn
@@ -214,7 +215,74 @@ def gene_embed(req: GeneEmbedRequest):
     }
 
 
+def write_demo_atlas(public_dir: Path) -> None:
+    """Write small *fake* atlas parquets into public_dir so the Feature-atlas tab works offline.
+
+    Demo data only (seeded, fabricated) — the real atlas is produced from your SAE elsewhere.
+    Matches the schema the dashboard reads: features_atlas (per-feature x/y + stats),
+    feature_metadata (per-feature labels/stats), feature_examples (top examples per feature).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    public_dir.mkdir(parents=True, exist_ok=True)
+    n = 200
+    rng = np.random.default_rng(1)
+    fids = list(range(n))
+    labels = [LABELS.get(f) for f in fids]
+    freq = [round(float(v), 3) for v in rng.uniform(0.01, 0.5, n)]
+    maxact = [round(float(v), 3) for v in rng.uniform(1, 8, n)]
+    x = [round(float(v), 3) for v in rng.normal(0, 5, n)]
+    y = [round(float(v), 3) for v in rng.normal(0, 5, n)]
+    pq.write_table(
+        pa.table(
+            {"feature_id": fids, "x": x, "y": y, "label": labels, "activation_freq": freq, "max_activation": maxact}
+        ),
+        public_dir / "features_atlas.parquet",
+    )
+    pq.write_table(
+        pa.table({"feature_id": fids, "label": labels, "activation_freq": freq, "max_activation": maxact}),
+        public_dir / "feature_metadata.parquet",
+    )
+    ex = {
+        k: []
+        for k in (
+            "feature_id",
+            "example_rank",
+            "sequence",
+            "activations",
+            "max_activation",
+            "best_annotation",
+            "sequence_id",
+            "start",
+            "end",
+        )
+    }
+    for f in fids:
+        for r in range(3):
+            start = int(rng.integers(0, 1_000_000))
+            ex["feature_id"].append(f)
+            ex["example_rank"].append(r)
+            ex["sequence"].append("".join(rng.choice(list("ACGT"), 40)))
+            ex["activations"].append([round(float(v), 3) for v in rng.uniform(0, maxact[f], 40)])
+            ex["max_activation"].append(round(maxact[f] * float(rng.uniform(0.5, 1)), 3))
+            ex["best_annotation"].append(labels[f] or "intergenic")
+            ex["sequence_id"].append(f"demo_chr{f % 5}")
+            ex["start"].append(start)
+            ex["end"].append(start + 40)
+    pq.write_table(pa.table(ex), public_dir / "feature_examples.parquet")
+    print(f"wrote demo atlas parquets ({n} features) -> {public_dir}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Mock Evo2-SAE backend (no GPU)")
     ap.add_argument("--port", type=int, default=8001)
-    uvicorn.run(app, host="0.0.0.0", port=ap.parse_args().port, log_level="warning")
+    ap.add_argument(
+        "--demo-data",
+        action="store_true",
+        help="also write fake atlas parquets to ./public so the Feature-atlas tab works offline",
+    )
+    args = ap.parse_args()
+    if args.demo_data:
+        write_demo_atlas(Path(__file__).resolve().parent / "public")
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
