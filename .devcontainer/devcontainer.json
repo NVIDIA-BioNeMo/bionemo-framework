@@ -1,0 +1,43 @@
+{
+    "name": "BioNeMo Recipes Dev Container",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "mounts": [
+        "source=${localEnv:HOME}/.bash_history_devcontainer,target=/home/ubuntu/.bash_history,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.cache,target=/home/ubuntu/.cache,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.claude,target=/home/ubuntu/.claude,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.claude.json,target=/home/ubuntu/.claude.json,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.codex,target=/home/ubuntu/.codex,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.config,target=/home/ubuntu/.config,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.cursor,target=/home/ubuntu/.cursor,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.netrc,target=/home/ubuntu/.netrc,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,readonly,type=bind,consistency=cached"
+    ],
+    "postCreateCommand": ".devcontainer/postCreateCommand.sh",
+    "initializeCommand": ".devcontainer/initializeCommand.sh",
+    "remoteUser": "ubuntu",
+    "runArgs": [
+        "--gpus=all",
+        "--shm-size=4g"
+    ],
+    "containerEnv": {
+        "PRE_COMMIT_HOME": "/home/ubuntu/.cache/pre-commit-devcontainer"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "Anthropic.claude-code",
+                "charliermarsh.ruff",
+                "eamodio.gitlens",
+                "ms-azuretools.vscode-docker",
+                "ms-python.python",
+                "ms-toolsai.jupyter",
+                "redhat.vscode-yaml",
+                "streetsidesoftware.code-spell-checker",
+                "tamasfe.even-better-toml"
+            ]
+        }
+    }
+}
