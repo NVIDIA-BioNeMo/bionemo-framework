@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.0",
     "numpy>=1.20",
     "pyarrow>=23.0.0",
+    "umap-learn>=0.5",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "pandas>=1.5",
