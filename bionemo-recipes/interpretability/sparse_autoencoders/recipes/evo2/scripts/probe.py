@@ -24,6 +24,24 @@ this driver only knows how to build/load Evo2 buffers and pick label sets.
   probe.py domain-eval   --fasta .. --track ..  user annotated dataset -> per-feature domain-F1 + AUROC vs
                                                 any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
   probe.py loss-recovered [...]                 fidelity via sae.eval.loss_recovered (needs the model)
+
+Example end-to-end flow (7B / layer 26; $CKPT = MBridge dir, $SAE = trained SAE .pt):
+
+  # 1. Build the probing buffer once: SAE codes + dense twin + per-token labels (needs the model)
+  python probe.py extract --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer 26 \
+      --fasta probe_set.fa --out buf.npz
+
+  # 2-3. Score the buffer (no model): per-feature AUROC, then SAE-vs-dense linear probes
+  python probe.py auroc  --acts buf.npz --labels motif_ATG,motif_stop,cds_coding,is_prok
+  python probe.py linear --acts buf.npz --labels cds_coding,is_prok
+
+  # 4. User annotated dataset -> per-feature domain-F1 (prec/nt, recall/annotation) + AUROC,
+  #    vs any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
+  python probe.py domain-eval --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer 26 \
+      --fasta GRCh38_chr20.fa --track exon=refseq.gff3:exon --track cCRE=encode_ccre.bed
+
+  # 5. SAE fidelity (loss recovered) — separate script, needs the model
+  python probe_loss_recovered.py --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer 26 --fasta probe_set.fa
 """  # noqa: D205
 
 from __future__ import annotations
@@ -298,6 +316,17 @@ def cmd_extract(a):  # noqa: D103
     print(f"saved buffer -> {a.out} ({buf.codes.shape[0]} x {buf.codes.shape[1]}, dense {buf.dense.shape[1]})")
 
 
+def _add_model_args(p, *, required=(), max_tokens=160_000):
+    """Shared model + encoding args for the model-backed subcommands (extract/euk-f1/domain-eval)."""
+    for arg in ("--evo2-ckpt-dir", "--sae-checkpoint", "--fasta", *required):
+        p.add_argument(arg, required=True)
+    p.add_argument("--layer", type=int, required=True)
+    p.add_argument("--max-tokens", type=int, default=max_tokens)
+    p.add_argument("--seq-len", type=int, default=1024)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--auroc-device", default="cuda:1")
+
+
 def main():  # noqa: D103
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -318,30 +347,17 @@ def main():  # noqa: D103
             p.add_argument("--labels", required=True)
         p.set_defaults(func=fn)
     pe = sub.add_parser("extract", parents=[common])
-    for arg in ["--evo2-ckpt-dir", "--sae-checkpoint", "--fasta", "--out"]:
-        pe.add_argument(arg, required=True)
-    pe.add_argument("--layer", type=int, required=True)
+    _add_model_args(pe, required=("--out",), max_tokens=200_000)
     pe.add_argument("--kingdoms", default="prok,euk")
     pe.add_argument("--annotate-cds", action="store_true")
-    pe.add_argument("--max-tokens", type=int, default=200_000)
     pe.add_argument("--subsample", type=int, default=50_000)
-    pe.add_argument("--seq-len", type=int, default=1024)
-    pe.add_argument("--batch-size", type=int, default=8)
-    pe.add_argument("--auroc-device", default="cuda:1")
     pe.set_defaults(func=cmd_extract)
     pk = sub.add_parser("euk-f1", parents=[common])
-    for arg in ["--evo2-ckpt-dir", "--sae-checkpoint", "--fasta", "--gff"]:
-        pk.add_argument(arg, required=True)
-    pk.add_argument("--layer", type=int, required=True)
+    _add_model_args(pk, required=("--gff",))
     pk.add_argument("--organism", default="Human")
-    pk.add_argument("--max-tokens", type=int, default=160_000)
-    pk.add_argument("--seq-len", type=int, default=1024)
-    pk.add_argument("--batch-size", type=int, default=8)
-    pk.add_argument("--auroc-device", default="cuda:1")
     pk.set_defaults(func=cmd_euk)
     pd = sub.add_parser("domain-eval", parents=[common])
-    for arg in ["--evo2-ckpt-dir", "--sae-checkpoint", "--fasta"]:
-        pd.add_argument(arg, required=True)
+    _add_model_args(pd)
     pd.add_argument(
         "--track",
         action="append",
@@ -350,12 +366,7 @@ def main():  # noqa: D103
         help="annotation track; BED or GFF intervals = instances of concept NAME. Repeatable "
         "(e.g. --track exon=refseq.gff3:exon --track tfbs=jaspar.bed --track cCRE=encode.bed).",
     )
-    pd.add_argument("--layer", type=int, required=True)
     pd.add_argument("--organism", default="Human")
-    pd.add_argument("--max-tokens", type=int, default=160_000)
-    pd.add_argument("--seq-len", type=int, default=1024)
-    pd.add_argument("--batch-size", type=int, default=8)
-    pd.add_argument("--auroc-device", default="cuda:1")
     pd.set_defaults(func=cmd_domain_eval)
     args = ap.parse_args()
     torch.set_grad_enabled(False)
