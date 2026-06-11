@@ -62,3 +62,15 @@ def test_tuple_output_steers_only_hidden_state():
     handle.remove()
     assert isinstance(out, tuple) and out[1] == "meta"
     assert out[0].shape == x.shape and not torch.allclose(out[0], x)  # clamp moved it
+
+
+def test_decode_only_skips_prefill():
+    """decode_only steers single-token decode steps ([1,B,H]) but leaves multi-token prefill alone."""
+    sae, m = _sae(), nn.Identity()
+    prefill = torch.randn(5, 2, 8)  # [S=5, B, H] — prompt prefill, must pass through
+    decode = torch.randn(1, 2, 8)  # [S=1, B, H] — a single new token, must be steered
+    handle = m.register_forward_hook(clamp_hook(sae, {3: 5.0}, decode_only=True))
+    out_prefill, out_decode = m(prefill), m(decode)
+    handle.remove()
+    assert torch.allclose(out_prefill, prefill, atol=1e-5)  # prefill untouched
+    assert not torch.allclose(out_decode, decode)  # decode step steered

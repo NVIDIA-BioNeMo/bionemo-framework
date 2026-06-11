@@ -30,7 +30,7 @@ from typing import Dict
 import torch
 
 
-def clamp_hook(sae, clamps: Dict[int, float]):
+def clamp_hook(sae, clamps: Dict[int, float], decode_only: bool = False):
     """Build a forward hook that clamps ``{feature_idx: value}`` via the delta method.
 
     The hook adds ``decode(clamped_codes) - decode(original_codes)`` to the hooked module's
@@ -42,6 +42,10 @@ def clamp_hook(sae, clamps: Dict[int, float]):
         sae: A trained SAE exposing ``encode_pre_act(x) -> (pre_act, info)``, ``decode(codes, info)``,
             and ``top_k``.
         clamps: Map of feature index -> absolute code value to force at every position.
+        decode_only: If True, steer only autoregressive *decode* steps and leave the prompt
+            prefill untouched (continuation-only steering). Assumes a ``(sequence, batch, hidden)``
+            layout — the convention for Evo2/megatron decoder layers — and applies the clamp only
+            when the sequence dimension is 1 (a single new token).
 
     Returns:
         A ``register_forward_hook``-compatible ``hook(module, inputs, output)``.
@@ -50,6 +54,8 @@ def clamp_hook(sae, clamps: Dict[int, float]):
 
     def hook(module, inputs, output):
         h, rest = (output[0], output[1:]) if isinstance(output, tuple) else (output, None)
+        if decode_only and h.shape[0] != 1:  # prefill (seq dim > 1) — leave untouched
+            return output
         dtype, shape = h.dtype, h.shape
         h_flat = h.reshape(-1, h.shape[-1]).float()
         with torch.no_grad():
@@ -68,9 +74,9 @@ def clamp_hook(sae, clamps: Dict[int, float]):
 
 
 @contextmanager
-def steer(module, sae, clamps: Dict[int, float]):
+def steer(module, sae, clamps: Dict[int, float], decode_only: bool = False):
     """Register the clamp hook on ``module`` for the duration of the ``with`` block, then remove it."""
-    handle = module.register_forward_hook(clamp_hook(sae, clamps))
+    handle = module.register_forward_hook(clamp_hook(sae, clamps, decode_only=decode_only))
     try:
         yield
     finally:
