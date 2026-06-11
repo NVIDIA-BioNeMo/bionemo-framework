@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bionemo-geneformer"
+readme = "README.md"
+description = "BioNeMo Geneformer"
+authors = [{ name = "BioNeMo Team", email = "bionemofeedback@nvidia.com" }]
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+dependencies = [
+    # bionemo sub-packages
+    'bionemo-core',
+    'bionemo-llm',
+    # external
+    'cellxgene_census',
+]
+
+[project.optional-dependencies]
+test = [
+    'bionemo-testing'
+]
+te = [
+    # TE & Apex need to be installed after PyTorch, NVCC, and CUDA.
+    # TODO(@pstjohn, @cspades): Figure out how to do this without post-installation.
+    'transformer_engine[pytorch]'
+]
+
+[project.scripts]
+bionemo-geneformer-train= "bionemo.geneformer.run.main:main"
+bionemo-geneformer-recipe= "bionemo.geneformer.run.recipes:main"
+infer_geneformer = "bionemo.geneformer.scripts.infer_geneformer:geneformer_infer_entrypoint"
+train_geneformer = "bionemo.geneformer.scripts.train_geneformer:entrypoint"
+geneformer_mlm_loss_eval = "bionemo.geneformer.scripts.geneformer_mlm_loss_eval:entrypoint"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bionemo.*"]
+namespaces = true
+exclude = ["test*."]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.uv]
+cache-keys = [{ git = true }]

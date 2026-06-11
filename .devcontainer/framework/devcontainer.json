@@ -1,0 +1,60 @@
+{
+	"name": "BioNeMo2 Framework Dev Container",
+	"runArgs": [
+		"--gpus=all",
+		"--shm-size=4g"
+	],
+	"build": {
+		"context": "${localWorkspaceFolder}",
+		"dockerfile": "${localWorkspaceFolder}/Dockerfile",
+		"target": "dev"
+	},
+	"mounts": [
+		// Mount the local ~/.aws config to pass along AWS credentials for PBSS.
+		"source=${localEnv:HOME}/.aws,target=/home/ubuntu/.aws,type=bind,consistency=cached",
+		"source=${localEnv:HOME}/.ngc,target=/home/ubuntu/.ngc,type=bind,consistency=cached",
+		"source=${localEnv:HOME}/.cache,target=/home/ubuntu/.cache,type=bind,consistency=cached",
+		"source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,readonly,type=bind,consistency=cached",
+		"source=${localEnv:HOME}/.netrc,target=/home/ubuntu/.netrc,readonly,type=bind,consistency=cached",
+		// Mount bash history file for persistence. Created if it doesn't exist in initializeCommand.sh
+		"source=${localEnv:HOME}/.bash_history_devcontainer,target=/home/ubuntu/.bash_history,type=bind,consistency=cached"
+	],
+	"containerEnv": {
+		"TMPDIR": "/tmp",
+		"NUMBA_CACHE_DIR": "/tmp/"
+	},
+	"postCreateCommand": "./.devcontainer/framework/postCreateCommand.sh",
+	"initializeCommand": "./.devcontainer/framework/initializeCommand.sh",
+	"remoteUser": "ubuntu",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"eamodio.gitlens",
+				"streetsidesoftware.code-spell-checker",
+				"ms-azuretools.vscode-docker",
+				"charliermarsh.ruff",
+				"njpwerner.autodocstring",
+				"ms-toolsai.jupyter",
+				"tamasfe.even-better-toml"
+			],
+			"settings": {
+				"python.analysis.extraPaths": [
+					"./sub-packages/bionemo-core/src",
+					"./sub-packages/bionemo-llm/src",
+					"./sub-packages/bionemo-testing/src",
+					"./sub-packages/bionemo-example_model/src",
+					"./3rdparty/NeMo",
+					"./3rdparty/Megatron-LM"
+				],
+				"python.defaultInterpreterPath": "/usr/bin/python",
+				"python.testing.pytestEnabled": true,
+				"python.testing.pytestArgs": [
+					"sub-packages/"
+				],
+				"python.analysis.typeCheckingMode": "standard"
+			}
+		}
+	}
+}

@@ -1,0 +1,7 @@
+# Pinned versions installed in the Docker container.
+# If updating these, also update the version pins in `pyproject.toml` !!
+torch-cluster==1.6.3
+torch-geometric==2.5.0
+torch-scatter==2.1.2
+torch_sparse==0.6.18
+rdkit==2023.9.6

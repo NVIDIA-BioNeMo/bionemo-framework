@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bionemo-geometric"
+readme = "README.md"
+description = "BioNeMo component library for graphical neural networks (GNNs) solving drug discovery problems."
+authors = [{ name = "BioNeMo Team", email = "bionemofeedback@nvidia.com" }]
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+dependencies = [
+    'bionemo-core',
+    # Version pins for the pip package. If updating these, also update the image pins in requirements.txt.
+    # Ideally we should allow these dependencies to float in the package definition.
+    'torch-cluster==1.6.3',
+    'torch-geometric==2.5.0',
+    'torch-scatter==2.1.2',
+    'torch_sparse==0.6.18',
+    'rdkit==2023.9.6',
+]
+
+# Make sure that the data CSV files are being packaged alongside the python files.
+[tool.setuptools.package-data]
+"bionemo.geometric" = ["**/*.csv"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bionemo.*"]
+namespaces = true
+exclude = ["test*."]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.uv]
+cache-keys = [{ git = true }]

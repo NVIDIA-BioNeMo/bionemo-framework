@@ -1,0 +1,29 @@
+diff --git a/transformer_engine/pytorch/csrc/extensions/cast.cpp b/transformer_engine/pytorch/csrc/extensions/cast.cpp
+index 2c3ccff1..a00d46cc 100644
+--- a/transformer_engine/pytorch/csrc/extensions/cast.cpp
++++ b/transformer_engine/pytorch/csrc/extensions/cast.cpp
+@@ -10,6 +10,7 @@
+ #include "extensions.h"
+ #include "pybind.h"
+ #include "transformer_engine/transformer_engine.h"
++#include "util.h"
+
+ namespace transformer_engine::pytorch {
+
+@@ -33,6 +34,16 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
+     DType fake_te_type = GetTransformerEngineDType(fake_tensor_type);
+     std::tie(te_output, out) = my_quantizer->create_tensor(input_shape, fake_te_type);
+   } else {
++    if (my_quantizer->columnwise_usage && !non_tn_fp8_gemm_supported()) {
++      bool transpose_exists = !output.attr("_transpose_invalid").cast<bool>() && !output.attr("_transpose").is_none();
++      if (!transpose_exists) {
++        DType fake_te_type = GetTransformerEngineDType(fake_tensor_type);
++        py::object new_out;
++        std::tie(std::ignore, new_out) = my_quantizer->create_tensor(input_shape, fake_te_type);
++        output.attr("_transpose_invalid") = py::bool_(false);
++        output.attr("_transpose") = new_out.attr("_transpose");
++      }
++    }
+     out = output;
+     te_output = makeTransformerEngineTensor(output, quantizer);
+   }
