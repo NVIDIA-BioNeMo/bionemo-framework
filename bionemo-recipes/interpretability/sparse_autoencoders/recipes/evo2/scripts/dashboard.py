@@ -13,89 +13,207 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate the Feature-atlas dashboard data from an SAE + a FASTA corpus.
+"""Generate the Feature-atlas dashboard parquets via two subcommands, split by cost.
 
-Runs the corpus through the same ``Evo2SAE`` engine the server uses, then writes the
-three parquet files ``launch_dashboard.py --data-dir`` stages into ``public/``:
+    atlas    features_atlas.parquet + feature_metadata.parquet
+             Stats from a RANDOM SAMPLE of cached layer activations (an extract.py store)
+             run through the SAE; UMAP x/y from the SAE decoder. Loads ONLY the SAE — no
+             Evo2 7B, no megatron. This is the same activation store the SAE trained on.
 
-    features_atlas.parquet   1 row / feature: feature_id, x, y (UMAP), label,
-                             activation_freq, max_activation  -> the scatter points
-    feature_metadata.parquet 1 row / feature: feature_id, label, activation_freq,
-                             max_activation                   -> the catalog
-    feature_examples.parquet N rows / feature: top-activating sequences with the
-                             per-base activation track        -> the example cards
+    examples feature_examples.parquet
+             Top-activating sequences + per-base tracks. Needs sequence-aligned activations
+             (which the anonymous token-level cache can't give), so this one loads the full
+             Evo2SAE engine (7B -> SAE) over a SMALL --examples-fasta.
 
-The heavy lifting is reused, not reimplemented: ``encode_batch`` (engine) for the
-activations and ``sae.analysis.compute_feature_umap`` for the 2-D layout. (Per-feature
-stats are computed locally from the SAE codes rather than via ``compute_feature_stats``,
-which wants raw pre-SAE activations — holding those for long DNA would not fit in memory.)
+Why the split: the expensive 7B forward pass already ran once (extract.py, reused for SAE
+training). The atlas only needs feature firing-rates + decoder geometry, so it samples that
+cache through the SAE — cheap and representative. Only the example cards inherently need a
+fresh forward pass, and that's a small, bounded job.
 
-This runs over a SMALL representative corpus (``--max-sequences``), not the full atlas
-corpus: the 7B pass is here only because the example cards need sequence-aligned
-activations, which the anonymous token-level training cache cannot provide.
-
-Feature *labels* are not produced here — they come from ``--feature-annotations`` (the
-feature-probing / label-producer pipeline, PR #1630) and are joined into the ``label``
-column; unlabeled features fall back to ``Feature N``. Users can further rename in-UI.
-
-Memory is bounded by a two-pass scheme (mirrors the codonfm generator): pass 1 keeps
-only the per-(sequence, feature) max to pick top examples; pass 2 re-encodes just the
-sequences that won, to pull their per-base tracks.
+Feature *labels* are produced elsewhere — by the feature-probing / label-producer pipeline
+(PR #1630), read from --feature-annotations and joined into `label`; unlabeled -> "Feature N".
 
 Example:
-    python scripts/dashboard.py \
-        --evo2-ckpt-dir $EVO2_CKPT_DIR --sae-ckpt-path $SAE_CKPT_PATH \
-        --feature-annotations $FEATURE_ANNOTATIONS --layer 26 \
-        --fasta corpus.fa --output-dir dashboard_data
-    # then: python scripts/launch_dashboard.py --data-dir dashboard_data
+    # atlas — point at the SAE's training activation store (no 7B):
+    python scripts/dashboard.py atlas --sae-ckpt-path $SAE_CKPT_PATH \
+        --feature-annotations $FEATURE_ANNOTATIONS \
+        --activations-dir /path/to/activation_store --output-dir dashboard_data
+
+    # examples — small corpus through the engine (loads the 7B):
+    python scripts/dashboard.py examples --evo2-ckpt-dir $EVO2_CKPT_DIR \
+        --sae-ckpt-path $SAE_CKPT_PATH --feature-annotations $FEATURE_ANNOTATIONS \
+        --examples-fasta small_corpus.fa --output-dir dashboard_data
+
+    python scripts/launch_dashboard.py --data-dir dashboard_data   # then view
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import random
 from pathlib import Path
 
 import torch
 
 
-def parse_args():
-    """Parse engine config (flags or env) + corpus / output / UMAP options."""
-    p = argparse.ArgumentParser(description="Generate Feature-atlas dashboard parquets from an SAE + FASTA")
-    # Engine config — same env defaults as the inference CLI.
-    p.add_argument("--evo2-ckpt-dir", default=os.environ.get("EVO2_CKPT_DIR"))
+def _add_sae_args(p):
+    """Args common to both modes: the SAE, labels, layer, device, output, UMAP knobs."""
     p.add_argument("--sae-ckpt-path", default=os.environ.get("SAE_CKPT_PATH"))
     p.add_argument("--feature-annotations", default=os.environ.get("FEATURE_ANNOTATIONS"))
     p.add_argument("--layer", type=int, default=int(os.environ.get("EMBEDDING_LAYER", "26")))
     p.add_argument("--device", default=os.environ.get("DEVICE", "cuda"))
-    p.add_argument("--max-seq-len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "8192")))
-    # Corpus + output. This is meant to be a SMALL, representative corpus (a few thousand seqs):
-    # we re-run the 7B over it only because the example cards need sequence-aligned activations,
-    # which the (anonymous, token-level) training activation cache can't provide. It is NOT the
-    # full atlas corpus — stats/UMAP need only a representative sample.
-    p.add_argument("--fasta", required=True, help="SMALL representative FASTA (a few thousand seqs)")
-    p.add_argument("--output-dir", required=True, help="Directory to write the 3 parquets into")
-    p.add_argument("--max-sequences", type=int, default=4000, help="Cap sequences read from --fasta (keep it small)")
-    p.add_argument("--organism", default="None (raw DNA)", help="Phylo-tag preset to prepend (default: raw DNA)")
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--n-examples", type=int, default=6, help="Top examples per feature")
-    p.add_argument(
-        "--max-example-bp",
-        type=int,
-        default=0,
-        help="Trim each stored example to this many bp around its peak (0 = keep full sequence)",
-    )
+    p.add_argument("--output-dir", required=True, help="Directory to write the parquet(s) into")
     p.add_argument("--umap-n-neighbors", type=int, default=15)
     p.add_argument("--umap-min-dist", type=float, default=0.1)
-    return p.parse_args()
 
 
-def _pass1_max_acts(eng, seqs, tag, tag_len, batch_size):
-    """Pass 1: per-(sequence, feature) max activation, keeping only [n_seq, n_features].
+def parse_args():
+    """Parse the `atlas` / `examples` subcommand and its options."""
+    ap = argparse.ArgumentParser(description="Generate Feature-atlas dashboard parquets (atlas | examples)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
 
-    Encodes in chunks and immediately reduces each sequence's per-base codes to a max
-    over positions (dropping the per-base tensors) so memory stays bounded by the result.
+    pa_ = sub.add_parser("atlas", help="features_atlas + feature_metadata from cached activations (no 7B)")
+    _add_sae_args(pa_)
+    pa_.add_argument("--activations-dir", required=True, help="extract.py activation store (shard_*.parquet)")
+    pa_.add_argument("--sample-tokens", type=int, default=2_000_000, help="random tokens to sample from the store")
+    pa_.add_argument("--batch-size", type=int, default=8192, help="SAE-encode batch (rows)")
+    pa_.add_argument("--seed", type=int, default=0)
+
+    pe = sub.add_parser("examples", help="feature_examples from a small FASTA (loads the 7B)")
+    _add_sae_args(pe)
+    pe.add_argument("--evo2-ckpt-dir", default=os.environ.get("EVO2_CKPT_DIR"))
+    pe.add_argument("--max-seq-len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "8192")))
+    pe.add_argument("--examples-fasta", required=True, help="SMALL representative FASTA (a few hundred seqs)")
+    pe.add_argument("--max-sequences", type=int, default=1000, help="Cap sequences read (keep it small)")
+    pe.add_argument("--organism", default="None (raw DNA)", help="Phylo-tag preset to prepend")
+    pe.add_argument("--batch-size", type=int, default=4)
+    pe.add_argument("--n-examples", type=int, default=6, help="Top examples per feature")
+    pe.add_argument("--max-example-bp", type=int, default=256, help="Window each example to N bp around its peak")
+    return ap.parse_args()
+
+
+# --------------------------------------------------------------------------- shared
+def _load_sae_only(args):
+    """Load just the SAE (+ labels) by reusing the engine's loaders — no 7B / megatron.
+
+    ``Evo2SAE.__init__`` only records config; ``_load_sae``/``_load_feature_meta`` touch the
+    SAE checkpoint and annotation parquet but never ``bionemo.evo2``, so this stays light.
     """
+    from evo2_sae.core import Evo2SAE
+
+    eng = Evo2SAE(
+        evo2_ckpt_dir="",
+        sae_ckpt_path=args.sae_ckpt_path,
+        layer=args.layer,
+        device=args.device,
+        feature_annotations=args.feature_annotations,
+    )
+    sae, n_features = eng._load_sae()
+    labels, _ = eng._load_feature_meta()
+    return sae, n_features, labels
+
+
+def _write_label_columns(n_features, labels):
+    """(feature_ids, label_list) with the #1630 labels joined in, 'Feature N' otherwise."""
+    fids = list(range(n_features))
+    return fids, [labels.get(f, f"Feature {f}") for f in fids]
+
+
+# --------------------------------------------------------------------------- atlas mode
+def _iter_sampled_activations(shards, sample_tokens, batch_size):
+    """Yield ``[<=batch_size, hidden_dim]`` CPU tensors sampled from random activation shards."""
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    seen = 0
+    for path in shards:
+        if seen >= sample_tokens:
+            return
+        tbl = pq.read_table(path)
+        dims = [c for c in tbl.column_names if c.startswith("dim_")]
+        arr = np.stack([tbl.column(c).to_numpy(zero_copy_only=False) for c in dims], axis=1)
+        for i in range(0, arr.shape[0], batch_size):
+            if seen >= sample_tokens:
+                return
+            chunk = arr[i : i + batch_size]
+            seen += chunk.shape[0]
+            yield torch.from_numpy(chunk).float()
+
+
+def run_atlas(args):
+    """features_atlas + feature_metadata from a random sample of the cached activation store."""
+    import math
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from sae.analysis import compute_feature_umap
+
+    sae, n_features, labels = _load_sae_only(args)
+    shards = sorted(Path(args.activations_dir).glob("shard_*.parquet"))
+    if not shards:
+        raise SystemExit(
+            f"No activation store in {args.activations_dir!r}. Generate one with extract.py "
+            f"(the same activations your SAE trained on):\n"
+            f"  torchrun --nproc_per_node 8 scripts/extract.py --ckpt-dir $EVO2_CKPT_DIR "
+            f"--embedding-layer {args.layer} --fasta corpus.fa --activation-store-dir {args.activations_dir}"
+        )
+    random.Random(args.seed).shuffle(shards)
+
+    # Streaming, vectorized firing-rate + peak over a random token sample (no 7B). We hand-roll
+    # these instead of sae.analysis.compute_feature_stats: we need only freq/max, while that
+    # helper also builds per-feature top-example heaps over anonymous token indices we can't use.
+    device = args.device
+    sae.eval().to(device)
+    fire = torch.zeros(n_features, device=device)
+    peak = torch.zeros(n_features, device=device)
+    total = 0
+    with torch.no_grad():
+        for batch in _iter_sampled_activations(shards, args.sample_tokens, args.batch_size):
+            codes = sae.encode(batch.to(device))
+            fire += (codes > 0).sum(dim=0).float()
+            peak = torch.maximum(peak, codes.max(dim=0).values)
+            total += codes.shape[0]
+            print(f"  atlas: sampled {total:,}/{args.sample_tokens:,} tokens", end="\r")
+    print()
+    if total == 0:
+        raise SystemExit("Sampled 0 tokens — is the activation store empty?")
+    freq = (fire / total).cpu()
+    peak = peak.cpu()
+
+    print("[atlas] computing UMAP layout from the SAE decoder...")
+    geom = compute_feature_umap(
+        sae, n_neighbors=args.umap_n_neighbors, min_dist=args.umap_min_dist, compute_clusters=False
+    )
+
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    fids, lbls = _write_label_columns(n_features, labels)
+    freq_l = [float(v) for v in freq.tolist()]
+    peak_l = [float(v) for v in peak.tolist()]
+    cols = {
+        "feature_id": pa.array(fids, type=pa.int32()),
+        "label": pa.array(lbls),
+        "activation_freq": pa.array(freq_l, type=pa.float32()),
+        "max_activation": pa.array(peak_l, type=pa.float32()),
+    }
+    atlas = pa.table(
+        {
+            **cols,
+            "x": pa.array([float(v) for v in geom.umap_x], type=pa.float32()),
+            "y": pa.array([float(v) for v in geom.umap_y], type=pa.float32()),
+            "log_frequency": pa.array([math.log10(v) if v > 0 else -10.0 for v in freq_l], type=pa.float32()),
+        }
+    )
+    pq.write_table(atlas, out / "features_atlas.parquet", compression="snappy")
+    pq.write_table(pa.table(cols), out / "feature_metadata.parquet", compression="snappy")
+    live = int((peak > 0).sum())
+    print(f"[atlas] wrote features_atlas + feature_metadata ({n_features} features, {live} live, {total:,} tokens) -> {out}")
+
+
+# --------------------------------------------------------------------------- examples mode
+def _pass1_max_acts(eng, seqs, tag, tag_len, batch_size):
+    """Per-(sequence, feature) max activation -> [n_seq, n_features], reducing each batch eagerly."""
     n_seq, n_features = len(seqs), eng.n_features
     max_acts = torch.zeros(n_seq, n_features, dtype=torch.float32)
     for start in range(0, n_seq, batch_size):
@@ -105,62 +223,64 @@ def _pass1_max_acts(eng, seqs, tag, tag_len, batch_size):
             region = codes[tag_len:] if codes.shape[0] > tag_len else codes
             if region.shape[0]:
                 max_acts[start + j] = region.max(dim=0).values
-        print(f"  pass 1: {min(start + batch_size, n_seq)}/{n_seq} sequences", end="\r")
+        print(f"  examples pass 1: {min(start + batch_size, n_seq)}/{n_seq} sequences", end="\r")
     print()
     return max_acts
 
 
-def _pass2_examples(eng, seqs, ids, tag, tag_len, top_idx, labels, max_example_bp, batch_size):
-    """Pass 2: re-encode only the winning sequences, build the feature_examples rows.
+def _pass2_examples(eng, seqs, ids, tag, tag_len, top_idx, peak, labels, max_example_bp, batch_size):
+    """Re-encode only the winning sequences and pull each example's windowed per-base track.
 
-    ``top_idx`` is [n_examples, n_features] sequence indices from topk over pass-1 maxima.
-    Each (feature, rank) row gets the DNA substring + aligned per-base activation track,
-    optionally trimmed to a window around the per-feature peak.
+    Memory-bounded: per (seq, feature) we extract just that feature's column and immediately
+    materialize a short windowed list (``.tolist()`` detaches it), so the full ``[S, n_features]``
+    code tensor is freed each batch — never accumulated. Dead features (peak == 0) are skipped.
     """
     n_examples, n_features = top_idx.shape
-    # Which sequences need re-encoding, and for which features.
+    alive = [f for f in range(n_features) if peak[f] > 0]
     needed: dict[int, set[int]] = {}
-    for f in range(n_features):
+    for f in alive:
         for r in range(n_examples):
             needed.setdefault(int(top_idx[r, f]), set()).add(f)
 
-    # Re-encode the needed sequences -> {seq_idx: codes[region_len, n_features]} (region excludes tag).
-    codes_by_seq: dict[int, torch.Tensor] = {}
+    win: dict[tuple, tuple] = {}  # (seq_idx, feat) -> (lo, hi, [activations])
     need_ids = sorted(needed)
     for start in range(0, len(need_ids), batch_size):
         batch_ids = need_ids[start : start + batch_size]
         codes_list = eng.encode_batch([tag + seqs[i] for i in batch_ids], batch_size=batch_size)
         for i, codes in zip(batch_ids, codes_list):
-            codes_by_seq[i] = codes[tag_len:] if codes.shape[0] > tag_len else codes
-        print(f"  pass 2: {min(start + batch_size, len(need_ids))}/{len(need_ids)} sequences", end="\r")
+            region = codes[tag_len:] if codes.shape[0] > tag_len else codes
+            for f in needed[i]:
+                track = region[:, f]
+                lo, hi = 0, track.shape[0]
+                if max_example_bp and hi > max_example_bp:
+                    pk = int(track.argmax())
+                    lo = max(0, pk - max_example_bp // 2)
+                    hi = min(track.shape[0], lo + max_example_bp)
+                    lo = max(0, hi - max_example_bp)
+                win[(i, f)] = (lo, hi, [round(float(v), 4) for v in track[lo:hi].tolist()])
+        print(f"  examples pass 2: re-encoded {min(start + batch_size, len(need_ids))}/{len(need_ids)} seqs", end="\r")
     print()
 
     rows = []
-    for f in range(n_features):
+    for f in alive:
         for rank in range(n_examples):
-            seq_idx = int(top_idx[rank, f])
-            codes = codes_by_seq.get(seq_idx)
-            if codes is None or codes.shape[0] == 0:
+            si = int(top_idx[rank, f])
+            w = win.get((si, f))
+            if w is None:
                 continue
-            track = codes[:, f]
-            dna = seqs[seq_idx][: codes.shape[0]]  # align to encoded region length
-            lo, hi = 0, codes.shape[0]
-            if max_example_bp and codes.shape[0] > max_example_bp:
-                peak = int(track.argmax())
-                lo = max(0, peak - max_example_bp // 2)
-                hi = min(codes.shape[0], lo + max_example_bp)
-                lo = max(0, hi - max_example_bp)
-            acts = [round(float(v), 4) for v in track[lo:hi].tolist()]
+            lo, hi, acts = w
+            if not acts or max(acts) <= 0:
+                continue
             rows.append(
                 {
                     "feature_id": f,
                     "example_rank": rank,
-                    "sequence_id": ids[seq_idx],
+                    "sequence_id": ids[si],
                     "start": lo,
                     "end": hi,
-                    "sequence": dna[lo:hi],
+                    "sequence": seqs[si][lo:hi],
                     "activations": acts,
-                    "max_activation": max(acts) if acts else 0.0,
+                    "max_activation": max(acts),
                     "best_annotation": labels.get(f, ""),
                 }
             )
@@ -168,70 +288,12 @@ def _pass2_examples(eng, seqs, ids, tag, tag_len, top_idx, labels, max_example_b
     return rows
 
 
-def _write_parquets(out_dir, n_features, freq, peak, geom, labels, example_rows):
-    """Write the 3 parquets in the exact schema the dashboard's DuckDB queries read."""
-    import math
-
+def run_examples(args):
+    """feature_examples from a small corpus run through the full Evo2SAE engine (loads the 7B)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fids = list(range(n_features))
-    lbls = [labels.get(f, f"Feature {f}") for f in fids]
-    freq_l = [float(freq[f]) for f in fids]
-    peak_l = [float(peak[f]) for f in fids]
-
-    # features_atlas.parquet — scatter points (UMAP x/y) + stats.
-    atlas = pa.table(
-        {
-            "feature_id": pa.array(fids, type=pa.int32()),
-            "x": pa.array([float(v) for v in geom.umap_x], type=pa.float32()),
-            "y": pa.array([float(v) for v in geom.umap_y], type=pa.float32()),
-            "label": pa.array(lbls),
-            "activation_freq": pa.array(freq_l, type=pa.float32()),
-            "max_activation": pa.array(peak_l, type=pa.float32()),
-            "log_frequency": pa.array([math.log10(v) if v > 0 else -10.0 for v in freq_l], type=pa.float32()),
-        }
-    )
-    pq.write_table(atlas, out_dir / "features_atlas.parquet", compression="snappy")
-
-    # feature_metadata.parquet — the catalog.
-    meta = pa.table(
-        {
-            "feature_id": pa.array(fids, type=pa.int32()),
-            "label": pa.array(lbls),
-            "activation_freq": pa.array(freq_l, type=pa.float32()),
-            "max_activation": pa.array(peak_l, type=pa.float32()),
-        }
-    )
-    pq.write_table(meta, out_dir / "feature_metadata.parquet", compression="snappy")
-
-    # feature_examples.parquet — top sequences + per-base tracks (sorted by feature_id).
-    examples = pa.table(
-        {
-            "feature_id": pa.array([r["feature_id"] for r in example_rows], type=pa.int32()),
-            "example_rank": pa.array([r["example_rank"] for r in example_rows], type=pa.int8()),
-            "sequence_id": pa.array([r["sequence_id"] for r in example_rows]),
-            "start": pa.array([r["start"] for r in example_rows], type=pa.int32()),
-            "end": pa.array([r["end"] for r in example_rows], type=pa.int32()),
-            "sequence": pa.array([r["sequence"] for r in example_rows]),
-            "activations": pa.array([r["activations"] for r in example_rows], type=pa.list_(pa.float32())),
-            "max_activation": pa.array([r["max_activation"] for r in example_rows], type=pa.float32()),
-            "best_annotation": pa.array([r["best_annotation"] for r in example_rows]),
-        }
-    )
-    pq.write_table(examples, out_dir / "feature_examples.parquet", row_group_size=600, compression="snappy")
-
-
-def main():
-    """Build the engine, run the corpus, and write the 3 dashboard parquets."""
-    args = parse_args()  # before heavy imports so --help works without the model stack
-
     from evo2_sae.core import Evo2SAE, clean_dna
     from evo2_sae.fasta import read_fasta
-    from sae.analysis import compute_feature_umap
-
-    out_dir = Path(args.output_dir)
 
     eng = Evo2SAE(
         evo2_ckpt_dir=args.evo2_ckpt_dir,
@@ -243,46 +305,49 @@ def main():
     ).load()
 
     ids, seqs = [], []
-    for sid, seq in read_fasta(args.fasta):
+    for sid, seq in read_fasta(args.examples_fasta):
         if len(seqs) >= args.max_sequences:
             break
         ids.append(sid)
         seqs.append(clean_dna(seq))
     if not seqs:
-        raise SystemExit(f"No sequences read from {args.fasta}")
+        raise SystemExit(f"No sequences read from {args.examples_fasta}")
     tag = eng.resolve_tag(args.organism, None) or ""
-    # tag_len in *encoded* positions; clamp so a too-long tag never drops the whole sequence.
     tag_len = len(tag) if tag else 0
-    print(f"[dashboard] {len(seqs)} sequences, {eng.n_features} features, organism={args.organism!r}")
+    print(f"[examples] {len(seqs)} sequences, {eng.n_features} features, organism={args.organism!r}")
 
-    # Pass 1: per-feature stats from per-(sequence, feature) maxima.
     max_acts = _pass1_max_acts(eng, seqs, tag, tag_len, args.batch_size)
-    freq = (max_acts > 0).float().mean(dim=0)  # fraction of sequences in which the feature fires
     peak = max_acts.max(dim=0).values
-
-    # Top examples per feature -> [n_examples, n_features].
     k = min(args.n_examples, len(seqs))
     top_idx = torch.topk(max_acts, k=k, dim=0).indices
+    rows = _pass2_examples(eng, seqs, ids, tag, tag_len, top_idx, peak, eng.labels, args.max_example_bp, args.batch_size)
 
-    # Pass 2: per-base tracks for the winning sequences.
-    example_rows = _pass2_examples(
-        eng, seqs, ids, tag, tag_len, top_idx, eng.labels, args.max_example_bp, args.batch_size
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    tbl = pa.table(
+        {
+            "feature_id": pa.array([r["feature_id"] for r in rows], type=pa.int32()),
+            "example_rank": pa.array([r["example_rank"] for r in rows], type=pa.int8()),
+            "sequence_id": pa.array([r["sequence_id"] for r in rows]),
+            "start": pa.array([r["start"] for r in rows], type=pa.int32()),
+            "end": pa.array([r["end"] for r in rows], type=pa.int32()),
+            "sequence": pa.array([r["sequence"] for r in rows]),
+            "activations": pa.array([r["activations"] for r in rows], type=pa.list_(pa.float32())),
+            "max_activation": pa.array([r["max_activation"] for r in rows], type=pa.float32()),
+            "best_annotation": pa.array([r["best_annotation"] for r in rows]),
+        }
     )
+    pq.write_table(tbl, out / "feature_examples.parquet", row_group_size=600, compression="snappy")
+    print(f"[examples] wrote {len(rows)} example rows for {int((peak > 0).sum())} live features -> {out}")
 
-    # UMAP layout from the SAE decoder directions (reused from the shared sae package).
-    print("[dashboard] computing UMAP layout...")
-    geom = compute_feature_umap(
-        eng.sae,
-        n_neighbors=args.umap_n_neighbors,
-        min_dist=args.umap_min_dist,
-        compute_clusters=False,
-    )
 
-    _write_parquets(out_dir, eng.n_features, freq, peak, geom, eng.labels, example_rows)
-    print(
-        f"[dashboard] wrote {eng.n_features} features + {len(example_rows)} examples -> {out_dir}\n"
-        f"            launch with: python scripts/launch_dashboard.py --data-dir {out_dir}"
-    )
+def main():
+    """Dispatch to the atlas / examples subcommand."""
+    args = parse_args()  # before heavy imports so --help works without the model stack
+    if args.cmd == "atlas":
+        run_atlas(args)
+    else:
+        run_examples(args)
 
 
 if __name__ == "__main__":
