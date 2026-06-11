@@ -45,7 +45,7 @@ DOCKER_RUN_ARGS = [
 ]
 
 CUSTOM_CONTAINERS = {
-    "bionemo-recipes/models/amplify": "svcbionemo023/bionemo-framework:amplify-model-devcontainer-082025",
+    "models/amplify": "svcbionemo023/bionemo-framework:amplify-model-devcontainer-082025",
 }
 
 # DEFAULT_CONTAINER = "nvcr.io/nvidia/pytorch:26.02-py3"
@@ -71,13 +71,13 @@ def get_test_directories(input_dirs: Optional[List[str]] = None) -> List[str]:
     """Get directories to test.
 
     Returns list of (directory_path, docker_image) tuples.
-    If input_dirs is None, scans all subdirectories under bionemo-recipes/models/ and bionemo-recipes/recipes/.
+    If input_dirs is None, scans all subdirectories under models/ and recipes/.
     """
     git_root = get_git_root()
 
     # Scan models/ and recipes/ directories
     directories = []
-    for base_dir in ["bionemo-recipes/models", "bionemo-recipes/recipes"]:
+    for base_dir in ["models", "recipes"]:
         base_path = Path(git_root) / base_dir
         if base_path.exists():
             for subdir in base_path.iterdir():

@@ -13,10 +13,10 @@ would apply different random masks or different data augmentation strategies eac
 provides some utilities that make multi-epoch training easier, while obeying the determinism requirements of
 megatron.
 
-The [MultiEpochDatasetResampler][bionemo.core.data.multi_epoch_dataset.MultiEpochDatasetResampler] class simplifies the
+The [MultiEpochDatasetResampler][bionemo.common.data.multi_epoch_dataset.MultiEpochDatasetResampler] class simplifies the
 process of multi-epoch training, where the data should both be re-shuffled each epoch with different random effects
 applied each time the data is seen. To be compatible with this resampler, the provided dataset class's `__getitem__`
-method should accept a [EpochIndex][bionemo.core.data.multi_epoch_dataset.EpochIndex] tuple that contains both an epoch
+method should accept a [EpochIndex][bionemo.common.data.multi_epoch_dataset.EpochIndex] tuple that contains both an epoch
 and index value. Random effects can then be performed by setting the torch random seed based on the epoch value:
 
 ```python
@@ -37,9 +37,9 @@ details.
 ```
 
 For deterministic datasets that still want to train for multiple epochs with epoch-level shuffling, the
-[IdentityMultiEpochDatasetWrapper][bionemo.core.data.multi_epoch_dataset.IdentityMultiEpochDatasetWrapper] class can
+[IdentityMultiEpochDatasetWrapper][bionemo.common.data.multi_epoch_dataset.IdentityMultiEpochDatasetWrapper] class can
 simplify this process by wrapping a dataset that accepts integer indices and passes along the
-[EpochIndex][bionemo.core.data.multi_epoch_dataset.EpochIndex] index values from the resampled dataset.
+[EpochIndex][bionemo.common.data.multi_epoch_dataset.EpochIndex] index values from the resampled dataset.
 
 ```python
 class MyDeterministicDataset:
@@ -62,7 +62,7 @@ resumption. When writing your own datamodule, preserve these constraints:
   from a saved sample index — validation and test dataloaders should always start from the beginning.
 - Update the global step immediately before returning each dataloader so the resume position is accurate.
 
-See the `evo2_megatron` and `eden_megatron` recipes in `bionemo-recipes` for working examples of Megatron datamodule
+See the `evo2_megatron` and `eden_megatron` recipes in `BioNeMo Recipes` for working examples of Megatron datamodule
 implementations with training resumption.
 
 ## Testing Datasets for Megatron Compatibility
@@ -76,5 +76,5 @@ same sample. When writing tests for your dataset, confirm that:
 - `torch.manual_seed` is not called inside dataset `__getitem__` paths, as Megatron-LM manages torch seeding
   internally for model parallelism.
 
-Recipe-local tests in `bionemo-recipes` (e.g. in the `evo2_megatron` recipe) are the best reference for how to
+Recipe-local tests in `BioNeMo Recipes` (e.g. in the `evo2_megatron` recipe) are the best reference for how to
 validate these assumptions.

@@ -1,0 +1,17 @@
+- tag: eden_llama_og2_step_182313_on_evo2_rrna_highly_conserved_PMC4140814:1.0
+  ngc: null
+  ngc_registry: resource
+  pbss: "s3://bionemo-ci/test_data/evo2/eden_llama_og2_step_182313_on_evo2_rrna_highly_conserved_PMC4140814.tar.gz"
+  sha256: 7e13dde3ff1c2be113dcbd73de812b29b229cba700b7c981eb048e16dbb6b0cb
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    Test data for Evo2 llama inference.
+
+- tag: 7B-8k-og2:1.0
+  ngc: null
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/eden_llama_og2_step_182313.tar.gz"
+  sha256: 80a9dae5155f10c9c48e913be55900f51f231fab1252464938867c7511035010
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    7b llama 3.1 checkpoint trained on the open genome 2 metagenome subset data for approximately 250 billion tokens.

@@ -1,8 +1,8 @@
 ## Model Overview
 
-!!! note "Training Code Lives in bionemo-recipes"
+!!! note "Training Code Lives in BioNeMo Recipes"
 For training, fine-tuning, and example notebooks, see the Evo2 recipe in
-[`bionemo-recipes/recipes/evo2_megatron`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/evo2_megatron).
+[`recipes/evo2_megatron`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/evo2_megatron).
 
 ### Description:
 

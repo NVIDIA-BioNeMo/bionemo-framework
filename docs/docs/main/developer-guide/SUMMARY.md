@@ -1,8 +1,0 @@
-- [bionemo-core](bionemo-core/bionemo-core-Overview.md)
-- [bionemo-moco](bionemo-moco/bionemo-moco-Overview.md)
-- [bionemo-noodles](bionemo-noodles/bionemo-noodles-Overview.md)
-- [bionemo-recipeutils](bionemo-recipeutils/bionemo-recipeutils-Overview.md)
-- [bionemo-scdl](bionemo-scdl/bionemo-scdl-Overview.md)
-- [bionemo-scspeedtest](bionemo-scspeedtest/bionemo-scspeedtest-Overview.md)
-- [bionemo-size-aware-batching](bionemo-size-aware-batching/bionemo-size-aware-batching-Overview.md)
-- [bionemo-webdatamodule](bionemo-webdatamodule/bionemo-webdatamodule-Overview.md)

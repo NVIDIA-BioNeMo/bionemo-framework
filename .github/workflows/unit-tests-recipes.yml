@@ -25,6 +25,7 @@ jobs:
       any_changed: ${{ steps.changed-files.outputs.any_changed }}
       all_changed_files: ${{ steps.changed-files.outputs.all_changed_files }}
       dirs: ${{ steps.set-dirs.outputs.dirs }}
+      labels: ${{ steps.set-dirs.outputs.labels }}
 
     steps:
       - id: get-pr-info
@@ -53,10 +54,9 @@ jobs:
           dir_names: true
           dir_names_max_depth: 3
           files: |
-            bionemo-recipes/models/**
-            bionemo-recipes/recipes/**
-            !bionemo-recipes/recipes/*megatron/**
-            !bionemo-recipes/recipes/vllm_inference/**
+            models/**
+            recipes/**
+            !recipes/vllm_inference/**
 
       - id: set-dirs
         name: Determine which directories to run
@@ -66,7 +66,7 @@ jobs:
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
           # Get all recipe and model directories
-          ALL_DIRS=$(ls -d bionemo-recipes/models/*/ bionemo-recipes/recipes/*/ 2>/dev/null | grep -v -E "vllm_inference|megatron" | jq -R -s -c 'split("\n")[:-1] | map(rtrimstr("/"))')
+          ALL_DIRS=$(ls -d models/*/ recipes/*/ 2>/dev/null | grep -v -E "vllm_inference" | jq -R -s -c 'split("\n")[:-1] | map(rtrimstr("/"))')
 
           # Helper to check for a PR label
           has_label() {
@@ -81,8 +81,8 @@ jobs:
           elif has_label "ciflow:skip"; then
             echo "Found 'ciflow:skip' label - skipping all recipe tests"
             DIRS="[]"
-          elif has_label "ciflow:all-recipes"; then
-            echo "Found 'ciflow:all-recipes' label - running all directories"
+          elif has_label "ciflow:all"; then
+            echo "Found 'ciflow:all' label - running all directories"
             DIRS="$ALL_DIRS"
           else
             # Filter directories to only those that have changed files
@@ -104,9 +104,9 @@ jobs:
           DIRS_WITH_IMAGES=$(echo "$DIRS" | jq -c '
             map({
               dir: .,
-              name: (. | sub("^bionemo-recipes/"; "")),
+              name: .,
               image: (
-                if . == "bionemo-recipes/models/amplify" then
+                if . == "models/amplify" then
                   "svcbionemo023/bionemo-framework:amplify-model-devcontainer-082025"
                 else
                   # "nvcr.io/nvidia/pytorch:26.04-py3"
@@ -116,6 +116,14 @@ jobs:
             })
           ')
           echo "dirs=$DIRS_WITH_IMAGES" >> $GITHUB_OUTPUT
+
+          # Emit PR labels as a JSON array so downstream jobs can gate on ciflow:* labels.
+          if [[ "$PR_INFO" != "null" && "$PR_INFO" != "" ]]; then
+            LABELS=$(echo "$PR_INFO" | jq -c '[.labels[]?.name]' 2>/dev/null || echo "[]")
+          else
+            LABELS="[]"
+          fi
+          echo "labels=$LABELS" >> $GITHUB_OUTPUT
 
       - name: Show output
         run: |
@@ -191,19 +199,80 @@ jobs:
           fi
           pytest -v .
 
+  run-tests-notebooks:
+    needs: changed-dirs
+    runs-on: linux-amd64-gpu-l4-latest-1
+    # Label-only on PRs, automatic on merge_group and nightly schedule. Scoped to evo2_megatron,
+    # the only recipe in this suite with example notebooks.
+    if: |
+        contains(needs.changed-dirs.outputs.dirs, 'recipes/evo2_megatron') &&
+        (
+          (github.event_name == 'schedule') ||
+          (github.event_name == 'merge_group') ||
+          contains(fromJSON(needs.changed-dirs.outputs.labels || '[]'), 'ciflow:all') ||
+          contains(fromJSON(needs.changed-dirs.outputs.labels || '[]'), 'ciflow:notebooks')
+        )
+    name: "notebook-tests (evo2_megatron)"
+    container:
+      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+      options: --shm-size=16G
+      env:
+        CI: true
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_HOME: /cache/huggingface
+        BIONEMO_DATA_SOURCE: ngc
+
+    steps:
+      - name: Show GPU info
+        run: nvidia-smi
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@main
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: recipes/evo2_megatron
+          sparse-checkout-cone-mode: false
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: /cache/huggingface
+          key: ${{ runner.os }}-huggingface-evo2_megatron-notebooks-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-huggingface-evo2_megatron-notebooks-
+            ${{ runner.os }}-huggingface-evo2_megatron-
+            ${{ runner.os }}-huggingface-
+
+      - name: Install dependencies
+        working-directory: recipes/evo2_megatron
+        run: |
+          bash .ci_build.sh
+          source .ci_test_env.sh
+          pip install nbval
+
+      - name: Run notebook tests
+        working-directory: recipes/evo2_megatron
+        run: |
+          source .ci_test_env.sh
+          FAST_CI_MODE=1 pytest -v -s --nbval-lax -x -p no:python \
+            examples/lora-fine-tuning-tutorial.ipynb
+
   verify-recipe-tests:
-    # This job checks the status of the unit-tests matrix and fails if any matrix job failed or was cancelled.
+    # This job checks the status of the test jobs and fails if any failed or were cancelled.
     # Use this job as the required check for PRs.
-    needs: unit-tests
+    needs:
+      - unit-tests
+      - run-tests-notebooks
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check unit-tests matrix status
         run: |
-          if [[ "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "cancelled" ]]; then
-            echo "Some unit-tests matrix jobs have failed or been cancelled!"
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "Some recipe test jobs have failed or been cancelled!"
             exit 1
           else
-            echo "All unit-tests matrix jobs have completed successfully or were skipped!"
+            echo "All recipe test jobs have completed successfully or were skipped!"
             exit 0
           fi

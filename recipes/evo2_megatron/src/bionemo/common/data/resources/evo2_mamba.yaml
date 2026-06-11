@@ -1,0 +1,19 @@
+- tag: 7b-8k:0.1
+  ngc: null
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/nemo2_evo2_mamba_7b_8k_ns_281892352_20250715.tar.gz"
+  sha256: eaf673e49495bfa33f5a40f4bb4db8e39c4e4ad70c13ccc2ddabbeea5bdf3724
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    A 7b parameter evo2-mamba model trained for 281892352 samples (just over 500k steps) to a validation loss of 1.0070.
+    This optimizer was removed from the checkpoint to reduce the size of the model:
+      ```
+      evo2_remove_optimizer --model-type mamba --model-path checkpoints/pretrain_hybrid_mamba_8b--val_loss\=1.0070-epoch\=0-consumed_samples\=281892352.0-last \
+        --output-dir checkpoints/pretrain_hybrid_mamba_8b--val_loss\=1.0070-epoch\=0-consumed_samples\=281892352.0-last-noopt
+      ```
+    Next the compressed tar.gz (relative to the inner directory, aka a tar bomb as expected by load) was created with:
+      ```
+      cd checkpoints/pretrain_hybrid_mamba_8b--val_loss\=1.0070-epoch\=0-consumed_samples\=281892352.0-last-noopt
+      tar -I pigz -cf ../nemo2_evo2_mamba_7b_8k_ns_281892352_20250715.tar.gz ./
+      sha256sum ../nemo2_evo2_mamba_7b_8k_ns_281892352_20250715.tar.gz
+      ```

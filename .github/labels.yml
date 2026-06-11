@@ -8,12 +8,8 @@
   color: 1D76DB  # Blue
 
 - name: ciflow:all
-  description: Run all tests (unit tests, slow tests, and notebooks). This label can be used to enforce running all framework tests.
+  description: Run all tests, including unit tests, slow tests, notebooks, and every recipe/model directory.
   color: FBCA04  # Yellow/Gold
-
-- name: ciflow:all-recipes
-  description: Run tests for all recipes (under bionemo-recipes). This label can be used to enforce running tests for all recipes.
-  color: 812afe  # Purple
 
 - name: ciflow:skip
   description: Skip all CI tests for this PR

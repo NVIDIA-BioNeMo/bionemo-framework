@@ -2,4 +2,4 @@
 # https://github.com/gitleaks/gitleaks#gitleaksignore
 
 # False positive: training hyperparameter string `lr=3e-4` matches generic-api-key rule
-bionemo-recipes/interpretability/sparse_autoencoders/recipes/esm2/README.md:generic-api-key:116
+interpretability/sparse_autoencoders/recipes/esm2/README.md:generic-api-key:116
