@@ -26,7 +26,6 @@ All three build the same `Evo2SAE` engine; config comes from flags or env
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import os
 
@@ -72,36 +71,6 @@ def _engine(args):
         max_seq_len=args.max_seq_len,
         feature_annotations=args.feature_annotations,
     )
-
-
-def _read_fasta(path: str):
-    """Read a FASTA file (plain or gzipped) into parallel id/sequence lists.
-
-    Args:
-        path: Path to a FASTA file; a ``.gz`` suffix is read transparently.
-
-    Returns:
-        (ids, seqs): the header names and their concatenated sequences. A header with no
-        token after ``>`` (e.g. ``">"`` or ``"> "``) gets a generated ``seq_<n>`` id.
-    """
-    seqs, ids = [], []
-    name, parts = None, []
-    opener = gzip.open if str(path).endswith(".gz") else open
-    with opener(path, "rt") as f:
-        for line in f:
-            line = line.rstrip()
-            if line.startswith(">"):
-                if name is not None:
-                    seqs.append("".join(parts))
-                    ids.append(name)
-                header = line[1:].strip().split()
-                name, parts = (header[0] if header else f"seq_{len(ids)}"), []
-            else:
-                parts.append(line)
-    if name is not None:
-        seqs.append("".join(parts))
-        ids.append(name)
-    return ids, seqs
 
 
 def main():
@@ -156,7 +125,12 @@ def main():
     elif args.cmd == "batch":
         import pandas as pd
 
-        ids, seqs = _read_fasta(args.fasta)
+        from .fasta import read_fasta
+
+        ids, seqs = [], []
+        for sid, seq in read_fasta(args.fasta):
+            ids.append(sid)
+            seqs.append(seq)
         print(f"[batch] {len(seqs)} sequences from {args.fasta}; encoding (batch_size={args.batch_size})…")
         codes_list = eng.encode_batch(seqs, batch_size=args.batch_size)
         rows = []

@@ -15,7 +15,24 @@
 
 """Evo2 + SAE inference engine — reused by the live server, the batch CLI, and the viz backend."""
 
-from .core import DEFAULT_ORGANISM_TAGS, Evo2SAE, clean_dna
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:  # for type checkers / ruff F822 — runtime access goes through __getattr__ below
+    from .core import DEFAULT_ORGANISM_TAGS, Evo2SAE, clean_dna
 
 
 __all__ = ["DEFAULT_ORGANISM_TAGS", "Evo2SAE", "clean_dna"]
+
+
+def __getattr__(name: str):
+    """Lazily pull the heavy engine symbols from ``.core`` (importing ``.core`` loads torch).
+
+    Keeps ``import evo2_sae`` (and lightweight submodules like ``evo2_sae.fasta``) cheap so
+    stdlib-only callers don't drag in torch, while ``from evo2_sae import Evo2SAE`` still works.
+    """
+    if name in __all__:
+        from . import core
+
+        return getattr(core, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
