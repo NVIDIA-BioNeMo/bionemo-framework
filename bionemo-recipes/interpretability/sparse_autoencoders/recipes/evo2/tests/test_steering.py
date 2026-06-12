@@ -88,7 +88,7 @@ def test_sanitize_temperature_zero_forces_greedy_topk():
     """temperature<=0 (divide-by-zero in the sampler) is coerced to greedy top-1."""
     from evo2_sae.core import _sanitize_steering
 
-    _, _, temp, top_k = _sanitize_steering([{"feature_id": 5, "strength": 1.0}], 65536, 0.0, 0)
+    _, _, _, top_k = _sanitize_steering([{"feature_id": 5, "strength": 1.0}], 65536, 0.0, 0)
     assert top_k == 1  # bumped from 0 so the logits/temperature path is skipped
 
 
