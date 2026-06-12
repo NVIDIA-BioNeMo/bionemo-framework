@@ -16,7 +16,7 @@ export default function GenerativeSteering() {
   const [organism, setOrganism] = useState('Human')
   const [tag, setTag] = useState(null)
   const [prompt, setPrompt] = useState('')
-  const [rows, setRows] = useState([{ q: '', strength: 4 }])
+  const [rows, setRows] = useState([{ q: '', strength: 0 }])
   const [nTokens, setNTokens] = useState(120)
   const [temperature, setTemperature] = useState(1.0)
   const [compareBaseline, setCompareBaseline] = useState(false)
@@ -31,9 +31,10 @@ export default function GenerativeSteering() {
     if (!catalog.length) getJSON('/features').then(setCatalog).catch(() => {})
   }, [health.status, organismTags])
 
+  const nFeatures = health.info?.n_features
   const clamps = rows
     .map((r) => ({ id: resolveFeatureId(catalog, r.q), strength: Number(r.strength) }))
-    .filter((c) => c.id != null)
+    .filter((c) => c.id != null && (nFeatures == null || (c.id >= 0 && c.id < nFeatures)))
 
   const generate = async () => {
     setBusy(true)
@@ -76,7 +77,7 @@ export default function GenerativeSteering() {
         </Row>
 
         <Row label="Clamp features:">
-          <FeaturePicker catalog={catalog} rows={rows} setRows={setRows} withStrength={true} />
+          <FeaturePicker catalog={catalog} rows={rows} setRows={setRows} withStrength={true} nFeatures={nFeatures} />
         </Row>
 
         <Row label="Temperature:">

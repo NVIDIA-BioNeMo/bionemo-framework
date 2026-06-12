@@ -10,7 +10,7 @@ import InfoButton from './InfoButton'
 import { Sun, Moon } from 'lucide-react'
 import { styles } from './styles'
 
-export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "Real SAE features — Evo 2 1B, layer 19" }) {
+export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "Real SAE features — Evo 2, layer 26" }) {
   const [darkMode, setDarkMode] = useState(true)
 
   // Toggle dark class on document root

@@ -179,10 +179,12 @@ export function Legend({ label = 'SAE activation', note }) {
 
 // Resolve a picker row's text ("#123 …" or an exact label) to a feature id.
 export function resolveFeatureId(catalog, q) {
+  // A bare numeric id resolves to ANY feature (the catalog only lists the labeled subset, but
+  // every feature 0..n_features-1 is clampable). Otherwise match an exact label from the catalog.
   const m = String(q).match(/#?(\d+)/)
   if (m) {
     const id = Number(m[1])
-    if (catalog.some((f) => f.id === id)) return id
+    if (Number.isInteger(id) && id >= 0) return id
   }
   const lab = String(q).trim()
   const hit = catalog.find((f) => f.label === lab)
@@ -190,26 +192,42 @@ export function resolveFeatureId(catalog, q) {
 }
 
 // Shared by-name feature picker (used by both tabs). withStrength adds a clamp value.
-export function FeaturePicker({ catalog, rows, setRows, withStrength }) {
+// CLAMP_MAX mirrors the backend MAX_CLAMP_STRENGTH guard — the UI can't request a target
+// the engine would reject/cap. Steering clamps an absolute SAE-code value (0 = suppress;
+// above the feature's natural peak = amplify), so the slider spans the real activation scale.
+const CLAMP_MAX = 300
+
+export function FeaturePicker({ catalog, rows, setRows, withStrength, nFeatures }) {
   const byId = useMemo(() => Object.fromEntries(catalog.map((f) => [f.id, f])), [catalog])
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)))
-  const add = () => setRows((rs) => [...rs, withStrength ? { q: '', strength: 4 } : { q: '' }])
+  const add = () => setRows((rs) => [...rs, withStrength ? { q: '', strength: 0 } : { q: '' }])
   const del = (i) => setRows((rs) => (rs.length > 1 ? rs.filter((_, j) => j !== i) : rs))
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '6px' }}>
       {rows.map((r, i) => {
         const fid = resolveFeatureId(catalog, r.q)
         const f = fid != null ? byId[fid] : null
+        const outOfRange = fid != null && nFeatures != null && (fid < 0 || fid >= nFeatures)
         return (
           <div key={i} style={S.pickRow}>
             <input list="evo2-feature-catalog" value={r.q} onChange={(e) => setRow(i, { q: e.target.value })}
               placeholder="feature name or #id…" style={S.featInput} />
-            <span style={S.resolved}>{f ? `→ #${f.id} ${f.label}` : '— not resolved'}</span>
+            <span style={{ ...S.resolved, ...(outOfRange ? { color: '#ef4444' } : {}) }}>
+              {outOfRange
+                ? `✗ #${fid} out of range (0–${nFeatures - 1})`
+                : f
+                  ? `→ #${f.id} ${f.label}`
+                  : fid != null
+                    ? `→ #${fid} (unlabeled)`
+                    : '— not resolved'}
+            </span>
             {withStrength && (
-              <span style={S.strengthWrap}>clamp to&nbsp;
-                <input type="range" min={-2} max={10} step={0.5} value={r.strength}
+              <span style={S.strengthWrap}>clamp&nbsp;to&nbsp;
+                <input type="range" min={0} max={CLAMP_MAX} step={5} value={r.strength}
                   onChange={(e) => setRow(i, { strength: parseFloat(e.target.value) })} style={{ width: '140px' }} />
-                <input type="number" step={0.5} value={r.strength} onChange={(e) => setRow(i, { strength: e.target.value })} style={S.num} />
+                <input type="number" min={0} max={CLAMP_MAX} step={5} value={r.strength}
+                  onChange={(e) => setRow(i, { strength: Math.max(0, Math.min(CLAMP_MAX, Number(e.target.value))) })} style={S.num} />
+                <span style={S.help}>{f?.natural_peak != null ? `peak ≈ ${Math.round(f.natural_peak)} · 0 = suppress` : '0 = suppress'}</span>
               </span>
             )}
             <button onClick={() => del(i)} style={S.del} title="remove">✕</button>
@@ -242,7 +260,7 @@ export function OrganismField({ organismTags, organism, setOrganism, tag, setTag
 export function BackendBanner({ health }) {
   if (health.status === 'ready') {
     const i = health.info || {}
-    return <div style={{ ...S.banner, ...S.bannerOk }}>● Backend live — Evo2 1B layer {i.layer}, {i.n_features} SAE features ({i.n_labels} labeled) on {i.device}.</div>
+    return <div style={{ ...S.banner, ...S.bannerOk }}>● Backend live — Evo2 layer {i.layer}, {i.n_features} SAE features ({i.n_labels} labeled) on {i.device}.</div>
   }
   if (health.status === 'loading') return <div style={{ ...S.banner, ...S.bannerWarn }}>◐ Backend loading model + SAE… (~1 min at startup)</div>
   return <div style={{ ...S.banner, ...S.bannerWarn }}>Backend offline. Start the backend: <code>launch_inference.sh serve</code> on port 8001 (7B, layer 26).</div>
