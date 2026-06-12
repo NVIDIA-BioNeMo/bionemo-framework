@@ -83,12 +83,18 @@ def _z(X, tr):
     return (X - mu) / sd
 
 
+def _load(a):
+    """Load the probing buffer + resolve requested label names (default: all labels in the buffer)."""
+    buf = ActivationBuffer.load(a.acts)
+    labels = a.labels.split(",") if getattr(a, "labels", None) else list(buf.label_names)
+    return buf, [t for t in labels if t in buf.name_idx]
+
+
 # ───────────────────────────────────────── buffer-only subcommands (no model)
 def cmd_auroc(a):  # noqa: D103
-    buf = ActivationBuffer.load(a.acts)
+    buf, names = _load(a)
     dev = a.device
     X = torch.from_numpy(buf.codes).to(dev).float()
-    names = [t for t in a.labels.split(",") if t in buf.name_idx]
     Y = torch.stack([torch.from_numpy(buf.labels[:, buf.name_idx[n]]).to(dev) for n in names], 1)
     au = auroc_all(X, Y).cpu().numpy()
     print(f"{'label':18s} {'%pos':>6s} {'best AUROC':>10s} {'feature':>8s}")
@@ -118,9 +124,8 @@ def _eval_matrix(mat, buf, names, tr, te, dev, steps, wd):
 
 
 def cmd_linear(a):  # noqa: D103
-    buf = ActivationBuffer.load(a.acts)
+    buf, names = _load(a)
     dev = a.device
-    names = [t for t in a.labels.split(",") if t in buf.name_idx]
     tr, te = split_indices(buf.codes.shape[0], a.test_frac, a.seed)
     sae = _eval_matrix(buf.codes, buf, names, tr, te, dev, a.steps, a.weight_decay)
     den = _eval_matrix(buf.dense, buf, names, tr, te, dev, a.steps, a.weight_decay) if buf.dense is not None else None
@@ -181,9 +186,8 @@ def cmd_annotate(a):
     import pyarrow.parquet as pq
     from sae.eval.probing import annotate_features
 
-    buf = ActivationBuffer.load(a.acts)
+    buf, names = _load(a)
     dev = a.device
-    names = [t for t in (a.labels.split(",") if a.labels else list(buf.label_names)) if t in buf.name_idx]
     X = torch.from_numpy(buf.codes).to(dev).float()
     Y = torch.stack([torch.from_numpy(buf.labels[:, buf.name_idx[n]]).to(dev) for n in names], 1)
     ann = annotate_features(X, Y, names, min_auroc=a.min_auroc)
