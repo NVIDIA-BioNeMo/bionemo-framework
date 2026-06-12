@@ -24,6 +24,7 @@ from .loss_recovered import (
 )
 from .probing import (
     ActivationBuffer,
+    annotate_features,
     auroc_all,
     auroc_vec,
     best_single_train_test,
@@ -51,6 +52,7 @@ __all__ = [
     "LossRecoveredResult",
     "ReconstructionMetrics",
     "SparsityMetrics",
+    "annotate_features",
     "auroc_all",
     "auroc_vec",
     "best_single_train_test",
