@@ -60,6 +60,11 @@ if _SAE_SRC not in sys.path:
 
 _VALID_BASES = re.compile(r"[^ACGTN]")
 
+# Steering clamp targets are absolute SAE-code values; this SAE's features peak ~100-300.
+# Cap the magnitude so an extreme target can't blow the logits to NaN (which device-asserts
+# and wedges the process). Generous headroom for amplification, bounded against runaway.
+MAX_CLAMP_STRENGTH = float(os.environ.get("MAX_CLAMP_STRENGTH", "300"))
+
 # Phylogenetic-tag prefixes per organism (Evo2 was trained with lineage tags).
 DEFAULT_ORGANISM_TAGS = {
     "None (raw DNA)": "",
@@ -137,6 +142,16 @@ class Evo2SAE:
         if self.gen_components is None:
             from bionemo.evo2.run import infer as INF
 
+            # load_model_to_layer (the encode model) already initialized the global
+            # num-microbatches calculator; setup_inference_engine re-inits it and asserts
+            # unless we tear the singleton down first.
+            try:
+                from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
+
+                destroy_num_microbatches_calculator()
+            except Exception:
+                pass
+
             self.gen_components = INF.setup_inference_engine(
                 Path(self.evo2_ckpt_dir), max_seq_length=self.max_seq_len, cuda_graph_impl="none"
             )
@@ -206,12 +221,7 @@ class Evo2SAE:
     @torch.no_grad()
     def encode(self, dna: str) -> torch.Tensor:
         """ONE sequence -> SAE codes [seq_len, n_features] on CPU. No phylo tag."""
-        ids = self.tokenize(dna)
-        if not ids:
-            return torch.empty(0, self.n_features)
-        with self._lock:
-            hidden = self._forward_hidden([ids])[0]  # [S, H]
-            return self.sae.encode(hidden.to(self.device)).detach().cpu()
+        return self.encode_batch([dna])[0]
 
     @torch.no_grad()
     def encode_batch(self, seqs: list[str], batch_size: int = 8) -> list[torch.Tensor]:
@@ -325,14 +335,24 @@ class Evo2SAE:
         if not full_prompt:
             raise ValueError("Provide a prompt or pick an organism (need >=1 token to seed)")
         n_tokens = max(1, min(int(n_tokens), 400))
-        fids = [int(f["feature_id"]) for f in features]
+        # Guard rails — a bad clamp can wedge the whole process (a CUDA device-side assert
+        # corrupts the context, so every later request 500s until restart):
+        #   * a feature id outside [0, n_features) indexes off the SAE codes -> assert;
+        #   * an extreme target overflows the logits -> NaN under sampling -> assert.
+        # Reject out-of-range ids (the server maps ValueError -> 400) and cap the magnitude.
+        bad = sorted({int(f["feature_id"]) for f in features if not (0 <= int(f["feature_id"]) < self.n_features)})
+        if bad:
+            raise ValueError(f"feature_id(s) {bad} out of range [0, {self.n_features})")
+        clamps = {
+            int(f["feature_id"]): max(-MAX_CLAMP_STRENGTH, min(MAX_CLAMP_STRENGTH, float(f.get("strength", 1.0))))
+            for f in features
+        }
+        fids = list(clamps)
 
         with self._lock:
             comp = self._ensure_engine()
             hook_layer = unwrap_model(comp.model).decoder.layers[self.layer]
             from sae.steering import clamp_hook
-
-            clamps = {int(f["feature_id"]): float(f.get("strength", 1.0)) for f in features}
             feat_meta = [{"id": fid, "label": self.labels.get(fid), "strength": s} for fid, s in clamps.items()]
 
             def _run(steer: bool) -> str:
