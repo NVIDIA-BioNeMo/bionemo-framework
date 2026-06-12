@@ -85,6 +85,9 @@ def build_app(engine: Evo2SAE) -> FastAPI:
     allowed_origins = os.getenv("CORS_ORIGINS", "*").split(",")  # comma-separated; "*" by default (local backend)
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["*"], allow_headers=["*"])
 
+    def _require_ready():
+        _require_ready()
+
     @app.get("/health")
     def health():
         return {
@@ -100,8 +103,7 @@ def build_app(engine: Evo2SAE) -> FastAPI:
 
     @app.get("/features")
     def features():
-        if not engine.ready:
-            raise HTTPException(503, "Backend not ready")
+        _require_ready()
         rows = [
             {"id": int(f), "label": lab, "natural_peak": engine.peaks.get(int(f))} for f, lab in engine.labels.items()
         ]
@@ -110,8 +112,7 @@ def build_app(engine: Evo2SAE) -> FastAPI:
 
     @app.post("/annotate")
     def annotate(req: AnnotateRequest):
-        if not engine.ready:
-            raise HTTPException(503, "Backend not ready")
+        _require_ready()
         dna = clean_dna(req.sequence)
         if not dna:
             raise HTTPException(400, "No valid nucleotides in sequence")
@@ -159,8 +160,7 @@ def build_app(engine: Evo2SAE) -> FastAPI:
 
     @app.post("/generate")
     def generate(req: GenerateRequest):
-        if not engine.ready:
-            raise HTTPException(503, "Backend not ready")
+        _require_ready()
         try:
             return engine.generate(
                 prompt=req.prompt,
