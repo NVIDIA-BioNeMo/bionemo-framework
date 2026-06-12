@@ -258,7 +258,7 @@ toml==0.10.2
 torchmetrics==1.8.2
 torchprofile==0.0.4
 torchx==0.7.0
-tornado==6.5.1
+tornado==6.5.6
 tqdm==4.67.1
 traitlets==5.14.3
 transformers==4.56.2
