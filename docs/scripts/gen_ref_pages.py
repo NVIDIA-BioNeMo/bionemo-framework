@@ -14,6 +14,7 @@
 # limitations under the License.
 """Generate reference pages and copy docs from framework packages and recipes."""
 
+import itertools
 import json
 import logging
 import os
@@ -72,7 +73,7 @@ def _rewrite_relative_links(
 
     * Paths resolving under ``docs/docs/`` (shared assets, images) are rewritten
       relative to the docs-tree root so they reach the correct asset.
-    * Paths resolving under ``bionemo-recipes/`` are rewritten relative to the
+    * Paths resolving under ```` are rewritten relative to the
       ``main/recipes/`` subtree so cross-recipe links keep working.
     * Paths from sub-package READMEs to examples, notebooks, and assets are
       rewritten to the generated docs locations where those files are copied.
@@ -105,14 +106,11 @@ def _rewrite_relative_links(
         dest_dir_html = str(dest.parent / dest.stem)
 
     docs_docs_dir = root / "docs" / "docs"
-    recipes_dir = root / "bionemo-recipes"
-    sub_packages_dir = root / "sub-packages"
-
-    source_package_name = None
-    try:
-        source_package_name = source.resolve().relative_to(sub_packages_dir.resolve()).parts[0]
-    except (IndexError, ValueError):
-        pass
+    recipe_roots = {
+        root / "models": "models",
+        root / "recipes": "recipes",
+        root / "interpretability": "interpretability",
+    }
 
     def _make_rewriter(ref_dir: str, rendered_links: bool = False):
         """Return a rewrite function that computes paths relative to *ref_dir*."""
@@ -157,7 +155,7 @@ def _rewrite_relative_links(
             trailing_slash = clean.endswith("/")
 
             try:
-                resolved = (source_dir / clean).resolve()
+                resolved = ((root if clean.startswith("/") else source_dir) / clean.lstrip("/")).resolve()
             except (ValueError, OSError):
                 return rel_path
 
@@ -174,52 +172,29 @@ def _rewrite_relative_links(
             except ValueError:
                 pass
 
-            # bionemo-recipes/... -> main/recipes/...
-            try:
-                rel_to_recipes = resolved.relative_to(recipes_dir)
-                if resolved.suffix == ".md" and "src" in rel_to_recipes.parts:
+            for recipe_root, section in recipe_roots.items():
+                try:
+                    rel_to_recipe_root = resolved.relative_to(recipe_root)
+                except ValueError:
+                    continue
+
+                if resolved.suffix == ".md" and "src" in rel_to_recipe_root.parts:
                     repo_rel = resolved.relative_to(root).as_posix()
                     return f"{GITHUB_BLOB_BASE}/{repo_rel}" + suffix
 
-                target = "main/recipes/" + rel_to_recipes.as_posix()
+                target = f"main/recipes/{section}/" + rel_to_recipe_root.as_posix()
                 if target.endswith("/README.md"):
                     target = target[:-10] + "/index.md"
                 return _final_link(target, trailing_slash, suffix)
-            except ValueError:
-                pass
 
-            # sub-packages/<package>/examples/... -> main/examples/<package>/examples/...
-            # sub-packages/<package>/notebooks/... -> main/examples/<package>/notebooks/...
-            # sub-packages/<package>/assets/... -> main/developer-guide/<package>/assets/...
-            try:
-                rel_to_subpackages = resolved.relative_to(sub_packages_dir)
-                package_name = rel_to_subpackages.parts[0]
-                package_path = rel_to_subpackages.parts[1:]
-
-                target = None
-                if package_path and package_path[0] in ("examples", "notebooks"):
-                    target = "main/examples/" + package_name + "/" + Path(*package_path).as_posix()
-                elif package_path and package_path[0] == "assets":
-                    target = "main/developer-guide/" + package_name + "/" + Path(*package_path).as_posix()
-                elif package_path and package_path[0] == "README.md":
-                    target = f"main/developer-guide/{package_name}/{package_name}-Overview.md"
-
-                if target is not None:
-                    append_trailing_slash = trailing_slash
-                    if resolved.is_dir():
-                        target += "/index.md"
-                        append_trailing_slash = False
-                    return _final_link(target, append_trailing_slash, suffix)
-            except ValueError:
-                pass
-
-            if source_package_name is not None:
+            if source.resolve() == (root / "README.md").resolve():
                 try:
-                    repo_rel = resolved.relative_to(root).as_posix()
-                    github_path_type = "tree" if trailing_slash or resolved.is_dir() else "blob"
-                    return f"{GITHUB_BLOB_BASE.replace('/blob/', f'/{github_path_type}/')}/{repo_rel}" + suffix
+                    repo_rel = resolved.relative_to(root)
                 except ValueError:
                     pass
+                else:
+                    if resolved.is_file():
+                        return f"{GITHUB_BLOB_BASE}/{repo_rel.as_posix()}" + suffix
 
             return rel_path
 
@@ -267,7 +242,7 @@ def _sanitize_imported_text(
         Sanitized Markdown content with correct relative links.
     """
     source_str = source.as_posix()
-    if source_str.endswith("bionemo-recipes/recipes/geneformer_native_te_mfsdp_fp8/README.md"):
+    if source_str.endswith("recipes/geneformer_native_te_mfsdp_fp8/README.md"):
         heading_idx = text.find("# Geneformer Pretraining")
         if heading_idx != -1:
             text = text[heading_idx:]
@@ -280,18 +255,17 @@ def _sanitize_imported_text(
         text,
     )
 
-    recipes_dir = root / "bionemo-recipes"
-    sub_packages_dir = root / "sub-packages"
-    try:
-        source.resolve().relative_to(recipes_dir.resolve())
-        text = _rewrite_relative_links(source, dest, root, text, rendered_markdown_links)
-    except ValueError:
-        pass
-    try:
-        source.resolve().relative_to(sub_packages_dir.resolve())
-        text = _rewrite_relative_links(source, dest, root, text, rendered_markdown_links)
-    except ValueError:
-        pass
+    if source.resolve() == (root / "README.md").resolve():
+        return _rewrite_relative_links(source, dest, root, text, rendered_markdown_links)
+
+    recipe_roots = (root / "models", root / "recipes", root / "interpretability")
+    for recipe_root in recipe_roots:
+        try:
+            source.resolve().relative_to(recipe_root.resolve())
+            text = _rewrite_relative_links(source, dest, root, text, rendered_markdown_links)
+            break
+        except ValueError:
+            pass
 
     return text
 
@@ -385,6 +359,16 @@ def write_directory_index(dest_dir: Path, title: str, entries: list[Path]) -> No
         for entry in sorted(entries):
             label = entry.stem.replace("_", " ").replace("-", " ").title()
             fd.write(f"- [{label}]({entry.relative_to(dest_dir).as_posix()})\n")
+
+    logger.info("Added generated index: %s", index_file)
+
+
+def write_generated_tutorials_index() -> None:
+    """Write the top-level generated tutorials index page."""
+    index_file = Path("main/examples/index.md")
+    with mkdocs_gen_files.open(index_file, "w") as fd:
+        fd.write("# Generated Tutorials\n\n")
+        fd.write("Tutorials generated from recipe notebooks are listed in this section.\n")
 
     logger.info("Added generated index: %s", index_file)
 
@@ -539,24 +523,25 @@ def copy_support_files(source_dir: Path, dest_dir: Path, root: Path, log_prefix:
 
 
 def generate_api_reference() -> None:
-    """Generate API reference documentation for a given source directory.
-
-    This function iterates through all 'src' directories in the sub-packages,
-    generating API reference documentation for Python files and copying Markdown files.
-
-    Returns:
-        None
-    """
+    """Generate API reference documentation for import-light model and interpretability packages."""
     root = Path(__file__).parent.parent.parent
-    sub_package_srcs = (root / "sub-packages").rglob("src")
+    source_roots = [
+        (src, ())
+        for src in itertools.chain((root / "models").rglob("src"), (root / "interpretability").rglob("src"))
+        if "src" not in src.relative_to(root).parts[:-1]
+    ]
+    source_roots.append((root / "recipes" / "evo2_megatron" / "src", ("bionemo", "common")))
 
-    for src in sub_package_srcs:
+    for src, required_prefix in source_roots:
         # Process Python files
         for path in sorted(src.rglob("*.py")):
             module_path = path.relative_to(src).with_suffix("")
             doc_path = path.relative_to(src).with_suffix(".md")
             full_doc_path = Path("main/references/API_reference") / doc_path
             parts = tuple(module_path.parts)
+
+            if required_prefix and parts[: len(required_prefix)] != required_prefix:
+                continue
 
             if parts[-1] in ("__init__", "__main__"):
                 continue
@@ -574,53 +559,11 @@ def generate_api_reference() -> None:
             copy_text_file(path, full_doc_path, root, f"Added Markdown file: {full_doc_path}")
 
 
-def get_subpackage_notebooks(sub_package: Path, root: Path) -> None:
-    """Copy example docs from a sub-package to the examples directory.
-
-    Args:
-        sub_package (Path): The path to the sub-package directory.
-        root (Path): The root directory of the project.
-
-    Returns:
-        None
-    """
-    dest_root = Path("main/examples") / sub_package.name
-    copy_assets_dir(sub_package / "assets", dest_root / "assets", "Added sub-package tutorial asset")
-
-    example_sections: list[Path] = []
-    for docs_dir_name in ("examples", "notebooks"):
-        docs_dir = sub_package / docs_dir_name
-        if docs_dir.exists():
-            dest_dir = dest_root / docs_dir_name
-            copied_docs = copy_docs_from_dir(docs_dir, dest_dir, root, "Added sub-package example")
-            if copied_docs:
-                example_sections.append(dest_dir / "index.md")
-
-    write_directory_index(dest_root, f"{sub_package.name} Examples", example_sections)
-
-
-def get_subpackage_readmes(sub_package: Path, root: Path) -> None:
-    """Copy README file from a sub-package to the user guide's developer guide directory.
-
-    Args:
-        sub_package (Path): The path to the sub-package directory.
-        root (Path): The root directory of the project.
-
-    Returns:
-        None
-    """
-    readme_file = sub_package / "README.md"
-    if readme_file.exists():
-        dest_dir = Path("main/developer-guide") / sub_package.name
-        dest_file = dest_dir / f"{sub_package.name}-Overview.md"
-        copy_text_file(readme_file, dest_file, root, f"Added README: {dest_file}")
-
-
 def get_recipes_readmes(recipes_dir: Path, root: Path) -> None:
-    """Copy README files from bionemo-recipes to the recipes directory.
+    """Copy README files from root recipe directories to the docs recipes directory.
 
     Args:
-        recipes_dir (Path): The path to the bionemo-recipes directory.
+        recipes_dir (Path): The repository root.
         root (Path): The root directory of the project.
 
     Returns:
@@ -718,28 +661,11 @@ def get_recipe_examples(recipe_item: Path, root: Path) -> None:
     write_directory_index(dest_root, f"{dest_name} Examples", example_sections)
 
 
-def get_subpackage_assets(sub_package: Path, root: Path) -> None:
-    """Copy assets dir from a sub-package to the user guide's developer guide directory.
-
-    Images will be copied over and must be referenced relative to assets using markdown
-    image syntax e.g.: ![image](assets/image.png)
-
-    Args:
-        sub_package (Path): The path to the sub-package directory.
-        root (Path): The root directory of the project.
-
-    Returns:
-        None
-    """
-    dest_dir = Path("main/developer-guide") / sub_package.name
-    copy_assets_dir(sub_package / "assets", dest_dir / "assets", "Added asset")
-
-
 def get_recipes_assets(recipes_dir: Path, root: Path) -> None:
-    """Copy assets from bionemo-recipes to the recipes directory.
+    """Copy assets from root recipe directories to the docs recipes directory.
 
     Args:
-        recipes_dir (Path): The path to the bionemo-recipes directory.
+        recipes_dir (Path): The repository root.
         root (Path): The root directory of the project.
 
     Returns:
@@ -769,32 +695,24 @@ def get_recipes_assets(recipes_dir: Path, root: Path) -> None:
 def generate_pages() -> None:
     """Generate pages for documentation.
 
-    This function orchestrates the entire process of generating API references,
-    copying notebooks, and copying README files for all sub-packages and recipes.
+    This function orchestrates API references, notebooks, and README files for recipes.
 
     Returns:
         None
     """
     root = Path(__file__).parent.parent.parent
-    sub_packages_dir = root / "sub-packages"
-    recipes_dir = root / "bionemo-recipes"
+    recipes_dir = root
 
     # Provide a stub versions.json so mike's version-selector JS doesn't
     # flood the console with 404 retries during local `mkdocs serve`.
     with mkdocs_gen_files.open("versions.json", "w") as f:
         json.dump([{"version": "main", "title": "main", "aliases": ["latest"]}], f)
 
-    # Generate api docs for sub-packages
+    # Generate API docs for recipe and model packages.
     generate_api_reference()
 
-    # Process sub-packages
-    for sub_package in sub_packages_dir.glob("bionemo-*"):
-        if sub_package.is_dir():
-            get_subpackage_assets(sub_package, root)
-            get_subpackage_notebooks(sub_package, root)
-            get_subpackage_readmes(sub_package, root)
-
     # Process recipes
+    write_generated_tutorials_index()
     get_recipes_assets(recipes_dir, root)
     get_recipes_readmes(recipes_dir, root)
 

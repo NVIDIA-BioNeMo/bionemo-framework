@@ -169,10 +169,10 @@ local/
 
 # Logs
 *.log
-!bionemo-recipes/recipes/fp8_analysis/dummy_logs_esm2/rank_0/nvdlfw_inspect_logs/nvdlfw_inspect_globalrank-0.log
-!bionemo-recipes/recipes/fp8_analysis/dummy_logs_esm2/rank_0/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log
-!bionemo-recipes/recipes/fp8_analysis/dummy_logs_llama3/rank_0/nvdlfw_inspect_logs/nvdlfw_inspect_globalrank-0.log
-!bionemo-recipes/recipes/fp8_analysis/dummy_logs_llama3/rank_0/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log
+!recipes/fp8_analysis/dummy_logs_esm2/rank_0/nvdlfw_inspect_logs/nvdlfw_inspect_globalrank-0.log
+!recipes/fp8_analysis/dummy_logs_esm2/rank_0/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log
+!recipes/fp8_analysis/dummy_logs_llama3/rank_0/nvdlfw_inspect_logs/nvdlfw_inspect_globalrank-0.log
+!recipes/fp8_analysis/dummy_logs_llama3/rank_0/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log
 
 # Tests
 tests/__pycache__/
@@ -206,7 +206,7 @@ wandb/
 # Any model checkpoints
 *.safetensors
 # Allow golden value test fixtures
-!bionemo-recipes/models/*/tests/golden_state_dict.safetensors
+!models/*/tests/golden_state_dict.safetensors
 checkpoint_export/
 checkpoints/
 

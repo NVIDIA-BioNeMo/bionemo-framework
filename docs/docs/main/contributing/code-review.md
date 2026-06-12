@@ -460,7 +460,7 @@ a fruitful interaction across the team members.
 - In BioNeMo, for features under development that are not ready for
   production, we put them inside a `contrib` folder. This allows for teams to develop
   faster (less strict reviews) while testing code. When a feature is
-  complete and well tested, we move it to the appropriate sub-package under `sub-packages/`
+  complete and well tested, we move it to the appropriate top-level path under `models/`, `recipes/`, or `interpretability/`
   and complete all the requirements for production.
 
 ## References

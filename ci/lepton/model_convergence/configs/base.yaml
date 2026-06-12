@@ -109,7 +109,7 @@ checkout_script: |
     echo "Checking out branch: ${branch}"
     git checkout "${branch}"
   fi
-  cd bionemo-recipes/recipes/${recipe_subdir}
+  cd recipes/${recipe_subdir}
   pip install -r requirements.txt
 
 ############################################################

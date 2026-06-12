@@ -65,9 +65,11 @@ plugins:
       handlers:
         python:
           paths:
-            - ../sub-packages/*/src
-            - ../bionemo-recipes/models/*/src
-            - ../bionemo-recipes/recipes/*/src
+            - ../models/*/src
+            - ../recipes/*/src
+            - ../interpretability/*/*/src
+            - ../interpretability/*/*/*/src
+            - ../interpretability/*/*/*/*/src
           options:
             docstring_options:
               warnings: false
@@ -130,7 +132,7 @@ extra:
     provider: mike
     default: latest
     alias: true
-  docker_url: nvcr.io/nvidia/clara/bionemo-framework
+  docker_url: svcbionemo023/bionemo-framework
   docker_tag: nightly
   github_url: https://github.com/NVIDIA-BioNeMo/bionemo-framework
 

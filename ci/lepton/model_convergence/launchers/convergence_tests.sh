@@ -180,7 +180,7 @@ NVIDIA_DRIVER_INFO="$(jq -n --arg dv "$DRIVER_VERSION" --arg cv "$CUDA_VERSION" 
 set -e
 
 # Look for W&B files
-WANDB_DIR="/workspace/bionemo-framework/bionemo-recipes/recipes/$RECIPE_SUBDIR/wandb"
+WANDB_DIR="/workspace/bionemo-framework/recipes/$RECIPE_SUBDIR/wandb"
 
 WANDB_FOUND=0
 WANDB_SUMMARY=""

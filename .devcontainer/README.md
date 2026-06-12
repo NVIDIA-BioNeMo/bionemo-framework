@@ -1,3 +1,3 @@
-# Dev Container Setup
+# BioNeMo Recipes Dev Container
 
-General-purpose dev container for local recipe development.
+General-purpose dev container for local BioNeMo Recipes development.
