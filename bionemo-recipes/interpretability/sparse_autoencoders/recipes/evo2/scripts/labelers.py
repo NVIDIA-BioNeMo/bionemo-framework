@@ -201,25 +201,15 @@ def _spans(dna: str, pattern: str) -> np.ndarray:
     return out
 
 
-@labeler("motif_ATG")
-def _atg(ctx):
-    return _dna_mask(ctx, _starts(ctx.dna, r"ATG"))
-
-
-@labeler("motif_stop")
-def _stop(ctx):
-    return _dna_mask(ctx, _starts(ctx.dna, r"TAA|TAG|TGA"))
-
-
-@labeler("motif_TATA")
-def _tata(ctx):
-    return _dna_mask(ctx, _spans(ctx.dna, r"TATA[AT]A"))
-
-
-@labeler("motif_RBS_SD")
-def _rbs(ctx):
-    # Shine-Dalgarno ribosome-binding site
-    return _dna_mask(ctx, _spans(ctx.dna, r"AGGAGG"))
+# Consensus motifs: (name, matcher, regex) — `_starts` marks the match start, `_spans` the whole match.
+_MOTIFS = [
+    ("motif_ATG", _starts, r"ATG"),
+    ("motif_stop", _starts, r"TAA|TAG|TGA"),
+    ("motif_TATA", _spans, r"TATA[AT]A"),
+    ("motif_RBS_SD", _spans, r"AGGAGG"),  # Shine-Dalgarno ribosome-binding site
+]
+for _name, _match, _pat in _MOTIFS:
+    labeler(_name)(lambda ctx, m=_match, p=_pat: _dna_mask(ctx, m(ctx.dna, p)))
 
 
 # --------------------------------------------------- complex / consensus (refine later)
