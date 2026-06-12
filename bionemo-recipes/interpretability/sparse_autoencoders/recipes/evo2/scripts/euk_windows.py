@@ -67,11 +67,13 @@ def parse_gff(gff_path):
                 tx_gene[tid] = a.get("Parent", "").replace("gene:", "")
                 tx_biotype[tid] = a.get("biotype", "")
             elif typ == "exon":
-                tid = a.get("Parent", "").replace("transcript:", "")
-                tx_exon[tid].append((s, e))
+                for tid in a.get("Parent", "").replace("transcript:", "").split(","):
+                    if tid:
+                        tx_exon[tid].append((s, e))
             elif typ == "CDS":
-                tid = a.get("Parent", "").replace("transcript:", "")
-                tx_cds[tid].append((s, e))
+                for tid in a.get("Parent", "").replace("transcript:", "").split(","):
+                    if tid:
+                        tx_cds[tid].append((s, e))
     genes = {}
     for tid, gid in tx_gene.items():
         if gene_biotype.get(gid) != "protein_coding" or tx_biotype.get(tid) != "protein_coding":

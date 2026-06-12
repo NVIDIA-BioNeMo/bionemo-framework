@@ -225,7 +225,7 @@ def _kozak(ctx):
 @labeler("splice_donor", complex=True)
 def _sd(ctx):
     # 5' donor consensus GT(A/G)AGT — mark the GT
-    return _dna_mask(ctx, _starts(ctx.dna, r"GT[AG]AG"))
+    return _dna_mask(ctx, _starts(ctx.dna, r"GT[AG]AGT"))
 
 
 @labeler("splice_acceptor", complex=True)
