@@ -24,26 +24,9 @@ Non-overlapping windows by default. Each chunk gets a header of the form
 """
 
 import argparse
-import gzip
 from pathlib import Path
 
-
-def parse_fasta(path: Path):
-    """Yield (seq_id, sequence) tuples from a FASTA file (transparently handles .gz)."""
-    opener = gzip.open if path.suffix == ".gz" else open
-    seq_id, parts = None, []
-    with opener(path, "rt") as f:
-        for line in f:
-            line = line.rstrip()
-            if line.startswith(">"):
-                if seq_id is not None:
-                    yield seq_id, "".join(parts)
-                seq_id = line[1:].split()[0]
-                parts = []
-            else:
-                parts.append(line)
-        if seq_id is not None:
-            yield seq_id, "".join(parts)
+from evo2_sae.fasta import read_fasta
 
 
 def main():
@@ -61,7 +44,7 @@ def main():
     n_in = n_out = bp_out = 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w") as out:
-        for seq_id, seq in parse_fasta(args.input):
+        for seq_id, seq in read_fasta(args.input):
             n_in += 1
             for start in range(0, len(seq), args.window):
                 end = min(start + args.window, len(seq))
