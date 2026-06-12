@@ -79,6 +79,33 @@ def clean_dna(seq: str) -> str:
     return _VALID_BASES.sub("", (seq or "").upper())
 
 
+def _sanitize_steering(features, n_features, temperature, top_k):
+    """Validate/normalize steering inputs (pure, no GPU); raise on bad input.
+
+    Each guard prevents a CUDA device-side assert that would corrupt the context and wedge
+    the server until restart:
+
+      * feature id outside [0, n_features) indexes off the SAE codes -> ValueError (server -> 400);
+      * |strength| beyond MAX_CLAMP_STRENGTH blows the logits to inf/NaN -> capped;
+      * temperature <= 0 makes the recipe's sampler divide logits by temperature (NaN under
+        multinomial) -> coerce to greedy top-1, which is deterministic and skips that path.
+
+    Returns ``(clamps: dict[int, float], fids: list[int], temperature: float, top_k: int)``.
+    """
+    bad = sorted({int(f["feature_id"]) for f in features if not (0 <= int(f["feature_id"]) < n_features)})
+    if bad:
+        raise ValueError(f"feature_id(s) {bad} out of range [0, {n_features})")
+    clamps = {
+        int(f["feature_id"]): max(-MAX_CLAMP_STRENGTH, min(MAX_CLAMP_STRENGTH, float(f.get("strength", 1.0))))
+        for f in features
+    }
+    temperature = float(temperature)
+    top_k = int(top_k)
+    if temperature <= 0:  # greedy — avoid the sampler's logits/temperature division (NaN)
+        top_k = max(top_k, 1)
+    return clamps, list(clamps), temperature, top_k
+
+
 def _init_single_process_distributed() -> None:
     """Set the env vars Megatron's distributed init expects for a 1-GPU process."""
     os.environ.setdefault("RANK", "0")
@@ -335,19 +362,9 @@ class Evo2SAE:
         if not full_prompt:
             raise ValueError("Provide a prompt or pick an organism (need >=1 token to seed)")
         n_tokens = max(1, min(int(n_tokens), 400))
-        # Guard rails — a bad clamp can wedge the whole process (a CUDA device-side assert
-        # corrupts the context, so every later request 500s until restart):
-        #   * a feature id outside [0, n_features) indexes off the SAE codes -> assert;
-        #   * an extreme target overflows the logits -> NaN under sampling -> assert.
-        # Reject out-of-range ids (the server maps ValueError -> 400) and cap the magnitude.
-        bad = sorted({int(f["feature_id"]) for f in features if not (0 <= int(f["feature_id"]) < self.n_features)})
-        if bad:
-            raise ValueError(f"feature_id(s) {bad} out of range [0, {self.n_features})")
-        clamps = {
-            int(f["feature_id"]): max(-MAX_CLAMP_STRENGTH, min(MAX_CLAMP_STRENGTH, float(f.get("strength", 1.0))))
-            for f in features
-        }
-        fids = list(clamps)
+        # Validate/normalize steering inputs — out-of-range ids, extreme clamps, and temperature
+        # 0 each trigger CUDA device-side asserts that wedge the server (see _sanitize_steering).
+        clamps, fids, temperature, top_k = _sanitize_steering(features, self.n_features, temperature, top_k)
 
         with self._lock:
             comp = self._ensure_engine()

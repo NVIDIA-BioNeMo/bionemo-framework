@@ -60,6 +60,46 @@ def test_clamp_math():
     assert torch.equal(hook(None, None, prefill), prefill)
 
 
+# --------------------------------------------------- CPU: steering input guards (no model)
+# Each guards against a CUDA device-side assert that would corrupt the context and wedge the
+# server: out-of-range id (indexes off the SAE codes), extreme clamp (NaN logits), and
+# temperature 0 (sampler divides logits by temperature -> NaN under multinomial).
+def test_sanitize_rejects_out_of_range_id():
+    """feature_id outside [0, n_features) -> ValueError (server maps to 400, not a wedge)."""
+    from evo2_sae.core import _sanitize_steering
+
+    with pytest.raises(ValueError):
+        _sanitize_steering([{"feature_id": 70000, "strength": 1.0}], n_features=65536, temperature=1.0, top_k=0)
+    with pytest.raises(ValueError):
+        _sanitize_steering([{"feature_id": -1, "strength": 1.0}], n_features=65536, temperature=1.0, top_k=0)
+
+
+def test_sanitize_caps_clamp_magnitude():
+    """An extreme target is capped to ±MAX_CLAMP_STRENGTH (prevents NaN logits)."""
+    from evo2_sae.core import MAX_CLAMP_STRENGTH, _sanitize_steering
+
+    clamps, _, _, _ = _sanitize_steering([{"feature_id": 5, "strength": 99999.0}], 65536, 1.0, 0)
+    assert clamps[5] == MAX_CLAMP_STRENGTH
+    clamps, _, _, _ = _sanitize_steering([{"feature_id": 5, "strength": -99999.0}], 65536, 1.0, 0)
+    assert clamps[5] == -MAX_CLAMP_STRENGTH
+
+
+def test_sanitize_temperature_zero_forces_greedy_topk():
+    """temperature<=0 (divide-by-zero in the sampler) is coerced to greedy top-1."""
+    from evo2_sae.core import _sanitize_steering
+
+    _, _, temp, top_k = _sanitize_steering([{"feature_id": 5, "strength": 1.0}], 65536, 0.0, 0)
+    assert top_k == 1  # bumped from 0 so the logits/temperature path is skipped
+
+
+def test_sanitize_passthrough():
+    """Valid inputs pass through unchanged — no spurious capping or top_k change."""
+    from evo2_sae.core import _sanitize_steering
+
+    clamps, fids, temp, top_k = _sanitize_steering([{"feature_id": 5, "strength": 2.0}], 65536, 0.8, 0)
+    assert clamps == {5: 2.0} and fids == [5] and temp == 0.8 and top_k == 0
+
+
 # --------------------------------------------------------------------- GPU: real generation
 _CKPT = os.environ.get("EVO2_CKPT_DIR")
 _SAE = os.environ.get("SAE_CKPT_PATH")
