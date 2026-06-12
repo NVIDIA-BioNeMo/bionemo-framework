@@ -155,7 +155,7 @@ def _rewrite_relative_links(
             trailing_slash = clean.endswith("/")
 
             try:
-                resolved = (source_dir / clean).resolve()
+                resolved = ((root if clean.startswith("/") else source_dir) / clean.lstrip("/")).resolve()
             except (ValueError, OSError):
                 return rel_path
 
@@ -186,6 +186,15 @@ def _rewrite_relative_links(
                 if target.endswith("/README.md"):
                     target = target[:-10] + "/index.md"
                 return _final_link(target, trailing_slash, suffix)
+
+            if source.resolve() == (root / "README.md").resolve():
+                try:
+                    repo_rel = resolved.relative_to(root)
+                except ValueError:
+                    pass
+                else:
+                    if resolved.is_file():
+                        return f"{GITHUB_BLOB_BASE}/{repo_rel.as_posix()}" + suffix
 
             return rel_path
 
@@ -245,6 +254,9 @@ def _sanitize_imported_text(
         r'<a id="\2"></a>' + "\n" + r"\1",
         text,
     )
+
+    if source.resolve() == (root / "README.md").resolve():
+        return _rewrite_relative_links(source, dest, root, text, rendered_markdown_links)
 
     recipe_roots = (root / "models", root / "recipes", root / "interpretability")
     for recipe_root in recipe_roots:
