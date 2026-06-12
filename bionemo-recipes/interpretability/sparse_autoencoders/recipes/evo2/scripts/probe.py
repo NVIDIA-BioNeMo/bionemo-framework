@@ -17,7 +17,8 @@ r"""Unified Evo2 SAE probing CLI. All scoring is sae.eval.probing (model-agnosti
 this driver only knows how to build/load Evo2 buffers and pick label sets.
 
   probe.py extract       --out BUF [...]        build an ActivationBuffer (needs the model)
-  probe.py auroc         --acts BUF --labels .. per-feature AUROC table
+  probe.py auroc         --acts BUF --labels .. per-feature AUROC table (prints)
+  probe.py annotate      --acts BUF --out P     assign each feature its best concept -> annotation parquet
   probe.py linear        --acts BUF --labels .. SAE-vs-dense single + multi (disentanglement/distributed)
   probe.py codon-aa      --acts CODON_BUF       codon/AA decoders + family-disjoint, SAE vs dense
   probe.py euk-f1        --fasta .. --gff ..    RefSeq gene-structure domain-F1 (needs the model)
@@ -31,9 +32,13 @@ Example end-to-end flow (7B / layer 26; $CKPT = MBridge dir, $SAE = trained SAE 
   python probe.py extract --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer 26 \
       --fasta probe_set.fa --out buf.npz
 
-  # 2-3. Score the buffer (no model): per-feature AUROC, then SAE-vs-dense linear probes
+  # 2. Score the buffer (no model): per-feature AUROC, then SAE-vs-dense linear probes
   python probe.py auroc  --acts buf.npz --labels motif_ATG,motif_stop,cds_coding,is_prok
   python probe.py linear --acts buf.npz --labels cds_coding,is_prok
+
+  # 3. Persist annotations (no model): each feature's best concept (incl. base_A/C/G/T) ->
+  #    the feature-annotation parquet the engine/dashboard load via --feature-annotations
+  python probe.py annotate --acts buf.npz --out feature_annotations.parquet --min-auroc 0.85
 
   # 4. User annotated dataset -> per-feature domain-F1 (prec/nt, recall/annotation) + AUROC,
   #    vs any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
@@ -163,6 +168,35 @@ def cmd_codon_aa(a):  # noqa: D103
         del X, Xz
         torch.cuda.empty_cache()
         print(f"{nm:6s} {ca:12.3f} {aaa:10.3f} | {'  '.join(rec)}")
+
+
+def cmd_annotate(a):
+    """Buffer -> feature-annotation parquet: each feature's best concept by AUROC + activation stats.
+
+    The persist step (uses sae.eval.probing.annotate_features). Writes a feature_metadata-style
+    parquet — {feature_id, label, auroc, activation_freq, max_activation} — the engine/dashboard
+    load via --feature-annotations. Concepts default to all labels in the buffer (incl. base_*).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from sae.eval.probing import annotate_features
+
+    buf = ActivationBuffer.load(a.acts)
+    dev = a.device
+    names = [t for t in (a.labels.split(",") if a.labels else list(buf.label_names)) if t in buf.name_idx]
+    X = torch.from_numpy(buf.codes).to(dev).float()
+    Y = torch.stack([torch.from_numpy(buf.labels[:, buf.name_idx[n]]).to(dev) for n in names], 1)
+    ann = annotate_features(X, Y, names, min_auroc=a.min_auroc)
+    cols = {"feature_id": [], "label": [], "auroc": [], "activation_freq": [], "max_activation": []}
+    for r in ann:
+        col = X[:, r["feature_id"]]
+        cols["feature_id"].append(r["feature_id"])
+        cols["label"].append(r["label"])
+        cols["auroc"].append(r["auroc"])
+        cols["activation_freq"].append(round(float((col > 0).float().mean()), 6))
+        cols["max_activation"].append(round(float(col.max()), 4))
+    pq.write_table(pa.table(cols), a.out, compression="snappy")
+    print(f"[annotate] {len(ann)} features labeled (AUROC >= {a.min_auroc}) over {len(names)} concepts -> {a.out}")
 
 
 # ───────────────────────────────────────── model subcommands (need Evo2)
@@ -332,6 +366,14 @@ def main():  # noqa: D103
         if needs_labels:
             p.add_argument("--labels", required=True)
         p.set_defaults(func=fn)
+    pan = sub.add_parser("annotate", parents=[common])
+    pan.add_argument("--acts", required=True)
+    pan.add_argument("--out", required=True)
+    pan.add_argument(
+        "--labels", default=None, help="comma-separated concept subset; default = all labels in the buffer"
+    )
+    pan.add_argument("--min-auroc", type=float, default=0.8)
+    pan.set_defaults(func=cmd_annotate)
     pe = sub.add_parser("extract", parents=[common])
     _add_model_args(pe, required=("--out",), max_tokens=200_000)
     pe.add_argument("--kingdoms", default="prok,euk")
