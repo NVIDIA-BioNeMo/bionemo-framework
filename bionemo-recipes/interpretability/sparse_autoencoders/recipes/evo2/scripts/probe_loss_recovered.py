@@ -112,6 +112,8 @@ def main():  # noqa: D103
         ids = engine.tokenize(KINGDOM_TAGS[kingdom] + dna)
         if len(ids) > 4:
             batches.append(torch.tensor([ids], dtype=torch.long, device=dev))
+    if not batches:
+        raise SystemExit(f"no evaluable sequences (>4 tokens) from {args.fasta}; check the FASTA / --seq-len")
 
     def fwd(ids):
         return gen(input_ids=ids, position_ids=None, attention_mask=None, labels=None, runtime_gather_output=True)

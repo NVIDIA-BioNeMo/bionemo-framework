@@ -24,7 +24,7 @@ this driver only knows how to build/load Evo2 buffers and pick label sets.
   probe.py euk-f1        --fasta .. --gff ..    RefSeq gene-structure domain-F1 (needs the model)
   probe.py domain-eval   --fasta .. --track ..  user annotated dataset -> per-feature domain-F1 + AUROC vs
                                                 any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
-  probe.py loss-recovered [...]                 fidelity via sae.eval.loss_recovered (needs the model)
+  (SAE fidelity / loss-recovered lives in the separate probe_loss_recovered.py script — see step 5 below)
 
 Example end-to-end flow (7B / layer 26; $CKPT = MBridge dir, $SAE = trained SAE .pt):
 
@@ -86,8 +86,14 @@ def _z(X, tr):
 def _load(a):
     """Load the probing buffer + resolve requested label names (default: all labels in the buffer)."""
     buf = ActivationBuffer.load(a.acts)
-    labels = a.labels.split(",") if getattr(a, "labels", None) else list(buf.label_names)
-    return buf, [t for t in labels if t in buf.name_idx]
+    if getattr(a, "labels", None):
+        names = a.labels.split(",")
+        unknown = [t for t in names if t not in buf.name_idx]
+        if unknown:
+            raise SystemExit(f"unknown label(s) {unknown}; buffer has: {list(buf.label_names)}")
+    else:
+        names = list(buf.label_names)
+    return buf, names
 
 
 # ───────────────────────────────────────── buffer-only subcommands (no model)
@@ -113,7 +119,7 @@ def _eval_matrix(mat, buf, names, tr, te, dev, steps, wd):
     for n in names:
         ytr = torch.from_numpy(buf.labels[tr.numpy(), buf.name_idx[n]]).to(dev).float()
         yte = torch.from_numpy(buf.labels[te.numpy(), buf.name_idx[n]]).to(dev)
-        if ytr.sum() in (0, len(ytr)) or yte.sum() == 0:
+        if ytr.sum() in (0, len(ytr)) or yte.sum() in (0, len(yte)):
             out[n] = (float("nan"), float("nan"))
             continue
         w, b = fit_logreg(Xz[tr], ytr, steps=steps, wd=wd)
@@ -157,8 +163,8 @@ def cmd_codon_aa(a):  # noqa: D103
         if nm not in z.files:
             continue
         X = torch.from_numpy(z[nm]).to(dev).float()
-        Xz = (X - X.mean(0)) / (X.std(0) + 1e-6)
         tr, te = split_indices(X.shape[0], a.test_frac, a.seed)
+        Xz = _z(X, tr)  # standardize on the train split only (no test-set leakage)
         _, ca, _ = decode_eval(Xz[tr], codon[tr], Xz[te], codon[te], ncod, steps=a.steps, wd=a.weight_decay)
         _, aaa, _ = decode_eval(Xz[tr], aa[tr], Xz[te], aa[te], naa, steps=a.steps, wd=a.weight_decay)
         trn = torch.from_numpy(np.nonzero(~np.isin(codon_np, hidx))[0]).to(dev)
@@ -348,7 +354,7 @@ def _add_model_args(p, *, required=(), max_tokens=160_000):
     p.add_argument("--max-tokens", type=int, default=max_tokens)
     p.add_argument("--seq-len", type=int, default=1024)
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--auroc-device", default="cuda:1")
+    p.add_argument("--auroc-device", default=None, help="device for the AUROC matrix; defaults to --device")
 
 
 def main():  # noqa: D103
@@ -401,6 +407,8 @@ def main():  # noqa: D103
     pd.add_argument("--organism", default="Human")
     pd.set_defaults(func=cmd_domain_eval)
     args = ap.parse_args()
+    if getattr(args, "auroc_device", None) is None:  # default the AUROC matrix to the model device
+        args.auroc_device = getattr(args, "device", "cuda:0")
     torch.set_grad_enabled(False)
     args.func(args)
 
