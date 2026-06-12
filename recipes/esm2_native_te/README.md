@@ -67,13 +67,13 @@ docker run -it --gpus all --network host --ipc=host --rm -v ${PWD}:/workspace/bi
 
 ### Performance Benchmarks
 
-![Performance Benchmarks](../../../docs/docs/assets/images/esm2/esm2_low_precision/esm2_15b_grouped_bars.png)
+![Performance Benchmarks](../../docs/docs/assets/images/esm2/esm2_low_precision/esm2_15b_grouped_bars.png)
 ESM-2 15B single-node pretraining benchmarks were conducted on 1 node (8 GPUs) across H200 (140 GB) and B200 (192 GB) hardware. We evaluate a progression of optimization strategies: PyTorch Flash Attention 2 (with and without torch.compile), Transformer Engine with BSHD and THD (sequence packing) layouts, and low-precision training with FP8 Block Scaling (H200), MXFP8, and NVFP4 (B200). On H200, moving from baseline FA2 to TE with FP8 Block Scaling yields a 4.4x improvement in unpadded tokens/s/GPU (1,630 → 7,119). On B200, the full optimization stack from FA2 to NVFP4 delivers a 7.3x speedup (2,958 → 21,476), with NVFP4 reaching over 2,000 TFLOPS per GPU. Sequence packing (THD) alone accounts for a 2.5–2.7x gain over padded BSHD on both platforms, while Blackwell-native low-precision formats (MXFP8, NVFP4) unlock an additional 1.3–1.8x on top of that. For more information on how low precision scales with model parameters see the next section.
 
 ### Low precision performance benchmarks
 
-![Performance Benchmarks Low Precision](../../../docs/docs/assets/images/esm2/esm2_low_precision/esm2_8gpu_speedup.png)
-![Performance Benchmarks Low Precision](../../../docs/docs/assets/images/esm2/esm2_low_precision/esm2_8gpu_tflops.png)
+![Performance Benchmarks Low Precision](../../docs/docs/assets/images/esm2/esm2_low_precision/esm2_8gpu_speedup.png)
+![Performance Benchmarks Low Precision](../../docs/docs/assets/images/esm2/esm2_low_precision/esm2_8gpu_tflops.png)
 In the above plots, we can see both the speedup over BF16 training as well as TFLOPS per gpu for the various GPU SKUs. Moreover, as we increase the scale of our models, the benefits of low precision training are apparent.
 This is because at smaller parameter models (such as 650M, 3B) etc, the cost to quantize activations from high precision to low
 precision outweights the benefits of performing matrix multiplication with low precision. However, as our models scale up in
@@ -85,13 +85,13 @@ Note: these plots were using our [fsdp2](./train_fsdp2.py) script.
 
 #### MXFP8
 
-![Convergence Benchmarks MXFP8](../../../docs/docs/assets/images/esm2/esm2_low_precision/esm2-15b-b300-mxfp8-10node-conv.svg)
+![Convergence Benchmarks MXFP8](../../docs/docs/assets/images/esm2/esm2_low_precision/esm2-15b-b300-mxfp8-10node-conv.svg)
 In the above plot, for our ESM2-15B model that was trained with FSDP2 using 80 B300 GPUs nodes for 10 hours. We can clearly see that
 our MXFP8 run and our BF16 baseline run have the same results. A perfect match in convergence.
 
 #### NVFP4
 
-![Convergence Benchmarks NVFP4](../../../docs/docs/assets/images/esm2/esm2_low_precision/esm2-15b-b300-nvfp4-10node-conv.svg)
+![Convergence Benchmarks NVFP4](../../docs/docs/assets/images/esm2/esm2_low_precision/esm2-15b-b300-nvfp4-10node-conv.svg)
 In the above plot, for our ESM2-15B model, we show several lines. Each experiment shows a unique configuration using a custom
 amount of `fp4_layers` per run (more info on how to enable this below). Moreover, the experiments can be read as
 `esm2-15b-b300-mxfp8-fp4_layer_start-fp4_layer_end-N-10-mbs-26-b300` which denotes at which point we start and end the fp4 layers.

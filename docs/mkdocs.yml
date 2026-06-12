@@ -67,6 +67,9 @@ plugins:
           paths:
             - ../models/*/src
             - ../recipes/*/src
+            - ../interpretability/*/*/src
+            - ../interpretability/*/*/*/src
+            - ../interpretability/*/*/*/*/src
           options:
             docstring_options:
               warnings: false

@@ -35,7 +35,7 @@ import torch
 
 # ── Path setup ──────────────────────────────────────────────────────────────────
 # Import both the ptl_te recipe model and the native_te model.
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Force non-exact (standard TETransformerLayer) mode for ptl_te.
 os.environ["CODON_FM_TE_IMPL"] = "nonexact"

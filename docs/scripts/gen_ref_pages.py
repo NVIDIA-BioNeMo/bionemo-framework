@@ -351,6 +351,16 @@ def write_directory_index(dest_dir: Path, title: str, entries: list[Path]) -> No
     logger.info("Added generated index: %s", index_file)
 
 
+def write_generated_tutorials_index() -> None:
+    """Write the top-level generated tutorials index page."""
+    index_file = Path("main/examples/index.md")
+    with mkdocs_gen_files.open(index_file, "w") as fd:
+        fd.write("# Generated Tutorials\n\n")
+        fd.write("Tutorials generated from recipe notebooks are listed in this section.\n")
+
+    logger.info("Added generated index: %s", index_file)
+
+
 def copy_docs_from_dir(source_dir: Path, dest_dir: Path, root: Path, log_prefix: str) -> list[Path]:
     """Copy Markdown and notebook files from a directory tree.
 
@@ -501,17 +511,25 @@ def copy_support_files(source_dir: Path, dest_dir: Path, root: Path, log_prefix:
 
 
 def generate_api_reference() -> None:
-    """Generate API reference documentation for recipe and model source directories."""
+    """Generate API reference documentation for import-light model and interpretability packages."""
     root = Path(__file__).parent.parent.parent
-    source_roots = itertools.chain((root / "models").rglob("src"), (root / "recipes").rglob("src"))
+    source_roots = [
+        (src, ())
+        for src in itertools.chain((root / "models").rglob("src"), (root / "interpretability").rglob("src"))
+        if "src" not in src.relative_to(root).parts[:-1]
+    ]
+    source_roots.append((root / "recipes" / "evo2_megatron" / "src", ("bionemo", "common")))
 
-    for src in source_roots:
+    for src, required_prefix in source_roots:
         # Process Python files
         for path in sorted(src.rglob("*.py")):
             module_path = path.relative_to(src).with_suffix("")
             doc_path = path.relative_to(src).with_suffix(".md")
             full_doc_path = Path("main/references/API_reference") / doc_path
             parts = tuple(module_path.parts)
+
+            if required_prefix and parts[: len(required_prefix)] != required_prefix:
+                continue
 
             if parts[-1] in ("__init__", "__main__"):
                 continue
@@ -682,6 +700,7 @@ def generate_pages() -> None:
     generate_api_reference()
 
     # Process recipes
+    write_generated_tutorials_index()
     get_recipes_assets(recipes_dir, root)
     get_recipes_readmes(recipes_dir, root)
 

@@ -14,7 +14,7 @@ docker run --rm -it -p 8000:8000 \
   bionemo-docs:latest
 ```
 
-Then open `http://0.0.0.0:8000`.
+Then open `http://localhost:8000`.
 
 ## Adding Docs
 

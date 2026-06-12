@@ -21,7 +21,7 @@ results use GBS 384 on 6× H100 nodes (48 GPUs). Note that we also use bf16/fp32
 which may also contribute to its lower test performance.
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_convergence_vs_megatron.png" alt="OpenGenome2 7B convergence vs Megatron" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_convergence_vs_megatron.png" alt="OpenGenome2 7B convergence vs Megatron" width="80%" />
 </p>
 
 | Model                      | Step / checkpoint | Train loss | Mean Test loss | Mean Test Perplexity |
@@ -92,7 +92,7 @@ As seen in the table and chart below, using THD with our recipe provides ~80-85%
 | BSHD (this recipe) | 3,145,728                    | 5,380                   |
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_throughput_comparison.png" alt="BSHD vs THD throughput comparison" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_throughput_comparison.png" alt="BSHD vs THD throughput comparison" width="80%" />
 </p>
 
 ## How to use this recipe
