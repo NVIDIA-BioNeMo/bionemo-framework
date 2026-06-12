@@ -144,6 +144,35 @@ def best_single_train_test(Xtr, ytr, Xte, yte, chunk=2048):
     return float(1 - a_te if flip else a_te)
 
 
+@torch.no_grad()
+def annotate_features(codes, labels, label_names, min_auroc: float = 0.8, chunk: int = 1024):
+    """Assign each feature the concept it best separates (by AUROC) -> the feature->label table.
+
+    The persistence half of probing: turns a buffer (codes + concept labels) into per-feature
+    annotations. For each feature, takes the concept with the highest AUROC and keeps it only if
+    that AUROC >= ``min_auroc`` (unconfident features stay unlabeled).
+
+    Args:
+        codes: [N, F] feature activations.
+        labels: [N, L] bool concept masks.
+        label_names: length-L concept names.
+        min_auroc: keep a feature's annotation only if its best AUROC clears this.
+        chunk: feature chunk size for ``auroc_all``.
+
+    Returns:
+        ``[{"feature_id": int, "label": str, "auroc": float}]`` sorted by feature_id.
+    """
+    au = auroc_all(codes, labels, chunk=chunk)  # [F, L]
+    best = au.max(dim=1)
+    names = list(label_names)
+    out = []
+    for f in range(au.shape[0]):
+        score = float(best.values[f])
+        if score >= min_auroc:
+            out.append({"feature_id": int(f), "label": str(names[int(best.indices[f])]), "auroc": round(score, 4)})
+    return out
+
+
 # ───────────────────────────────────────────────────────────── linear probes
 def fit_logreg(Xtr, ytr, steps=400, lr=0.05, wd=1e-2):
     """Fit a logistic-regression probe (Adam + BCE-with-logits); returns (w, b)."""

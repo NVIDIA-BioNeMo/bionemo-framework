@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from sae.eval.probing import (
     ActivationBuffer,
+    annotate_features,
     auroc_all,
     best_single_train_test,
     decode_eval,
@@ -104,6 +105,19 @@ def test_decode_eval_recovers_separable_classes():
     xr, yr = torch.randn(120, dim), torch.randint(0, nclass, (120,))
     acc_rand, _, _ = decode_eval(xr[:90], yr[:90], xr[90:], yr[90:], nclass, steps=400, lr=0.1)
     assert acc_rand < 0.6
+
+
+def test_annotate_features_assigns_best_concept_above_threshold():
+    """Each feature gets the concept it best separates; unconfident features stay unlabeled."""
+    torch.manual_seed(0)
+    n = 200
+    labels = torch.stack([torch.arange(n) % 2 == 0, torch.arange(n) < n // 2], 1)  # [N, 2]: 'even', 'first_half'
+    detector = labels[:, 0].float() + torch.randn(n) * 0.01  # cleanly tracks 'even'
+    noise = torch.randn(n)  # tracks nothing
+    codes = torch.stack([detector, noise], 1)  # [N, 2 features]
+    ann = annotate_features(codes, labels, ["even", "first_half"], min_auroc=0.9)
+    assert {a["feature_id"]: a["label"] for a in ann} == {0: "even"}  # feature 1 (noise) excluded
+    assert ann[0]["auroc"] > 0.99
 
 
 def test_buffer_roundtrip_and_split(tmp_path):
