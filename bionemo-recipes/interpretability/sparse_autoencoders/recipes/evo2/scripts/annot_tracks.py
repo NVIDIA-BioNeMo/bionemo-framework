@@ -33,73 +33,58 @@ import gzip
 from collections import defaultdict
 
 
+def _open(path):
+    """Open a path for text reading, transparently handling ``.gz``."""
+    return (gzip.open if str(path).endswith(".gz") else open)(path, "rt")
+
+
 def read_fasta_dict(path: str) -> dict[str, str]:
     """Read a (multi-record) FASTA into ``{seq_id: sequence}`` (``.gz`` transparent).
 
-    ``seq_id`` is the first whitespace-delimited token of the header, so it matches the
-    chrom/seqid column of BED/GFF tracks.
+    ``seq_id`` is the first whitespace token of the header — matches the chrom/seqid of BED/GFF.
     """
-    opener = gzip.open if str(path).endswith(".gz") else open
     seqs: dict[str, str] = {}
     name, parts = None, []
-    with opener(path, "rt") as fh:
+    with _open(path) as fh:
         for line in fh:
             line = line.rstrip()
             if line.startswith(">"):
                 if name is not None:
                     seqs[name] = "".join(parts)
-                header = line[1:].strip().split()
-                name, parts = (header[0] if header else f"seq_{len(seqs)}"), []
-            else:
+                tok = line[1:].split()
+                name, parts = (tok[0] if tok else f"seq_{len(seqs)}"), []
+            elif line:
                 parts.append(line)
     if name is not None:
         seqs[name] = "".join(parts)
     return seqs
 
 
-def _parse_bed(path):
-    """Yield (chrom, start0, end0) from a BED file (0-based, half-open — used as-is)."""
-    opener = gzip.open if str(path).endswith(".gz") else open
-    with opener(path, "rt") as fh:
+def _intervals(path, fmt, feature_type=None):
+    """Yield (seqid, start0, end0) from BED (0-based) or GFF/GTF (1-based -> 0-based half-open).
+
+    GFF rows are optionally filtered to a single column-3 ``feature_type`` (e.g. ``exon``).
+    """
+    chrom_i, start_i, end_i, off = (0, 1, 2, 0) if fmt == "bed" else (0, 3, 4, 1)
+    with _open(path) as fh:
         for line in fh:
-            if not line.strip() or line.startswith(("#", "track", "browser")):
+            if not line.strip() or line[0] == "#" or line.startswith(("track", "browser")):
                 continue
             f = line.split("\t")
-            if len(f) < 3:
+            if len(f) <= end_i or (feature_type and fmt != "bed" and f[2] != feature_type):
                 continue
-            yield f[0], int(f[1]), int(f[2])
+            yield f[chrom_i], int(f[start_i]) - off, int(f[end_i])
 
 
-def _parse_gff(path, feature_type=None):
-    """Yield (seqid, start0, end0) from GFF/GTF (1-based inclusive -> 0-based half-open)."""
-    opener = gzip.open if str(path).endswith(".gz") else open
-    with opener(path, "rt") as fh:
-        for line in fh:
-            if line.startswith("#") or not line.strip():
-                continue
-            f = line.rstrip("\n").split("\t")
-            if len(f) < 5:
-                continue
-            if feature_type and f[2] != feature_type:
-                continue
-            yield f[0], int(f[3]) - 1, int(f[4])
+def load_track(path, feature_type=None, fmt=None):
+    """Load one annotation track into ``{seqid: [(start0, end0), ...]}`` (0-based half-open, sorted).
 
-
-def load_track(path: str, feature_type: str | None = None, fmt: str | None = None) -> dict[str, list[tuple[int, int]]]:
-    """Load one annotation track into ``{seqid: [(start0, end0), ...]}`` (0-based half-open).
-
-    Args:
-        path: BED or GFF/GTF file (``.gz`` ok).
-        feature_type: GFF only — keep just this column-3 type (e.g. ``"exon"``, ``"ncRNA"``).
-        fmt: ``"bed"`` / ``"gff"``; inferred from the extension when omitted.
-
-    Returns:
-        Intervals grouped by sequence id, each sorted. Every interval is one instance.
+    ``fmt`` (``bed``/``gff``) is inferred from the extension; ``feature_type`` filters GFF column 3.
+    Every interval is one annotation instance.
     """
-    fmt = fmt or ("gff" if str(path).endswith((".gff", ".gff3", ".gtf", ".gff.gz", ".gff3.gz")) else "bed")
-    rows = _parse_gff(path, feature_type) if fmt == "gff" else _parse_bed(path)
-    by_seq: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    for chrom, s, e in rows:
+    fmt = fmt or ("gff" if str(path).replace(".gz", "").endswith((".gff", ".gff3", ".gtf")) else "bed")
+    by_seq = defaultdict(list)
+    for chrom, s, e in _intervals(path, fmt, feature_type):
         if e > s:
             by_seq[chrom].append((s, e))
     return {k: sorted(v) for k, v in by_seq.items()}
