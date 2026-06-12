@@ -53,7 +53,12 @@ class ActivationBuffer:
 
     @classmethod
     def load(cls, path: str) -> "ActivationBuffer":
-        """Load an ActivationBuffer from an .npz written by save()."""
+        """Load an ActivationBuffer from an .npz written by save().
+
+        Warning:
+            Uses ``allow_pickle=True`` (the per-concept instance dict is an object array);
+            only load buffers from trusted sources.
+        """
         z = np.load(path, allow_pickle=True)
         inst = {k[5:]: z[k] for k in z.files if k.startswith("inst_")}
         return cls(
@@ -240,6 +245,8 @@ def domain_f1(codes, fmax, concept_mask, inst_ids, thresholds=(0.15, 0.3, 0.5, 0
     n_inst = len(uniq)
     if n_inst == 0:
         return torch.zeros(F, device=dev), torch.zeros(F, device=dev)
+    # size = max instance id + 2: +1 to index by the max id itself, +1 headroom so a -1
+    # sentinel never indexes out of bounds when remapped.
     remap = torch.full((int(inst_ids.max().item()) + 2,), -1, device=dev, dtype=torch.long)
     remap[uniq.long()] = torch.arange(n_inst, device=dev)
     inst_c = torch.where(valid, remap[inst_ids.long()], torch.full_like(inst_ids, -1, dtype=torch.long))
