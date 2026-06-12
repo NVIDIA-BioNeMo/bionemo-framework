@@ -1216,6 +1216,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
             featureListRef={featureListRef}
             endOfListRef={endOfListRef}
             featureRefs={featureRefs}
+            onLoadMore={() => setDisplayedCardCount(c => Math.min(c + 200, filteredFeatures.length))}
           />
         </div>
       </div>

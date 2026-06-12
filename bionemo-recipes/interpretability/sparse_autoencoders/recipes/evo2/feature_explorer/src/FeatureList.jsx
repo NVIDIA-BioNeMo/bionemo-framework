@@ -27,6 +27,7 @@ function FeatureListComponent({
   featureListRef,
   endOfListRef,
   featureRefs,
+  onLoadMore,
 }) {
   const visibleFeatures = filteredFeatures.slice(0, displayedCardCount)
   const clickedIsVisible = clickedFeatureId != null &&
@@ -67,9 +68,16 @@ function FeatureListComponent({
       {/* Sentinel element for infinite scroll detection */}
       <div ref={endOfListRef} style={{ height: '1px' }} />
       {displayedCardCount < filteredFeatures.length && (
-        <div style={{ padding: '12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>
-          Scroll to load more... ({visibleFeatures.length} of {filteredFeatures.length})
-        </div>
+        <button
+          onClick={onLoadMore}
+          style={{
+            padding: '10px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px',
+            cursor: 'pointer', background: 'transparent', border: '1px solid var(--border, #555)',
+            borderRadius: '6px', width: '100%',
+          }}
+        >
+          Load more — showing {visibleFeatures.length} of {filteredFeatures.length} (search/sort to find specific features)
+        </button>
       )}
       {filteredFeatures.length === 0 && clickedFeatureId == null && (
         <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-secondary)' }}>
