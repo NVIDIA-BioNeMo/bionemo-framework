@@ -50,7 +50,7 @@ def read_fasta(path):  # noqa: D103
 
 
 def sample_sequences(fasta, max_tokens, seq_len, kingdoms=("prok", "euk"), seed=0):  # noqa: D103
-    from evo2_sae_infer.core import clean_dna
+    from evo2_sae.core import clean_dna
 
     kingdoms = list(kingdoms)
     pools = {k: [] for k in kingdoms}

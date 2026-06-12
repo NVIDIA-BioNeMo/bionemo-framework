@@ -41,7 +41,7 @@ sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent))
 
 from evo2_buffer import sample_sequences  # noqa: E402
-from evo2_sae_infer.core import Evo2SAE  # noqa: E402
+from evo2_sae.core import Evo2SAE  # noqa: E402
 from sae.eval.loss_recovered import evaluate_loss_recovered  # noqa: E402  (Jared's code)
 
 

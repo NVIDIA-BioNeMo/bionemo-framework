@@ -241,7 +241,7 @@ def _encode_windows(eng, windows, tag_ids, lab_keys, inst_keys, tot, a):
 def cmd_euk(a):
     """Eukaryotic exon/intron/CDS domain-adjusted F1 vs shuffle null (chr21 FASTA+GFF)."""
     from euk_windows import build_windows
-    from evo2_sae_infer.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
+    from evo2_sae.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
     from sae.eval.probing import domain_f1
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
@@ -284,7 +284,7 @@ def cmd_domain_eval(a):
     domain-F1 (precision-per-nt, recall-per-annotation) and — threshold-free — by AUROC.
     """
     from annot_tracks import label_windows, load_track, read_fasta_dict
-    from evo2_sae_infer.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
+    from evo2_sae.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
     from sae.eval.probing import auroc_all, domain_f1
 
     tracks = {}
@@ -315,7 +315,7 @@ def cmd_domain_eval(a):
 
 def cmd_extract(a):  # noqa: D103
     from evo2_buffer import build_buffer, sample_sequences
-    from evo2_sae_infer.core import Evo2SAE
+    from evo2_sae.core import Evo2SAE
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
     label_names = list(L.LABELERS.keys())
