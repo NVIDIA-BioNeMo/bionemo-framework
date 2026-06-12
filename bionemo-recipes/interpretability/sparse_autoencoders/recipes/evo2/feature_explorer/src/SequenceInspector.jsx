@@ -191,6 +191,16 @@ export function resolveFeatureId(catalog, q) {
   return hit ? hit.id : null
 }
 
+// In-UI feature renames live in localStorage (featureTitle_<id>). Overlay them so a name set
+// in the atlas also shows in the steering/inspector pickers (cross-tab carry-over, per browser).
+export function userLabel(id) {
+  try {
+    return localStorage.getItem(`featureTitle_${id}`) || null
+  } catch {
+    return null
+  }
+}
+
 // Shared by-name feature picker (used by both tabs). withStrength adds a clamp value.
 // CLAMP_MAX mirrors the backend MAX_CLAMP_STRENGTH guard — the UI can't request a target
 // the engine would reject/cap. Steering clamps an absolute SAE-code value (0 = suppress;
@@ -207,6 +217,7 @@ export function FeaturePicker({ catalog, rows, setRows, withStrength, nFeatures 
       {rows.map((r, i) => {
         const fid = resolveFeatureId(catalog, r.q)
         const f = fid != null ? byId[fid] : null
+        const ul = fid != null ? userLabel(fid) : null
         const outOfRange = fid != null && nFeatures != null && (fid < 0 || fid >= nFeatures)
         return (
           <div key={i} style={S.pickRow}>
@@ -215,11 +226,13 @@ export function FeaturePicker({ catalog, rows, setRows, withStrength, nFeatures 
             <span style={{ ...S.resolved, ...(outOfRange ? { color: '#ef4444' } : {}) }}>
               {outOfRange
                 ? `✗ #${fid} out of range (0–${nFeatures - 1})`
-                : f
-                  ? `→ #${f.id} ${f.label}`
-                  : fid != null
-                    ? `→ #${fid} (unlabeled)`
-                    : '— not resolved'}
+                : ul
+                  ? `→ #${fid} ${ul}`
+                  : f
+                    ? `→ #${f.id} ${f.label}`
+                    : fid != null
+                      ? `→ #${fid} (unlabeled)`
+                      : '— not resolved'}
             </span>
             {withStrength && (
               <span style={S.strengthWrap}>clamp&nbsp;to&nbsp;
@@ -236,7 +249,7 @@ export function FeaturePicker({ catalog, rows, setRows, withStrength, nFeatures 
       })}
       <div><button onClick={add} style={S.addBtn}>+ Add feature</button></div>
       <datalist id="evo2-feature-catalog">
-        {catalog.slice(0, 2000).map((f) => <option key={f.id} value={`#${f.id} ${f.label}`} />)}
+        {catalog.slice(0, 2000).map((f) => <option key={f.id} value={`#${f.id} ${userLabel(f.id) || f.label}`} />)}
       </datalist>
     </div>
   )

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useHealth, postJSON, getJSON, cleanDNA } from './backend'
-import { BackendBanner, OrganismField, FeaturePicker, resolveFeatureId, Row } from './SequenceInspector'
+import { BackendBanner, OrganismField, FeaturePicker, resolveFeatureId, Row, userLabel } from './SequenceInspector'
 
 // Generative steering: autoregressively generate DNA from Evo2 while ADDITIVELY
 // clamping one or more SAE features (picked by name) on the generated
@@ -148,7 +148,7 @@ function SteerResult({ result }) {
           Clamped {feats.length} feature{feats.length === 1 ? '' : 's'} on the generated continuation ({result.organism}).&nbsp;
           {feats.map((f) => (
             <span key={f.id} style={{ marginRight: '12px' }}>
-              <b>#{f.id} {f.label}</b> mean <b style={{ color: 'var(--accent)' }}>{mean(gen.activations[f.id]).toFixed(3)}</b>
+              <b>#{f.id} {userLabel(f.id) || f.label}</b> mean <b style={{ color: 'var(--accent)' }}>{mean(gen.activations[f.id]).toFixed(3)}</b>
               {base ? ` (baseline ${mean(base.activations[f.id]).toFixed(3)})` : ''} @ clamp {f.strength}
             </span>
           ))}
