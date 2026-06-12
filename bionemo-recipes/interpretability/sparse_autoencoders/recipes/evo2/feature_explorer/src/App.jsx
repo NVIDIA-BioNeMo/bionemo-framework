@@ -292,6 +292,16 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
 
         setCategoryColumns(detectedCategories)
 
+        // Default color-by so the atlas is colored on load (not one flat color):
+        // cluster_id if present, else a frequency/activation metric, else the first column.
+        const _names = detectedCategories.map(c => c.name)
+        const _defaultColor =
+          ['cluster_id', 'log_frequency', 'activation_freq', 'max_activation'].find(n => _names.includes(n)) || _names[0]
+        if (_defaultColor) {
+          setSelectedCategory(_defaultColor)
+          setHistMetric3(_defaultColor)
+        }
+
         // Create crossfilter selection
         brushRef.current = vg.Selection.crossfilter()
 
@@ -778,7 +788,8 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
       result = result.filter(f =>
         f.description?.toLowerCase().includes(q) ||
         f.feature_id.toString().includes(q) ||
-        f.best_annotation?.toLowerCase().includes(q)
+        f.best_annotation?.toLowerCase().includes(q) ||
+        (localStorage.getItem(`featureTitle_${f.feature_id}`) || '').toLowerCase().includes(q)
       )
     }
 

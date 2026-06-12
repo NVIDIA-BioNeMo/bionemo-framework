@@ -13,13 +13,15 @@ export default function GenerativeSteering() {
   const organismTags = health.info?.organism_tags
 
   const [catalog, setCatalog] = useState([])
-  const [organism, setOrganism] = useState('Human')
+  const [organism, setOrganism] = useState('E. coli')
   const [tag, setTag] = useState(null)
-  const [prompt, setPrompt] = useState('')
-  const [rows, setRows] = useState([{ q: '', strength: 0 }])
+  // Open as a working demo: a coding-DNA seed + a known-steerable feature (#643) clamped to 0
+  // (suppress), greedy decoding, baseline comparison on — so the first "Generate" visibly steers.
+  const [prompt, setPrompt] = useState('ATGACCATGATTACGGATTCACTGGCCGTCGTTTTACAACGTCGTGACTGGGAAAACCCTG')
+  const [rows, setRows] = useState([{ q: '643', strength: 0 }])
   const [nTokens, setNTokens] = useState(120)
-  const [temperature, setTemperature] = useState(1.0)
-  const [compareBaseline, setCompareBaseline] = useState(false)
+  const [temperature, setTemperature] = useState(0)
+  const [compareBaseline, setCompareBaseline] = useState(true)
 
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
