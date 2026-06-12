@@ -86,7 +86,8 @@ def build_app(engine: Evo2SAE) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["*"], allow_headers=["*"])
 
     def _require_ready():
-        _require_ready()
+        if not engine.ready:
+            raise HTTPException(503, "Backend not ready")
 
     @app.get("/health")
     def health():
