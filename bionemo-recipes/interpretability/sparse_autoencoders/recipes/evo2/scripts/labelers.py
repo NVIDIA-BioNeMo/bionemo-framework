@@ -118,6 +118,18 @@ def _last(ctx):
     return _dna_mask(ctx, d)
 
 
+# --------------------------------------------------------------------- single base
+# Evo2 is nucleotide-level (1 token = 1 base), so the most atomic feature is a single-base
+# detector. One labeler per nucleotide — fires at every position whose base equals it —
+# so probing can surface features that monosemantically track a single base (e.g. base_G).
+def _register_base_labelers():
+    for base in "ACGT":
+        labeler(f"base_{base}")(lambda ctx, b=base: _dna_mask(ctx, _bytes(ctx.dna) == ord(b)))
+
+
+_register_base_labelers()
+
+
 # --------------------------------------------------------------------- composition
 def _gc_window(dna: str, radius: int = 10) -> np.ndarray:
     arr = _bytes(dna)
