@@ -256,7 +256,9 @@ def run_atlas(args):
     pq.write_table(atlas, out / "features_atlas.parquet", compression="snappy")
     pq.write_table(pa.table(cols), out / "feature_metadata.parquet", compression="snappy")
     live = int((peak > 0).sum())
-    print(f"[atlas] wrote features_atlas + feature_metadata ({n_features} features, {live} live, {total:,} tokens) -> {out}")
+    print(
+        f"[atlas] wrote features_atlas + feature_metadata ({n_features} features, {live} live, {total:,} tokens) -> {out}"
+    )
 
 
 # --------------------------------------------------------------------------- examples mode
@@ -368,7 +370,9 @@ def run_examples(args):
     peak = max_acts.max(dim=0).values
     k = min(args.n_examples, len(seqs))
     top_idx = torch.topk(max_acts, k=k, dim=0).indices
-    rows = _pass2_examples(eng, seqs, ids, tag, tag_len, top_idx, peak, eng.labels, args.max_example_bp, args.batch_size)
+    rows = _pass2_examples(
+        eng, seqs, ids, tag, tag_len, top_idx, peak, eng.labels, args.max_example_bp, args.batch_size
+    )
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
