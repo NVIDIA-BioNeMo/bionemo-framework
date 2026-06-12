@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.0",
     "numpy>=1.20",
     "pyarrow>=23.0.0",
+    "biopython>=1.80",  # genetic code / translation in labelers.py
 ]
 
 # No package code lives here yet — the recipe is just an entry-point for
