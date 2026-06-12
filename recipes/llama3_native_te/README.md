@@ -49,7 +49,7 @@ for the list of dependencies.
 ### Performance Benchmarks
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/70b-cp-benchmarks.png" alt="Llama 3 Context Parallelism Benchmarks" width="100%" />
+  <img src="../../docs/docs/assets/images/recipes/70b-cp-benchmarks.png" alt="Llama 3 Context Parallelism Benchmarks" width="100%" />
 </p>
 
 Scaling Llama 3 70B with Context Parallelism (CP) on 32x NVIDIA GB300 GPUs (NVL32) with synthetic data of increasing
@@ -67,7 +67,7 @@ def compute_model_pflops(seq_len, global_batch_size, step_time_s):
 
 ### Low precision performance benchmarks
 
-![Performance Benchmarks Low Precision](../../../docs/docs/assets/images/llama3/llama3_8gpu_tflops.png)
+![Performance Benchmarks Low Precision](../../docs/docs/assets/images/llama3/llama3_8gpu_tflops.png)
 In the above plot we can see the performance increases as we lower the precision of our transformer layers across the 1B and 8B variant of LLAMA3.
 
 #### MXFP8 vs BF16 throughput on Llama-3.1 (Lingua / DCLM)
@@ -75,7 +75,7 @@ In the above plot we can see the performance increases as we lower the precision
 We benchmarked MXFP8 (`MXFP8BlockScaling`, E4M3) against the BF16 baseline using the Lingua / DCLM training setup on NVIDIA Blackwell GPUs. All runs use TransformerEngine, fused AdamW with FP32 master weights, and THD sequence packing.
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/llama3/lingua-8b-vs-70b-mxfp8-uplift.png" alt="MXFP8 throughput uplift over BF16 on Llama-3.1-8B vs 70B (single B300 node)" width="100%" />
+  <img src="../../docs/docs/assets/images/llama3/lingua-8b-vs-70b-mxfp8-uplift.png" alt="MXFP8 throughput uplift over BF16 on Llama-3.1-8B vs 70B (single B300 node)" width="100%" />
 </p>
 
 **Key finding:** plain MXFP8 over BF16 gives roughly the same ~30% throughput uplift on both 8B and 70B. Quantized model init (`qinit`) adds essentially nothing on 8B (+0.8 pp) but **adds ~10 percentage points on 70B (+9.7 pp)** — the per-layer quantize/dequantize work saved by qinit scales with depth (80 vs 32 transformer layers). On 70B, MXFP8 + qinit delivers a **+38.4% throughput gain over BF16** on a single B300 node.
@@ -88,7 +88,7 @@ The per-model charts below show the 3-way (BF16 / MXFP8 no-qinit / MXFP8 + qinit
 **Llama-3.1-8B** (1 node / 8× B300 SXM6 AC, mbs=4, grad_acc=1, gbs = 32 seqs / 262k tokens, seq_len = 8192):
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/llama3/lingua-8b-mxfp8-1node.png" alt="Llama-3.1-8B MXFP8 vs BF16 throughput (single-node 3-way)" width="100%" />
+  <img src="../../docs/docs/assets/images/llama3/lingua-8b-mxfp8-1node.png" alt="Llama-3.1-8B MXFP8 vs BF16 throughput (single-node 3-way)" width="100%" />
 </p>
 
 On a single B300 node, **MXFP8 + qinit (+31.1%) and MXFP8 without qinit (+30.4%) deliver essentially the same throughput gain over BF16**. At this layer count the per-layer quantize/dequantize saving qinit provides is small; the speedup comes mainly from the FP8 GEMMs themselves. Averaged over global step ∈ [500, 990].
@@ -96,7 +96,7 @@ On a single B300 node, **MXFP8 + qinit (+31.1%) and MXFP8 without qinit (+30.4%)
 **Llama-3.1-70B** (1 node / 8× B300 SXM6 AC, mbs=1, grad_acc=1, cp=2, dp=4, gbs = 4 seqs / ≈34k packed tokens, seq_len = 8192):
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/llama3/lingua-70b-mxfp8-1node.png" alt="Llama-3.1-70B MXFP8 vs BF16 throughput (single-node 3-way)" width="100%" />
+  <img src="../../docs/docs/assets/images/llama3/lingua-70b-mxfp8-1node.png" alt="Llama-3.1-70B MXFP8 vs BF16 throughput (single-node 3-way)" width="100%" />
 </p>
 
 On a single B300 node, **MXFP8 + qinit (+39.4%) pulls ahead of MXFP8 without qinit (+28.7%) — a ~10 percentage point gap that doesn't appear at 8B**. With 80 transformer layers, the per-step quantize/dequantize work avoided by qinit (the FP8 weight is already in compute format, so no on-the-fly cast every forward and backward) adds up to a meaningful throughput gain over the no-qinit path. Averaged over global step ∈ [500, 990]. We also separately measured `preserve_high_precision_init_val=True` (HPIV) and found it within 1% of the qinit-without-HPIV throughput, so HPIV's startup-time master-weight seeding is essentially free at steady state.
@@ -111,7 +111,7 @@ We also measured MXFP8 + qinit throughput at scale, on multi-node B200 with long
 **Llama-3.1-8B** (8 nodes / 64× B200, mbs=2, grad_acc=2, global batch = 256 seqs, seq_len = 8192):
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/llama3/lingua-7b-mxfp8-multinode.png" alt="Llama-3.1-8B MXFP8 vs BF16 throughput (multi-node)" width="100%" />
+  <img src="../../docs/docs/assets/images/llama3/lingua-7b-mxfp8-multinode.png" alt="Llama-3.1-8B MXFP8 vs BF16 throughput (multi-node)" width="100%" />
 </p>
 
 MXFP8 + qinit reaches **22,517 unpadded tokens / s / GPU vs 17,644 for BF16 — a +27.6% throughput gain (×1.28 speedup, −21.7% step time)**. Averaged over global step ∈ [500, 1000].
@@ -119,7 +119,7 @@ MXFP8 + qinit reaches **22,517 unpadded tokens / s / GPU vs 17,644 for BF16 — 
 **Llama-3.1-70B** (4 nodes / 32× B200, cp=2, dp=16, mbs=1, grad_acc=1, gbs = 16 seqs, seq_len = 8192):
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/llama3/lingua-70b-mxfp8-multinode.png" alt="Llama-3.1-70B MXFP8 vs BF16 throughput (multi-node)" width="100%" />
+  <img src="../../docs/docs/assets/images/llama3/lingua-70b-mxfp8-multinode.png" alt="Llama-3.1-70B MXFP8 vs BF16 throughput (multi-node)" width="100%" />
 </p>
 
 MXFP8 + qinit reaches **2,725 unpadded tokens / s / GPU vs 1,972 for BF16 — a +38.2% throughput gain (×1.40 speedup, −27.6% step time)**. Averaged over global step ∈ [100, 490]. The larger relative gain on 70B vs 8B at scale matches the size-dependent pattern shown in the single-node headline above.
@@ -136,8 +136,8 @@ Wandb runs:
 ### Convergence Benchmarks
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/llama3/lingua-1b-loss-curve.png" alt="Llama 3 Lingua 1B Loss Curve" width="49%" />
-  <img src="../../../docs/docs/assets/images/llama3/lingua-1b-step-time.png" alt="Llama 3 Lingua 1B Step Time" width="49%" />
+  <img src="../../docs/docs/assets/images/llama3/lingua-1b-loss-curve.png" alt="Llama 3 Lingua 1B Loss Curve" width="49%" />
+  <img src="../../docs/docs/assets/images/llama3/lingua-1b-step-time.png" alt="Llama 3 Lingua 1B Step Time" width="49%" />
 </p>
 
 We compared the convergence of this Llama3 recipe (with FSDP2) against NeMo 2.0

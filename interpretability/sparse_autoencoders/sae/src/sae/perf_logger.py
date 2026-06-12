@@ -43,6 +43,7 @@ class PerfLogger:
 
     Example:
         >>> perf_logger = PerfLogger(log_interval=10, use_wandb=True)
+        >>> learning_rate = 1e-4
         >>> for step, batch in enumerate(dataloader):
         ...     outputs = model(batch)
         ...     loss.backward()
@@ -53,7 +54,7 @@ class PerfLogger:
         ...         batch=batch,
         ...         loss_dict={'total': loss, 'mse': mse_loss, 'sparsity': sparsity_loss},
         ...         grad_norm=grad_norm,
-        ...         lr=optimizer.param_groups[0]['lr'],
+        ...         lr=learning_rate,
         ...     )
         >>> perf_logger.finish()
 

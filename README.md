@@ -14,7 +14,7 @@ The biological AI community actively prototypes model architectures and needs to
 ### Performance Benchmarks
 
 <p align="center">
-  <img src="docs/docs/assets/images/esm2/esm2_native_te_benchmarks.svg" width="600">
+  <img src="docs/docs/assets/images/esm2/esm2_native_te_benchmarks.svg" alt="ESM2 native TE benchmarks chart showing performance results" width="600">
   <br>
   <em> Training benchmarks for ESM-2 using the <code>esm2_native_te</code> recipe.</em>
 </p>
@@ -239,7 +239,7 @@ For detailed contribution guidelines, refer to our individual component READMEs:
 
 ## License
 
-This project is licensed under the terms described in [LICENSE/license.txt](LICENSE/license.txt).
+This project is licensed under the terms described in [LICENSE/license.txt](/LICENSE/license.txt).
 
 ## Support
 

@@ -48,7 +48,7 @@ in the figure below. The data was likely split by length or sequence similarity 
 partitioned into files.
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_data_sorting.png" alt="OpenGenome2 sequence length distribution across shards" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_data_sorting.png" alt="OpenGenome2 sequence length distribution across shards" width="80%" />
 </p>
 
 The median sequence length is ~2.2k bases and the mean is ~4k, but some sequences exceed 1M bases.
@@ -63,7 +63,7 @@ For context, the Megatron/NeMo baseline uses the **ShardedEden dataloader**, whi
 global shuffle:
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_megatron_sharded_eden_dataloader.png" alt="Megatron ShardedEden dataloader" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_megatron_sharded_eden_dataloader.png" alt="Megatron ShardedEden dataloader" width="80%" />
 </p>
 
 1. **Precomputed window index** — All 80 shards are indexed offline to produce a mapping of
@@ -78,7 +78,7 @@ This recipe replaces that pipeline with the HuggingFace streaming API.
 ## How this recipe handles data: HuggingFace streaming buffer
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_hf_streaming_buffer_original.png" alt="HF streaming buffer with original dataset" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_hf_streaming_buffer_original.png" alt="HF streaming buffer with original dataset" width="80%" />
 </p>
 
 The pipeline has five stages:
@@ -118,14 +118,14 @@ To address the limited batch diversity, we globally shuffle all sequences and re
 more Parquet files using [DuckDB](https://duckdb.org/):
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_resharding_duckdb.png" alt="Resharding pipeline with DuckDB" width="60%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_resharding_duckdb.png" alt="Resharding pipeline with DuckDB" width="60%" />
 </p>
 
 This produces 1,734 Parquet shards with sequences globally shuffled (no
 length ordering within any file) and uniformly distributed across files:
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_original_vs_reshuffled.png" alt="Original vs reshuffled data distribution" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_original_vs_reshuffled.png" alt="Original vs reshuffled data distribution" width="80%" />
 </p>
 
 With 48 ranks now streaming from ~36 shards each (instead of 1–2), and 8 workers per rank each
@@ -133,7 +133,7 @@ reading from different shards, the effective shuffle pool becomes
 `buffer_size × num_workers` across a much more diverse set of sequences. We also expect better performance because we can use more workers compared to the non sharded dataset.
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_hf_streaming_buffer_resharded.png" alt="HF streaming buffer with resharded dataset" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_hf_streaming_buffer_resharded.png" alt="HF streaming buffer with resharded dataset" width="80%" />
 </p>
 
 ### Creating your own resharded dataset
@@ -180,7 +180,7 @@ torchrun --nproc_per_node=8 train_fsdp2.py --config-name og2_7b_thd_gqa_global_s
 Overall, we recommend using the resharded dataset for best performance and batch diversity. If using the original dataset, we recommend using at least a 50k buffer (with 1 worker).
 
 <p align="center">
-  <img src="../../../docs/docs/assets/images/recipes/og2_summary_shuffling_approaches.png" alt="Summary of shuffling approaches" width="80%" />
+  <img src="../../docs/docs/assets/images/recipes/og2_summary_shuffling_approaches.png" alt="Summary of shuffling approaches" width="80%" />
 </p>
 
 ## Config mapping

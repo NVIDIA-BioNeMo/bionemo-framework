@@ -1,1 +1,1 @@
-- [Generated Tutorials](./)
+- [Generated Tutorials](index.md)

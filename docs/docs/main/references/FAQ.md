@@ -1,6 +1,6 @@
 # Frequently Asked Questions
 
-### Is BioNeMo Recipes free to use?
+## Is BioNeMo Recipes free to use?
 
 Yes, BioNeMo Recipes is free to use. BioNeMo Recipes code is licensed under the Apache 2.0 License. The Apache 2.0
 License is a permissive open-source license that allows users to freely use, modify, and distribute software. With this
@@ -19,7 +19,7 @@ for more information.
 BioNeMo Recipes is distributed as a Docker container through NVIDIA NGC. To download the pre-built Docker container
 and data assets, you will need a free NVIDIA NGC account.
 
-Alternatively, you can install individual recipe packages from within BioNeMo Recipes by following the corresponding
+Alternatively, you can install individual recipe directories from within BioNeMo Recipes by following the corresponding
 README pages the [BioNeMo Recipes GitHub](https://github.com/NVIDIA-BioNeMo/bionemo-framework). Please note that this is a
 beta feature and may require some additional effort to install seamlessly. We are actively working on testing this
 functionality and expect it will be a fully supported feature in future releases. You can review our
@@ -41,8 +41,8 @@ hardware, refer to the [Hardware and Software Prerequisites](../getting-started/
 
 Yes, BioNeMo Recipes is open source and we welcome contributions from organizations and individuals.
 You can do so either by forking the repository and directly opening a PR against our `main` branch from your fork or by
-[contacting us](https://www.nvidia.com/en-us/industries/healthcare/contact-sales/) fo r further assistance. BioNeMo
-Framework's mission is to stay extremely light weight and primarily support building blocks required for various AI
+[contacting us](https://www.nvidia.com/en-us/industries/healthcare/contact-sales/) for further assistance. BioNeMo
+Recipes' mission is to stay extremely light weight and primarily support building blocks required for various AI
 models. As such, we currently prioritize feature extensions, bug fixes, and new independent modules such as dataloaders,
 tokenizers, custom architecture blocks, and other reusable features over end-to-end model implementations. We might
 consider end-to-end model implementations on a case-by-case basis. If you're interested in this contribution of this

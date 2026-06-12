@@ -24,4 +24,4 @@ python ci/scripts/check_copied_files.py --fix
 
 ## Recipe Expectations
 
-Recipes should be self-contained, documented in their local README, and runnable from their own directory. Shared helper code used by megatron recipes lives in `bionemo.common` inside the recipe packages.
+Recipes should be self-contained, documented in their local README, and runnable from their own directory. Shared helper code used by megatron recipes lives in `bionemo.common` inside the recipe directories under `recipes/`.

@@ -91,7 +91,7 @@ collate_fn: thd
 # inherit and reuse this logic without modification.
 ############################################################
 checkout_script: |
-  cd /workspace/codonfm
+  cd /workspace
   git clone https://github.com/NVIDIA/bionemo-framework.git
   cd bionemo-framework
   if [ -n "${commit_sha}" ]; then
