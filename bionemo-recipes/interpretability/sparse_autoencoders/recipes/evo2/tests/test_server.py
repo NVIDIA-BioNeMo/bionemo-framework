@@ -50,6 +50,9 @@ class FakeEngine:
         codes[:, 0] = 1.0  # feature 0 fires everywhere
         return codes
 
+    def encode_batch(self, seqs, batch_size=8):
+        return [self.encode(s) for s in seqs]
+
     def top_features(self, codes, tag_len=0, k=8):
         return [{"feature_id": 0, "label": self.labels.get(0), "max_activation": 1.0}]
 
@@ -94,6 +97,19 @@ def test_annotate_rejects_non_dna(client):
 def test_generate_returns_sequence(client):
     b = client.post("/generate", json={"prompt": "ACGT", "organism": "None (raw DNA)"}).json()
     assert b["generation"]["sequence"]
+
+
+def test_gene_embed_returns_decodable_matrix(client):
+    import base64
+
+    import numpy as np
+
+    genes = [{"symbol": "g1", "sequence": "ACGTACGT"}, {"symbol": "g2", "sequence": "TTTTGGGG"}]
+    b = client.post("/gene_embed", json={"genes": genes, "min_firing": 1}).json()
+    assert {"G_b64", "Gmax_b64", "n_features", "n_genes", "genes"} <= set(b)
+    assert b["n_genes"] == 2 and len(b["genes"]) == 2
+    g = np.frombuffer(base64.b64decode(b["G_b64"]), dtype=np.float32)
+    assert g.size == b["n_genes"] * b["n_features"]  # [n_genes x n_features], the matrix the client UMAPs
 
 
 def test_endpoints_503_until_ready():

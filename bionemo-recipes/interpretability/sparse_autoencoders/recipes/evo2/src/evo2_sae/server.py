@@ -69,6 +69,15 @@ class GenerateRequest(BaseModel):
     compare_baseline: bool = False
 
 
+class GeneEmbedRequest(BaseModel):
+    """Request body for /gene_embed (embed many sequences into per-feature vectors for UMAP)."""
+
+    genes: list[dict]  # [{symbol, sequence, label?, species?}, ...]
+    organism: str = "None (raw DNA)"
+    tag: Optional[str] = None
+    min_firing: int = 10  # feature_stats keeps features firing in >= this many sequences
+
+
 def build_app(engine: Evo2SAE) -> FastAPI:
     """Build the FastAPI app; the engine is loaded once in the lifespan handler."""
 
@@ -175,5 +184,78 @@ def build_app(engine: Evo2SAE) -> FastAPI:
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    @app.post("/gene_embed")
+    def gene_embed(req: GeneEmbedRequest):
+        """Embed sequences for the Sequence-UMAP tab.
+
+        Each sequence -> Evo2 layer-L -> SAE -> pool over the DNA region into a per-feature
+        vector. One encode per sequence yields both mean- and max-pooled vectors (base64
+        float32 [n x n_features]) so the client can toggle pooling without re-running the model;
+        UMAP runs client-side. Also returns per-sequence metadata + feature stats.
+        """
+        if not engine.ready:
+            raise HTTPException(503, "Backend not ready")
+        import base64
+
+        import numpy as np
+
+        tag = engine.resolve_tag(req.organism, req.tag)
+        if tag is None:
+            raise HTTPException(400, f"Unknown organism '{req.organism}' and no custom tag")
+        tag_len = len(tag)
+        seqs, meta = [], []
+        for g in req.genes[:1000]:
+            dna = clean_dna(str(g.get("sequence", "")))
+            if len(dna) < 3:
+                continue
+            seqs.append(tag + dna)
+            meta.append(
+                {
+                    "gene_symbol": g.get("symbol") or g.get("gene_symbol") or f"gene{len(meta)}",
+                    "label": g.get("label"),
+                    "species": g.get("species"),
+                }
+            )
+        if not seqs:
+            raise HTTPException(400, "No valid gene sequences")
+
+        rows_mean, rows_max, meta_out = [], [], []
+        for codes, m in zip(engine.encode_batch(seqs), meta):  # codes: [S, n_features]
+            tl = tag_len if codes.shape[0] > tag_len else 0
+            seg = codes[tl:]  # DNA region only (drop the phylo-tag tokens)
+            if seg.shape[0] == 0:
+                continue
+            rows_mean.append(seg.mean(dim=0).numpy().astype(np.float32))
+            rows_max.append(seg.max(dim=0).values.numpy().astype(np.float32))
+            meta_out.append(m)
+        if not rows_mean:
+            raise HTTPException(400, "No valid gene sequences")
+
+        gmean = np.stack(rows_mean).astype(np.float32)  # [n_genes, n_features]
+        gmax = np.stack(rows_max).astype(np.float32)
+        n_firing = (gmax > 0).sum(0)  # TopK/ReLU codes >= 0 -> firing set is pooling-invariant
+        stats = []
+        for fid in np.nonzero(n_firing >= req.min_firing)[0]:
+            fid = int(fid)
+            col = gmean[:, fid]
+            stats.append(
+                {
+                    "feature_id": fid,
+                    "n_firing": int(n_firing[fid]),
+                    "mean_act_when_firing": float(col[col > 0].mean()) if (col > 0).any() else 0.0,
+                    "max_act": float(gmax[:, fid].max()),
+                    "label": engine.labels.get(fid),
+                }
+            )
+        stats.sort(key=lambda s: -s["n_firing"])
+        return {
+            "G_b64": base64.b64encode(gmean.tobytes()).decode(),
+            "Gmax_b64": base64.b64encode(gmax.tobytes()).decode(),
+            "n_features": int(gmean.shape[1]),
+            "n_genes": int(gmean.shape[0]),
+            "genes": meta_out,
+            "feature_stats": stats,
+        }
 
     return app

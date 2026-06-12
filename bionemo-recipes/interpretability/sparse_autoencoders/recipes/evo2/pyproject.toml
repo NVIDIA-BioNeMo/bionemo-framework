@@ -13,10 +13,17 @@ dependencies = [
     "torch>=2.0",
     "numpy>=1.20",
     "pyarrow>=23.0.0",
+    "scikit-learn>=1.3",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "pandas>=1.5",
 ]
+
+# Optional: nicer feature-atlas layout. umap-learn pulls numba (needs NumPy <= 2.3), so it
+# can't live in the megatron venv (NumPy 2.5); `dashboard.py atlas --layout auto` uses it
+# when present and falls back to the numba-free pca/tsne otherwise.
+[project.optional-dependencies]
+umap = ["umap-learn>=0.5"]
 
 # The `evo2_sae` package (src/) holds the live inference engine + server + CLI;
 # scripts/ (extract, train) are standalone entry points alongside it.
