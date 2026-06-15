@@ -188,7 +188,7 @@ psutil==7.0.0
 ptyprocess==0.7.0
 PuLP==3.2.2
 pure_eval==0.2.3
-pyarrow==21.0.0
+pyarrow==23.0.1
 pybind11-global==3.0.0
 pybind11==3.0.0
 pycparser==2.22
