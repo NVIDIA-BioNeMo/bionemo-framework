@@ -46,8 +46,10 @@ predict_eden = "bionemo.eden.run.predict:main"
 eden_convert_nemo2_to_mbridge = "bionemo.eden.utils.checkpoint.nemo2_to_mbridge:main"
 eden_export_mbridge_to_hf = "bionemo.eden.utils.checkpoint.eden_mbridge_hf:main_export"
 eden_convert_hf_to_mbridge = "bionemo.eden.utils.checkpoint.eden_mbridge_hf:main_import"
-download_bionemo_data = "bionemo.common.data.load:entrypoint"
-bionemo_fasta_to_jsonl = "bionemo.common.io.fasta_to_jsonl:main"
+download_bionemo_data = "bionemo.core.data.load:entrypoint"
+bionemo_fasta_to_jsonl = "bionemo.recipeutils.io.fasta_to_jsonl:main"
+bionemo_precompute_windows = "bionemo.recipeutils.data.basecamp.sharded_dataset:main_precompute"
+bionemo_remove_optimizer = "bionemo.recipeutils.checkpoint.remove_optimizer:main"
 eden_remove_optimizer = "bionemo.eden.utils.checkpoint.eden_remove_optimizer:main"
 
 [tool.setuptools.packages.find]
