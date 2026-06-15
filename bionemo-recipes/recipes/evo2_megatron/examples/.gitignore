@@ -16,3 +16,9 @@ preprocessed_data/
 pretraining_demo/
 brca1_fasta_files/
 brca1/
+benchmark_data/
+GFMBench-api/
+
+# files created during these notebook runs.
+evo2_gfmbench_results.csv
+evo2_gfmbench_results.json
