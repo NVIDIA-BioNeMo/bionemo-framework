@@ -6,6 +6,7 @@ grad_acc_steps: 1  # Gradient accumulation steps. Effective batch = micro_batch_
 
 use_meta_device: true
 use_sequence_packing: false
+cp_size: 1
 
 dataset:
   data_path: ???
