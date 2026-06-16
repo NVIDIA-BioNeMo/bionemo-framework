@@ -40,18 +40,14 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Cache pre-commit environments
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: ~/.cache/pre-commit
-          key: ${{ runner.os }}-python-3.13-pre-commit-${{ hashFiles('.pre-commit-config.yaml', '**/.ruff.toml') }}
-
       - name: Install pre-commit
         run: |
           uv tool install pre-commit --with pre-commit-uv --force-reinstall
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run pre-commit
+        env:
+          PRE_COMMIT_HOME: ${{ runner.temp }}/pre-commit
         run: pre-commit run --all-files --show-diff-on-failure
 
   changed-dirs:
