@@ -210,7 +210,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 python-hostlist==2.2.2
 python-json-logger==3.3.0
-python-multipart==0.0.20
+python-multipart==0.0.31
 pytorch-lightning==2.5.5
 PyYAML
 pyzmq==27.0.1
