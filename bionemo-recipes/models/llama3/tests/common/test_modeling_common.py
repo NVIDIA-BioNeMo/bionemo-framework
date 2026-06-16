@@ -724,8 +724,6 @@ class BaseModelTest(ABC):
 
         if te_attn_backend == "fused_attn" and torch.cuda.get_device_capability()[0] == 8:
             pytest.xfail("On Ada and Ampere, no THD implementation is available for fused attn.")
-        elif te_attn_backend == "fused_attn" and torch.cuda.get_device_capability()[0] == 12:
-            pytest.xfail("BIONEMO-2840: On sm120, the THD implementation is not available for fused attn.")
 
         input_data_bshd = self.get_test_input_data(format="bshd")
         input_data_thd = self.get_test_input_data(format="thd")
