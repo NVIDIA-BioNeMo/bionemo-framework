@@ -4,4 +4,4 @@
 - [Tutorials](examples/)
 - [Data Sets](datasets/)
 - [Contributing](contributing/)
-- [References](references/)
+- [Frequently Asked Questions](FAQ.md)

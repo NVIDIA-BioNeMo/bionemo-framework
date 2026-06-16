@@ -61,20 +61,6 @@ plugins:
       version_selector: true
       css_dir: "assets/css"
       javascript_dir: "assets/js"
-  - mkdocstrings:
-      handlers:
-        python:
-          paths:
-            - ../models/*/src
-            - ../recipes/*/src
-            - ../interpretability/*/*/src
-            - ../interpretability/*/*/*/src
-            - ../interpretability/*/*/*/*/src
-          options:
-            docstring_options:
-              warnings: false
-              warn_missing_types: false
-              warn_unknown_params: false
   - mkdocs-jupyter:
       theme: auto
       include: ["*.ipynb"]

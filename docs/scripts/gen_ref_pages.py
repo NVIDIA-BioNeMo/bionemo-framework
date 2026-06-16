@@ -14,7 +14,6 @@
 # limitations under the License.
 """Generate reference pages and copy docs from framework packages and recipes."""
 
-import itertools
 import json
 import logging
 import os
@@ -522,43 +521,6 @@ def copy_support_files(source_dir: Path, dest_dir: Path, root: Path, log_prefix:
     write_support_directory_indexes(dest_dir, copied_files, explicit_index_dirs)
 
 
-def generate_api_reference() -> None:
-    """Generate API reference documentation for import-light model and interpretability packages."""
-    root = Path(__file__).parent.parent.parent
-    source_roots = [
-        (src, ())
-        for src in itertools.chain((root / "models").rglob("src"), (root / "interpretability").rglob("src"))
-        if "src" not in src.relative_to(root).parts[:-1]
-    ]
-    source_roots.append((root / "recipes" / "evo2_megatron" / "src", ("bionemo", "common")))
-
-    for src, required_prefix in source_roots:
-        # Process Python files
-        for path in sorted(src.rglob("*.py")):
-            module_path = path.relative_to(src).with_suffix("")
-            doc_path = path.relative_to(src).with_suffix(".md")
-            full_doc_path = Path("main/references/API_reference") / doc_path
-            parts = tuple(module_path.parts)
-
-            if required_prefix and parts[: len(required_prefix)] != required_prefix:
-                continue
-
-            if parts[-1] in ("__init__", "__main__"):
-                continue
-
-            with mkdocs_gen_files.open(full_doc_path, "w") as fd:
-                identifier = ".".join(parts)
-                print("::: " + identifier, file=fd)
-
-            mkdocs_gen_files.set_edit_path(full_doc_path, path.relative_to(root))
-
-        # Process Markdown files
-        for path in sorted(src.rglob("*.md")):
-            doc_path = path.relative_to(src)
-            full_doc_path = Path("main/references/API_reference") / doc_path
-            copy_text_file(path, full_doc_path, root, f"Added Markdown file: {full_doc_path}")
-
-
 def get_recipes_readmes(recipes_dir: Path, root: Path) -> None:
     """Copy README files from root recipe directories to the docs recipes directory.
 
@@ -695,7 +657,7 @@ def get_recipes_assets(recipes_dir: Path, root: Path) -> None:
 def generate_pages() -> None:
     """Generate pages for documentation.
 
-    This function orchestrates API references, notebooks, and README files for recipes.
+    This function orchestrates notebooks and README files for recipes.
 
     Returns:
         None
@@ -707,9 +669,6 @@ def generate_pages() -> None:
     # flood the console with 404 retries during local `mkdocs serve`.
     with mkdocs_gen_files.open("versions.json", "w") as f:
         json.dump([{"version": "main", "title": "main", "aliases": ["latest"]}], f)
-
-    # Generate API docs for recipe and model packages.
-    generate_api_reference()
 
     # Process recipes
     write_generated_tutorials_index()
