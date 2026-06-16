@@ -1,6 +1,6 @@
 # BioNeMo Recipes: Available Models
 
-State-of-the-art models are continually integrated into the BioNeMo Recipes. The BioNeMo Recipes currently offers the following pre-trained models:
+State-of-the-art models are continually integrated into BioNeMo Recipes. BioNeMo Recipes currently offers the following pre-trained models:
 
 | **Model**                     | **Modality** | **Uses**                | **Training Location**                                                            |
 | ----------------------------- | ------------ | ----------------------- | -------------------------------------------------------------------------------- |

@@ -131,9 +131,9 @@ at the ESM2-650M model size. The BioNeMo implementation could handle batch sizes
 
 ![ESM-2 Model Scaling](../../assets/images/esm2/esm2_model_scaling.png)
 
-Training ESM-2 at the 650M, 3B, and 15B model variants show improved performance with the BioNeMo Recipes over the
+Training ESM-2 at the 650M, 3B, and 15B model variants show improved performance with BioNeMo Recipes over the
 pure-PyTorch baseline. These experiments were conducted on 16x NVIDIA A100 or 16x NVIDIA H100 GPUs split across two
-nodes. <sup>\*</sup>*Note:* 15B model variants were trained on 64 GPUs with the BioNeMo Recipes.
+nodes. <sup>\*</sup>*Note:* 15B model variants were trained on 64 GPUs with BioNeMo Recipes.
 
 #### Device Scaling
 
