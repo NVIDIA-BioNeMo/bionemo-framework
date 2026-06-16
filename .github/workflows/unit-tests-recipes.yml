@@ -19,7 +19,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          enable-cache: true
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/pre-commit
+          key: ${{ runner.os }}-python-3.13-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-python-3.13-pre-commit-
+
+      - name: Install pre-commit
+        run: |
+          uv tool install pre-commit --with pre-commit-uv --force-reinstall
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure
+
   changed-dirs:
+    needs:
+      - pre-commit
     runs-on: ubuntu-latest
     outputs:
       any_changed: ${{ steps.changed-files.outputs.any_changed }}
@@ -139,7 +178,9 @@ jobs:
         shell: bash
 
   unit-tests:
-    needs: changed-dirs
+    needs:
+      - changed-dirs
+      - pre-commit
     runs-on: linux-amd64-gpu-l4-latest-1
     if: ${{ needs.changed-dirs.outputs.dirs != '[]' }}
     name: "unit-tests (${{ matrix.recipe.name }})"
@@ -202,7 +243,9 @@ jobs:
           pytest -v .
 
   run-tests-notebooks:
-    needs: changed-dirs
+    needs:
+      - changed-dirs
+      - pre-commit
     runs-on: linux-amd64-gpu-l4-latest-1
     permissions:
       contents: read
@@ -267,6 +310,7 @@ jobs:
     # This job checks the status of the test jobs and fails if any failed or were cancelled.
     # Use this job as the required check for PRs.
     needs:
+      - pre-commit
       - unit-tests
       - run-tests-notebooks
     runs-on: ubuntu-latest
