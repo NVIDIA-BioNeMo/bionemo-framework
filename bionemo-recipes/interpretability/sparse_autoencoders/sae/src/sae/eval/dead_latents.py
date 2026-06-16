@@ -67,6 +67,7 @@ class DeadLatentTracker:
 
         # Tracks activity since last reset
         self.recently_active = torch.zeros(hidden_dim, dtype=torch.bool, device=device)
+        self._last_avg_nonzero: float = 0.0
 
     @torch.no_grad()
     def update(self, codes: torch.Tensor) -> None:
