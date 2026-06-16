@@ -20,7 +20,7 @@ bcrypt==5.0.0
 beautifulsoup4==4.13.4
 biopython==1.85
 black==25.1.0
-bleach==6.2.0
+bleach==6.4.0
 catalogue==2.0.10
 certifi==2025.8.3
 cffi==1.17.1
