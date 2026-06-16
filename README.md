@@ -21,7 +21,7 @@ The biological AI community actively prototypes model architectures and needs to
 
 ### Use Cases
 
-The use cases of BioNeMO Recipes include:
+The use cases of BioNeMo Recipes include:
 
 - **Foundation Model Developers**: AI researchers and ML engineers developing novel biological foundation models who need to scale up prototypes efficiently
 - **Foundation Model Customizers**: Domain scientists looking to fine-tune existing models with proprietary data for drug discovery and biological research

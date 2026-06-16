@@ -1,10 +1,12 @@
 ## Model Overview
 
-!!! note "Training Code Lives in BioNeMo Recipes"
-Use [`models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/models/amplify)
-for checkpoint conversion and model implementation details. For training, use the ESM-2 recipes in
-[`recipes`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes)
-with an AMPLIFY model tag such as `nvidia/AMPLIFY_120M`.
+Training code for this model is in
+[`recipes/esm2_native_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_native_te)
+and
+[`recipes/esm2_accelerate_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_accelerate_te);
+use an AMPLIFY model tag such as `nvidia/AMPLIFY_120M`. Use
+[`models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/models/amplify)
+for checkpoint conversion and model implementation details.
 
 ### Description
 

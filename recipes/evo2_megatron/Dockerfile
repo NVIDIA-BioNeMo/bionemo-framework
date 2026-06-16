@@ -33,8 +33,7 @@ ENV CAUSAL_CONV1D_FORCE_BUILD=1
 ENV PIP_NO_BINARY=causal-conv1d
 
 # 5. Install package and dependencies
-RUN --mount=type=secret,id=netrc,target=/root/.netrc \
-    --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     uv pip install -r build_requirements.txt --no-build-isolation && \
     uv pip install -c pip-constraints.txt -e . --no-build-isolation

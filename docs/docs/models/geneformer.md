@@ -1,8 +1,5 @@
 # Geneformer
 
-!!! note "Training Code Moved to BioNeMo Recipes"
-The 5D parallel training implementation for Geneformer has been migrated to a simplified TransformerEngine + FSDP implementation in [BioNeMo Recipes](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/geneformer_native_te_mfsdp_fp8). For training Geneformer models, please refer to the recipe in `recipes/geneformer_native_te_mfsdp_fp8/`. This page contains model card information, checkpoint details, and benchmark results.
-
 ## Model Overview
 
 ### Description:

@@ -73,9 +73,9 @@ def _rewrite_relative_links(
 
     * Paths resolving under ``docs/docs/`` (shared assets, images) are rewritten
       relative to the docs-tree root so they reach the correct asset.
-    * Paths resolving under ```` are rewritten relative to the
-      ``main/recipes/`` subtree so cross-recipe links keep working.
-    * Paths from sub-package READMEs to examples, notebooks, and assets are
+    * Paths resolving under ``models/``, ``recipes/``, or ``interpretability/``
+      are rewritten relative to the generated ``main/recipes/`` docs tree.
+    * Paths from imported READMEs to examples, notebooks, and assets are
       rewritten to the generated docs locations where those files are copied.
 
     All other relative links (e.g. to ``ci/scripts/``) are left untouched.

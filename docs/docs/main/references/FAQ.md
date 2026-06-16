@@ -8,36 +8,21 @@ license, users have the right to use the software for any purpose, including com
 or attribution. Overall, our choice of the Apache 2.0 License allows for wide adoption and use of BioNeMo Recipes,
 while also providing a high degree of freedom and flexibility for users.
 
-For users that would like NVIDIA AI Enterprise support for
-[BioNeMo Recipes](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/containers/bionemo-framework) container
-usage, refer to the
-[NVAIE Landing Page](https://www.nvidia.com/en-us/data-center/products/ai-enterprise/)
-for more information.
+## How do I install BioNeMo Recipes?
 
-### How do I install BioNeMo Recipes?
-
-BioNeMo Recipes is distributed as a Docker container through NVIDIA NGC. To download the pre-built Docker container
-and data assets, you will need a free NVIDIA NGC account.
-
-Alternatively, you can install individual recipe directories from within BioNeMo Recipes by following the corresponding
+You can install individual recipe directories from within BioNeMo Recipes by following the corresponding
 README pages the [BioNeMo Recipes GitHub](https://github.com/NVIDIA-BioNeMo/bionemo-framework). Please note that this is a
 beta feature and may require some additional effort to install seamlessly. We are actively working on testing this
 functionality and expect it will be a fully supported feature in future releases. You can review our
 [release notes](../about/releasenotes-fw.md) to stay up to
 date on our releases.
 
-### How do I update BioNeMo Recipes to the latest version?
-
-To update the BioNeMo Recipes Docker container, you need to pull the latest version of the Docker image using the
-command `docker pull`. For available tags, refer to the
-[BioNeMo Recipes page in the NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/containers/bionemo-framework).
-
-### What are the system requirements for BioNeMo Recipes?
+## What are the system requirements for BioNeMo Recipes?
 
 Generally, BioNeMo Recipes should run on any NVIDIA GPU with Compute Capability ≥8.0. For a full list of supported
 hardware, refer to the [Hardware and Software Prerequisites](../getting-started/pre-reqs.md).
 
-### Can I contribute code or models to BioNeMo Recipes?
+## Can I contribute code or models to BioNeMo Recipes?
 
 Yes, BioNeMo Recipes is open source and we welcome contributions from organizations and individuals.
 You can do so either by forking the repository and directly opening a PR against our `main` branch from your fork or by
@@ -51,14 +36,14 @@ kind, we recommend [reaching out to us](https://www.nvidia.com/en-us/industries/
 For more information about external contributions, refer to the [Contributing](../contributing/contributing.md) and
 [Code Review](../contributing/code-review.md) pages.
 
-### How do I report bugs or suggest new features?
+## How do I report bugs or suggest new features?
 
 To report a bug or suggest a new feature, open an issue on the
 [BioNeMo Recipes GitHub site](https://github.com/NVIDIA-BioNeMo/bionemo-framework/issues). For the fastest turnaround,
 thoroughly describe your issue, including any steps and/or _minimal_ data sets necessary to reproduce (when possible),
 as well as the expected behavior.
 
-### Can I train models in Jupyter notebooks using BioNeMo Recipes?
+## Can I train models in Jupyter notebooks using BioNeMo Recipes?
 
 Most BioNeMo recipes now use native PyTorch or Accelerate-based training loops that work
 fine inside notebooks. Some Megatron-based recipes (such as `evo2_megatron`) still require

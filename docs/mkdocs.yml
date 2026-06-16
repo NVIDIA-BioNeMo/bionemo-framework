@@ -132,8 +132,6 @@ extra:
     provider: mike
     default: latest
     alias: true
-  docker_url: svcbionemo023/bionemo-framework
-  docker_tag: nightly
   github_url: https://github.com/NVIDIA-BioNeMo/bionemo-framework
 
 copyright: |
