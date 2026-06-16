@@ -6,12 +6,14 @@ defaults:
 model_preset: encodon_5b
 num_train_steps: 500_000
 
+precision: bf16-mixed
+
 use_sequence_packing: true
 dataset:
   data_path: ???
   micro_batch_size: 4
   num_workers: 1
-  max_seq_length: 512
+  max_seq_length: 2048
 
 # WandB config
 wandb_init_args:

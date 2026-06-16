@@ -6,6 +6,8 @@ defaults:
 model_preset: encodon_200k
 num_train_steps: 250
 
+precision: fp32
+
 use_sequence_packing: false
 dataset:
   data_path: train.parquet
@@ -30,3 +32,8 @@ checkpoint:
 
 logger:
   frequency: 1
+
+validation:
+  enabled: true
+  eval_interval: 50
+  num_batches: 4

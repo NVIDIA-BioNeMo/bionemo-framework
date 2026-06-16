@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 import torch
+from codon_memmap_dataset import CodonMemmapDataset
 from distributed_config import DistributedConfig
 from tokenizer import CodonTokenizer
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
@@ -162,6 +163,11 @@ class MemmapCodonDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, str]:  # noqa: D105
         chunk_id, start, end = self.global_indices[idx]
         token_ids = self.sequences_mmaps[chunk_id][start:end]
+        # Note: decode(skip_special_tokens=True) silently drops <UNK> tokens (ID 2). The codon
+        # tokenizer's tokenize() is strict 3-char chunking that cannot reparse the "<UNK>"
+        # literal in a decoded string, so any window containing ambiguous-base codons loses
+        # those positions when round-tripped. Use CodonMemmapDataset (returns sequence_tokens
+        # directly) for PTL-parity behavior.
         sequence = self.tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
         return {"sequence": sequence}
 
@@ -203,7 +209,10 @@ class CodonMLMCollator:
         all_labels = []
 
         for sample in batch:
-            ids = self.tokenizer.encode(sample["sequence"], add_special_tokens=True)
+            if "sequence_tokens" in sample:
+                ids = [self.tokenizer.cls_token_id, *sample["sequence_tokens"].tolist(), self.tokenizer.sep_token_id]
+            else:
+                ids = self.tokenizer.encode(sample["sequence"], add_special_tokens=True)
             # Truncate to max_seq_length, preserving trailing SEP token
             if len(ids) > self.max_seq_length:
                 ids = [*ids[: self.max_seq_length - 1], self.tokenizer.sep_token_id]
@@ -281,7 +290,10 @@ class CodonTHDCollator:
         seq_lengths = []
 
         for sample in batch:
-            ids = self.tokenizer.encode(sample["sequence"], add_special_tokens=True)
+            if "sequence_tokens" in sample:
+                ids = [self.tokenizer.cls_token_id, *sample["sequence_tokens"].tolist(), self.tokenizer.sep_token_id]
+            else:
+                ids = self.tokenizer.encode(sample["sequence"], add_special_tokens=True)
             # Truncate to max_seq_length, preserving trailing SEP token
             if len(ids) > self.max_seq_length:
                 ids = [*ids[: self.max_seq_length - 1], self.tokenizer.sep_token_id]
@@ -344,13 +356,26 @@ class CodonTHDCollator:
         }
 
 
-def _create_dataset(data_path: str, max_seq_length: int, seed: int) -> Dataset:
+def _create_dataset(
+    data_path: str,
+    max_seq_length: int,
+    seed: int,
+    split: str | None = None,
+    split_kwargs: dict | None = None,
+) -> Dataset:
     """Create the appropriate dataset based on data_path format.
 
     Args:
         data_path: 'synthetic', path to a parquet file, or path to a memmap directory.
         max_seq_length: Maximum sequence length (used for memmap sliding windows).
         seed: Random seed.
+        split: If set ("train" / "validation" / "test"), construct the split-aware
+            CodonMemmapDataset (port of the PTL dataset) instead of MemmapCodonDataset.
+            Only meaningful when data_path is a memmap directory; ignored otherwise.
+        split_kwargs: Extra keyword arguments forwarded to CodonMemmapDataset
+            (train_val_test_ratio, context_overlap, pretraining_task, min_seq_length,
+            max_filter_seq_length, groups_to_use, taxid_exclusion_file, split_name_prefix,
+            force_recompute). Only used when split is set.
 
     Returns:
         A Dataset instance.
@@ -359,6 +384,14 @@ def _create_dataset(data_path: str, max_seq_length: int, seed: int) -> Dataset:
         return SyntheticCodonDataset(num_samples=500, seed=seed)
     data_dir = Path(data_path)
     if data_dir.is_dir() and (data_dir / "metadata.json").exists():
+        if split is not None:
+            return CodonMemmapDataset(
+                data_path,
+                split=split,
+                max_seq_length=max_seq_length,
+                seed=seed,
+                **(split_kwargs or {}),
+            )
         return MemmapCodonDataset(data_path, max_seq_length=max_seq_length)
     return ParquetCodonDataset(data_path)
 
@@ -372,6 +405,8 @@ def create_bshd_dataloader(
     num_workers: int = 1,
     seed: int = 42,
     pad_to_multiple_of: int | None = None,
+    split: str | None = None,
+    split_kwargs: dict | None = None,
 ) -> tuple[DataLoader, DistributedSampler]:
     """Create a BSHD-format dataloader.
 
@@ -384,25 +419,30 @@ def create_bshd_dataloader(
         num_workers: Number of dataloader workers.
         seed: Random seed.
         pad_to_multiple_of: Unused in BSHD mode (only applies to THD).
+        split: If set, use the split-aware CodonMemmapDataset for memmap dirs.
+        split_kwargs: Extra arguments forwarded to CodonMemmapDataset when split is set.
 
     Returns:
         Tuple of (DataLoader, DistributedSampler).
     """
     tokenizer = CodonTokenizer()
 
-    dataset = _create_dataset(data_path, max_seq_length, seed)
+    dataset = _create_dataset(data_path, max_seq_length, seed, split=split, split_kwargs=split_kwargs)
 
+    sampler_kwargs = {"shuffle": False} if split == "validation" else {}
     sampler = DistributedSampler(
         dataset,
         rank=dist_config.rank,
         num_replicas=dist_config.world_size,
         seed=seed,
+        **sampler_kwargs,
     )
 
     collator = CodonMLMCollator(
         tokenizer=tokenizer,
         max_seq_length=max_seq_length,
         mlm_probability=mlm_probability,
+        seed=seed,
     )
 
     dataloader = DataLoader(
@@ -426,6 +466,8 @@ def create_thd_dataloader(
     num_workers: int = 1,
     seed: int = 42,
     pad_to_multiple_of: int | None = None,
+    split: str | None = None,
+    split_kwargs: dict | None = None,
 ) -> tuple[DataLoader, DistributedSampler]:
     """Create a THD-format (packed sequence) dataloader.
 
@@ -440,6 +482,8 @@ def create_thd_dataloader(
         pad_to_multiple_of: If set, pad total tokens to a multiple of this value. If None,
             defaults to micro_batch_size * max_seq_length for consistent tensor shapes
             (matching ESM2's approach). Set to 0 to disable padding.
+        split: If set, use the split-aware CodonMemmapDataset for memmap dirs.
+        split_kwargs: Extra arguments forwarded to CodonMemmapDataset when split is set.
 
     Returns:
         Tuple of (DataLoader, DistributedSampler).
@@ -454,13 +498,15 @@ def create_thd_dataloader(
     elif pad_to_multiple_of == 0:
         pad_to_multiple_of = None
 
-    dataset = _create_dataset(data_path, max_seq_length, seed)
+    dataset = _create_dataset(data_path, max_seq_length, seed, split=split, split_kwargs=split_kwargs)
 
+    sampler_kwargs = {"shuffle": False} if split == "validation" else {}
     sampler = DistributedSampler(
         dataset,
         rank=dist_config.rank,
         num_replicas=dist_config.world_size,
         seed=seed,
+        **sampler_kwargs,
     )
 
     collator = CodonTHDCollator(
@@ -468,6 +514,7 @@ def create_thd_dataloader(
         max_seq_length=max_seq_length,
         mlm_probability=mlm_probability,
         pad_to_multiple_of=pad_to_multiple_of,
+        seed=seed,
     )
 
     dataloader = DataLoader(
@@ -480,3 +527,59 @@ def create_thd_dataloader(
     )
 
     return dataloader, sampler
+
+
+def create_dataloaders(
+    dist_config: DistributedConfig,
+    *,
+    use_sequence_packing: bool,
+    build_validation: bool,
+    use_split_dataset: bool = True,
+    split_kwargs: dict | None = None,
+    **factory_kwargs,
+) -> tuple[DataLoader, DataLoader | None, DistributedSampler]:
+    """Build train (and optionally validation) dataloaders from a single configuration.
+
+    Wrapper modeled on esm2_peft_te.create_dataloader: one factory call produces both loaders, so
+    train and val datasets share the on-disk caches via mmap and the kernel page cache. When
+    use_split_dataset is True, the new CodonMemmapDataset is constructed for each split (train/val
+    samples are disjoint by the PTL proportional cluster split); when False, the legacy path is
+    used and the val loader simply re-reads the train data (placeholder behavior).
+
+    If split_kwargs requests force_recompute, the flag is honored only by the train call; the val
+    call is invoked with force_recompute=False so the cache written by train is reused instead of
+    rebuilt a second time in the same process.
+
+    Args:
+        dist_config: Distributed configuration.
+        use_sequence_packing: Pick THD factory if True, BSHD factory if False.
+        build_validation: If False, skip val-loader construction entirely (returns None).
+        use_split_dataset: When True (default), construct the split-aware CodonMemmapDataset
+            for memmap directories. Set to False to fall back to the legacy MemmapCodonDataset,
+            in which case the val loader (if requested) re-reads the train data as a
+            placeholder. Has no effect for synthetic/parquet data paths.
+        split_kwargs: Extra arguments forwarded to CodonMemmapDataset (only used when
+            use_split_dataset=True). See codon_memmap_dataset.CodonMemmapDataset for the full list.
+        **factory_kwargs: Remaining keyword arguments passed to the low-level factory
+            (data_path, micro_batch_size, max_seq_length, mlm_probability, num_workers, seed,
+            pad_to_multiple_of).
+
+    Returns:
+        Tuple of (train_dataloader, val_dataloader or None, train DistributedSampler).
+    """
+    factory = create_thd_dataloader if use_sequence_packing else create_bshd_dataloader
+
+    train_split = "train" if use_split_dataset else None
+    val_split = "validation" if use_split_dataset else None
+
+    train_dataloader, sampler = factory(dist_config, split=train_split, split_kwargs=split_kwargs, **factory_kwargs)
+
+    val_dataloader = None
+    if build_validation:
+        # The train call above has already regenerated the cache if force_recompute was set, so
+        # the val call must use the warmed cache rather than redo the work. Copy split_kwargs to
+        # avoid mutating the caller's dict.
+        val_split_kwargs = {**split_kwargs, "force_recompute": False} if split_kwargs is not None else None
+        val_dataloader, _ = factory(dist_config, split=val_split, split_kwargs=val_split_kwargs, **factory_kwargs)
+
+    return train_dataloader, val_dataloader, sampler

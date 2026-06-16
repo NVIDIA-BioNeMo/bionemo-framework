@@ -181,6 +181,18 @@ class PerfLogger:
                 self.num_unpadded_tokens.zero_()
                 self.grad_acc_step_count = 0
 
+    def log_validation(self, step: int, val_metrics: dict):
+        """Log validation metrics to wandb on the main process.
+
+        Args:
+            step: The current optimizer step.
+            val_metrics: Dict of metric name -> scalar value (already reduced across ranks).
+        """
+        if not self._dist_config.is_main_process():
+            return
+        wandb.log({f"val/{k}": v for k, v in val_metrics.items()}, step=step)
+        logger.info("[VAL step=%d] %s", step, ", ".join(f"{k}: {v:.4g}" for k, v in val_metrics.items()))
+
     def finish(self):
         """Finish the logger."""
         if self.quant_stats_config:

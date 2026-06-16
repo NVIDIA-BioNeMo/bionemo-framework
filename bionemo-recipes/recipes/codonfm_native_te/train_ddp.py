@@ -13,16 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FSDP2 training script for CodonFM with TransformerEngine layers."""
+"""DDP training script for CodonFM with TransformerEngine layers."""
 
 import logging
 from contextlib import nullcontext
+from datetime import timedelta
 from pathlib import Path
 
 import hydra
 import nvdlfw_inspect.api as debug_api
 import torch
-from checkpoint import load_checkpoint_fsdp2, save_checkpoint_fsdp2, save_final_model_fsdp2, should_save_checkpoint
+from checkpoint import load_checkpoint_ddp, save_checkpoint_ddp, save_final_model_ddp, should_save_checkpoint
 from dataset import create_dataloaders
 from distributed_config import DistributedConfig
 from modeling_codonfm_te import MODEL_PRESETS, CodonFMConfig, CodonFMForMaskedLM
@@ -31,7 +32,6 @@ from perf_logger import PerfLogger
 from quantization import WandBQuantLogger, initialize_quant_stats_logging, resolve_layer_precision
 from scheduler import get_linear_schedule_with_warmup
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.optim import AdamW
 from transformer_engine.common.recipe import Format
 
@@ -41,41 +41,22 @@ logger.setLevel(logging.INFO)
 
 
 _VALID_PRECISIONS = ("fp32", "bf16", "bf16-mixed")
-_VALID_REDUCE_TYPES = ("fp32", "bf16")
-_PRECISION_TO_STORAGE_DTYPE = {
-    "fp32": torch.float32,
-    "bf16": torch.bfloat16,
-    "bf16-mixed": torch.float32,  # master shards stored fp32; MP policy casts to bf16 at compute time
-}
 
 
-def _assert_fsdp_param_dtypes(model: torch.nn.Module, precision: str) -> None:
-    """Verify FSDP2 produced the expected param storage dtypes."""
-    expected = _PRECISION_TO_STORAGE_DTYPE[precision]
-    for name, param in model.named_parameters():
-        if param.dtype != expected:
-            raise RuntimeError(
-                f"FSDP2 precision={precision}: expected param storage {expected}, got {param.dtype} for {name}"
-            )
-    logger.info("FSDP2 param dtype check OK (precision=%s, storage=%s)", precision, expected)
+def precision_context(precision: str):
+    """Return a fresh autocast context for the given precision mode.
 
-
-def _assert_fsdp_optimizer_state_dtypes(optimizer: torch.optim.Optimizer, precision: str) -> None:
-    """Verify optimizer moments are in the expected dtype after the first step."""
-    expected = _PRECISION_TO_STORAGE_DTYPE[precision]
-    for param_state in optimizer.state.values():
-        for key in ("exp_avg", "exp_avg_sq"):
-            t = param_state.get(key)
-            if t is not None and t.dtype != expected:
-                raise RuntimeError(
-                    f"FSDP2 precision={precision}: optimizer state {key} dtype={t.dtype}, expected {expected}"
-                )
-    logger.info("FSDP2 optimizer state dtype check OK (precision=%s, dtype=%s)", precision, expected)
+    For `bf16-mixed`, wraps forward in `torch.autocast(cuda, bf16)`. For `fp32` and `bf16`,
+    returns a nullcontext — params are already in the target dtype, no autocast needed.
+    """
+    if precision == "bf16-mixed":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
 
 
 @hydra.main(config_path="hydra_config", config_name="L0_sanity", version_base="1.2")
 def main(args: DictConfig) -> float | None:
-    """Train CodonFM with TE layers using FSDP2.
+    """Train CodonFM with TE layers using DDP.
 
     Returns:
         float: The minimum loss value seen during training.
@@ -84,23 +65,21 @@ def main(args: DictConfig) -> float | None:
 
     if args.precision not in _VALID_PRECISIONS:
         raise ValueError(f"precision must be one of {_VALID_PRECISIONS}, got {args.precision!r}")
-    if args.grad_reduce_type not in _VALID_REDUCE_TYPES:
-        raise ValueError(f"grad_reduce_type must be one of {_VALID_REDUCE_TYPES}, got {args.grad_reduce_type!r}")
 
     # Initialize distributed configuration
     dist_config = DistributedConfig()
     logger.info("Initializing distributed training: %s", dist_config)
     device = torch.device(f"cuda:{dist_config.local_rank}")
-    torch.distributed.init_process_group(backend="nccl", device_id=device)
+    torch.distributed.init_process_group(backend="nccl", device_id=device, timeout=timedelta(hours=1))
     torch.cuda.set_device(dist_config.local_rank)
 
     perf_logger = None
     try:
-        # Create device mesh for FSDP
+        # Mirrors the FSDP2 device mesh — not strictly required for DDP, but keeps configs symmetric.
         device_mesh = init_device_mesh(
             "cuda",
             mesh_shape=(dist_config.world_size,),
-            mesh_dim_names=("dp",),
+            mesh_dim_names=("ddp",),
         )
 
         # Build model config from preset
@@ -153,40 +132,26 @@ def main(args: DictConfig) -> float | None:
 
         logger.info("Initialized Model:\n%s", model)
 
-        # Apply FSDP2 sharding with precision-specific mixed precision policy.
-        #   fp32       - no MP overrides; sharded params stay fp32.
-        #   bf16       - no MP overrides; params get cast to bf16 after init_empty_weights below.
-        #   bf16-mixed - fp32 master shards, MP policy casts to bf16 at compute time. grad_reduce_type
-        #                controls reduce-scatter dtype (default fp32 is more conservative than PTL FSDP
-        #                bf16-mixed, which reduces in bf16).
-        if args.precision == "bf16-mixed":
-            reduce_dtype = torch.float32 if args.grad_reduce_type == "fp32" else torch.bfloat16
-            mp_policy = MixedPrecisionPolicy(
-                param_dtype=torch.bfloat16,
-                reduce_dtype=reduce_dtype,
-                output_dtype=torch.bfloat16,
-                cast_forward_inputs=False,
-            )
-        else:
-            mp_policy = MixedPrecisionPolicy()
-        for layer in model.encoder.layers:
-            fully_shard(layer, mesh=device_mesh["dp"], mp_policy=mp_policy)
-        fully_shard(model, mesh=device_mesh["dp"], mp_policy=mp_policy)
-
-        # Initialize weights from meta device
+        # Materialize weights. With meta-device init, init_empty_weights() runs the MAGNETO init
+        # and moves params to CUDA; otherwise the model was constructed eagerly on CPU.
         if args.use_meta_device:
             model.init_empty_weights()
+        else:
+            model = model.to(device)
 
-        # Pure bf16: cast sharded params (and downstream optimizer state) to bf16. Must happen
-        # after init_empty_weights so the cast catches the freshly-initialized values, not metadata.
         if args.precision == "bf16":
             model = model.to(dtype=torch.bfloat16)
-
-        _assert_fsdp_param_dtypes(model, args.precision)
 
         # Assign layer names for debug API
         if args.quant_stats_config.enabled:
             debug_api.infer_and_assign_layer_names(model)
+
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[dist_config.local_rank],
+            output_device=dist_config.local_rank,
+            device_mesh=device_mesh["ddp"],
+        )
 
         # Create optimizer and scheduler
         optimizer = AdamW(model.parameters(), **OmegaConf.to_container(args.adamw_kwargs, resolve=True))
@@ -205,9 +170,9 @@ def main(args: DictConfig) -> float | None:
         )
 
         # Resume from checkpoint if available
-        ckpt_path = Path(args.checkpoint.ckpt_dir) / "train_fsdp2" if args.checkpoint.ckpt_dir else None
+        ckpt_path = Path(args.checkpoint.ckpt_dir) / "train_ddp" if args.checkpoint.ckpt_dir else None
         if args.checkpoint.resume_from_checkpoint and ckpt_path:
-            model, optimizer, scheduler, start_step, epoch = load_checkpoint_fsdp2(
+            model, optimizer, scheduler, start_step, epoch = load_checkpoint_ddp(
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
@@ -223,7 +188,6 @@ def main(args: DictConfig) -> float | None:
         # Training loop
         step = start_step
         micro_step = 0  # Gradient accumulation step counter
-        optimizer_state_asserted = False
         while step < args.num_train_steps:
             batches_in_epoch = 0
             for batch in train_dataloader:
@@ -231,18 +195,25 @@ def main(args: DictConfig) -> float | None:
 
                 micro_step += 1
 
-                # Forward pass
-                outputs = model(**batch)
+                # Skip DDP grad sync on intermediate accumulation micro-steps; the final
+                # micro-step (when we will call optimizer.step) syncs as usual.
+                is_accumulation_boundary = micro_step % args.grad_acc_steps == 0
+                sync_context = nullcontext() if is_accumulation_boundary else model.no_sync()
 
-                # Backward pass - scale loss by grad_acc_steps for proper gradient averaging
-                loss = outputs.loss / args.grad_acc_steps
-                loss.backward()
+                with sync_context:
+                    # Forward pass under the precision-specific autocast context.
+                    # backward inherits the cached autocast state — no need to wrap it.
+                    with precision_context(args.precision):
+                        outputs = model(**batch)
+                        # Scale loss by grad_acc_steps for proper gradient averaging
+                        loss = outputs.loss / args.grad_acc_steps
+                    loss.backward()
 
                 # Log micro-batch data for accumulation metrics
                 perf_logger.log_micro_step(step=step, batch=batch, outputs=outputs)
 
                 # Optimizer step only after accumulating grad_acc_steps micro-batches
-                if micro_step % args.grad_acc_steps == 0:
+                if is_accumulation_boundary:
                     micro_step = 0
 
                     # Grad clip
@@ -251,9 +222,6 @@ def main(args: DictConfig) -> float | None:
                     # Optimizer step
                     optimizer.step()
                     scheduler.step()
-                    if not optimizer_state_asserted:
-                        _assert_fsdp_optimizer_state_dtypes(optimizer, args.precision)
-                        optimizer_state_asserted = True
                     optimizer.zero_grad()
 
                     perf_logger.log_step(
@@ -263,7 +231,7 @@ def main(args: DictConfig) -> float | None:
                     )
 
                     if ckpt_path and should_save_checkpoint(step, args.checkpoint.save_every_n_steps):
-                        save_checkpoint_fsdp2(
+                        save_checkpoint_ddp(
                             model=model,
                             optimizer=optimizer,
                             scheduler=scheduler,
@@ -274,7 +242,7 @@ def main(args: DictConfig) -> float | None:
                             max_checkpoints=args.checkpoint.max_checkpoints,
                         )
                         if args.checkpoint.save_final_model_with_checkpoint:
-                            save_final_model_fsdp2(
+                            save_final_model_ddp(
                                 model=model,
                                 config=config,
                                 save_directory=ckpt_path / f"step_{step}" / "final_model",
@@ -295,7 +263,8 @@ def main(args: DictConfig) -> float | None:
                                 val_batch = {
                                     k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in val_batch.items()
                                 }
-                                val_outputs = model(**val_batch)
+                                with precision_context(args.precision):
+                                    val_outputs = model(**val_batch)
                                 val_loss_sum += val_outputs.loss.detach()
                                 val_batches_seen += 1
                         torch.distributed.all_reduce(val_loss_sum)
@@ -321,7 +290,7 @@ def main(args: DictConfig) -> float | None:
 
         # Save final model
         if args.checkpoint.save_final_model and ckpt_path:
-            save_final_model_fsdp2(
+            save_final_model_ddp(
                 model=model,
                 config=config,
                 save_directory=ckpt_path / "final_model",
