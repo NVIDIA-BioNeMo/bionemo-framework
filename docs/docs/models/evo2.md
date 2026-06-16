@@ -159,7 +159,7 @@ Evo2 NIM:
 - H200 (1 and 2 GPU configurations, 144 GB each)
 - H100 (2 GPU configuration, 80 GB each)
 
-BioNeMo Framework:
+BioNeMo Recipes:
 
 - A100 (1, 8, ..., 1024 GPU configurations)
 - H100 (1, 8, ..., 2048 GPU configurations)

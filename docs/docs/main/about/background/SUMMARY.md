@@ -1,2 +1,0 @@
-- [NeMo2](nemo2.md)
-- [Megatron Dataset Considerations](megatron_datasets.md)

@@ -1,3 +1,1 @@
 - [Overview](overview.md)
-- [Background](background/)
-- [Release Notes](releasenotes-fw.md)

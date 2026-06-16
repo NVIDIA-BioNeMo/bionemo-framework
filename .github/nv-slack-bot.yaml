@@ -1,8 +1,8 @@
 $schema: https://public.gha-runners.nvidia.com/nv-slack-bot/schemas/config-v1.json
 enabled: true
 notifications:
-  # Send a slack notification when BioNeMo Framework nightly CI fails
-  - name: "BioNeMo Framework Nightly CI Failed"
+  # Send a slack notification when BioNeMo Recipes nightly CI fails
+  - name: "BioNeMo Recipes Nightly CI Failed"
     event: workflow_run
     slack:
       nvidia:
@@ -10,11 +10,11 @@ notifications:
           - id: C0832RNTR09 # bionemo-fw-ci-alerts
     match: >
       workflow_run.conclusion = "failure"
-      and workflow_run.name = "BioNeMo Framework CI"
+      and workflow_run.name = "BioNeMo Recipes CI"
       and workflow_run.event = "schedule"
     message:
       body: |
-        <{{url}}|BioNeMo Framework nightly CI "{{name}}"> failed
+        <{{url}}|BioNeMo Recipes nightly CI "{{name}}"> failed
       vars:
         url: workflow_run.html_url
         name: workflow_run.name
