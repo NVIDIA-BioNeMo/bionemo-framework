@@ -9,6 +9,39 @@ These are initiated by the member commenting `/build-ci` directly on the PR. All
 sufficient code review before being merged.
 ```
 
+## Quick Start for Contributors
+
+To make sure you have a delightful and successful contribution experience, please adhere to the following:
+
+### **Steps to contribute to the BioNeMo Framework:**
+1. **Sign your commits** - Add `-s` flag to all commits (required for DCO compliance). For example `git commit -s -m "<commit message>"`
+2. **Fork & branch** - External Contributors: create any Pull Requests from your private fork, Internal: create any Pull Requests from a branch labeled `username/feature_name` .
+3. **Code to standards** - Follow Google Python style guide (see below), add type hints, and write docstrings.
+4. **Test your changes** - Make sure to add unit tests if appropriate (which will be true for most contributions), then run `pytest` locally
+5. **Submit PR** - Use proper labels (`contribution` for external contributors).
+6. **Wait for review** - **All** external Pull Requests **must** be approved by an NVIDIA staff contributor. NVIDIA staff will comment `/build-ci` to run tests; continuous integration can be skipped only in rare circumstances.
+7. **Address feedback** - Once reviewed, make or address any requested changes, then ensure the continuous integration stages all pass.
+8. **Merge** - Once approved and CI has fully passed, you may merge your Pull Request.
+
+### **Requirements for all contributions:**
+All contributions to the BioNeMo Framework must meet the following criteria before they can be accepted:
+
+- All commits must be signed-off using `git commit -s` to comply with the Developer Certificate of Origin
+- Code must adhere to our Python standards, including ruff formatting, comprehensive type hints, and complete docstrings
+- Unit tests should be added for any new functionality to ensure code quality and prevent regressions
+- Documentation must be updated to reflect any changes, including docstrings and relevant README modifications
+- Pre-commit hooks must be installed and all checks must pass before submission
+- The continuous integration pipeline must complete successfully without failures
+
+### **Important notes for contributors:**
+Please be aware of these common requirements that can delay the review process if not followed:
+
+- The DCO sign-off (`-s` flag) is mandatory for all commits and cannot be waived
+- External contributors are required to add the `contribution` label to their Pull Requests
+- Proper use of checkbox controls and labels in the PR description helps configure CI behavior appropriately. CI failures significantly slow down the review process and can greatly increase the time required to integrate your contribution
+
+---
+
 ## Developer Certificate of Origin (DCO)
 
 We require that all contributors "sign-off" on their commits (not GPG signing, just adding the `-s | --signoff`
