@@ -1,7 +1,10 @@
-# Geneformer
+---
+title: "Geneformer"
+description: ""
+---
+<Note>Training Code Moved to bionemo-recipes</Note>
 
-!!! note "Training Code Moved to bionemo-recipes"
-The 5D parallel training implementation for Geneformer has been migrated to a simplified TransformerEngine + FSDP implementation in [bionemo-recipes](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/geneformer_native_te_mfsdp_fp8). For training Geneformer models, please refer to the recipe in `bionemo-recipes/recipes/geneformer_native_te_mfsdp_fp8/`. This page contains model card information, checkpoint details, and benchmark results.
+The 5D parallel training implementation for Geneformer has been migrated to a simplified TransformerEngine + FSDP implementation in [bionemo-recipes](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/geneformer_native_te_mfsdp_fp8). For training Geneformer models, please refer to the recipe in `bionemo-recipes/recipes/geneformer_native_te_mfsdp_fp8/`. This page contains model card information, checkpoint details, and benchmark results.
 
 ## Model Overview
 
@@ -153,21 +156,21 @@ NVIDIA believes Trustworthy AI is a shared responsibility and we have establishe
 
 ### geneformer-10M
 
-<!-- WandB Logs: https://wandb.ai/clara-discovery/Geneformer-pretraining-jsjconfigs/runs/i8LWOctg?nw=nwuserjomitchell -->
+{/* WandB Logs: https://wandb.ai/clara-discovery/Geneformer-pretraining-jsjconfigs/runs/i8LWOctg?nw=nwuserjomitchell */}
 
 Training was performed on 8 servers with 8 A100 GPUs each for a total of 81485 steps using the CELLxGENE split with a per-GPU micro batch size 32 and global batch size of 2048. Training took a total of 4 days, 8 hours of wallclock time. As can be seen in the following images, training and validation curves both decreased fairly smoothly throughout the course of training.
 
-![Training Loss Over Time for Geneformer 10M Model](../assets/images/geneformer/geneformer_10m_training_loss.png)
-![Validation Loss Over Time for Geneformer 10M Model](../assets/images/geneformer/geneformer_10m_val_loss.png)
+![Training Loss Over Time for Geneformer 10M Model](/assets/images/geneformer/geneformer_10m_training_loss.png)
+![Validation Loss Over Time for Geneformer 10M Model](/assets/images/geneformer/geneformer_10m_val_loss.png)
 
 ### geneformer-106M
 
-<!-- WandB Logs https://wandb.ai/clara-discovery/geneformer-pretraining-106m-16node-spike -->
+{/* WandB Logs https://wandb.ai/clara-discovery/geneformer-pretraining-106m-16node-spike */}
 
 This checkpoint was trained for approximately 35,650 steps using the CELLxGENE split. Training was performed on 16 servers with 8 A100 GPUs each for a total of 35,650 steps using the CELLxGENE split with a per-GPU micro batch size 16 and global batch size of 2,048. Training took a total of 8 hours of wallclock time. As can be seen in the following image, training and validation curves both decreased fairly smoothly throughout the course of training.
 
-![Training Loss Over Time for Geneformer 106M Model](../assets/images/geneformer/Geneformer_steven_106m_train.png)
-![Validation Loss Over Time for Geneformer 106M Model](../assets/images/geneformer/Geneformer_steven_106m_val.png)
+![Training Loss Over Time for Geneformer 106M Model](/assets/images/geneformer/Geneformer_steven_106m_train.png)
+![Validation Loss Over Time for Geneformer 106M Model](/assets/images/geneformer/Geneformer_steven_106m_val.png)
 
 ## Benchmarking
 
@@ -183,7 +186,7 @@ The following describes the BERT MLM token loss. Like in the original BERT paper
 | geneformer-10M-240530  | 3.18                         |
 | geneformer-106M-240530 | 2.89                         |
 
-!!! bug "Baseline Geneformer was recently updated on HuggingFace making loss comparisons challenging."
+<Warning>Baseline Geneformer was recently updated on HuggingFace making loss comparisons challenging.</Warning>
 
 ```
 [Geneformer](https://huggingface.co/ctheodoris/Geneformer) was recently updated on HuggingFace to a new version.
@@ -211,13 +214,13 @@ Elmentaite et al. (2020), Developmental Cell. This dataset contains approximatel
 
 For more details see the example notebook titled Geneformer-celltype-classification-example.ipynb
 
-![F1-Score Comparison Across Model Variants on Cell Type Classification Task](../assets/images/geneformer/f1-score-models-04-18-2025.png)
-![Average Accuracy Comparison Across Model Variants on Cell Type Classification Task](../assets/images/geneformer/accuracy-models-04-18-2025.png)
+![F1-Score Comparison Across Model Variants on Cell Type Classification Task](/assets/images/geneformer/f1-score-models-04-18-2025.png)
+![Average Accuracy Comparison Across Model Variants on Cell Type Classification Task](/assets/images/geneformer/accuracy-models-04-18-2025.png)
 
 ### Performance Benchmarks
 
 The 106M parameter variant of Geneformer achieves over 50 TFLOPS per GPU during training. This is consistent whether trained with 1 or 8 A100s.
 
-![GPU Performance (TFLOPS) Comparison Between Geneformer Model Variants on A100 GPUs](../assets/images/geneformer/model_tflops_per_gpu_chart_geneformer.png)
+![GPU Performance (TFLOPS) Comparison Between Geneformer Model Variants on A100 GPUs](/assets/images/geneformer/model_tflops_per_gpu_chart_geneformer.png)
 
 Performance will increase if the `num_dataset_workers` and the `micro_batch_size` are set appropriately. For the above metrics, we set `num_dataset_workers=8`. For the 10m model, set `micro_batch_size=120` and for the 106m model set the `micro_batch_size=16`. This will enable you to achieve similar performance results.

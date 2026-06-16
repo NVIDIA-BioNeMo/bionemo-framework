@@ -1,0 +1,46 @@
+---
+title: "Pre-training ESM-2"
+description: ""
+---
+Pre-trained checkpoints for ESM-2 are available at the 8M, 650M, and 3B model sizes. These models were trained by the
+BioNeMo Framework team to reproduce the original training results from Lin et al., Science (2023), with more recent
+UniProt data and leveraging the BioNeMo training infrastructure. The full [pre-training data](/main/datasets/uniprot)
+and train/test splits are available.
+
+## Training with bionemo-recipes
+
+Active ESM-2 training code lives in
+[`bionemo-recipes/recipes/esm2_native_te`](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_native_te).
+See the recipe README for setup instructions, supported training scripts (`train_ddp.py`,
+`train_fsdp2.py`), and benchmark results.
+
+An Accelerate-based variant is also available at
+[`bionemo-recipes/recipes/esm2_accelerate_te`](https://github.com/NVIDIA/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_accelerate_te).
+
+## Model Convergence
+
+Validation perplexity evaluated on the NVIDIA validation set.
+
+![ESM-2 Pre-training Convergence](/assets/images/esm2/esm2_pretrain_convergence.png)
+
+| Model Size | Perplexity at 500K Updates |
+| ---------- | -------------------------- |
+| 8M         | 10.26                      |
+| 650M       | 7.14                       |
+| 3B         | 6.42                       |
+
+## Pre-trained Checkpoint Tags
+
+| Model Size | Checkpoint Tag     |
+| ---------- | ------------------ |
+| 8M         | `esm2/8m:2.0`      |
+| 650M       | `esm2/nv_650m:2.1` |
+| 3B         | `esm2/nv_3b:2.1`   |
+
+Load a checkpoint with:
+
+```python
+from bionemo.core.data.load import load
+
+esm2_ckpt_path = load("esm2/8m:2.0")
+```

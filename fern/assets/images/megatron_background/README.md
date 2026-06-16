@@ -1,0 +1,1 @@
+NOTE: these images are from https://nvidia.sharepoint.com/:p:/r/sites/PixelsManagementTeams/_layouts/15/doc2.aspx?sourcedoc=%7BD1FC26B6-A366-4D1E-8595-A9D3CD3A0D71%7D&file=Pixels_SW_Team_Meeting_2024_09_05.pptx&action=edit&mobileredirect=true&DefaultItemOpen=1

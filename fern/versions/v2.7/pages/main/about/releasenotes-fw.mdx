@@ -1,0 +1,434 @@
+---
+title: "Release Notes"
+description: ""
+---
+## BioNeMo Framework v2.7
+
+### Updates & Improvements
+
+- Evo2 model improvements:
+
+  - Context, tensor and data parallelism support in the prediction endpoint as well as support for context lengths over 8192 https://github.com/NVIDIA/bionemo-framework/pull/1123. Fixes https://github.com/NVIDIA/bionemo-framework/issues/910 and https://github.com/NVIDIA/bionemo-framework/issues/1048.
+
+  - LoRA fine-tuning by @gabenavarro: https://github.com/NVIDIA/bionemo-framework/pull/980. Note: internal CI coverage of LoRA convergence is still a work in progress; therefore, we cannot guarantee convergence.
+
+  - Fix a 2x memory-usage issue during Evo2 generation: https://github.com/NVIDIA/NeMo/pull/14515
+
+  - Add flash-decode support in inference: https://github.com/NVIDIA/bionemo-framework/pull/1000
+
+  - Update Rotary Embedding and sequence-length defaults to address incorrect checkpoint conversion: https://github.com/NVIDIA/NeMo/pull/14514
+
+  - Improvements to tag masking in the Evo2 loss: https://github.com/NVIDIA/bionemo-framework/pull/1008
+
+  - Support for [Spike-no-more](https://arxiv.org/abs/2312.16903) to improve training stability: https://github.com/NVIDIA/bionemo-framework/pull/1011
+
+- Added a header to SCDL archives, providing improved provenance tracking and supporting future releases. It also adds tracking of AnnData API coverage in SCDL tests.
+  This header stores metadata about the archive and its composite arrays, including a version; the array lengths and data types; and information about the RowFeatureIndexes. This adds the features necessary to fix https://github.com/NVIDIA/bionemo-framework/issues/999 as well as to implement simple bit-packing of the rowptr, colptr, and data arrays. It should also make SCDL more secure, enable strict compatibility checking, and open the door to further performance improvements: https://github.com/NVIDIA/bionemo-framework/pull/1030
+
+- `bionemo-geometric` has been deprecated and removed. The molecular-featurization tooling in this package has moved to [cuik-molmaker](https://github.com/NVIDIA-Digital-Bio/cuik-molmaker).
+
+### Known Issues
+
+- We have removed `libtiff` from the container due to a known vulnerability, [CVE-2025-9900](https://ubuntu.com/security/CVE-2025-9900). `libtiff` isn't directly used in any BioNeMo code; however, users might face issues with e.g. Pillow or other common image-manipulation libraries inside this container.
+
+## BioNeMo Framework v2.6.3
+
+### Updates & Improvements
+
+- Fixes numerous issues with Evo2 model:
+  1. Inference/Generation issues resolved. https://github.com/NVIDIA/bionemo-framework/issues/890
+  2. FP8 training resumption issues resolved. https://github.com/NVIDIA/bionemo-framework/issues/973
+  3. Bug in inference script that concerns checkpoint loading is fixed. https://github.com/NVIDIA/bionemo-framework/pull/950
+- ESM2 LoRA model inference issue resolved. https://github.com/NVIDIA/bionemo-framework/pull/996
+- Added experimental evo2-mamba model. https://github.com/NVIDIA/bionemo-framework/pull/888
+- Updated base Docker image to [nvidia-pytorch 25.06-py3](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags)
+- NCCL issue in ESM2 pretraining resolved. https://github.com/NVIDIA/bionemo-framework/issues/970
+
+### What's Changed
+
+- Fix test_train_evo2_stops test by @balvisio in https://github.com/NVIDIA/bionemo-framework/pull/965
+- Enable test_train_evo2_stop_at_max_steps_and_continue. by @balvisio in https://github.com/NVIDIA/bionemo-framework/pull/966
+- automated benchmarks: esm2 650M training analogous to bionemo-recipes by @dorotat-nv in https://github.com/NVIDIA/bionemo-framework/pull/975
+- Fix database path in esm2_pretrain_recipes by @pstjohn in https://github.com/NVIDIA/bionemo-framework/pull/978
+- Add fp8 stop and go test for evo2 by @jwilber in https://github.com/NVIDIA/bionemo-framework/pull/974
+- Update Docs Banner for GitHub Pages-hosted Docs by @tshimko-nv in https://github.com/NVIDIA/bionemo-framework/pull/981
+- Add release notes for v2.6.2 (25.06) by @trvachov in https://github.com/NVIDIA/bionemo-framework/pull/971
+- Evo2 Generation fixes and necessary base dependency and container updates. Large change. by @jwilber in https://github.com/NVIDIA/bionemo-framework/pull/949
+- Point NeMo submodule back to main repo by @trvachov in https://github.com/NVIDIA/bionemo-framework/pull/984
+- Use new b2b kernels in evo2 jet tests by @jwilber in https://github.com/NVIDIA/bionemo-framework/pull/985
+- change where dtype is found in checkpoint export by @pstjohn in https://github.com/NVIDIA/bionemo-framework/pull/989
+- Evo2 Mamba by @jstjohn in https://github.com/NVIDIA/bionemo-framework/pull/888
+- Adding inference CDS length tests by @jstjohn in https://github.com/NVIDIA/bionemo-framework/pull/991
+- Fix PIL CVE by @trvachov in https://github.com/NVIDIA/bionemo-framework/pull/992
+- (BIONEMO-2334) Patch TE to fix Evo2 stop and go training by @balvisio in https://github.com/NVIDIA/bionemo-framework/pull/987
+- Fix bug in evo2-mamba train and add test by @jstjohn in https://github.com/NVIDIA/bionemo-framework/pull/994
+- Fix esm2 lora inference by @yzhang123 in https://github.com/NVIDIA/bionemo-framework/pull/996
+- Reset parameters for the ESM-2 contact head on HF export by @pstjohn in https://github.com/NVIDIA/bionemo-framework/pull/983
+
+## BioNeMo Framework v2.6.2
+
+### Updates & Improvements
+
+- Fixes numerous ESM2 model issues:
+  1. Finetuning metric for token classification is fixed. https://github.com/NVIDIA/bionemo-framework/pull/946
+  2. Losses for finetuning were fixed for data and model parallelism. https://github.com/NVIDIA/bionemo-framework/pull/959
+  3. Bug in inference script that concerns checkpoint loading is fixed. https://github.com/NVIDIA/bionemo-framework/pull/950
+- Updated base Docker image to [nvidia-pytorch 25.04-py3](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags)
+
+### Known Issues
+
+- Evo2 generation is broken (i.e. `bionemo-evo2/src/bionemo/evo2/run/infer.py`). See issue https://github.com/NVIDIA/bionemo-framework/issues/890. A workaround exists on branch https://github.com/NVIDIA/bionemo-framework/pull/949 and we are working to fix this issue for the July release.
+- There is a NCCL communication issue on certain A100 multi-node environments. In our internal testing, we were not able to reproduce the issue reliably across environments. If end users see the following error, please report in issue https://github.com/NVIDIA/bionemo-framework/issues/970 :
+
+```
+[rank9]: torch.distributed.DistBackendError: NCCL error in: /opt/pytorch/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:3356, internal error - please report this issue to the NCCL developers, NCCL version 2.26.3
+```
+
+## BioNeMo Framework v2.6.1
+
+### Updates & Improvements
+
+- Fixes around ESM2 pretraining and finetuning checkpoints.
+- Added sanity dataset for AMPLIFY testing.
+- Tested against A100 [brev](https://developer.nvidia.com/brev) instances.
+- Update `tornado` package to `>6.5.0` to fix container CVEs.
+
+## BioNeMo Framework v2.6
+
+### New Features
+
+- Adds support for AMPLIFY [doi:10.1101/2024.09.23.614603](https://doi.org/10.1101/2024.09.23.614603) pre-training and inference, offering a 70% speedup over the xformers-based attention backend with similar final perplexity values at 1M pre-training steps. (4.23 for 120M, 3.05 for 350M). The model is fully compatible with existing weights on HuggingFace.
+- Adds alpha support for [LoRA fine-tuning to for ESM2 models](https://nvidia.github.io/bionemo-framework/models/ESM-2/#lora-fine-tuning-performace). Inference and fine-tuning are enabled along with resumption from a checkpoint.
+
+### Updates & Improvements
+
+- Blackwell support, tested on B200 systems.
+- Fixed Grace CPU support, released ARM compatible container.
+
+## BioNeMo Framework v2.5
+
+### New Features
+
+- Adding the Evo2 model training workflow, including data preprocessing, pre-training, fine-tuning and inference with bf16 and fp8 support.
+
+### Updates & Improvements
+
+- Supporting/upgrading federated learning examples of BioNeMo in [NVFlare](https://github.com/NVIDIA/NVFlare/tree/2.6.0rc1/examples/advanced/bionemo)
+- Upgrade bionemo-moco to v0.0.2
+- Brev.dev launchable tutorials
+
+#### Known Issues
+
+- Partial test failures on ARM CPUs.
+
+## BioNeMo Framework v2.4.1
+
+### Updates & Improvements
+
+- Applies fixes to ESM2 metric logging that result in NotImplementedError while using Model Parallelism.
+
+## BioNeMo Framework v2.4
+
+### New Features
+
+- Draft implementation of Evo2 with support for Hyena operators
+- bionemo-moco v0.0.1 released for building diffusion-like generative models.
+
+### Known Issues
+
+- Partial test failures on ARM CPUs.
+
+### Updates & Improvements
+
+- ESM2 fine-tuning script with CLI (finetune_esm2) that supports sequence-level/token-level classification/regression using a CSV dataset.
+- Brev.dev launchable [fine-tuning tutorial for ESM2](https://nvidia.github.io/bionemo-framework/user-guide/examples/bionemo-esm2/finetune/)
+
+## BioNeMo Framework v2.3
+
+### New Features
+
+- Distributed Inference Support for ESM2 and Geneformer
+  - Enables linear inference throughput as GPU number is increased
+  - [See ESM2 inference notebook](https://github.com/NVIDIA/bionemo-framework/blob/release-v2.3/docs/docs/user-guide/examples/bionemo-esm2/inference.ipynb) and use `--num-gpus` parameter.
+
+### Updates & Improvements
+
+- Prior Geneformer inference on H100 accuracy regression fixed.
+- Base image updated to `nvcr.io/nvidia/pytorch:24.12-py3`; python updated to 3.12 among other core dependency upgrades ([base container release notes here](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-24-12.html#rel-24-12)).
+
+## BioNeMo Framework v2.2
+
+### New Features
+
+- Small Molecule Featurization
+  - Implemented elementary and advanced atom, bond, and full molecule featurizers.
+- GH200 Support for BioNeMo
+  - Added a `Dockerfile.arm` that builds a BioNeMo container that runs on GH200 machines.
+  - Publish a version of the BioNeMo container that supports multiple architectures to NGC.
+
+### Updates & Improvements
+
+- Single-Cell Dataloader (SCDL)
+  - Changed metadata storage to `parquet` files, which creates a 30x speed up when iterating over a large dataset.
+  - Added functionality to concatenate several `anndata` files without doubling disk memory usage.
+- ESM2
+  - Added support for `SIGTERM` preemption checkpoint saving.
+  - Moved ESM-2 and Geneformer training scripts to new executables, `train_esm2` and `train_geneformer`, respectively.
+  - Moved inference script to a new executable `infer_esm2`, and deprecated the inference example in the fine-tuning tutorial.
+  - Added new Jupyter notebook tutorials for inference and zero-shot protein design. These notebooks can be deployed on the cloud resources as a [brev.dev](https://www.brev.dev/) launchable.
+
+### Known Issues:
+
+- Loading a checkpoint for Geneformer inference on H100 has a known regression in accuracy. Work is in progress to resolve by next release.
+
+## BioNeMo Framework v2.1
+
+### New Features:
+
+- ESM2 Implementation
+  - Updated the ESM-2 Model Card with detailed performance benchmarks comparing BioNeMo2 training against vanilla pytorch.
+  - Added ESM-2 inference endpoint for evaluating pre-trained models
+- Size-Aware Batching
+  - Added SizeAwareBatchSampler, a pytorch data sampler that batches elements of varying sizes while ensuring that the total size of each batch does not exceed a specified maximum.
+  - Added BucketBatchSampler, another pytorch data sampler that groups elements of varying sizes based on predefined bucket ranges, and create batches with elements from each bucket to ensure that each batch has elements with homogeneous sizes.
+- CLI Support
+  - Added pydantic interface for pretraining jobs via parsing JSON configuration files that enables passing customized Model and DataModules classes.
+  - Implemented pydantic configuration for Geneformer and ESM2 pretraining and finetuning.
+  - Added 'recipes' for generating validated JSON files to be used with pydantic interface.
+  - Added installable scripts for 2/3 respectively, bionemo-esm2-recipe, bionemo-esm2-train, bionemo-geneformer-recipe, bionemo-geneformer-train.
+- Geneformer support in BioNeMo2:
+  - Tested pre-training scripts and fine-tuning example scripts that can be used as a starting point for users to create custom derivative models.
+  - Geneformer 10M and 106M checkpoints ported from BioNeMo v1 into BioNeMo v2 available and included in documentation.
+  - Added inference scripts
+- Documentation
+  - Cell type classification example notebook which covers the process of converting anndata into our internal format, and running inference on that data with a geneformer checkpoint, as well as making use of the inference results.
+  - Updated Getting Started guide, ESM-2 tutorials
+  - Added Frequently Asked Questions (FAQ) page
+
+## BioNeMo Framework v2.0
+
+### New Features:
+
+- ESM-2 implementation
+  - State of the art training performance and equivalent accuracy to the reference implementation
+  - 650M, and 3B scale checkpoints available which mirror the reference model
+  - Flexible fine-tuning examples that can be copied and modified to accomplish a wide variety of downstream tasks
+- First version of our NeMo v2 based reference implementation which re-imagines bionemo as a repository of megatron models, dataloaders, and training recipes which make use of NeMo v2 for training loops.
+  - Modular design and permissible Apache 2 OSS licenses enables the import and use of our framework in proprietary applications.
+  - NeMo2 training abstractions allows the user to focus on the model implementation while the training strategy handles distribution and model parallelism.
+- Documentation and documentation build system for BioNeMo 2.
+
+### Known Issues:
+
+- PEFT support is not yet fully functional.
+- Partial implementation of Geneformer is present, use at your own risk. It will be optimized and officially released in the future.
+- Command line interface is currently based on one-off training recipes and scripts. We are working on a configuration based approach that will be released in the future.
+- Fine-tuning workflow is implemented for BERT based architectures and could be adapted for others, but it requires you to inherit from the biobert base model config. You can follow similar patterns in the short term to load weights from an old checkpoint partially into a new model, however in the future we will have a more direct API which is easier to follow.
+- Slow memory leak occurs during ESM-2 pretraining, which can cause OOM during long pretraining runs. Training with a
+  microbatch size of 48 on 40 A100s raised an out-of-memory error after 5,800 training steps.
+  - Possible workarounds include calling `gc.collect(); torch.cuda.empty_cache()` at every ~1,000 steps, which appears
+    to reclaim the consumed memory; or training with a lower microbatch size and re-starting training from a saved
+    checkpoint periodically.
+
+## BioNeMo Framework v1.9
+
+### New Features
+
+- [Documentation] Updated, executable ESM-2nv notebooks demonstrating: Data preprocessing and model training with custom datasets, Fine-tuning on FLIP data, Inference on OAS sequences, Pre-training from scratch and continuing training
+- [Documentation] New notebook demonstrating Zero-Shot Protein Design Using ESM-2nv. Thank you to @awlange from A-Alpha Bio for contributing the original version of this recipe!
+
+### Bug fixes and Improvements
+
+- [Geneformer] Fixed bug in preprocessing due to a relocation of dependent artifacts.
+- [Geneformer] Fixes bug in finetuning to use the newer preprocessing constructor.
+
+## BioNeMo Framework v1.8
+
+### New Features
+
+- [Documentation] Updated, executable MolMIM notebooks demonstrating: Training on custom data, Inference and downstream prediction, ZINC15 dataset preprocesing, and CMA-ES optimization
+- [Dependencies] Upgraded the framework to [NeMo v1.23](https://github.com/NVIDIA/NeMo/tree/v1.23.0), which updates PyTorch to version 2.2.0a0+81ea7a4 and CUDA to version 12.3.
+
+### Bug fixes and Improvements
+
+- [ESM2] Fixed a bug in gradient accumulation in encoder fine-tuning
+- [MegaMolBART] Make MegaMolBART encoder finetuning respect random seed set by user
+- [MegaMolBART] Finetuning with val_check_interval=1 bug fix
+
+### Known Issues
+
+- Minor training speed regression observed for models DNABERT, Geneformer, MolMIM
+- Two known critical CVEs GHSA-cgwc-qvrx-rf7f, GHSA-mr7h-w2qc-ffc2. The vulnerabilities arise within a package that's installed by lightning by default. We do not use that package in bionemo framework container. we are also unable to remove the package in question as it's installed as a side-effect of installing lightning.
+- Two known High CVEs from pytorch : GHSA-pg7h-5qx3-wjr3, GHSA-5pcm-hx3q-hm94.
+
+## BioNeMo Framework v1.7
+
+### New Models
+
+- [DSMBind](https://www.biorxiv.org/content/10.1101/2023.12.10.570461v1), developed under the BioNeMo framework, is a model which can produce comparative values for ranking protein-ligand binding affinities. This release features the capability to perform inference using a newly trained checkpoint.
+
+### New Features
+
+- [EquiDock] Remove steric clashes as a post-processing step after equidock inference.
+- [Documentation] Updated Getting Started section which sequentially describes prerequisites, BioNeMo Framework access, startup instructions, and next steps.
+
+### Known Issues
+
+- There is a known security vulnerability with NLTK that can allow for arbitrary code execution via pickle files that are external assets downloaded via nltk.download() (https://github.com/nltk/nltk/issues/3266). BioNeMo itself does not use this dependency in any way, however parts of NeMo text-to-speech (nemo.collections.tts) does use this vulnerable codepath. Since NeMo is installed in the BioNeMo release containers, users are urged to exercise caution when using nemo.collections.tts or nltk.
+
+## BioNeMo Framework v1.6
+
+### New Features
+
+- [Model Fine-tuning] `model.freeze_layers` fine-tuning config parameter added to freeze a specified number of layers. Thank you to github user [@nehap25](https://github.com/nehap25)!
+- [ESM2] Loading pre-trained ESM-2 weights and continue pre-training on the MLM objective on a custom FASTA dataset is now supported.
+- [OpenFold] MLPerf feature 3.2 bug (mha_fused_gemm) fix has merged.
+- [OpenFold] MLPerf feature 3.10 integrated into bionemo framework.
+- [DiffDock] Updated data loading module for DiffDock model training, changing from sqlite3 backend to webdataset.
+
+## BioNeMo Framework v1.5
+
+### New Models
+
+- [Geneformer](https://www.nature.com/articles/s41586-023-06139-9) is out of **Beta** status. This release includes newly trained checkpoints and benchmarks, including a variant based on the publication with 10M parameters, and the largest variant of geneformer publically available to date with 106M parameters.
+
+## BioNeMo Framework v1.4
+
+### New Models
+
+- **Beta** [Geneformer](https://www.nature.com/articles/s41586-023-06139-9) a foundation model for single-cell data that encodes each cell as represented by an ordered list of differentially expressed genes for that cell.
+
+### New Features
+
+- **Beta** Geneformer pretraining with custom datasets
+- Low-Rank Adaptation (LoRA) finetuning for ESM2
+
+### Bug fixes and Improvements
+
+- OpenFold training improved benchmarks and validation of optimizations
+
+### Known Issues
+
+- BioNeMo Framework v24.04 container is vulnerable to [GHSA-whh8-fjgc-qp73](https://github.com/advisories/GHSA-whh8-fjgc-qp73) in onnx 1.14.0. Users are advised not to open untrusted onnx files with this image. Restrict your mount point to minimize directory traversal impact. A fix for this is scheduled in the 24.05 (May) release.
+
+## BioNeMo Framework v1.3
+
+### New Models
+
+- MolMIM implementation under BioNeMo framework, [a small molecule model developed at NVIDIA](https://arxiv.org/abs/2208.09016) which can be used to produce embeddings and novel molecules.
+
+### New Features
+
+- [MolMIM](https://developer.nvidia.com/blog/new-models-molmim-and-diffdock-power-molecule-generation-and-molecular-docking-in-bionemo/) re-trained on more data is now available in the framework and achieves state-of-the-art performance.
+- MolMIM property guided tutorial notebook covering property guided optimization using our new framework model.
+- MolMIM training tutorial available walking users through either training from scratch or from an existing checkpoint on your own data.
+- MolMIM tutorial notebook covering molecular sampling and property prediction is also now available.
+- Numerous optimizations from [NVIDIA's entry to the MLPerf competition](https://developer.nvidia.com/blog/optimizing-openfold-training-for-drug-discovery/) have been added to OpenFold. Documentation and detailed benchmarks are works in progress and will be published in upcoming releases. This release contains the following performance optimizations:
+  - Fused GEMMs in multi-head attention (MHA)
+  - Non-blocking data pipeline
+  - BF16 precision training
+  - Fused MHA gating
+  - Inductor Compiled LayerNorm
+  - OpenAI Triton LayerNorm kernels
+  - OpenAI Triton MHA
+
+### Bug fixes and Improvements
+
+- NeMo upgraded to v1.22 ([see NeMo release notes](https://github.com/NVIDIA/NeMo/releases)),
+- PyTorch Lightning upgraded to 2.0.7
+- [NGC CLI](https://org.ngc.nvidia.com/setup/installers/cli) has been removed from the release container. If users
+  download models from inside the container (e.g. using `bionemo_data_download` or via running specific unit tests),
+  the NGC CLI will be auto-installed to pull the models from NGC.
+
+### Known Issues
+
+- BioNeMo Framework v24.03 container is vulnerable to [GHSA-whh8-fjgc-qp73](https://github.com/advisories/GHSA-whh8-fjgc-qp73) in onnx 1.14.0. Users are advised not to open untrusted onnx files with this image. Restrict your mount point to minimize directory traversal impact.
+
+## BioNeMo Framework v1.2
+
+## New Models
+
+- OpenFold implementation under BioNeMo framework, derived from public OpenFold and DeepMind AlphaFold-2.
+- DNABERT implementation for computing embeddings for each nucleotide in the input DNA sequence.
+
+### New Features
+
+- Training recipes for DNABERT and OpenFold, including automated data processing and full configuration for training.
+- Example tutorials for running inference using OpenFold.
+- Splice Prediction downstream task example for DNABERT.
+- Wrapper scripts for DNABERT and OpenFold to launch jobs on BCP.
+
+### Bug fixes and Improvements
+
+- Interface improvements for ESM-2 data ingestion and pre-processing. The interface allows for explicit specification of training, validation, and test sets. The user may set `config.model.data.default_dataset_path` to maintain prior behavior, or set `config.model.data.train.dataset_path`, `config.model.data.val.dataset_path`, `config.model.data.test.dataset_path` which may all be unique.
+
+### Known Issues
+
+- OpenFold training speed does not yet include [MLPerf optimizations](https://blogs.nvidia.com/blog/scaling-ai-training-mlperf/), and these will be released in the subsequent release.
+
+## BioNeMo Framework v1.1
+
+## New Models
+
+- EquiDock for protein-protein docking pose prediction
+- DiffDock for protein-ligand blind docking pose generation
+
+### New Features
+
+- Training recipes for EquiDock and DiffDock, including automated data processing and full configuration for training.
+- Accelerated inference and training for DiffDock via fast tensor-product kernels.
+- Example tutorials for running inference using EquiDock and DiffDock.
+- Recipes for running EquiDock and DiffDock on BCP and Slurm.
+- Pipeline parallel supported for ESM-2nv.
+- Migration of inference notebooks to using pytriton.
+
+### Bug fixes and Improvements
+
+- Faster pre-processing of data on BCP.
+- Refactor of download_models.sh to download_models.py for easier CLI use.
+- Refactor of install structure to move from /opt/nvidia to /workspace/bionemo. The environment variable $BIONEMO_HOME now points to the repo base and is required to be set for tests to pass.
+
+### Security Notice
+
+SchedMD Slurm in the release container is shipped with a security vulnerability, [CVE-2022-29501](https://ubuntu.com/security/CVE-2022-29501), and therefore this version of Slurm should not be used to run a Slurm cluster (specifically, the processes `slurmdbd`, `slurmctld`, and `slurmd`.
+
+In general, the BioNeMo Framework release is designed to ship code and an environment that would be executed on local workstations, or deployed on clusters for large scale training jobs. This container is not designed to run as a service with public facing APIs. A full summary of security vulnerabilities can be found [here](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/containers/bionemo-framework/security).
+
+## BioNeMo Framework v1.0
+
+## New Models
+
+- ESM-2nv for protein sequence representations, pretrained weights of ESM-2 650M and ESM-2 3B converted from HF checkpoint available.
+
+### New Features
+
+- Pre-training recipes for ESM-2nv, including automated data processing and full configuration for training
+- Fine-tuning of ESM-2nv with encoder frozen or trainable
+- Downstream task finetuning support for single-value classification (e.g. subcellular localization), single-value regression (e.g. meltome) and per-token classification (e.g. secondary structure)
+- Validation in loop to evaluate performance on downstream tasks during training
+- Example tutorials for pre-training, fine tuning, and downstream tasks
+
+## BioNeMo Framework v0.4.0
+
+### New Models
+
+- ESM-1nv for protein sequence representations, pretrained weights available
+- ProtT5nv for protein sequence representation and sequence-to-sequence tasks, pretrained weights available
+
+### New Features
+
+- Pre-training for all models, including automated data processing and full configuration for training
+- Fine-tuning of MegaMolBART, ESM-1nv, and ProtT5nv with encoder frozen or trainable
+- Downstream task example applications – secondary structure prediction for ESM-1nv and ProtT5nv, physchem prediction (lipophilicity, FreeSolv, ESOL) and retrosynthesis prediction for MegaMolBART
+- Validation in loop to evaluate performance on downstream tasks during training: physchem prediction (MegaMolBART) and secondary structure prediction (ESM-1nv and ProtT5nv).
+- Pipeline parallelism supported as a beta feature. Not fully tested.
+- Example notebooks for pre-training, fine tuning, and downstream tasks
+
+### Known Issues
+
+- Data preprocessing on DGX Cloud is slow. Faster to do it on a local machine.
+
+### New APIs
+
+- BioNeMoDataModule - Encapsulates dataset instantiation in bionemo models so that many different datasets can be used with the same model
+- EncoderFineTuning - Base class to facilitate implementation of downstream tasks built on embeddings from other models

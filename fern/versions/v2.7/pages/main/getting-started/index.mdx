@@ -1,0 +1,66 @@
+---
+title: "Getting Started"
+description: ""
+---
+## Repository structure
+
+BioNeMo Framework is organized around two complementary code areas:
+
+- `bionemo-recipes`: self-contained models and ready-to-run training or inference recipes.
+- `sub-packages`: lightweight, reusable libraries for biological workflows, data handling, I/O, batching, benchmarking, and recipe support.
+
+Training code for actively supported models now lives in `bionemo-recipes`, not in `sub-packages`.
+
+### Current sub-packages
+
+- `sub-packages/bionemo-core`
+- `sub-packages/bionemo-moco`
+- `sub-packages/bionemo-noodles`
+- `sub-packages/bionemo-recipeutils`
+- `sub-packages/bionemo-scdl`
+- `sub-packages/bionemo-scspeedtest`
+- `sub-packages/bionemo-size-aware-batching`
+- `sub-packages/bionemo-webdatamodule`
+
+Documentation source is stored in `docs/`.
+
+## Development environment
+
+We recommend using the recipes devcontainer for both recipe and framework library development.
+
+When working on a package in `sub-packages`, install it into the active environment with an editable install:
+
+```bash
+uv pip install -e ./sub-packages/bionemo-core
+uv pip install -e ./sub-packages/bionemo-scdl
+uv pip install -e "./sub-packages/bionemo-recipeutils[basecamp]"
+```
+
+You can also use `pip install -e ...` if you prefer.
+
+## Repository layout
+
+```text
+.
+├── bionemo-recipes/
+│   ├── models/
+│   └── recipes/
+├── sub-packages/
+│   ├── bionemo-core/
+│   ├── bionemo-moco/
+│   ├── bionemo-noodles/
+│   ├── bionemo-recipeutils/
+│   ├── bionemo-scdl/
+│   ├── bionemo-scspeedtest/
+│   ├── bionemo-size-aware-batching/
+│   └── bionemo-webdatamodule/
+├── docs/
+├── ci/
+└── Dockerfile
+```
+
+## Next steps
+
+- For model training and fine-tuning workflows, start in `bionemo-recipes/`.
+- For reusable libraries and workflow utilities, start in `sub-packages/`.
+- For local development details, see [Development with BioNeMo](/main/getting-started/development).

@@ -1,0 +1,30 @@
+tabs:
+  docs:
+    display-name: Documentation
+    slug: ""
+  api:
+    display-name: API Reference
+    slug: api
+
+navigation:
+  - tab: docs
+    layout:
+      - section: "Documentation"
+        contents:
+          - page: "Home"
+            path: ./v2.7/pages/index.mdx
+          - folder: ./v2.7/pages/main
+            title: "BioNeMo Framework"
+            title-source: frontmatter
+          - folder: ./v2.7/pages/models
+            title: "Models"
+            title-source: frontmatter
+  - tab: api
+    layout:
+      - section: "Python API"
+        slug: reference/python-api
+        contents:
+          - page: Overview
+            path: ./v2.7/pages/api-reference/index.mdx
+            slug: ""
+          - folder: ../product-docs/bionemo-core/Full-Library-Reference
