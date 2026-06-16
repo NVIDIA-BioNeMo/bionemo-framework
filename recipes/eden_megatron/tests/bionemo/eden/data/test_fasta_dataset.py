@@ -20,10 +20,11 @@ from pathlib import Path
 
 import pytest
 import torch
-from bionemo.eden.data.fasta_dataset import SimpleFastaDataset
-from bionemo.eden.data.test_utils.create_fasta_file import create_fasta_file
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+
+from bionemo.eden.data.fasta_dataset import SimpleFastaDataset
+from bionemo.eden.data.test_utils.create_fasta_file import create_fasta_file
 
 
 # Tokenizer path from recipe root

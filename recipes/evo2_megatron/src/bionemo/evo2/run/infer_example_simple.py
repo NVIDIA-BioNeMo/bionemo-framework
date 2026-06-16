@@ -41,6 +41,7 @@ Example:
 from typing import List, Optional
 
 import torch
+
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
 
 

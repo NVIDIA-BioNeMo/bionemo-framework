@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
+
 from bionemo.evo2.models.evo2_lora import Evo2LoRA
 from bionemo.evo2.models.evo2_provider import Hyena1bModelProvider
 
@@ -442,8 +443,9 @@ def _build_pretrain_config(
 
 def _pretrain_base_model(base_dir: Path, *, train_iters: int = 1) -> Path:
     """Train a base model for 1 step and return the checkpoint directory."""
-    from bionemo.evo2.models.evo2_provider import hyena_forward_step
     from megatron.bridge.training.pretrain import pretrain
+
+    from bionemo.evo2.models.evo2_provider import hyena_forward_step
 
     cfg = _build_pretrain_config(base_dir, train_iters=train_iters)
     pretrain(cfg, hyena_forward_step)
@@ -811,8 +813,9 @@ class TestEvo2LoRAPretrainIntegration:
 
     def test_lora_checkpoint_excludes_frozen_embeddings(self, tmp_path: Path, base_ckpt: Path):
         """LoRA WITHOUT skip_freeze → checkpoint does NOT contain embedding keys."""
-        from bionemo.evo2.models.evo2_provider import hyena_forward_step
         from megatron.bridge.training.pretrain import pretrain
+
+        from bionemo.evo2.models.evo2_provider import hyena_forward_step
 
         lora_dir = tmp_path / "lora_frozen"
         cfg = _build_pretrain_config(
@@ -854,8 +857,9 @@ class TestEvo2LoRAPretrainIntegration:
         lora_targets: list[str] | None,
     ):
         """LoRA + skip_freeze → checkpoint contains the unfrozen module and its weights changed."""
-        from bionemo.evo2.models.evo2_provider import hyena_forward_step
         from megatron.bridge.training.pretrain import pretrain
+
+        from bionemo.evo2.models.evo2_provider import hyena_forward_step
 
         lora_dir = tmp_path / f"lora_{skip_freeze[0]}"
         cfg = _build_pretrain_config(

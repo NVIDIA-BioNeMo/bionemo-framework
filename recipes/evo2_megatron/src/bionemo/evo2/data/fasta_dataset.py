@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 import torch
+
 from bionemo.common.fasta.nvfaidx import NvFaidx
 
 

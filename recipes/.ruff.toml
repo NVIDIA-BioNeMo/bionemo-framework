@@ -61,7 +61,8 @@ exclude = [
 
 [lint.isort]
 lines-after-imports = 2
-known-third-party = ["bionemo", "wandb"]
+known-first-party = ["bionemo"]
+known-third-party = ["wandb"]
 
 [lint.pydocstyle]
 convention = "google"

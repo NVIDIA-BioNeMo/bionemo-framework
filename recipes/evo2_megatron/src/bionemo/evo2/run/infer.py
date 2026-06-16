@@ -87,15 +87,6 @@ except ImportError:
     from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
         HuggingFaceTokenizer as _HuggingFaceTokenizer,
     )
-from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
-from bionemo.evo2.models.evo2_provider import (
-    bind_hyena_packed_views_to_dynamic_context,
-    build_evo2_mamba_inference_state_config,
-    compute_evo2_paged_kv_buffer_size_gb,
-    make_evo2_dynamic_inference_context_cls,
-)
-from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
-from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 from megatron.bridge.training.utils.checkpoint_utils import (
     file_exists,
     get_checkpoint_run_config_filename,
@@ -106,6 +97,16 @@ from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.transformer.module import Float16Module
+
+from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
+from bionemo.evo2.models.evo2_provider import (
+    bind_hyena_packed_views_to_dynamic_context,
+    build_evo2_mamba_inference_state_config,
+    compute_evo2_paged_kv_buffer_size_gb,
+    make_evo2_dynamic_inference_context_cls,
+)
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
+from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 
 
 logger: logging.Logger = logging.getLogger(__name__)

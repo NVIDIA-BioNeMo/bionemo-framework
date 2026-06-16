@@ -23,11 +23,12 @@ from pathlib import Path
 
 import pytest
 import torch
+from megatron.bridge.training.tokenizers.config import TokenizerConfig
+from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.data.fasta_dataset import SimpleFastaDataset
 from bionemo.evo2.data.test_utils.create_fasta_file import create_fasta_file
-from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
 
 @pytest.fixture

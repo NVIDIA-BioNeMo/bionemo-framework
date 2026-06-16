@@ -22,9 +22,6 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
-from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
-from bionemo.evo2.models.megatron.hyena.hyena_hybrid_layer_allocation import Symbols as LayerSymbols
-from bionemo.evo2.models.megatron.hyena.hyena_hybrid_layer_allocation import allocate_layers
 from megatron.core import tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
@@ -44,6 +41,10 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import sharded_state_dict_default
 from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
 from torch import Tensor, nn
+
+from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
+from bionemo.evo2.models.megatron.hyena.hyena_hybrid_layer_allocation import Symbols as LayerSymbols
+from bionemo.evo2.models.megatron.hyena.hyena_hybrid_layer_allocation import allocate_layers
 
 
 try:

@@ -17,8 +17,9 @@
 # limitations under the License.
 import torch
 import torch.nn.functional as F  # noqa: N812
-from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
 from einops import rearrange
+
+from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
 
 
 try:

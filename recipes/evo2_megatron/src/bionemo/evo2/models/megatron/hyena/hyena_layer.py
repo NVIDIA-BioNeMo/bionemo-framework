@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
-from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -31,6 +30,8 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import deprecate_inference_params
 from torch import Tensor
+
+from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 
 
 @dataclass

@@ -19,9 +19,10 @@ import contextlib
 from unittest.mock import MagicMock, patch
 
 import torch
-from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaOptimizerConfigOverrideProvider
 from megatron.bridge.training.config import OptimizerConfig, OptimizerConfigOverrideProviderContext, SchedulerConfig
 from megatron.core.optimizer import _get_param_groups
+
+from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaOptimizerConfigOverrideProvider
 
 
 class _FakePGCollection:

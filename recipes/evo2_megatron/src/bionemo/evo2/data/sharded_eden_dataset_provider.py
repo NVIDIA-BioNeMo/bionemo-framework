@@ -26,6 +26,9 @@ Contributed by BaseCamp Research: https://basecamp-research.com/
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
+from megatron.core.tokenizers.megatron_tokenizer import MegatronTokenizerBase
+
 from bionemo.common.data.basecamp.sharded_dataset import (
     ShardedEdenDataset,
     compute_num_windows,
@@ -36,8 +39,6 @@ from bionemo.common.data.multi_epoch_dataset import (
     IdentityMultiEpochDatasetWrapper,
     MultiEpochDatasetResampler,
 )
-from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
-from megatron.core.tokenizers.megatron_tokenizer import MegatronTokenizerBase
 
 
 __all__ = [

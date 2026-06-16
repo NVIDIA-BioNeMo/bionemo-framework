@@ -18,16 +18,6 @@ import warnings
 from pathlib import Path
 
 import torch
-from bionemo.evo2.data.evo2_dataset_provider import Evo2DatasetProvider
-from bionemo.evo2.data.evo2_mock_dataset_provider import MockEvo2DatasetProvider
-from bionemo.evo2.data.megatron.hyena.evo2_dataset import Evo2Dataset, Evo2DatasetPadEodLossMask
-from bionemo.evo2.data.sharded_eden_dataset_provider import ShardedEdenDatasetProvider
-from bionemo.evo2.models.evo2_lora import Evo2LoRA
-from bionemo.evo2.models.evo2_provider import (
-    Hyena1bModelProvider,
-    HyenaModelProvider,
-    HyenaOptimizerConfigOverrideProvider,
-)
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import (
@@ -41,6 +31,17 @@ from megatron.bridge.training.config import (
 )
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig, get_mixed_precision_config
 from typing_extensions import TypedDict, Unpack
+
+from bionemo.evo2.data.evo2_dataset_provider import Evo2DatasetProvider
+from bionemo.evo2.data.evo2_mock_dataset_provider import MockEvo2DatasetProvider
+from bionemo.evo2.data.megatron.hyena.evo2_dataset import Evo2Dataset, Evo2DatasetPadEodLossMask
+from bionemo.evo2.data.sharded_eden_dataset_provider import ShardedEdenDatasetProvider
+from bionemo.evo2.models.evo2_lora import Evo2LoRA
+from bionemo.evo2.models.evo2_provider import (
+    Hyena1bModelProvider,
+    HyenaModelProvider,
+    HyenaOptimizerConfigOverrideProvider,
+)
 
 
 class Evo2CommonKwargs(TypedDict, total=False):

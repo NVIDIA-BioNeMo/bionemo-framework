@@ -15,9 +15,10 @@
 from pathlib import Path
 
 import torch
+from megatron.bridge.training.pretrain import pretrain
+
 from bionemo.evo2.models.evo2_provider import hyena_forward_step
 from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
-from megatron.bridge.training.pretrain import pretrain
 
 
 if __name__ == "__main__":

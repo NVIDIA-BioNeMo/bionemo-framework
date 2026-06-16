@@ -22,6 +22,9 @@ import numpy as np
 import polars as pol
 import pytest
 import torch
+from megatron.bridge.training.tokenizers.config import TokenizerConfig
+from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+
 from bionemo.eden.data.sharded_eden_dataset_provider import (
     DatasetBuildContext,
     ShardedEdenDataset,
@@ -29,8 +32,6 @@ from bionemo.eden.data.sharded_eden_dataset_provider import (
     extract_sample_id,
     precompute_window_database,
 )
-from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
 
 # Tokenizer paths from recipe root (relative to test file)

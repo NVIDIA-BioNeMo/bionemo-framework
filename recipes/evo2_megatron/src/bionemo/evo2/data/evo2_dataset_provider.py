@@ -20,14 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Type
 
-from bionemo.evo2.data.megatron.hyena.config import parse_dataset_config
-from bionemo.evo2.data.megatron.hyena.evo2_dataset import Evo2Dataset
 from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
 from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.datasets.gpt_dataset import GPTDatasetConfig
 from megatron.core.datasets.megatron_dataset import MegatronDataset
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.tokenizers.megatron_tokenizer import MegatronTokenizerBase
+
+from bionemo.evo2.data.megatron.hyena.config import parse_dataset_config
+from bionemo.evo2.data.megatron.hyena.evo2_dataset import Evo2Dataset
 
 
 @dataclass

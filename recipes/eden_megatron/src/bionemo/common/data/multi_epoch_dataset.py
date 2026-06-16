@@ -26,8 +26,9 @@ from dataclasses import dataclass
 from typing import Generic, NamedTuple, Protocol, Sequence, TypeVar
 
 import numpy as np
-from bionemo.common.data.permute import permute
 from torch.utils.data import Dataset
+
+from bionemo.common.data.permute import permute
 
 
 __all__: Sequence[str] = (

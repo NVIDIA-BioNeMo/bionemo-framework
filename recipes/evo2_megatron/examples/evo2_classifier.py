@@ -47,16 +47,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
-from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
-from bionemo.evo2.models.evo2_lora import Evo2LoRA
-from bionemo.evo2.models.evo2_provider import (
-    Hyena1bModelProvider,
-    HyenaModelProvider,
-    HyenaOptimizerConfigOverrideProvider,
-)
-from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import get_hyena_stack_spec
-from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel as MCoreHyenaModel
-from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.training.checkpointing import (
     _generate_model_state_dict,
@@ -91,6 +81,17 @@ from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.spec_utils import ModuleSpec
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
+
+from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
+from bionemo.evo2.models.evo2_lora import Evo2LoRA
+from bionemo.evo2.models.evo2_provider import (
+    Hyena1bModelProvider,
+    HyenaModelProvider,
+    HyenaOptimizerConfigOverrideProvider,
+)
+from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import get_hyena_stack_spec
+from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel as MCoreHyenaModel
+from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 
 
 logger: logging.Logger = logging.getLogger(__name__)

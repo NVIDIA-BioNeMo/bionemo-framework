@@ -22,9 +22,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import torch
-from bionemo.eden.models.eden_provider import EDEN_MODEL_OPTIONS
-from bionemo.eden.recipes.eden import DEFAULT_HF_TOKENIZER_MODEL_PATH
-from bionemo.eden.recipes.eden import eden_pretrain_config as pretrain_config
 from megatron.bridge.training.comm_overlap import (
     CommOverlapConfig,
     userbuffers_bf16_h100_h8192_tp4_mbs1_seqlen8192,
@@ -36,6 +33,10 @@ from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.utils.common_utils import get_rank_safe
+
+from bionemo.eden.models.eden_provider import EDEN_MODEL_OPTIONS
+from bionemo.eden.recipes.eden import DEFAULT_HF_TOKENIZER_MODEL_PATH
+from bionemo.eden.recipes.eden import eden_pretrain_config as pretrain_config
 
 
 logger: logging.Logger = logging.getLogger(__name__)

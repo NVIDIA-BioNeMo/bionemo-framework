@@ -21,14 +21,15 @@ from typing import Any
 
 import torch
 import torch.distributed.checkpoint as dcp
-from bionemo.evo2.models.evo2_provider import MODEL_OPTIONS, HyenaModelProvider
-from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
 from megatron.bridge.training.checkpointing import save_tokenizer_assets
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from torch.distributed.checkpoint import FileSystemReader, FileSystemWriter
 from torch.distributed.checkpoint.metadata import BytesStorageMetadata
+
+from bionemo.evo2.models.evo2_provider import MODEL_OPTIONS, HyenaModelProvider
+from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
 
 
 logger = logging.getLogger(__name__)

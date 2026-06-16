@@ -31,9 +31,10 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint import FileSystemWriter
+
 from bionemo.eden.models.eden_provider import EDEN_MODEL_OPTIONS
 from bionemo.eden.utils.checkpoint.mbridge_checkpoint_utils import load_mbridge_state_dict
-from torch.distributed.checkpoint import FileSystemWriter
 
 
 logger = logging.getLogger(__name__)

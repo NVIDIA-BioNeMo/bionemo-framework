@@ -23,6 +23,13 @@ from typing import Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+from einops import rearrange
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
+from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.utils import sharded_state_dict_default
+
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     B2BCausalConv1dModule,
@@ -31,12 +38,6 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     ParallelShortHyenaOperator,
     divide,
 )
-from einops import rearrange
-from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.spec_utils import ModuleSpec, build_module
-from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.utils import sharded_state_dict_default
 
 
 logger = logging.getLogger(__name__)

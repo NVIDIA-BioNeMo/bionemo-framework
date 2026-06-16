@@ -22,11 +22,12 @@ from typing import Any, Dict, Type
 
 import numpy as np
 import torch
-from bionemo.evo2.data.megatron.hyena.evo2_dataset import Evo2Dataset
 from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
 from megatron.core.datasets.megatron_dataset import MegatronDataset
 from megatron.core.tokenizers.megatron_tokenizer import MegatronTokenizerBase
 from torch.utils.data import Dataset
+
+from bionemo.evo2.data.megatron.hyena.evo2_dataset import Evo2Dataset
 
 
 class MockGPTDataset(Dataset):

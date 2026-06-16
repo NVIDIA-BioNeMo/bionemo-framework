@@ -24,10 +24,11 @@ import os
 
 import pytest
 import torch
+from huggingface_hub import hf_hub_download
+
 from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS
 from bionemo.evo2.utils.checkpoint.mbridge_to_vortex import mbridge_to_vortex_state_dict
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import load_savanna_state_dict, savanna_to_mbridge_state_dict
-from huggingface_hub import hf_hub_download
 
 
 SAVANNA_1B_REPO = "arcinstitute/savanna_evo2_1b_base"

@@ -20,8 +20,9 @@
 from pathlib import Path
 from typing import Literal
 
-from bionemo.evo2.models.megatron.hyena.hyena_utils import hyena_no_weight_decay_cond
 from pydantic import BaseModel
+
+from bionemo.evo2.models.megatron.hyena.hyena_utils import hyena_no_weight_decay_cond
 
 
 def hyena_no_weight_decay_cond_with_embeddings(name, param):

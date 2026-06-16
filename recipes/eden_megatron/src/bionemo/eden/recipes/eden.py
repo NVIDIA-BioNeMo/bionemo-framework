@@ -24,8 +24,6 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from bionemo.eden.data.sharded_eden_dataset_provider import ShardedEdenDatasetProvider
-from bionemo.eden.models.eden_provider import EdenModelProvider
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import (
@@ -38,6 +36,9 @@ from megatron.bridge.training.config import (
     TrainingConfig,
 )
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig, get_mixed_precision_config
+
+from bionemo.eden.data.sharded_eden_dataset_provider import ShardedEdenDatasetProvider
+from bionemo.eden.models.eden_provider import EdenModelProvider
 
 
 _REPO_BASE_DIR = Path(__file__).resolve().parents[4]

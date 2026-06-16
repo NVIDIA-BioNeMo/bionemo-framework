@@ -19,8 +19,9 @@
 from typing import ClassVar, Dict, Optional
 
 import torch
-from bionemo.evo2.models.megatron.hyena.hyena_utils import make_upper_case
 from megatron.core.datasets.gpt_dataset import GPTDataset
+
+from bionemo.evo2.models.megatron.hyena.hyena_utils import make_upper_case
 
 
 class Evo2Dataset(GPTDataset):

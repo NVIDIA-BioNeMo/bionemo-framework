@@ -36,11 +36,12 @@ from typing import Optional
 import numpy as np
 import torch
 import yaml
+from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
+
 from bionemo.common.fasta import back_transcribe_sequence, complement_sequence, reverse_sequence, transcribe_sequence
 from bionemo.common.fasta.nvfaidx import NvFaidx
 from bionemo.evo2.data.dataset_tokenizer import Evo2DatasetTokenizer
 from bionemo.evo2.utils.config import Evo2PreprocessingConfig, Evo2TaxonomyLineage
-from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
 
 
 logger = logging.getLogger(__name__)
