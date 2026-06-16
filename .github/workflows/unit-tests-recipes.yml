@@ -44,9 +44,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/pre-commit
-          key: ${{ runner.os }}-python-3.13-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-python-3.13-pre-commit-
+          key: ${{ runner.os }}-python-3.13-pre-commit-${{ hashFiles('.pre-commit-config.yaml', '**/.ruff.toml') }}
 
       - name: Install pre-commit
         run: |
