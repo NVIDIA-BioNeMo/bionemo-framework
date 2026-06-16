@@ -1380,8 +1380,12 @@ def test_native_dynamic_full_fp8_runs_with_and_without_chunked_prefill(mbridge_c
         top_k=1,
         seed=42,
         max_seq_length=512,
-        extra_args=fp8_args
-        + ["--enable-chunked-prefill", "--inference-dynamic-batching-max-tokens", str(chunk_max_tokens)],
+        extra_args=[
+            *fp8_args,
+            "--enable-chunked-prefill",
+            "--inference-dynamic-batching-max-tokens",
+            str(chunk_max_tokens),
+        ],
     )
     for label, rec in (("full", full), ("chunked", chunked)):
         assert rec["usage"]["prompt_tokens"] == n_prompt_tokens, (
