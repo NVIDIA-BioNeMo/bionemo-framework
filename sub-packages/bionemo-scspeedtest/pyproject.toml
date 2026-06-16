@@ -19,9 +19,12 @@ dependencies = [
     "tqdm>=4.0.0",
     "scdataset",
     "anndata>=0.11.0",
-    "bionemo-scdl>=0.0.7"
-
+    "bionemo-scdl>=0.0.7",
+    "annbatch[zarrs]==0.0.1"
 ]
+[project.optional-dependencies]
+cupy-cuda13 = [ "annbatch[cupy-cuda13]" ]
+
 
 [tool.setuptools.packages.find]
 where = ["src"]
