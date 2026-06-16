@@ -13,6 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# --- BEGIN COPIED FILE NOTICE ---
+# This file is copied from: bionemo-recipes/models/mixtral/modeling_mixtral_te.py
+# Do not modify this file directly. Instead, modify the source and run:
+#     python ci/scripts/check_copied_files.py --fix
+# --- END COPIED FILE NOTICE ---
+
 """TransformerEngine-optimized Mixtral model with Mixture of Experts."""
 
 import logging
@@ -923,11 +929,6 @@ class HFInferenceParams(InferenceParams):
             updated_key_cache = key_cache.index_select(0, beam_idx)
             updated_value_cache = value_cache.index_select(0, beam_idx)
             self.cache_manager.cache[layer_number] = (updated_key_cache, updated_value_cache)
-
-    @property
-    def is_compileable(self) -> bool:
-        """Return False as this cache is not compatible with torch.compile."""
-        return False
 
 
 @torch.compile(fullgraph=True)

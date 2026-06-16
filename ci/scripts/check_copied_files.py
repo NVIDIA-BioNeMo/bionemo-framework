@@ -164,6 +164,8 @@ SOURCE_TO_DESTINATION_MAP: dict[str, list[str]] = {
         "bionemo-recipes/recipes/esm2_native_te/collator.py",
         "bionemo-recipes/recipes/llama3_native_te/collator.py",
         "bionemo-recipes/recipes/opengenome2_llama_native_te/collator.py",
+        "bionemo-recipes/recipes/mixtral_native_te/collator.py",
+        "bionemo-recipes/recipes/opengenome2_mixtral_native_te/collator.py",
         "bionemo-recipes/recipes/esm2_peft_te/collator.py",
     ],
     "bionemo-recipes/models/esm2/state.py": [
@@ -194,6 +196,10 @@ SOURCE_TO_DESTINATION_MAP: dict[str, list[str]] = {
     ],
     "bionemo-recipes/models/esm2/LICENSE": [
         "bionemo-recipes/recipes/vllm_inference/esm2/LICENSE",
+    ],
+    "bionemo-recipes/models/mixtral/modeling_mixtral_te.py": [
+        "bionemo-recipes/recipes/mixtral_native_te/modeling_mixtral_te.py",
+        "bionemo-recipes/recipes/opengenome2_mixtral_native_te/modeling_mixtral_te.py",
     ],
     # CodonFM model -> recipe sync
     "bionemo-recipes/models/codonfm/modeling_codonfm_te.py": [

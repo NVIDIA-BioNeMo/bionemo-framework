@@ -1,0 +1,66 @@
+defaults:
+  - defaults
+  - _self_
+
+config_name_or_path: ./model_configs/og2-mixtral-8x1B
+
+config_kwargs:
+  attn_input_format: thd
+  self_attn_mask_type: padding_causal
+
+use_sequence_packing: true
+use_meta_device: false
+use_fp32_master_weights: true
+
+dataset:
+  tokenizer_name_or_path: ./tokenizers/nucleotide_fast_tokenizer
+  micro_batch_size: 2
+  num_workers: 1
+  max_seq_length: 2048
+  stride: 200
+  buffer_size: 50_000
+  mask_degenerate_bases: true
+  uppercase_labels: false
+  load_dataset_kwargs:
+    path: json
+    data_files: /data/opengenome2/json/pretraining_or_both_phases/metagenomes/data_metagenomics_train_*.jsonl.gz
+    split: train
+    streaming: true
+
+num_train_steps: 20_000
+grad_acc_steps: 4
+
+adamw_kwargs:
+  lr: 3e-4
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.1
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 500
+  num_decay_steps: 19_500
+  min_lr_ratio: 0.02
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 1_000
+  async_save: true
+
+validation:
+  enabled: true
+  eval_interval: 200
+  num_batches: 10
+  data_path: /data/opengenome2/json/pretraining_or_both_phases/metagenomes/data_metagenomics_valid_chunk1.jsonl.gz
+  micro_batch_size: 4
+  max_seq_length: null
+  stride: null
+
+logger:
+  frequency: 10
+
+wandb:
+  name: og2_mixtral_8x1B_thd_moe
+  project: opengenome2-mixtral

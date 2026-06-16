@@ -1,0 +1,65 @@
+defaults:
+  - defaults
+  - _self_
+
+config_name_or_path: ./model_configs/og2-mixtral-8x1B
+
+config_kwargs:
+  attn_input_format: thd
+  self_attn_mask_type: padding_causal
+
+use_weight_decay_grouping: true
+skip_embedding_weight_decay: true
+use_fp32_master_weights: true
+use_meta_device: false
+use_torch_compile: false
+use_sequence_packing: true
+
+num_train_steps: 2000
+grad_acc_steps: 2
+
+dataset:
+  tokenizer_name_or_path: ./tokenizers/nucleotide_fast_tokenizer
+  micro_batch_size: 2
+  num_workers: 0
+  max_seq_length: 1024
+  stride: 200
+  buffer_size: 50_000
+  text_column: text
+  mask_degenerate_bases: true
+  uppercase_labels: false
+  load_dataset_kwargs:
+    path: parquet
+    data_files: ../../opengenome2_llama_native_te/dlcm_sanity_dataset.parquet
+    split: train
+    streaming: true
+
+adamw_kwargs:
+  lr: 1e-3
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-5
+  weight_decay: 0.1
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 100
+  num_decay_steps: 1900
+  min_lr_ratio: 0.01
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: false
+  resume_from_checkpoint: false
+  save_every_n_steps: 0
+  async_save: false
+
+validation:
+  enabled: false
+
+logger:
+  frequency: 1
+
+wandb:
+  mode: online
+  project: og2-architecture-comparison
+  name: og2-mixtral-8x1B

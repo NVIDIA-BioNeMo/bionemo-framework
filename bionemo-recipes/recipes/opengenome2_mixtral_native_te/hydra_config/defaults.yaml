@@ -1,0 +1,95 @@
+# OpenGenome2 Mixtral training defaults
+
+use_te: true
+config_name_or_path: ???
+
+use_weight_decay_grouping: true
+skip_embedding_weight_decay: true
+use_fp32_master_weights: true
+
+config_kwargs: {}
+
+num_train_steps: ???
+grad_acc_steps: 1
+seed: 42
+
+use_meta_device: false
+use_torch_compile: false
+use_sequence_packing: false
+
+# Expert parallelism: number of GPUs per expert-parallel group.
+# Must divide world_size evenly. Set > 1 to enable MoE expert parallelism.
+expert_parallel_size: 1
+# Token dispatcher for EP runs. Options: "alltoall" (NCCL, always available) or
+# "fused_deepep" (requires deep_ep + Triton). token_dispatcher_fallback controls
+# what happens when fused_deepep is unavailable: "alltoall" to fall back silently,
+# or "error" to raise immediately.
+token_dispatcher: alltoall
+token_dispatcher_fallback: error
+
+dataset:
+  tokenizer_name_or_path: ???
+  micro_batch_size: 8
+  num_workers: 4
+  max_seq_length: 8192
+  stride: 200
+  buffer_size: 50_000
+  use_stateful_dataloader: false
+  pad_sequences_to_be_divisible_by: null
+  uppercase_labels: false
+  mask_degenerate_bases: true
+  load_dataset_kwargs:
+    path: ???
+    split: "train"
+    streaming: true
+
+wandb:
+  name: ???
+  project: null
+
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: false
+
+adamw_kwargs:
+  lr: 3e-3
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-5
+  weight_decay: 0.1
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 498_000
+  min_lr_ratio: 0.000001
+
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 50
+  max_checkpoints: 5
+  async_save: true
+
+logger:
+  frequency: 100
+
+validation:
+  enabled: false
+  eval_interval: 500
+  num_batches: 10
+  data_path: null
+
+fp8_stats_config:
+  enabled: false
+  fp8_stats_file: ./fp8_debugging_stats.yaml
+  fp8_log_dir: ./log_fp8_stats
+
+profiler:
+  enabled: false
+  start_step: 10
+  end_step: 15
