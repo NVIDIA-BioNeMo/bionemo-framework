@@ -20,10 +20,9 @@
 from pathlib import Path
 
 import ftfy
+from bionemo.evo2.utils.config import Evo2PreprocessingConfig
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer, build_tokenizer
-
-from bionemo.evo2.utils.config import Evo2PreprocessingConfig
 
 
 REPO_BASE_DIR = Path(__file__).parent.parent.parent.parent.parent

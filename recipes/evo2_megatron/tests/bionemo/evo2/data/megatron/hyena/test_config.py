@@ -36,7 +36,6 @@ from typing import Union
 
 import pytest
 import yaml
-
 from bionemo.evo2.data.megatron.hyena.config import (
     Evo2BlendedDatasetConfig,
     infer_global_batch_size,

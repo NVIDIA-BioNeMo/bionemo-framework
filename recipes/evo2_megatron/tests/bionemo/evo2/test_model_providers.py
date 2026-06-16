@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from bionemo.evo2.models.evo2_provider import (
     HYENA_MODEL_OPTIONS,
     MODEL_OPTIONS,

@@ -67,6 +67,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
+from bionemo.eden.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 from megatron.bridge.models.model_provider import ProcessGroupCollection
 from megatron.bridge.training.checkpointing import _load_model_weights_from_checkpoint
 from megatron.bridge.training.config import DistributedInitConfig, RNGConfig
@@ -94,8 +95,6 @@ from megatron.core.inference.text_generation_controllers.text_generation_control
 )
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_model_config
-
-from bionemo.eden.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 
 
 _REPO_BASE_DIR = Path(__file__).resolve().parents[4]

@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Callable, Iterable, Literal, Optional, Type
 
 import torch
+from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig as _HyenaConfigForFlops
+from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import get_hyena_stack_spec
+from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel as MCoreHyenaModel
+from bionemo.evo2.models.megatron.hyena.hyena_utils import hyena_no_weight_decay_cond
 from megatron.bridge.models.model_provider import ModelProviderMixin
 from megatron.bridge.models.transformer_config import TransformerConfig
 from megatron.bridge.training.config import (
@@ -49,11 +53,6 @@ from megatron.core.optimizer import (
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.utils import get_batch_on_this_cp_rank, get_model_config
-
-from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig as _HyenaConfigForFlops
-from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import get_hyena_stack_spec
-from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel as MCoreHyenaModel
-from bionemo.evo2.models.megatron.hyena.hyena_utils import hyena_no_weight_decay_cond
 
 
 def _patch_megatron_dataset_helper_compile() -> None:

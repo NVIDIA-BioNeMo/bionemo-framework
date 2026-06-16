@@ -20,14 +20,13 @@
 from pathlib import Path
 
 import torch
-from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
-
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.data.evo2_dataset_provider import DatasetBuildContext, Evo2DatasetProvider
 from bionemo.evo2.data.preprocess import Evo2Preprocessor
 from bionemo.evo2.data.test_utils.create_fasta_file import create_fasta_file
 from bionemo.evo2.utils.config import Evo2PreprocessingConfig
+from megatron.bridge.training.tokenizers.config import TokenizerConfig
+from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
 
 def create_preprocessing_config(

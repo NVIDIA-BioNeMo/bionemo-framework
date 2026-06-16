@@ -26,14 +26,13 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
+from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint, sharded_state_dict_default
 from torch.autograd.function import Function
-
-from bionemo.evo2.models.megatron.hyena.fft_utils import linear_causal_fft_size
-from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 
 
 try:

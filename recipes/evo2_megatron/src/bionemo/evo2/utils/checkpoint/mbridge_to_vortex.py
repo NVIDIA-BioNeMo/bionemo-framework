@@ -27,10 +27,9 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
+from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS, HyenaModelProvider
 from torch.distributed.checkpoint import FileSystemReader
 from torch.distributed.checkpoint.metadata import BytesStorageMetadata
-
-from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS, HyenaModelProvider
 
 
 logger = logging.getLogger(__name__)

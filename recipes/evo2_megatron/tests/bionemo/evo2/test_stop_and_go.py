@@ -22,9 +22,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from .utils import find_free_network_port, is_fp4_supported, is_fp8_supported, is_mxfp8_supported
 

@@ -19,14 +19,13 @@ import importlib.util
 
 import pytest
 import torch
-from einops import rearrange
-
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaTestModelProvider
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spec_no_te
 from bionemo.evo2.models.megatron.hyena.hyena_mixer import HyenaMixer
 from bionemo.evo2.models.megatron.hyena.hyena_utils import ImplicitModalFilter
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
+from einops import rearrange
 
 from ....utils import distributed_model_parallel_state
 

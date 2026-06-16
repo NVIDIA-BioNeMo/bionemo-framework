@@ -28,15 +28,14 @@ from pathlib import Path
 import huggingface_hub.errors
 import torch
 import torch.distributed.checkpoint as dcp
+from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS, HyenaModelProvider
+from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
 from huggingface_hub import hf_hub_download
 from megatron.bridge.training.checkpointing import save_tokenizer_assets
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from torch.distributed.checkpoint import FileSystemWriter
-
-from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS, HyenaModelProvider
-from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
 
 
 logger = logging.getLogger(__name__)

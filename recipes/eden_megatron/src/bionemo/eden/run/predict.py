@@ -65,6 +65,8 @@ from typing import Literal, Optional
 import numpy as np
 import torch
 import torch.distributed as dist
+from bionemo.common.inference.collation import batch_collator
+from bionemo.eden.data.fasta_dataset import SimpleFastaDataset
 from megatron.bridge.data.samplers import build_pretraining_data_loader
 from megatron.bridge.training.checkpointing import _load_model_weights_from_checkpoint
 from megatron.bridge.training.config import DistributedInitConfig, RNGConfig
@@ -89,9 +91,6 @@ from megatron.core.tensor_parallel.mappings import _gather_along_last_dim
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_batch_on_this_cp_rank
 from torch import Tensor
-
-from bionemo.common.inference.collation import batch_collator
-from bionemo.eden.data.fasta_dataset import SimpleFastaDataset
 
 
 _REPO_BASE_DIR = Path(__file__).resolve().parents[4]

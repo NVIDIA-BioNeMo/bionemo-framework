@@ -16,7 +16,6 @@
 import warnings
 
 import pytest
-
 from bionemo.evo2.models.megatron.hyena import subquadratic_safety as sqs
 
 

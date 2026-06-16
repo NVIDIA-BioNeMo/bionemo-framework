@@ -25,7 +25,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from bionemo.eden.data.test_utils.create_fasta_file import ALU_SEQUENCE, create_fasta_file
 from bionemo.eden.run.predict import batch_collator
 

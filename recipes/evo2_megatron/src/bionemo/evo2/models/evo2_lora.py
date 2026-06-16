@@ -20,13 +20,12 @@ from functools import wraps
 from typing import Set
 
 import torch
+from bionemo.evo2.models.megatron.hyena.hyena_block import HyenaStack
 from megatron.bridge.peft.base import ModelType
 from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.peft.utils import wildcard_match
 from megatron.core.utils import unwrap_model
 from torch import nn
-
-from bionemo.evo2.models.megatron.hyena.hyena_block import HyenaStack
 
 
 logger: logging.Logger = logging.getLogger(__name__)

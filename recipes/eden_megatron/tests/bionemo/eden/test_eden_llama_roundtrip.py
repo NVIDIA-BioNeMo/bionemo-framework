@@ -27,7 +27,6 @@ handle this format.
 
 import pytest
 import torch
-
 from bionemo.eden.utils.checkpoint.eden_mbridge_hf import (
     hf_to_mbridge_state_dict,
     mbridge_to_hf_state_dict,

@@ -20,7 +20,6 @@ from typing import Generator
 
 import pytest
 import torch
-
 from bionemo.evo2.models.evo2_provider import HyenaTestModelProvider
 from bionemo.evo2.models.megatron.hyena.engine import (
     adjust_filter_shape_for_broadcast,

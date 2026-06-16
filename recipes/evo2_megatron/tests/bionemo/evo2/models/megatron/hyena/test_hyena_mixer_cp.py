@@ -29,16 +29,15 @@ from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+from bionemo.evo2.models.evo2_provider import HyenaTestModelProvider
+from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
+from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spec_no_te
+from bionemo.evo2.models.megatron.hyena.hyena_mixer import HyenaMixer
 from einops import rearrange
 from megatron.core import parallel_state
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from torch.distributed.nn.functional import all_gather as functional_all_gather
 from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: N817
-
-from bionemo.evo2.models.evo2_provider import HyenaTestModelProvider
-from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
-from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spec_no_te
-from bionemo.evo2.models.megatron.hyena.hyena_mixer import HyenaMixer
 
 
 logging = logging.getLogger(__name__)

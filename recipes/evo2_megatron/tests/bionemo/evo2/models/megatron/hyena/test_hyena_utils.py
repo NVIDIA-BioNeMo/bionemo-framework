@@ -21,7 +21,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F  # noqa: N812
-
 from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     B2BCausalConv1dModule,
     ExchangeOverlappingRegionsCausal,

@@ -35,14 +35,13 @@ import numpy as np
 import polars as pol
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset, default_collate
-
 from bionemo.common.data.basecamp.utils import (
     SEQUENCE_COLUMN_NAME,
     SEQUENCE_ID_COLUMN_NAME,
     SEQUENCE_LENGTH_COLUMN_NAME,
     extract_sample_id,
 )
+from torch.utils.data import Dataset, default_collate
 
 
 logger = logging.getLogger(__name__)

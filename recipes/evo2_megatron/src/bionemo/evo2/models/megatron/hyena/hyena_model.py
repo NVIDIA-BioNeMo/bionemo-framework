@@ -21,6 +21,12 @@ from copy import deepcopy
 from typing import Literal, Optional
 
 import torch
+from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
+from bionemo.evo2.models.megatron.hyena.hyena_utils import (
+    get_init_method,
+    make_upper_case,
+    reweighted_cross_entropy,
+)
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
@@ -37,13 +43,6 @@ from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
 from torch import Tensor
 from torch.nn.parameter import Parameter
-
-from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
-from bionemo.evo2.models.megatron.hyena.hyena_utils import (
-    get_init_method,
-    make_upper_case,
-    reweighted_cross_entropy,
-)
 
 
 class HyenaModel(LanguageModule):

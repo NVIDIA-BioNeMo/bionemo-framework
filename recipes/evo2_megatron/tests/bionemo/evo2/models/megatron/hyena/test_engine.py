@@ -16,7 +16,6 @@
 import pytest
 import torch
 import torch.nn.functional as F  # noqa: N812
-
 from bionemo.evo2.models.megatron.hyena import engine
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 

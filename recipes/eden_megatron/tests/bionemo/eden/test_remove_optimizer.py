@@ -21,10 +21,9 @@ from pathlib import Path
 import pytest
 import torch
 import torch.distributed.checkpoint as dcp
+from bionemo.common.checkpoint.remove_optimizer import remove_optimizer
 from torch.distributed.checkpoint import FileSystemReader
 from torch.distributed.checkpoint.metadata import BytesStorageMetadata
-
-from bionemo.common.checkpoint.remove_optimizer import remove_optimizer
 
 
 def _get_dcp_keys(iter_dir: Path) -> set[str]:

@@ -15,7 +15,6 @@
 
 import pytest
 import torch
-
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaTestModelProvider
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spec_no_te
