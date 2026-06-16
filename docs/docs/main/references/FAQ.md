@@ -11,11 +11,7 @@ while also providing a high degree of freedom and flexibility for users.
 ## How do I install BioNeMo Recipes?
 
 You can install individual recipe directories from within BioNeMo Recipes by following the corresponding
-README pages the [BioNeMo Recipes GitHub](https://github.com/NVIDIA-BioNeMo/bionemo-framework). Please note that this is a
-beta feature and may require some additional effort to install seamlessly. We are actively working on testing this
-functionality and expect it will be a fully supported feature in future releases. You can review our
-[release notes](../about/releasenotes-fw.md) to stay up to
-date on our releases.
+README pages the [BioNeMo Recipes GitHub](https://github.com/NVIDIA-BioNeMo/bionemo-framework).
 
 ## What are the system requirements for BioNeMo Recipes?
 

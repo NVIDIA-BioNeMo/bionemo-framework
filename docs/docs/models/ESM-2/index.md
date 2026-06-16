@@ -106,9 +106,9 @@ Dataset](../../main/datasets/uniprot.md)). This validation set was used to ensur
 checkpoints is consistent with their outputs when evaluated with the HuggingFace Transformers library.
 
 | Checkpoint | HuggingFace | BioNeMo Recipes | Lin *et al.* 2023                   |
-| ---------- | ----------- | ----------------- | ----------------------------------- |
-| 650M       | 7.001       | 7.002             | 6.95 :material-information-outline: |
-| 3B         | 6.003       | 6.004             | 6.49 :material-information-outline: |
+| ---------- | ----------- | --------------- | ----------------------------------- |
+| 650M       | 7.001       | 7.002           | 6.95 :material-information-outline: |
+| 3B         | 6.003       | 6.004           | 6.49 :material-information-outline: |
 
 !!! info "Different Validation Sets"
 
