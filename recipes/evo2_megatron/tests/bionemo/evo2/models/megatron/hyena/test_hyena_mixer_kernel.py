@@ -65,7 +65,7 @@ def test_config(dtype, config_type) -> HyenaTestModelProvider:
 
 
 @pytest.fixture
-def hyena_config() -> HyenaConfig:  # noqa: D103
+def hyena_config() -> HyenaConfig:
     config = HyenaConfig()
     config.num_groups_hyena = 4096
     config.num_groups_hyena_short = 256
@@ -85,8 +85,8 @@ def operator_type(request):
     return request.param
 
 
-class MixerModuleWrapper(torch.nn.Module):  # noqa: D101
-    def __init__(  # noqa: D107
+class MixerModuleWrapper(torch.nn.Module):
+    def __init__(
         self, hyena_config, hyena_test_config, seq_len, use_subquadratic_ops=False, operator_type="hyena_medium_conv"
     ):
         super().__init__()
@@ -109,7 +109,7 @@ class MixerModuleWrapper(torch.nn.Module):  # noqa: D101
             operator_type=self.operator_type,
         )
 
-    def forward(self, x, _use_cp=False):  # noqa: D102
+    def forward(self, x, _use_cp=False):
         if self.use_subquadratic_ops and self.operator_type != "hyena":
             z = self.mixer.b2b_kernel(x, _use_cp=_use_cp)
         else:  # long `hyena` operator internally sets use_subquadratic_ops from config
@@ -249,7 +249,7 @@ def test_implicit_filter(mixer_kernel_hyena_only: MixerModuleWrapper):
     importlib.util.find_spec("subquadratic_ops_torch") is None or not HAVE_SUBQUADRATIC_OPS,
     reason="subquadratic_ops_torch is not installed",
 )
-def test_subquadratic_ops_kernel(  # noqa: D103
+def test_subquadratic_ops_kernel(
     test_config: HyenaTestModelProvider, hyena_config: HyenaConfig, config_type, operator_type
 ):
     # Skip bf16 with short convolution due to numerical instability
@@ -338,7 +338,7 @@ def test_subquadratic_ops_kernel(  # noqa: D103
         for (n, g), (n_kernel, g_kernel) in zip(grads, grads_kernel):
             try:
                 torch.testing.assert_close(g, g_kernel, msg=f"Gradient mismatch for {operator_type} - {n}")
-            except AssertionError as e:  # noqa: PERF203
+            except AssertionError as e:
                 gradient_mismatch = True
                 print(f"Gradient mismatch for {operator_type} - {n}: {e}")
 

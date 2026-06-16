@@ -775,7 +775,7 @@ def test_packed_partial_tag_subsequence_pretag_middletag_bs3(tag_tokens):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_packed_partial_tag_subsequence_pretag_middletag_bs3_cuda(tag_tokens):  # noqa: D103
+def test_packed_partial_tag_subsequence_pretag_middletag_bs3_cuda(tag_tokens):
     sequence_alpha = "cacata|0acagataaaata|d__tag;|TACAGGGAATA|d__somet"
     sequence = torch.tensor([ord(t) if t != "0" else 0 for t in sequence_alpha], dtype=torch.int32)
     expected_mask = torch.tensor(
@@ -954,7 +954,7 @@ def _construct_taxonomy_token(dropout: float = 0.0) -> str:
     )
 
 
-def mask_phylogenetic_tags_old(tokenized_sequence, terminal_tag_char, other_tag_chars, eod_token_id):  # noqa: D417
+def mask_phylogenetic_tags_old(tokenized_sequence, terminal_tag_char, other_tag_chars, eod_token_id):
     """Optimized version to create a phylonetic tag mask for batched tokenized sequences with correct handling of partial tags.
 
     Args:

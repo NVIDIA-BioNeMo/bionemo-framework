@@ -84,7 +84,7 @@ class MockProjConv(torch.nn.Module):
         kernel_size (int): Size of the convolution kernel
     """
 
-    def __init__(self, kernel_size):  # noqa: D107
+    def __init__(self, kernel_size):
         super().__init__()
         self.kernel_size = kernel_size
         self.short_conv_weight = torch.randn(1, 1, kernel_size)
@@ -101,7 +101,7 @@ class MockMixer(torch.nn.Module):
         use_conv_bias (bool, optional): Whether to use bias in convolutions. Defaults to False.
     """
 
-    def __init__(self, kernel_size, use_conv_bias=False):  # noqa: D107
+    def __init__(self, kernel_size, use_conv_bias=False):
         super().__init__()
         self.kernel_size = kernel_size
         self.hyena_medium_conv_len = 10
@@ -148,7 +148,7 @@ def test_parallel_causal_depthwise_conv1d_uses_subquadratic_fast_conv(
 
 
 @pytest.mark.parametrize("operator_type", ["hyena_short_conv", "hyena_medium_conv"])
-def test_b2b_causal_conv1d_module_initialization(operator_type):  # noqa: D103
+def test_b2b_causal_conv1d_module_initialization(operator_type):
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5)
 
@@ -162,7 +162,7 @@ def test_b2b_causal_conv1d_module_initialization(operator_type):  # noqa: D103
 
 
 @pytest.mark.parametrize("operator_type", ["hyena_short_conv", "hyena_medium_conv"])
-def test_b2b_causal_conv1d_module_weight_extraction(operator_type):  # noqa: D103
+def test_b2b_causal_conv1d_module_weight_extraction(operator_type):
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5)
     b2b_module = B2BCausalConv1dModule(
@@ -180,7 +180,7 @@ def test_b2b_causal_conv1d_module_weight_extraction(operator_type):  # noqa: D10
 
 @pytest.mark.parametrize("operator_type", ["hyena_short_conv", "hyena_medium_conv"])
 @pytest.mark.parametrize("use_conv_bias", [True, False])
-def test_b2b_causal_conv1d_module_bias_handling(use_conv_bias, operator_type):  # noqa: D103
+def test_b2b_causal_conv1d_module_bias_handling(use_conv_bias, operator_type):
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5, use_conv_bias=use_conv_bias)
     b2b_module = B2BCausalConv1dModule(
@@ -196,7 +196,7 @@ def test_b2b_causal_conv1d_module_bias_handling(use_conv_bias, operator_type):  
     assert result.shape == x.shape
 
 
-def test_b2b_causal_conv1d_module_invalid_operator():  # noqa: D103
+def test_b2b_causal_conv1d_module_invalid_operator():
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5)
 
@@ -208,7 +208,7 @@ def test_b2b_causal_conv1d_module_invalid_operator():  # noqa: D103
 
 @pytest.mark.parametrize("batch_size", [1, 2, 4])
 @pytest.mark.parametrize("seq_len", [8, 16, 32])
-def test_b2b_causal_conv1d_module_different_shapes(batch_size, seq_len):  # noqa: D103
+def test_b2b_causal_conv1d_module_different_shapes(batch_size, seq_len):
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5)
     b2b_module = B2BCausalConv1dModule(
@@ -229,7 +229,7 @@ def test_b2b_causal_conv1d_module_different_shapes(batch_size, seq_len):  # noqa
 
 
 @pytest.mark.parametrize("kernel_size", [3, 5, 7])
-def test_b2b_causal_conv1d_module_different_kernel_sizes(kernel_size):  # noqa: D103
+def test_b2b_causal_conv1d_module_different_kernel_sizes(kernel_size):
     proj_conv = MockProjConv(kernel_size=kernel_size)
     mixer = MockMixer(kernel_size=kernel_size)
     b2b_module = B2BCausalConv1dModule(
@@ -245,7 +245,7 @@ def test_b2b_causal_conv1d_module_different_kernel_sizes(kernel_size):  # noqa: 
     assert result.shape == x.shape, f"Shape mismatch for kernel_size={kernel_size}"
 
 
-def test_b2b_causal_conv1d_module_invalid_input():  # noqa: D103
+def test_b2b_causal_conv1d_module_invalid_input():
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5)
     b2b_module = B2BCausalConv1dModule(
@@ -261,7 +261,7 @@ def test_b2b_causal_conv1d_module_invalid_input():  # noqa: D103
         b2b_module(torch.randn(2, 96))  # Missing sequence dimension
 
 
-def test_b2b_causal_conv1d_module_dtype_handling():  # noqa: D103
+def test_b2b_causal_conv1d_module_dtype_handling():
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5)
     b2b_module = B2BCausalConv1dModule(
@@ -281,7 +281,7 @@ def test_b2b_causal_conv1d_module_dtype_handling():  # noqa: D103
         assert result.dtype == dtype, f"Dtype mismatch for {dtype}"
 
 
-def test_b2b_causal_conv1d_module_device_handling():  # noqa: D103
+def test_b2b_causal_conv1d_module_device_handling():
     proj_conv = MockProjConv(kernel_size=3)
     mixer = MockMixer(kernel_size=5)
     b2b_module = B2BCausalConv1dModule(
@@ -384,7 +384,7 @@ def test_b2b_causal_conv1d_module_matches_sequential_reference():
     torch.testing.assert_close(fused, reference, rtol=1e-4, atol=1e-4)
 
 
-def test_zigzag_get_overlapping_patches():  # noqa: D103
+def test_zigzag_get_overlapping_patches():
     # Test the actual output of zigzag_get_overlapping_patches
     data = torch.arange(8).reshape(2, 4)  # shape [2, 4]
     seq_dim = 1
@@ -397,7 +397,7 @@ def test_zigzag_get_overlapping_patches():  # noqa: D103
     assert torch.equal(overlap_b, torch.tensor([[2, 3], [6, 7]]))
 
 
-def test_exchange_overlapping_regions_causal_forward(monkeypatch):  # noqa: D103
+def test_exchange_overlapping_regions_causal_forward(monkeypatch):
     class DummyReq:
         def wait(self):
             pass

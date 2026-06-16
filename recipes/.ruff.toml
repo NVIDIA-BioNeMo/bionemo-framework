@@ -2,7 +2,7 @@ line-length = 119
 target-version = "py312"
 
 [lint]
-ignore = ["C901", "D100", "E501", "N811", "N814"]
+ignore = ["C901", "D100", "E501", "N811", "N814", "PERF203"]
 select = [
     "C",    # Pylint conventions
     "D",    # Documentation formatting
@@ -54,6 +54,7 @@ exclude = [
 "esm_nv.py" = ["C901"]
 "__init__.py" = ["D104", "E402", "F401", "F403", "F811"]
 "test_*.py" = ["C", "D"]
+"**/test_*.py" = ["C", "D"]
 "conftest.py" = ["D"]
 "scripts/*.py" = ["D"]
 "**/*.ipynb" = ["D"]

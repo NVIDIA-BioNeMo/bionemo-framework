@@ -56,7 +56,7 @@ def _download_shards(repo_id: str, weights_filename: str, download_dir: str, rev
             )
             parts.append(part_path)
             part_num += 1
-        except huggingface_hub.errors.EntryNotFoundError:  # noqa: PERF203
+        except huggingface_hub.errors.EntryNotFoundError:
             break
     return parts
 
@@ -66,7 +66,7 @@ def _cleanup_parts(parts: list[str]) -> None:
     for part in parts:
         try:
             os.remove(part)
-        except OSError:  # noqa: PERF203
+        except OSError:
             pass
 
 

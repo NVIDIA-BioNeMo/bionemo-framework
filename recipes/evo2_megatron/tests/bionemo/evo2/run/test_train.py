@@ -285,7 +285,7 @@ def assert_optimizer_states_match(checkpoint_dirs):
             print(f"Optimizer tensors match for {base_dir} and {other_dir}")
             del other_plain
             del other_opt_tensors
-        except AssertionError as e:  # noqa: PERF203
+        except AssertionError as e:
             msg = f"AssertionError comparing {base_dir} to {other_dir}:\n{e}"
             print(f"Optimizer tensors mismatch for {base_dir} and {other_dir}:\n{msg}")
             assertions.append(AssertionError(msg))

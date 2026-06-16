@@ -175,7 +175,7 @@ def zigzag_gather_from_group_ranks(data, group, seq_dim=0):
 class MixerModuleWrapper(torch.nn.Module):
     """Wrapper for the HyenaMixer."""
 
-    def __init__(self, seq_len, operator_type="hyena_short_conv", use_subquadratic_ops=False):  # noqa: D107
+    def __init__(self, seq_len, operator_type="hyena_short_conv", use_subquadratic_ops=False):
         super().__init__()
 
         self.use_subquadratic_ops = use_subquadratic_ops
@@ -412,7 +412,7 @@ if __name__ == "__main__":
             for (n_without_cp, g_without_cp), (n_with_cp, g_with_cp) in zip(grads_without_cp, grads_with_cp):
                 try:
                     torch.testing.assert_close(g_without_cp, g_with_cp)
-                except AssertionError as e:  # noqa: PERF203
+                except AssertionError as e:
                     gradient_mismatch = True
                     logging.error(f"Gradient mismatch for {n_without_cp}: {e}")
 

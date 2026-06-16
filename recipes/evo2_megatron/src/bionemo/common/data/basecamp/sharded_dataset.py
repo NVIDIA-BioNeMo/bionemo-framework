@@ -118,7 +118,7 @@ class ShardedEdenDataset(Dataset):
             try:
                 conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                 self.db_connections[sample_id] = conn
-            except sqlite3.Error as e:  # noqa: PERF203
+            except sqlite3.Error as e:
                 logger.error(f"Failed to open/attach database for sample {sample_id} at {db_path}: {e}")
                 raise
 
