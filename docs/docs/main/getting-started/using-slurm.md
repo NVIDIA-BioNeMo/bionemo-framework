@@ -87,7 +87,7 @@ cd /workspace/bionemo/recipes/evo2_megatron \
     --hidden-dropout $HDO \
     --limit-val-batches=20 \
     --val-check-interval=${VAL_CHECK} \
-    --experiment-dir=/workspace/bionemo/model/checkpoints/${EXPERIMENT_NAME} \
+    --result-dir=${RESULTS_PATH} \
     --seq-length=${SEQ_LEN} \
     --tensor-parallel-size=${TP_SIZE} \
     --context-parallel-size=${CP_SIZE} \
