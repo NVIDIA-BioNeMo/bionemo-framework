@@ -64,7 +64,7 @@ class TestCodonFMConfig:
 
 class TestModelPresets:
     def test_all_presets_exist(self):
-        expected = {"encodon_200k", "encodon_80m", "encodon_600m", "encodon_1b", "encodon_5b"}
+        expected = {"encodon_200k", "encodon_80m", "encodon_600m", "encodon_1b"}
         assert set(MODEL_PRESETS.keys()) == expected
 
     @pytest.mark.parametrize("preset_name", list(MODEL_PRESETS.keys()))
