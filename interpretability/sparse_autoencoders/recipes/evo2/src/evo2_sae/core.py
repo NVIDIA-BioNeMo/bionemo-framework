@@ -519,15 +519,19 @@ class Evo2SAE:
                 main_dna = _run(steer=True)
                 base_dna = _run(steer=False) if (compare_baseline and clamps) else None
         except Exception as e:
-            # A CUDA device-side assert poisons the context: every later request would 500 until
-            # restart. Mark the engine not-ready so /health flips to 503 and an orchestrator
-            # recycles the pod, instead of serving a permanently-wedged worker. NOTE: this only
-            # recovers if something restarts the worker on a failed /health — without a
-            # readiness-based recycler it serves 503 until a human restarts (fail-closed, but a
-            # single bad request can take the replica down). Confirm the deployment recycles on 503.
+            # A CUDA device-side assert poisons the context for the whole process — unrecoverable
+            # in-process (re-init won't clear it), so restart is the only cure. Mark not-ready so
+            # /health flips to 503; and if EXIT_ON_CUDA_WEDGE is set (launch_inference.sh sets it
+            # for `serve`, where it runs under a restart loop), exit the worker so ANY restart-on-
+            # exit supervisor (the launch loop / docker --restart / systemd / k8s) respawns it —
+            # host-independent recovery, not dependent on a readiness probe. Default (unset): just
+            # fail-closed at 503 (safe for library/CLI/test use, which must not kill the process).
             if _is_unrecoverable_cuda(e):
                 self.ready = False
                 logger.exception("unrecoverable CUDA error in generate() — marking engine not-ready")
+                if os.environ.get("EXIT_ON_CUDA_WEDGE") == "1":
+                    logger.critical("EXIT_ON_CUDA_WEDGE=1 — exiting the worker for the supervisor to restart")
+                    os._exit(1)
             raise
 
         resp = {

@@ -34,4 +34,21 @@ fi
 source "$VENV/bin/activate"
 cd "$RECIPE_DIR"
 export PYTHONPATH="$RECIPE_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# One-shot modes (encode/batch/generate) just run once. For `serve`, a bad request can trip a
+# CUDA device-side assert that poisons the process context — unrecoverable in-process, restart is
+# the only cure. So tell the engine to exit the worker on that fault (EXIT_ON_CUDA_WEDGE) and
+# respawn it here, making recovery independent of the host (no k8s/liveness probe required).
+# Restart on a crash/wedge exit; stop on a clean exit (0) or a signal (Ctrl-C 130 / SIGTERM 143).
+if [[ "${1:-}" == "serve" ]]; then
+  export EXIT_ON_CUDA_WEDGE=1
+  while true; do
+    python -m evo2_sae.cli "$@" && rc=0 || rc=$?
+    if [[ "$rc" -eq 0 || "$rc" -eq 130 || "$rc" -eq 143 ]]; then
+      exit "$rc"  # clean shutdown / Ctrl-C / SIGTERM — don't respawn
+    fi
+    echo "[launch] serve exited ($rc); restarting in 2s…" >&2
+    sleep 2
+  done
+fi
 exec python -m evo2_sae.cli "$@"
