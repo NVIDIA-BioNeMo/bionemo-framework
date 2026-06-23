@@ -13,19 +13,43 @@ import { useHealth } from './backend'
 const ALL_TABS = [
   {
     id: 'atlas', label: 'Feature atlas', offline: true, // static parquet
-    desc: 'Browse every SAE feature — firing rate, decoder-space UMAP, top-activating example sequences, and labels. Reads precomputed files; no backend needed.',
+    desc: 'Browse every feature in the SAE dictionary — its firing rate across the corpus, position in a decoder-space UMAP, top-activating example sequences, and any label. Reads precomputed static files, so it needs no backend or GPU.',
+    limits: [
+      'Static snapshot — reflects the activation corpus and SAE checkpoint it was built from, not anything you enter live.',
+      'The UMAP is a 2-D projection of decoder vectors: nearby points are roughly similar, but distances and axes have no absolute meaning.',
+      'Top examples come only from the precompute corpus — a feature may also fire on sequences not shown here.',
+      'Labels are human/automatic annotations and are incomplete; most features are unlabeled.',
+    ],
   },
   {
     id: 'steering', label: 'Generative steering', offline: false, // needs the live 7B
-    desc: 'Generate DNA from a prompt while clamping chosen SAE features on the continuation, and compare against the unsteered baseline. Runs the live 7B model.',
+    desc: 'Generate DNA from a prompt while clamping chosen SAE features on the continuation, and compare against the unsteered baseline. Each request runs the live model end-to-end.',
+    limits: [
+      'A clamp sets an absolute SAE activation value (capped at ±300); large magnitudes can push the model off-distribution into repetitive or degenerate DNA.',
+      'Steering affects only the generated continuation, at the SAE’s layer — the prompt itself is not rewritten.',
+      'A clamp changes output only if the feature is actually causal for what it appears to encode; a dead or non-causal feature leaves generation unchanged.',
+      'One GPU, serialized — concurrent generations queue, and long generations can take a while.',
+    ],
   },
   {
     id: 'inspector', label: 'Sequence inspector', offline: false, // needs live encode
-    desc: 'Paste a sequence to see per-base SAE feature activations — the top-k firing features or specific ones you pick. Runs a live encode.',
+    desc: 'Paste a sequence to see per-base SAE feature activations — either the top-k features firing on it or specific feature ids you pick. Each request runs a live encode.',
+    limits: [
+      'Activations are read at the SAE’s single training layer only — not the whole network.',
+      'A phylogenetic tag is prepended to the sequence; its leading positions are shown but excluded from the top-k ranking.',
+      'Sequences longer than the model’s context (max_seq_len) are rejected, not truncated.',
+      'Top-k ranks by each feature’s peak activation over the DNA region, so broad-but-weak features can rank below sharp local ones.',
+    ],
   },
   {
     id: 'sequmap', label: 'Sequence UMAP', offline: 'bundle', // offline iff dashboard.py embeddings bundle exists
-    desc: 'Embed a set of sequences, UMAP them, then color or reorganize the layout by an SAE feature. Uses the live backend, or a precomputed bundle when offline.',
+    desc: 'Embed a set of sequences (each pooled into one per-feature SAE vector), UMAP them to 2-D, then color or re-project the layout by any SAE feature. Uses the live backend, or a precomputed bundle when offline.',
+    limits: [
+      'UMAP is stochastic and only 2-D: the same sequences can land in different spots between runs, and cluster sizes/distances aren’t quantitative.',
+      'Each sequence is pooled (mean or max) over its DNA region into one vector — within-sequence position is lost.',
+      'Only features firing in at least min_firing sequences are kept, so rare features drop out of the layout.',
+      'Up to 1000 sequences per request; sequences past the cap or longer than the context limit (~8192 bases) are dropped — the tab reports how many rather than silently truncating. The offline bundle is a fixed precomputed set.',
+    ],
   },
 ]
 
@@ -71,9 +95,25 @@ export default function Dashboard() {
         </button>
       </div>
 
-      {ALL_TABS.find((t) => t.id === tab)?.desc && (
-        <div style={S.desc}>{ALL_TABS.find((t) => t.id === tab).desc}</div>
-      )}
+      {(() => {
+        const active = ALL_TABS.find((t) => t.id === tab)
+        if (!active?.desc) return null
+        return (
+          <div style={S.desc}>
+            <div>{active.desc}</div>
+            {active.limits?.length > 0 && (
+              <details style={S.limitsBox}>
+                <summary style={S.limitsToggle}>Limitations</summary>
+                <ul style={S.limits}>
+                  {active.limits.map((l, i) => (
+                    <li key={i} style={S.limitItem}>{l}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )
+      })()}
 
       <div style={{ ...S.content, overflow: tab === 'atlas' ? 'hidden' : 'auto' }}>
         {tab === 'atlas' && <App />}
@@ -109,5 +149,11 @@ const S = {
     padding: '7px 16px', fontSize: '12px', lineHeight: 1.4, color: 'var(--text-secondary)',
     background: 'var(--bg-card)', borderBottom: '1px solid var(--border)', flexShrink: 0,
   },
+  limitsBox: { marginTop: '4px' },
+  limitsToggle: {
+    cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', userSelect: 'none',
+  },
+  limits: { margin: '4px 0 2px', paddingLeft: '16px' },
+  limitItem: { fontSize: '11px', lineHeight: 1.45, color: 'var(--text-secondary)', marginBottom: '2px' },
   content: { flex: 1, minHeight: 0 },
 }

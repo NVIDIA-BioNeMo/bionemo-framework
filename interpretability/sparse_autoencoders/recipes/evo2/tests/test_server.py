@@ -130,6 +130,29 @@ def test_gene_embed_returns_decodable_matrix(client):
     assert b["feature_ids"] == [0]  # the fake fires feature 0 in every sequence, nothing else
     g = np.frombuffer(base64.b64decode(b["G_b64"]), dtype=np.float32)
     assert g.size == b["n_genes"] * b["n_features"]  # [n_genes x n_firing_features], what the client UMAPs
+    # accounting fields so the UI can warn instead of silently embedding fewer than submitted
+    assert b["n_received"] == 2 and b["n_skipped_short"] == 0 and b["n_skipped_too_long"] == 0
+    assert b["n_dropped_over_cap"] == 0
+
+
+def test_gene_embed_reports_skipped_sequences(client, fake_engine):
+    """Too-short and over-length sequences are dropped but REPORTED (not silently truncated)."""
+    genes = [
+        {"symbol": "ok", "sequence": "ACGTACGT"},
+        {"symbol": "short", "sequence": "AC"},  # < 3 bases -> skipped
+        {"symbol": "toolong", "sequence": "A" * (fake_engine.max_seq_len + 1)},  # > context -> skipped, not truncated
+    ]
+    b = client.post("/api/gene_embed", json={"genes": genes, "min_firing": 1}).json()
+    assert b["n_received"] == 3
+    assert b["n_genes"] == 1  # only the valid one is embedded
+    assert b["n_skipped_short"] == 1 and b["n_skipped_too_long"] == 1
+
+
+def test_gene_embed_all_invalid_400(client, fake_engine):
+    """If nothing is embeddable, 400 with a message accounting for why (no silent empty result)."""
+    r = client.post("/api/gene_embed", json={"genes": [{"sequence": "A" * (fake_engine.max_seq_len + 1)}]})
+    assert r.status_code == 400
+    assert "context limit" in r.json()["detail"]
 
 
 def test_generate_rejects_out_of_range_feature(client):

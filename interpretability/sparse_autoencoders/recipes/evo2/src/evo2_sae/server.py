@@ -235,6 +235,10 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(413 if "too long" in str(e) else 400, str(e))
 
+    # Per-request sequence cap for /gene_embed (one encode each on the single GPU). Surfaced in the
+    # response (max_genes) and enforced by reporting overflow rather than silently dropping it.
+    MAX_GENES = 1000
+
     @api.post("/gene_embed")
     def gene_embed(req: GeneEmbedRequest):
         """Embed sequences for the Sequence-UMAP tab.
@@ -248,12 +252,22 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
         tag = engine.resolve_tag(req.organism, req.tag)
         if tag is None:
             raise HTTPException(400, f"Unknown organism '{req.organism}' and no custom tag")
+        n_received = len(req.genes)
+        n_over_cap = max(0, n_received - MAX_GENES)  # sequences past the per-request cap
         seqs, meta = [], []
-        for g in req.genes[:1000]:
+        n_too_short = n_too_long = 0
+        for g in req.genes[:MAX_GENES]:
             dna = core.clean_dna(str(g.get("sequence", "")))
             if len(dna) < 3:
+                n_too_short += 1
                 continue
-            seqs.append(tag + dna)
+            full = tag + dna
+            # Don't silently truncate an over-length sequence into a misleading vector (which is what
+            # tokenize would do) — skip it and report it, matching /annotate's reject-don't-truncate.
+            if len(full) > engine.max_seq_len:
+                n_too_long += 1
+                continue
+            seqs.append(full)
             meta.append(
                 {
                     "gene_symbol": g.get("symbol") or g.get("gene_symbol") or f"gene{len(meta)}",
@@ -262,10 +276,23 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
                 }
             )
         # pooling + stats + base64 packing live in Evo2SAE.embed_bundle, shared with the offline
-        # dashboard.py precompute so the static bundle is byte-identical to this response.
+        # dashboard.py precompute so the static bundle is the same shape as this response.
         bundle = engine.embed_bundle(seqs, len(tag), meta, min_firing=req.min_firing) if seqs else None
         if bundle is None:
-            raise HTTPException(400, "No valid gene sequences")
+            raise HTTPException(
+                400,
+                f"No embeddable sequences (received {n_received}: {n_too_short} too short, "
+                f"{n_too_long} over the {engine.max_seq_len}-base context limit, "
+                f"{n_over_cap} past the {MAX_GENES}-sequence cap)",
+            )
+        # Report everything we excluded so the UI can warn the user, rather than silently returning a
+        # UMAP of fewer sequences than they submitted (over-cap, too-short, and over-length are dropped).
+        bundle["n_received"] = n_received
+        bundle["n_skipped_short"] = n_too_short
+        bundle["n_skipped_too_long"] = n_too_long
+        bundle["n_dropped_over_cap"] = n_over_cap
+        bundle["max_seq_len"] = engine.max_seq_len
+        bundle["max_genes"] = MAX_GENES
         return bundle
 
     app.include_router(api, prefix="/api")

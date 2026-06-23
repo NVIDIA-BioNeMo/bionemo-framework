@@ -75,6 +75,7 @@ export default function SequenceUMAPView({ height = 600 }) {
   const [organisms, setOrganisms] = useState(['None (raw DNA)'])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null) // non-fatal warning: e.g. some sequences dropped before embedding
   const [bundle, setBundle] = useState(null) // {G(active), Gmean, Gmax, nf, ng, meta, items:[{name,label,species,x,y}], stats}
   const [pooling, setPooling] = useState('mean') // 'mean' | 'max' — toggled client-side, no re-forward
   const [selectedFeature, setSelectedFeature] = useState(null)
@@ -118,7 +119,7 @@ export default function SequenceUMAPView({ height = 600 }) {
   async function embed() {
     const genes = mode === 'preset' ? library.filter((_, i) => picked.has(i)) : parseCustom(customText)
     if (!genes.length) { setError('Pick or paste at least one sequence (>=3 nt).'); return }
-    setBusy(true); setError(null); setBundle(null); setSelectedFeature(null); setReorgCoords(null); setPooling('mean')
+    setBusy(true); setError(null); setNotice(null); setBundle(null); setSelectedFeature(null); setReorgCoords(null); setPooling('mean')
     try {
       // Live path: embed the chosen genes through the backend. If the backend is unreachable,
       // fall back to the precomputed static bundle (preset library only — custom paste needs the model).
@@ -150,6 +151,16 @@ export default function SequenceUMAPView({ height = 600 }) {
       const colOf = r.feature_ids ? new Map(r.feature_ids.map((fid, c) => [fid, c])) : null
       const items = buildItems(Gmean, nf, ng, r.genes) // default pooling = mean
       setBundle({ G: Gmean, Gmean, Gmax, nf, ng, meta: r.genes, items, stats: r.feature_stats, saeId: r.sae_id, colOf })
+      // The backend drops sequences it can't embed (over the per-request cap, too short, or longer
+      // than the context window) — surface that instead of silently UMAPing fewer than submitted.
+      const dropped = (r.n_skipped_short || 0) + (r.n_skipped_too_long || 0) + (r.n_dropped_over_cap || 0)
+      if (dropped > 0) {
+        const parts = []
+        if (r.n_dropped_over_cap) parts.push(`${r.n_dropped_over_cap} past the ${r.max_genes}-sequence cap`)
+        if (r.n_skipped_too_long) parts.push(`${r.n_skipped_too_long} over the ${r.max_seq_len}-base context limit`)
+        if (r.n_skipped_short) parts.push(`${r.n_skipped_short} shorter than 3 nt`)
+        setNotice(`Embedded ${ng} of ${r.n_received} sequences — dropped ${parts.join(', ')}.`)
+      }
     } catch (e) { setError(String(e.message || e)) } finally { setBusy(false) }
   }
 
@@ -342,6 +353,7 @@ export default function SequenceUMAPView({ height = 600 }) {
             One Evo2 forward per sequence (no batching) — embedding many sequences or long sequences can take a while.
           </div>
           {error && <div style={{ color: '#ef4444', marginTop: 8, fontSize: 12 }}>{error}</div>}
+          {notice && <div style={{ color: '#f59e0b', marginTop: 8, fontSize: 12 }}>⚠ {notice}</div>}
         </div>
       )}
 
