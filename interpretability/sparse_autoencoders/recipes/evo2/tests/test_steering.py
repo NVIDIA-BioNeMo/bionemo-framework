@@ -98,6 +98,12 @@ def test_sanitize_feature_contract():
     assert fids == [5, 7, 9]  # one entry per distinct feature, in insertion order
 
 
+def test_sanitize_clamps_negative_top_k():
+    """A negative top_k is an invalid sampler arg -> coerced to 0 (no top-k filtering)."""
+    _, _, _, top_k = _sanitize_steering([{"feature_id": 5, "strength": 1.0}], 65536, 1.0, -5)
+    assert top_k == 0
+
+
 # --------------------------------------------------------------------- GPU: real generation
 _PROMPT = "ATGGCCGAATTCGGCACGAGGACGTGCTGAAAGCTAGCTAGGCTAACCGGTTACGTGCAT"
 _ORG = "Human"
@@ -171,10 +177,12 @@ def test_steering_changes_continuation(engine):
 
 @pytest.mark.slow
 def test_encode_batch_preserves_order_and_lengths(engine):
-    """Batched encode keeps input order + per-sequence length, with finite codes (real model, no mock)."""
-    seqs = [_tag(engine) + _PROMPT[:20], _tag(engine) + _PROMPT, _tag(engine) + _PROMPT[:40]]
+    """Batched encode keeps input order + per-sequence length (incl. an empty sequence), with
+    finite codes (real model, no mock)."""
+    seqs = ["", _tag(engine) + _PROMPT[:20], _tag(engine) + _PROMPT, _tag(engine) + _PROMPT[:40]]
     batch = engine.encode_batch(seqs)
-    assert [c.shape[0] for c in batch] == [len(engine.tokenize(s)) for s in seqs]  # order + length preserved
+    assert [c.shape[0] for c in batch] == [len(engine.tokenize(s)) for s in seqs]  # order + length (empty -> 0)
+    assert batch[0].shape == (0, engine.n_features)  # empty sequence -> empty codes, correct width
     assert all(c.shape[1] == engine.n_features and torch.isfinite(c).all() for c in batch)
 
 

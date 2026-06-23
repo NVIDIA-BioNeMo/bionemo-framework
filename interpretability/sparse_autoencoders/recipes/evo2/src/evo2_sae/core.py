@@ -88,7 +88,8 @@ def _sanitize_steering(features, n_features, temperature, top_k):
       * feature id outside [0, n_features) indexes off the SAE codes -> ValueError (server -> 400);
       * |strength| beyond MAX_CLAMP_STRENGTH blows the logits to inf/NaN -> capped;
       * temperature <= 0 makes the recipe's sampler divide logits by temperature (NaN under
-        multinomial) -> coerce to greedy top-1, which is deterministic and skips that path.
+        multinomial) -> coerce to greedy top-1, which is deterministic and skips that path;
+      * negative top_k is an invalid sampler argument -> coerce to 0 (no top-k filtering).
 
     Returns ``(clamps: dict[int, float], fids: list[int], temperature: float, top_k: int)``.
     """
@@ -100,7 +101,7 @@ def _sanitize_steering(features, n_features, temperature, top_k):
         for f in features
     }
     temperature = float(temperature)
-    top_k = int(top_k)
+    top_k = max(0, int(top_k))  # negative top_k is an invalid sampler arg -> 0 (no filtering)
     if temperature <= 0:  # greedy — avoid the sampler's logits/temperature division (NaN)
         top_k = max(top_k, 1)
     return clamps, list(clamps), temperature, top_k
