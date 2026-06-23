@@ -15,9 +15,11 @@
 
 """FastAPI server over the Evo2SAE engine — the live backend the viz talks to.
 
-Endpoints: /health, /features, /annotate (per-base activations for a pasted
-sequence), /generate (autoregressive generation + optional SAE-feature clamp).
-This is a thin layer; all model work lives in `core.Evo2SAE`.
+Endpoints (under /api): /api/health, /api/features, /api/annotate (per-base activations for a
+pasted sequence), /api/generate (autoregressive generation + optional SAE-feature clamp). The
+/api prefix lets a prebuilt frontend be served from "/" on the same origin (single-container
+deploy); when no frontend is configured the server is API-only. This is a thin layer; all model
+work lives in `core.Evo2SAE`.
 """
 
 from __future__ import annotations
@@ -25,11 +27,13 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import anyio
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Response
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import core
@@ -37,6 +41,19 @@ from .core import Evo2SAE
 
 
 logger = logging.getLogger("evo2_sae_infer.server")
+
+
+def _resolve_static_dir(static_dir: Optional[str]) -> Optional[str]:
+    """Directory of a prebuilt frontend to serve at ``/``, or None for an API-only server.
+
+    Explicit ``static_dir`` arg wins, else the ``DASHBOARD_DIST`` env var. Returns None unless the
+    path is an existing directory — so a server with no built frontend (dev, or an image built
+    without one) just serves the API and ``/`` 404s, instead of crashing. This layer is generic:
+    it serves whatever static dir it's pointed at and knows nothing about the dashboard (the
+    dashboard recipe supplies the dir via DASHBOARD_DIST / the Docker build).
+    """
+    cand = static_dir or os.getenv("DASHBOARD_DIST")
+    return cand if (cand and Path(cand).is_dir()) else None
 
 
 class AnnotateRequest(BaseModel):
@@ -70,8 +87,14 @@ class GenerateRequest(BaseModel):
     compare_baseline: bool = False
 
 
-def build_app(engine: Evo2SAE) -> FastAPI:
-    """Build the FastAPI app; the engine is loaded once in the lifespan handler."""
+def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
+    """Build the FastAPI app; the engine is loaded once in the lifespan handler.
+
+    API routes live under ``/api`` (so the dashboard and the API can be served from one origin:
+    the frontend always calls ``/api/*``, in dev via the Vite proxy and in production from the
+    same server). If a built frontend is found (``static_dir`` / ``DASHBOARD_DIST``), it is mounted
+    at ``/`` so a single container serves both the UI and the API; otherwise the server is API-only.
+    """
     # One GPU (the engine serializes model calls with a lock), so cap how many sync requests run
     # at once: excess requests wait for a worker instead of piling up dozens of parked threads.
     # NOTE: generation is bounded only by the context window now, so a single /generate can run
@@ -113,7 +136,10 @@ def build_app(engine: Evo2SAE) -> FastAPI:
         if not engine.ready:
             raise HTTPException(503, "Backend not ready")
 
-    @app.get("/health")
+    # All endpoints under /api (mounted below) so the SPA at "/" never collides with them.
+    api = APIRouter()
+
+    @api.get("/health")
     def health(response: Response):
         if not engine.ready:
             response.status_code = 503  # readiness probes shed this pod until load finishes (body still informative)
@@ -128,7 +154,7 @@ def build_app(engine: Evo2SAE) -> FastAPI:
             "max_seq_len": engine.max_seq_len,  # context budget — UI caps generation length to this
         }
 
-    @app.get("/features")
+    @api.get("/features")
     def features():
         _require_ready()
         rows = [
@@ -137,7 +163,7 @@ def build_app(engine: Evo2SAE) -> FastAPI:
         rows.sort(key=lambda r: r["id"])
         return rows
 
-    @app.post("/annotate")
+    @api.post("/annotate")
     def annotate(req: AnnotateRequest):
         _require_ready()
         try:
@@ -183,7 +209,7 @@ def build_app(engine: Evo2SAE) -> FastAPI:
             "features": feats,
         }
 
-    @app.post("/generate")
+    @api.post("/generate")
     def generate(req: GenerateRequest):
         _require_ready()
         try:
@@ -199,5 +225,17 @@ def build_app(engine: Evo2SAE) -> FastAPI:
             )
         except ValueError as e:
             raise HTTPException(413 if "too long" in str(e) else 400, str(e))
+
+    app.include_router(api, prefix="/api")
+
+    # Serve a prebuilt frontend at "/" when present, so one container serves UI + API. Mounted
+    # AFTER the API router, so /api/* always resolves to the API; unknown /api/* paths 404 here
+    # (StaticFiles only serves index.html for "/", not as a SPA catch-all — the UI is tabs at "/").
+    resolved = _resolve_static_dir(static_dir)
+    if resolved:
+        app.mount("/", StaticFiles(directory=resolved, html=True), name="dashboard")
+        logger.info("serving dashboard from %s", resolved)
+    else:
+        logger.info("no frontend mounted (API-only)")
 
     return app
