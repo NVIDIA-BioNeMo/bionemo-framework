@@ -173,6 +173,8 @@ class FakeEngine:
         prompt = core.clean_dna(kw.get("prompt", ""))
         if not prompt and kw.get("organism") == "None (raw DNA)" and not kw.get("tag"):
             raise ValueError("need a seed")
+        if len(prompt) > self.max_seq_len:  # mirror the real over-context reject (server -> 413)
+            raise ValueError(f"prompt too long: {len(prompt)} > max_seq_len ({self.max_seq_len})")
         # Match the real engine's response: features are feat_meta dicts keyed {id, label, strength}
         # (NOT feature_id) — this is the shape the dashboard consumes through /generate.
         feat_meta = [

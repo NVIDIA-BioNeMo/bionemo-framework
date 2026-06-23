@@ -519,13 +519,20 @@ class Evo2SAE:
                 main_dna = _run(steer=True)
                 base_dna = _run(steer=False) if (compare_baseline and clamps) else None
         except Exception as e:
-            # A CUDA device-side assert poisons the context for the whole process — unrecoverable
-            # in-process (re-init won't clear it), so restart is the only cure. Mark not-ready so
-            # /health flips to 503; and if EXIT_ON_CUDA_WEDGE is set (launch_inference.sh sets it
-            # for `serve`, where it runs under a restart loop), exit the worker so ANY restart-on-
-            # exit supervisor (the launch loop / docker --restart / systemd / k8s) respawns it —
-            # host-independent recovery, not dependent on a readiness probe. Default (unset): just
-            # fail-closed at 503 (safe for library/CLI/test use, which must not kill the process).
+            # PURELY DEFENSIVE: the known client-reachable CUDA-assert triggers are all neutralized
+            # earlier by _sanitize_steering (out-of-range id, magnitude cap, non-finite strength,
+            # temperature<=0, negative top_k), so a wedge here implies a genuine hardware/driver
+            # fault, NOT a crafted request — it is not client-inducible (so exit+restart is not a
+            # remote DoS vector). If that ever stops holding, a new trigger must be added to
+            # _sanitize_steering, not handled by leaning on this path.
+            #
+            # When it does happen, the device-side assert poisons the CUDA context for the whole
+            # process — unrecoverable in-process (re-init won't clear it), so restart is the only
+            # cure. Mark not-ready so /health flips to 503; and if EXIT_ON_CUDA_WEDGE is set
+            # (launch_inference.sh sets it for `serve`, which runs under a restart loop), exit the
+            # worker so ANY restart-on-exit supervisor (the launch loop / docker --restart /
+            # systemd / k8s) respawns it — host-independent recovery, no readiness probe required.
+            # Default (unset): fail-closed at 503 (safe for library/CLI/test use — must not exit).
             if _is_unrecoverable_cuda(e):
                 self.ready = False
                 logger.exception("unrecoverable CUDA error in generate() — marking engine not-ready")

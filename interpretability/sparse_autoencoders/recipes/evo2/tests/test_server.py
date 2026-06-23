@@ -102,6 +102,11 @@ def test_generate_rejects_out_of_range_feature(client):
     assert r.status_code == 400  # the wedge guard, surfaced to the client
 
 
+def test_generate_rejects_too_long(client, fake_engine):
+    seq = "A" * (fake_engine.max_seq_len + 1)  # exceeds the context budget -> 413 (parity w/ annotate)
+    assert client.post("/generate", json={"prompt": seq}).status_code == 413
+
+
 def test_generate_compare_baseline(client):
     b = client.post(
         "/generate",
