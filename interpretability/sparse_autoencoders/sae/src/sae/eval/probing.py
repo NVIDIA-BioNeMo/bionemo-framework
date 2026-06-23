@@ -20,6 +20,13 @@ an optional dense-residual twin, per-token labels, optional instance IDs). Recip
 drivers (e.g. Evo2) only produce the buffer; all scoring lives here so it is shared
 and reusable. Companions in this package: loss_recovered (fidelity), reconstruction,
 sparsity, dead_latents.
+
+These metrics are hand-rolled rather than pulled from scikit-learn / scipy on purpose:
+``auroc_all`` ranks every feature against every concept in one vectorized, GPU-capable pass
+(``sklearn.roc_auc_score`` is a per-(feature, concept) CPU loop — infeasible at ~65k features),
+and it keeps this library's dependencies minimal. Correctness isn't traded away for it: ranks are
+tie-averaged (the Mann-Whitney convention), so the result equals the reference AUROC even on the
+heavy zero-mass of sparse SAE codes — pinned by the oracle tests.
 """
 
 from __future__ import annotations
@@ -88,6 +95,26 @@ def standardize(X, tr):
     return mu, sd
 
 
+def _average_ranks(x: torch.Tensor) -> torch.Tensor:
+    """Tie-corrected (average) ranks along dim 0, 1-indexed.
+
+    Tied values share their mean rank — the convention the Mann-Whitney/AUROC rank-sum assumes.
+    Plain ``argsort().argsort()`` hands the heavy zero-mass of sparse SAE codes arbitrary distinct
+    ranks, which biases the AUROC; this averages each tie instead. Vectorized via ``searchsorted``
+    so it keeps the all-features-at-once speed: ``lt``/``le`` count values strictly-less / <= each
+    value, the tie group spans ordinal ranks ``lt+1..le``, whose mean is ``(lt+le+1)/2``.
+    """
+    x = x.float()
+    xs = x.sort(dim=0).values
+    if x.dim() == 1:
+        lt = torch.searchsorted(xs, x, right=False)
+        le = torch.searchsorted(xs, x, right=True)
+    else:  # searchsorted ranks along the last dim; transpose so the token axis (dim 0) is searched
+        lt = torch.searchsorted(xs.t().contiguous(), x.t().contiguous(), right=False).t()
+        le = torch.searchsorted(xs.t().contiguous(), x.t().contiguous(), right=True).t()
+    return (lt + le + 1).float() / 2.0
+
+
 # ───────────────────────────────────────────────────────────── AUROC
 @torch.no_grad()
 def auroc_all(X, Y, chunk=1024):
@@ -103,7 +130,7 @@ def auroc_all(X, Y, chunk=1024):
     out = torch.full((F, L), 0.5, device=X.device)
     for c0 in range(0, F, chunk):
         c1 = min(c0 + chunk, F)
-        ranks = X[:, c0:c1].float().argsort(0).argsort(0).float() + 1.0
+        ranks = _average_ranks(X[:, c0:c1])
         au = (y.t() @ ranks - half[:, None]) / denom[:, None]
         out[c0:c1] = au.t()
     out[:, ~valid] = 0.5
@@ -118,7 +145,7 @@ def auroc_vec(scores, y):
     nneg = n - npos
     if npos == 0 or nneg == 0:
         return 0.5
-    ranks = scores.argsort().argsort().float() + 1.0
+    ranks = _average_ranks(scores)
     return float((ranks[y].sum() - npos * (npos + 1) / 2) / (npos * nneg))
 
 
@@ -136,7 +163,7 @@ def best_single_train_test(Xtr, ytr, Xte, yte, chunk=2048):
         F = X.shape[1]
         out = torch.empty(F, device=X.device)
         for c0 in range(0, F, chunk):
-            ranks = X[:, c0 : c0 + chunk].float().argsort(0).argsort(0).float() + 1.0
+            ranks = _average_ranks(X[:, c0 : c0 + chunk])
             out[c0 : c0 + chunk] = (yf @ ranks - npos * (npos + 1) / 2) / (npos * nneg)
         return out
 
@@ -216,7 +243,7 @@ def macro_auroc(logits, y, nclass):
         npos = int(yc.sum())
         if npos == 0 or npos == len(y):
             continue
-        ranks = logits[:, c].argsort().argsort().float() + 1.0
+        ranks = _average_ranks(logits[:, c])
         aucs.append(float((ranks[yc].sum() - npos * (npos + 1) / 2) / (npos * (len(y) - npos))))
     return (sum(aucs) / max(1, len(aucs))), len(aucs)
 
