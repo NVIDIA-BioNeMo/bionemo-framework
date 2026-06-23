@@ -287,9 +287,14 @@ class Evo2SAE:
 
         Sequences are padded to the longest in each micro-batch; padding is masked
         out before SAE-encoding so each result has the true per-base length.
+
+        Work is length-bucketed (processed in token-length order) so each micro-batch holds
+        similar-length sequences and wastes little padding on mixed-length inputs; results are
+        written back by original index, so the returned order matches the input order.
         """
         out: list[torch.Tensor] = [None] * len(seqs)  # type: ignore
         order = [(i, self.tokenize(s)) for i, s in enumerate(seqs)]
+        order.sort(key=lambda it: len(it[1]))  # length-bucket to minimize padding (out[orig_i] un-sorts)
         with self._lock:
             for start in range(0, len(order), batch_size):
                 chunk = order[start : start + batch_size]

@@ -84,6 +84,24 @@ def test_check_dim_rejects_sae_model_mismatch():
     Evo2SAE._check_dim(sae_input_dim=1920, hidden=None, layer=26)  # unknown -> skip
 
 
+def test_encode_batch_length_bucketing_preserves_order():
+    # encode_batch sorts work by length (bucketing) but must return results in INPUT order.
+    # Stub the model so this runs on CPU: each sequence's first token carries its (distinct) length
+    # as a marker, _forward_hidden echoes it, and the SAE is identity — so out[i] should carry the
+    # marker of seqs[i] regardless of the internal length-sort.
+    import types
+
+    eng = _engine()
+    seqs = ["AC", "ACGTACGT", "A" * 20, "ACG", "A" * 15]  # lengths 2,8,20,3,15 (distinct markers)
+    eng.tokenize = lambda s: [len(s)] + [0] * (len(s) - 1)
+    eng._forward_hidden = lambda id_lists: [torch.tensor([[float(ids[0])]]) for ids in id_lists]
+    eng.sae = types.SimpleNamespace(encode=lambda h: h)
+    eng.n_features = 1
+    out = eng.encode_batch(seqs, batch_size=2)
+    assert len(out) == len(seqs)
+    assert [int(o[0, 0].item()) for o in out] == [len(s) for s in seqs]  # input order preserved
+
+
 # ------------------------------------------------------------------------------- generate input guards
 def test_generate_rejects_unknown_organism():
     with pytest.raises(ValueError, match="organism"):
