@@ -133,7 +133,7 @@ def _tag(engine):
 
 @pytest.mark.slow
 def test_encode_smoke(engine):
-    """encode runs the truncated bf16 forward and returns finite per-feature codes (>=1 firing).
+    """encode runs the engine's bf16 forward and returns finite per-feature codes (>=1 firing).
 
     Guards the TransformerEngine bf16/fp32 autocast path: a dtype mismatch would crash here.
     """
@@ -173,6 +173,34 @@ def test_steering_changes_continuation(engine):
     )
     assert both["generation"]["sequence"] == steered  # steered half matches
     assert both["baseline"]["sequence"] == base  # baseline half == unsteered
+
+
+@pytest.mark.slow
+def test_highlight_steer_interleaving_no_bleed(engine):
+    """Single engine: encode (highlight) and generate (steer) drive ONE shared model, so
+    interleaving them must not corrupt either path.
+
+    (1) encode is bit-identical before and after a steered generate runs in between — the
+        full-sequence highlight forward is unaffected by the decode dynamic-context / KV state
+        the generate path builds and tears down on the same model.
+    (2) a baseline (unsteered) generate is identical whether or not an encode + a steered
+        generate ran first — no steering hook leaked and no decode state carried over.
+    """
+    full = _tag(engine) + _PROMPT
+    codes_before = engine.encode(full)
+    per = codes_before.max(dim=0).values
+    fid, peak = int(per.argmax()), float(per.max())
+    feature = {"feature_id": fid, "strength": max(peak * 3.0, 50.0)}
+
+    base_clean = _gen(engine, [])["generation"]["sequence"]  # reference baseline
+    _ = _gen(engine, [feature])  # steered generate between the two encodes
+    codes_after = engine.encode(full)
+    assert torch.equal(codes_before, codes_after)  # (1) highlight forward unchanged by the steer
+
+    _ = engine.encode(full)  # more interleaving: encode then steered-gen before a baseline
+    _ = _gen(engine, [feature])
+    base_after = _gen(engine, [])["generation"]["sequence"]
+    assert base_after == base_clean  # (2) baseline unaffected by prior encode/steer history
 
 
 @pytest.mark.slow

@@ -26,11 +26,12 @@
 It has NO web dependency: the FastAPI server (`server.py`) and the batch CLI
 (`cli.py`) are thin wrappers over this class, and the viz backend imports it too.
 
-The heavy Evo2 machinery is reused from the recipe: model loading via
-`predict.load_model_to_layer` and generation via `infer.setup_inference_engine` /
-`infer.generate` (run eager, `cuda_graph_impl="none"`, so the residual-stream steering
-hook applies). This module only adds the SAE layer: encode, feature labels, and the
-decode-only feature-clamp hook.
+The heavy Evo2 machinery is reused from the recipe: a SINGLE inference engine
+(`infer.setup_inference_engine`, run eager with `cuda_graph_impl="none"` so the
+residual-stream steering hook applies) serves both paths. Encode/highlight runs a normal
+full-sequence forward on the engine's model and reads layer `layer` off a forward hook;
+generation uses the same model via `infer.generate`. This module only adds the SAE layer:
+encode, feature labels, and the decode-only feature-clamp hook.
 """
 
 from __future__ import annotations
@@ -138,8 +139,8 @@ class Evo2SAE:
         self.feature_annotations = feature_annotations
         self.organism_tags = dict(organism_tags) if organism_tags else dict(DEFAULT_ORGANISM_TAGS)
 
-        self.model = None  # truncated model (post_process=False) for activations
-        self.gen_components = None  # recipe inference engine (full model) for generation, lazy
+        self.model = None  # the engine's mcore model (full): encode forward + steering hook target
+        self.gen_components = None  # recipe inference engine (the single model), built in load()
         self.tokenizer = None
         self.sae = None
         self.n_features = None
@@ -150,11 +151,18 @@ class Evo2SAE:
 
     # ------------------------------------------------------------------ loading
     def load(self) -> "Evo2SAE":
-        """Load the truncated Evo2 model + SAE + feature labels (one-time, ~1 min)."""
-        from bionemo.evo2.run import predict as P
+        """Load the single Evo2 inference engine + SAE + feature labels (one-time, ~1 min).
+
+        One model serves both paths: encode/highlight runs a full-sequence forward and reads
+        layer ``layer`` off a hook (see ``_forward_hidden``); generate drives the same model's
+        dynamic-decode engine with a steering hook on the same layer.
+        """
+        from megatron.core.utils import unwrap_model
 
         _init_single_process_distributed()
-        self.model, self.tokenizer = P.load_model_to_layer(self.evo2_ckpt_dir, self.layer, full=False)
+        comp = self._ensure_engine()  # the one engine; reused by generate()
+        self.model = unwrap_model(comp.model)  # mcore model: encode forward + steering-hook target
+        self.tokenizer = comp.tokenizer
         self.sae, self.n_features = self._load_sae()
         # Fail loudly now if the SAE doesn't fit the model, instead of a cryptic matmul error on the
         # first encode. We can only catch a dim mismatch (wrong SAE/model); a wrong layer with the
@@ -174,9 +182,8 @@ class Evo2SAE:
         if self.gen_components is None:
             from bionemo.evo2.run import infer as INF
 
-            # load_model_to_layer (the encode model) already initialized the global
-            # num-microbatches calculator; setup_inference_engine re-inits it and asserts
-            # unless we tear the singleton down first.
+            # Defensive: if anything earlier initialized the global num-microbatches calculator,
+            # setup_inference_engine re-inits it and asserts unless we tear the singleton down first.
             try:
                 from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
 
@@ -310,9 +317,14 @@ class Evo2SAE:
 
     @torch.no_grad()
     def _forward_hidden(self, id_lists: list[list[int]]) -> list[torch.Tensor]:
-        """Run the truncated model on a (padded) batch of token-id lists.
+        """Run the engine's model on a (padded) batch of token-id lists.
 
         Returns the unpadded layer-`layer` hidden states [S_i, H] per sequence.
+
+        The single engine model is ``post_process=True`` (it produces logits for generation), so
+        we can't ask ``_predict_step`` for embeddings. Instead we drive a normal full-sequence
+        forward and read layer ``layer`` off a forward hook — the same module + ``[S, B, H]``
+        layout the steering ``clamp_hook`` uses, so encode and steer see identical activations.
         """
         from bionemo.evo2.run import predict as P
 
@@ -333,12 +345,22 @@ class Evo2SAE:
             "loss_mask": loss_mask,
             "seq_idx": torch.arange(b, dtype=torch.long, device=self.device),
         }
+        # Capture layer-`layer` output via a forward hook (engine model has no embedding-only mode).
+        captured: dict[str, torch.Tensor] = {}
+
+        def _capture(_module, _inputs, output):
+            captured["h"] = output[0] if isinstance(output, tuple) else output  # [S, B, H]
+
+        handle = self.model.decoder.layers[self.layer].register_forward_hook(_capture)
         # Evo2 runs bf16; TransformerEngine asserts param/input dtypes match unless inside an
         # autocast region. predict()'s loop relies on this too, so wrap the direct _predict_step.
         device_type = "cuda" if self.device.startswith("cuda") else "cpu"
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            result = P._predict_step(model=self.model, batch=batch, output_embeddings=True)
-        hidden = result["hidden_embeddings"]  # [B, S, H]
+        try:
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                P._predict_step(model=self.model, batch=batch, output_embeddings=False)
+        finally:
+            handle.remove()
+        hidden = captured["h"].transpose(0, 1).contiguous()  # [S, B, H] -> [B, S, H]
         return [hidden[i, : lens[i]].float() for i in range(b)]
 
     def feature_tracks(self, dna: str, fids: list[int]) -> dict:
@@ -385,8 +407,6 @@ class Evo2SAE:
         steering is a decode-only forward hook on layer `layer`. Returns
         {generation:{sequence,activations}, baseline:..|None, features, steered}.
         """
-        from megatron.core.utils import unwrap_model
-
         from bionemo.evo2.run import infer as INF
 
         features = features or []
@@ -408,7 +428,7 @@ class Evo2SAE:
 
         with self._lock:
             comp = self._ensure_engine()
-            hook_layer = unwrap_model(comp.model).decoder.layers[self.layer]
+            hook_layer = self.model.decoder.layers[self.layer]  # same module encode reads; steer here
             from sae.steering import clamp_hook
 
             feat_meta = [{"id": fid, "label": self.labels.get(fid), "strength": s} for fid, s in clamps.items()]
