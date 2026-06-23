@@ -28,7 +28,7 @@ import math
 import pytest
 import torch
 from evo2_sae import Evo2SAE
-from evo2_sae.core import MAX_CLAMP_STRENGTH, _sanitize_steering
+from evo2_sae.core import MAX_CLAMP_STRENGTH, _is_unrecoverable_cuda, _sanitize_steering
 
 
 # The delta-clamp math + decode-only/prefill behavior is covered against the production
@@ -102,6 +102,13 @@ def test_sanitize_clamps_negative_top_k():
     """A negative top_k is an invalid sampler arg -> coerced to 0 (no top-k filtering)."""
     _, _, _, top_k = _sanitize_steering([{"feature_id": 5, "strength": 1.0}], 65536, 1.0, -5)
     assert top_k == 0
+
+
+def test_is_unrecoverable_cuda():
+    """Only sticky CUDA faults flip the engine not-ready; ordinary errors propagate normally."""
+    assert _is_unrecoverable_cuda(RuntimeError("CUDA error: device-side assert triggered"))
+    assert not _is_unrecoverable_cuda(RuntimeError("shape mismatch"))
+    assert not _is_unrecoverable_cuda(ValueError("bad input"))
 
 
 # --------------------------------------------------------------------- GPU: real generation

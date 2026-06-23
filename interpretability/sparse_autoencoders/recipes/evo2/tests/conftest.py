@@ -116,3 +116,78 @@ def sae_ckpt_path(tmp_path_factory) -> str:
 def embedding_layer() -> int:
     """Layer whose residual stream the SAE reads/steers (1B has 25 layers; default 19)."""
     return int(os.environ.get("EMBEDDING_LAYER", "19"))
+
+
+# ---------------------------------------------------------------------------------------------
+# CPU fixtures for the serve layer (#1637). `FakeEngine` is the one mock the CLI tests
+# (test_cli.py) and the server contract tests (test_server.py) both drive — no model, CPU-only —
+# so the two suites stay in lockstep on the engine surface the server/CLI touch.
+# ---------------------------------------------------------------------------------------------
+from evo2_sae import core  # noqa: E402
+
+
+class FakeEngine:
+    """Minimal stand-in for Evo2SAE exposing only what the CLI + server touch."""
+
+    def __init__(self):
+        self.ready = True
+        self.layer = 19
+        self.n_features = 4
+        self.labels = {0: "feat0", 1: "feat1"}
+        self.peaks = {0: 0.5}
+        self.organism_tags = {"None (raw DNA)": "", "Human": "|tag|"}
+        self.device = "cpu"
+        self.sae_ckpt_path = "fake.pt"
+        self.max_seq_len = 8192
+        self.gen_kwargs = None  # records the last generate() call for CLI assertions
+        self.last_k = None  # records the k top_features() was last called with
+
+    def load(self):
+        self.ready = True
+        return self  # the CLI uses `_engine(args).load()`
+
+    def resolve_tag(self, organism, tag):
+        return tag if tag is not None else self.organism_tags.get(organism)
+
+    def encode(self, full):
+        codes = torch.zeros(len(full), self.n_features)
+        codes[:, 0] = 1.0  # feature 0 fires everywhere
+        return codes
+
+    def encode_batch(self, seqs, batch_size=8):
+        return [self.encode(s) for s in seqs]
+
+    def top_features(self, codes, tag_len=0, k=8):
+        self.last_k = k  # so tests can assert the server clamped k into [1, 64]
+        feats = [{"feature_id": i, "label": self.labels.get(i), "max_activation": 1.0} for i in range(self.n_features)]
+        return feats[:k]
+
+    def generate(self, **kw):
+        self.gen_kwargs = kw
+        # Mirror the real engine: clamps normalize through the shared parser (a malformed --clamp
+        # raises), out-of-range ids are rejected (the wedge guard), and a seedless request is too.
+        specs = [core.parse_clamp_spec(f) for f in (kw.get("features") or [])]
+        bad = [s["feature_id"] for s in specs if not (0 <= s["feature_id"] < self.n_features)]
+        if bad:
+            raise ValueError(f"feature_id(s) {bad} out of range [0, {self.n_features})")
+        prompt = core.clean_dna(kw.get("prompt", ""))
+        if not prompt and kw.get("organism") == "None (raw DNA)" and not kw.get("tag"):
+            raise ValueError("need a seed")
+        resp = {
+            "prompt": prompt,
+            "organism": kw.get("organism"),
+            "tag": kw.get("tag"),
+            "steered": bool(specs),
+            "features": specs,
+            "generation": {"sequence": "ACGT", "activations": {0: [1.0, 1.0, 1.0, 1.0]}},
+            "baseline": None,
+        }
+        if kw.get("compare_baseline") and specs:
+            resp["baseline"] = {"sequence": "TTTT", "activations": {}}
+        return resp
+
+
+@pytest.fixture
+def fake_engine():
+    """A fresh CPU FakeEngine instance."""
+    return FakeEngine()

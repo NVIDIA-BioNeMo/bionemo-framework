@@ -37,6 +37,7 @@ encode, feature labels, and the decode-only feature-clamp hook.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import sys
@@ -80,6 +81,64 @@ def clean_dna(seq: str) -> str:
     return _VALID_BASES.sub("", (seq or "").upper())
 
 
+def annotate(engine, sequence: str, organism: str = "None (raw DNA)", tag: Optional[str] = None):
+    """Shared encode path for the CLI ``encode`` and the server ``/annotate`` (topk).
+
+    Cleans the sequence, resolves the phylo tag, encodes once, and computes the tag length
+    (the leading tag tokens to skip, ignored if it would drop the whole sequence). Returns
+    ``(dna, resolved_tag, codes, tag_len)``; callers add their own top-k / per-base presentation.
+
+    Raises ``ValueError`` on an empty/non-DNA sequence or an unknown organism — the server maps
+    these to HTTP 400, the CLI to a clean exit. Takes the engine as an argument (rather than
+    living on ``Evo2SAE``) so it composes with any object exposing ``resolve_tag``/``encode``.
+    """
+    dna = clean_dna(sequence)
+    if not dna:
+        raise ValueError("No valid nucleotides in sequence")
+    resolved_tag = engine.resolve_tag(organism, tag)
+    if resolved_tag is None:
+        raise ValueError(f"Unknown organism '{organism}' and no custom tag")
+    full = resolved_tag + dna
+    # Reject over-length input rather than letting encode() silently truncate to max_seq_len —
+    # the per-base `activations` would then be shorter than `bases` and the viz would misalign.
+    if len(full) > engine.max_seq_len:
+        raise ValueError(f"sequence too long: {len(full)} > max_seq_len ({engine.max_seq_len})")
+    codes = engine.encode(full)
+    if codes.shape[0] != len(full):  # belt-and-suspenders: encode must be 1:1 with the input here
+        raise ValueError("encoded length != input length (tokenizer truncated)")
+    tag_len = len(resolved_tag) if codes.shape[0] >= len(resolved_tag) else 0
+    return dna, resolved_tag, codes, tag_len
+
+
+def parse_clamp_spec(spec) -> dict:
+    """Normalize one feature-clamp spec into ``{"feature_id": int, "strength": float}``.
+
+    Accepts a ``"FEATURE_ID[:STRENGTH]"`` string (CLI ``--clamp``; strength defaults to 1.0,
+    e.g. ``29244:300`` or ``29244``), or a mapping with ``feature_id``/``strength`` (server
+    ``FeatureClamp``). Single source of truth so the CLI and the API parse clamps identically.
+    Magnitude/finiteness/range are enforced later by ``_sanitize_steering``.
+
+    Raises ``ValueError`` on a malformed string (caller decides whether that's a 400 or an exit).
+    """
+    if isinstance(spec, str):
+        fid, sep, strength = spec.partition(":")
+        try:
+            return {"feature_id": int(fid), "strength": float(strength) if (sep and strength) else 1.0}
+        except ValueError:
+            raise ValueError(f"invalid clamp {spec!r}: expected FEATURE_ID[:STRENGTH] with numeric values")
+    return {"feature_id": int(spec["feature_id"]), "strength": float(spec.get("strength", 1.0))}
+
+
+def _is_unrecoverable_cuda(e: Exception) -> bool:
+    """True for CUDA errors that poison the process context (device-side assert / sticky CUDA error).
+
+    These don't clear on the next request — the worker must be recycled — so the caller marks the
+    engine not-ready rather than retrying into a stream of 500s.
+    """
+    s = str(e).lower()
+    return isinstance(e, RuntimeError) and ("device-side assert" in s or "cuda error" in s)
+
+
 def _sanitize_steering(features, n_features, temperature, top_k):
     """Validate/normalize steering inputs (pure, no GPU); raise on bad input.
 
@@ -97,10 +156,12 @@ def _sanitize_steering(features, n_features, temperature, top_k):
     bad = sorted({int(f["feature_id"]) for f in features if not (0 <= int(f["feature_id"]) < n_features)})
     if bad:
         raise ValueError(f"feature_id(s) {bad} out of range [0, {n_features})")
-    clamps = {
-        int(f["feature_id"]): max(-MAX_CLAMP_STRENGTH, min(MAX_CLAMP_STRENGTH, float(f.get("strength", 1.0))))
-        for f in features
-    }
+    clamps = {}
+    for f in features:
+        s = float(f.get("strength", 1.0))
+        if not math.isfinite(s):  # NaN/±inf would blow the logits to NaN -> neutralize explicitly
+            s = 0.0
+        clamps[int(f["feature_id"])] = max(-MAX_CLAMP_STRENGTH, min(MAX_CLAMP_STRENGTH, s))
     temperature = float(temperature)
     top_k = max(0, int(top_k))  # negative top_k is an invalid sampler arg -> 0 (no filtering)
     if temperature <= 0:  # greedy — avoid the sampler's logits/temperature division (NaN)
@@ -409,7 +470,9 @@ class Evo2SAE:
         """
         from bionemo.evo2.run import infer as INF
 
-        features = features or []
+        # Accept CLI "ID[:STRENGTH]" strings and server FeatureClamp dicts identically, then
+        # validate/cap below via _sanitize_steering.
+        features = [parse_clamp_spec(f) for f in (features or [])]
         resolved_tag = self.resolve_tag(organism, tag)
         if resolved_tag is None:
             raise ValueError(f"Unknown organism '{organism}' and no custom tag")
@@ -426,30 +489,39 @@ class Evo2SAE:
         # 0 each trigger CUDA device-side asserts that wedge the server (see _sanitize_steering).
         clamps, fids, temperature, top_k = _sanitize_steering(features, self.n_features, temperature, top_k)
 
-        with self._lock:
-            comp = self._ensure_engine()
-            hook_layer = self.model.decoder.layers[self.layer]  # same module encode reads; steer here
-            from sae.steering import clamp_hook
+        try:
+            with self._lock:
+                comp = self._ensure_engine()
+                hook_layer = self.model.decoder.layers[self.layer]  # same module encode reads; steer here
+                from sae.steering import clamp_hook
 
-            feat_meta = [{"id": fid, "label": self.labels.get(fid), "strength": s} for fid, s in clamps.items()]
+                feat_meta = [{"id": fid, "label": self.labels.get(fid), "strength": s} for fid, s in clamps.items()]
 
-            def _run(steer: bool) -> str:
-                handle = (
-                    hook_layer.register_forward_hook(clamp_hook(self.sae, clamps, decode_only=True))
-                    if (steer and clamps)
-                    else None
-                )
-                try:
-                    out = INF.generate(
-                        comp, [full_prompt], max_new_tokens=n_tokens, temperature=temperature, top_k=top_k
+                def _run(steer: bool) -> str:
+                    handle = (
+                        hook_layer.register_forward_hook(clamp_hook(self.sae, clamps, decode_only=True))
+                        if (steer and clamps)
+                        else None
                     )
-                    return clean_dna(INF._unwrap_result(out[0]).generated_text)
-                finally:
-                    if handle is not None:
-                        handle.remove()
+                    try:
+                        out = INF.generate(
+                            comp, [full_prompt], max_new_tokens=n_tokens, temperature=temperature, top_k=top_k
+                        )
+                        return clean_dna(INF._unwrap_result(out[0]).generated_text)
+                    finally:
+                        if handle is not None:
+                            handle.remove()
 
-            main_dna = _run(steer=True)
-            base_dna = _run(steer=False) if (compare_baseline and clamps) else None
+                main_dna = _run(steer=True)
+                base_dna = _run(steer=False) if (compare_baseline and clamps) else None
+        except Exception as e:
+            # A CUDA device-side assert poisons the context: every later request would 500 until
+            # restart. Mark the engine not-ready so /health flips to 503 and an orchestrator
+            # recycles the pod, instead of serving a permanently-wedged worker.
+            if _is_unrecoverable_cuda(e):
+                self.ready = False
+                logger.exception("unrecoverable CUDA error in generate() — marking engine not-ready")
+            raise
 
         resp = {
             "prompt": dna,
