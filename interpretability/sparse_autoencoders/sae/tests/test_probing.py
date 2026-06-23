@@ -17,8 +17,8 @@
 
 One strong test per non-trivial metric: each checks the result against an independent
 reference (a definitional oracle or a hand-computed value) rather than a loose sanity bound.
-The trivial standardize helper is exercised transitively (decode_eval test); split_indices
-folds into the buffer roundtrip.
+standardize has a direct test for its zero-variance floor (the dead-latent safety the probe
+relies on); split_indices folds into the buffer roundtrip.
 """
 
 import numpy as np
@@ -32,6 +32,7 @@ from sae.eval.probing import (
     decode_eval,
     domain_f1,
     split_indices,
+    standardize,
 )
 
 
@@ -196,3 +197,22 @@ def test_buffer_roundtrip_without_dense_or_instances(tmp_path):
     lo = ActivationBuffer.load(path)
     assert lo.dense is None and lo.instances is None
     assert np.array_equal(lo.codes, codes) and lo.label_names == ["a", "b"]
+
+
+def test_standardize_floors_zero_variance_and_uses_train_rows():
+    """standardize floors std at 1e-6 (constant/dead latents don't divide to NaN) and uses only tr rows.
+
+    The probe's linear/codon paths z-score SAE codes, where ~20% of latents are dead (constant 0);
+    without the floor those columns would produce inf/NaN and poison every logreg fit.
+    """
+    X = torch.zeros(6, 3)
+    X[:, 0] = 5.0  # constant feature -> zero variance (dead-latent-like)
+    X[:, 1] = torch.tensor([1.0, 2.0, 3.0, 9.0, 9.0, 9.0])  # varies within the train rows
+    tr = torch.tensor([0, 1, 2])  # train split = first three rows
+
+    mu, sd = standardize(X, tr)
+    assert torch.all(sd >= 1e-6)  # constant column floored, never exactly 0
+    assert sd[1] > 1e-6  # a varying feature keeps its real std
+    assert torch.isfinite((X - mu) / sd).all()  # so the z-score is finite everywhere
+    # stats are computed over the train rows only (no test-set leakage)
+    assert torch.allclose(mu, X[tr].mean(0)) and torch.allclose(sd, X[tr].std(0) + 1e-6)
