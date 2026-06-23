@@ -15,11 +15,11 @@ dependencies = [
     "pyarrow>=23.0.0",
 ]
 
-# No package code lives here yet — the recipe is just an entry-point for
-# scripts/ that depends on the shared `sae` workspace package. Declare no
-# packages so setuptools doesn't try to discover anything.
-[tool.setuptools]
-packages = []
+# The `evo2_sae` package (src/) holds the live inference engine + steering hook;
+# scripts/ (extract, train) are standalone entry points alongside it. The FastAPI
+# server + CLI (and their fastapi/uvicorn deps) are added by the serve PR (#1637).
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.uv.sources]
 sae = { workspace = true }

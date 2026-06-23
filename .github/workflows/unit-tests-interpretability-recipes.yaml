@@ -1,0 +1,77 @@
+name: "BioNeMo Interpretability Recipes CI"
+
+# CI for the SAE interpretability recipes (interpretability/sparse_autoencoders).
+# Uses the same squashed megatron image + L4 GPU as the mbridge lane, but the interpretability
+# tree is a single uv workspace (not N *megatron recipes), so there is no per-recipe matrix —
+# just a path-gated GPU job. Currently scoped to the evo2 recipe, whose engine builds on the
+# mbridge bionemo.evo2 recipe, so the job also checks out recipes/evo2_megatron (which pulls its
+# bionemo-core / bionemo-recipeutils deps from git).
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+      - "dependabot/**"
+    paths:
+      - "interpretability/sparse_autoencoders/**"
+      - "recipes/evo2_megatron/**" # engine builds on bionemo.evo2
+      - ".github/workflows/unit-tests-interpretability-recipes.yaml"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "0 9 * * *" # Runs at 9 AM UTC daily (2 AM MST)
+
+defaults:
+  run:
+    shell: bash -x -e -u -o pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: linux-amd64-gpu-l4-latest-1
+    name: "interpretability-unit-tests (evo2)"
+    container:
+      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+      options: --shm-size=16G
+      env:
+        CI: true
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_HOME: /cache/huggingface
+
+    steps:
+      - name: Show GPU info
+        run: nvidia-smi
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@main
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # The evo2 recipe builds on bionemo.evo2 (recipes/evo2_megatron); evo2_megatron pulls
+          # its bionemo-core / bionemo-recipeutils deps from git, so only these two are needed.
+          sparse-checkout: |
+            interpretability/sparse_autoencoders
+            recipes/evo2_megatron
+          sparse-checkout-cone-mode: false
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: /cache/huggingface
+          key: ${{ runner.os }}-huggingface-interp-evo2-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-huggingface-interp-evo2-
+            ${{ runner.os }}-huggingface-
+
+      - name: Install dependencies
+        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+        run: bash .ci_build.sh
+
+      - name: Run tests
+        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+        run: |
+          source .ci_test_env.sh
+          pytest -v tests/
