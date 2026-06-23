@@ -38,16 +38,17 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
+import pytest
 import torch
 from sae.architectures import TopKSAE
-from sae.eval.probing import ActivationBuffer, domain_f1
+from sae.eval.probing import ActivationBuffer, auroc_all, domain_f1
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import probe
 from annot_tracks import label_windows
-from evo2_buffer import forward_codes
+from evo2_buffer import KINGDOM_TAGS, build_buffer, forward_codes
 
 
 # Feature index deliberately planted to track the "planted" concept.
@@ -152,14 +153,21 @@ def test_linear_cli_emits_dense_comparison(tmp_path, monkeypatch, capsys):
     assert sae_single >= 0.95  # the planted feature separates the concept under the linear probe too
 
 
-# ----------------------------------------------- shared engine->codes helper (evo2_buffer)
+# ----------------------------------------------- engine -> buffer harness (evo2_buffer)
 class _FakeEngine:
-    """Minimal stand-in for the Evo2SAE engine: a real SAE + random hidden states, no model."""
+    """Minimal stand-in for the Evo2SAE engine: a real SAE + random hidden states, no model.
+
+    Byte-level tokenization (1 char = 1 token, like Evo2) so per-token labels line up with codes.
+    """
 
     def __init__(self, sae):
         self.device = "cpu"
         self.sae = sae
+        self.n_features = sae.hidden_dim
         self._lock = contextlib.nullcontext()  # no GPU to serialize in the CPU test
+
+    def tokenize(self, text):
+        return list(range(len(text)))
 
     def _forward_hidden(self, id_lists):
         h = self.sae.pre_bias.shape[0]
@@ -176,6 +184,59 @@ def test_forward_codes_pairs_hidden_with_sae_codes():
     for (h, codes), ids in zip(out, id_lists):
         assert h.shape == (len(ids), 8) and codes.shape == (len(ids), 16)
         assert torch.allclose(codes, sae.encode(h))
+
+
+def test_build_buffer_shapes_and_label_alignment_with_fake_engine():
+    """build_buffer streams seqs -> ActivationBuffer with codes/dense/labels aligned and tag-offset right.
+
+    Exercises the harness buffer build (forward_codes + labelers + ActivationBuffer) end to end on CPU,
+    with no model: the per-base `base_A` label must fire exactly on the DNA 'A' positions and never on
+    the phylo-tag prefix.
+    """
+    sae = TopKSAE(input_dim=8, hidden_dim=16, top_k=4, normalize_input=False)
+    eng = _FakeEngine(sae)
+    dna = "ACGT" * 20  # 80 bp, above build_buffer's 60 bp floor
+    tag = KINGDOM_TAGS["euk"]
+    T = len(tag) + len(dna)
+
+    buf = build_buffer(
+        eng, [("euk", dna)], ["base_A", "base_C", "base_G", "base_T"], subsample=512, auroc_device="cpu"
+    )
+
+    assert buf.codes.shape == (T, eng.n_features)
+    assert buf.dense.shape == (T, 8) and buf.labels.shape == (T, 4)
+    assert list(buf.label_names) == ["base_A", "base_C", "base_G", "base_T"]
+    base_a = buf.labels[:, 0]
+    assert base_a[: len(tag)].sum() == 0  # phylo-tag prefix is never base-labeled
+    assert base_a[len(tag) :].sum() == dna.count("A")  # every DNA 'A', and only those
+
+
+@pytest.mark.slow
+def test_build_buffer_and_score_real_engine(evo2_ckpt_dir, sae_ckpt_path, embedding_layer):
+    """End-to-end against the REAL Evo2SAE engine — the #1636<->#1622 seam, run in the merged GPU lane.
+
+    Skips unless CUDA + the `evo2_sae` engine (#1622) are present. The evo2_ckpt_dir / sae_ckpt_path /
+    embedding_layer fixtures come from the recipe `conftest.py` once the serve + eval stacks share
+    `recipes/evo2/` — so this validates the real model -> codes -> labels -> scoring path after merge.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("real-engine test requires CUDA")
+    try:
+        from evo2_sae.core import Evo2SAE
+    except ImportError:
+        pytest.skip("evo2_sae engine (#1622) not importable in this env")
+
+    eng = Evo2SAE(evo2_ckpt_dir=evo2_ckpt_dir, sae_ckpt_path=sae_ckpt_path, layer=embedding_layer).load()
+    seqs = [("euk", "ACGTACGT" * 16), ("prok", "ATGGCCGAATTC" * 10)]
+    label_names = ["base_A", "base_C", "base_G", "base_T", "motif_ATG"]
+
+    buf = build_buffer(eng, seqs, label_names, subsample=1024, auroc_device="cpu", batch_size=2)
+    assert buf.codes.shape[0] > 0 and buf.codes.shape[1] == eng.n_features
+    assert buf.dense is not None and buf.dense.shape[0] == buf.codes.shape[0]
+    assert np.isfinite(buf.codes).all()
+
+    au = auroc_all(torch.from_numpy(buf.codes).float(), torch.from_numpy(buf.labels).bool())
+    assert au.shape == (eng.n_features, len(label_names)) and torch.isfinite(au).all()
 
 
 # --------------------------------------------------- labels (#1630) <-> domain_f1 (#1629) seam
