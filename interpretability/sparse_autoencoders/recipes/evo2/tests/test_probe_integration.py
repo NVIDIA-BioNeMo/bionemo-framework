@@ -31,12 +31,16 @@ everything else is noise, so a green run means the whole pipeline carried the si
 ``scripts/`` is on ``sys.path`` via ``conftest.py``.
 """
 
+import contextlib
 import sys
 
 import numpy as np
 import probe
 import pyarrow.parquet as pq
+import torch
 from annot_tracks import label_windows
+from evo2_buffer import forward_codes
+from sae.architectures import TopKSAE
 from sae.eval.probing import ActivationBuffer, domain_f1
 
 
@@ -142,14 +146,38 @@ def test_linear_cli_emits_dense_comparison(tmp_path, monkeypatch, capsys):
     assert sae_single >= 0.95  # the planted feature separates the concept under the linear probe too
 
 
+# ----------------------------------------------- shared engine->codes helper (evo2_buffer)
+class _FakeEngine:
+    """Minimal stand-in for the Evo2SAE engine: a real SAE + random hidden states, no model."""
+
+    def __init__(self, sae):
+        self.device = "cpu"
+        self.sae = sae
+        self._lock = contextlib.nullcontext()  # no GPU to serialize in the CPU test
+
+    def _forward_hidden(self, id_lists):
+        h = self.sae.pre_bias.shape[0]
+        return [torch.randn(len(ids), h) for ids in id_lists]
+
+
+def test_forward_codes_pairs_hidden_with_sae_codes():
+    """forward_codes returns (hidden, codes) per input, codes == the SAE's own encode of hidden."""
+    sae = TopKSAE(input_dim=8, hidden_dim=16, top_k=4, normalize_input=False)
+    eng = _FakeEngine(sae)
+    id_lists = [[1, 2, 3], [4, 5]]
+    out = forward_codes(eng, id_lists)
+    assert len(out) == len(id_lists)
+    for (h, codes), ids in zip(out, id_lists):
+        assert h.shape == (len(ids), 8) and codes.shape == (len(ids), 16)
+        assert torch.allclose(codes, sae.encode(h))
+
+
 # --------------------------------------------------- labels (#1630) <-> domain_f1 (#1629) seam
 def test_label_windows_feed_domain_f1(tmp_path):
     """annot_tracks windows (mask + instance ids) drive instance-level domain_f1 end to end.
 
     A feature planted to fire exactly on the concept mask must beat a shuffled-label null.
     """
-    import torch
-
     seqs = {"chr1": "ACGT" * 300}  # 1200 bp
     tracks = {"site": {"chr1": [(20, 90), (300, 380), (700, 760)]}}  # three instances
     windows, stats = label_windows(seqs, tracks, seq_len=200)

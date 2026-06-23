@@ -28,15 +28,30 @@ import random
 import labelers as L
 import numpy as np
 import torch
-from evo2_sae.fasta import read_fasta  # shared reader (also handles .gz); kingdom check uses the id prefix
 from sae.eval.probing import ActivationBuffer
 
 
 KINGDOM_TAGS = {"prok": "|d__Bacteria|", "euk": "|d__Eukaryota|"}
 
 
+@torch.no_grad()
+def forward_codes(engine, id_lists):
+    """Run token-id lists through the engine -> ``[(hidden[S,H], sae_codes[S,F])]`` on engine.device.
+
+    The single place the probing harness touches the engine internals — the GPU forward plus the
+    SAE encode, serialized by the engine lock. ``build_buffer`` (here) and ``probe._encode_windows``
+    both go through this, so the coupling to the engine API lives in exactly one spot.
+    """
+    dev = engine.device
+    with engine._lock:
+        return [(h, engine.sae.encode(h.to(dev))) for h in engine._forward_hidden(id_lists)]
+
+
 def sample_sequences(fasta, max_tokens, seq_len, kingdoms=("prok", "euk"), seed=0):  # noqa: D103
+    # Imported here (not at module top) so this module is usable without the evo2_sae engine
+    # installed — e.g. the CPU tests that exercise forward_codes / labels.
     from evo2_sae.core import clean_dna
+    from evo2_sae.fasta import read_fasta  # shared reader; also handles .gz
 
     kingdoms = list(kingdoms)
     pools = {k: [] for k in kingdoms}
@@ -87,34 +102,33 @@ def build_buffer(engine, seqs, label_names, *, subsample, auroc_device, annotate
             tids = engine.tokenize(tag)
             id_lists.append(tids + engine.tokenize(dna))
             metas.append((tag, len(tids), kg, dna))
-        with engine._lock:
-            hiddens = engine._forward_hidden(id_lists)
-            for h, (tag, tlen, kg, dna) in zip(hiddens, metas):
-                if h.shape[0] == 0 or filled >= S:
-                    continue
-                hd = h.to(dev)
-                codes = engine.sae.encode(hd)
-                norm = h.float().norm(dim=-1).cpu().numpy()
-                T = codes.shape[0]
-                cds_mask = cds_frame = gene_starts = None
-                if annotate_cds and kg == "prok":
-                    cds_mask, cds_frame, gene_starts = L.predict_cds(dna)
-                ctx = L.SeqContext(
-                    text=(tag + dna)[:T],
-                    tag_len=tlen,
-                    dna=dna,
-                    kingdom=kg,
-                    hidden_norm=norm[:T],
-                    cds_mask=cds_mask,
-                    cds_frame=cds_frame,
-                    gene_starts=gene_starts,
-                )
-                lab = np.stack([L.LABELERS[n](ctx)[:T] for n in label_names], axis=1)
-                take = min(T, S - filled)
-                code_buf[filled : filled + take] = codes[:take].to(torch.float16).to(auroc_device)
-                dense_buf[filled : filled + take] = hd[:take].to(torch.float16).to(auroc_device)
-                lab_buf[filled : filled + take] = torch.from_numpy(lab[:take]).to(auroc_device)
-                filled += take
+        # GPU forward + SAE encode happen inside forward_codes (engine-locked); the per-token
+        # label computation + buffer fills below are CPU/copy work and need no lock.
+        for (h, codes), (tag, tlen, kg, dna) in zip(forward_codes(engine, id_lists), metas):
+            if h.shape[0] == 0 or filled >= S:
+                continue
+            hd = h.to(dev)
+            norm = h.float().norm(dim=-1).cpu().numpy()
+            T = codes.shape[0]
+            cds_mask = cds_frame = gene_starts = None
+            if annotate_cds and kg == "prok":
+                cds_mask, cds_frame, gene_starts = L.predict_cds(dna)
+            ctx = L.SeqContext(
+                text=(tag + dna)[:T],
+                tag_len=tlen,
+                dna=dna,
+                kingdom=kg,
+                hidden_norm=norm[:T],
+                cds_mask=cds_mask,
+                cds_frame=cds_frame,
+                gene_starts=gene_starts,
+            )
+            lab = np.stack([L.LABELERS[n](ctx)[:T] for n in label_names], axis=1)
+            take = min(T, S - filled)
+            code_buf[filled : filled + take] = codes[:take].to(torch.float16).to(auroc_device)
+            dense_buf[filled : filled + take] = hd[:take].to(torch.float16).to(auroc_device)
+            lab_buf[filled : filled + take] = torch.from_numpy(lab[:take]).to(auroc_device)
+            filled += take
         if (start // batch_size) % 10 == 0:
             log(f"  {start + len(batch)}/{len(seqs)} seqs | buf {filled}/{S}")
     return ActivationBuffer(

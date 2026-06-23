@@ -20,7 +20,6 @@ this driver only knows how to build/load Evo2 buffers and pick label sets.
   probe.py auroc         --acts BUF --labels .. per-feature AUROC table (prints)
   probe.py annotate      --acts BUF --out P     assign each feature its best concept -> annotation parquet
   probe.py linear        --acts BUF --labels .. SAE-vs-dense single + multi (disentanglement/distributed)
-  probe.py codon-aa      --acts CODON_BUF       codon/AA decoders + family-disjoint, SAE vs dense
   probe.py euk-f1        --fasta .. --gff ..    RefSeq gene-structure domain-F1 (needs the model)
   probe.py domain-eval   --fasta .. --track ..  user annotated dataset -> per-feature domain-F1 + AUROC vs
                                                 any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
@@ -65,13 +64,12 @@ sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parents[2] / "sae" / "src"))  # sparse_autoencoders/sae/src
 
 import labelers as L  # noqa: E402
+from evo2_buffer import forward_codes  # noqa: E402  (engine-free import; only the call needs a model)
 from sae.eval.probing import (  # noqa: E402
     ActivationBuffer,
     auroc_all,
     auroc_vec,
     best_single_train_test,
-    decode_eval,
-    fit_softmax,
     split_indices,
     standardize,
 )
@@ -149,38 +147,6 @@ def cmd_linear(a):  # noqa: D103
         print(row)
 
 
-def cmd_codon_aa(a):  # noqa: D103
-    z = np.load(a.acts)
-    dev = a.device
-    codon = torch.from_numpy(z["codon"].astype(np.int64)).to(dev)
-    aa = torch.from_numpy(z["aa"].astype(np.int64)).to(dev)
-    codon_np = z["codon"].astype(np.int64)
-    ncod, naa = len(L.CODON_LIST), len(L.AA_LIST)
-    held = {"L": ["TTA", "TTG"], "S": ["AGT", "AGC"], "R": ["AGA", "AGG"]}
-    hidx = [L.CODON_TO_IDX[c] for v in held.values() for c in v]
-    print(f"{'matrix':6s} {'codon mAUROC':>12s} {'AA mAUROC':>10s} | family-disjoint recall L/S/R (chance)")
-    for nm in ("sae", "dense"):
-        if nm not in z.files:
-            continue
-        X = torch.from_numpy(z[nm]).to(dev).float()
-        tr, te = split_indices(X.shape[0], a.test_frac, a.seed)
-        Xz = _z(X, tr)  # standardize on the train split only (no test-set leakage)
-        _, ca, _ = decode_eval(Xz[tr], codon[tr], Xz[te], codon[te], ncod, steps=a.steps, wd=a.weight_decay)
-        _, aaa, _ = decode_eval(Xz[tr], aa[tr], Xz[te], aa[te], naa, steps=a.steps, wd=a.weight_decay)
-        trn = torch.from_numpy(np.nonzero(~np.isin(codon_np, hidx))[0]).to(dev)
-        W, b = fit_softmax(Xz[trn], aa[trn], naa, steps=a.steps, wd=a.weight_decay)
-        rec = []
-        for A, cods in held.items():
-            m = np.isin(codon_np, [L.CODON_TO_IDX[c] for c in cods])
-            pred = (Xz[torch.from_numpy(np.nonzero(m)[0]).to(dev)] @ W + b).argmax(1).cpu().numpy()
-            rec.append(
-                f"{A}={float((pred == L.AA_TO_IDX[A]).mean()):.2f}({float((aa == L.AA_TO_IDX[A]).float().mean()):.2f})"
-            )
-        del X, Xz
-        torch.cuda.empty_cache()
-        print(f"{nm:6s} {ca:12.3f} {aaa:10.3f} | {'  '.join(rec)}")
-
-
 def cmd_annotate(a):
     """Buffer -> feature-annotation parquet: each feature's best concept by AUROC + activation stats.
 
@@ -224,22 +190,19 @@ def _encode_windows(eng, windows, tag_ids, lab_keys, inst_keys, tot, a):
     filled = 0
     for s0 in range(0, len(windows), a.batch_size):
         batch = windows[s0 : s0 + a.batch_size]
-        with eng._lock:
-            for h, w in zip(eng._forward_hidden([tag_ids + eng.tokenize(w["dna"]) for w in batch]), batch):
-                if h.shape[0] == 0:
-                    continue
-                codes = eng.sae.encode(h.to(a.device))
-                take = min(len(w["dna"]), codes.shape[0] - tlen, tot - filled)
-                if take <= 0:
-                    continue
-                code_buf[filled : filled + take] = codes[tlen : tlen + take].to(torch.float16).to(adev)
-                for k in lab:
-                    lab[k][filled : filled + take] = torch.from_numpy(w["labels"][k][:take]).to(adev)
-                for k in inst:
-                    inst[k][filled : filled + take] = torch.from_numpy(w["instances"][k][:take].astype(np.int64)).to(
-                        adev
-                    )
-                filled += take
+        id_lists = [tag_ids + eng.tokenize(w["dna"]) for w in batch]
+        for (h, codes), w in zip(forward_codes(eng, id_lists), batch):
+            if h.shape[0] == 0:
+                continue
+            take = min(len(w["dna"]), codes.shape[0] - tlen, tot - filled)
+            if take <= 0:
+                continue
+            code_buf[filled : filled + take] = codes[tlen : tlen + take].to(torch.float16).to(adev)
+            for k in lab:
+                lab[k][filled : filled + take] = torch.from_numpy(w["labels"][k][:take]).to(adev)
+            for k in inst:
+                inst[k][filled : filled + take] = torch.from_numpy(w["instances"][k][:take].astype(np.int64)).to(adev)
+            filled += take
     code_buf = code_buf[:filled]
     for d in (lab, inst):
         for k in d:
@@ -369,7 +332,6 @@ def main():  # noqa: D103
     for name, fn, needs_labels in [
         ("auroc", cmd_auroc, True),
         ("linear", cmd_linear, True),
-        ("codon-aa", cmd_codon_aa, False),
     ]:
         p = sub.add_parser(name, parents=[common])
         p.add_argument("--acts", required=True)

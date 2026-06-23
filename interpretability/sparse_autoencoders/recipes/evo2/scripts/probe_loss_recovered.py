@@ -40,30 +40,25 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent))
 
-from evo2_buffer import sample_sequences  # noqa: E402
+from evo2_buffer import KINGDOM_TAGS, sample_sequences  # noqa: E402
 from evo2_sae.core import Evo2SAE  # noqa: E402
 from sae.eval.loss_recovered import evaluate_loss_recovered  # noqa: E402  (Jared's code)
 
 
-KINGDOM_TAGS = {"prok": "|d__Bacteria|", "euk": "|d__Eukaryota|"}
-
-
 class SAEWrap(nn.Module):
-    """sae.forward(x[N,H]) -> (recon, codes) in RAW residual space (denormalized)."""
+    """Wrap the SAE so ``forward(x[N,H]) -> (recon, codes)`` with recon on the raw residual scale.
+
+    Delegates to the SAE's own ``forward``, which applies top-k and denormalizes to the input
+    scale when ``normalize_input`` is set — the same code path the steering hook uses. Computing
+    the reconstruction here by hand risks drifting from the SAE's actual (de)normalization.
+    """
 
     def __init__(self, sae):  # noqa: D107
         super().__init__()
         self.sae = sae
 
     def forward(self, x):  # noqa: D102
-        s = self.sae
-        codes = s.encode(x)  # encode normalizes internally if normalize_input
-        recon = s.decoder(codes) + s.pre_bias
-        if getattr(s, "normalize_input", False):
-            mu = x.mean(-1, keepdim=True)
-            std = x.std(-1, keepdim=True) + 1e-8
-            recon = recon * std + mu
-        return recon, codes
+        return self.sae(x)
 
 
 class L26Hook:  # noqa: D101
