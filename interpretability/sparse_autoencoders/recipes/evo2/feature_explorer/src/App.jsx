@@ -8,6 +8,7 @@ import EmbeddingView from './EmbeddingView'
 import Histogram from './Histogram'
 import { Sun, Moon } from 'lucide-react'
 import { styles } from './styles'
+import { userLabel } from './components'
 
 export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "Real SAE features — Evo 2, layer 26" }) {
   const [darkMode, setDarkMode] = useState(true)
@@ -568,7 +569,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
   // Export all edited features to CSV with full data
   const handleExportEdited = useCallback(() => {
     // Get all edited features
-    const editedFeatures = features.filter(f => localStorage.getItem(`featureTitle_${f.feature_id}`) !== null)
+    const editedFeatures = features.filter(f => userLabel(f.feature_id) !== null)
 
     if (editedFeatures.length === 0) {
       alert('No edited features to export')
@@ -591,7 +592,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
     }
 
     editedFeatures.forEach((f, idx) => {
-      const userTitle = localStorage.getItem(`featureTitle_${f.feature_id}`)
+      const userTitle = userLabel(f.feature_id)
       const label = f.label || `Feature ${f.feature_id}`
 
       // Add separator for readability
@@ -668,7 +669,7 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
     if (showEditedOnly) {
       // Get all edited feature IDs from localStorage
       const editedIds = features
-        .filter(f => localStorage.getItem(`featureTitle_${f.feature_id}`) !== null)
+        .filter(f => userLabel(f.feature_id) !== null)
         .map(f => f.feature_id)
 
       if (editedIds.length > 0) {
@@ -786,13 +787,13 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
         f.description?.toLowerCase().includes(q) ||
         f.feature_id.toString().includes(q) ||
         f.best_annotation?.toLowerCase().includes(q) ||
-        (localStorage.getItem(`featureTitle_${f.feature_id}`) || '').toLowerCase().includes(q)
+        (userLabel(f.feature_id) || '').toLowerCase().includes(q)
       )
     }
 
     // Filter by edited features only
     if (showEditedOnly) {
-      result = result.filter(f => localStorage.getItem(`featureTitle_${f.feature_id}`) !== null)
+      result = result.filter(f => userLabel(f.feature_id) !== null)
     }
 
     // Helper: unlabeled features sort last
