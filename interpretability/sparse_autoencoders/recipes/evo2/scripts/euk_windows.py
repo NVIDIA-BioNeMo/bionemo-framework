@@ -28,6 +28,11 @@ exon length), tile its span ± flank into windows, and label every position:
 
 `python euk_windows.py --fasta chr21.fa --gff chr21.gff3 --dry-run` prints
 coverage stats without building sequences.
+
+Single chromosome only: the FASTA is read as one concatenated sequence and ``parse_gff``
+drops the seqid column, so a multi-record FASTA + multi-chromosome GFF would apply
+per-chromosome coordinates against a concatenated blob (silently wrong labels). ``build_windows``
+asserts a single FASTA record; run one chromosome at a time.
 """
 
 from __future__ import annotations
@@ -96,7 +101,12 @@ def representative_tx(gene):
 
 
 def _label_window(chrom, w0, w1, gm, N):
-    """Label a window [w0,w1) using one gene model's intervals (central-gene approx)."""
+    """Label a window [w0,w1) using one gene model's intervals (central-gene approx).
+
+    Caveat: labels derive from a single gene model — every position outside this gene's span is
+    marked intergenic, so a *second* gene overlapping the window would have its exons mislabeled.
+    build_windows skips windows overlapping another gene's span to avoid injecting that bias.
+    """
     L = w1 - w0
     pos = np.arange(w0, w1)
     lab = {k: np.zeros(L, bool) for k in ("exon", "intron", "cds", "utr", "intergenic")}
@@ -122,11 +132,20 @@ def _label_window(chrom, w0, w1, gm, N):
 def build_windows(  # noqa: D103
     fasta, gff, seq_len=1024, max_tokens=300_000, flank=300, seed=0, intergenic_frac=0.12, dry_run=False
 ):
-    seqs = []
+    seqs, n_records = [], 0
     with open(fasta) as fh:
         for line in fh:
-            if not line.startswith(">"):
+            if line.startswith(">"):
+                n_records += 1
+            else:
                 seqs.append(line.strip())
+    if n_records != 1:
+        # parse_gff keeps no seqid, and we concatenate all records into one `chrom`; a multi-record
+        # FASTA + multi-chromosome GFF would silently apply per-chromosome coordinates to the blob.
+        raise ValueError(
+            f"euk_windows expects a single-chromosome FASTA matching the GFF, got {n_records} "
+            f"records. Run one chromosome at a time (e.g. chr21.fa + chr21.gff3)."
+        )
     chrom = "".join(seqs).upper()
     N = len(chrom)
     genes = parse_gff(gff)
@@ -173,7 +192,7 @@ def build_windows(  # noqa: D103
     # exon-centered windows sampled across ALL genes' exons (diverse + exon/intron balanced)
     exon_refs = [(gi, ei) for gi, gm in enumerate(gene_models) for ei in range(len(gm["exons"]))]
     rng.shuffle(exon_refs)
-    windows, tot = [], 0
+    windows, tot, accepted = [], 0, []
     budget_genic = int(max_tokens * (1 - intergenic_frac))
     for gi, ei in exon_refs:
         if tot >= budget_genic:
@@ -185,10 +204,19 @@ def build_windows(  # noqa: D103
         w1 = min(N, w0 + seq_len)
         if w1 - w0 < 60:
             continue
+        # _label_window labels from one gene model, so a second gene overlapping the window would
+        # have its exons mislabeled intergenic — skip those windows to keep eval labels trustworthy.
+        if any(j != gi and w0 < ge and w1 > gs - 1 for j, (gs, ge) in enumerate(gene_spans)):
+            continue
+        # adjacent exons of one gene center on nearly the same span; drop near-duplicate windows so
+        # heavily-overlapping (correlated) positions don't quietly eat the token budget.
+        if any(min(w1, aw1) - max(w0, aw0) > seq_len // 2 for aw0, aw1 in accepted):
+            continue
         win = _label_window(chrom, w0, w1, gm, N)
         if win["dna"].count("N") > 0.5 * len(win["dna"]):
             continue
         windows.append(win)
+        accepted.append((w0, w1))
         tot += w1 - w0
     # intergenic windows: random spots clear of any gene span (+flank)
     spans = sorted(gene_spans)

@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=1.20",
     "pyarrow>=23.0.0",
     "biopython>=1.80",  # genetic code / translation in labelers.py
+    "pyrodigal>=3.0",  # prokaryotic gene calling in labelers.predict_cds / predict_codons
 ]
 
 # No package code lives here yet — the recipe is just an entry-point for

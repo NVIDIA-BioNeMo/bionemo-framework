@@ -328,6 +328,20 @@ def predict_codons(dna: str):
     return codon_id, aa_id
 
 
+def _frame_and_start(b: int, e: int, strand: int):
+    """Codon-frame array (0/1/2 along [b, e)) + the translation-start position for one CDS.
+
+    Frame is relative to the strand-correct start: the start is the low coord on the + strand
+    (frame counts up from ``b``) and the high coord on the - strand (frame counts back from
+    ``e-1``). Pure arithmetic, split out from predict_cds so the reverse-strand anchor (an easy
+    off-by-one) is unit-tested directly.
+    """
+    idx = np.arange(b, e)
+    if strand == 1:
+        return ((idx - b) % 3).astype(np.int8), b
+    return (((e - 1) - idx) % 3).astype(np.int8), e - 1
+
+
 def predict_cds(dna: str):
     """Prokaryotic gene calling via pyrodigal (meta mode) on a single DNA chunk.
 
@@ -353,13 +367,9 @@ def predict_cds(dna: str):
         if e <= b:
             continue
         cds_mask[b:e] = True
-        idx = np.arange(b, e)
-        if g.strand == 1:
-            gene_starts[b] = True
-            cds_frame[b:e] = (idx - b) % 3
-        else:  # reverse strand: start codon sits at the (forward) end
-            gene_starts[e - 1] = True
-            cds_frame[b:e] = ((e - 1) - idx) % 3
+        frame, start = _frame_and_start(b, e, g.strand)
+        cds_frame[b:e] = frame
+        gene_starts[start] = True
     return cds_mask, cds_frame, gene_starts
 
 

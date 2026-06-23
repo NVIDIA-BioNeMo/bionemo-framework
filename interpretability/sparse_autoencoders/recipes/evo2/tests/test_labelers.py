@@ -51,3 +51,41 @@ def test_tag_prefix_is_unlabeled():
     ctx = _ctx("ATG", tag_len=2)  # tokens: [tag, tag, A, T, G]
     m = LABELERS["motif_ATG"](ctx)
     assert len(m) == 5 and not m[:2].any() and m[2]  # ATG starts at DNA pos 0 -> token 2
+
+
+def test_gc_window_labelers():
+    """gc_high/low fire on GC-rich / AT-rich windows (mean GC over the ±10 window)."""
+    assert LABELERS["gc_high_window"](_ctx("G" * 30)).all()  # all-GC -> high everywhere
+    assert not LABELERS["gc_high_window"](_ctx("A" * 30)).any()
+    assert LABELERS["gc_low_window"](_ctx("A" * 30)).all()  # all-AT -> low everywhere
+
+
+def test_homopolymer_window():
+    """homopolymer_window marks runs of >=5 identical bases (and nothing shorter)."""
+    m = LABELERS["homopolymer_window"](_ctx("TTAAAAACC"))  # AAAAA (5) at positions 2..6
+    assert list(m.nonzero()[0]) == [2, 3, 4, 5, 6]
+
+
+def test_dinuc_repeat_window():
+    """dinuc_repeat_window marks alternating dinucleotide repeats (>=3 reps, span >=6)."""
+    assert LABELERS["dinuc_repeat_window"](_ctx("ATATATAT")).all()  # (AT)x4
+    assert not LABELERS["dinuc_repeat_window"](_ctx("ATAT")).any()  # (AT)x2 -> too short
+
+
+def test_consensus_offsets_kozak_and_splice():
+    """The consensus labelers mark the biologically meaningful offset within the match."""
+    assert list(LABELERS["kozak_atg"](_ctx("AAAATGG")).nonzero()[0]) == [3]  # [AG]..ATGG -> the ATG
+    assert list(LABELERS["splice_donor"](_ctx("CCGTAAGTCC")).nonzero()[0]) == [2]  # GT[AG]AGT -> the GT
+    assert list(LABELERS["splice_acceptor"](_ctx("TTTTTTAG")).nonzero()[0]) == [6, 7]  # ...AG -> the AG
+
+
+def test_frame_and_start_forward_and_reverse():
+    """The CDS frame helper anchors frame 0 at the strand-correct start (the reverse-strand
+    off-by-one): start = low coord on +strand, high coord on -strand, counting back."""
+    from labelers import _frame_and_start
+
+    frame, start = _frame_and_start(10, 19, strand=1)  # 9 bp = 3 codons, forward
+    assert start == 10 and list(frame) == [0, 1, 2, 0, 1, 2, 0, 1, 2]
+
+    frame, start = _frame_and_start(10, 19, strand=-1)  # reverse: start at the high coord
+    assert start == 18 and list(frame) == [2, 1, 0, 2, 1, 0, 2, 1, 0]
