@@ -24,7 +24,7 @@ they run in CI even when the GPU/1B path skips, and cover the code paths the mod
 import pytest
 import torch
 from evo2_sae import Evo2SAE
-from sae.architectures import ReLUSAE, TopKSAE
+from sae.architectures import TopKSAE
 
 
 def _engine(sae_ckpt_path="unused.pt", **kw):
@@ -73,14 +73,6 @@ def test_load_sae_strips_module_prefix(tmp_path):
     _save_topk(ckpt, prefix="module.")  # as saved under DDP
     sae, n_features = _engine(ckpt)._load_sae()
     assert isinstance(sae, TopKSAE) and n_features == 16
-
-
-def test_load_sae_selects_relu_by_path_hint(tmp_path):
-    ckpt = tmp_path / "relu_tiny.pt"  # "relu" in the path -> ReLUSAE
-    relu = ReLUSAE(input_dim=8, hidden_dim=16)
-    torch.save({"model_config": {"input_dim": 8, "hidden_dim": 16}, "model_state_dict": relu.state_dict()}, ckpt)
-    sae, n_features = _engine(ckpt)._load_sae()
-    assert isinstance(sae, ReLUSAE) and n_features == 16
 
 
 # ------------------------------------------------------------------------------- generate input guards

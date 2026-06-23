@@ -191,20 +191,12 @@ class Evo2SAE:
         state = ckpt["model_state_dict"]
         if any(k.startswith("module.") for k in state):
             state = {k.removeprefix("module."): v for k, v in state.items()}
-        train_cfg = ckpt.get("config")
-        arch = (
-            str(train_cfg.get("architecture", train_cfg.get("arch", ""))).lower()
-            if isinstance(train_cfg, dict)
-            else ""
-        )
-        hint = (arch + " " + self.sae_ckpt_path).lower()
-        from sae.architectures import ReLUSAE, TopKSAE
+        from sae.architectures import TopKSAE
 
-        cls = ReLUSAE if "relu" in hint else TopKSAE
-        sae = cls(**cfg)
+        sae = TopKSAE(**cfg)
         sae.load_state_dict(state)
         sae.eval().to(self.device)
-        logger.info("SAE loaded: %s input_dim=%d n_features=%d", cls.__name__, cfg["input_dim"], cfg["hidden_dim"])
+        logger.info("SAE loaded: TopKSAE input_dim=%d n_features=%d", cfg["input_dim"], cfg["hidden_dim"])
         return sae, int(cfg["hidden_dim"])
 
     def _load_feature_meta(self):

@@ -19,9 +19,9 @@ A forward hook on the layer the SAE was trained on: it re-encodes the layer outp
 the SAE, overrides chosen features in code-space, decodes, and adds the **delta** back to the
 activation. Because we add ``decode(clamped) - decode(original)`` (not the recon itself), the
 SAE's reconstruction error cancels and only the clamped feature's decoder contribution moves
-the activation. Model-agnostic: needs only the SAE (``encode_pre_act`` / ``decode`` / ``top_k``)
-and the module to hook. Measure the effect (e.g. ΔP of a target token) by running the model
-with vs. without the hook.
+the activation. Model-agnostic: needs only the SAE (``encode`` / ``decode``) and the module to
+hook. Measure the effect (e.g. ΔP of a target token) by running the model with vs. without the
+hook.
 """
 
 from contextlib import contextmanager
@@ -39,8 +39,8 @@ def clamp_hook(sae: Any, clamps: Dict[int, float], decode_only: bool = False) ->
     whose first element is the hidden state.
 
     Args:
-        sae: A trained SAE exposing ``encode_pre_act(x) -> (pre_act, info)``, ``decode(codes, info)``,
-            and ``top_k``.
+        sae: A trained TopK SAE exposing ``encode(x) -> codes``, ``encode_pre_act(x) -> (_, info)``,
+            and ``decode(codes, info)``.
         clamps: Map of feature index -> absolute code value to force at every position.
         decode_only: If True, steer only autoregressive *decode* steps and leave the prompt
             prefill untouched (continuation-only steering). Assumes a ``(sequence, batch, hidden)``
@@ -59,12 +59,14 @@ def clamp_hook(sae: Any, clamps: Dict[int, float], decode_only: bool = False) ->
         dtype, shape = h.dtype, h.shape
         h_flat = h.reshape(-1, h.shape[-1]).float()
         with torch.no_grad():
-            pre_act, info = sae.encode_pre_act(h_flat)
-            codes = torch.relu(pre_act)
-            kvals, kidx = torch.topk(codes, sae.top_k, dim=-1)
-            codes_orig = torch.zeros_like(codes).scatter(-1, kidx, kvals)
+            # Encode through the SAE itself (canonical encode) instead of re-deriving relu+topk on
+            # sae.top_k: no hardcoded sparsity, and it can never drift from the model's true
+            # encoding. encode_pre_act supplies the normalization info decode needs to map back to
+            # the original activation scale.
+            _, info = sae.encode_pre_act(h_flat)
+            codes_orig = sae.encode(h_flat)
             codes_clamped = codes_orig.clone()
-            n_feat = codes.shape[-1]
+            n_feat = codes_orig.shape[-1]
             for f, v in items:
                 if not 0 <= f < n_feat:
                     raise ValueError(f"clamp feature {f} out of range [0, {n_feat})")

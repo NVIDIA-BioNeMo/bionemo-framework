@@ -72,7 +72,6 @@ torchrun --nproc_per_node="$NPROC" "${RECIPE_DIR}/scripts/train.py" \
     --cache-dir "$PARQUET_DIR" \
     --model-path "$CKPT_DIR" \
     --layer "$LAYER" \
-    --model-type topk \
     --expansion-factor 16 --top-k 128 \
     --normalize-input \
     --auxk 2048 --auxk-coef 0.03125 \
