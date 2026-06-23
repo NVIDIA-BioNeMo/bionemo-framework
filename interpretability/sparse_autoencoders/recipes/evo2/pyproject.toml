@@ -25,3 +25,10 @@ where = ["src"]
 
 [tool.uv.sources]
 sae = { workspace = true }
+
+# Register markers locally so the recipe is self-contained (the repo-root pytest.ini isn't in the
+# CI sparse-checkout); lets the CPU lane select `-m "not slow"` without an unknown-marker warning.
+[tool.pytest.ini_options]
+markers = [
+    "slow: GPU/integration tests that load a model (skip without CUDA + checkpoints)",
+]

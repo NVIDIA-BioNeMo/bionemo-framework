@@ -1,0 +1,53 @@
+name: "BioNeMo Evo2 SAE Recipe CI (CPU)"
+
+# CPU unit tests for the model-agnostic parts of the evo2 SAE recipe (DNA labelers, window
+# builders, eval metrics) — no model and no GPU, just CPU torch + numpy + biopython on
+# ubuntu-latest. The model-loading GPU tests (@pytest.mark.slow) run in the dedicated megatron
+# lane (unit-tests-interpretability-recipes.yaml); here they're excluded via -m "not slow".
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+      - "dependabot/**"
+    paths:
+      - "interpretability/sparse_autoencoders/recipes/evo2/**"
+      - "interpretability/sparse_autoencoders/sae/**"
+      - ".github/workflows/unit-tests-evo2-recipe-cpu.yaml"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "0 9 * * *" # Runs at 9 AM UTC daily (2 AM MST)
+
+defaults:
+  run:
+    shell: bash -x -e -u -o pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  recipe-cpu-tests:
+    runs-on: ubuntu-latest
+    name: "evo2-recipe-tests (cpu)"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: interpretability/sparse_autoencoders
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (CPU torch + sae + recipe)
+        working-directory: interpretability/sparse_autoencoders
+        run: |
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu -e sae -e recipes/evo2
+
+      - name: Run model-agnostic recipe tests
+        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+        run: pytest -v tests/ -m "not slow"
