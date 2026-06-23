@@ -59,7 +59,12 @@ def evo2_ckpt_dir(tmp_path_factory) -> str:
         pytest.skip(f"need >= {_MIN_GPU_GB} GB GPU for the 1B; have {total_gb:.1f} GB")
 
     try:
-        from bionemo.core.data.load import load as bionemo_load
+        # The NGC loader lives in bionemo.common on the migrated recipes layout; older framework
+        # builds expose it as bionemo.core. Support both so the fixture works either way.
+        try:
+            from bionemo.common.data.load import load as bionemo_load
+        except ImportError:
+            from bionemo.core.data.load import load as bionemo_load
         from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
         from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
     except ImportError as e:  # pragma: no cover - environment guard
