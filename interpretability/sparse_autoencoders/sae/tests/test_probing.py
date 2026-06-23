@@ -27,6 +27,7 @@ from sae.eval.probing import (
     ActivationBuffer,
     annotate_features,
     auroc_all,
+    auroc_vec,
     best_single_train_test,
     decode_eval,
     domain_f1,
@@ -163,3 +164,35 @@ def test_buffer_roundtrip_and_split(tmp_path):
     tr, te = split_indices(100, test_frac=0.4, seed=0)
     s_tr, s_te = set(tr.tolist()), set(te.tolist())
     assert s_tr.isdisjoint(s_te) and (s_tr | s_te) == set(range(100)) and len(s_te) == 40
+
+
+def test_auroc_all_degenerate_label_is_half():
+    """A concept that never fires (all-False) or always fires (all-True) -> AUROC 0.5, not garbage.
+
+    Realistic for rare genomic concepts (a buffer/split can contain only negatives). Exercises the
+    valid = (npos>0) & (nneg>0) guard.
+    """
+    x = torch.randn(40, 3)
+    y = torch.zeros(40, 2, dtype=torch.bool)
+    y[:, 1] = True  # col 0: never fires (npos=0); col 1: always fires (nneg=0)
+    au = auroc_all(x, y)
+    assert torch.allclose(au, torch.full_like(au, 0.5))
+
+
+def test_auroc_vec_matches_oracle_with_ties():
+    """auroc_vec (the single-vector AUROC behind best_single) matches the tie-aware oracle."""
+    scores = torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 2.0])
+    y = torch.tensor([False, True, False, True, False, True])
+    assert abs(auroc_vec(scores, y) - _auroc_ref(scores, y)) < 1e-6
+
+
+def test_buffer_roundtrip_without_dense_or_instances(tmp_path):
+    """ActivationBuffer with no dense twin and no instances round-trips (the Optional -> None paths)."""
+    codes = np.zeros((5, 3), np.float16)
+    labels = np.ones((5, 2), bool)
+    buf = ActivationBuffer(codes, labels, ["a", "b"])  # dense=None, instances=None
+    path = str(tmp_path / "b.npz")
+    buf.save(path)
+    lo = ActivationBuffer.load(path)
+    assert lo.dense is None and lo.instances is None
+    assert np.array_equal(lo.codes, codes) and lo.label_names == ["a", "b"]
