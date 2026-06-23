@@ -23,6 +23,8 @@ and assert steering (on a discovered active feature) changes the continuation on
 EVO2_CKPT_DIR + SAE_CKPT_PATH.
 """
 
+import math
+
 import pytest
 import torch
 from evo2_sae import Evo2SAE
@@ -64,6 +66,36 @@ def test_sanitize_passthrough():
     """Valid inputs pass through unchanged — no spurious capping or top_k change."""
     clamps, fids, temp, top_k = _sanitize_steering([{"feature_id": 5, "strength": 2.0}], 65536, 0.8, 0)
     assert clamps == {5: 2.0} and fids == [5] and temp == 0.8 and top_k == 0
+
+
+def test_sanitize_neutralizes_nonfinite_strength():
+    """NaN / ±inf are capped to a finite magnitude <= MAX_CLAMP_STRENGTH, never propagated.
+
+    A non-finite clamp would blow the logits to NaN (a CUDA device-assert that wedges the
+    server) — exactly what this guard exists to prevent.
+    """
+    for bad in (math.nan, math.inf, -math.inf):
+        clamps, _, _, _ = _sanitize_steering([{"feature_id": 3, "strength": bad}], 65536, 1.0, 0)
+        assert math.isfinite(clamps[3]) and abs(clamps[3]) <= MAX_CLAMP_STRENGTH
+
+
+def test_sanitize_feature_contract():
+    """Duplicate ids collapse (last wins), missing strength defaults to 1.0, strength 0 is kept."""
+    clamps, fids, _, _ = _sanitize_steering(
+        [
+            {"feature_id": 5, "strength": 1.0},
+            {"feature_id": 5, "strength": 2.0},  # duplicate id
+            {"feature_id": 7},  # missing strength
+            {"feature_id": 9, "strength": 0.0},  # suppress-to-zero
+        ],
+        65536,
+        1.0,
+        0,
+    )
+    assert clamps[5] == 2.0  # duplicate id -> last value wins
+    assert clamps[7] == 1.0  # missing strength -> default 1.0
+    assert clamps[9] == 0.0  # strength 0 retained, not dropped
+    assert fids == [5, 7, 9]  # one entry per distinct feature, in insertion order
 
 
 # --------------------------------------------------------------------- GPU: real generation
