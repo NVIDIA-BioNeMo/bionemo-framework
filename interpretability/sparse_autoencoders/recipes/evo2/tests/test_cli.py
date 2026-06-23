@@ -75,7 +75,11 @@ def test_generate_passes_raw_clamp_strings(fake, monkeypatch, capsys):
     # The CLI hands raw "ID[:STRENGTH]" strings straight to the engine; core normalizes them.
     assert fake.gen_kwargs["features"] == ["0:5", "1"]
     out = json.loads(capsys.readouterr().out)
-    assert out["features"] == [{"feature_id": 0, "strength": 5.0}, {"feature_id": 1, "strength": 1.0}]
+    # generate() echoes feat_meta keyed {id, label, strength} — the shape the viz consumes.
+    assert out["features"] == [
+        {"id": 0, "label": "feat0", "strength": 5.0},
+        {"id": 1, "label": "feat1", "strength": 1.0},
+    ]
 
 
 def test_generate_rejects_malformed_clamp(fake, monkeypatch):

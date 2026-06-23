@@ -72,6 +72,15 @@ def test_annotate_pick_requires_ids(client):
     assert client.post("/annotate", json={"sequence": "ACGT", "mode": "pick"}).status_code == 400
 
 
+def test_annotate_pick_rejects_out_of_range_id(client, fake_engine):
+    # user-supplied pick ids: an over-range id must 400 (not 500/IndexError), a negative one must
+    # 400 (not silently index the wrong feature via torch negative-indexing).
+    over = client.post("/annotate", json={"sequence": "ACGT", "mode": "pick", "feature_ids": [fake_engine.n_features]})
+    assert over.status_code == 400
+    neg = client.post("/annotate", json={"sequence": "ACGT", "mode": "pick", "feature_ids": [-1]})
+    assert neg.status_code == 400
+
+
 def test_annotate_rejects_invalid_mode(client):
     assert client.post("/annotate", json={"sequence": "ACGT", "mode": "bogus"}).status_code == 400
 

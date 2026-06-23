@@ -97,6 +97,9 @@ def build_app(engine: Evo2SAE) -> FastAPI:
 
     # Reject oversized request bodies up front (a multi-MB sequence would be read into memory
     # before per-field validation could reject it). Default 16 MiB; override with MAX_BODY_BYTES.
+    # NOTE: advisory — this trusts the Content-Length header, so a chunked request (no length) or a
+    # lying header bypasses it; it guards well-behaved clients, not a hard cap. Fine behind SSO;
+    # real enforcement would count streamed bytes.
     max_body = int(os.getenv("MAX_BODY_BYTES", str(16 * 1024 * 1024)))
 
     @app.middleware("http")
@@ -148,6 +151,11 @@ def build_app(engine: Evo2SAE) -> FastAPI:
             if not req.feature_ids:
                 raise HTTPException(400, "mode='pick' requires feature_ids")
             chosen = [int(i) for i in req.feature_ids]
+            # Pick ids are user-supplied; an out-of-range id would IndexError (500) and a negative
+            # one would silently index the wrong feature via torch negative-indexing. Reject -> 400.
+            bad = sorted({i for i in chosen if not (0 <= i < engine.n_features)})
+            if bad:
+                raise HTTPException(400, f"feature_id(s) {bad} out of range [0, {engine.n_features})")
         else:
             k = max(1, min(int(req.k), 64))
             chosen = [ft["feature_id"] for ft in engine.top_features(codes, tag_len=tag_len, k=k)]

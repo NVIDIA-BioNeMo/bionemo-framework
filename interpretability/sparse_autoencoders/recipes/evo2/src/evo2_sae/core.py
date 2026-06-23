@@ -480,6 +480,10 @@ class Evo2SAE:
         full_prompt = resolved_tag + dna
         if not full_prompt:
             raise ValueError("Provide a prompt or pick an organism (need >=1 token to seed)")
+        # Reject an over-context prompt rather than silently truncating it in tokenize() (parity
+        # with annotate; the server maps "too long" -> 413). Raise MAX_SEQ_LEN to allow longer.
+        if len(full_prompt) > self.max_seq_len:
+            raise ValueError(f"prompt too long: {len(full_prompt)} > max_seq_len ({self.max_seq_len})")
         # Cap to the engine's configured context budget (prompt + generation must fit max_seq_len),
         # not an arbitrary constant. Raise MAX_SEQ_LEN at launch to generate longer — the 7B is the
         # long-context (1M) model, so it's memory-bound, not architecture-bound (OOD past training len).
@@ -517,7 +521,10 @@ class Evo2SAE:
         except Exception as e:
             # A CUDA device-side assert poisons the context: every later request would 500 until
             # restart. Mark the engine not-ready so /health flips to 503 and an orchestrator
-            # recycles the pod, instead of serving a permanently-wedged worker.
+            # recycles the pod, instead of serving a permanently-wedged worker. NOTE: this only
+            # recovers if something restarts the worker on a failed /health — without a
+            # readiness-based recycler it serves 503 until a human restarts (fail-closed, but a
+            # single bad request can take the replica down). Confirm the deployment recycles on 503.
             if _is_unrecoverable_cuda(e):
                 self.ready = False
                 logger.exception("unrecoverable CUDA error in generate() — marking engine not-ready")

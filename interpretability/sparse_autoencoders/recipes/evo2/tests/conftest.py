@@ -173,12 +173,18 @@ class FakeEngine:
         prompt = core.clean_dna(kw.get("prompt", ""))
         if not prompt and kw.get("organism") == "None (raw DNA)" and not kw.get("tag"):
             raise ValueError("need a seed")
+        # Match the real engine's response: features are feat_meta dicts keyed {id, label, strength}
+        # (NOT feature_id) — this is the shape the dashboard consumes through /generate.
+        feat_meta = [
+            {"id": s["feature_id"], "label": self.labels.get(s["feature_id"]), "strength": s["strength"]}
+            for s in specs
+        ]
         resp = {
             "prompt": prompt,
             "organism": kw.get("organism"),
             "tag": kw.get("tag"),
             "steered": bool(specs),
-            "features": specs,
+            "features": feat_meta,
             "generation": {"sequence": "ACGT", "activations": {0: [1.0, 1.0, 1.0, 1.0]}},
             "baseline": None,
         }

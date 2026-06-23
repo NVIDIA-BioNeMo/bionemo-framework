@@ -47,9 +47,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--evo2-ckpt-dir", default=os.environ.get("EVO2_CKPT_DIR"))
     p.add_argument("--sae-ckpt-path", default=os.environ.get("SAE_CKPT_PATH"))
     p.add_argument("--feature-annotations", default=os.environ.get("FEATURE_ANNOTATIONS"))
-    p.add_argument("--layer", type=int, default=os.environ.get("EMBEDDING_LAYER", "26"))
+    # int() the env defaults explicitly: argparse's type= only coerces values passed on the command
+    # line, never the default — so an env-sourced (or absent) value would otherwise stay a str.
+    p.add_argument("--layer", type=int, default=int(os.environ.get("EMBEDDING_LAYER", "26")))
     p.add_argument("--device", default=os.environ.get("DEVICE", "cuda"))
-    p.add_argument("--max-seq-len", type=int, default=os.environ.get("MAX_SEQ_LEN", "8192"))
+    p.add_argument("--max-seq-len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "8192")))
 
 
 def _engine(args):
@@ -82,7 +84,9 @@ def main():
     ps = sub.add_parser("serve", help="start the FastAPI inference server")
     _add_common(ps)
     ps.add_argument("--host", default="0.0.0.0")
-    ps.add_argument("--port", type=int, default=os.environ.get("PORT", "8001"))
+    ps.add_argument(
+        "--port", type=int, default=int(os.environ.get("PORT", "8001"))
+    )  # int: uvicorn.run needs an int port
 
     pe = sub.add_parser("encode", help="annotate ONE sequence -> top features (JSON)")
     _add_common(pe)
