@@ -79,6 +79,12 @@ def test_annotate_rejects_non_dna(client):
     assert client.post("/api/annotate", json={"sequence": "ZZZZ"}).status_code == 400
 
 
+def test_annotate_rejects_unknown_organism(client):
+    # an organism with no preset tag (and no custom tag) -> 400, not a 500 from a None tag downstream
+    r = client.post("/api/annotate", json={"sequence": "ACGT", "organism": "Klingon"})
+    assert r.status_code == 400
+
+
 def test_annotate_pick_mode(client):
     b = client.post("/api/annotate", json={"sequence": "ACGTACGT", "mode": "pick", "feature_ids": [1]}).json()
     assert [f["feature_id"] for f in b["features"]] == [1]
@@ -157,6 +163,12 @@ def test_gene_embed_all_invalid_400(client, fake_engine):
     assert "context limit" in r.json()["detail"]
 
 
+def test_gene_embed_rejects_unknown_organism(client):
+    # unknown organism (no preset tag, no custom tag) -> 400 before embedding, not a 500
+    r = client.post("/api/gene_embed", json={"genes": [{"sequence": "ACGT"}], "organism": "Klingon"})
+    assert r.status_code == 400
+
+
 def test_generate_rejects_out_of_range_feature(client):
     r = client.post("/api/generate", json={"prompt": "ACGT", "features": [{"feature_id": 999}]})
     assert r.status_code == 400  # the wedge guard, surfaced to the client
@@ -227,5 +239,15 @@ def test_api_only_when_no_frontend(fake_engine, monkeypatch):
     """
     monkeypatch.delenv("DASHBOARD_DIST", raising=False)
     with TestClient(build_app(fake_engine)) as c:
+        assert c.get("/").status_code == 404
+        assert c.get("/api/health").status_code == 200
+
+
+def test_bad_static_dir_degrades_to_api_only(fake_engine, tmp_path, monkeypatch):
+    """A bogus static_dir (e.g. a wrong DASHBOARD_DIST) must NOT crash the app — it degrades to
+    API-only (/ 404s, /api still works) instead of erroring at mount time."""
+    monkeypatch.delenv("DASHBOARD_DIST", raising=False)
+    missing = tmp_path / "does-not-exist"  # not a directory
+    with TestClient(build_app(fake_engine, static_dir=str(missing))) as c:
         assert c.get("/").status_code == 404
         assert c.get("/api/health").status_code == 200
