@@ -35,6 +35,12 @@ No Node ends up in the runtime image. **Default build (no flag) is engine + serv
 pulls Node or builds the front-end, so an SAE-only deployment isn't coupled to the dashboard
 toolchain. See the [recipe Dockerfile](../Dockerfile) for the layer layout.
 
+> **Feature-atlas data:** the atlas tab loads three parquets (`features_atlas`, `feature_metadata`,
+> `feature_examples`) from the served directory. They aren't baked in (per-SAE generated data), so put
+> them in `$DASHBOARD_DIST` — either generate them in the same container with
+> `scripts/dashboard.py atlas|examples --output-dir "$DASHBOARD_DIST" …` (see mode 3), or `cp` a
+> pre-made set in before `serve`. Without them, the other three tabs still work via `/api`.
+
 ### 2. Local dev — UI iteration with hot reload
 
 Needs **Node ≥ 18** (for Vite), plus a GPU + checkpoints for the live tabs. Two processes:
