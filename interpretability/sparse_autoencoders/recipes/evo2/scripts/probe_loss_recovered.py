@@ -99,7 +99,10 @@ def main():  # noqa: D103
     engine = Evo2SAE(args.evo2_ckpt_dir, args.sae_checkpoint, args.layer, device=dev).load()
     from megatron.core.utils import unwrap_model
 
-    gen = engine._ensure_gen_model()
+    # The engine builds the generation model lazily inside its inference components
+    # (Evo2SAE._ensure_engine() -> gen_components; the megatron model is .model). We call it
+    # directly below for teacher-forced CE, and hook its layer-`args.layer` output.
+    gen = engine._ensure_engine().model
     layer = unwrap_model(gen).decoder.layers[args.layer]
     hook = L26Hook()
     layer.register_forward_hook(hook)
