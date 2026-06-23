@@ -130,9 +130,11 @@ def test_gene_embed_returns_decodable_matrix(client):
     assert b["feature_ids"] == [0]  # the fake fires feature 0 in every sequence, nothing else
     g = np.frombuffer(base64.b64decode(b["G_b64"]), dtype=np.float32)
     assert g.size == b["n_genes"] * b["n_features"]  # [n_genes x n_firing_features], what the client UMAPs
-    # accounting fields so the UI can warn instead of silently embedding fewer than submitted
+    # accounting fields so the UI can warn instead of silently embedding fewer than submitted —
+    # lock the full set the banner interpolates (counts + the limits it names in the message).
     assert b["n_received"] == 2 and b["n_skipped_short"] == 0 and b["n_skipped_too_long"] == 0
     assert b["n_dropped_over_cap"] == 0
+    assert b["max_seq_len"] > 0 and b["max_genes"] == 1000  # referenced verbatim in the UI warning
 
 
 def test_gene_embed_reports_skipped_sequences(client, fake_engine):
