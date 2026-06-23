@@ -13,13 +13,23 @@ ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.04-py3
 FROM ${BASE_IMAGE}
 
 WORKDIR /workspace
-# evo2_megatron pulls its bionemo-core / bionemo-recipeutils deps from git, so only these two
-# trees are needed in the build context.
-COPY interpretability/sparse_autoencoders interpretability/sparse_autoencoders
+# Two layers so editing SAE code doesn't rebuild the ~30-min megatron stack:
+#
+# 1. Expensive, rarely-changing: build the bionemo.evo2 (mbridge) env. Depends ONLY on
+#    recipes/evo2_megatron (which pulls its bionemo-core/recipeutils deps from git), so this layer
+#    stays cached across SAE code edits. Copy just the recipe's .ci_build.sh to drive the build.
 COPY recipes/evo2_megatron recipes/evo2_megatron
-
+COPY interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh \
+     interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh
 WORKDIR /workspace/interpretability/sparse_autoencoders/recipes/evo2
-RUN bash .ci_build.sh
+RUN bash .ci_build.sh env
+
+# 2. Cheap, frequently-changing: add the SAE library + this recipe, install editable. A code
+#    change invalidates only this layer (the two pip installs, seconds), not the build above.
+WORKDIR /workspace
+COPY interpretability/sparse_autoencoders interpretability/sparse_autoencoders
+WORKDIR /workspace/interpretability/sparse_autoencoders/recipes/evo2
+RUN bash .ci_build.sh install
 
 # Default to the built venv so `docker run … pytest tests/` (or importing Evo2SAE) just works.
 ENV VIRTUAL_ENV=/workspace/recipes/evo2_megatron/.venv

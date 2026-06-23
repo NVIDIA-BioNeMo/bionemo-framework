@@ -9,7 +9,15 @@
 #
 # The CI checkout must also provide the sibling recipe (recipes/evo2_megatron); it pulls its
 # own bionemo-core / bionemo-recipeutils deps from git, so nothing else is required locally.
+#
+# Phases (arg, default "all") — let the Dockerfile cache the expensive megatron build separately
+# from the cheap, frequently-changing SAE installs (so a code edit doesn't rebuild megatron):
+#   env      build the bionemo.evo2 (mbridge) env only       (depends on recipes/evo2_megatron)
+#   install  install the SAE library + this recipe only       (depends on the SAE source)
+#   all      both (CI / default)
 set -euo pipefail
+
+phase="${1:-all}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SAE_LIB="$HERE/../../sae"                       # sparse_autoencoders/sae
@@ -27,10 +35,14 @@ fi
 
 # 1. Build the bionemo.evo2 (mbridge) environment. Creates $MEGATRON/.venv with the
 #    system-site torch/TE plus the full megatron stack.
-( cd "$MEGATRON" && bash .ci_build.sh )
+if [[ "$phase" == "env" || "$phase" == "all" ]]; then
+  ( cd "$MEGATRON" && bash .ci_build.sh )
+fi
 
 # 2. Add the generic SAE library + this recipe into that venv. PIP_CONSTRAINT= clears the
 #    TE pin constraint evo2_megatron sets (it must not block our pure-Python installs).
-source "$MEGATRON/.venv/bin/activate"
-PIP_CONSTRAINT= pip install -e "$SAE_LIB"
-PIP_CONSTRAINT= pip install -e "$HERE"
+if [[ "$phase" == "install" || "$phase" == "all" ]]; then
+  source "$MEGATRON/.venv/bin/activate"
+  PIP_CONSTRAINT= pip install -e "$SAE_LIB"
+  PIP_CONSTRAINT= pip install -e "$HERE"
+fi
