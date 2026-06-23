@@ -12,13 +12,15 @@ production), so the only thing that ever changes is *where* `/api` is served fro
 
 ### 1. One container — recommended for sharing / deploy
 
-The recipe [`Dockerfile`](../Dockerfile) builds this front-end to static files and bakes them
-into the image, so a **single container serves the dashboard and the API on one port** — no
-Node and no second process at runtime. This is what to hand a coworker or put behind an SSO proxy.
+Pass `--build-arg WITH_DASHBOARD=1` to the recipe [`Dockerfile`](../Dockerfile) and it builds this
+front-end to static files and bakes them in, so a **single container serves the dashboard and the
+API on one port** — no Node and no second process at runtime. This is what to hand a coworker or
+put behind an SSO proxy. (Without the flag, the image is engine + server only — see the note below.)
 
 ```bash
 # build from the REPO ROOT (the build context needs the recipes/evo2_megatron sibling):
-docker build -f interpretability/sparse_autoencoders/recipes/evo2/Dockerfile -t evo2-sae .
+docker build --build-arg WITH_DASHBOARD=1 \
+  -f interpretability/sparse_autoencoders/recipes/evo2/Dockerfile -t evo2-sae .
 
 # run with a GPU + your checkpoints, then open http://localhost:8001
 docker run --gpus all -p 8001:8001 \
@@ -27,9 +29,11 @@ docker run --gpus all -p 8001:8001 \
 # -> dashboard + API both on http://localhost:8001  (/ = UI, /api = backend)
 ```
 
-The first build compiles the megatron stack (~30 min) and is layer-cached afterward; a Node build
-stage produces the static bundle (`DASHBOARD_DIST`) and the server mounts it at `/`. No Node ends
-up in the runtime image. See the [recipe Dockerfile](../Dockerfile) for the layer layout.
+The first build compiles the megatron stack (~30 min) and is layer-cached afterward; with the flag,
+a Node build stage produces the static bundle and the server mounts it at `/` via `DASHBOARD_DIST`.
+No Node ends up in the runtime image. **Default build (no flag) is engine + server only** — it never
+pulls Node or builds the front-end, so an SAE-only deployment isn't coupled to the dashboard
+toolchain. See the [recipe Dockerfile](../Dockerfile) for the layer layout.
 
 ### 2. Local dev — UI iteration with hot reload
 
