@@ -75,6 +75,15 @@ def test_load_sae_strips_module_prefix(tmp_path):
     assert isinstance(sae, TopKSAE) and n_features == 16
 
 
+def test_check_dim_rejects_sae_model_mismatch():
+    # an SAE whose input_dim != the model's hidden size would matmul-fail on the first encode;
+    # load() catches it with a clear error instead. (hidden=None -> unknown -> skip, never blocks.)
+    with pytest.raises(ValueError, match="does not match"):
+        Evo2SAE._check_dim(sae_input_dim=4096, hidden=1920, layer=26)
+    Evo2SAE._check_dim(sae_input_dim=1920, hidden=1920, layer=26)  # match -> no raise
+    Evo2SAE._check_dim(sae_input_dim=1920, hidden=None, layer=26)  # unknown -> skip
+
+
 # ------------------------------------------------------------------------------- generate input guards
 def test_generate_rejects_unknown_organism():
     with pytest.raises(ValueError, match="organism"):

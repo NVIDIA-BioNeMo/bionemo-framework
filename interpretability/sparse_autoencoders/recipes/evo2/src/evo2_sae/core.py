@@ -156,6 +156,10 @@ class Evo2SAE:
         _init_single_process_distributed()
         self.model, self.tokenizer = P.load_model_to_layer(self.evo2_ckpt_dir, self.layer, full=False)
         self.sae, self.n_features = self._load_sae()
+        # Fail loudly now if the SAE doesn't fit the model, instead of a cryptic matmul error on the
+        # first encode. We can only catch a dim mismatch (wrong SAE/model); a wrong layer with the
+        # same hidden size is undetectable here (the SAE checkpoint records no training layer).
+        self._check_dim(self._sae_input_dim, self._model_hidden_size(), self.layer)
         self.labels, self.peaks = self._load_feature_meta()
         self.ready = True
         logger.info("Evo2SAE ready: layer=%d n_features=%d n_labels=%d", self.layer, self.n_features, len(self.labels))
@@ -185,6 +189,37 @@ class Evo2SAE:
             )
         return self.gen_components
 
+    def _model_hidden_size(self):
+        """The model's hidden size at this layer (== encode's feature dim).
+
+        Config first (cheap); else a 1-token forward (ground truth); ``None`` if neither works
+        (then the dim check is skipped, never blocking load).
+        """
+        try:
+            from megatron.core.utils import unwrap_model
+
+            cfg = getattr(unwrap_model(self.model), "config", None)
+            if cfg is not None and getattr(cfg, "hidden_size", None):
+                return int(cfg.hidden_size)
+        except Exception:
+            pass
+        try:
+            probe = self._forward_hidden([self.tokenize("A")])
+            if probe and probe[0].numel():
+                return int(probe[0].shape[-1])
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _check_dim(sae_input_dim, hidden, layer):
+        """Raise if the SAE input_dim != the model hidden size (skip if hidden is unknown)."""
+        if hidden is not None and hidden != sae_input_dim:
+            raise ValueError(
+                f"SAE input_dim={sae_input_dim} does not match the Evo2 hidden size={hidden} at "
+                f"layer {layer} — wrong SAE/model pairing (check --sae-ckpt-path / --layer)."
+            )
+
     def _load_sae(self):
         ckpt = torch.load(self.sae_ckpt_path, map_location="cpu", weights_only=False)
         cfg = dict(ckpt["model_config"])
@@ -196,6 +231,7 @@ class Evo2SAE:
         sae = TopKSAE(**cfg)
         sae.load_state_dict(state)
         sae.eval().to(self.device)
+        self._sae_input_dim = int(cfg["input_dim"])  # must equal the model hidden size (checked in load)
         logger.info("SAE loaded: TopKSAE input_dim=%d n_features=%d", cfg["input_dim"], cfg["hidden_dim"])
         return sae, int(cfg["hidden_dim"])
 
