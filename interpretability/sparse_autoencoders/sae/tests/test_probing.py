@@ -35,13 +35,16 @@ from sae.eval.probing import (
 
 
 def _auroc_ref(scores: torch.Tensor, y: torch.Tensor) -> float:
-    """Definitional AUROC oracle: P(score+ > score-) over all positive/negative pairs.
+    """Definitional AUROC oracle: P(s+ > s-) + 0.5·P(s+ == s-) over all positive/negative pairs.
 
-    Computed by brute-force pair comparison — independent of the argsort rank-sum used by
-    auroc_all, so agreement validates that implementation (randn inputs => no ties).
+    The 0.5·tie term is the Mann-Whitney convention. Computed by brute-force pair comparison —
+    independent of the rank-sum in auroc_all — so agreement validates that implementation,
+    including on tied (sparse) inputs.
     """
     pos, neg = scores[y], scores[~y]
-    return float((pos[:, None] > neg[None, :]).float().mean())
+    gt = (pos[:, None] > neg[None, :]).float().mean()
+    eq = (pos[:, None] == neg[None, :]).float().mean()
+    return float(gt + 0.5 * eq)
 
 
 def test_auroc_all_matches_definition():
@@ -54,6 +57,26 @@ def test_auroc_all_matches_definition():
     for fi in range(f):
         for li in range(ell):
             assert abs(float(au[fi, li]) - _auroc_ref(x[:, fi], y[:, li])) < 1e-6
+
+
+def test_auroc_all_handles_ties():
+    """On sparse codes (heavily tied at 0) — the regime plain argsort ranks get wrong — auroc_all
+    still matches the tie-aware oracle. ~85% exact zeros, the rest positive, per feature."""
+    torch.manual_seed(0)
+    n, f, ell = 300, 5, 2
+    x = torch.where(torch.rand(n, f) < 0.15, torch.rand(n, f), torch.zeros(n, f))  # mostly exact 0
+    y = torch.rand(n, ell) > 0.5
+    au = auroc_all(x, y)
+    for fi in range(f):
+        for li in range(ell):
+            assert abs(float(au[fi, li]) - _auroc_ref(x[:, fi], y[:, li])) < 1e-5
+
+
+def test_auroc_all_constant_feature_is_half():
+    """A constant (all-tied) feature scores exactly 0.5 — every positive/negative pair is a tie."""
+    x = torch.zeros(50, 1)
+    y = (torch.arange(50) < 20).unsqueeze(1)  # 20 pos / 30 neg, both present
+    assert abs(float(auroc_all(x, y)[0, 0]) - 0.5) < 1e-6
 
 
 def test_best_single_reports_flipped_test_auroc():
