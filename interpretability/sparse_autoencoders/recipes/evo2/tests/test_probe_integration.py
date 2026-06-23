@@ -28,20 +28,26 @@ These cover the *seams* between the eval layers that per-layer unit tests miss:
 A feature is *planted* to track one concept so the metrics have a known right answer;
 everything else is noise, so a green run means the whole pipeline carried the signal.
 
-``scripts/`` is on ``sys.path`` via ``conftest.py``.
+The eval modules live in ``scripts/`` (run as scripts, not installed), so it's added to
+``sys.path`` below — matching the sibling test modules.
 """
 
 import contextlib
 import sys
+from pathlib import Path
 
 import numpy as np
-import probe
 import pyarrow.parquet as pq
 import torch
-from annot_tracks import label_windows
-from evo2_buffer import forward_codes
 from sae.architectures import TopKSAE
 from sae.eval.probing import ActivationBuffer, domain_f1
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+import probe
+from annot_tracks import label_windows
+from evo2_buffer import forward_codes
 
 
 # Feature index deliberately planted to track the "planted" concept.
