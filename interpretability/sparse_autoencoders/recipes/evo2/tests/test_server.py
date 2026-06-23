@@ -122,7 +122,7 @@ def test_gene_embed_returns_decodable_matrix(client):
     import numpy as np
 
     genes = [{"symbol": "g1", "sequence": "ACGTACGT"}, {"symbol": "g2", "sequence": "TTTTGGGG"}]
-    b = client.post("/gene_embed", json={"genes": genes, "min_firing": 1}).json()
+    b = client.post("/api/gene_embed", json={"genes": genes, "min_firing": 1}).json()
     assert {"G_b64", "Gmax_b64", "n_features", "n_genes", "genes", "feature_ids"} <= set(b)
     assert b["n_genes"] == 2 and len(b["genes"]) == 2
     # only firing columns are shipped: feature_ids maps column -> real SAE feature id

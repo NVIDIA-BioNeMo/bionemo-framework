@@ -11,14 +11,14 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5176,
     strictPort: true,
-    // The live backend (server.py) runs on :8001. Proxying it under
-    // /api means only the Vite port needs to be tunneled — the browser talks
-    // to Vite, Vite talks to the backend, both on the pod.
+    // The live backend (server.py) runs on :8001 and serves the API under /api. Proxy /api
+    // straight through (NO rewrite) so dev hits the same paths as production: in dev the browser
+    // talks to Vite and Vite forwards /api/* to :8001/api/*; in the single-container build the
+    // browser hits /api/* on the backend directly. Same frontend code, identical paths both ways.
     proxy: {
       '/api': {
         target: 'http://localhost:8001',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
       },
     },
   },
