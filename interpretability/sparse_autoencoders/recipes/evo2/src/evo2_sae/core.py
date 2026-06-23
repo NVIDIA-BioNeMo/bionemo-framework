@@ -376,6 +376,65 @@ class Evo2SAE:
                     )
         return out
 
+    def embed_bundle(self, tagged_seqs, tag_len, meta, min_firing=10, batch_size=8):
+        """Pool per-sequence SAE vectors into the Sequence-UMAP bundle dict.
+
+        Encodes each tag-prefixed sequence, drops the ``tag_len`` phylo-tag tokens, and mean/max-pools
+        the DNA region into a per-feature vector. Ships ONLY the columns that fire in ``>= min_firing``
+        sequences — a wide SAE (e.g. 65536 features) is almost entirely zeros per gene, so sending the
+        full matrix is hundreds of MB and pointless for UMAP. ``feature_ids`` maps each returned column
+        back to its real SAE feature id. Returns base64 float32 ``[n_genes, n_firing_features]`` (mean and
+        max) + ``feature_ids`` + per-sequence ``meta`` + per-feature firing stats — the exact shape the
+        ``/gene_embed`` endpoint and the offline ``dashboard.py embeddings`` precompute both serve.
+        ``None`` if nothing was encodable. ``meta`` is a list of dicts aligned to ``tagged_seqs``.
+        """
+        import base64
+
+        import numpy as np
+
+        rows_mean, rows_max, meta_out = [], [], []
+        for codes, m in zip(self.encode_batch(tagged_seqs, batch_size=batch_size), meta):
+            tl = tag_len if codes.shape[0] > tag_len else 0
+            seg = codes[tl:]  # DNA region only (drop the phylo-tag tokens)
+            if seg.shape[0] == 0:
+                continue
+            rows_mean.append(seg.mean(dim=0).numpy().astype(np.float32))
+            rows_max.append(seg.max(dim=0).values.numpy().astype(np.float32))
+            meta_out.append(m)
+        if not rows_mean:
+            return None
+        gmean = np.stack(rows_mean).astype(np.float32)  # [n_genes, n_features]
+        gmax = np.stack(rows_max).astype(np.float32)
+        n_firing = (gmax > 0).sum(0)  # TopK/ReLU codes >= 0 -> firing set is pooling-invariant
+        fire_ids = np.nonzero(n_firing >= min_firing)[0]  # the only columns worth shipping
+        stats = []
+        for fid in fire_ids:
+            fid = int(fid)
+            col = gmean[:, fid]
+            stats.append(
+                {
+                    "feature_id": fid,
+                    "n_firing": int(n_firing[fid]),
+                    "mean_act_when_firing": float(col[col > 0].mean()) if (col > 0).any() else 0.0,
+                    "max_act": float(gmax[:, fid].max()),
+                    "label": self.labels.get(fid),
+                }
+            )
+        stats.sort(key=lambda s: -s["n_firing"])
+        # Slice to the firing columns only; feature_ids[col] -> real SAE feature id. tobytes()
+        # copies in C order, so the fancy-indexed views serialize correctly.
+        gmean = gmean[:, fire_ids]
+        gmax = gmax[:, fire_ids]
+        return {
+            "G_b64": base64.b64encode(gmean.tobytes()).decode(),
+            "Gmax_b64": base64.b64encode(gmax.tobytes()).decode(),
+            "n_features": int(gmean.shape[1]),  # = number of firing features (reduced width)
+            "n_genes": int(gmean.shape[0]),
+            "feature_ids": [int(f) for f in fire_ids],  # column index -> real SAE feature id
+            "genes": meta_out,
+            "feature_stats": stats,
+        }
+
     @torch.no_grad()
     def _forward_hidden(self, id_lists: list[list[int]]) -> list[torch.Tensor]:
         """Run the engine's model on a (padded) batch of token-id lists.

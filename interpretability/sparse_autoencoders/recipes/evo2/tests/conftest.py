@@ -194,6 +194,10 @@ class FakeEngine:
             resp["baseline"] = {"sequence": "TTTT", "activations": {}}
         return resp
 
+    # /gene_embed delegates pooling/packing to the real Evo2SAE.embed_bundle (uses only
+    # encode_batch + labels), so bind it here to exercise the shared implementation.
+    embed_bundle = core.Evo2SAE.embed_bundle
+
 
 @pytest.fixture
 def fake_engine():

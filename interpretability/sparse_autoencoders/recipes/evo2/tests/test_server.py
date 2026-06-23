@@ -116,6 +116,22 @@ def test_generate_returns_sequence(client):
     assert b["generation"]["sequence"]
 
 
+def test_gene_embed_returns_decodable_matrix(client):
+    import base64
+
+    import numpy as np
+
+    genes = [{"symbol": "g1", "sequence": "ACGTACGT"}, {"symbol": "g2", "sequence": "TTTTGGGG"}]
+    b = client.post("/gene_embed", json={"genes": genes, "min_firing": 1}).json()
+    assert {"G_b64", "Gmax_b64", "n_features", "n_genes", "genes", "feature_ids"} <= set(b)
+    assert b["n_genes"] == 2 and len(b["genes"]) == 2
+    # only firing columns are shipped: feature_ids maps column -> real SAE feature id
+    assert len(b["feature_ids"]) == b["n_features"]
+    assert b["feature_ids"] == [0]  # the fake fires feature 0 in every sequence, nothing else
+    g = np.frombuffer(base64.b64decode(b["G_b64"]), dtype=np.float32)
+    assert g.size == b["n_genes"] * b["n_features"]  # [n_genes x n_firing_features], what the client UMAPs
+
+
 def test_generate_rejects_out_of_range_feature(client):
     r = client.post("/api/generate", json={"prompt": "ACGT", "features": [{"feature_id": 999}]})
     assert r.status_code == 400  # the wedge guard, surfaced to the client

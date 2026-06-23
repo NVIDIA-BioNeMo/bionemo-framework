@@ -87,6 +87,15 @@ class GenerateRequest(BaseModel):
     compare_baseline: bool = False
 
 
+class GeneEmbedRequest(BaseModel):
+    """Request body for /gene_embed (embed many sequences into per-feature vectors for UMAP)."""
+
+    genes: list[dict]  # [{symbol, sequence, label?, species?}, ...]
+    organism: str = "None (raw DNA)"
+    tag: Optional[str] = None
+    min_firing: int = 10  # feature_stats keeps features firing in >= this many sequences
+
+
 def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
     """Build the FastAPI app; the engine is loaded once in the lifespan handler.
 
@@ -225,6 +234,39 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
             )
         except ValueError as e:
             raise HTTPException(413 if "too long" in str(e) else 400, str(e))
+
+    @api.post("/gene_embed")
+    def gene_embed(req: GeneEmbedRequest):
+        """Embed sequences for the Sequence-UMAP tab.
+
+        Each sequence -> Evo2 layer-L -> SAE -> pool over the DNA region into a per-feature
+        vector. One encode per sequence yields both mean- and max-pooled vectors (base64
+        float32 [n x n_firing_features]) so the client can toggle pooling without re-running the
+        model; UMAP runs client-side. Also returns per-sequence metadata + feature stats.
+        """
+        _require_ready()
+        tag = engine.resolve_tag(req.organism, req.tag)
+        if tag is None:
+            raise HTTPException(400, f"Unknown organism '{req.organism}' and no custom tag")
+        seqs, meta = [], []
+        for g in req.genes[:1000]:
+            dna = core.clean_dna(str(g.get("sequence", "")))
+            if len(dna) < 3:
+                continue
+            seqs.append(tag + dna)
+            meta.append(
+                {
+                    "gene_symbol": g.get("symbol") or g.get("gene_symbol") or f"gene{len(meta)}",
+                    "label": g.get("label"),
+                    "species": g.get("species"),
+                }
+            )
+        # pooling + stats + base64 packing live in Evo2SAE.embed_bundle, shared with the offline
+        # dashboard.py precompute so the static bundle is byte-identical to this response.
+        bundle = engine.embed_bundle(seqs, len(tag), meta, min_firing=req.min_firing) if seqs else None
+        if bundle is None:
+            raise HTTPException(400, "No valid gene sequences")
+        return bundle
 
     app.include_router(api, prefix="/api")
 
