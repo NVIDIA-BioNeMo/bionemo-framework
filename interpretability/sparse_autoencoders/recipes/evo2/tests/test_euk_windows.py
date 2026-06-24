@@ -15,15 +15,8 @@
 
 """CPU tests for euk_windows: GFF parsing, 1-based->0-based labeling, single-chromosome guard."""
 
-import sys
-from pathlib import Path
-
 import pytest
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-from euk_windows import _label_window, build_windows, parse_gff, representative_tx
+from evo2_sae.eval.probing.euk_windows import _label_window, build_windows, parse_gff, representative_tx
 
 
 _GFF = (

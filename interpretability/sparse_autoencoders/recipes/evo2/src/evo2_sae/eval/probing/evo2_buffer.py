@@ -18,17 +18,19 @@
 The only model-touching code in the probing pipeline. Streams sequences through
 the Evo2SAE engine (Evo2 -> layer-L residual -> SAE.encode), keeps the dense
 residual twin, and computes per-token labels (+ instance IDs) from labelers.py.
-All scoring is done elsewhere by the model-agnostic sae.eval.probing metrics.
+All scoring is done elsewhere by the model-agnostic evo2_sae.eval.probing metrics.
 """
 
 from __future__ import annotations
 
 import random
 
-import labelers as L
 import numpy as np
 import torch
-from sae.eval.probing import ActivationBuffer
+
+from evo2_sae.eval.probing import ActivationBuffer
+
+from . import labelers as L
 
 
 KINGDOM_TAGS = {"prok": "|d__Bacteria|", "euk": "|d__Eukaryota|"}

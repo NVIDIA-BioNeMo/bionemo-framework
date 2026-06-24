@@ -25,11 +25,3 @@ where = ["src"]
 
 [tool.uv.sources]
 sae = { workspace = true }
-
-# Register markers locally so the recipe is self-contained: in CI/Docker the repo-root
-# pytest.ini (which registers `slow`) isn't in the sparse-checkout, so without this the
-# @pytest.mark.slow GPU tests raise PytestUnknownMarkWarning (and would fail --strict-markers).
-[tool.pytest.ini_options]
-markers = [
-    "slow: GPU/integration tests that load a model (skip without CUDA + checkpoints)",
-]

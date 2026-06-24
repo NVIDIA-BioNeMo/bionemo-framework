@@ -15,15 +15,8 @@
 
 """CPU tests for the per-token labelers (pure masks, no model)."""
 
-import sys
-from pathlib import Path
-
 import numpy as np
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-from labelers import LABELERS, SeqContext
+from evo2_sae.eval.probing.labelers import LABELERS, SeqContext
 
 
 def _ctx(dna, tag_len=0):
@@ -82,7 +75,7 @@ def test_consensus_offsets_kozak_and_splice():
 def test_frame_and_start_forward_and_reverse():
     """The CDS frame helper anchors frame 0 at the strand-correct start (the reverse-strand
     off-by-one): start = low coord on +strand, high coord on -strand, counting back."""
-    from labelers import _frame_and_start
+    from evo2_sae.eval.probing.labelers import _frame_and_start
 
     frame, start = _frame_and_start(10, 19, strand=1)  # 9 bp = 3 codons, forward
     assert start == 10 and list(frame) == [0, 1, 2, 0, 1, 2, 0, 1, 2]

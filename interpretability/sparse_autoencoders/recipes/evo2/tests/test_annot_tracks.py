@@ -15,13 +15,7 @@
 
 """CPU unit tests for the generic interval-track loader (no model / no torch-CUDA)."""
 
-import sys
-from pathlib import Path
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-from annot_tracks import label_windows, load_track, read_fasta_dict
+from evo2_sae.eval.probing.annot_tracks import label_windows, load_track, read_fasta_dict
 
 
 def test_read_fasta_dict_uses_first_token(tmp_path):

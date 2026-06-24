@@ -17,7 +17,7 @@
 
 These cover the *seams* between the eval layers that per-layer unit tests miss:
 
-  * ``sae.eval.probing`` (#1629) <-> the probe CLI (#1636): a buffer is written by
+  * ``evo2_sae.eval.probing`` (#1629) <-> the probe CLI (#1636): a buffer is written by
     ``ActivationBuffer.save``, reloaded, and scored through the real ``probe.main()``
     dispatch (``auroc`` / ``annotate`` / ``linear``). This is the path that silently
     broke when ``save`` dropped the dense twin — the ``linear`` SAE-vs-dense comparison
@@ -27,28 +27,19 @@ These cover the *seams* between the eval layers that per-layer unit tests miss:
 
 A feature is *planted* to track one concept so the metrics have a known right answer;
 everything else is noise, so a green run means the whole pipeline carried the signal.
-
-The eval modules live in ``scripts/`` (run as scripts, not installed), so it's added to
-``sys.path`` below — matching the sibling test modules.
 """
 
 import contextlib
 import sys
-from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
 import torch
+from evo2_sae.eval.probing import ActivationBuffer, auroc_all, domain_f1, probe
+from evo2_sae.eval.probing.annot_tracks import label_windows
+from evo2_sae.eval.probing.evo2_buffer import KINGDOM_TAGS, build_buffer, forward_codes
 from sae.architectures import TopKSAE
-from sae.eval.probing import ActivationBuffer, auroc_all, domain_f1
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-import probe
-from annot_tracks import label_windows
-from evo2_buffer import KINGDOM_TAGS, build_buffer, forward_codes
 
 
 # Feature index deliberately planted to track the "planted" concept.
@@ -211,7 +202,7 @@ def test_build_buffer_shapes_and_label_alignment_with_fake_engine():
     assert base_a[len(tag) :].sum() == dna.count("A")  # every DNA 'A', and only those
 
 
-@pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU (loads the Evo2 model)")
 def test_build_buffer_and_score_real_engine(evo2_ckpt_dir, sae_ckpt_path, embedding_layer):
     """End-to-end against the REAL Evo2SAE engine — the #1636<->#1622 seam, run in the merged GPU lane.
 

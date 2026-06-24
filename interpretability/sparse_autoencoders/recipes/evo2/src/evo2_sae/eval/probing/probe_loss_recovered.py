@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-r"""Loss recovered (fidelity) for the Evo2 SAE — reuses sae.eval.loss_recovered (Jared Wilber).
+r"""Loss recovered (fidelity) for the Evo2 SAE — reuses sae.eval.loss_recovered.
 
     loss_recovered = 1 - (CE_sae - CE_clean) / (CE_zero - CE_clean)
 
@@ -28,21 +28,15 @@ raw residual space the layer actually emits.
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as Fn
+from sae.eval.loss_recovered import evaluate_loss_recovered
 
+from evo2_sae.core import Evo2SAE
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
-
-from evo2_buffer import KINGDOM_TAGS, sample_sequences  # noqa: E402
-from evo2_sae.core import Evo2SAE  # noqa: E402
-from sae.eval.loss_recovered import evaluate_loss_recovered  # noqa: E402  (Jared's code)
+from .evo2_buffer import KINGDOM_TAGS, sample_sequences
 
 
 class SAEWrap(nn.Module):

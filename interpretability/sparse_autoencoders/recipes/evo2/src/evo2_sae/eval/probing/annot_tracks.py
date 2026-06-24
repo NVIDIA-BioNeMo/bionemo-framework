@@ -20,7 +20,7 @@ tracks (BED or GFF) naming intervals — RefSeq genes/exons, Rfam ncRNA, JASPAR 
 ENCODE cCREs, etc. Each interval is one annotation **instance**. This module tiles the
 sequences into windows and produces, per concept, a per-token boolean mask + per-token
 **global** instance IDs (stable across the windows an interval spans) — exactly the
-inputs `sae.eval.probing.domain_f1` (recall-per-instance) and `auroc_all` (per-feature)
+inputs `evo2_sae.eval.probing.domain_f1` (recall-per-instance) and `auroc_all` (per-feature)
 consume. No model here; the SAE-encode step lives in the probe CLI (`probe.py domain-eval`).
 
 This is the generic sibling of `euk_windows.py` (which decomposes RefSeq gene models into

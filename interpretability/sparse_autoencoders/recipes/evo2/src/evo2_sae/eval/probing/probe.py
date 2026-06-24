@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-r"""Unified Evo2 SAE probing CLI. All scoring is sae.eval.probing (model-agnostic);
+r"""Unified Evo2 SAE probing CLI. All scoring is evo2_sae.eval.probing (model-agnostic);
 this driver only knows how to build/load Evo2 buffers and pick label sets.
 
   probe.py extract       --out BUF [...]        build an ActivationBuffer (needs the model)
@@ -51,21 +51,11 @@ Example end-to-end flow (7B / layer 26; $CKPT = MBridge dir, $SAE = trained SAE 
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 
-
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
-sys.path.insert(0, str(_HERE.parents[2] / "sae" / "src"))  # sparse_autoencoders/sae/src
-
-import labelers as L  # noqa: E402
-from evo2_buffer import forward_codes  # noqa: E402  (engine-free import; only the call needs a model)
-from sae.eval.probing import (  # noqa: E402
+from evo2_sae.eval.probing import (
     ActivationBuffer,
     auroc_all,
     auroc_vec,
@@ -74,9 +64,12 @@ from sae.eval.probing import (  # noqa: E402
     standardize,
 )
 
+from . import labelers as L
+from .evo2_buffer import forward_codes  # engine-free import; only the call needs a model
+
 
 def _z(X, tr):
-    # Standardize X by the train-split mean/std (reuses sae.eval.probing.standardize).
+    # Standardize X by the train-split mean/std (reuses evo2_sae.eval.probing.standardize).
     mu, sd = standardize(X, tr)
     return (X - mu) / sd
 
@@ -112,7 +105,7 @@ def _eval_matrix(mat, buf, names, tr, te, dev, steps, wd):
     X = torch.from_numpy(mat).to(dev).float()
     Xz = _z(X, tr)
     out = {}
-    from sae.eval.probing import fit_logreg
+    from evo2_sae.eval.probing import fit_logreg
 
     for n in names:
         ytr = torch.from_numpy(buf.labels[tr.numpy(), buf.name_idx[n]]).to(dev).float()
@@ -150,13 +143,14 @@ def cmd_linear(a):  # noqa: D103
 def cmd_annotate(a):
     """Buffer -> feature-annotation parquet: each feature's best concept by AUROC + activation stats.
 
-    The persist step (uses sae.eval.probing.annotate_features). Writes a feature_metadata-style
+    The persist step (uses evo2_sae.eval.probing.annotate_features). Writes a feature_metadata-style
     parquet — {feature_id, label, auroc, activation_freq, max_activation} — the engine/dashboard
     load via --feature-annotations. Concepts default to all labels in the buffer (incl. base_*).
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from sae.eval.probing import annotate_features
+
+    from evo2_sae.eval.probing import annotate_features
 
     buf, names = _load(a)
     dev = a.device
@@ -214,8 +208,9 @@ def _encode_windows(eng, windows, tag_ids, lab_keys, inst_keys, tot, a):
 def cmd_euk(a):
     """Eukaryotic exon/intron/CDS domain-adjusted F1 vs shuffle null (chr21 FASTA+GFF)."""
     from euk_windows import build_windows
+
     from evo2_sae.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
-    from sae.eval.probing import domain_f1
+    from evo2_sae.eval.probing import domain_f1
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
     windows, stats, tot, _ = build_windows(a.fasta, a.gff, a.seq_len, a.max_tokens, seed=a.seed)
@@ -257,8 +252,9 @@ def cmd_domain_eval(a):
     domain-F1 (precision-per-nt, recall-per-annotation) and — threshold-free — by AUROC.
     """
     from annot_tracks import label_windows, load_track, read_fasta_dict
+
     from evo2_sae.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
-    from sae.eval.probing import auroc_all, domain_f1
+    from evo2_sae.eval.probing import auroc_all, domain_f1
 
     tracks = {}
     for spec in a.track:
@@ -288,6 +284,7 @@ def cmd_domain_eval(a):
 
 def cmd_extract(a):  # noqa: D103
     from evo2_buffer import build_buffer, sample_sequences
+
     from evo2_sae.core import Evo2SAE
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
