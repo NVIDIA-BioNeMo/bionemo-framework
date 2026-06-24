@@ -105,6 +105,10 @@ def test_sanitize_clamps_negative_top_k():
 
 
 # --------------------------------------------------------------------- GPU: real generation
+# These load the real Evo2 model: skip unless a GPU is present. (The conftest fixtures further skip
+# on too-little GPU memory or an unfetchable/unimportable checkpoint.)
+requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU (loads Evo2 + SAE)")
+
 _PROMPT = "ATGGCCGAATTCGGCACGAGGACGTGCTGAAAGCTAGCTAGGCTAACCGGTTACGTGCAT"
 _ORG = "Human"
 
@@ -131,7 +135,7 @@ def _tag(engine):
     return engine.resolve_tag(_ORG, None) or ""
 
 
-@pytest.mark.slow
+@requires_gpu
 def test_encode_smoke(engine):
     """encode runs the engine's bf16 forward and returns finite per-feature codes (>=1 firing).
 
@@ -143,14 +147,14 @@ def test_encode_smoke(engine):
     assert (codes > 0).any()
 
 
-@pytest.mark.slow
+@requires_gpu
 def test_unsteered_is_dna(engine):
     """Unsteered generation yields a non-empty ACGT string (Evo2 stays in-distribution)."""
     seq = _gen(engine, [])["generation"]["sequence"]
     assert seq and set(seq) <= set("ACGTN")
 
 
-@pytest.mark.slow
+@requires_gpu
 def test_steering_changes_continuation(engine):
     """Clamping a KNOWN-ACTIVE feature hard changes the continuation; empty clamp is a no-op.
 
@@ -175,7 +179,7 @@ def test_steering_changes_continuation(engine):
     assert both["baseline"]["sequence"] == base  # baseline half == unsteered
 
 
-@pytest.mark.slow
+@requires_gpu
 def test_highlight_steer_interleaving_no_bleed(engine):
     """Single engine: encode (highlight) and generate (steer) drive ONE shared model, so
     interleaving them must not corrupt either path.
@@ -203,7 +207,7 @@ def test_highlight_steer_interleaving_no_bleed(engine):
     assert base_after == base_clean  # (2) baseline unaffected by prior encode/steer history
 
 
-@pytest.mark.slow
+@requires_gpu
 def test_encode_batch_preserves_order_and_lengths(engine):
     """Batched encode keeps input order + per-sequence length (incl. an empty sequence), with
     finite codes (real model, no mock)."""
@@ -214,7 +218,7 @@ def test_encode_batch_preserves_order_and_lengths(engine):
     assert all(c.shape[1] == engine.n_features and torch.isfinite(c).all() for c in batch)
 
 
-@pytest.mark.slow
+@requires_gpu
 def test_max_clamp_strength_stays_in_distribution(engine):
     """Clamping at MAX_CLAMP_STRENGTH still produces valid DNA — proves the cap is a *safe* level.
 
