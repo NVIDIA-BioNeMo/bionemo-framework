@@ -15,7 +15,7 @@
 
 r"""Evo2 SAE steering harness CLI — clamp a feature and measure the causal effect on generation.
 
-Thin wrapper: builds an ``Evo2SAE`` and calls ``evo2_sae.steer_analysis.run_steering`` (the
+Thin wrapper: builds an ``Evo2SAE`` and calls ``evo2_sae.eval.steering.run_steering`` (the
 engine-driven harness + pure metrics live there, CPU-tested). Writes a structured
 ``steering_results.json`` so the evidence is persisted and reproducible — the steering analog of
 how ``extract.py`` persists its outputs.
@@ -34,7 +34,7 @@ import json
 from pathlib import Path
 
 from evo2_sae.core import MAX_CLAMP_STRENGTH, Evo2SAE
-from evo2_sae.steer_analysis import pick_target, run_steering
+from evo2_sae.eval.steering import pick_target, run_steering
 
 
 def main():
@@ -72,14 +72,14 @@ def main():
         print(f"  (no labeled feature; defaulting target to top-active {target})")
 
     # 2-4. Run the sweep (reuses the production generate path; pure metrics score it).
-    result = run_steering(
-        eng, a.sequence, a.organism, target, controls, strengths, a.n_tokens, MAX_CLAMP_STRENGTH
-    )
+    result = run_steering(eng, a.sequence, a.organism, target, controls, strengths, a.n_tokens, MAX_CLAMP_STRENGTH)
 
     print(f"\nbaseline:  {result['baseline'][:60]}")
     print(f"\n=== dose-response: feature {target} ({eng.labels.get(target)}) ===")
     for r in result["dose_response"]:
-        print(f"  strength {r['strength']:7.1f}: prefix@{r['first_divergence']:3d}  {r['frac_changed']:6.1%} rewritten")
+        print(
+            f"  strength {r['strength']:7.1f}: prefix@{r['first_divergence']:3d}  {r['frac_changed']:6.1%} rewritten"
+        )
     sel = result["selectivity"]
     if sel is not None:
         print(f"\n=== selectivity @ strength {strengths[-1]} (target/control ratio {sel['selectivity_ratio']}) ===")

@@ -23,7 +23,7 @@ engine path is covered by the GPU ``test_steering.py``.
 
 from typing import ClassVar
 
-from evo2_sae.steer_analysis import divergence, dose_response, edit_distance, pick_target, run_steering, selectivity
+from evo2_sae.eval.steering import divergence, dose_response, edit_distance, pick_target, run_steering, selectivity
 
 
 # ----------------------------------------------------------------------------- pure metrics
@@ -115,8 +115,14 @@ def test_pick_target_honors_explicit_feature():
 def test_run_steering_dose_response_is_monotone():
     """A stronger clamp rewrites more (frac up) and bites earlier (shared prefix down)."""
     res = run_steering(
-        FakeEngine(), "ACGT" * 20, "None (raw DNA)", target=7,
-        controls=[], strengths=[0.0, 50.0, 100.0, 200.0], n_tokens=60, max_clamp=300.0,
+        FakeEngine(),
+        "ACGT" * 20,
+        "None (raw DNA)",
+        target=7,
+        controls=[],
+        strengths=[0.0, 50.0, 100.0, 200.0],
+        n_tokens=60,
+        max_clamp=300.0,
     )
     fracs = [r["frac_changed"] for r in res["dose_response"]]
     prefixes = [r["first_divergence"] for r in res["dose_response"]]
@@ -129,8 +135,14 @@ def test_run_steering_dose_response_is_monotone():
 def test_run_steering_selectivity_is_feature_specific():
     """Target (potent) vs control (10x weaker) at the strongest clamp -> ratio > 1."""
     res = run_steering(
-        FakeEngine(), "ACGT" * 20, "None (raw DNA)", target=7,
-        controls=[3], strengths=[0.0, 200.0], n_tokens=60, max_clamp=300.0,
+        FakeEngine(),
+        "ACGT" * 20,
+        "None (raw DNA)",
+        target=7,
+        controls=[3],
+        strengths=[0.0, 200.0],
+        n_tokens=60,
+        max_clamp=300.0,
     )
     sel = res["selectivity"]
     assert sel["selectivity_ratio"] > 1
@@ -140,8 +152,14 @@ def test_run_steering_selectivity_is_feature_specific():
 def test_run_steering_surfaces_the_clamp_cap():
     """A requested strength above the cap is recorded and steered at the effective (capped) value."""
     res = run_steering(
-        FakeEngine(), "ACGT" * 20, "None (raw DNA)", target=7,
-        controls=[], strengths=[50.0, 200.0], n_tokens=60, max_clamp=100.0,
+        FakeEngine(),
+        "ACGT" * 20,
+        "None (raw DNA)",
+        target=7,
+        controls=[],
+        strengths=[50.0, 200.0],
+        n_tokens=60,
+        max_clamp=100.0,
     )
     assert res["max_clamp_strength"] == 100.0
     assert res["capped_strengths"] == [200.0]
