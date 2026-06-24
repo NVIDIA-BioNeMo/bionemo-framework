@@ -16,7 +16,7 @@
 """High-performance SQLite-backed genomic dataset and window pre-computation.
 
 Contributed by BaseCamp Research: https://basecamp-research.com/
-https://github.com/NVIDIA/bionemo-framework/pull/1091
+https://github.com/NVIDIA-BioNeMo/bionemo-recipes/pull/1091
 
 This module is used by multiple recipes via ``bionemo.common``.
 **It must not import megatron-core, megatron-bridge, or NeMo.**

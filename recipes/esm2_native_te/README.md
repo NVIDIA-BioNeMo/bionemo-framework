@@ -7,8 +7,8 @@ training.
 ## How to use this recipe
 
 This folder contains an independent, minimal training example. It does not depend on any other code in the top-level
-bionemo-framework repository. You can download a zipped directory of this folder alone by clicking
-[here](https://download-directory.github.io?url=https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_native_te&filename=esm2-native-te).
+bionemo-recipes repository. You can download a zipped directory of this folder alone by clicking
+[here](https://download-directory.github.io?url=https://github.com/NVIDIA-BioNeMo/bionemo-recipes/tree/main/recipes/esm2_native_te&filename=esm2-native-te).
 
 ### How to deploy this recipe on cloud providers
 

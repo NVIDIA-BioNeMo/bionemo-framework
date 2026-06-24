@@ -16,7 +16,7 @@
 r"""Step 1 (15B): Extract activations from ESM2-15B and save to disk.
 
 Uses nvidia/esm2_t48_15B_UR50D with TransformerEngine for memory-efficient
-BF16 inference. No need to clone bionemo-framework -- the model code is
+BF16 inference. No need to clone bionemo-recipes -- the model code is
 fetched automatically from HuggingFace Hub via trust_remote_code.
 
 This is step 1 of the 3-step ESM2-15B SAE workflow:

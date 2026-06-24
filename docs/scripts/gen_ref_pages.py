@@ -60,7 +60,7 @@ SUPPORT_FILE_SUFFIXES = {
 }
 SUPPORT_FILE_NAMES = {"Dockerfile", "LICENSE", "Makefile", "requirements.txt"}
 SKIP_SUPPORT_DIRS = {"assets", "examples", "notebooks", ".venv", "__pycache__", ".pytest_cache"}
-GITHUB_BLOB_BASE = "https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main"
+GITHUB_BLOB_BASE = "https://github.com/NVIDIA-BioNeMo/bionemo-recipes/blob/main"
 
 
 def _rewrite_relative_links(

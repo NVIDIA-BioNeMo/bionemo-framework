@@ -1,7 +1,7 @@
 site_name: BioNeMo
-site_url: https://nvidia-bionemo.github.io/bionemo-framework
-repo_url: https://github.com/NVIDIA-BioNeMo/bionemo-framework
-repo_name: NVIDIA-BioNeMo/bionemo-framework
+site_url: https://nvidia-bionemo.github.io/bionemo-recipes
+repo_url: https://github.com/NVIDIA-BioNeMo/bionemo-recipes
+repo_name: NVIDIA-BioNeMo/bionemo-recipes
 
 theme:
   name: "material"
@@ -113,12 +113,12 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/NVIDIA-BioNeMo/bionemo-framework
+      link: https://github.com/NVIDIA-BioNeMo/bionemo-recipes
   version:
     provider: mike
     default: latest
     alias: true
-  github_url: https://github.com/NVIDIA-BioNeMo/bionemo-framework
+  github_url: https://github.com/NVIDIA-BioNeMo/bionemo-recipes
 
 copyright: |
   &copy; Copyright 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

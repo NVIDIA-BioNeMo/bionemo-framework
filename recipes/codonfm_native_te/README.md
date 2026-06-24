@@ -15,7 +15,7 @@ based recipe (with both "exact" and "non-exact" TE modes), see
 ## How to use this recipe
 
 This folder contains an independent, minimal training example. It does not depend on any other code in the top-level
-bionemo-framework repository.
+bionemo-recipes repository.
 
 ## Supported Training Features
 
@@ -195,4 +195,4 @@ e.g., `python train_fsdp2.py fp8_config.enabled=true`. For verbose logging, use 
 
 ## License
 
-Refer to the [BioNeMo Recipes LICENSE](https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/LICENSE).
+Refer to the [BioNeMo Recipes LICENSE](https://github.com/NVIDIA-BioNeMo/bionemo-recipes/blob/main/LICENSE).

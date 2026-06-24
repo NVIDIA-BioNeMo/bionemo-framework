@@ -11,7 +11,7 @@ while also providing a high degree of freedom and flexibility for users.
 ## How do I install BioNeMo Recipes?
 
 You can install individual recipe directories from within BioNeMo Recipes by following the corresponding
-README pages the [BioNeMo Recipes GitHub](https://github.com/NVIDIA-BioNeMo/bionemo-framework).
+README pages in the [BioNeMo Recipes GitHub repository](https://github.com/NVIDIA-BioNeMo/bionemo-recipes).
 
 ## What are the system requirements for BioNeMo Recipes?
 
@@ -35,7 +35,7 @@ For more information about external contributions, refer to the [Contributing](c
 ## How do I report bugs or suggest new features?
 
 To report a bug or suggest a new feature, open an issue on the
-[BioNeMo Recipes GitHub site](https://github.com/NVIDIA-BioNeMo/bionemo-framework/issues). For the fastest turnaround,
+[BioNeMo Recipes GitHub site](https://github.com/NVIDIA-BioNeMo/bionemo-recipes/issues). For the fastest turnaround,
 thoroughly describe your issue, including any steps and/or _minimal_ data sets necessary to reproduce (when possible),
 as well as the expected behavior.
 

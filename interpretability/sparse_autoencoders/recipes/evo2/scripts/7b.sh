@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-EVO2_MEGATRON_DIR="${EVO2_MEGATRON_DIR:-/workspace/bionemo-framework/recipes/evo2_megatron}"
+EVO2_MEGATRON_DIR="${EVO2_MEGATRON_DIR:-/workspace/bionemo-recipes/recipes/evo2_megatron}"
 RECIPE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 LAYER="${LAYER:-26}"

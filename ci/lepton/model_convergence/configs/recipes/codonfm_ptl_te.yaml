@@ -69,7 +69,7 @@ task_cmd: "train"
 
 # edit these
 max_steps: 200
-out_dir: "/workspace/bionemo-framework/recipes/codonfm_ptl_te"
+out_dir: "/workspace/bionemo-recipes/recipes/codonfm_ptl_te"
 learning_rate: 1e-4
 train_batch_size: 32
 val_batch_size: 32
@@ -92,8 +92,8 @@ collate_fn: thd
 ############################################################
 checkout_script: |
   cd /workspace
-  git clone https://github.com/NVIDIA/bionemo-framework.git
-  cd bionemo-framework
+  git clone https://github.com/NVIDIA-BioNeMo/bionemo-recipes.git
+  cd bionemo-recipes
   if [ -n "${commit_sha}" ]; then
     echo "Checking out commit: ${commit_sha}"
     git checkout "${commit_sha}"

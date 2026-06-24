@@ -100,8 +100,8 @@ commit_sha: ""
 ############################################################
 checkout_script: |
   set -euo pipefail
-  git clone https://github.com/NVIDIA/bionemo-framework.git
-  cd bionemo-framework
+  git clone https://github.com/NVIDIA-BioNeMo/bionemo-recipes.git
+  cd bionemo-recipes
   if [ -n "${commit_sha}" ]; then
     echo "Checking out commit: ${commit_sha}"
     git checkout "${commit_sha}"
