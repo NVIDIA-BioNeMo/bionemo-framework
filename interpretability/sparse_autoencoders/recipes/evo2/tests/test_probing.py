@@ -23,7 +23,7 @@ relies on); split_indices folds into the buffer roundtrip.
 
 import numpy as np
 import torch
-from sae.eval.probing import (
+from evo2_sae.eval.probing import (
     ActivationBuffer,
     annotate_features,
     auroc_all,
