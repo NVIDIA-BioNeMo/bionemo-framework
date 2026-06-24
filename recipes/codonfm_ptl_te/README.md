@@ -22,8 +22,6 @@ The table below summarizes the set of open source pre-trained weights currently 
 | EnCodon 1B         | MLM (random p=0.15)            | 2048        | 18     | 16    | 8192         | `mlm/encodon_1b.sh`   | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-1B-v1)      | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-1B-v1)      |
 | EnCodon 1B (CDSWT) | MLM (codon frequency-weighted) | 2048        | 18     | 16    | 8192         | `cdswt/encodon_1b.sh` | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-Cdwt-1B-v1) | [Link](https://huggingface.co/nvidia/NV-CodonFM-Encodon-TE-Cdwt-1B-v1) |
 
-> Note (May 2026): The EnCodon 5B model checkpoint will be released in the near future.
-
 ## Repository Structure
 
 High-level overview (NerdTree-style):
@@ -87,7 +85,6 @@ All training experiments reported here were run on `8 x NVIDIA H100 80GB HBM3` G
 | ----- | ------------------------: | --------------------: | -----------------------: | ----------------------: | ----------------------------- |
 | 80M   |                    117119 |                145357 |                   419087 |                 1028891 | 1.00x / 1.24x / 3.58x / 9.79x |
 | 1B    |                      8698 |                  9899 |                    26476 |                   69300 | 1.00x / 1.14x / 3.04x / 7.97x |
-| 5B    |                      2320 |                  2865 |                     5112 |                   13973 | 1.00x / 1.23x / 2.20x / 6.02x |
 
 For inference, we report both relative speedup and absolute throughput. The figure below compares inference configurations by relative speedup within each model size.
 
@@ -99,7 +96,6 @@ All inference experiments reported here were run on `8 x NVIDIA H100 80GB HBM3` 
 | ----- | ------------------------: | --------------------: | -----------------------: | ----------------------: | ------------------------------ |
 | 80M   |                    156819 |                190380 |                   542147 |                 1875140 | 1.00x / 1.21x / 3.46x / 11.96x |
 | 1B    |                     18655 |                 21715 |                    46551 |                  221110 | 1.00x / 1.16x / 2.50x / 11.85x |
-| 5B    |                      5316 |                  5991 |                     9996 |                   40373 | 1.00x / 1.13x / 1.88x / 7.59x  |
 
 ## Quickstart
 

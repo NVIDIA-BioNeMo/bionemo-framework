@@ -99,13 +99,10 @@ def read_codon_csv(
         "in_splice_junction",
         "phylop",
         "gene",
-        "5b_cdwt",
-        "5b",
         "1b_cdwt",
         "1b",
         "600m",
         "80m",
-        "5b_avg",
         "trinuc_context",
         "gc_content",
     ]
