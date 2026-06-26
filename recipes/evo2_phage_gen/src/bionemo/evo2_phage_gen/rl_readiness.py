@@ -21,7 +21,6 @@ import argparse
 import importlib
 import importlib.util
 import json
-import sys
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -32,7 +31,6 @@ import yaml
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_GRPO_CONFIG = RECIPE_ROOT / "configs" / "grpo_phage_megatron.yaml"
-DEFAULT_LOCAL_NEMO_RL = RECIPE_ROOT / "3rdparty" / "nemo-rl"
 
 
 @dataclass(frozen=True)
@@ -81,7 +79,10 @@ def _config_relative_path(config_path: Path, path_like: str | Path | None) -> Pa
 
 def _module_check(name: str, module_name: str, *, required: bool) -> RLReadinessCheck:
     """Create a Python import-spec readiness check without importing the module."""
-    ok = importlib.util.find_spec(module_name) is not None
+    try:
+        ok = importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        ok = False
     detail = module_name if ok else f"{module_name} not importable"
     return RLReadinessCheck(name=name, ok=ok, required=required, detail=detail)
 
@@ -115,13 +116,6 @@ def _iter_target_values(value: Any) -> list[str]:
     return targets
 
 
-def _add_local_nemo_rl(local_nemo_rl: Path) -> None:
-    """Put a local NeMo-RL checkout on ``sys.path`` when present."""
-    local_nemo_rl = Path(local_nemo_rl)
-    if local_nemo_rl.exists() and str(local_nemo_rl) not in sys.path:
-        sys.path.insert(0, str(local_nemo_rl))
-
-
 def _cuda_device_count() -> int | None:
     """Return CUDA device count, or ``None`` when PyTorch is unavailable."""
     if importlib.util.find_spec("torch") is None:
@@ -131,17 +125,15 @@ def _cuda_device_count() -> int | None:
     return int(torch.cuda.device_count())
 
 
-def _runtime_checks(local_nemo_rl: Path) -> list[RLReadinessCheck]:
+def _runtime_checks() -> list[RLReadinessCheck]:
     """Check NeMo-RL runtime imports."""
-    _add_local_nemo_rl(local_nemo_rl)
-    local_checkout_ok = Path(local_nemo_rl).exists()
     nemo_rl_importable = importlib.util.find_spec("nemo_rl") is not None
     return [
         RLReadinessCheck(
-            name="nemo_rl_checkout_or_install",
-            ok=local_checkout_ok or nemo_rl_importable,
+            name="nemo_rl_install",
+            ok=nemo_rl_importable,
             required=True,
-            detail=str(local_nemo_rl) if local_checkout_ok else "nemo_rl is installed in the active environment",
+            detail="nemo_rl is installed in the active environment" if nemo_rl_importable else "nemo_rl not importable",
         ),
         _module_check("nemo_rl", "nemo_rl", required=True),
         _module_check("ray", "ray", required=True),
@@ -324,13 +316,12 @@ def _config_checks(
 def check_rl_readiness(
     config_path: Path = DEFAULT_GRPO_CONFIG,
     *,
-    local_nemo_rl: Path = DEFAULT_LOCAL_NEMO_RL,
     require_evo2_adapter: bool = True,
     expected_gpus: int | None = None,
 ) -> list[RLReadinessCheck]:
     """Check whether the phage GRPO scaffold is ready to launch."""
     return [
-        *_runtime_checks(local_nemo_rl),
+        *_runtime_checks(),
         *_config_checks(config_path, require_evo2_adapter=require_evo2_adapter, expected_gpus=expected_gpus),
     ]
 
@@ -347,7 +338,6 @@ def main() -> None:
     """CLI entry point for NeMo-RL readiness checks."""
     parser = argparse.ArgumentParser(description="Check prerequisites for the Evo2 phage NeMo-RL GRPO scaffold")
     parser.add_argument("--config", type=Path, default=DEFAULT_GRPO_CONFIG)
-    parser.add_argument("--local-nemo-rl", type=Path, default=DEFAULT_LOCAL_NEMO_RL)
     parser.add_argument(
         "--allow-template-gaps",
         action="store_true",
@@ -359,7 +349,6 @@ def main() -> None:
 
     checks = check_rl_readiness(
         args.config,
-        local_nemo_rl=args.local_nemo_rl,
         require_evo2_adapter=not args.allow_template_gaps,
     )
     if args.json:

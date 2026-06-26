@@ -22,14 +22,17 @@ from pathlib import Path
 
 
 PHIX174_REFERENCE_START = "GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAA"
-DEFAULT_PROMPT_LENGTHS = (4, 5, 6, 7, 8, 9)
+DEFAULT_PROMPT_LENGTHS = tuple(range(1, 12))
+DEFAULT_PROMPT_PREFIX = "+~"
+DNA_ALPHABET = frozenset("ACGTacgt")
 
 
 def phix174_prompts(
     reference_start: str = PHIX174_REFERENCE_START,
     prompt_lengths: Sequence[int] = DEFAULT_PROMPT_LENGTHS,
+    prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
 ) -> dict[int, str]:
-    """Return PhiX174-start prompts keyed by prompt length."""
+    """Return paper-style PhiX174-start prompts keyed by nucleotide prompt length."""
     reference_start = reference_start.strip().upper()
     prompts: dict[int, str] = {}
     for prompt_len in prompt_lengths:
@@ -37,7 +40,7 @@ def phix174_prompts(
             raise ValueError(f"Prompt length must be positive, got {prompt_len}")
         if prompt_len > len(reference_start):
             raise ValueError(f"Prompt length {prompt_len} exceeds reference length {len(reference_start)}")
-        prompts[int(prompt_len)] = reference_start[:prompt_len]
+        prompts[int(prompt_len)] = f"{prompt_prefix}{reference_start[:prompt_len]}"
     return prompts
 
 
@@ -46,6 +49,7 @@ def write_prompt_sweep_jsonl(
     *,
     reference_start: str = PHIX174_REFERENCE_START,
     prompt_lengths: Sequence[int] = DEFAULT_PROMPT_LENGTHS,
+    prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
     num_prompts: int = 1000,
     id_prefix: str = "phix174",
 ) -> list[Path]:
@@ -54,7 +58,7 @@ def write_prompt_sweep_jsonl(
         raise ValueError(f"num_prompts must be positive, got {num_prompts}")
     output_dir.mkdir(parents=True, exist_ok=True)
     written_paths: list[Path] = []
-    for prompt_len, prompt in phix174_prompts(reference_start, prompt_lengths).items():
+    for prompt_len, prompt in phix174_prompts(reference_start, prompt_lengths, prompt_prefix=prompt_prefix).items():
         output_path = output_dir / f"{id_prefix}_prompt{prompt_len}_{num_prompts}.jsonl"
         with output_path.open("w") as f:
             for idx in range(num_prompts):
@@ -69,6 +73,11 @@ def _sequence_before_eos(sequence: str) -> str:
     return str(sequence).replace("\n", "").strip().split(maxsplit=1)[0]
 
 
+def _prompt_nucleotides(prompt: str) -> str:
+    """Keep only nucleotide bases from a prompt that may include SFT soft tokens."""
+    return "".join(char for char in prompt if char in DNA_ALPHABET)
+
+
 def _wrap_fasta_sequence(sequence: str, width: int = 80) -> str:
     """Wrap a FASTA sequence to a fixed line width."""
     return "\n".join(sequence[i : i + width] for i in range(0, len(sequence), width))
@@ -80,7 +89,7 @@ def infer_jsonl_to_fasta(
     *,
     include_source_stem: bool = True,
 ) -> Path:
-    """Convert ``infer_evo2`` JSONL records to FASTA by prepending prompt to completion."""
+    """Convert ``infer_evo2`` JSONL records to FASTA by prepending prompt nucleotides to completion."""
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
     with output_fasta.open("w") as fasta:
         for jsonl_path in sorted(Path(path) for path in jsonl_paths):
@@ -91,7 +100,7 @@ def infer_jsonl_to_fasta(
                     record = json.loads(line)
                     record_id = str(record.get("id") or f"{jsonl_path.stem}_{line_idx:06d}")
                     header = f"{record_id}|{jsonl_path.stem}" if include_source_stem else record_id
-                    prompt = _sequence_before_eos(record.get("prompt", ""))
+                    prompt = _prompt_nucleotides(_sequence_before_eos(record.get("prompt", "")))
                     completion = _sequence_before_eos(record.get("completion", ""))
                     sequence = f"{prompt}{completion}".upper()
                     fasta.write(f">{header}\n{_wrap_fasta_sequence(sequence)}\n")
@@ -117,6 +126,7 @@ def main() -> None:
     prompt_parser.add_argument("--output-dir", type=Path, required=True)
     prompt_parser.add_argument("--reference-start", type=str, default=PHIX174_REFERENCE_START)
     prompt_parser.add_argument("--prompt-lengths", type=int, nargs="+", default=list(DEFAULT_PROMPT_LENGTHS))
+    prompt_parser.add_argument("--prompt-prefix", type=str, default=DEFAULT_PROMPT_PREFIX)
     prompt_parser.add_argument("--num-prompts", type=int, default=1000)
     prompt_parser.add_argument("--id-prefix", type=str, default="phix174")
 
@@ -133,6 +143,7 @@ def main() -> None:
             args.output_dir,
             reference_start=args.reference_start,
             prompt_lengths=args.prompt_lengths,
+            prompt_prefix=args.prompt_prefix,
             num_prompts=args.num_prompts,
             id_prefix=args.id_prefix,
         ):

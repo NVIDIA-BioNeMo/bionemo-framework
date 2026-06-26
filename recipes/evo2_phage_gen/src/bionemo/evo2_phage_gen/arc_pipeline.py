@@ -35,6 +35,38 @@ ARC_LEGACY_CHECKV_ENV = (
     "env = {**os.environ, 'CHECKVDB': \"/large_experiments/hielab/brianhie/dna-gen/checkv/checkv-db-v1.5\"}"
 )
 PATCHED_CHECKV_ENV = "env = os.environ.copy()"
+ARC_LEGACY_LOVIS4U_CONDA_WRAPPER = '''def run_lovis4u_in_conda_env(env_name: str, command: str) -> None:
+    """
+    Activate a Conda environment and run a command within it.
+    
+    Args:
+        env_name (str): The name of the Conda environment to activate.
+        command (str): The command to run inside the activated environment.
+    """
+    try:
+        # Full command to initialize Conda and activate environment before running the given command
+        full_command = f"""
+        eval "$(conda shell.bash hook)"
+        conda activate {env_name}
+        {command}
+        """
+        subprocess.run(full_command, shell=True, executable="/bin/bash", check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error while running command in Conda environment {env_name}: {e}")
+'''
+PATCHED_LOVIS4U_CONDA_WRAPPER = '''def run_lovis4u_in_conda_env(env_name: str, command: str) -> None:
+    """Run LoVis4u command in the active environment.
+
+    The original Arc script activates a separate conda environment here. The
+    recipe installs LoVis4u into its uv-managed venv, so the active PATH is the
+    reproducible environment boundary.
+    """
+    try:
+        subprocess.run(command, shell=True, executable="/bin/bash", check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error while running LoVis4u command with active environment instead of {env_name}: {e}")
+        raise
+'''
 ARC_PIPELINE_FILES = (
     "genome_design_filtering_pipeline.py",
     "genetic_architecture.py",
@@ -82,14 +114,18 @@ def prepare_arc_pipeline_workdir(
 
     filtering_pipeline_path = output_dir / "genome_design_filtering_pipeline.py"
     text = filtering_pipeline_path.read_text()
-    patched_text = text.replace(ARC_LEGACY_PRODIGAL_CMD, PATCHED_PRODIGAL_CMD).replace(
-        ARC_LEGACY_CHECKV_ENV, PATCHED_CHECKV_ENV
+    patched_text = (
+        text.replace(ARC_LEGACY_PRODIGAL_CMD, PATCHED_PRODIGAL_CMD)
+        .replace(ARC_LEGACY_CHECKV_ENV, PATCHED_CHECKV_ENV)
+        .replace(ARC_LEGACY_LOVIS4U_CONDA_WRAPPER, PATCHED_LOVIS4U_CONDA_WRAPPER)
     )
     missing_patches = []
     if ARC_LEGACY_PRODIGAL_CMD in text and PATCHED_PRODIGAL_CMD not in patched_text:
         missing_patches.append("Prodigal command")
     if ARC_LEGACY_CHECKV_ENV in text and PATCHED_CHECKV_ENV not in patched_text:
         missing_patches.append("CheckV environment")
+    if ARC_LEGACY_LOVIS4U_CONDA_WRAPPER in text and PATCHED_LOVIS4U_CONDA_WRAPPER not in patched_text:
+        missing_patches.append("LoVis4u environment")
     if missing_patches:
         raise ValueError(f"Failed to patch {', '.join(missing_patches)} in {filtering_pipeline_path}")
     filtering_pipeline_path.write_text(patched_text)

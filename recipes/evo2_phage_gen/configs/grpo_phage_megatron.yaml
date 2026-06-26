@@ -1,9 +1,8 @@
 # Evo2 phage GRPO template for NeMo-RL.
 #
-# This config is intentionally a teaching scaffold. It uses NeMo-RL's Megatron
-# generation backend, not vLLM, because Evo2 does not provide vLLM layers.
-# The policy model-construction path still needs a BioNeMo Evo2 adapter in
-# NeMo-RL before this config can run end-to-end.
+# This config uses NeMo-RL's Megatron generation backend, not vLLM, because Evo2
+# does not provide vLLM layers. The recipe build repairs upstream NeMo-RL package
+# discovery and applies the local Evo2/MBridge patch required for this path.
 
 defaults: "nemo_rl_defaults/grpo_math_1B_megatron.yaml"
 
@@ -26,7 +25,7 @@ checkpointing:
     format: "megatron_bridge"
 
 policy:
-  # Placeholder until NeMo-RL can construct BioNeMo Evo2 providers directly.
+  # Non-HF identifier; the Evo2/MBridge patch reuses the converted policy config.
   model_name: "bionemo/evo2_7b_base"
   tokenizer:
     name: "tokenizers/nucleotide_fast_tokenizer_512"
@@ -57,6 +56,10 @@ policy:
     temperature: 0.8
     top_p: 0.95
     top_k: null
+    mcore_generation_config:
+      cuda_graph_impl: "local"
+      inference_cuda_graph_scope: "block"
+      use_cuda_graphs_for_non_decode_steps: true
 
 data:
   max_input_seq_length: 512
@@ -84,6 +87,34 @@ env:
     weight_genome_length: 1.0
     weight_gc_content: 1.0
     weight_nt_homopolymer: 1.0
+    weight_orf: 1.0
+    weight_coding_density: 1.0
+    weight_protein_hit_count: 1.0
+    weight_tropism: 1.0
+    weight_genetic_architecture: 1.0
+    weight_checkv: 1.0
+    weight_synteny: 1.0
+    weight_mmseqs_clustering: 1.0
+    # Small normalized diversity bonus. Set to 0.0 for the diversity ablation.
+    weight_diversity: 0.05
+    external_qc:
+      enabled: true
+      config_path: "configs/arc_genome_design_filtering_local.yaml"
+      pipeline_script: "data/arc_pipeline_patched/genome_design_filtering_pipeline.py"
+      work_dir: "data/checkpoints/phage_grpo_external_qc"
+      checkv_db_path: "data/external/checkv/checkv-db-v1.5"
+      keep_artifacts: false
+      enable_orf: true
+      enable_coding_density: true
+      enable_protein_hit_count: true
+      enable_tropism: true
+      enable_genetic_architecture: true
+      enable_checkv: true
+      enable_synteny: true
+      enable_mmseqs_clustering: true
+      enable_diversity: true
+      diversity_quality_threshold: 0.6
+      diversity_kmer_size: 8
 
 logger:
   log_dir: "data/checkpoints/phage_grpo_logs"

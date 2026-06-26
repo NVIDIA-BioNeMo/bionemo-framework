@@ -19,3 +19,18 @@ uv pip install -r build_requirements.txt --no-build-isolation
 
 # 5. Install the recipe with all remaining dependencies, including test extras
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
+
+# 6. Upstream NeMo-RL's current pyproject only packages the top-level nemo_rl module.
+# Reinstall the pinned checkout with complete package discovery, then apply this recipe's Evo2 patch.
+evo2_phage_patch_nemo_rl --repair-install
+
+# 7. CI starts from the base devcontainer image, so keep native verifier tools
+# recipe-local instead of requiring apt/conda or a custom image. Installing into
+# .venv/bin makes them available whenever .ci_test_env.sh activates the venv.
+evo2_phage_prepare_external_assets \
+  --external-dir data/external \
+  --bin-dir .venv/bin \
+  --skip-mmseqs \
+  --skip-phrogs-annotation \
+  --skip-arc-evo2 \
+  --skip-checkv

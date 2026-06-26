@@ -1,0 +1,13 @@
+.git
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.venv
+**/pip-constraints.txt
+
+# Local generated assets can be hundreds of GB. Mount or prepare them at runtime
+# instead of baking them into the image build context.
+recipes/evo2_phage_gen/data/checkpoints
+recipes/evo2_phage_gen/data/external
+recipes/evo2_phage_gen/data/arc_pipeline_patched
+recipes/evo2_phage_gen/dist

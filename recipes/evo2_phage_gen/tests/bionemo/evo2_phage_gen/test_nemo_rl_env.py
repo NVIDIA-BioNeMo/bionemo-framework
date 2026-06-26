@@ -15,7 +15,7 @@
 
 """Tests for ``bionemo.evo2_phage_gen.nemo_rl_env`` helpers."""
 
-from bionemo.evo2_phage_gen.nemo_rl_env import extract_assistant_sequence, score_message_logs
+from bionemo.evo2_phage_gen.nemo_rl_env import extract_assistant_sequence, extract_scored_sequence, score_message_logs
 
 
 def test_extract_assistant_sequence_concatenates_assistant_messages():
@@ -28,6 +28,16 @@ def test_extract_assistant_sequence_concatenates_assistant_messages():
     ]
 
     assert extract_assistant_sequence(message_log) == "ACGTTGCA"
+
+
+def test_extract_scored_sequence_keeps_prompt_dna_and_drops_soft_tokens():
+    """QC should include the nucleotide prompt but not fine-tuning soft tokens."""
+    message_log = [
+        {"role": "user", "content": "+~GAGT"},
+        {"role": "assistant", "content": "ACGT"},
+    ]
+
+    assert extract_scored_sequence(message_log) == "GAGTACGT"
 
 
 def test_score_message_logs_uses_phage_reward():

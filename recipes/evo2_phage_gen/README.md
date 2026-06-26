@@ -16,8 +16,8 @@ copied-file mapping if CI/package behavior makes symlinking awkward.
 
 ## Local References
 
-The recipe pins NeMo-RL by git commit and carries a local patch that can be
-applied to the installed package with `evo2_phage_patch_nemo_rl`. Runtime
+The recipe pins NeMo-RL by git commit and carries a local patch applied during
+environment setup with `evo2_phage_patch_nemo_rl --repair-install`. Runtime
 artifacts and downloaded analysis assets live under the gitignored
 `recipes/evo2_phage_gen/data` tree so the recipe can be recreated without any
 `dist/` scratch state:
@@ -66,8 +66,9 @@ NeMo-RL package integration:
   NeMo-RL package APIs directly.
 - The GRPO defaults inherited by `configs/grpo_phage_megatron.yaml` are copied
   into `configs/nemo_rl_defaults`.
-- After installing the environment, run `evo2_phage_patch_nemo_rl` to patch the
-  importable `nemo_rl` package.
+- `.ci_build_env.sh` runs `evo2_phage_patch_nemo_rl --repair-install` after
+  dependency installation. This repairs upstream NeMo-RL package discovery so
+  all `nemo_rl.*` modules are installed, then applies the Evo2/MBridge patch.
 - Processor, environment, and Megatron-model adapter registration should be
   ordinary upstream extension points. Once those hooks land, delete the patch
   file and patch application step entirely.
@@ -322,9 +323,10 @@ Paper SFT settings:
 
 For a paper-faithful Evo2 SFT run, keep `--seq-length 10240`,
 `--global-batch-size 32`, `--lr 1e-5`, `--min-lr 1e-6`, warm up for 600 steps,
-decay over 12,000 steps, and train for 12,000 optimizer steps. On this
-two-A6000 workspace, full-parameter 7B SFT reaches the first optimizer step but
-OOMs during Adam state initialization, even at shorter sequence lengths.
+decay over 12,000 steps, and train for 12,000 optimizer steps. Validate the
+local data/config path with a small smoke first; the full paper SFT recipe was
+run on a much larger multi-H100 allocation than this two-GPU development
+workspace.
 
 Use the following 4-layer TP=2 smoke to validate the local SFT data and training
 path before moving to a larger GPU system:
@@ -373,10 +375,8 @@ smoke loaded the base checkpoint subset, ran two optimizer steps, saved
 |         2 |      7.065330 |           4.894439 | Checkpoint saved at iteration 2. |
 
 The final validation-set and test-set summaries were `5.606985` and `5.376484`,
-respectively. The full-parameter 7B attempt with the same data path, TP=2, and
-`seq_length=10240` OOMed at Adam state initialization; reducing to
-`seq_length=2048` still OOMed, confirming that optimizer state, not sequence
-activation memory, is the local blocker.
+respectively. Use the smoke to validate data loading, tokenization, checkpoint
+loading, and optimizer wiring before scaling to the full 7B SFT configuration.
 
 Evaluate both the base checkpoint and released Microviridae checkpoint on a
 small recipe-local validation FASTA sample before starting SFT. With TP=2,
@@ -448,13 +448,13 @@ short-run target when debugging the SFT stage.
 
 Run these from the repository root.
 
-01. Build and enter the recipe environment:
+01. Build and enter the recipe environment. For local development on an existing
+    BioNeMo/PyTorch container:
 
     ```bash
     cd recipes/evo2_phage_gen
     ./.ci_build_env.sh
     source .ci_test_env.sh
-    evo2_phage_patch_nemo_rl
     cd ../..
     ```
 
@@ -464,14 +464,31 @@ Run these from the repository root.
     selects a managed Python whose system site packages do not include the
     container CUDA/PyTorch stack.
 
+    To build the same stack with native QC tools baked into an image, use the
+    recipe Dockerfile from the repository root:
+
+    ```bash
+    docker build -f recipes/evo2_phage_gen/Dockerfile -t evo2-phage-gen .
+    ```
+
+    The Dockerfile intentionally reuses `.ci_build_env.sh`: Python dependencies
+    are managed by `uv`, while small native verifier tools are downloaded into
+    `.venv/bin`. Large databases and checkpoints should still be mounted or
+    prepared under `recipes/evo2_phage_gen/data` at runtime rather than baked
+    into the image.
+
 02. Prepare recipe-local external assets and Arc reference data:
 
     ```bash
     evo2_phage_prepare_external_assets
     ```
 
-    Add `--download-large-databases` when you are ready to fetch the PHROGs
-    MMseqs DB and CheckV DB.
+    Add `--download-large-databases --skip-checkv --insecure-downloads` when
+    you are ready to fetch PHROGs assets and build the GPU-padded PHROGs MMseqs
+    DB. `--insecure-downloads` is currently needed because the PHROGs HTTPS
+    certificate is expired. The CI build installs upstream DIAMOND and HMMER's
+    `hmmsearch` into `.venv/bin`; the asset helper can also install them into
+    any target with `--bin-dir`.
 
 03. Validate the converter with the CI-friendly 1B Vortex checkpoint:
 
@@ -605,11 +622,11 @@ Run these from the repository root.
     evo2_phage_check_rl --allow-template-gaps --warn-only
     ```
 
-    On the current two-A6000 workspace, the local checkpoint, checkpoint
+    On the current two-H100 workspace, the local checkpoint, checkpoint
     `run_config.yaml`, BioNeMo checkpoint targets, tokenizer, prompt data,
-    Megatron generation backend, inherited colocated Megatron GRPO topology, and
-    GPU count pass. After installing the environment, run
-    `evo2_phage_patch_nemo_rl` so the Evo2/MBridge patch is applied to the
+    Megatron generation backend, colocated Megatron GRPO topology, CUDA graph
+    generation settings, and GPU count pass. Environment setup repairs upstream
+    NeMo-RL package discovery and applies the Evo2/MBridge patch to the
     importable `nemo_rl` package.
 
 13. Inspect the NeMo-RL GRPO scaffold:
@@ -640,22 +657,26 @@ PhiX174-like consensus start. The bundled reference
 GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAA...
 ```
 
-The publication reports that one or two consensus nucleotides were too weakly
-conditioning, while nine or more nucleotides at low temperature tended toward
-memorized PhiX174 recall. The useful regime for diverse, PhiX174-like genomes
-was around 4-9 nt prompts and sampling temperature 0.7-0.9, with `n = 1000`
-sequences per prompt/temperature parameter combination in the sweep.
+The Methods report that prompt sweeps used the first 1-11 nucleotides of this
+consensus start, prepended with the `+~` fine-tuning tokens that mark
+95-100 percent identity to PhiX174 in the processed SFT dataset. One or two
+consensus nucleotides were too weakly conditioning, while nine or more
+nucleotides at low temperature tended toward memorized PhiX174 recall. The
+useful regime for diverse, PhiX174-like genomes was around 4-9 nt prompts and
+sampling temperature 0.7-0.9, with approximately 1000 sequences per
+prompt/temperature parameter combination in the sweep. All sampling runs used
+`top-k = 4` and `top-p = 1`.
 
 For this recipe, start with the following prompt set:
 
 | Prompt length | Prompt      |
 | ------------- | ----------- |
-| 4             | `GAGT`      |
-| 5             | `GAGTT`     |
-| 6             | `GAGTTT`    |
-| 7             | `GAGTTTT`   |
-| 8             | `GAGTTTTA`  |
-| 9             | `GAGTTTTAT` |
+| 4             | `+~GAGT`      |
+| 5             | `+~GAGTT`     |
+| 6             | `+~GAGTTT`    |
+| 7             | `+~GAGTTTT`   |
+| 8             | `+~GAGTTTTA`  |
+| 9             | `+~GAGTTTTAT` |
 
 The Arc curated candidate FASTA in `data/external/arc_evo2/phage_gen/data` is not the raw
 generation sweep, but its headers preserve useful provenance. In
@@ -681,7 +702,7 @@ infer_evo2 \
   --max-new-tokens 5996 \
   --temperature 0.7 \
   --top-k 4 \
-  --top-p 0.0 \
+  --top-p 1.0 \
   --seed 7 \
   --tensor-parallel-size 1 \
   --max-seq-length 6144 \
@@ -704,7 +725,7 @@ infer_evo2 \
   --max-new-tokens 16 \
   --temperature 0.7 \
   --top-k 4 \
-  --top-p 0.0 \
+  --top-p 1.0 \
   --seed 11 \
   --tensor-parallel-size 1 \
   --max-seq-length 128 \
@@ -722,10 +743,11 @@ evo2_phage_nucleotide_qc \
 
 This loaded the converted 7B Microviridae checkpoint through Megatron/MCore
 CUDA graph inference, generated two deterministic 16-token completions from
-two `GAGT` prompts, reconstructed FASTA records by prepending the prompt, and
-passed both records through the valid-nucleotide filter. Both records are
-expected to fail genome-length QC because this smoke intentionally generates
-20 nt sequences, not 4-6 kb candidate genomes.
+two `+~GAGT` prompts, reconstructed FASTA records by stripping the `+~` soft
+tokens and prepending the `GAGT` nucleotide prefix, and passed both records
+through the valid-nucleotide filter. Both records are expected to fail
+genome-length QC because this smoke intentionally generates 20 nt sequences,
+not 4-6 kb candidate genomes.
 
 Run the full first-pass Evo2 sweep:
 
@@ -748,7 +770,7 @@ for temp in 0.7 0.8 0.9; do
       --max-new-tokens $((6000 - prompt_len)) \
       --temperature "${temp}" \
       --top-k 4 \
-      --top-p 0.0 \
+      --top-p 1.0 \
       --seed 7 \
       --tensor-parallel-size 1 \
       --max-seq-length 6144 \
@@ -759,8 +781,9 @@ done
 ```
 
 Convert generated JSONL to FASTA before QC. `infer_evo2` writes `prompt` and
-`completion` separately, so FASTA reconstruction should prepend the prompt to
-the completion:
+`completion` separately, so FASTA reconstruction strips prompt soft tokens
+such as `+~`, prepends the nucleotide prompt to the completion, and leaves
+non-DNA completion tokens for QC to reject:
 
 ```bash
 evo2_phage_generation jsonl-to-fasta \
@@ -769,8 +792,9 @@ evo2_phage_generation jsonl-to-fasta \
 ```
 
 Then run the nucleotide QC and reward commands above on
-`evo2_microviridae_prompt_sweep.fasta`. Full paper replication still needs the
-external ORF, MMseqs, PHROGs, CheckV, architecture, and diversification stages.
+`evo2_microviridae_prompt_sweep.fasta`. For paper-style filtering replication,
+use the Arc external QC pipeline after preparing PHROGs/MMseqs-GPU, the
+PhiX174 G-protein MMseqs database, and any optional CheckV/Zenodo inputs.
 
 ## Arc External QC Pipeline
 
@@ -843,12 +867,30 @@ tree:
 export PATH="$PWD/recipes/evo2_phage_gen/data/external/bin:$PATH"
 
 # Lightweight setup: creates a prodigal wrapper backed by pyrodigal, downloads
-# the latest official MMseqs2-GPU binary, and downloads the PHROGs v4 annotation.
-evo2_phage_prepare_external_assets
+# the official MMseqs2-GPU binary, upstream DIAMOND, HMMER/hmmsearch, and the
+# PHROGs v4 annotation.
+evo2_phage_prepare_external_assets \
+  --mmseqs-url https://dev.mmseqs.com/latest/mmseqs-linux-gpu-cuda13.tar.gz
 
-# Full external database setup. This also downloads the PHROGs MMseqs profile DB
-# and CheckV database, which are larger and slower to fetch.
-evo2_phage_prepare_external_assets --download-large-databases
+# PHROGs protein database setup. This downloads the legacy PHROGs MMseqs
+# profile DB, downloads raw PHROGs FASTA files, and builds a padded GPU-ready
+# MMseqs sequence DB at data/external/phrogs/phrogs_gpu_seq_db_pad.
+evo2_phage_prepare_external_assets \
+  --skip-mmseqs \
+  --skip-arc-evo2 \
+  --download-large-databases \
+  --skip-checkv \
+  --insecure-downloads
+
+# CheckV setup. The CI build already installs upstream DIAMOND and
+# HMMER/hmmsearch into .venv/bin; this command downloads the CheckV database.
+evo2_phage_prepare_external_assets \
+  --skip-mmseqs \
+  --skip-diamond \
+  --skip-hmmer \
+  --skip-phrogs-annotation \
+  --skip-arc-evo2 \
+  --download-large-databases
 export CHECKVDB="$PWD/recipes/evo2_phage_gen/data/external/checkv/checkv-db-v1.5"
 ```
 
@@ -856,21 +898,25 @@ export CHECKVDB="$PWD/recipes/evo2_phage_gen/data/external/checkv/checkv-db-v1.5
 including `checkv`, `orfipy`, `lovis4u`, `pyrodigal`, `pyrodigal-gv`,
 `biopython`, `biotite`, and plotting/data-analysis packages. The asset command
 handles the pieces that are not normal Python package dependencies: the
-MMseqs2-GPU executable, the Prodigal-compatible wrapper, PHROGs files, and the
-CheckV database.
+MMseqs2-GPU executable, upstream DIAMOND, the Prodigal-compatible wrapper,
+HMMER/hmmsearch, PHROGs files, and the CheckV database. In CI, the small native
+tools are installed into `.venv/bin` by `.ci_build_env.sh`, so sourcing
+`.ci_test_env.sh` is enough to put them on `PATH`.
 
 The expected populated paths are:
 
 - `recipes/evo2_phage_gen/data/external/zenodo/microviridae_sft_training_data_raw.fna`
   for training-data identity filtering.
-- `recipes/evo2_phage_gen/data/external/phrogs/phrogs_mmseqs_db/phrogs_mmseqs_db`
-  and `recipes/evo2_phage_gen/data/external/phrogs/phrog_annot_v4.tsv` for PHROGs
-  protein hit counts and annotation.
+- `recipes/evo2_phage_gen/data/external/phrogs/phrogs_gpu_seq_db_pad` and
+  `recipes/evo2_phage_gen/data/external/phrogs/phrog_annot_v4.tsv` for PHROGs
+  protein hit counts and annotation with the new MMseqs2-GPU binary. The legacy
+  profile DB is still downloaded under
+  `recipes/evo2_phage_gen/data/external/phrogs/phrogs_mmseqs_db/` for reference.
 - `recipes/evo2_phage_gen/data/external/mmseqs/NC_001422_1_Gprotein/` with an MMseqs
   database built from `data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta`
   for the tropism filter.
-- A CheckV database and `CHECKVDB` environment setting for CheckV quality
-  filtering.
+- A CheckV database, `CHECKVDB` environment setting, `hmmsearch`, and DIAMOND
+  binary for CheckV quality filtering.
 - A Prodigal-compatible executable discoverable on `PATH`; the asset command
   creates `recipes/evo2_phage_gen/data/external/bin/prodigal` as a wrapper around
   `pyrodigal`.
@@ -884,8 +930,9 @@ possible.
 After those commands work, rerun `evo2_phage_check_external_qc` without
 `--warn-only`, then enable one config stage at a time. Start with
 `orf_filtering`, then `homology_filtering` after the PHROGs, tropism-protein,
-and training-data databases are present, then CheckV after `CHECKVDB` points at
-the downloaded CheckV database.
+and training-data databases are present, then CheckV after `diamond` and
+`hmmsearch` are on `PATH` and `CHECKVDB` points at the downloaded CheckV
+database.
 
 Current nucleotide-QC replication:
 
@@ -895,10 +942,11 @@ evo2_phage_nucleotide_qc \
   --output-dir recipes/evo2_phage_gen/data/checkpoints/qc/all_generated_phages_nucleotide
 ```
 
-The bundled `all_generated_phages.fasta` contains 302 paper candidates. All 302
-pass the dependency-light nucleotide filters: valid DNA characters, 4-6 kb
-length, 30-65 percent GC, and nucleotide homopolymer length at most 10. This is
-expected because the bundled FASTA is already the curated paper candidate set,
+The bundled `all_generated_phages.fasta` contains 302 paper candidates that
+already survived Arc's candidate-selection process. All 302 pass the
+dependency-light nucleotide filters: valid DNA characters, 4-6 kb length,
+30-65 percent GC, and nucleotide homopolymer length at most 10. This is expected
+because the bundled FASTA is already curated,
 not raw model samples.
 
 Current online reward scorer:
@@ -1000,9 +1048,10 @@ infer_evo2 \
   --output-file recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
 ```
 
-This loaded the converted 7B checkpoint on one A6000, used MCore local CUDA
-graphs, peaked at about 17.5 GB GPU memory, and generated `GATAAAGC` for the
-short smoke prompt.
+This loads the converted 7B checkpoint with MCore local CUDA graphs and
+generates `GATAAAGC` for the short smoke prompt. A steady-state TP=2 CUDA graph
+run on 2xH100 reaches about 109 completion tokens/sec for a 1024-token
+completion.
 
 Ambiguous reverse mappings need a principled initialization projection:
 
@@ -1063,8 +1112,10 @@ evo2_phage_score_fasta \
 Smoke result on Arc's bundled generated phages: 302 initial sequences, 302 pass
 valid nucleotide characters, length, GC, and homopolymer filters. The online
 reward smoke has 302 rows with mean/min/max reward all equal to 1.0. This only
-covers the dependency-light nucleotide layer; ORF, protein, MMseqs, CheckV, and
-genetic-architecture checks still need their external databases and tools.
+covers the dependency-light nucleotide layer on the already-curated FASTA. To
+reproduce the paper-style raw-generation pass rate, run the same filters on a
+fresh prompt sweep before curation; length failures should be counted in the
+denominator.
 
 ## RL Stack Direction
 
@@ -1078,16 +1129,6 @@ Reasons:
 - Megatron-RL exists in the pinned MCore commit, but its README still describes
   the external surface as under active development and not yet intended as an
   out-of-the-box framework.
-
-Open exploration for the first RL milestone:
-
-- Verify NeMo-RL's Megatron model-import path can construct BioNeMo's Evo2
-  `HyenaModelProvider` rather than a standard GPTModel-only provider.
-- Decide whether the first reward-optimization pass should be GRPO, PPO, or a
-  simpler reward-weighted SFT baseline. GRPO is attractive because the reward is
-  sequence-level and candidate validation is sparse.
-- Confirm the checkpoint handoff path from MBridge SFT checkpoints into NeMo-RL
-  policy initialization and back into this recipe's train/infer scripts.
 
 Current RL scaffold:
 
@@ -1104,8 +1145,28 @@ The launcher registers `phage_qc` as a NeMo-RL environment backed by
 `bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment`, registers the plain DNA
 prompt processor, then calls NeMo-RL's GRPO APIs directly. The config sets
 `policy.generation.backend: "megatron"`, initializes from the converted
-Microviridae MBridge checkpoint, and uses the dependency-light phage reward as
-the environment score.
+Microviridae MBridge checkpoint, and uses the configured phage reward as the
+environment score. The reward can run only cheap nucleotide checks or enable the
+heavier Arc-style stack: Prodigal/Orfipy ORF checks, PHROGs/MMseqs protein hit
+count, tropism, genetic architecture, CheckV, MMseqs clustering, a
+synteny-correlated annotation/order proxy, and a gated normalized diversity
+bonus. GRPO generation uses MCore local CUDA graphs via
+`policy.generation.mcore_generation_config.cuda_graph_impl: "local"` and
+`use_cuda_graphs_for_non_decode_steps: true`.
+
+NeMo Gym is the direction NeMo-RL is taking for multi-step environment
+orchestration: a Resources Server owns tool/verifier logic and NeMo-RL can call
+it through a Ray actor when `env.should_use_nemo_gym: true` is configured.
+That is useful if this reward becomes a long-running verifier service shared by
+training and evaluation. It does not replace container dependency management:
+NeMo Gym is CPU-only environment orchestration and still expects the same Ray
+and Python stack as NeMo-RL, plus any native tools the verifier calls. Also, the
+documented NeMo Gym training path is currently centered on vLLM HTTP generation;
+this recipe uses NeMo-RL's Megatron backend because Evo2 has no vLLM layers.
+For now, keep Python deps in `uv` and the small native binaries in `.venv/bin`
+through `evo2_phage_prepare_external_assets --bin-dir .venv/bin`; consider a
+NeMo Gym Resources Server later if the QC verifier needs to scale or be shared
+independently of GRPO.
 
 `evo2_phage_check_rl` verifies NeMo-RL imports, Ray, the GRPO config defaults,
 the converted checkpoint and latest-iteration marker, the checkpoint
@@ -1115,11 +1176,12 @@ that checkpoint config, tokenizer, prompt JSONL, Megatron generation backend,
 topology, and the Evo2 policy finalization hook.
 
 The recipe keeps upstreamable NeMo-RL changes in
-`patches/nemo-rl-evo2-mbridge-grpo.patch`. Apply them to the installed package
-with:
+`patches/nemo-rl-evo2-mbridge-grpo.patch`. `.ci_build_env.sh` applies them as
+part of environment setup. For an existing environment, repair and patch the
+installed package with:
 
 ```bash
-evo2_phage_patch_nemo_rl
+evo2_phage_patch_nemo_rl --repair-install
 ```
 
 The patch:
@@ -1139,12 +1201,11 @@ The patch:
   Evo2 Mamba-state config and binding Hyena recurrent-state views into MCore's
   dynamic context.
 
-Current two-A6000 status: the short GRPO run loads the converted checkpoint with
-TP=2, initializes policy and reference models, runs CUDA graph-backed Megatron
-generation, computes rewards/logprobs, and reaches backward/training. The
-non-offloaded run runs out of GPU memory at Adam state initialization. A retry
-with optimizer CPU offload progressed to setup but needs a larger-GPU validation
-run or further memory tuning before this recipe can claim a saved RL checkpoint.
+Current two-H100 status: a one-step GRPO smoke loads the converted checkpoint
+with TP=2, initializes policy and reference models, runs CUDA graph-backed
+Megatron generation, computes rewards/logprobs, completes training, and saves a
+policy checkpoint under `data/checkpoints/phage_grpo*`. The saved policy can be
+loaded by `infer_evo2` for CUDA graph-backed generation.
 
 ## Reward And QC Plan
 

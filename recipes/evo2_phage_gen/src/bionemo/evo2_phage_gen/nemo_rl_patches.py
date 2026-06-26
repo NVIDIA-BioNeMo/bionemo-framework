@@ -19,12 +19,22 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import shutil
 import subprocess
+import sys
+import tempfile
+import tomllib
 from pathlib import Path
 
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PATCH = RECIPE_ROOT / "patches" / "nemo-rl-evo2-mbridge-grpo.patch"
+REQUIRED_NEMO_RL_MODULES = [
+    "nemo_rl.algorithms.grpo",
+    "nemo_rl.data.processors",
+    "nemo_rl.models.generation.megatron.megatron_worker",
+    "nemo_rl.models.megatron.setup",
+]
 
 
 def _nemo_rl_source_root() -> Path:
@@ -44,6 +54,113 @@ def _run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str
         stderr=subprocess.STDOUT,
         check=False,
     )
+
+
+def _nemo_rl_source_pin() -> tuple[str, str]:
+    """Read the pinned NeMo-RL source URL and revision from this recipe."""
+    pyproject = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
+    source = pyproject["tool"]["uv"]["sources"]["nemo-rl"]
+    return source["git"], source["rev"]
+
+
+def _is_complete_nemo_rl_install() -> bool:
+    """Return whether the importable NeMo-RL package contains the modules GRPO needs."""
+    for module_name in REQUIRED_NEMO_RL_MODULES:
+        try:
+            if importlib.util.find_spec(module_name) is None:
+                return False
+        except ModuleNotFoundError:
+            return False
+    return True
+
+
+def _uv_cache_dir() -> Path | None:
+    """Return uv's cache dir when uv is available."""
+    result = subprocess.run(["uv", "cache", "dir"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        return None
+    return Path(result.stdout.strip()).expanduser()
+
+
+def _git_head(path: Path) -> str | None:
+    """Return the Git HEAD for ``path`` when it is a Git checkout."""
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _looks_like_nemo_rl_source(path: Path) -> bool:
+    """Check for files that identify a full NeMo-RL source checkout."""
+    return (path / "pyproject.toml").exists() and (path / "nemo_rl" / "algorithms" / "grpo.py").exists()
+
+
+def _find_cached_nemo_rl_source(revision: str) -> Path | None:
+    """Find the pinned NeMo-RL checkout in uv's git cache, if present."""
+    cache_dir = _uv_cache_dir()
+    if cache_dir is None:
+        return None
+    checkouts_dir = cache_dir / "git-v0" / "checkouts"
+    if not checkouts_dir.exists():
+        return None
+    for pyproject_path in checkouts_dir.rglob("pyproject.toml"):
+        candidate = pyproject_path.parent
+        if _looks_like_nemo_rl_source(candidate) and _git_head(candidate) == revision:
+            return candidate
+    return None
+
+
+def _clone_nemo_rl_source(git_url: str, revision: str, destination: Path) -> Path:
+    """Clone the pinned NeMo-RL source when it is not already in uv's cache."""
+    subprocess.run(["git", "clone", "--filter=blob:none", git_url, str(destination)], check=True)
+    subprocess.run(["git", "-C", str(destination), "checkout", revision], check=True)
+    return destination
+
+
+def _copy_minimal_nemo_rl_source(source_root: Path, destination: Path) -> Path:
+    """Copy only files needed to build the NeMo-RL Python package."""
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_root / "nemo_rl", destination / "nemo_rl")
+    for filename in ["pyproject.toml", "README.md", "LICENSE"]:
+        source_file = source_root / filename
+        if source_file.exists():
+            shutil.copy2(source_file, destination / filename)
+    return destination
+
+
+def _patch_nemo_rl_packaging_metadata(source_root: Path) -> None:
+    """Patch upstream packaging metadata so setuptools includes all ``nemo_rl`` subpackages."""
+    pyproject_path = source_root / "pyproject.toml"
+    text = pyproject_path.read_text()
+    text = text.replace('packages = ["nemo_rl"]', 'packages = { find = { include = ["nemo_rl*"] } }')
+    text = text.replace('requires-python = ">=3.13.13,<3.14"', 'requires-python = ">=3.10"')
+    pyproject_path.write_text(text)
+
+
+def repair_nemo_rl_install() -> str:
+    """Reinstall the pinned NeMo-RL checkout with complete package discovery."""
+    if _is_complete_nemo_rl_install():
+        return "nemo-rl install already contains required modules"
+
+    git_url, revision = _nemo_rl_source_pin()
+    source_root = _find_cached_nemo_rl_source(revision)
+    with tempfile.TemporaryDirectory(prefix="evo2-phage-nemo-rl-") as temp_dir:
+        temp_path = Path(temp_dir)
+        if source_root is None:
+            source_root = _clone_nemo_rl_source(git_url, revision, temp_path / "source")
+        build_root = _copy_minimal_nemo_rl_source(source_root, temp_path / "build")
+        _patch_nemo_rl_packaging_metadata(build_root)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(build_root)],
+            check=True,
+        )
+    return f"reinstalled nemo-rl from {revision} with complete package discovery"
 
 
 def apply_nemo_rl_patch(patch_path: Path = DEFAULT_PATCH, *, check_only: bool = False) -> str:
@@ -78,7 +195,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Apply Evo2 phage NeMo-RL integration patch")
     parser.add_argument("--patch", type=Path, default=DEFAULT_PATCH)
     parser.add_argument("--check", action="store_true", help="Only check whether the patch can be applied")
+    parser.add_argument(
+        "--repair-install",
+        action="store_true",
+        help="Reinstall the pinned NeMo-RL checkout with all nemo_rl subpackages before applying the patch.",
+    )
     args = parser.parse_args()
+    if args.repair_install:
+        print(repair_nemo_rl_install())
+        importlib.invalidate_caches()
+        for module_name in list(sys.modules):
+            if module_name == "nemo_rl" or module_name.startswith("nemo_rl."):
+                sys.modules.pop(module_name)
     print(apply_nemo_rl_patch(args.patch, check_only=args.check))
 
 

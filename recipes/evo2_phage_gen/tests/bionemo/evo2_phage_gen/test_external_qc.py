@@ -75,8 +75,9 @@ def test_external_qc_checker_allows_missing_optional_external_tools(tmp_path):
     assert any(check.name == "phrogs_mmseqs_db" and not check.required and not check.ok for check in checks)
 
 
-def test_external_qc_checker_requires_enabled_stage_inputs(tmp_path):
+def test_external_qc_checker_requires_enabled_stage_inputs(tmp_path, monkeypatch):
     """Enabling homology should promote MMseqs databases to required checks."""
+    monkeypatch.setattr("shutil.which", lambda _tool: None)
     checks = check_arc_qc_prerequisites(
         _write_config(tmp_path, homology_filtering=True),
         genetic_architecture_import_fasta=_write_import_fasta(tmp_path),
@@ -87,6 +88,18 @@ def test_external_qc_checker_requires_enabled_stage_inputs(tmp_path):
     assert "tropism_mmseqs_db" in missing_required
     assert "mmseqs" in missing_required
     assert "orfipy" in missing_required
+
+
+def test_external_qc_checker_requires_lovis4u_for_visualization_stage(tmp_path, monkeypatch):
+    """The exact Arc visualization/synteny stage needs LoVis4u on PATH."""
+    monkeypatch.setattr("shutil.which", lambda _tool: None)
+    checks = check_arc_qc_prerequisites(
+        _write_config(tmp_path, genetic_architecture_visualization_and_synteny_filtering=True),
+        genetic_architecture_import_fasta=_write_import_fasta(tmp_path),
+    )
+
+    missing_required = {check.name for check in checks if check.required and not check.ok}
+    assert "lovis4u" in missing_required
 
 
 def test_external_qc_cli_warn_only_does_not_fail_on_missing_required(tmp_path, monkeypatch, capsys):

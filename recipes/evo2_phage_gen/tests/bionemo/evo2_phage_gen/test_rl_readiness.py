@@ -15,21 +15,10 @@
 
 """Tests for ``bionemo.evo2_phage_gen.rl_readiness``."""
 
+import yaml
 from pathlib import Path
 
-import yaml
-
 from bionemo.evo2_phage_gen.rl_readiness import check_rl_readiness
-
-
-def _write_minimal_nemo_rl_checkout(path: Path) -> None:
-    """Create enough package structure for import-spec checks."""
-    (path / "nemo_rl").mkdir(parents=True)
-    (path / "nemo_rl" / "__init__.py").write_text("")
-    (path / "nemo_rl" / "algorithms").mkdir()
-    (path / "nemo_rl" / "algorithms" / "__init__.py").write_text("")
-    (path / "nemo_rl" / "algorithms" / "grpo.py").write_text("def setup():\n    pass\n")
-    (path / "ray.py").write_text("")
 
 
 def _write_minimal_config(
@@ -85,13 +74,12 @@ def _write_minimal_config(
 
 def test_rl_readiness_reports_recipe_evo2_adapter_patch(tmp_path):
     """The readiness checker should see the recipe-local Evo2 NeMo-RL patch."""
-    local_nemo_rl = tmp_path / "nemo-rl"
-    _write_minimal_nemo_rl_checkout(local_nemo_rl)
     config_path = _write_minimal_config(tmp_path)
 
-    checks = check_rl_readiness(config_path, local_nemo_rl=local_nemo_rl, expected_gpus=2)
+    checks = check_rl_readiness(config_path, expected_gpus=2)
     by_name = {check.name: check for check in checks}
 
+    assert by_name["nemo_rl_install"].ok
     assert by_name["nemo_rl"].ok
     assert by_name["ray"].ok
     assert by_name["grpo_algorithm"].ok
@@ -107,13 +95,10 @@ def test_rl_readiness_reports_recipe_evo2_adapter_patch(tmp_path):
 
 def test_rl_readiness_allows_template_gap_to_be_optional(tmp_path):
     """The adapter check can be marked optional when only inspecting the scaffold."""
-    local_nemo_rl = tmp_path / "nemo-rl"
-    _write_minimal_nemo_rl_checkout(local_nemo_rl)
     config_path = _write_minimal_config(tmp_path)
 
     checks = check_rl_readiness(
         config_path,
-        local_nemo_rl=local_nemo_rl,
         require_evo2_adapter=False,
         expected_gpus=2,
     )
@@ -124,11 +109,9 @@ def test_rl_readiness_allows_template_gap_to_be_optional(tmp_path):
 
 def test_rl_readiness_passes_when_adapter_path_is_configured(tmp_path):
     """A config with an explicit Evo2 provider adapter should pass local checks."""
-    local_nemo_rl = tmp_path / "nemo-rl"
-    _write_minimal_nemo_rl_checkout(local_nemo_rl)
     config_path = _write_minimal_config(tmp_path, include_adapter=True)
 
-    checks = check_rl_readiness(config_path, local_nemo_rl=local_nemo_rl, expected_gpus=2)
+    checks = check_rl_readiness(config_path, expected_gpus=2)
     missing_required = [check for check in checks if check.required and not check.ok]
 
     assert missing_required == []
@@ -136,11 +119,9 @@ def test_rl_readiness_passes_when_adapter_path_is_configured(tmp_path):
 
 def test_rl_readiness_rejects_non_colocated_megatron_topology(tmp_path):
     """The two-GPU recipe scaffold targets colocated Megatron GRPO."""
-    local_nemo_rl = tmp_path / "nemo-rl"
-    _write_minimal_nemo_rl_checkout(local_nemo_rl)
     config_path = _write_minimal_config(tmp_path, include_adapter=True, colocated_generation=False)
 
-    checks = check_rl_readiness(config_path, local_nemo_rl=local_nemo_rl, expected_gpus=2)
+    checks = check_rl_readiness(config_path, expected_gpus=2)
     topology_check = {check.name: check for check in checks}["megatron_generation_topology"]
 
     assert not topology_check.ok

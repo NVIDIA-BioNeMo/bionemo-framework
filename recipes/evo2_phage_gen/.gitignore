@@ -1,2 +1,3 @@
 .venv/
 pip-constraints.txt
+tmp_*

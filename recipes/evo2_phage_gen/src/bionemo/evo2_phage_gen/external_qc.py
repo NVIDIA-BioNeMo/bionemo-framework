@@ -28,6 +28,8 @@ import yaml
 ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA = (
     "/large_storage/hielab/samuelking/phage_design/data/phix174_only/microviridae_genomes_NC_001422_1.fna"
 )
+RECIPE_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_CHECKV_DB = RECIPE_ROOT / "data" / "external" / "checkv" / "checkv-db-v1.5"
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ def check_arc_qc_prerequisites(
     config_path: Path,
     *,
     genetic_architecture_import_fasta: str | Path = ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA,
+    checkv_db_path: str | Path = DEFAULT_CHECKV_DB,
 ) -> list[QCPrerequisiteCheck]:
     """Check path and tool prerequisites for the local Arc pipeline config."""
     config = yaml.safe_load(Path(config_path).read_text())
@@ -124,11 +127,22 @@ def check_arc_qc_prerequisites(
 
     checkv_required = homology_required and bool(config.get("checkv_filter"))
     checks.append(_check_tool("checkv", "checkv", required=checkv_required))
+    checks.append(_check_tool("hmmsearch", "hmmsearch", required=checkv_required))
+    checks.append(_check_tool("diamond", "diamond", required=checkv_required))
+    checks.append(
+        QCPrerequisiteCheck(
+            name="checkv_database",
+            ok=_path_exists(checkv_db_path),
+            required=checkv_required,
+            detail=str(checkv_db_path),
+        )
+    )
 
     diversification_required = bool(config.get("diversification_filtering"))
     checks.append(_check_tool("mmseqs_for_diversification", "mmseqs", required=diversification_required))
 
     visualization_required = bool(config.get("genetic_architecture_visualization_and_synteny_filtering"))
+    checks.append(_check_tool("lovis4u", "lovis4u", required=visualization_required))
     checks.extend(
         [
             _check_path(
@@ -167,6 +181,12 @@ def main() -> None:
         default=Path(ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA),
         help="PhiX174 FASTA path read by Arc genetic_architecture.py at import time",
     )
+    parser.add_argument(
+        "--checkv-db",
+        type=Path,
+        default=DEFAULT_CHECKV_DB,
+        help="CheckV database directory exported as CHECKVDB for CheckV runs",
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     parser.add_argument("--warn-only", action="store_true", help="Report missing required checks without failing")
     args = parser.parse_args()
@@ -174,6 +194,7 @@ def main() -> None:
     checks = check_arc_qc_prerequisites(
         args.config,
         genetic_architecture_import_fasta=args.genetic_architecture_import_fasta,
+        checkv_db_path=args.checkv_db,
     )
     if args.json:
         print(json.dumps([asdict(check) for check in checks], indent=2))

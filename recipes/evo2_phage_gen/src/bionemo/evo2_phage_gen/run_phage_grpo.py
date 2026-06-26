@@ -74,7 +74,8 @@ def main() -> None:
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "NeMo-RL and its runtime dependencies are required for GRPO. "
-            "Install the recipe environment and run evo2_phage_patch_nemo_rl before launching GRPO."
+            "Install the recipe environment, or repair an existing environment with "
+            "evo2_phage_patch_nemo_rl --repair-install, before launching GRPO."
         ) from exc
 
     _register_recipe_extensions()

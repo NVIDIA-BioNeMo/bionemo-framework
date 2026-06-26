@@ -17,9 +17,11 @@
 
 from bionemo.evo2_phage_gen.arc_pipeline import (
     ARC_LEGACY_CHECKV_ENV,
+    ARC_LEGACY_LOVIS4U_CONDA_WRAPPER,
     ARC_LEGACY_PRODIGAL_CMD,
     ARC_PIPELINE_FILES,
     PATCHED_CHECKV_ENV,
+    PATCHED_LOVIS4U_CONDA_WRAPPER,
     PATCHED_PRODIGAL_CMD,
     prepare_arc_pipeline_workdir,
 )
@@ -35,7 +37,7 @@ def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
         if filename == "genetic_architecture.py":
             content = f'fasta_file = "{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"\n'
         if filename == "genome_design_filtering_pipeline.py":
-            content = f"{ARC_LEGACY_PRODIGAL_CMD}\n{ARC_LEGACY_CHECKV_ENV}\n"
+            content = f"{ARC_LEGACY_PRODIGAL_CMD}\n{ARC_LEGACY_CHECKV_ENV}\n{ARC_LEGACY_LOVIS4U_CONDA_WRAPPER}\n"
         (source_dir / filename).write_text(content)
     phix174_fasta = tmp_path / "NC_001422_1.fna"
     phix174_fasta.write_text(">NC_001422.1\nACGT\n")
@@ -54,5 +56,7 @@ def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
     pipeline_text = (tmp_path / "patched" / "genome_design_filtering_pipeline.py").read_text()
     assert ARC_LEGACY_PRODIGAL_CMD not in pipeline_text
     assert ARC_LEGACY_CHECKV_ENV not in pipeline_text
+    assert ARC_LEGACY_LOVIS4U_CONDA_WRAPPER not in pipeline_text
     assert PATCHED_PRODIGAL_CMD in pipeline_text
     assert PATCHED_CHECKV_ENV in pipeline_text
+    assert PATCHED_LOVIS4U_CONDA_WRAPPER in pipeline_text

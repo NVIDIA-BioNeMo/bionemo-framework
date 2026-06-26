@@ -75,3 +75,25 @@ def test_apply_nemo_rl_patch_reports_already_applied(tmp_path: Path, monkeypatch
     result = nemo_rl_patches.apply_nemo_rl_patch(patch_file)
 
     assert result == f"patch already applied to {source_root}"
+
+
+def test_patch_nemo_rl_packaging_metadata_includes_subpackages(tmp_path: Path) -> None:
+    """The repair helper should make upstream NeMo-RL package all submodules."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '\n'.join(
+            [
+                "[tool.setuptools]",
+                'packages = ["nemo_rl"]',
+                "",
+                "[project]",
+                'requires-python = ">=3.13.13,<3.14"',
+            ]
+        )
+    )
+
+    nemo_rl_patches._patch_nemo_rl_packaging_metadata(tmp_path)
+
+    patched = pyproject.read_text()
+    assert 'packages = { find = { include = ["nemo_rl*"] } }' in patched
+    assert 'requires-python = ">=3.10"' in patched
