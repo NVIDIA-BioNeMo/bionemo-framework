@@ -71,6 +71,14 @@ def _path_check(name: str, path_like: str | Path | None, *, required: bool) -> R
     return RLReadinessCheck(name=name, ok=path.exists(), required=required, detail=str(path))
 
 
+def _config_relative_path(config_path: Path, path_like: str | Path | None) -> Path | None:
+    """Resolve a path the same way NeMo-RL config inheritance resolves it."""
+    if path_like in (None, ""):
+        return None
+    path = Path(path_like)
+    return path if path.is_absolute() else config_path.parent / path
+
+
 def _module_check(name: str, module_name: str, *, required: bool) -> RLReadinessCheck:
     """Create a Python import-spec readiness check without importing the module."""
     ok = importlib.util.find_spec(module_name) is not None
@@ -212,7 +220,11 @@ def _config_checks(
 
     checks.extend(
         [
-            _path_check("config_defaults", config.get("defaults"), required=True),
+            _path_check(
+                "config_defaults",
+                _config_relative_path(config_path, config.get("defaults")),
+                required=True,
+            ),
             _path_check(
                 "pretrained_checkpoint",
                 _nested_get(config, ("checkpointing", "pretrained_checkpoint", "path")),

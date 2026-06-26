@@ -446,16 +446,23 @@ short-run target when debugging the SFT stage.
 
 ## Replication Command Checklist
 
-Run these from a checkout rooted at `/workspaces/bionemo-framework`.
+Run these from the repository root.
 
 01. Build and enter the recipe environment:
 
     ```bash
-    cd /workspaces/bionemo-framework/recipes/evo2_phage_gen
+    cd recipes/evo2_phage_gen
     ./.ci_build_env.sh
     source .ci_test_env.sh
     evo2_phage_patch_nemo_rl
+    cd ../..
     ```
+
+    If the install fails while building CUDA extension packages because they
+    cannot import the container's preinstalled PyTorch, retry the build command
+    as `UV_NO_MANAGED_PYTHON=1 ./.ci_build_env.sh`. This can happen when `uv`
+    selects a managed Python whose system site packages do not include the
+    container CUDA/PyTorch stack.
 
 02. Prepare recipe-local external assets and Arc reference data:
 
@@ -469,16 +476,16 @@ Run these from a checkout rooted at `/workspaces/bionemo-framework`.
 03. Validate the converter with the CI-friendly 1B Vortex checkpoint:
 
     ```bash
-    EVO2_CHECKPOINT_CACHE_DIR=/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints \
+    EVO2_CHECKPOINT_CACHE_DIR=recipes/evo2_phage_gen/data/checkpoints \
     python -m pytest \
-      /workspaces/bionemo-framework/recipes/evo2_megatron/tests/bionemo/evo2/utils/checkpoint/test_vortex_to_mbridge.py \
+      recipes/evo2_megatron/tests/bionemo/evo2/utils/checkpoint/test_vortex_to_mbridge.py \
       -q
     ```
 
 04. Download Arc's Microviridae Vortex checkpoint to the local replication cache:
 
     ```bash
-    mkdir -p /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints
+    mkdir -p recipes/evo2_phage_gen/data/checkpoints
     python - <<'PY'
     from pathlib import Path
     import shutil
@@ -489,7 +496,7 @@ Run these from a checkout rooted at `/workspaces/bionemo-framework`.
         repo_id="evo-design/evo-2-7b-8k-microviridae",
         filename="evo2_7b_microviridae.pt",
     )
-    dst = Path("/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt")
+    dst = Path("recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt")
     shutil.copy2(src, dst)
     print(dst)
     PY
@@ -499,19 +506,19 @@ Run these from a checkout rooted at `/workspaces/bionemo-framework`.
 
     ```bash
     evo2_convert_vortex_to_mbridge \
-      --vortex-ckpt-path /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt \
-      --mbridge-ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+      --vortex-ckpt-path recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt \
+      --mbridge-ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
       --model-size evo2_7b_base \
       --seq-length 10240 \
-      --tokenizer-path /workspaces/bionemo-framework/recipes/evo2_phage_gen/tokenizers/nucleotide_fast_tokenizer_512
+      --tokenizer-path recipes/evo2_phage_gen/tokenizers/nucleotide_fast_tokenizer_512
     ```
 
 06. Export the converted checkpoint back to Vortex:
 
     ```bash
     evo2_export_mbridge_to_vortex \
-      --mbridge-ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-      --output-path /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt \
+      --mbridge-ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+      --output-path recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt \
       --model-size evo2_7b_base
     ```
 
@@ -525,8 +532,8 @@ Run these from a checkout rooted at `/workspaces/bionemo-framework`.
     import torch
     from torch.serialization import safe_globals
 
-    orig_path = Path("/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt")
-    conv_path = Path("/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt")
+    orig_path = Path("recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt")
+    conv_path = Path("recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt")
     with safe_globals([BytesIO]):
         orig = torch.load(orig_path, map_location="cpu", weights_only=True, mmap=True)
         conv = torch.load(conv_path, map_location="cpu", weights_only=True, mmap=True)
@@ -550,9 +557,9 @@ Run these from a checkout rooted at `/workspaces/bionemo-framework`.
 08. Run a short Megatron inference smoke:
 
     ```bash
-    mkdir -p /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation
+    mkdir -p recipes/evo2_phage_gen/data/checkpoints/generation
     infer_evo2 \
-      --ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+      --ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
       --prompt GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAAAAATTATCTT \
       --max-new-tokens 8 \
       --temperature 0.8 \
@@ -561,35 +568,35 @@ Run these from a checkout rooted at `/workspaces/bionemo-framework`.
       --tensor-parallel-size 1 \
       --max-seq-length 128 \
       --max-batch-size 1 \
-      --output-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
+      --output-file recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
     ```
 
 09. Reproduce the dependency-light nucleotide QC smoke:
 
     ```bash
     evo2_phage_nucleotide_qc \
-      --input-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
-      --output-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke
+      --input-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
+      --output-dir recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke
     ```
 
 10. Score the same FASTA with the online reward:
 
     ```bash
     evo2_phage_score_fasta \
-      --input-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
-      --output-csv /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke/rewards.csv
+      --input-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
+      --output-csv recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke/rewards.csv
     ```
 
 11. Re-run the checkpoint-prior analysis used by the converter:
 
     ```bash
     evo2_analyze_inverse_prior \
-      --checkpoint-dir /home/ubuntu/.cache/bionemo/d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990-nemo2_evo2_1b_8k.tar.gz.untar \
-      --output-json /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_1b_8k_prior.json
+      --checkpoint-dir "$HOME/.cache/bionemo/d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990-nemo2_evo2_1b_8k.tar.gz.untar" \
+      --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_1b_8k_prior.json
 
     evo2_analyze_inverse_prior \
-      --checkpoint-dir /home/ubuntu/.cache/bionemo/78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655-nemo2_evo2_7b_8k.tar.gz.untar \
-      --output-json /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_7b_8k_prior.json
+      --checkpoint-dir "$HOME/.cache/bionemo/78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655-nemo2_evo2_7b_8k.tar.gz.untar" \
+      --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_7b_8k_prior.json
     ```
 
 12. Check the NeMo-RL GRPO scaffold readiness:
@@ -608,8 +615,10 @@ Run these from a checkout rooted at `/workspaces/bionemo-framework`.
 13. Inspect the NeMo-RL GRPO scaffold:
 
     ```bash
+    cd recipes/evo2_phage_gen
     evo2_phage_run_grpo \
-      --config /workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/grpo_phage_megatron.yaml
+      --config configs/grpo_phage_megatron.yaml
+    cd ../..
     ```
 
     This is expected to require a NeMo-RL-capable environment with runtime
@@ -659,16 +668,16 @@ sampling at temperatures 0.7 or 0.9 and prompt lengths 4, 9, or 11 bp:
 Generate one paper-style parameter combination with repeated prompts:
 
 ```bash
-mkdir -p /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/prompts
+mkdir -p recipes/evo2_phage_gen/data/checkpoints/generation/prompts
 evo2_phage_generation write-prompts \
-  --output-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/prompts \
+  --output-dir recipes/evo2_phage_gen/data/checkpoints/generation/prompts \
   --prompt-lengths 4 \
   --num-prompts 1000 \
   --id-prefix phix174
 
 infer_evo2 \
-  --ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-  --prompt-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/prompts/phix174_prompt4_1000.jsonl \
+  --ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+  --prompt-file recipes/evo2_phage_gen/data/checkpoints/generation/prompts/phix174_prompt4_1000.jsonl \
   --max-new-tokens 5996 \
   --temperature 0.7 \
   --top-k 4 \
@@ -677,21 +686,21 @@ infer_evo2 \
   --tensor-parallel-size 1 \
   --max-seq-length 6144 \
   --max-batch-size 1 \
-  --output-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/phix174_prompt4_temp0.7.jsonl
+  --output-file recipes/evo2_phage_gen/data/checkpoints/generation/phix174_prompt4_temp0.7.jsonl
 ```
 
 Mini prompt-file smoke result:
 
 ```bash
 evo2_phage_generation write-prompts \
-  --output-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/prompts \
+  --output-dir recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/prompts \
   --prompt-lengths 4 \
   --num-prompts 2 \
   --id-prefix mini
 
 infer_evo2 \
-  --ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-  --prompt-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/prompts/mini_prompt4_2.jsonl \
+  --ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+  --prompt-file recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/prompts/mini_prompt4_2.jsonl \
   --max-new-tokens 16 \
   --temperature 0.7 \
   --top-k 4 \
@@ -700,15 +709,15 @@ infer_evo2 \
   --tensor-parallel-size 1 \
   --max-seq-length 128 \
   --max-batch-size 1 \
-  --output-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.jsonl
+  --output-file recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.jsonl
 
 evo2_phage_generation jsonl-to-fasta \
-  --input-jsonl /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.jsonl \
-  --output-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.fasta
+  --input-jsonl recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.jsonl \
+  --output-fasta recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.fasta
 
 evo2_phage_nucleotide_qc \
-  --input-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.fasta \
-  --output-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/qc
+  --input-fasta recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.fasta \
+  --output-dir recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/qc
 ```
 
 This loaded the converted 7B Microviridae checkpoint through Megatron/MCore
@@ -722,11 +731,11 @@ Run the full first-pass Evo2 sweep:
 
 ```bash
 mkdir -p \
-  /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/prompts \
-  /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/jsonl
+  recipes/evo2_phage_gen/data/checkpoints/generation/prompts \
+  recipes/evo2_phage_gen/data/checkpoints/generation/jsonl
 
 evo2_phage_generation write-prompts \
-  --output-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/prompts \
+  --output-dir recipes/evo2_phage_gen/data/checkpoints/generation/prompts \
   --prompt-lengths 4 5 6 7 8 9 \
   --num-prompts 1000 \
   --id-prefix phix174
@@ -734,8 +743,8 @@ evo2_phage_generation write-prompts \
 for temp in 0.7 0.8 0.9; do
   for prompt_len in 4 5 6 7 8 9; do
     infer_evo2 \
-      --ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-      --prompt-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/prompts/phix174_prompt${prompt_len}_1000.jsonl \
+      --ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+      --prompt-file recipes/evo2_phage_gen/data/checkpoints/generation/prompts/phix174_prompt${prompt_len}_1000.jsonl \
       --max-new-tokens $((6000 - prompt_len)) \
       --temperature "${temp}" \
       --top-k 4 \
@@ -744,7 +753,7 @@ for temp in 0.7 0.8 0.9; do
       --tensor-parallel-size 1 \
       --max-seq-length 6144 \
       --max-batch-size 1 \
-      --output-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/jsonl/phix174_prompt${prompt_len}_temp${temp}.jsonl
+      --output-file recipes/evo2_phage_gen/data/checkpoints/generation/jsonl/phix174_prompt${prompt_len}_temp${temp}.jsonl
   done
 done
 ```
@@ -755,8 +764,8 @@ the completion:
 
 ```bash
 evo2_phage_generation jsonl-to-fasta \
-  --input-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/jsonl \
-  --output-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/evo2_microviridae_prompt_sweep.fasta
+  --input-dir recipes/evo2_phage_gen/data/checkpoints/generation/jsonl \
+  --output-fasta recipes/evo2_phage_gen/data/checkpoints/generation/evo2_microviridae_prompt_sweep.fasta
 ```
 
 Then run the nucleotide QC and reward commands above on
@@ -795,13 +804,12 @@ Run the local template from that prepared workdir so sibling imports such as
 
 ```bash
 evo2_phage_check_external_qc \
-  --config /workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/arc_genome_design_filtering_local.yaml \
-  --genetic-architecture-import-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna \
+  --config recipes/evo2_phage_gen/configs/arc_genome_design_filtering_local.yaml \
+  --genetic-architecture-import-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna \
   --warn-only
 
-cd /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/arc_pipeline_patched
-python genome_design_filtering_pipeline.py \
-  /workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/arc_genome_design_filtering_local.yaml
+python recipes/evo2_phage_gen/data/arc_pipeline_patched/genome_design_filtering_pipeline.py \
+  recipes/evo2_phage_gen/configs/arc_genome_design_filtering_local.yaml
 ```
 
 Drop `--warn-only` when using the checker as a gate immediately before running
@@ -815,13 +823,12 @@ For the curated-candidate smoke config:
 evo2_phage_prepare_arc_pipeline --overwrite
 
 evo2_phage_check_external_qc \
-  --config /workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/arc_genome_design_filtering_curated_smoke.yaml \
-  --genetic-architecture-import-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna \
+  --config recipes/evo2_phage_gen/configs/arc_genome_design_filtering_curated_smoke.yaml \
+  --genetic-architecture-import-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna \
   --warn-only
 
-cd /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/arc_pipeline_patched
-python genome_design_filtering_pipeline.py \
-  /workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/arc_genome_design_filtering_curated_smoke.yaml
+python recipes/evo2_phage_gen/data/arc_pipeline_patched/genome_design_filtering_pipeline.py \
+  recipes/evo2_phage_gen/configs/arc_genome_design_filtering_curated_smoke.yaml
 ```
 
 Patched curated smoke result: Arc's nucleotide-only pipeline loads 302 bundled
@@ -833,7 +840,7 @@ downloaded assets under the ignored `recipes/evo2_phage_gen/data/external/`
 tree:
 
 ```bash
-export PATH=/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/bin:$PATH
+export PATH="$PWD/recipes/evo2_phage_gen/data/external/bin:$PATH"
 
 # Lightweight setup: creates a prodigal wrapper backed by pyrodigal, downloads
 # the latest official MMseqs2-GPU binary, and downloads the PHROGs v4 annotation.
@@ -842,7 +849,7 @@ evo2_phage_prepare_external_assets
 # Full external database setup. This also downloads the PHROGs MMseqs profile DB
 # and CheckV database, which are larger and slower to fetch.
 evo2_phage_prepare_external_assets --download-large-databases
-export CHECKVDB=/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/checkv/checkv-db-v1.5
+export CHECKVDB="$PWD/recipes/evo2_phage_gen/data/external/checkv/checkv-db-v1.5"
 ```
 
 `pyproject.toml` installs the Python-facing analysis dependencies by default,
@@ -884,8 +891,8 @@ Current nucleotide-QC replication:
 
 ```bash
 evo2_phage_nucleotide_qc \
-  --input-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
-  --output-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/qc/all_generated_phages_nucleotide
+  --input-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
+  --output-dir recipes/evo2_phage_gen/data/checkpoints/qc/all_generated_phages_nucleotide
 ```
 
 The bundled `all_generated_phages.fasta` contains 302 paper candidates. All 302
@@ -898,8 +905,8 @@ Current online reward scorer:
 
 ```bash
 evo2_phage_score_fasta \
-  --input-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
-  --output-csv /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/qc/all_generated_phages_rewards.csv
+  --input-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
+  --output-csv recipes/evo2_phage_gen/data/checkpoints/qc/all_generated_phages_rewards.csv
 ```
 
 The first RL objective boundary is
@@ -937,9 +944,9 @@ the existing MBridge-to-Vortex exporter:
 CI checkpoint test:
 
 ```bash
-EVO2_CHECKPOINT_CACHE_DIR=/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints \
+EVO2_CHECKPOINT_CACHE_DIR=recipes/evo2_phage_gen/data/checkpoints \
 python -m pytest \
-  /workspaces/bionemo-framework/recipes/evo2_megatron/tests/bionemo/evo2/utils/checkpoint/test_vortex_to_mbridge.py \
+  recipes/evo2_megatron/tests/bionemo/evo2/utils/checkpoint/test_vortex_to_mbridge.py \
   -q
 ```
 
@@ -950,15 +957,15 @@ Microviridae bootstrap status:
 
 ```bash
 evo2_convert_vortex_to_mbridge \
-  --vortex-ckpt-path /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt \
-  --mbridge-ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+  --vortex-ckpt-path recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt \
+  --mbridge-ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
   --model-size evo2_7b_base \
   --seq-length 10240 \
-  --tokenizer-path /workspaces/bionemo-framework/recipes/evo2_phage_gen/tokenizers/nucleotide_fast_tokenizer_512
+  --tokenizer-path recipes/evo2_phage_gen/tokenizers/nucleotide_fast_tokenizer_512
 
 evo2_export_mbridge_to_vortex \
-  --mbridge-ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-  --output-path /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt \
+  --mbridge-ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+  --output-path recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt \
   --model-size evo2_7b_base
 ```
 
@@ -981,7 +988,7 @@ Megatron inference smoke test:
 
 ```bash
 infer_evo2 \
-  --ckpt-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
+  --ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
   --prompt GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAAAAATTATCTT \
   --max-new-tokens 8 \
   --temperature 0.8 \
@@ -990,7 +997,7 @@ infer_evo2 \
   --tensor-parallel-size 1 \
   --max-seq-length 128 \
   --max-batch-size 1 \
-  --output-file /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
+  --output-file recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
 ```
 
 This loaded the converted 7B checkpoint on one A6000, used MCore local CUDA
@@ -1024,12 +1031,12 @@ Prior-analysis status:
 
 ```bash
 evo2_analyze_inverse_prior \
-  --checkpoint-dir /home/ubuntu/.cache/bionemo/d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990-nemo2_evo2_1b_8k.tar.gz.untar \
-  --output-json /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_1b_8k_prior.json
+  --checkpoint-dir "$HOME/.cache/bionemo/d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990-nemo2_evo2_1b_8k.tar.gz.untar" \
+  --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_1b_8k_prior.json
 
 evo2_analyze_inverse_prior \
-  --checkpoint-dir /home/ubuntu/.cache/bionemo/78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655-nemo2_evo2_7b_8k.tar.gz.untar \
-  --output-json /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_7b_8k_prior.json
+  --checkpoint-dir "$HOME/.cache/bionemo/78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655-nemo2_evo2_7b_8k.tar.gz.untar" \
+  --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_7b_8k_prior.json
 ```
 
 Both reports show less than 0.01 percent of `gamma` values inside the original
@@ -1045,12 +1052,12 @@ QC stage and an online-safe scalar reward:
 
 ```bash
 evo2_phage_nucleotide_qc \
-  --input-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
-  --output-dir /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke
+  --input-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
+  --output-dir recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke
 
 evo2_phage_score_fasta \
-  --input-fasta /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
-  --output-csv /workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke/rewards.csv
+  --input-fasta recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta \
+  --output-csv recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke/rewards.csv
 ```
 
 Smoke result on Arc's bundled generated phages: 302 initial sequences, 302 pass
@@ -1085,10 +1092,12 @@ Open exploration for the first RL milestone:
 Current RL scaffold:
 
 ```bash
+cd recipes/evo2_phage_gen
 evo2_phage_check_rl --allow-template-gaps --warn-only
 
 evo2_phage_run_grpo \
-  --config /workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/grpo_phage_megatron.yaml
+  --config configs/grpo_phage_megatron.yaml
+cd ../..
 ```
 
 The launcher registers `phage_qc` as a NeMo-RL environment backed by

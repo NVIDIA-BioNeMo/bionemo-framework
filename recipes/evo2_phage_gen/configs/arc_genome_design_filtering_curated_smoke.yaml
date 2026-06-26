@@ -7,9 +7,9 @@
 # It points at Arc's bundled curated candidate FASTA, so it can run before
 # local generation has produced a prompt-sweep FASTA.
 
-results_save_dir: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/arc_filtering/all_generated_phages_nucleotide"
-current_config_file: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/arc_genome_design_filtering_curated_smoke.yaml"
-evo_gen_seqs_fasta_file_save_location: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta"
+results_save_dir: "recipes/evo2_phage_gen/data/checkpoints/arc_filtering/all_generated_phages_nucleotide"
+current_config_file: "recipes/evo2_phage_gen/configs/arc_genome_design_filtering_curated_smoke.yaml"
+evo_gen_seqs_fasta_file_save_location: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta"
 
 keep_only_up_to_first_eos: true
 overwrite_sequence_ids: true

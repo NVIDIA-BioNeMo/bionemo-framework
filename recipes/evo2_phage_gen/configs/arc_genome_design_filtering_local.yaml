@@ -14,9 +14,9 @@
 ### 1. INITIAL CLEANUP PARAMETERS ####
 ######################################
 
-results_save_dir: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/arc_filtering/prompt_sweep"
-current_config_file: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/arc_genome_design_filtering_local.yaml"
-evo_gen_seqs_fasta_file_save_location: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/checkpoints/generation/evo2_microviridae_prompt_sweep.fasta"
+results_save_dir: "recipes/evo2_phage_gen/data/checkpoints/arc_filtering/prompt_sweep"
+current_config_file: "recipes/evo2_phage_gen/configs/arc_genome_design_filtering_local.yaml"
+evo_gen_seqs_fasta_file_save_location: "recipes/evo2_phage_gen/data/checkpoints/generation/evo2_microviridae_prompt_sweep.fasta"
 
 keep_only_up_to_first_eos: true
 overwrite_sequence_ids: true
@@ -95,13 +95,13 @@ homology_filter_seqs_circular_fasta_file_save_location: "qc4_homology_filter_seq
 
 protein_database_hit_count_filter: true
 mmseqs_threads: 16
-mmseqs_db_protein_database: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/phrogs/phrogs_mmseqs_db/phrogs_mmseqs_db"
+mmseqs_db_protein_database: "recipes/evo2_phage_gen/data/external/phrogs/phrogs_mmseqs_db/phrogs_mmseqs_db"
 mmseqs_protein_database_results_dir_save_location: "qc4_mmseqs_results_protein_database"
 mmseqs_protein_database_sensitivity: 4.0
 protein_database_hit_count: 7
 
 training_data_sequence_identity_filter: false
-training_data_genomes_fasta: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/zenodo/microviridae_sft_training_data_raw.fna"
+training_data_genomes_fasta: "recipes/evo2_phage_gen/data/external/zenodo/microviridae_sft_training_data_raw.fna"
 mmseqs_training_data_results_dir_save_location: "qc4_mmseqs_results_training_data"
 mmseqs_training_data_sensitivity: 7.5
 training_data_sequence_identity_range: [0, 100]
@@ -112,16 +112,16 @@ checkv_quality_range: ["Low-quality", "Medium-quality", "High-quality", "Complet
 checkv_results_dir_save_location: "qc4_checkv_results"
 
 reference_genome_sequence_identity_filter: false
-reference_genome_fasta: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
+reference_genome_fasta: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
 reference_genome_sequence_identity_range: [60, 100]
 
 genetic_architecture_filter: true
-genetic_architecture_reference_genome: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
+genetic_architecture_reference_genome: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
 genetic_architecture_score_range: [0, 10]
 
 tropism_protein_sequence_identity_filter: true
-reference_tropism_protein: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta"
-mmseqs_db_tropism_protein: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein"
+reference_tropism_protein: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta"
+mmseqs_db_tropism_protein: "recipes/evo2_phage_gen/data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein"
 mmseqs_tropism_protein_results_dir_save_location: "qc4_mmseqs_results_tropism_protein"
 mmseqs_tropism_protein_sensitivity: 4.0
 tropism_protein_sequence_identity_range: [60, 100]
@@ -161,12 +161,12 @@ diversification_filter_seqs_fasta_file_save_location: "qc5_diversification_filte
 ########################################
 
 genetic_architecture_visualization_and_synteny_filtering: false
-genetic_architecture_visualization_script: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/pipelines/genetic_architecture_visualization.py"
-protein_annotation_file: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/phrogs/phrog_annot_v4.tsv"
+genetic_architecture_visualization_script: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/pipelines/genetic_architecture_visualization.py"
+protein_annotation_file: "recipes/evo2_phage_gen/data/external/phrogs/phrog_annot_v4.tsv"
 lovis4u_conda_env: "genome_visualization"
 
 use_reference_genome: false
-reference_genome_gff_file_save_location: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422.1_pseudocircular.gff"
+reference_genome_gff_file_save_location: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422.1_pseudocircular.gff"
 
 average_protein_sequence_identity_filter: false
 average_protein_sequence_identity_range: [0, 95]

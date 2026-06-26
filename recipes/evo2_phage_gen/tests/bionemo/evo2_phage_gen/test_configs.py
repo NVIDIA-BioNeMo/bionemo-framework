@@ -52,3 +52,17 @@ def test_arc_curated_smoke_config_targets_bundled_candidates():
     assert config["homology_filtering"] is False
     assert config["diversification_filtering"] is False
     assert config["genetic_architecture_visualization_and_synteny_filtering"] is False
+
+
+def test_docs_and_configs_do_not_use_stale_workspace_paths():
+    """Recipe docs and configs should be portable across checkout locations."""
+    checked_paths = [
+        RECIPE_ROOT / "README.md",
+        RECIPE_ROOT / "examples" / "replication_walkthrough.ipynb",
+        *sorted((RECIPE_ROOT / "configs").rglob("*.yaml")),
+    ]
+
+    stale_prefix = "/workspaces/bionemo-framework"
+    offenders = [path for path in checked_paths if stale_prefix in path.read_text()]
+
+    assert offenders == []

@@ -5,7 +5,7 @@
 # The policy model-construction path still needs a BioNeMo Evo2 adapter in
 # NeMo-RL before this config can run end-to-end.
 
-defaults: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/nemo_rl_defaults/grpo_math_1B_megatron.yaml"
+defaults: "nemo_rl_defaults/grpo_math_1B_megatron.yaml"
 
 grpo:
   num_prompts_per_step: 2
@@ -29,7 +29,7 @@ policy:
   # Placeholder until NeMo-RL can construct BioNeMo Evo2 providers directly.
   model_name: "bionemo/evo2_7b_base"
   tokenizer:
-    name: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/tokenizers/nucleotide_fast_tokenizer_512"
+    name: "tokenizers/nucleotide_fast_tokenizer_512"
     chat_template_kwargs: null
   train_global_batch_size: 4
   train_micro_batch_size: 1
