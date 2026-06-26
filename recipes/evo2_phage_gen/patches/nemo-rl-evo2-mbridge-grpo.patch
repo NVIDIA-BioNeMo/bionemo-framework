@@ -1,0 +1,196 @@
+diff --git a/nemo_rl/models/generation/megatron/megatron_worker.py b/nemo_rl/models/generation/megatron/megatron_worker.py
+index 0a0721dd9..3517e2ede 100644
+--- a/nemo_rl/models/generation/megatron/megatron_worker.py
++++ b/nemo_rl/models/generation/megatron/megatron_worker.py
+@@ -18,6 +18,7 @@ import os
+ import threading
+ import time
+ import warnings
++from types import MethodType
+ from typing import AsyncGenerator, Optional
+
+ import requests
+@@ -79,7 +80,6 @@ class MegatronGenerationMixin:
+         if self._inference_engine_initialized:
+             return
+
+-        from megatron.core.inference.config import MambaInferenceStateConfig
+         from megatron.core.inference.contexts.dynamic_context import (
+             DynamicInferenceContext,
+         )
+@@ -115,7 +115,25 @@ class MegatronGenerationMixin:
+         num_speculative_tokens = mcore_generation_config["num_speculative_tokens"]
+         max_requests = mcore_generation_config.get("max_requests")
+
+-        mamba_inference_state_config = MambaInferenceStateConfig.from_model(self.model)
++        evo2_bind_hyena_packed_views = None
++        try:
++            from bionemo.evo2.models.evo2_provider import (
++                bind_hyena_packed_views_to_dynamic_context,
++                build_evo2_mamba_inference_state_config,
++            )
++        except ModuleNotFoundError:
++            bind_hyena_packed_views_to_dynamic_context = None
++            build_evo2_mamba_inference_state_config = None
++
++        raw_model = unwrap_model(self.model)
++        has_evo2_hyena_state = hasattr(getattr(raw_model, "decoder", raw_model), "hyena_state_shapes_per_request")
++        if has_evo2_hyena_state and build_evo2_mamba_inference_state_config is not None:
++            mamba_inference_state_config = build_evo2_mamba_inference_state_config(raw_model)
++            evo2_bind_hyena_packed_views = bind_hyena_packed_views_to_dynamic_context
++        else:
++            from megatron.core.inference.config import MambaInferenceStateConfig
++
++            mamba_inference_state_config = MambaInferenceStateConfig.from_model(self.model)
+         is_hybrid_model = mamba_inference_state_config is not None
+         if is_hybrid_model:
+             if (
+@@ -182,6 +200,19 @@ class MegatronGenerationMixin:
+         self.inference_context = DynamicInferenceContext(
+             self.model.config, inference_config
+         )
++        if evo2_bind_hyena_packed_views is not None:
++            hyena_model = raw_model
++            original_add_request = self.inference_context.add_request
++
++            def evo2_add_request(context, req, prefill_chunk_length=None):
++                request_slot = int(context.total_request_count)
++                result = original_add_request(req, prefill_chunk_length=prefill_chunk_length)
++                mamba_slot = int(context.mamba_metadata.request_to_mamba_state_idx[request_slot].item())
++                evo2_bind_hyena_packed_views(hyena_model, context, request_slot=mamba_slot)
++                return result
++
++            self.inference_context.add_request = MethodType(evo2_add_request, self.inference_context)
++            self.inference_context.materialize_only_last_token_logits = materialize_only_last_token_logits
+         self.inference_wrapped_model = GPTInferenceWrapper(
+             self.model, self.inference_context
+         )
+diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
+index b0d5be4d9..6f7dca0c0 100644
+--- a/nemo_rl/models/megatron/setup.py
++++ b/nemo_rl/models/megatron/setup.py
+@@ -98,6 +98,40 @@ from nemo_rl.models.value.config import ValueConfig
+ TokenizerType = TypeVar("TokenizerType", bound=PreTrainedTokenizerBase)
+
+
++def _apply_target_allowlist_prefixes(config: PolicyConfig) -> None:
++    """Allow extra Megatron config ``_target_`` prefixes requested by policy config."""
++    prefixes = config["megatron_cfg"].get("target_allowlist_prefixes", [])
++    if not prefixes:
++        return
++
++    from megatron.training.config.instantiate_utils import target_allowlist
++
++    for prefix in prefixes:
++        target_allowlist.add_prefix(prefix)
++
++
++class NoRefitMegatronBridge:
++    """Bridge placeholder for colocated Megatron generation paths that do not refit."""
++
++    def __init__(self, transformer_config: Any | None = None):
++        self.transformer_config = transformer_config
++
++    def get_conversion_tasks(self, *_args, **_kwargs):
++        return []
++
++    def export_hf_weights(self, *_args, **_kwargs):
++        raise NotImplementedError(
++            "Colocated Megatron generation reuses the training policy and does not export Hugging Face weights."
++        )
++
++
++def _uses_colocated_megatron_generation(config: PolicyConfig) -> bool:
++    """Return whether policy generation is Megatron and colocated with training."""
++    generation = config.get("generation") or {}
++    colocated = (generation.get("colocated") or {}).get("enabled", True)
++    return generation.get("backend") == "megatron" and colocated is not False
++
++
+ def destroy_parallel_state():
+     """Safely destroy parallel state and reset async call tracking.
+
+@@ -464,6 +498,7 @@ def setup_model_config(
+                 "directory not mounted on this node. Please check."
+             )
+
++        _apply_target_allowlist_prefixes(config)
+         try:
+             cfg_from_pretrained = ConfigContainer.from_yaml(
+                 pretrained_run_config, mode=InstantiationMode.STRICT
+@@ -950,6 +985,8 @@ def _create_megatron_config(
+         "overlap_param_gather": overlap_param_gather,
+         "reuse_grad_buf_for_mxfp8_param_ag": reuse_grad_buf_for_mxfp8_param_ag,
+     }
++    tokenizer_cfg = config.get("tokenizer") or {}
++    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
+
+     return ConfigContainer(
+         model=model_cfg,
+@@ -986,7 +1023,7 @@ def _create_megatron_config(
+         dataset=None,
+         tokenizer=TokenizerConfig(
+             tokenizer_type="HuggingFaceTokenizer",
+-            tokenizer_model=hf_model_name,
++            tokenizer_model=tokenizer_model,
+         ),
+     )
+
+@@ -1554,9 +1591,11 @@ def finalize_megatron_setup(
+         pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
+     )
+
++    tokenizer_cfg = config.get("tokenizer") or {}
++    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
+     tokenizer_config = TokenizerConfig(
+         tokenizer_type="HuggingFaceTokenizer",
+-        tokenizer_model=hf_model_name,
++        tokenizer_model=tokenizer_model,
+         hf_tokenizer_kwargs={
+             "trust_remote_code": True,
+             "use_fast": True,
+@@ -1571,9 +1610,10 @@ def finalize_megatron_setup(
+     )
+
+     dp_size = worker_sharding_annotations.get_axis_size("data_parallel")
+-    megatron_bridge = AutoBridge.from_hf_pretrained(
+-        hf_model_name, trust_remote_code=True
+-    )
++    if _uses_colocated_megatron_generation(config):
++        megatron_bridge = NoRefitMegatronBridge(transformer_config=getattr(model, "config", None))
++    else:
++        megatron_bridge = AutoBridge.from_hf_pretrained(hf_model_name, trust_remote_code=True)
+
+     should_disable_forward_pre_hook = (
+         config["megatron_cfg"]["optimizer"]["use_distributed_optimizer"]
+diff --git a/nemo_rl/models/policy/lm_policy.py b/nemo_rl/models/policy/lm_policy.py
+index f1a5d705c..0b86a145b 100644
+--- a/nemo_rl/models/policy/lm_policy.py
++++ b/nemo_rl/models/policy/lm_policy.py
+@@ -303,7 +303,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
+             self.flops_tracker = FLOPTracker.from_config(
+                 config["model_name"], get_default_hf_config(config["model_name"])
+             )
+-        except ValueError as e:
++        except (OSError, ValueError) as e:
+             self.flops_tracker = None
+             print(f"FLOPS tracker not supported for model {config['model_name']}: {e}")
+
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index e517e0298..84ef1f1b0 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -1167,6 +1167,13 @@ class MegatronPolicyWorkerImpl(
+     @wrap_with_nvtx_name("megatron_policy_worker/prepare_refit_info")
+     def prepare_refit_info(self) -> None:
+         """Prepare state dict metadata for weight refitting and IPC streaming."""
++        generation = self.cfg.get("generation") or {}
++        colocated = (generation.get("colocated") or {}).get("enabled", True)
++        if generation.get("backend") == "megatron" and colocated is not False:
++            self.refit_param_info_mcore = []
++            self.refit_conversion_tasks = []
++            return {}
++
+         self.refit_param_info_mcore = self._calculate_refit_param_info()
+
+         # Collect tensor metadata for refit / hf side info

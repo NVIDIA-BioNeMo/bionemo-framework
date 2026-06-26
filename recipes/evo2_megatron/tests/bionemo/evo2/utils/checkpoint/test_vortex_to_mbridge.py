@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for ``bionemo.evo2.utils.checkpoint.vortex_to_mbridge``."""
+
+import os
+from io import BytesIO
+
+import torch
+from megatron.core.dist_checkpointing.mapping import ShardedObject, ShardedTensor
+
+from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS, HyenaTestModelProvider
+from bionemo.evo2.utils.checkpoint.mbridge_to_vortex import _split_fc1, mbridge_to_vortex_state_dict
+from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import _to_mcore_sharded_state_dict
+from bionemo.evo2.utils.checkpoint.vortex_to_mbridge import (
+    _add_mbridge_te_extra_states,
+    _merge_fc1,
+    download_vortex_checkpoint,
+    load_vortex_state_dict,
+    vortex_to_mbridge_state_dict,
+)
+
+
+def _make_test_provider() -> HyenaTestModelProvider:
+    """Use tiny dimensions while preserving all Evo2 layer symbols."""
+    return HyenaTestModelProvider(
+        hybrid_override_pattern="SDH*",
+        hidden_size=4,
+        num_groups_hyena=4,
+        num_attention_heads=2,
+        ffn_hidden_size=6,
+    )
+
+
+def _make_mock_vortex_sd(pattern: str) -> dict[str, torch.Tensor]:
+    """Create a compact mock Vortex state dict that exercises all layer symbols."""
+    sd = {
+        "embedding_layer.weight": torch.randn(8, 4, dtype=torch.bfloat16),
+        "norm.scale": torch.randn(4, dtype=torch.bfloat16),
+    }
+    sd["unembed.weight"] = sd["embedding_layer.weight"].clone()
+
+    for i, symbol in enumerate(pattern):
+        bp = f"blocks.{i}"
+        sd[f"{bp}.pre_norm.scale"] = torch.randn(4, dtype=torch.bfloat16)
+        sd[f"{bp}.post_norm.scale"] = torch.randn(4, dtype=torch.bfloat16)
+        sd[f"{bp}.mlp.l1.weight"] = torch.randn(6, 4, dtype=torch.bfloat16)
+        sd[f"{bp}.mlp.l2.weight"] = torch.randn(6, 4, dtype=torch.bfloat16)
+        sd[f"{bp}.mlp.l3.weight"] = torch.randn(4, 6, dtype=torch.bfloat16)
+
+        if symbol == "*":
+            sd[f"{bp}.inner_mha_cls.Wqkv.weight"] = torch.randn(12, 4, dtype=torch.bfloat16)
+            sd[f"{bp}.inner_mha_cls.out_proj.weight"] = torch.randn(4, 4, dtype=torch.bfloat16)
+            sd[f"{bp}.inner_mha_cls.out_proj.bias"] = torch.randn(4, dtype=torch.bfloat16)
+            sd[f"{bp}.inner_mha_cls.rotary_emb.inv_freq"] = torch.randn(1, dtype=torch.float32)
+        else:
+            sd[f"{bp}.projections.weight"] = torch.randn(12, 4, dtype=torch.bfloat16)
+            sd[f"{bp}.filter.short_filter_weight"] = torch.randn(12, 1, 3, dtype=torch.bfloat16)
+            sd[f"{bp}.out_filter_dense.weight"] = torch.randn(4, 4, dtype=torch.bfloat16)
+            sd[f"{bp}.out_filter_dense.bias"] = torch.randn(4, dtype=torch.bfloat16)
+            if symbol == "S":
+                sd[f"{bp}.filter.h"] = torch.randn(4, 1, 3, dtype=torch.float32)
+            elif symbol == "D":
+                sd[f"{bp}.filter.D"] = torch.randn(4, dtype=torch.float32)
+                sd[f"{bp}.filter.h"] = 1e-8 * torch.randn(4, 1, 3, dtype=torch.float32)
+            elif symbol == "H":
+                sd[f"{bp}.filter.D"] = torch.randn(4, dtype=torch.float32)
+                # Negative log poles are required for a valid inverse.
+                sd[f"{bp}.filter.log_poles"] = -(0.25 + torch.rand(4, 1, 1, dtype=torch.float32))
+                sd[f"{bp}.filter.residues"] = torch.randn(4, 1, dtype=torch.float32)
+
+    return sd
+
+
+def test_mlp_fc1_merge_split_roundtrip():
+    """Verify Vortex l1/l2 merge into MBridge fc1 and split back exactly."""
+    w1 = torch.randn(8, 4)
+    w2 = torch.randn(8, 4)
+    merged = _merge_fc1(w1, w2)
+    split_w1, split_w2 = _split_fc1(merged)
+    assert torch.equal(w1, split_w1)
+    assert torch.equal(w2, split_w2)
+
+
+def test_vortex_to_mbridge_all_layer_types():
+    """Verify Vortex-to-MBridge conversion emits keys for S, D, H, and attention layers."""
+    result = vortex_to_mbridge_state_dict(_make_mock_vortex_sd("SDH*"), _make_test_provider(), te_enabled=True)
+
+    assert "embedding.word_embeddings.weight" in result
+    assert "decoder.final_norm.weight" in result
+    assert "decoder.layers.0.mixer.mixer.short_conv.short_conv_weight" in result
+    assert "decoder.layers.1.mixer.mixer.filter.h" in result
+    assert "decoder.layers.1.mixer.mixer.filter.decay" in result
+    assert "decoder.layers.2.mixer.mixer.filter.p" in result
+    assert "decoder.layers.2.mixer.mixer.filter.gamma" in result
+    assert "decoder.layers.2.mixer.mixer.filter.R" in result
+    assert "decoder.layers.3.self_attention.linear_qkv.weight" in result
+    assert "decoder.layers.3.self_attention.linear_proj.weight" in result
+    assert "decoder.layers.3.self_attention.rotary_emb.inv_freq" in result
+
+
+def test_add_mbridge_te_extra_states_initializes_mbridge_runtime_state():
+    """Packaging should add MBridge TE extra states without importing Vortex FP8 runtime state."""
+    provider = _make_test_provider()
+    mbridge_sd = vortex_to_mbridge_state_dict(_make_mock_vortex_sd("SDH*"), provider, te_enabled=True)
+    mbridge_sd["_vortex_passthrough.blocks.0.projections._extra_state"] = BytesIO(b"legacy-vortex-fp8")
+    mbridge_sd["_vortex_passthrough.blocks.3.mixer.dense._extra_state"] = BytesIO(b"legacy-vortex-fp8")
+
+    _add_mbridge_te_extra_states(mbridge_sd, provider)
+
+    assert torch.equal(
+        mbridge_sd["decoder.layers.0.mixer.dense_projection._extra_state"], torch.empty(0, dtype=torch.uint8)
+    )
+    assert torch.equal(
+        mbridge_sd["decoder.layers.3.self_attention.linear_proj._extra_state"], torch.empty(0, dtype=torch.uint8)
+    )
+    assert torch.equal(mbridge_sd["decoder.layers.0.mlp.linear_fc1._extra_state"], torch.empty(0, dtype=torch.uint8))
+    assert torch.equal(
+        mbridge_sd["decoder.layers.3.self_attention.linear_qkv._extra_state"], torch.empty(0, dtype=torch.uint8)
+    )
+    assert torch.equal(mbridge_sd["decoder.final_norm._extra_state"], torch.empty(0, dtype=torch.uint8))
+    assert mbridge_sd["output_layer._extra_state"] is None
+
+
+def test_mcore_packaging_wraps_extra_state_as_sharded_object():
+    """MCore treats module extra state as a replicated ShardedObject, not a tensor shard."""
+    state_dict = {
+        "decoder.final_norm.weight": torch.randn(4),
+        "decoder.final_norm._extra_state": torch.empty(0, dtype=torch.uint8),
+        "output_layer._extra_state": None,
+    }
+
+    sharded = _to_mcore_sharded_state_dict(state_dict)
+
+    assert isinstance(sharded["decoder.final_norm.weight"], ShardedTensor)
+    extra_state = sharded["decoder.final_norm._extra_state"]
+    assert isinstance(extra_state, ShardedObject)
+    assert extra_state.unique_key == "decoder.final_norm._extra_state/shard_0_1"
+    output_extra_state = sharded["output_layer._extra_state"]
+    assert isinstance(output_extra_state, ShardedObject)
+    assert output_extra_state.unique_key == "output_layer._extra_state/shard_0_1"
+
+
+def test_long_filter_inverse_reconstructs_log_poles_exactly():
+    """The ambiguous long-filter inverse should round-trip log poles exactly."""
+    vortex_sd = _make_mock_vortex_sd("SDH*")
+    balanced = torch.tensor([[-0.7], [-0.5], [-0.3], [-0.1]], dtype=torch.float32)
+    vortex_sd["blocks.2.filter.log_poles"] = (-torch.exp(balanced) * torch.exp(balanced))[..., None]
+    result = vortex_to_mbridge_state_dict(vortex_sd, _make_test_provider(), te_enabled=True)
+    original = vortex_sd["blocks.2.filter.log_poles"]
+    p = result["decoder.layers.2.mixer.mixer.filter.p"].reshape(4, 1)
+    gamma = result["decoder.layers.2.mixer.mixer.filter.gamma"]
+    reconstructed = (-torch.exp(p) * torch.exp(gamma))[..., None]
+
+    assert torch.equal(reconstructed, original)
+    assert torch.allclose(p, gamma, rtol=0.0, atol=1e-6)
+
+
+def test_vortex_to_mbridge_to_vortex_synthetic_roundtrip():
+    """Round-trip a compact Vortex state dict through MBridge conversion."""
+    provider = _make_test_provider()
+    vortex_sd = _make_mock_vortex_sd("SDH*")
+    mbridge_sd = vortex_to_mbridge_state_dict(vortex_sd, provider, te_enabled=True)
+    roundtrip_sd = mbridge_to_vortex_state_dict(dict(mbridge_sd), provider, te_enabled=True)
+
+    assert set(roundtrip_sd) == set(vortex_sd)
+    for key, original in vortex_sd.items():
+        _assert_exact_value_equal(roundtrip_sd[key], original, key)
+
+
+def _assert_exact_value_equal(actual, expected, key: str) -> None:
+    """Assert exact equality for tensors and Vortex byte metadata."""
+    if isinstance(expected, BytesIO):
+        assert isinstance(actual, BytesIO), key
+        assert actual.getvalue() == expected.getvalue(), key
+    else:
+        assert torch.equal(actual, expected), key
+
+
+def test_1b_base_checkpoint_exact_roundtrip(tmp_path):
+    """Download the public 1B Vortex checkpoint and assert exact Vortex round-trip."""
+    cache_dir = os.environ.get("EVO2_CHECKPOINT_CACHE_DIR")
+    original_path = download_vortex_checkpoint(
+        "arcinstitute/evo2_1b_base",
+        filename="evo2_1b_base.pt",
+        cache_dir=cache_dir or tmp_path,
+    )
+    provider = HYENA_MODEL_OPTIONS["evo2_1b_base"]()
+    original_sd = load_vortex_state_dict(original_path)
+    mbridge_sd = vortex_to_mbridge_state_dict(original_sd, provider, te_enabled=True)
+    roundtrip_sd = mbridge_to_vortex_state_dict(dict(mbridge_sd), provider, te_enabled=True)
+
+    assert set(roundtrip_sd) == set(original_sd)
+    for key, original in original_sd.items():
+        _assert_exact_value_equal(roundtrip_sd[key], original, key)

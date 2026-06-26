@@ -1,0 +1,96 @@
+# Evo2 phage GRPO template for NeMo-RL.
+#
+# This config is intentionally a teaching scaffold. It uses NeMo-RL's Megatron
+# generation backend, not vLLM, because Evo2 does not provide vLLM layers.
+# The policy model-construction path still needs a BioNeMo Evo2 adapter in
+# NeMo-RL before this config can run end-to-end.
+
+defaults: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/configs/nemo_rl_defaults/grpo_math_1B_megatron.yaml"
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 2
+  max_num_steps: 10
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+loss_fn:
+  reference_policy_kl_penalty: 0.01
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "data/checkpoints/phage_grpo"
+  pretrained_checkpoint:
+    path: "data/checkpoints/evo2_7b_microviridae_mbridge"
+    format: "megatron_bridge"
+
+policy:
+  # Placeholder until NeMo-RL can construct BioNeMo Evo2 providers directly.
+  model_name: "bionemo/evo2_7b_base"
+  tokenizer:
+    name: "/workspaces/bionemo-framework/recipes/evo2_phage_gen/tokenizers/nucleotide_fast_tokenizer_512"
+    chat_template_kwargs: null
+  train_global_batch_size: 4
+  train_micro_batch_size: 1
+  generation_batch_size: 2
+  logprob_batch_size: 1
+  max_total_sequence_length: 10240
+  precision: "bfloat16"
+  sequence_packing:
+    enabled: false
+  dynamic_batching:
+    enabled: false
+  megatron_cfg:
+    enabled: true
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    context_parallel_size: 1
+    sequence_parallel: false
+    activation_checkpointing: true
+    target_allowlist_prefixes:
+      - "bionemo.evo2."
+      - "bionemo.common."
+  generation:
+    backend: "megatron"
+    max_new_tokens: 6000
+    temperature: 0.8
+    top_p: 0.95
+    top_k: null
+
+data:
+  max_input_seq_length: 512
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "phage_prompt_data_processor"
+    env_name: "phage_qc"
+  train:
+    dataset_name: "openai_format"
+    data_path: "data/phage_prompts.jsonl"
+    env_name: "phage_qc"
+    prompt_file: null
+    system_prompt_file: null
+  validation: null
+
+env:
+  phage_qc:
+    genome_length_min: 4000
+    genome_length_max: 6000
+    gc_content_min: 30.0
+    gc_content_max: 65.0
+    homopolymer_max: 10
+    weight_valid_nt_chars: 1.0
+    weight_genome_length: 1.0
+    weight_gc_content: 1.0
+    weight_nt_homopolymer: 1.0
+
+logger:
+  log_dir: "data/checkpoints/phage_grpo_logs"
+  wandb_enabled: false
+  tensorboard_enabled: true
+  monitor_gpus: true
+
+cluster:
+  gpus_per_node: 2
+  num_nodes: 1

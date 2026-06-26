@@ -5,17 +5,16 @@ requires = ["setuptools>=64,<80.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bionemo-evo2"
+name = "bionemo-evo2-phage-gen"
 readme = "README.md"
-description = "Library containing data preprocessing, training, and inference tooling for Evo2."
+description = "Library containing data preprocessing, training, and inference tooling for generating phage sequences with evo2."
 authors = [{ name = "BioNeMo Team", email = "bionemofeedback@nvidia.com" }]
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dynamic = ["version"]
 dependencies = [
+    # Core Evo2/Megatron runtime.
     "nvidia-modelopt[torch]>=0.37.0",
-
-    # These sources are defined in [tool.uv.sources] below
     "megatron-bridge",
     "causal_conv1d",
     "nv-grouped-gemm",
@@ -23,6 +22,34 @@ dependencies = [
     # nvidia-resiliency-ext is pulled transitively by megatron-bridge.
     "emerging_optimizers",
     "subquadratic-ops-torch-cu13",
+
+    # NeMo-RL scaffold runtime. Static metadata below keeps this recipe on the
+    # current BioNeMo/Megatron-Bridge Python/Torch stack while still installing
+    # NeMo-RL from a pinned source commit.
+    "nemo-rl",
+    "ray[default]>=2.49.2,<2.56",
+    "colored==2.2.3",
+    "datasets>=2.20.0",
+    "decord2",
+    "debugpy",
+    "hydra-core>1.3,<=1.3.2",
+    "math-verify",
+    "mlflow>=3.9.0",
+    "num2words>=0.5.14",
+    "nvidia-ml-py",
+    "nvtx",
+    "omegaconf>=2.3.0",
+    "open-clip-torch>=3.2.0",
+    "pillow>=12.1.1",
+    "pyzmq",
+    "sentencepiece",
+    "soundfile>=0.13.1",
+    "swanlab",
+    "tensordict",
+    "tensorboard>=2.19.0",
+    "timm",
+    "tiktoken",
+    "torchdata",
 
     # bionemo.common dependencies
     "boto3",
@@ -35,9 +62,23 @@ dependencies = [
     "pyyaml",
     "tqdm",
 
-    # These are dependencies for examples only, but are useful for actually doing analyses with this model
+    # Analysis/QC dependencies are installed by default because this recipe is
+    # intended to reproduce Arc's downstream filtering workflow. Non-Python
+    # binaries and large databases are prepared by evo2_phage_prepare_external_assets.
+    "bcbio-gff",
     "biopython",
+    "biotite",
+    "checkv",
+    "lovis4u",
     "openpyxl",
+    "orfipy",
+    "pandas",
+    "plotly",
+    "pyfastx",
+    "pyrodigal",
+    "pyrodigal-gv",
+    "scikit-learn",
+    "scipy",
     "seaborn",
 ]
 
@@ -57,6 +98,16 @@ evo2_convert_nemo2_to_mbridge = "bionemo.evo2.utils.checkpoint.nemo2_to_mbridge:
 evo2_convert_savanna_to_mbridge = "bionemo.evo2.utils.checkpoint.savanna_to_mbridge:main"
 evo2_export_mbridge_to_vortex = "bionemo.evo2.utils.checkpoint.mbridge_to_vortex:main"
 evo2_convert_vortex_to_mbridge = "bionemo.evo2.utils.checkpoint.vortex_to_mbridge:main"
+evo2_analyze_inverse_prior = "bionemo.evo2_phage_gen.checkpoint_prior:main"
+evo2_phage_prepare_external_assets = "bionemo.evo2_phage_gen.external_assets:main"
+evo2_phage_prepare_arc_pipeline = "bionemo.evo2_phage_gen.arc_pipeline:main"
+evo2_phage_check_external_qc = "bionemo.evo2_phage_gen.external_qc:main"
+evo2_phage_generation = "bionemo.evo2_phage_gen.generation:main"
+evo2_phage_nucleotide_qc = "bionemo.evo2_phage_gen.qc:main"
+evo2_phage_score_fasta = "bionemo.evo2_phage_gen.reward:main"
+evo2_phage_check_rl = "bionemo.evo2_phage_gen.rl_readiness:main"
+evo2_phage_run_grpo = "bionemo.evo2_phage_gen.run_phage_grpo:main"
+evo2_phage_patch_nemo_rl = "bionemo.evo2_phage_gen.nemo_rl_patches:main"
 download_bionemo_data = "bionemo.common.data.load:entrypoint"
 bionemo_fasta_to_jsonl = "bionemo.common.io.fasta_to_jsonl:main"
 bionemo_precompute_windows = "bionemo.common.data.basecamp.sharded_dataset:main_precompute"
@@ -118,10 +169,54 @@ causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = 
 nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v1.1.4.post6" }
 
 # nvidia-resiliency-ext is intentionally left to Megatron-Bridge so the transitive pin stays consistent.
+# Apply patches/nemo-rl-evo2-mbridge-grpo.patch after install with evo2_phage_patch_nemo_rl.
+nemo-rl = { git = "https://github.com/NVIDIA-NeMo/RL.git", rev = "d83dc4ba009438c67b3ba4f5872405ab17a0476c" }
 
 # Megatron Bundle. MCore is sourced from the same Megatron-Bridge release tag.
+# v0.5.0 is the first tested Bridge pin here whose bundled MCore exposes the
+# Megatron inference APIs required by NeMo-RL's Megatron generation backend.
 megatron-bridge = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", tag = "v0.5.0" }
 megatron-core = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", tag = "v0.5.0", subdirectory = "3rdparty/Megatron-LM" }
+
+[[tool.uv.dependency-metadata]]
+name = "nemo-rl"
+version = "0.0.0"
+requires-dist = [
+    "setuptools",
+    "pip",
+    "ninja",
+    "colored==2.2.3",
+    "ray[default]>=2.49.2,<2.56",
+    "wandb",
+    "numpy",
+    "datasets>=2.20.0",
+    "rich",
+    "math-verify",
+    "accelerate>=0.26",
+    "tensorboard>=2.19.0",
+    "omegaconf>=2.3.0",
+    "torchdata",
+    "nvidia-ml-py",
+    "hydra-core>1.3,<=1.3.2",
+    "tiktoken",
+    "sentencepiece",
+    "blobfile",
+    "debugpy",
+    "nvtx",
+    "matplotlib",
+    "plotly",
+    "sympy>=1.14.0",
+    "pillow>=11.3.0",
+    "num2words>=0.5.14",
+    "timm",
+    "open-clip-torch>=3.2.0",
+    "mlflow>=3.9.0",
+    "swanlab",
+    "tensordict",
+    "pyzmq",
+    "decord2",
+    "soundfile>=0.13.1",
+]
 
 [tool.uv.extra-build-dependencies]
 warp-lang = ["wheel_stub"]

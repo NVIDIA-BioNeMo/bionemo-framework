@@ -1,0 +1,2 @@
+{"messages":[{"role":"user","content":"Generate one circular Microviridae-like DNA genome for E. coli C. Output only A, C, G, and T characters."},{"role":"assistant","content":""}]}
+{"messages":[{"role":"user","content":"Generate a PhiX174-like ssDNA phage genome candidate. Output only the nucleotide sequence."},{"role":"assistant","content":""}]}

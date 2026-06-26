@@ -20,6 +20,7 @@ Converts a Megatron Bridge DCP checkpoint to ARC's Vortex inference format
 """
 
 import argparse
+import io
 import json
 import logging
 from collections import OrderedDict
@@ -65,10 +66,14 @@ def load_mbridge_state_dict(mbridge_ckpt_dir: Path) -> dict[str, torch.Tensor]:
     state_dict = {}
     for key, item_meta in metadata.state_dict_metadata.items():
         if isinstance(item_meta, BytesStorageMetadata):
-            continue
-        state_dict[key] = torch.empty(item_meta.size, dtype=item_meta.properties.dtype, device="cpu")
+            state_dict[key] = io.BytesIO()
+        else:
+            state_dict[key] = torch.empty(item_meta.size, dtype=item_meta.properties.dtype, device="cpu")
 
     dcp.load(state_dict=state_dict, storage_reader=reader, no_dist=True)
+    sidecar_path = iter_dir.parent / "vortex_passthrough.pt"
+    if sidecar_path.exists():
+        state_dict.update(torch.load(sidecar_path, map_location="cpu", weights_only=False))
     return state_dict
 
 
@@ -171,6 +176,11 @@ def mbridge_to_vortex_state_dict(
     final_norm_key = "decoder.final_norm.weight"
     if final_norm_key in mbridge_state_dict:
         vortex_sd["norm.scale"] = mbridge_state_dict.pop(final_norm_key)
+
+    passthrough_prefix = "_vortex_passthrough."
+    for key in list(mbridge_state_dict):
+        if key.startswith(passthrough_prefix):
+            vortex_sd[key.removeprefix(passthrough_prefix)] = mbridge_state_dict.pop(key)
 
     return vortex_sd
 
@@ -324,7 +334,11 @@ def _convert_attention_layer(
     if proj_bias_key in src:
         dst[f"{block_prefix}.inner_mha_cls.out_proj.bias"] = src.pop(proj_bias_key)
 
-    dst[f"{block_prefix}.inner_mha_cls.rotary_emb.inv_freq"] = _compute_inv_freq(rotary_dim, rotary_base)
+    rotary_key = f"{prefix}.self_attention.rotary_emb.inv_freq"
+    if rotary_key in src:
+        dst[f"{block_prefix}.inner_mha_cls.rotary_emb.inv_freq"] = src.pop(rotary_key)
+    else:
+        dst[f"{block_prefix}.inner_mha_cls.rotary_emb.inv_freq"] = _compute_inv_freq(rotary_dim, rotary_base)
 
 
 def _convert_mlp(
