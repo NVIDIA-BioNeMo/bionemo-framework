@@ -1,0 +1,9 @@
+- dataset_prefix: data/sft/preprocessed/microviridae_sft_processed_nucleotide_fast_tokenizer_512_train
+  dataset_weight: 1.0
+  dataset_split: train
+- dataset_prefix: data/sft/preprocessed/microviridae_sft_processed_nucleotide_fast_tokenizer_512_val
+  dataset_weight: 1.0
+  dataset_split: validation
+- dataset_prefix: data/sft/preprocessed/microviridae_sft_processed_nucleotide_fast_tokenizer_512_test
+  dataset_weight: 1.0
+  dataset_split: test

@@ -228,10 +228,10 @@ Not bundled and still needed:
 
 Data-loading note:
 
-- SFT replication will need a FASTA dataloader for the raw and processed
-  Microviridae FASTAs. The existing Evo2 Megatron data path may be sufficient,
-  but it must be validated against the soft prompt tokens in the processed
-  Zenodo file.
+- SFT replication uses the existing Evo2 Megatron preprocessing and indexed
+  dataset path for the processed Microviridae FASTA. The preprocessing config
+  keeps `force_uppercase: false` so the paper's soft prompt tokens remain
+  intact.
 - The dataloader must be deterministic under the parallelism strategy we use
   for SFT/RL, likely tensor parallelism plus data parallelism. In particular,
   ranks that are part of the same data-parallel sample group must agree on
@@ -250,6 +250,199 @@ Replication order:
    and then newly generated FASTAs.
 3. Only after the converter and filter/QC pipeline are validated, fetch the
    Zenodo SFT datasets and reproduce the SFT stage.
+
+## Local SFT Debug
+
+Run these commands from the recipe directory:
+
+```bash
+cd recipes/evo2_phage_gen
+source .ci_test_env.sh
+```
+
+Download the processed Microviridae SFT FASTA from the Zenodo paper record:
+
+```bash
+evo2_phage_download_sft_data
+```
+
+Add `--include-raw` if you also want
+`data/external/zenodo/microviridae_sft_training_data_raw.fna` for identity
+filtering and dataset inspection. The SFT training path uses the processed file,
+which includes the paper's soft prompt tokens.
+
+Convert the BioNeMo-hosted Evo2 7B base checkpoint that SFT starts from:
+
+```bash
+mkdir -p data/checkpoints
+BASE_NEMO2_CKPT=$(download_bionemo_data evo2/7b-8k:1.0)
+
+evo2_convert_nemo2_to_mbridge \
+  --mixed-precision-recipe bf16_mixed \
+  --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 \
+  --model-size evo2_7b_base \
+  --seq-length 10240 \
+  --nemo2-ckpt-dir "${BASE_NEMO2_CKPT}" \
+  --mbridge-ckpt-dir data/checkpoints/evo2_7b_base_mbridge
+```
+
+The released Arc Microviridae checkpoint is a Vortex checkpoint, so convert it
+with the reverse converter when evaluating the SFT target:
+
+```bash
+evo2_convert_vortex_to_mbridge \
+  --vortex-ckpt-path data/checkpoints/evo2_7b_microviridae.pt \
+  --mbridge-ckpt-dir data/checkpoints/evo2_7b_microviridae_mbridge \
+  --model-size evo2_7b_base \
+  --seq-length 10240 \
+  --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512
+```
+
+Preprocess the SFT FASTA into Megatron indexed datasets:
+
+```bash
+preprocess_evo2 --config configs/sft_microviridae_preprocess.yaml
+```
+
+This reads `configs/sft_microviridae_preprocess.yaml` and writes train,
+validation, and test `.bin/.idx` prefixes under `data/sft/preprocessed/`. The
+training dataset config is `configs/sft_microviridae_dataset.yaml`.
+
+Paper SFT settings:
+
+- Evo 1 7B 131K: 5,000 iterations on 16 H100 GPUs, batch size 64 samples,
+  context length 10,240 tokens, or 655,360 tokens per optimizer step.
+- Evo 2 7B 8K: 12,000 iterations on 32 H100 GPUs, batch size 32 samples,
+  context length 10,240 tokens, or 327,680 tokens per optimizer step.
+- Each sample is one phage genome, including the soft prompt tokens. Sequences
+  shorter than 10,240 tokens are padded to the context length, and loss is only
+  defined on non-pad sequence tokens.
+- The Evo 2 SFT learning-rate schedule starts at `1e-5`, linearly warms up for
+  5 percent of the 12,000 fine-tuning iterations, then cosine decays to `1e-6`.
+
+For a paper-faithful Evo2 SFT run, keep `--seq-length 10240`,
+`--global-batch-size 32`, `--lr 1e-5`, `--min-lr 1e-6`, warm up for 600 steps,
+decay over 12,000 steps, and train for 12,000 optimizer steps. On this
+two-A6000 workspace, full-parameter 7B SFT reaches the first optimizer step but
+OOMs during Adam state initialization, even at shorter sequence lengths.
+
+Use the following 4-layer TP=2 smoke to validate the local SFT data and training
+path before moving to a larger GPU system:
+
+```bash
+torchrun --nproc-per-node 2 --no-python train_evo2 \
+  --dataset-config configs/sft_microviridae_dataset.yaml \
+  --result-dir data/checkpoints/sft \
+  --experiment-name microviridae_sft_4layer_seq2048_smoke \
+  --finetune-ckpt-dir data/checkpoints/evo2_7b_base_mbridge \
+  --hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 \
+  --model-size evo2_7b_base \
+  --num-layers 4 \
+  --hybrid-override-pattern 'SDH*' \
+  --seq-length 2048 \
+  --tensor-model-parallel-size 2 \
+  --pipeline-model-parallel-size 1 \
+  --context-parallel-size 1 \
+  --sequence-parallel \
+  --micro-batch-size 1 \
+  --global-batch-size 1 \
+  --max-steps 2 \
+  --eval-interval 2 \
+  --eval-iters 1 \
+  --lr 1e-5 \
+  --min-lr 1e-6 \
+  --warmup-steps 1 \
+  --decay-steps 2 \
+  --workers 2 \
+  --ckpt-format torch_dist \
+  --log-interval 1 \
+  --optim-full-reshardable \
+  --activation-checkpoint-recompute-num-layers 2 \
+  --seed 1234 \
+  --dataset-seed 1234
+```
+
+This writes checkpoint/log output under
+`data/checkpoints/sft/microviridae_sft_4layer_seq2048_smoke`. The validated
+smoke loaded the base checkpoint subset, ran two optimizer steps, saved
+`checkpoints/iter_0000002`, and produced these logs:
+
+| Iteration | Train LM Loss | Validation LM Loss | Notes                            |
+| --------: | ------------: | -----------------: | -------------------------------- |
+|         1 |      7.334370 |                  - | First optimizer step.            |
+|         2 |      7.065330 |           4.894439 | Checkpoint saved at iteration 2. |
+
+The final validation-set and test-set summaries were `5.606985` and `5.376484`,
+respectively. The full-parameter 7B attempt with the same data path, TP=2, and
+`seq_length=10240` OOMed at Adam state initialization; reducing to
+`seq_length=2048` still OOMed, confirming that optimizer state, not sequence
+activation memory, is the local blocker.
+
+Evaluate both the base checkpoint and released Microviridae checkpoint on a
+small recipe-local validation FASTA sample before starting SFT. With TP=2,
+disable sequence parallelism for arbitrary-length FASTA records so odd sequence
+lengths do not hit the MCore reduce-scatter divisibility assertion.
+
+Base checkpoint starting-point loss:
+
+```bash
+torchrun --nproc_per_node 2 --no-python predict_evo2 \
+  --fasta data/sft/eval/microviridae_sft_processed_val_sample_32.fna \
+  --ckpt-dir data/checkpoints/evo2_7b_base_mbridge \
+  --output-dir data/sft/eval/predict_evo2_7b_base_mbridge \
+  --tensor-parallel-size 2 \
+  --no-sequence-parallel \
+  --micro-batch-size 1 \
+  --output-log-prob-seqs \
+  --log-prob-collapse-option mean \
+  --mask-phylogenetic-tags
+```
+
+Microviridae SFT target loss:
+
+```bash
+torchrun --nproc_per_node 2 --no-python predict_evo2 \
+  --fasta data/sft/eval/microviridae_sft_processed_val_sample_32.fna \
+  --ckpt-dir data/checkpoints/evo2_7b_microviridae_mbridge \
+  --output-dir data/sft/eval/predict_microviridae_mbridge \
+  --tensor-parallel-size 2 \
+  --no-sequence-parallel \
+  --micro-batch-size 1 \
+  --output-log-prob-seqs \
+  --log-prob-collapse-option mean \
+  --mask-phylogenetic-tags
+```
+
+Summarize either prediction directory:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import torch
+
+for label, path in [
+    ("base", Path("data/sft/eval/predict_evo2_7b_base_mbridge/predictions__rank_0__dp_rank_0.pt")),
+    ("microviridae", Path("data/sft/eval/predict_microviridae_mbridge/predictions__rank_0__dp_rank_0.pt")),
+]:
+    pred = torch.load(path, map_location="cpu")
+    loss = -pred["log_probs_seqs"].float()
+    print(
+        f"{label}: n={loss.numel()} mean_loss={loss.mean().item():.6f} "
+        f"median_loss={loss.median().item():.6f} "
+        f"min_loss={loss.min().item():.6f} max_loss={loss.max().item():.6f}"
+    )
+PY
+```
+
+Current validation losses on the 32-record sample:
+
+| Checkpoint                     | Mean loss | Median loss | Min loss | Max loss |
+| ------------------------------ | --------: | ----------: | -------: | -------: |
+| `evo2_7b_base_mbridge`         |  0.839977 |    0.807660 | 0.327738 | 1.166395 |
+| `evo2_7b_microviridae_mbridge` |  0.008796 |    0.008097 | 0.002886 | 0.018409 |
+
+Use the base loss as the starting point and the Microviridae loss as the
+short-run target when debugging the SFT stage.
 
 ## Replication Command Checklist
 

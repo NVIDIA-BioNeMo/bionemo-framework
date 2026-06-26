@@ -426,7 +426,7 @@ def get_batch(
     )
 
     # slice batch along sequence dimension for context parallelism
-    batch = get_batch_on_this_cp_rank(batch)
+    batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=False)
     attention_mask = batch.get("attention_mask")
     if need_attention_mask and attention_mask is None:
         raise ValueError("Attention mask is required but not found in the batch")
