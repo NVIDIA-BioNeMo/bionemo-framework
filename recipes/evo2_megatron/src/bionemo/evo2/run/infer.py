@@ -385,8 +385,10 @@ def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int, cud
 
     This mirrors Megatron's ``cuda_graph_impl=local`` setup, but applies it directly to the
     provider loaded from the checkpoint because this recipe does not use Megatron's global arg
-    parser. Empty ``cuda_graph_scope`` means per-layer local graph capture for every graphable
-    layer; Evo2's HyenaLayer follows the same convention as mcore's MambaLayer.
+    parser. Empty ``cuda_graph_scope`` enables local graphs for every graphable
+    layer, including Transformer attention/MLP layers and Hyena layers. The
+    enclosing HyenaStack only replays its own graph for explicit
+    ``CudaGraphScope.full_iteration`` so the default path does not nest graphs.
 
     ``cuda_graph_impl="none"`` disables graph capture entirely (decode runs eager) -- useful for
     debugging and for tests that need an un-graphed reference to compare against.
