@@ -66,3 +66,16 @@ def test_docs_and_configs_do_not_use_stale_workspace_paths():
     offenders = [path for path in checked_paths if stale_prefix in path.read_text()]
 
     assert offenders == []
+
+
+def test_grpo_config_enables_opt_in_evo2_batched_decode():
+    """GRPO should keep Megatron generation batch capacity aligned with Evo2 batched decode."""
+    config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron.yaml"
+    config = yaml.safe_load(config_path.read_text())
+
+    generation_batch_size = config["policy"]["generation_batch_size"]
+    mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
+
+    assert generation_batch_size == 8
+    assert mcore_generation_config["max_requests"] == generation_batch_size
+    assert mcore_generation_config["evo2_batched_decode_size"] == generation_batch_size

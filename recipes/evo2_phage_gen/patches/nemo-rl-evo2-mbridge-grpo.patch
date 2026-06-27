@@ -1,5 +1,5 @@
 diff --git a/nemo_rl/models/generation/megatron/megatron_worker.py b/nemo_rl/models/generation/megatron/megatron_worker.py
-index 0a0721dd9..3517e2ede 100644
+index 0a0721dd..cfd80fcf 100644
 --- a/nemo_rl/models/generation/megatron/megatron_worker.py
 +++ b/nemo_rl/models/generation/megatron/megatron_worker.py
 @@ -18,6 +18,7 @@ import os
@@ -8,29 +8,36 @@ index 0a0721dd9..3517e2ede 100644
  import warnings
 +from types import MethodType
  from typing import AsyncGenerator, Optional
-
+ 
  import requests
 @@ -79,7 +80,6 @@ class MegatronGenerationMixin:
          if self._inference_engine_initialized:
              return
-
+ 
 -        from megatron.core.inference.config import MambaInferenceStateConfig
          from megatron.core.inference.contexts.dynamic_context import (
              DynamicInferenceContext,
          )
-@@ -115,7 +115,25 @@ class MegatronGenerationMixin:
+@@ -113,9 +113,34 @@ class MegatronGenerationMixin:
+             "materialize_only_last_token_logits"
+         ]
          num_speculative_tokens = mcore_generation_config["num_speculative_tokens"]
++        evo2_batched_decode_size = int(mcore_generation_config.get("evo2_batched_decode_size", 1) or 1)
          max_requests = mcore_generation_config.get("max_requests")
-
--        mamba_inference_state_config = MambaInferenceStateConfig.from_model(self.model)
++        if evo2_batched_decode_size > 1:
++            max_requests = max(int(max_requests or 0), evo2_batched_decode_size)
++
 +        evo2_bind_hyena_packed_views = None
++        evo2_bind_hyena_packed_views_batch = None
 +        try:
 +            from bionemo.evo2.models.evo2_provider import (
++                bind_hyena_packed_views_to_dynamic_context_batch,
 +                bind_hyena_packed_views_to_dynamic_context,
 +                build_evo2_mamba_inference_state_config,
 +            )
 +        except ModuleNotFoundError:
 +            bind_hyena_packed_views_to_dynamic_context = None
++            bind_hyena_packed_views_to_dynamic_context_batch = None
 +            build_evo2_mamba_inference_state_config = None
 +
 +        raw_model = unwrap_model(self.model)
@@ -38,26 +45,37 @@ index 0a0721dd9..3517e2ede 100644
 +        if has_evo2_hyena_state and build_evo2_mamba_inference_state_config is not None:
 +            mamba_inference_state_config = build_evo2_mamba_inference_state_config(raw_model)
 +            evo2_bind_hyena_packed_views = bind_hyena_packed_views_to_dynamic_context
++            evo2_bind_hyena_packed_views_batch = bind_hyena_packed_views_to_dynamic_context_batch
 +        else:
 +            from megatron.core.inference.config import MambaInferenceStateConfig
-+
+ 
+-        mamba_inference_state_config = MambaInferenceStateConfig.from_model(self.model)
 +            mamba_inference_state_config = MambaInferenceStateConfig.from_model(self.model)
          is_hybrid_model = mamba_inference_state_config is not None
          if is_hybrid_model:
              if (
-@@ -182,6 +200,19 @@ class MegatronGenerationMixin:
+@@ -182,6 +207,28 @@ class MegatronGenerationMixin:
          self.inference_context = DynamicInferenceContext(
              self.model.config, inference_config
          )
 +        if evo2_bind_hyena_packed_views is not None:
 +            hyena_model = raw_model
 +            original_add_request = self.inference_context.add_request
++            self.inference_context.evo2_max_batched_decode_requests = evo2_batched_decode_size
 +
 +            def evo2_add_request(context, req, prefill_chunk_length=None):
 +                request_slot = int(context.total_request_count)
 +                result = original_add_request(req, prefill_chunk_length=prefill_chunk_length)
-+                mamba_slot = int(context.mamba_metadata.request_to_mamba_state_idx[request_slot].item())
-+                evo2_bind_hyena_packed_views(hyena_model, context, request_slot=mamba_slot)
++                active_request_count = int(context.total_request_count) - int(context.paused_request_count)
++                if evo2_batched_decode_size > 1 and active_request_count > 1:
++                    active_slice = slice(int(context.paused_request_count), int(context.total_request_count))
++                    mamba_slots = context.mamba_metadata.request_to_mamba_state_idx[active_slice]
++                    evo2_bind_hyena_packed_views_batch(hyena_model, context, request_slots=mamba_slots)
++                    context.evo2_batched_decode_enabled = active_request_count <= evo2_batched_decode_size
++                else:
++                    mamba_slot = int(context.mamba_metadata.request_to_mamba_state_idx[request_slot].item())
++                    evo2_bind_hyena_packed_views(hyena_model, context, request_slot=mamba_slot)
++                    context.evo2_batched_decode_enabled = False
 +                return result
 +
 +            self.inference_context.add_request = MethodType(evo2_add_request, self.inference_context)
@@ -65,14 +83,33 @@ index 0a0721dd9..3517e2ede 100644
          self.inference_wrapped_model = GPTInferenceWrapper(
              self.model, self.inference_context
          )
+@@ -428,6 +475,9 @@ class MegatronGenerationMixin:
+         top_p_val = (
+             0.0 if greedy else (float(top_p_cfg) if top_p_cfg is not None else 0.0)
+         )
++        mcore_generation_config = self.cfg["generation"].get("mcore_generation_config", {})
++        evo2_batched_decode_size = int(mcore_generation_config.get("evo2_batched_decode_size", 1) or 1)
++        termination_id = -1 if evo2_batched_decode_size > 1 else self.megatron_tokenizer.eod
+ 
+         return SamplingParams(
+             temperature=self.cfg["generation"]["temperature"] if not greedy else 0,
+@@ -436,7 +486,7 @@ class MegatronGenerationMixin:
+             skip_prompt_log_probs=True,
+             return_log_probs=True,
+             num_tokens_to_generate=self.cfg["generation"]["max_new_tokens"],
+-            termination_id=self.megatron_tokenizer.eod,
++            termination_id=termination_id,
+             stop_words=stop_words,
+         )
+ 
 diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
-index b0d5be4d9..6f7dca0c0 100644
+index b0d5be4d..6f7dca0c 100644
 --- a/nemo_rl/models/megatron/setup.py
 +++ b/nemo_rl/models/megatron/setup.py
 @@ -98,6 +98,40 @@ from nemo_rl.models.value.config import ValueConfig
  TokenizerType = TypeVar("TokenizerType", bound=PreTrainedTokenizerBase)
-
-
+ 
+ 
 +def _apply_target_allowlist_prefixes(config: PolicyConfig) -> None:
 +    """Allow extra Megatron config ``_target_`` prefixes requested by policy config."""
 +    prefixes = config["megatron_cfg"].get("target_allowlist_prefixes", [])
@@ -109,11 +146,11 @@ index b0d5be4d9..6f7dca0c0 100644
 +
  def destroy_parallel_state():
      """Safely destroy parallel state and reset async call tracking.
-
+ 
 @@ -464,6 +498,7 @@ def setup_model_config(
                  "directory not mounted on this node. Please check."
              )
-
+ 
 +        _apply_target_allowlist_prefixes(config)
          try:
              cfg_from_pretrained = ConfigContainer.from_yaml(
@@ -124,7 +161,7 @@ index b0d5be4d9..6f7dca0c0 100644
      }
 +    tokenizer_cfg = config.get("tokenizer") or {}
 +    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
-
+ 
      return ConfigContainer(
          model=model_cfg,
 @@ -986,7 +1023,7 @@ def _create_megatron_config(
@@ -135,11 +172,11 @@ index b0d5be4d9..6f7dca0c0 100644
 +            tokenizer_model=tokenizer_model,
          ),
      )
-
+ 
 @@ -1554,9 +1591,11 @@ def finalize_megatron_setup(
          pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
      )
-
+ 
 +    tokenizer_cfg = config.get("tokenizer") or {}
 +    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
      tokenizer_config = TokenizerConfig(
@@ -151,7 +188,7 @@ index b0d5be4d9..6f7dca0c0 100644
              "use_fast": True,
 @@ -1571,9 +1610,10 @@ def finalize_megatron_setup(
      )
-
+ 
      dp_size = worker_sharding_annotations.get_axis_size("data_parallel")
 -    megatron_bridge = AutoBridge.from_hf_pretrained(
 -        hf_model_name, trust_remote_code=True
@@ -160,11 +197,11 @@ index b0d5be4d9..6f7dca0c0 100644
 +        megatron_bridge = NoRefitMegatronBridge(transformer_config=getattr(model, "config", None))
 +    else:
 +        megatron_bridge = AutoBridge.from_hf_pretrained(hf_model_name, trust_remote_code=True)
-
+ 
      should_disable_forward_pre_hook = (
          config["megatron_cfg"]["optimizer"]["use_distributed_optimizer"]
 diff --git a/nemo_rl/models/policy/lm_policy.py b/nemo_rl/models/policy/lm_policy.py
-index f1a5d705c..0b86a145b 100644
+index f1a5d705..0b86a145 100644
 --- a/nemo_rl/models/policy/lm_policy.py
 +++ b/nemo_rl/models/policy/lm_policy.py
 @@ -303,7 +303,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
@@ -175,9 +212,9 @@ index f1a5d705c..0b86a145b 100644
 +        except (OSError, ValueError) as e:
              self.flops_tracker = None
              print(f"FLOPS tracker not supported for model {config['model_name']}: {e}")
-
+ 
 diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
-index e517e0298..84ef1f1b0 100644
+index e517e029..84ef1f1b 100644
 --- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
 +++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
 @@ -1167,6 +1167,13 @@ class MegatronPolicyWorkerImpl(
@@ -192,5 +229,5 @@ index e517e0298..84ef1f1b0 100644
 +            return {}
 +
          self.refit_param_info_mcore = self._calculate_refit_param_info()
-
+ 
          # Collect tensor metadata for refit / hf side info

@@ -68,7 +68,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -100,6 +100,7 @@ from megatron.core.transformer.module import Float16Module
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import (
+    bind_hyena_packed_views_to_dynamic_context_batch,
     bind_hyena_packed_views_to_dynamic_context,
     build_evo2_mamba_inference_state_config,
     compute_evo2_paged_kv_buffer_size_gb,
@@ -698,6 +699,8 @@ def generate(
     enable_chunked_prefill: bool = False,
     inference_dynamic_batching_max_tokens: Optional[int] = None,
     inference_dynamic_batching_block_size: int = 256,
+    evo2_batched_decode_size: int = 1,
+    result_callback: Optional[Callable[[int, Any], None]] = None,
 ) -> List[Any]:
     """Generate text using the Evo2 native dynamic-inference engine.
 
@@ -739,6 +742,8 @@ def generate(
         enable_chunked_prefill=enable_chunked_prefill,
         inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
         inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
+        evo2_batched_decode_size=evo2_batched_decode_size,
+        result_callback=result_callback,
     )
 
 
@@ -822,6 +827,51 @@ def _sample_from_logits(
     return sampled
 
 
+_BATCHED_DECODE_TEXT_STOP_MARKERS = ("STOP", "EOS", "EOD")
+
+
+def _native_stop_token_ids(tokenizer: Any) -> set[int]:
+    """Best-effort set of tokenizer EOD/EOS ids for fixed-shape native decode."""
+    stop_token_ids: set[int] = set()
+    for attr_name in ("eod", "eos", "eos_token_id"):
+        token_id = getattr(tokenizer, attr_name, None)
+        if token_id is None and hasattr(tokenizer, "tokenizer"):
+            token_id = getattr(tokenizer.tokenizer, attr_name, None)
+        if token_id is None:
+            continue
+        if isinstance(token_id, (list, tuple, set)):
+            stop_token_ids.update(int(item) for item in token_id if item is not None)
+        else:
+            stop_token_ids.add(int(token_id))
+    return stop_token_ids
+
+
+def _trim_native_text_stop_markers(text: str) -> str:
+    """Trim generated text at whitespace or textual STOP/EOS/EOD markers."""
+    text = str(text)
+    stop_index = len(text)
+    for idx, char in enumerate(text):
+        if char.isspace():
+            stop_index = min(stop_index, idx)
+            break
+    upper_text = text.upper()
+    for marker in _BATCHED_DECODE_TEXT_STOP_MARKERS:
+        marker_index = upper_text.find(marker)
+        if marker_index != -1:
+            stop_index = min(stop_index, marker_index)
+    return text[:stop_index]
+
+
+def _native_generated_ids_hit_stop(tokenizer: Any, generated_ids: list[int], stop_token_ids: set[int]) -> bool:
+    """Return whether one generated row has reached a stop marker."""
+    if not generated_ids:
+        return False
+    if generated_ids[-1] in stop_token_ids:
+        return True
+    generated_text = tokenizer.detokenize(generated_ids)
+    return _trim_native_text_stop_markers(generated_text) != generated_text
+
+
 def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx: Any, device: torch.device) -> None:
     """Capture the per-layer decode CUDA graph(s) up front on a throwaway request.
 
@@ -851,14 +901,17 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
     n_warmup_prompt_tokens = max(1, min(8, int(dyn_ctx.max_tokens)))
     try:
         with torch.inference_mode():
-            req = DynamicInferenceRequest(
-                request_id=0,
-                prompt_tokens=torch.zeros(n_warmup_prompt_tokens, dtype=torch.int64, device=device),
-                sampling_params=SamplingParams(num_tokens_to_generate=8, termination_id=-1),
-            )
-            dyn_ctx.add_request(req, prefill_chunk_length=n_warmup_prompt_tokens)
-            slot = int(dyn_ctx.mamba_metadata.request_to_mamba_state_idx[0].item())
-            bind_hyena_packed_views_to_dynamic_context(hyena_model, dyn_ctx, request_slot=slot)
+            warmup_request_count = max(1, int(getattr(dyn_ctx, "evo2_max_batched_decode_requests", 1)))
+            for request_id in range(warmup_request_count):
+                req = DynamicInferenceRequest(
+                    request_id=request_id,
+                    prompt_tokens=torch.zeros(n_warmup_prompt_tokens, dtype=torch.int64, device=device),
+                    sampling_params=SamplingParams(num_tokens_to_generate=8, termination_id=-1),
+                )
+                dyn_ctx.add_request(req, prefill_chunk_length=n_warmup_prompt_tokens)
+            slots = dyn_ctx.mamba_metadata.request_to_mamba_state_idx[:warmup_request_count]
+            bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
+            dyn_ctx.evo2_batched_decode_enabled = warmup_request_count > 1
             # One prefill forward (eager; not graphed) seeds the Hyena recurrent state, then two decode
             # forwards: the first triggers graph capture, the second replays it so any capture/replay
             # mismatch surfaces here rather than on a user prompt.
@@ -880,8 +933,8 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
                         runtime_gather_output=True,
                     )
                 dyn_ctx.update_requests(
-                    torch.ones(1, dtype=torch.bool, device=device),
-                    torch.zeros(1, dtype=torch.int64, device=device),
+                    torch.ones(warmup_request_count, dtype=torch.bool, device=device),
+                    torch.zeros(warmup_request_count, dtype=torch.int64, device=device),
                 )
     finally:
         dyn_ctx.reset()
@@ -923,6 +976,7 @@ def _get_or_build_shared_dynamic_context(
     block_size_tokens: int,
     max_tokens: Optional[int],
     enable_chunked_prefill: bool,
+    max_active_requests: int,
     device: torch.device,
 ) -> Any:
     """Return the engine's persistent dynamic context, building (and graph-warming) it on first use.
@@ -944,6 +998,7 @@ def _get_or_build_shared_dynamic_context(
         int(block_size_tokens),
         None if max_tokens is None else int(max_tokens),
         bool(enable_chunked_prefill),
+        int(max_active_requests),
     )
     cached = nd.shared_dyn_ctx
     if (
@@ -962,11 +1017,11 @@ def _get_or_build_shared_dynamic_context(
         _reset_layer_cuda_graphs(nd)
 
     hyena_model = nd.hyena_model
-    # max_requests is kept tp-divisible (max(tp,1)); the per-context exact rounder still decodes the
-    # single active request as ONE row. Size to the engine's full max_seq_length so the persistent
-    # context (and its constant rotary length) can serve any prompt across any batch.
+    # max_requests is kept at least tp-divisible and can be enlarged by the opt-in Evo2 batched
+    # decode path. Size to the engine's full max_seq_length so the persistent context (and its
+    # constant rotary length) can serve any prompt across any batch.
     tp = int(getattr(hyena_model.config, "tensor_model_parallel_size", 1) or 1)
-    max_requests = max(tp, 1)
+    max_requests = max(tp, int(max_active_requests), 1)
     msl = int(nd.max_seq_length)
     buf_gb = compute_evo2_paged_kv_buffer_size_gb(
         hyena_model.config,
@@ -992,6 +1047,7 @@ def _get_or_build_shared_dynamic_context(
         ),
     )
     dyn_ctx.materialize_only_last_token_logits = False
+    dyn_ctx.evo2_max_batched_decode_requests = int(max_active_requests)
     dyn_ctx.initialize_all_tensors()
     if nd.cuda_graphs_enabled:
         _warmup_native_dynamic_cuda_graphs(nd, dyn_ctx, device)
@@ -1012,6 +1068,8 @@ def _generate_native_dynamic(
     enable_chunked_prefill: bool,
     inference_dynamic_batching_max_tokens: Optional[int],
     inference_dynamic_batching_block_size: int,
+    evo2_batched_decode_size: int,
+    result_callback: Optional[Callable[[int, Any], None]],
 ) -> List[_NativeDynamicResult]:
     """Drive standalone Evo2 (text→DNA) generation through the native mcore dynamic engine.
 
@@ -1117,6 +1175,7 @@ def _generate_native_dynamic(
         block_size_tokens=block_size_tokens,
         max_tokens=max_tokens,
         enable_chunked_prefill=enable_chunked_prefill,
+        max_active_requests=max(1, int(evo2_batched_decode_size)),
         device=device,
     )
     if max_n_prompt > dyn_ctx.max_tokens and not enable_chunked_prefill:
@@ -1126,7 +1185,7 @@ def _generate_native_dynamic(
             "--enable-chunked-prefill."
         )
 
-    for prompt_token_ids in tokenized_prompts:
+    def _run_single_prompt(prompt_token_ids: list[int]) -> _NativeDynamicResult:
         n_prompt = len(prompt_token_ids)
 
         generated_ids: List[int] = []
@@ -1230,14 +1289,167 @@ def _generate_native_dynamic(
             dyn_ctx.reset()
 
         generated_text = tokenizer.detokenize(generated_ids) if generated_ids else ""
-        results.append(
-            _NativeDynamicResult(
-                generated_text=generated_text,
-                generated_length=len(generated_ids),
-                prompt_tokens=prompt_token_ids,
-                generated_log_probs=generated_logprobs if return_log_probs else None,
-            )
+        return _NativeDynamicResult(
+            generated_text=generated_text,
+            generated_length=len(generated_ids),
+            prompt_tokens=prompt_token_ids,
+            generated_log_probs=generated_logprobs if return_log_probs else None,
         )
+
+    def _run_batched_prompts(prompt_token_id_batch: list[list[int]]) -> list[_NativeDynamicResult]:
+        batch_request_count = len(prompt_token_id_batch)
+        if batch_request_count <= 1:
+            return [_run_single_prompt(prompt_token_id_batch[0])]
+        if max_new_tokens <= 0:
+            return [
+                _NativeDynamicResult(
+                    generated_text="",
+                    generated_length=0,
+                    prompt_tokens=prompt_token_ids,
+                    generated_log_probs=[] if return_log_probs else None,
+                )
+                for prompt_token_ids in prompt_token_id_batch
+            ]
+        if enable_chunked_prefill:
+            raise ValueError("Evo2 batched decode does not support chunked prefill")
+        prompt_lengths = {len(prompt_ids) for prompt_ids in prompt_token_id_batch}
+        if len(prompt_lengths) != 1:
+            raise ValueError(f"Evo2 batched decode requires same-length prompts, got lengths {sorted(prompt_lengths)}")
+
+        n_prompt = prompt_lengths.pop()
+        generated_ids: list[list[int]] = [[] for _ in range(batch_request_count)]
+        generated_logprobs: list[list[float]] = [[] for _ in range(batch_request_count)]
+        done = [False for _ in range(batch_request_count)]
+        stop_token_ids = _native_stop_token_ids(tokenizer)
+
+        def _all_rows_done() -> bool:
+            return all(done[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens for request_idx in range(batch_request_count))
+
+        def _forward_sample_update(*, count_generated: bool) -> bool:
+            dyn_ctx.initialize_attention_state()
+            input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
+            try:
+                from megatron.core.inference.utils import InferenceMode
+
+                inference_mode_context = InferenceMode.active()
+            except ImportError:
+                inference_mode_context = contextlib.nullcontext()
+            with inference_mode_context:
+                logits = forward_model(
+                    input_ids,
+                    position_ids,
+                    None,
+                    inference_context=dyn_ctx,
+                    runtime_gather_output=True,
+                )
+            last_logits = dyn_ctx.last_token_logits(logits).float()
+            if last_logits.shape[0] < batch_request_count:
+                raise RuntimeError(
+                    "Evo2 batched decode expected one logit row per active request; "
+                    f"got {last_logits.shape[0]} rows for {batch_request_count} requests"
+                )
+            active_logits = last_logits[:batch_request_count]
+            sampled = _sample_from_logits(
+                active_logits,
+                temperature=float(temperature),
+                top_k=eff_top_k,
+                top_p=eff_top_p,
+                generator=sampling_rng,
+                vocab_size=tokenizer.vocab_size,
+            )
+            if count_generated:
+                if return_log_probs:
+                    log_probs = torch.log_softmax(active_logits.float(), dim=-1)
+                for request_idx, next_tok_tensor in enumerate(sampled):
+                    if done[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens:
+                        continue
+                    next_tok_id = int(next_tok_tensor.item())
+                    generated_ids[request_idx].append(next_tok_id)
+                    if return_log_probs:
+                        generated_logprobs[request_idx].append(log_probs[request_idx, next_tok_id].item())
+                    if _native_generated_ids_hit_stop(tokenizer, generated_ids[request_idx], stop_token_ids):
+                        done[request_idx] = True
+
+            # Keep every slot alive until the whole fixed-shape batch is complete; per-row compaction
+            # would require rebinding Hyena recurrent-state views after MCore moves active requests.
+            keep_group_active = (not count_generated) or not _all_rows_done()
+            active_after_sample = torch.full((batch_request_count,), keep_group_active, dtype=torch.bool, device=device)
+            dyn_ctx.update_requests(active_after_sample, sampled.to(dtype=torch.int64, device=device))
+            if int(getattr(dyn_ctx, "paused_request_count", 0)) != 0:
+                raise RuntimeError("Evo2 batched decode does not yet support paused dynamic requests")
+            return keep_group_active
+
+        try:
+            with torch.inference_mode():
+                for request_idx, prompt_token_ids in enumerate(prompt_token_id_batch):
+                    req = DynamicInferenceRequest(
+                        request_id=request_idx,
+                        prompt_tokens=torch.tensor(prompt_token_ids, dtype=torch.int64, device=device),
+                        sampling_params=SamplingParams(num_tokens_to_generate=max_new_tokens, termination_id=-1),
+                    )
+                    dyn_ctx.add_request(req, prefill_chunk_length=n_prompt)
+
+                slots = dyn_ctx.mamba_metadata.request_to_mamba_state_idx[:batch_request_count]
+                bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
+                dyn_ctx.evo2_batched_decode_enabled = True
+                if rank == 0:
+                    logger.info(
+                        "[evo2-native] batched prompt prefill: requests=%d, chunk=%d/%d tokens, remaining=0",
+                        batch_request_count,
+                        n_prompt,
+                        n_prompt,
+                    )
+
+                _forward_sample_update(count_generated=True)
+                while not _all_rows_done():
+                    if not dyn_ctx.has_unfinished_requests():
+                        break
+                    _forward_sample_update(count_generated=True)
+        finally:
+            dyn_ctx.evo2_batched_decode_enabled = False
+            dyn_ctx.reset()
+
+        return [
+            _NativeDynamicResult(
+                generated_text=(
+                    _trim_native_text_stop_markers(tokenizer.detokenize(request_generated_ids))
+                    if request_generated_ids
+                    else ""
+                ),
+                generated_length=len(request_generated_ids),
+                prompt_tokens=prompt_token_ids,
+                generated_log_probs=generated_logprobs[request_idx] if return_log_probs else None,
+            )
+            for request_idx, (prompt_token_ids, request_generated_ids) in enumerate(
+                zip(prompt_token_id_batch, generated_ids)
+            )
+        ]
+
+    batched_decode_size = max(1, int(evo2_batched_decode_size))
+    if batched_decode_size > 1 and rank == 0:
+        logger.info("[evo2-native] opt-in batched decode active: size=%d", batched_decode_size)
+    def _append_results(group_results: list[_NativeDynamicResult], *, prompt_offset: int) -> None:
+        for local_idx, result in enumerate(group_results):
+            prompt_idx = prompt_offset + local_idx
+            results.append(result)
+            if result_callback is not None:
+                result_callback(prompt_idx, result)
+
+    for group_start in range(0, len(tokenized_prompts), batched_decode_size):
+        group = tokenized_prompts[group_start : group_start + batched_decode_size]
+        if batched_decode_size <= 1 or len(group) <= 1:
+            _append_results([_run_single_prompt(group[0])], prompt_offset=group_start)
+            continue
+        try:
+            _append_results(_run_batched_prompts(group), prompt_offset=group_start)
+        except Exception as exc:
+            if rank == 0:
+                logger.warning(
+                    "[evo2-native] batched decode group failed (%s); falling back to single-request decode",
+                    exc,
+                )
+            fallback_results = [_run_single_prompt(prompt_token_ids) for prompt_token_ids in group]
+            _append_results(fallback_results, prompt_offset=group_start)
 
     return results
 
@@ -1408,6 +1620,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Save results as JSONL (one result object per line)",
     )
+    ap.add_argument(
+        "--stream-output",
+        action="store_true",
+        default=False,
+        help="When --output-file is set, write and flush each JSONL result as soon as it is generated.",
+    )
 
     # Precision arguments
     ap.add_argument("--mixed-precision-recipe", type=str, default=None, help="Override precision recipe")
@@ -1442,6 +1660,14 @@ def parse_args() -> argparse.Namespace:
         help="Maximum batch size for inference. The inference engine pre-allocates GPU memory "
         "proportional to this value (KV caches, attention masks, internal buffers). "
         "For large models (e.g. 40b), only batch_size=1 may fit in memory.",
+    )
+    ap.add_argument(
+        "--evo2-batched-decode-size",
+        type=int,
+        default=1,
+        help="Opt-in Evo2 native batched next-token decode size for same-length prompts. "
+        "Values >1 keep that many prompts active in one dynamic-context step. "
+        "Unsupported groups fall back to the original single-request path.",
     )
     ap.add_argument(
         "--use-subquadratic-ops",
@@ -1539,11 +1765,13 @@ def infer(
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
     output_file: Optional[Path] = None,
+    stream_output: bool = False,
     mixed_precision_recipe: Optional[str] = None,
     vortex_style_fp8: bool = False,
     max_seq_length: Optional[int] = None,
     max_seq_length_num_prompts: int = _DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS,
     max_batch_size: int = 1,
+    evo2_batched_decode_size: int = 1,
     use_subquadratic_ops: bool = False,
     cuda_graph_impl: str = "local",
     enable_chunked_prefill: bool = False,
@@ -1569,6 +1797,7 @@ def infer(
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
         output_file: Optional path to save results as JSONL.
+        stream_output: Write and flush each result to ``output_file`` as soon as it is generated.
         mixed_precision_recipe: Override mixed precision recipe.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
@@ -1578,6 +1807,8 @@ def infer(
             (``<= 0`` = all). A longer later prompt grows the context on demand rather than erroring.
         max_batch_size: Maximum batch size for inference. The inference engine pre-allocates
             GPU memory proportional to this value. For large models, only 1 may fit.
+        evo2_batched_decode_size: Opt-in number of same-length Evo2 prompts to keep active for
+            native Hyena next-token decode. ``1`` preserves the original single-request path.
         use_subquadratic_ops: Use fused subquadratic-ops kernels in the inference path.
         cuda_graph_impl: ``"local"`` (default) uses mcore per-layer decode CUDA graphs; ``"none"``
             runs decode eagerly (no graph capture) -- mainly for debugging / un-graphed reference runs.
@@ -1628,48 +1859,78 @@ def infer(
     total_prompt_tokens = 0
     total_completion_tokens = 0
     t_generate_start = time.perf_counter()
+    is_rank_zero = int(os.environ.get("RANK", "0")) == 0
+    stream_file = None
+    streamed_record_count = 0
 
-    for batch_start in range(0, len(prompts), max_batch_size):
-        batch = prompts[batch_start : batch_start + max_batch_size]
-        batch_prompts = [entry["prompt"] for entry in batch]
-        batch_idx = batch_start // max_batch_size + 1
+    if is_rank_zero and output_file is not None and stream_output:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        stream_file = open(output_file, "w")
+        logger.info("Streaming JSONL results to: %s", output_file)
 
-        logger.info(f"Generating batch {batch_idx} ({len(batch)} prompt(s))...")
+    try:
+        for batch_start in range(0, len(prompts), max_batch_size):
+            batch = prompts[batch_start : batch_start + max_batch_size]
+            batch_prompts = [entry["prompt"] for entry in batch]
+            batch_idx = batch_start // max_batch_size + 1
 
-        t_batch_start = time.perf_counter()
-        results = generate(
-            components,
-            prompts=batch_prompts,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            return_log_probs=return_log_probs,
-            enable_chunked_prefill=enable_chunked_prefill,
-            inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
-            inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
-        )
-        t_batch_elapsed = time.perf_counter() - t_batch_start
+            logger.info(f"Generating batch {batch_idx} ({len(batch)} prompt(s))...")
 
-        batch_completion_tokens = 0
-        for entry, result in zip(batch, results):
-            record = _result_to_jsonl_record(
-                request_id=entry["id"],
-                prompt=entry["prompt"],
-                result=result,
+            def _stream_result(prompt_idx: int, result: Any) -> None:
+                nonlocal streamed_record_count
+                if stream_file is None:
+                    return
+                entry = batch[prompt_idx]
+                record = _result_to_jsonl_record(
+                    request_id=entry["id"],
+                    prompt=entry["prompt"],
+                    result=result,
+                    max_new_tokens=max_new_tokens,
+                    return_log_probs=return_log_probs,
+                )
+                stream_file.write(json.dumps(record) + "\n")
+                stream_file.flush()
+                streamed_record_count += 1
+
+            t_batch_start = time.perf_counter()
+            results = generate(
+                components,
+                prompts=batch_prompts,
                 max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
                 return_log_probs=return_log_probs,
+                enable_chunked_prefill=enable_chunked_prefill,
+                inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
+                inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
+                evo2_batched_decode_size=evo2_batched_decode_size,
+                result_callback=_stream_result if stream_file is not None else None,
             )
-            all_records.append(record)
-            batch_completion_tokens += record["usage"]["completion_tokens"]
-            total_prompt_tokens += record["usage"]["prompt_tokens"]
-            total_completion_tokens += record["usage"]["completion_tokens"]
+            t_batch_elapsed = time.perf_counter() - t_batch_start
 
-        batch_tok_per_sec = batch_completion_tokens / t_batch_elapsed if t_batch_elapsed > 0 else 0
-        logger.info(
-            f"[PERF] Batch {batch_idx}: {batch_completion_tokens} tokens in "
-            f"{t_batch_elapsed:.2f}s ({batch_tok_per_sec:.1f} completion tok/s)"
-        )
+            batch_completion_tokens = 0
+            for entry, result in zip(batch, results):
+                record = _result_to_jsonl_record(
+                    request_id=entry["id"],
+                    prompt=entry["prompt"],
+                    result=result,
+                    max_new_tokens=max_new_tokens,
+                    return_log_probs=return_log_probs,
+                )
+                all_records.append(record)
+                batch_completion_tokens += record["usage"]["completion_tokens"]
+                total_prompt_tokens += record["usage"]["prompt_tokens"]
+                total_completion_tokens += record["usage"]["completion_tokens"]
+
+            batch_tok_per_sec = batch_completion_tokens / t_batch_elapsed if t_batch_elapsed > 0 else 0
+            logger.info(
+                f"[PERF] Batch {batch_idx}: {batch_completion_tokens} tokens in "
+                f"{t_batch_elapsed:.2f}s ({batch_tok_per_sec:.1f} completion tok/s)"
+            )
+    finally:
+        if stream_file is not None:
+            stream_file.close()
 
     t_generate_elapsed = time.perf_counter() - t_generate_start
     total_tok_per_sec = total_completion_tokens / t_generate_elapsed if t_generate_elapsed > 0 else 0
@@ -1686,8 +1947,6 @@ def infer(
         f"({total_tok_per_sec:.1f} completion tok/s)"
     )
 
-    is_rank_zero = parallel_state.get_data_parallel_rank() == 0
-
     if is_rank_zero:
         for record in all_records:
             print(
@@ -1695,12 +1954,14 @@ def infer(
                 file=sys.stdout,
             )
 
-        if output_file is not None:
+        if output_file is not None and not stream_output:
             output_file.parent.mkdir(parents=True, exist_ok=True)
             with open(output_file, "w") as f:
                 for record in all_records:
                     f.write(json.dumps(record) + "\n")
             logger.info(f"Saved {len(all_records)} result(s) to: {output_file}")
+        elif output_file is not None and stream_output:
+            logger.info(f"Streamed {streamed_record_count} result(s) to: {output_file}")
 
     logger.info("Inference complete!")
 
@@ -1746,11 +2007,13 @@ def main() -> None:
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,
         context_parallel_size=args.context_parallel_size,
         output_file=args.output_file,
+        stream_output=args.stream_output,
         mixed_precision_recipe=args.mixed_precision_recipe,
         vortex_style_fp8=args.vortex_style_fp8,
         max_seq_length=max_seq_length,
         max_seq_length_num_prompts=args.max_seq_length_num_prompts,
         max_batch_size=args.max_batch_size,
+        evo2_batched_decode_size=args.evo2_batched_decode_size,
         use_subquadratic_ops=args.use_subquadratic_ops,
         cuda_graph_impl=args.cuda_graph_impl,
         enable_chunked_prefill=args.enable_chunked_prefill,

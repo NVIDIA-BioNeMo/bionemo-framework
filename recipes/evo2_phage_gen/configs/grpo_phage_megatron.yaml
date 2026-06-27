@@ -32,7 +32,7 @@ policy:
     chat_template_kwargs: null
   train_global_batch_size: 4
   train_micro_batch_size: 1
-  generation_batch_size: 2
+  generation_batch_size: 8
   logprob_batch_size: 1
   max_total_sequence_length: 10240
   precision: "bfloat16"
@@ -60,6 +60,8 @@ policy:
       cuda_graph_impl: "local"
       inference_cuda_graph_scope: "block"
       use_cuda_graphs_for_non_decode_steps: true
+      max_requests: 8
+      evo2_batched_decode_size: 8
 
 data:
   max_input_seq_length: 512

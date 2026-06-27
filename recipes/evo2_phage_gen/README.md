@@ -706,7 +706,9 @@ infer_evo2 \
   --seed 7 \
   --tensor-parallel-size 1 \
   --max-seq-length 6144 \
-  --max-batch-size 1 \
+  --max-batch-size 1000 \
+  --evo2-batched-decode-size 8 \
+  --stream-output \
   --output-file recipes/evo2_phage_gen/data/checkpoints/generation/phix174_prompt4_temp0.7.jsonl
 ```
 
@@ -774,7 +776,9 @@ for temp in 0.7 0.8 0.9; do
       --seed 7 \
       --tensor-parallel-size 1 \
       --max-seq-length 6144 \
-      --max-batch-size 1 \
+      --max-batch-size 1000 \
+      --evo2-batched-decode-size 8 \
+      --stream-output \
       --output-file recipes/evo2_phage_gen/data/checkpoints/generation/jsonl/phix174_prompt${prompt_len}_temp${temp}.jsonl
   done
 done

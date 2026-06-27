@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 # --- BEGIN COPIED FILE NOTICE ---
 # This file is copied from: recipes/evo2_megatron/src/bionemo/common/data/__init__.py
 # Do not modify this file directly. Instead, modify the source and run:
 #     python ci/scripts/check_copied_files.py --fix
 # --- END COPIED FILE NOTICE ---
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
 
 """Data loading and dataset helper utilities."""
 #
