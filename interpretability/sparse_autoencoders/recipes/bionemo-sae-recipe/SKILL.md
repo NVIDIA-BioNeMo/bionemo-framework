@@ -1,6 +1,6 @@
 ---
 name: bionemo-sae-recipe
-description: Build a new sparse-autoencoder recipe under bionemo-recipes/interpretability/sparse_autoencoders/recipes/ for a biological foundation model (e.g. evo2, nemotron, geneformer) — extract activations, train an SAE, and evaluate it. Trigger when the user asks to "add SAE for <model>", "build a new SAE recipe", or "run an SAE on <model>".
+description: Build a sparse-autoencoder (SAE) recipe for a biological foundation model (evo2, ESM2, geneformer) — extract layer activations, train an SAE, and evaluate it. Use when asked to add, build, or run an SAE for a model.
 ---
 
 # Build a new SAE recipe in bionemo-framework
@@ -9,7 +9,7 @@ description: Build a new sparse-autoencoder recipe under bionemo-recipes/interpr
 
 Every SAE recipe in `bionemo-recipes/interpretability/sparse_autoencoders/recipes/` decomposes into the same stages, separated by a universal contract:
 
-```
+```text
 extractor (model-specific) → ActivationStore parquet shards → train.py (universal) → eval (sae.eval, universal)
                                        ↑ contract
 ```
@@ -19,11 +19,11 @@ extractor (model-specific) → ActivationStore parquet shards → train.py (univ
 - **train.py** loads via `sae.activation_store.load_activations(cache_dir)` and trains a TopK/ReLU SAE — **near-identical across recipes, but not a blind verbatim copy.** It must wire the opt-in training flags (`--aggregate-loss` / `--dead-count-global` / `--mix-shards` / `--presample-shards`). **On `main`, only `evo2/scripts/train.py` wires all four** — `codonfm` and `esm2` are `0/4` (precisely why this belongs in shared `sae`). So copy **evo2's**, then change only the docstring + `--wandb-project` default. **Copying an older train.py silently drops those flags → the losing config** (this is exactly how a "reproduce the winner" run quietly turns into a baseline run). Uses `--model-path` only for a cache-validation warning. (The copy-paste is a known smell; the intended end-state is a single shared train-CLI in `sae`.)
 - **eval** (`sae.eval`, universal): `reconstruction` (variance explained), `dead_latents` (%), `loss_recovered` (CE fidelity), and `probing` (per-feature AUROC / linear probes / domain-F1 over a labeled `ActivationBuffer`). Probing scoring is **CPU-only** — it reads saved buffers, no model.
 
-## When this applies
+## Purpose
 
 Bringing up an SAE on a new biological foundation model — Evo2, ESM2, CodonFM, Nemotron, Geneformer, etc. Scope is the full **extract → train → eval** pipeline. Per-model you write a thin **extractor** (and, for interpretability, **labelers**); everything downstream is shared.
 
-## Assumptions about the model (check these first)
+## Prerequisites (check these first)
 
 This skill assumes the model is **already integrated into bionemo** — i.e. there's a setup in `bionemo-recipes/recipes/` to build on. If one of these is false, that's upstream work, not part of the SAE recipe:
 
@@ -65,7 +65,7 @@ evo2_convert_savanna_to_mbridge \
 - Decompress `.gz` if the predict CLI needs plain FASTA, and **chunk to the trained context** (gotcha 8) before extraction.
 - Grab a small subset (a few thousand sequences) first to smoke-test the whole pipeline.
 
-## Steps
+## Workflow
 
 ### 1. Reconnaissance (read, don't write)
 
@@ -83,7 +83,7 @@ ls /usr/local/lib/python*/dist-packages/transformer_engine 2>/dev/null && echo "
 
 ### 3. Scaffold the recipe dir
 
-```
+```text
 recipes/<model>/
 ├── README.md
 ├── pyproject.toml          # deps: sae, torch, numpy, pyarrow ; [tool.uv.sources] sae = { workspace = true }
@@ -152,7 +152,9 @@ Separate two things:
 | `--mix-shards 10`      | shuffles + blends shards; corpus/kingdom-ordered caches otherwise give a visible FVU cliff                                                        |
 | `--presample-shards 8` | geometric-median pre-bias over 8 shards, not shard-0 alone — a single-shard sample is corpus-order-biased and **measurably worsens dead latents** |
 
-## Known gotchas (these cost real debug time)
+## Troubleshooting (known gotchas)
+
+Each item below is a symptom → cause → fix learned the hard way; scan for your symptom first.
 
 ### Training dynamics (learned the hard way)
 
@@ -202,6 +204,14 @@ After training, run `sae.eval` on a **held-out** cache (same distribution, disjo
 1. **Mechanical** — pipeline runs end-to-end, `checkpoint_final.pt` exists. Smoke on 20–100 sequences (minutes).
 2. **Numerical** — `train.py` log shows loss ↓, FVU < 1, dead-% trending toward ~20% (not stuck at ~80%). If dead-% is stuck high, check normalize-input / presample / the LR horizon (gotcha 1).
 3. **Shape sanity** — `torch.load(checkpoint_final.pt)`: encoder `[hidden_dim → expansion·hidden_dim]`, decoder the transpose.
+
+## Limitations
+
+- **`train.py` is duplicated per recipe** (a known smell). Until it folds into one shared `sae` entrypoint, copying an *older* recipe's `train.py` silently drops the opt-in flags — always copy evo2's.
+- **The flags and numeric values are Evo2-tuned examples, not universal defaults.** Re-tune `expansion-factor`/`top-k`/`auxk` to your `hidden_dim`; set `--mix-shards`/`--presample-shards` to `1` if your shards are already shuffled.
+- **`probing` lands with the eval-recipe PR.** `reconstruction`/`dead_latents`/`loss_recovered` are already in `sae.eval`; if `sae.eval.probing` isn't in your tree yet, that PR is the dependency.
+- **The Megatron/MBridge path requires the NVIDIA PyTorch container + TransformerEngine.** HF-native models (ESM2/CodonFM) skip MBridge entirely.
+- **Some inherited perf numbers are unverified** (e.g. the ~10× memory / ~17× speedup note) — measure on your own model before quoting them.
 
 ## Reference recipes
 
