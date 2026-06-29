@@ -1,10 +1,12 @@
 ## Model Overview
 
-!!! note "Training Code Lives in bionemo-recipes"
-Use [`bionemo-recipes/models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/models/amplify)
-for checkpoint conversion and model implementation details. For training, use the ESM-2 recipes in
-[`bionemo-recipes/recipes`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes)
-with an AMPLIFY model tag such as `nvidia/AMPLIFY_120M`.
+Training code for this model is in
+[`recipes/esm2_native_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_native_te)
+and
+[`recipes/esm2_accelerate_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_accelerate_te);
+use an AMPLIFY model tag such as `nvidia/AMPLIFY_120M`. Use
+[`models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/models/amplify)
+for checkpoint conversion and model implementation details.
 
 ### Description
 
@@ -70,7 +72,7 @@ Schulz, Sarath Chandar, Christopher James Langmead bioRxiv 2024.09.23.614603; do
 
 The model is fully compatible with weights distributed via HuggingFace, i.e.,
 [chandar-lab/AMPLIFY_120M](https://huggingface.co/chandar-lab/AMPLIFY_120M). See
-[`bionemo-recipes/models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/models/amplify)
+[`models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/models/amplify)
 for checkpoint conversion utilities and usage examples.
 
 ## Training & Evaluation
@@ -96,9 +98,9 @@ AMPLIFY is provided under the Apache 2.0 license.
 
 Use the recipe READMEs for current training entrypoints:
 
-- [`bionemo-recipes/models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/models/amplify)
-- [`bionemo-recipes/recipes/esm2_native_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_native_te)
-- [`bionemo-recipes/recipes/esm2_accelerate_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_accelerate_te)
+- [`models/amplify`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/models/amplify)
+- [`recipes/esm2_native_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_native_te)
+- [`recipes/esm2_accelerate_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_accelerate_te)
 
 | Model Size | GPUs             | Batch Size (per GPU) | Training Step Time (s) |
 | ---------- | ---------------- | -------------------- | ---------------------- |

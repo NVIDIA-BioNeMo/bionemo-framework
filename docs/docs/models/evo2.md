@@ -1,9 +1,5 @@
 ## Model Overview
 
-!!! note "Training Code Lives in bionemo-recipes"
-For training, fine-tuning, and example notebooks, see the Evo2 recipe in
-[`bionemo-recipes/recipes/evo2_megatron`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/evo2_megatron).
-
 ### Description:
 
 Evo 2 is a genomic foundation model that enables prediction and generation tasks from the molecular to genome scale. At 40 billion parameters, the model understands the genetic code for all domains of life and is the largest AI model for biology to date. Evo 2 was trained on a dataset of nearly 9 trillion nucleotides.
@@ -163,7 +159,7 @@ Evo2 NIM:
 - H200 (1 and 2 GPU configurations, 144 GB each)
 - H100 (2 GPU configuration, 80 GB each)
 
-BioNeMo Framework:
+BioNeMo Recipes:
 
 - A100 (1, 8, ..., 1024 GPU configurations)
 - H100 (1, 8, ..., 2048 GPU configurations)

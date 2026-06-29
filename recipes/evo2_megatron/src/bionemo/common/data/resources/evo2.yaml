@@ -1,0 +1,98 @@
+- tag: 1b-8k:1.0
+  ngc: nvidia/clara/evo2-1b-8k-nemo2:1.0
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/nemo2_evo2_1b_8k.tar.gz"
+  sha256: d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    A 1b parameter evo2 model used in testing, torch_dist format. Converted from hf://arcinstitute/savanna_evo2_1b_base.
+
+- tag: 1b-8k-bf16:1.0
+  ngc: nvidia/clara/evo2-1b-8k-bf16-nemo2:1.0
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/nemo2_evo2_1b_8k_bf16.tar.gz"
+  sha256: ea4a3f5c9c26d5edc10bdc85165c090ad0ff23ac2670d4f61244f5f0d9d5e817
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    A 1b parameter evo2 model used in testing, torch_dist format. First converted from hf://arcinstitute/savanna_evo2_1b_base,
+    then fine-tuned on the same pretraining dataset for a further 30k steps with a learning rate of 1e-5, global batch size of 256,
+    and bf16 precision with 1% dropout on attention and hidden layers. This lead to a similar final loss as the original 1b model
+    on fp8 but it also generalizes to bf16 precision at inference time.
+
+- tag: 7b-8k:1.0
+  ngc: nvidia/clara/evo2-7b-8k-nemo2:1.0
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/nemo2_evo2_7b_8k.tar.gz"
+  sha256: 78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    A 7b parameter evo2 model used in testing, torch_dist format. Converted from hf://arcinstitute/savanna_evo2_7b_base.
+
+- tag: 7b-8k-zarr:1.0
+  ngc: nvidia/clara/evo2-7b-8k-zarr:1.1
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/interleaved_hyena_7b_fix_shape_v2.tar.gz"
+  sha256: e08d89a1841a6aa3796c772ffe84092f20ac0a11d1b6ef7b1966ebbd8253e17e
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    A 7b parameter evo2 model used in testing, zarr format (deprecated but equivalent to `evo2/7b-8k:1.0`).
+
+- tag: 7b-1m:1.0
+  ngc: nvidia/clara/evo2-7b-1m-nemo2:1.0
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/nemo2_evo2_7b_1m.tar.gz"
+  sha256: 448cf1f09204c079f9be3e6a46d6349de563fc1713ae5c38c376cfb274647f94
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    A 7b parameter evo2 model used in testing, torch_dist format. Converted from hf://arcinstitute/savanna_evo2_7b.
+
+- tag: 40b-1m-fp8-bf16:1.0
+  ngc: nvidia/clara/evo2-40b-1m-fp8-bf16-nemo2:1.0
+  ngc_registry: model
+  pbss: "s3://bionemo-ci/models/evo2_40b_bf16_finetune_wandb_Ji2IRcrz_step_119.tar.gz"
+  sha256: 544b47e033d1fb0261b686a53f7c4fe240cd290253187d31e8c99dea9e35a680
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    A 40b parameter evo2 model that was fine-tuned from hf://arcinstitute/savanna_evo2_40b to add support for fp8
+    and bf16 precision on Hopper/Blackwell/Ampere GPUs. The original evo2 40b model only supported fp8 precision on
+    Hopper.
+
+- tag: 7b-8k-nofp8-te-goldvalue-testdata:1.0
+  ngc: nvidia/clara/evo2-7b-8k-nofp8-te-goldvalue-testdata:1.0
+  ngc_registry: resource
+  pbss: "s3://bionemo-ci/test_data/evo2/final_7b_no_fp8_golden_value.pt"
+  sha256: dee5372fc6011dffc3f3933440623993b1870961fec6a24d1a3a874c940259b2
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    Test data for Evo2 inference. Built using the `evo2/7b-8k:1.0` checkpoint on an H100 GPU and the following DNA:
+    GAAATTAGCGCGTCCGGAATGATACGAGGGGAAACGAAATTTTGAATTAATGGAGAAAAAAGACGAGAAACCTTAAGCAAAAAAATTTTAGCTTCGAATATTTATTAATTTCTGAG
+    ATGTTGTTAAACGATTTTCGATTCCAAGTTGTGCGCACGAACGTTATTGCAAATAAATGCTGCTTATTCGGATGTTTCCACGATCTTTGTTGCAATGGTAGTCGAGTACCCGATAA
+    CCCAATTTCGTTACATCGGCCTATCTGTAGAATATCCAATCTATGGTTCATAAAAAATCTGATCGTTTGTTTTTAAGAAATTAAACGCGTTAAATTGAACGAATTTCGAATACCGG
+    TCTTAGCGAAGGACCTCCCCTCTTGCTTGCGTATTGCCCCGCGAAATTTCTTTTCGGCGATGAACGATACAAAAAATTCTATCGAATGTTACTTCTATTCTCTGCCTCGTCTATGA
+    CTTGGAGATTGGTCTATGTCGTTCGTTTTCTCGCGAGTTTCCAATATGTCCGTAGTATGTGAACGCTGGTATTCGTGAAGATAAATTATTGTTTTTACAATTTCTTTCAAAAATAT
+    ATAATTTTAATTTATATAAT
+
+- tag: 1b-8k-nofp8-te-goldvalue-testdata-A6000:1.0
+  ngc: nvidia/clara/evo2-1b-8k-nofp8-te-goldvalue-testdata-a6000:1.0
+  ngc_registry: resource
+  pbss: "s3://bionemo-ci/test_data/evo2/final_1b_no_fp8_golden_value_A6000.pt"
+  sha256: 289dc1c4c919162b467c7f068d27fa16e9670cb4a9fd15696198c6a6aac2fa21
+  owner: John St John <jstjohn@nvidia.com>
+  description: >
+    Test data for Evo2 inference. Built using the `evo2/1b-8k:1.0` checkpoint on an A6000 GPU and the following DNA:
+    GAAATTAGCGCGTCCGGAATGATACGAGGGGAAACGAAATTTTGAATTAATGGAGAAAAAAGACGAGAAACCTTAAGCAAAAAAATTTTAGCTTCGAATATTTATTAATTTCTGAG
+    ATGTTGTTAAACGATTTTCGATTCCAAGTTGTGCGCACGAACGTTATTGCAAATAAATGCTGCTTATTCGGATGTTTCCACGATCTTTGTTGCAATGGTAGTCGAGTACCCGATAA
+    CCCAATTTCGTTACATCGGCCTATCTGTAGAATATCCAATCTATGGTTCATAAAAAATCTGATCGTTTGTTTTTAAGAAATTAAACGCGTTAAATTGAACGAATTTCGAATACCGG
+    TCTTAGCGAAGGACCTCCCCTCTTGCTTGCGTATTGCCCCGCGAAATTTCTTTTCGGCGATGAACGATACAAAAAATTCTATCGAATGTTACTTCTATTCTCTGCCTCGTCTATGA
+    CTTGGAGATTGGTCTATGTCGTTCGTTTTCTCGCGAGTTTCCAATATGTCCGTAGTATGTGAACGCTGGTATTCGTGAAGATAAATTATTGTTTTTACAATTTCTTTCAAAAATAT
+    ATAATTTTAATTTATATAAT
+    The following command was used to get logits after adding the above to a fasta file. Note in general --fp8 is
+    required for good prediction accuracy for downstream zero shot tasks for the 1b model. The 7b model is robust to
+    fp8 precision exclusion at inference time:
+    ```bash
+    predict_evo2 \
+      --fasta test_seq.fasta \
+      --ckpt-dir path_to_1b_ckpt \
+      --output-dir new_gs_a6000 \
+      --model-size 1b
+    ```

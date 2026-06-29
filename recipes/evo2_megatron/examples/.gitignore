@@ -1,0 +1,24 @@
+# ignore temp files made by this tutorial
+# chromosome files
+*.fa
+*.fa.gz
+
+# config files
+*.yaml
+
+# directories created during these notebook runs.
+*_mbridge
+evo2_20b_finetune/
+savanna_20b_download/
+nemo2_evo2_1b_8k/
+evo2_1b_bf16_mbridge/
+preprocessed_data/
+pretraining_demo/
+brca1_fasta_files/
+brca1/
+benchmark_data/
+GFMBench-api/
+
+# files created during these notebook runs.
+evo2_gfmbench_results.csv
+evo2_gfmbench_results.json

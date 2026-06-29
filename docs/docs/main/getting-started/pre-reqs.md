@@ -1,11 +1,11 @@
-# Hardware and Software Prerequisites for BioNeMo Framework
+# Hardware and Software Prerequisites for BioNeMo Recipes
 
-Before you begin using the BioNeMo Framework, ensure the hardware and software prerequisites outlined below are
+Before you begin using BioNeMo Recipes, ensure the hardware and software prerequisites outlined below are
 met.
 
 ## Hardware Prerequisites
 
-The BioNeMo Framework is compatible with environments that have access to NVIDIA GPUs. `bfloat16` precision requires an
+BioNeMo Recipes are compatible with environments that have access to NVIDIA GPUs. `bfloat16` precision requires an
 Ampere generation GPU or higher ([Compute Capability ≥8.0](https://developer.nvidia.com/cuda-gpus)). You may be able
 to run BioNeMo on GPUs without `bfloat16`, but this use-case is not supported by the development team.
 
@@ -31,7 +31,7 @@ The following datacenter and desktop GPUs have Compute Capability ≥8.0 and are
 
 ## Software Prerequisites
 
-The BioNeMo Framework is supported on x86 Linux systems.
+BioNeMo Recipes are supported on x86 and ARM Linux systems.
 
 Ensure that the following are installed in your desired execution environment:
 

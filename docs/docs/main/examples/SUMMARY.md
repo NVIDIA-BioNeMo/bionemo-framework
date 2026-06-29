@@ -1,4 +1,1 @@
-- [Evo2](bionemo-evo2/)
-- [CodonFM](codonfm_ptl_te/)
-- [MoCo](bionemo-moco/)
-- [SCDL](bionemo-scdl/)
+- [Generated Tutorials](index.md)

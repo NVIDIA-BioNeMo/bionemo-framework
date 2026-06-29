@@ -1,5 +1,5 @@
 {
-    "name": "BioNeMo Dev Container",
+    "name": "BioNeMo Recipes Dev Container",
     "build": {
         "dockerfile": "Dockerfile"
     },

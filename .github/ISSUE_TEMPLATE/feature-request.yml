@@ -17,7 +17,7 @@ body:
  - type: input
    id: version
    attributes:
-     label: BioNeMo Framework Version
+     label: BioNeMo Recipes Version
      description: What version or commit hash of the framework are you using? Please, specify a commit hash or version tag. Do not use 'latest', 'ToT' or 'nightly' as a reference.
 
      placeholder: commit-hash or version tag, ie v1.2.3.

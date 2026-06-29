@@ -1,7 +1,6 @@
 mkdocs-material
 mkdocs-macros-plugin
 mkdocs-minify-plugin
-mkdocstrings[python]
 mkdocs-gen-files
 pymdown-extensions
 # Pinned: 0.26.0 (released 2026-03-23) breaks the build with

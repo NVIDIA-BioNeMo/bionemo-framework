@@ -1,19 +1,19 @@
 # Pre-training ESM-2
 
 Pre-trained checkpoints for ESM-2 are available at the 8M, 650M, and 3B model sizes. These models were trained by the
-BioNeMo Framework team to reproduce the original training results from Lin et al., Science (2023), with more recent
+BioNeMo Recipes team to reproduce the original training results from Lin et al., Science (2023), with more recent
 UniProt data and leveraging the BioNeMo training infrastructure. The full [pre-training data](../../main/datasets/uniprot.md)
 and train/test splits are available.
 
-## Training with bionemo-recipes
+## Training with BioNeMo Recipes
 
 Active ESM-2 training code lives in
-[`bionemo-recipes/recipes/esm2_native_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_native_te).
+[`recipes/esm2_native_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_native_te).
 See the recipe README for setup instructions, supported training scripts (`train_ddp.py`,
 `train_fsdp2.py`), and benchmark results.
 
 An Accelerate-based variant is also available at
-[`bionemo-recipes/recipes/esm2_accelerate_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/bionemo-recipes/recipes/esm2_accelerate_te).
+[`recipes/esm2_accelerate_te`](https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/esm2_accelerate_te).
 
 ## Model Convergence
 
@@ -38,7 +38,7 @@ Validation perplexity evaluated on the NVIDIA validation set.
 Load a checkpoint with:
 
 ```python
-from bionemo.core.data.load import load
+from bionemo.common.data.load import load
 
 esm2_ckpt_path = load("esm2/8m:2.0")
 ```

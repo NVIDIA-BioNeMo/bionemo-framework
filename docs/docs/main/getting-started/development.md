@@ -1,75 +1,32 @@
-# Development with BioNeMo
+# Development
 
-This page covers the current development model for the repository.
+BioNeMo Recipes favors self-contained, readable recipe code. Each model or recipe directory owns its dependency declarations, tests, and setup instructions.
 
-## Code overview
-
-BioNeMo Framework now has two main development workflows:
-
-- **Recipe development** in `bionemo-recipes/`, where model implementations and end-to-end training or inference workflows live.
-- **Framework library development** in `sub-packages/`, where reusable utilities and biology-oriented workflow libraries live.
-
-### Recipe isolation
-
-Each recipe should be treated as if it were its own isolated repository. Recipes may `pip install` packages from the
-`sub-packages/` framework libraries or from external sources, but they must not assume those packages are already
-available in the environment. Every recipe is responsible for declaring how its dependencies are installed (e.g. in a
-`requirements.txt`, `pyproject.toml`, or `Dockerfile`). This ensures recipes remain portable and self-contained — a
-user should be able to clone the repository, enter a recipe directory, and follow its instructions to get a working
-environment without relying on any implicit global state.
-
-Examples of current framework libraries include:
-
-- `bionemo-core`: shared interfaces and data utilities
-- `bionemo-recipeutils`: shared utilities used by multiple recipes
-- `bionemo-scdl`: single-cell dataset loading and conversion
-- `bionemo-moco`: molecular co-design utilities
-- `bionemo-webdatamodule`: `WebDataset` helpers
-
-## Package structure
-
-Most framework packages follow the same structure:
-
-- `pyproject.toml`: package metadata and dependencies
-- `src/`: importable source code
-- `tests/`: package tests
-- `examples/` or `notebooks/`: optional tutorial material that is pulled into the docs build
-- `README.md`: package overview and usage notes
-
-## Training and fine-tuning
-
-Training entrypoints for supported models live in `bionemo-recipes`.
-
-See also [Training Models](./training-models.md).
-
-Common locations:
-
-- `bionemo-recipes/models/esm2`
-- `bionemo-recipes/models/amplify`
-- `bionemo-recipes/models/geneformer`
-- `bionemo-recipes/recipes/evo2_megatron`
-- `bionemo-recipes/recipes/esm2_native_te`
-- `bionemo-recipes/recipes/esm2_accelerate_te`
-- `bionemo-recipes/recipes/geneformer_native_te_mfsdp_fp8`
-
-When a recipe or local workflow depends on a framework package, install that package into your active environment with an editable install:
+## Common Workflow
 
 ```bash
-uv pip install -e ./sub-packages/bionemo-core
-uv pip install -e ./sub-packages/bionemo-scdl
-uv pip install -e "./sub-packages/bionemo-recipeutils[basecamp]"
+cd models/esm2      # or recipes/<recipe>
+pip install -r requirements.txt
+pytest -v .
 ```
 
-## Data and checkpoints
+For megatron recipes:
 
-The `download_bionemo_data` CLI remains the standard way to fetch supported BioNeMo datasets and checkpoints:
+```bash
+cd recipes/evo2_megatron
+bash .ci_build.sh
+source .ci_test_env.sh
+pytest -v .
+```
+
+## Shared Helpers
+
+The megatron recipes include a local `bionemo.common` package for data loading, FASTA utilities, sharded dataset helpers, inference collation, and checkpoint cleanup. Update the canonical copy in `recipes/evo2_megatron/src/bionemo/common` and sync it to `recipes/eden_megatron/src/bionemo/common`.
+
+## Data And Checkpoints
+
+Use `download_bionemo_data` to list or fetch supported resources:
 
 ```bash
 download_bionemo_data --list-resources
 ```
-
-Set `DATA_SOURCE=ngc` for public resources, or `DATA_SOURCE=pbss` for internal NVIDIA workflows where applicable.
-
-## Advanced developer documentation
-
-For repository-wide development guidance, see the top-level \[README\]({{ github_url }}) and the package or recipe README in the directory you are modifying.

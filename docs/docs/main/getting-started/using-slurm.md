@@ -69,9 +69,9 @@ echo "*******STARTING********" \
 && echo "---------------" \
 && echo "Starting training" \
 &&  \
-cd /workspace/bionemo/bionemo-recipes/recipes/evo2_megatron \
+cd /workspace/bionemo/recipes/evo2_megatron \
 && train_evo2 \
-    -d /workspace/bionemo/bionemo-recipes/recipes/evo2_megatron/examples/configs/full_pretrain_shortphase_config.yaml \
+    -d /workspace/bionemo/recipes/evo2_megatron/examples/configs/full_pretrain_shortphase_config.yaml \
     --num-nodes=${SLURM_JOB_NUM_NODES} \
     --devices=${SLURM_NTASKS_PER_NODE} \
     --grad-acc-batches $GRAD_ACC_BATCHES \
@@ -182,9 +182,9 @@ EXPERIMENT_NAME=EVO2_SEQLEN${SEQ_LEN}_PP${PP_SIZE}_TP${TP_SIZE}_CP${CP_SIZE}_LR$
 After setting up all parameters and mounts, the training script is launched within the SLURM job using a compound command. This command string—stored in the `COMMAND` variable—calls the Python training script with all the environment-specific arguments and hyperparameters defined earlier.
 
 ```bash
-cd /workspace/bionemo/bionemo-recipes/recipes/evo2_megatron
+cd /workspace/bionemo/recipes/evo2_megatron
 train_evo2 \
-    -d /workspace/bionemo/bionemo-recipes/recipes/evo2_megatron/examples/configs/full_pretrain_shortphase_config.yaml \
+    -d /workspace/bionemo/recipes/evo2_megatron/examples/configs/full_pretrain_shortphase_config.yaml \
     --num-nodes=${SLURM_JOB_NUM_NODES} \
     --devices=${SLURM_NTASKS_PER_NODE} \
     --grad-acc-batches $GRAD_ACC_BATCHES \

@@ -1,0 +1,127 @@
+[build-system]
+# Learning: Pin setuptools < 80.0.0. Newer versions break some CUDA extension builds
+# by removing legacy distutils functionality.
+requires = ["setuptools>=64,<80.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bionemo-evo2"
+readme = "README.md"
+description = "Library containing data preprocessing, training, and inference tooling for Evo2."
+authors = [{ name = "BioNeMo Team", email = "bionemofeedback@nvidia.com" }]
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+dependencies = [
+    "nvidia-modelopt[torch]>=0.37.0",
+
+    # These sources are defined in [tool.uv.sources] below
+    "megatron-bridge",
+    "causal_conv1d",
+    "nv-grouped-gemm",
+    "megatron-core",
+    # nvidia-resiliency-ext is pulled transitively by megatron-bridge.
+    "emerging_optimizers",
+    "subquadratic-ops-torch-cu13",
+
+    # bionemo.common dependencies
+    "boto3",
+    "nest_asyncio",
+    "ngcsdk",
+    "platformdirs",
+    "polars",
+    "pooch",
+    "pydantic[email]",
+    "pyyaml",
+    "tqdm",
+
+    # These are dependencies for examples only, but are useful for actually doing analyses with this model
+    "biopython",
+    "openpyxl",
+    "seaborn",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+torchrun = "torch.distributed.run:main"
+infer_evo2 = "bionemo.evo2.run.infer:main"
+train_evo2 = "bionemo.evo2.run.train:main"
+predict_evo2 = "bionemo.evo2.run.predict:main"
+preprocess_evo2 = "bionemo.evo2.data.preprocess:main"
+splice_evo2 = "bionemo.evo2.data.transcript_extraction:main"
+evo2_convert_nemo2_to_mbridge = "bionemo.evo2.utils.checkpoint.nemo2_to_mbridge:main"
+evo2_convert_savanna_to_mbridge = "bionemo.evo2.utils.checkpoint.savanna_to_mbridge:main"
+evo2_export_mbridge_to_vortex = "bionemo.evo2.utils.checkpoint.mbridge_to_vortex:main"
+download_bionemo_data = "bionemo.common.data.load:entrypoint"
+bionemo_fasta_to_jsonl = "bionemo.common.io.fasta_to_jsonl:main"
+bionemo_precompute_windows = "bionemo.common.data.basecamp.sharded_dataset:main_precompute"
+bionemo_remove_optimizer = "bionemo.common.checkpoint.remove_optimizer:main"
+evo2_remove_optimizer = "bionemo.evo2.utils.checkpoint.evo2_remove_optimizer:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bionemo.*"]
+namespaces = true
+exclude = ["test*."]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.setuptools.package-data]
+"bionemo.common.data" = ["resources/*.yaml"]
+
+# ------------------------------------------------------------------
+# UV Configuration
+# ------------------------------------------------------------------
+
+[tool.uv]
+cache-keys = [{ git = true }]
+prerelease = "allow"
+
+# Learning: This list matches the official Megatron-Bridge config.
+# These packages must be built against the SYSTEM PyTorch (no isolation).
+no-build-isolation-package = [
+    "flash_mla",
+    "flash-linear-attention",
+    "causal-conv1d",
+    "nv-grouped-gemm",
+    "mamba-ssm",
+    "transformer-engine",
+    "transformer-engine-torch",
+]
+
+# Learning: The 'sys_platform == "never"' hack is the correct way
+# to force uv to accept the container's pre-installed versions.
+override-dependencies = [
+    "nvidia-modelopt[torch]>=0.37.0",
+    "torch; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "triton; sys_platform == 'never'",
+    "transformer-engine; sys_platform == 'never'",
+    "transformer-engine[pytorch]; sys_platform == 'never'",
+    # Avoid alpha Pydantic releases; langchain imports pulled by nvidia-resiliency-ext are not compatible.
+    "pydantic>=2.12,<2.14",
+    # Avoid optional log-pattern-mining dependency conflicts from nvidia-resiliency-ext.
+    "logsage; sys_platform == 'never'",
+    "drain3; sys_platform == 'never'",
+]
+
+[tool.uv.sources]
+# External dependencies with specific git tags/commits
+# 1.6.1 fixes a custom-op no-storage failure in no-grad/frozen forward paths.
+causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = "v1.6.1" }
+nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v1.1.4.post6" }
+
+# nvidia-resiliency-ext is intentionally left to Megatron-Bridge so the transitive pin stays consistent.
+
+# Megatron Bundle. MCore is sourced from the same Megatron-Bridge release tag.
+megatron-bridge = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", tag = "v0.4.1" }
+megatron-core = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", tag = "v0.4.1", subdirectory = "3rdparty/Megatron-LM" }
+
+[tool.uv.extra-build-dependencies]
+warp-lang = ["wheel_stub"]
+nvidia-resiliency-ext = ["poetry_dynamic_versioning"]

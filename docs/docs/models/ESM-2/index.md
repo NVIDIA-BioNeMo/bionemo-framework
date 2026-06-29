@@ -6,7 +6,7 @@
 
 ESM-2 is a pre-trained, bi-directional encoder (BERT-style model) over amino acid sequences. ESM-2 models provide
 embeddings for amino acids that have led to state-of-the-art performance on downstream tasks such as structure and
-function prediction. ESM-2 has been trained at a number of different model sizes. BioNeMo Framework includes converted
+function prediction. ESM-2 has been trained at a number of different model sizes. BioNeMo Recipes includes converted
 checkpoints for the 650M and 3B parameter variants. The 650M model has 33 layers, 20 attention heads, and a hidden space
 dimension of 1280. The 3B model has 36 layers, 40 attention heads, and a hidden space dimension of 2,560.
 
@@ -105,15 +105,15 @@ A validation set of 328,360 UniRef50 representative sequences were randomly sele
 Dataset](../../main/datasets/uniprot.md)). This validation set was used to ensure that the output of BioNeMo-converted
 checkpoints is consistent with their outputs when evaluated with the HuggingFace Transformers library.
 
-| Checkpoint | HuggingFace | BioNeMo Framework | Lin *et al.* 2023                   |
-| ---------- | ----------- | ----------------- | ----------------------------------- |
-| 650M       | 7.001       | 7.002             | 6.95 :material-information-outline: |
-| 3B         | 6.003       | 6.004             | 6.49 :material-information-outline: |
+| Checkpoint | HuggingFace | BioNeMo Recipes | Lin *et al.* 2023                   |
+| ---------- | ----------- | --------------- | ----------------------------------- |
+| 650M       | 7.001       | 7.002           | 6.95 :material-information-outline: |
+| 3B         | 6.003       | 6.004           | 6.49 :material-information-outline: |
 
 !!! info "Different Validation Sets"
 
 ```
-The HuggingFace and converted BioNeMo Framework checkpoints were evaluated on a newly curated validation set. Perplexities
+The HuggingFace and converted BioNeMo Recipes checkpoints were evaluated on a newly curated validation set. Perplexities
 from Lin *et al.* 2023 are reported for comparison, but the original train/test splits are not available.
 ```
 
@@ -131,9 +131,9 @@ at the ESM2-650M model size. The BioNeMo implementation could handle batch sizes
 
 ![ESM-2 Model Scaling](../../assets/images/esm2/esm2_model_scaling.png)
 
-Training ESM-2 at the 650M, 3B, and 15B model variants show improved performance with the BioNeMo Framework over the
+Training ESM-2 at the 650M, 3B, and 15B model variants show improved performance with BioNeMo Recipes over the
 pure-PyTorch baseline. These experiments were conducted on 16x NVIDIA A100 or 16x NVIDIA H100 GPUs split across two
-nodes. <sup>\*</sup>*Note:* 15B model variants were trained on 64 GPUs with the BioNeMo Framework.
+nodes. <sup>\*</sup>*Note:* 15B model variants were trained on 64 GPUs with BioNeMo Recipes.
 
 #### Device Scaling
 

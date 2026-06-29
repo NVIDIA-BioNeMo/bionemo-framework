@@ -13,7 +13,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: BioNeMo Framework Version
+      label: BioNeMo Recipes Version
       description: |
         **What version or commit hash of the framework are you using?**
 
@@ -89,8 +89,8 @@ body:
     id: docker-image-info
     attributes:
       label: Docker Image
-      description: If the issue occurred in a container, provide the docker image name. Visit [BioNeMo Framework NGC website](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/containers/bionemo-framework/tags) for available images.
-      placeholder: e.g., nvcr.io/nvidia/clara/bionemo-framework:2.2
+      description: If the issue occurred in a container, provide the docker image name. Visit the [PyTorch NGC Container Registry](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for available images.
+      placeholder: e.g., nvcr.io/nvidia/pytorch:26.05-py3
     validations:
       required: false
 
