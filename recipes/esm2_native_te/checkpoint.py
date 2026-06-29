@@ -320,9 +320,7 @@ def save_final_model_mfsdp(
     # Parameter gathering must happen on ALL processes
     unsharded_state_dict = {
         # Gather all parameters to CPU, and remove the "module." prefix from the Megatron-FSDP class wrapper.
-        k.removeprefix("module."): gather_uneven_dtensor_to_full_tensor(
-            v, target_device=torch.device("cpu")
-        ).to_local()
+        k.removeprefix("module."): gather_uneven_dtensor_to_full_tensor(v).to_local().to("cpu")
         if isinstance(v, torch.distributed.tensor.DTensor)
         else v
         for k, v in model.state_dict().items()
