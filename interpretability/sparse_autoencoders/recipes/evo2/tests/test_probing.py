@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU correctness tests for sae.eval.probing (no model / no GPU).
+"""CPU correctness tests for evo2_sae.eval.probing (no model / no GPU).
 
 One strong test per non-trivial metric: each checks the result against an independent
 reference (a definitional oracle or a hand-computed value) rather than a loose sanity bound.
