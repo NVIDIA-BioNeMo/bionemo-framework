@@ -154,43 +154,92 @@ Separate two things:
 
 ## Troubleshooting (known gotchas)
 
-Each item below is a symptom → cause → fix learned the hard way; scan for your symptom first.
+Each entry is **Symptom → Cause → Fix**, with the literal error/output where there is one. Scan for your symptom first; these cost real debug time.
 
 ### Training dynamics (learned the hard way)
 
-1. **Never truncate steps without fixing the LR horizon.** `--n-epochs 1` lets cosine decay over the *whole* epoch. Capping steps (e.g. a `--max-steps`/short `--lr-decay-steps`) shrinks the cosine horizon, so LR collapses to `lr_min` early and training is much worse — looks like a model/code regression but it's the schedule.
-2. **`--dead-count-global` is a no-op at dp-size 1** (world_size=1). It only does anything under DDP. And it must actually be **passed** — encoding "dcg=true" only in a run *name* while omitting the flag silently runs the per-rank default (a real sweep bug).
-3. **Pre-bias from shard-0 only is biased.** On a corpus-ordered cache (e.g. all-prok-then-all-euk), a single-shard geometric-median init mis-centers `pre_bias` toward one kingdom and worsens dead latents. Use `--presample-shards N>1`.
+**Training looks like a model/code regression after you changed step counts**
+
+- *Symptom:* FVU plateaus high and loss is much worse than a known-good run, with no code change that explains it.
+- *Cause:* capping steps (`--max-steps`, or a short `--lr-decay-steps`) shrinks the cosine horizon, so LR collapses to `lr_min` early.
+- *Fix:* never truncate steps without fixing the LR horizon — use `--n-epochs 1` so cosine decays over the *whole* epoch.
+
+**Dead-latent % higher than expected under DDP; AuxK seems to revive latents too late**
+
+- *Symptom:* dead-% stays elevated multi-GPU even though the config matches a good single-GPU run.
+- *Cause:* `--dead-count-global` was not actually passed (e.g. "dcg=true" lives only in the run *name*), so AuxK counts per-rank and fires `world_size`× too late. It is also a no-op at dp-size 1 (world_size=1).
+- *Fix:* pass `--dead-count-global` explicitly when running DDP, and confirm it's in the launch command, not just the run name.
+
+**Dead latents worse than expected on a corpus-ordered cache**
+
+- *Symptom:* high dead-% that `--normalize-input` alone doesn't fix, on shards written in corpus order (e.g. all-prok-then-all-euk).
+- *Cause:* a single-shard (shard-0) geometric-median init mis-centers `pre_bias` toward whatever is first in the corpus.
+- *Fix:* spread the pre-bias sample with `--presample-shards N>1` (and blend shards per batch with `--mix-shards N>1`).
 
 ### wandb
 
-4. **`unset WANDB_API_KEY` before launching** — a leaked key in the shared env overrides `~/.netrc`, so your runs log under someone else's account. Then set `WANDB_ENTITY` if your account has no default entity (else `wandb.init` fails / lands in the wrong entity).
+**Runs log under someone else's W&B account, or `wandb.init` fails**
+
+- *Symptom:* your run appears in the wrong entity/account, or `wandb.init` raises about a missing default entity.
+- *Cause:* a leaked `WANDB_API_KEY` in the shared env overrides `~/.netrc`; an account with no default entity can't `init` without one.
+- *Fix:* `unset WANDB_API_KEY` before launching, then `export WANDB_ENTITY=<your-entity>`.
 
 ### Container / env
 
-5. `.ci_build.sh` assumes system-site-packages TransformerEngine — verify before building (step 2).
-6. `huggingface-cli` is deprecated → use `hf` (same args). HF README dir names are unreliable (OpenGenome2's `jsonl/` is really `json/`) — verify the tree and that the downloaded file count is nonzero.
+**`.ci_build.sh` build fails importing TransformerEngine**
+
+- *Symptom:* `ModuleNotFoundError: No module named 'transformer_engine'` (or similar) when building/running the recipe venv.
+- *Cause:* `.ci_build.sh` makes a `--system-site-packages` venv that *assumes* the NVIDIA PyTorch container has TE preinstalled.
+- *Fix:* verify TE first — `ls /usr/local/lib/python*/dist-packages/transformer_engine` — and build inside the NVIDIA PyTorch container (step 2).
+
+**Downloaded data is empty or in the "wrong" directory**
+
+- *Symptom:* a `huggingface-cli` deprecation warning, or an expected dir (e.g. OpenGenome2 `jsonl/`) is missing / has zero files.
+- *Cause:* `huggingface-cli` is deprecated, and HF README dir names are unreliable (OpenGenome2's `jsonl/` is really `json/`).
+- *Fix:* use `hf` (same args); verify the tree and a nonzero file count (`curl -s "https://huggingface.co/api/datasets/<repo>/tree/main" | python3 -m json.tool`).
 
 ### Checkpoint loading
 
-7. **`weights_only=True` (torch 2.6 default) breaks legacy checkpoints with numpy arrays** — buried in stderr, exit 0, empty output dir. `UnpicklingError: Unsupported global: numpy.core.multiarray._reconstruct`. Patch the upstream `torch.load(...)` to `weights_only=False` if the source is trusted. (For Evo2, the recipe assumes an MBridge checkpoint — conversion from savanna/nemo2 is a prerequisite, not recipe code.)
+**Checkpoint conversion exits 0 but the output dir is empty**
+
+- *Symptom:* buried in stderr: `UnpicklingError: Unsupported global: numpy.core.multiarray._reconstruct`; the process exits 0 with an empty output dir (silent failure).
+- *Cause:* torch 2.6 defaults `torch.load(..., weights_only=True)`, which rejects legacy checkpoints that pickle numpy arrays.
+- *Fix:* patch the upstream `torch.load(...)` to `weights_only=False` **if the source is trusted**. (For Evo2 the recipe assumes an MBridge checkpoint — savanna/nemo2 conversion is a prerequisite, not recipe code.)
 
 ### Model architecture / extraction (general principle → Evo2 example)
 
 These are **general principles**; the numbers are Evo2 examples — **measure them for your model** (see "Verify the perf claims" below), don't copy the constants.
 
-08. **Long sequences can blow up memory super-linearly on conv/FFT architectures → chunk inputs to the model's trained context before extraction.** *Evo2 example:* Hyena's fftconv OOMs even at micro-batch=1 (intermediates scale super-linearly); chunk to 1B → 8192 bp, 7B → context-extended (check release), 40B → 1M. Don't rely on the inference tool to truncate.
-09. **Check your predict CLI's input constraints (compression/format).** *Evo2 example:* `predict_evo2` takes uncompressed FASTA only (`<(zcat ...)` fails); but if your chunker already reads `.gz` → writes plain `.fasta`, no separate gunzip is needed.
-10. **micro-batch=1 is rarely optimal — once inputs are short/uniform, raise it.** The specific figure (chunking dropping memory ~10× and a ~17× per-batch speedup on Evo2 1B) is an **unverified number inherited from an earlier extraction note** — we did *not* re-measure it. Treat it as a hypothesis and **measure your own** (below), don't quote it.
+**CUDA OOM during extraction even at micro-batch 1**
+
+- *Symptom:* `torch.cuda.OutOfMemoryError` on long sequences, even with `--micro-batch-size 1`, on conv/FFT architectures.
+- *Cause:* intermediates scale super-linearly with sequence length (e.g. Hyena's fftconv).
+- *Fix:* chunk inputs to the model's trained context before extraction (*Evo2 example:* 1B → 8192 bp, 7B → context-extended (check release), 40B → 1M). Don't rely on the inference tool to truncate.
+
+**The predict CLI errors on your input file**
+
+- *Symptom:* `predict_evo2` fails on a gzipped or process-substituted FASTA (`<(zcat ...)`).
+- *Cause:* the CLI accepts uncompressed FASTA only.
+- *Fix:* feed plain `.fasta` (if your chunker already reads `.gz` → writes plain `.fasta`, no separate gunzip is needed).
+
+**Extraction throughput is low / the GPU is underused**
+
+- *Symptom:* tokens/s far below what the GPU should sustain once inputs are short and uniform.
+- *Cause:* `--micro-batch-size 1` is rarely optimal once inputs are chunked.
+- *Fix:* raise the micro-batch and **measure** (the often-quoted ~10× memory / ~17× speedup on Evo2 1B is an unverified inherited number — measure your own, don't quote it).
 
 **Verify the perf claims (don't trust the constants):** a few-minute single-GPU micro-benchmark —
 
 - **micro-batch sweep:** fix a chunked FASTA, run the extractor at `--micro-batch-size ∈ {1,4,8,16,32}`, log peak GPU mem (`torch.cuda.max_memory_allocated`) + throughput (tokens/s over fixed N). Find the largest mbs that fits + the throughput curve.
-- **seq-length sweep** (for #8): mbs=1, L ∈ {1k,8k,16k,32k}, log peak mem → see the blowup / OOM point for *your* architecture.
+- **seq-length sweep:** mbs=1, L ∈ {1k,8k,16k,32k}, log peak mem → see the blowup / OOM point for *your* architecture.
 
 ### Output format
 
-11. `predict_evo2 --embedding-layer N` yields `{hidden_embeddings:[B,S,H], pad_mask:[B,S], seq_idx:[B], tokens:[B,S], batch_idx:int}`. `pad_mask` is a **loss mask** (1=valid), not an HF attention mask. The streaming `_store_writer` appends `hidden_embeddings[pad_mask.bool()]`.
+**SAE trains on padding, or activations are misaligned to positions**
+
+- *Symptom:* latents look degenerate / dead-% odd because padded positions leaked into the store.
+- *Cause:* `predict_evo2 --embedding-layer N` yields `{hidden_embeddings:[B,S,H], pad_mask:[B,S], seq_idx:[B], tokens:[B,S], batch_idx:int}`, and `pad_mask` is a **loss mask** (1=valid), *not* an HF attention mask.
+- *Fix:* the streaming `_store_writer` must append `hidden_embeddings[pad_mask.bool()]` (keep valid positions only).
 
 ## Evaluating the SAE
 
