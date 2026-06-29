@@ -1,6 +1,18 @@
 ---
 name: bionemo-sae-recipe
 description: Build a sparse-autoencoder (SAE) recipe for a biological foundation model (evo2, ESM2, geneformer) — extract layer activations, train an SAE, and evaluate it. Use when asked to add, build, or run an SAE for a model.
+version: 1.0.0
+author: NVIDIA BioNeMo
+tags:
+  - interpretability
+  - sparse-autoencoder
+  - bionemo
+  - training
+tools:
+  - Shell
+  - Read
+  - Write
+  - Edit
 ---
 
 # Build a new SAE recipe in bionemo-framework
@@ -65,7 +77,7 @@ evo2_convert_savanna_to_mbridge \
 - Decompress `.gz` if the predict CLI needs plain FASTA, and **chunk to the trained context** (gotcha 8) before extraction.
 - Grab a small subset (a few thousand sequences) first to smoke-test the whole pipeline.
 
-## Workflow
+## Instructions
 
 ### 1. Reconnaissance (read, don't write)
 
