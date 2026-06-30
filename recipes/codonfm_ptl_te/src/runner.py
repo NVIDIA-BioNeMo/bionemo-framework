@@ -126,7 +126,6 @@ def get_parser():  # noqa: D103
             "encodon_80m",
             "encodon_600m",
             "encodon_1b",
-            "encodon_5b",
             "encodon_10b",
         ],
     )

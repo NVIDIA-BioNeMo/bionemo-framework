@@ -1,6 +1,0 @@
-# @package _global_
-# CodonFM Encodon 5B: 24 layers, hidden_size=4096
-model_path: ../../data/jwilber/checkpoints/encodon_5b
-run_name: encodon_5b
-num_sequences: 50000
-batch_size: 2
