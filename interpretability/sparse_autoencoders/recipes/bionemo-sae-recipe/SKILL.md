@@ -35,6 +35,71 @@ extractor (model-specific) → ActivationStore parquet shards → train.py (univ
 
 Bringing up an SAE on a new biological foundation model — Evo2, ESM2, CodonFM, Nemotron, Geneformer, etc. Scope is the full **extract → train → eval** pipeline. Per-model you write a thin **extractor** (and, for interpretability, **labelers**); everything downstream is shared.
 
+## Fast path — HF-native models (ESM2, Geneformer, CodonFM, …)
+
+**Branch on the model FIRST.** If it loads with HuggingFace `AutoModel.from_pretrained` and exposes `output_hidden_states` (ESM2, Geneformer, CodonFM, most encoder LMs), use this **minimal path** — you do **not** need MBridge conversion, a `predict_<model>` CLI, DDP rank-merging, an orchestrator `.sh`, or a multi-file recipe. **Only Megatron models (Evo2)** need the heavier streaming/MBridge path in the sections below.
+
+**Done when:** a smoke run (a few hundred–2000 sequences/cells) completes and prints a `RESULT:` line showing `FVU < 1`, `dead_pct` not stuck high, and `var_explained` rising — and writes `metrics.json`. Print that block explicitly so success is verifiable from the output alone.
+
+### 1. Extractor — copy this, change only 3 things (model id, layer, `load_inputs`)
+
+```python
+# extract.py — HF-native streaming extractor (~40 lines). No .pt, fp32, second-to-last layer.
+import argparse, torch
+from transformers import AutoModel
+from sae.activation_store import ActivationStore
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", required=True)          # e.g. facebook/esm2_t33_650M_UR50D
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--num", type=int, default=2000)   # smoke first
+    args = ap.parse_args()
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModel.from_pretrained(args.model, output_hidden_states=True).to(dev).eval()
+    layer = model.config.num_hidden_layers - 1         # hidden_states[-2] == second-to-last
+    store = ActivationStore(args.output)
+    for ids, attn in load_inputs(args.model, args.num):       # <-- ONLY model-specific part
+        ids, attn = ids.to(dev), attn.to(dev)
+        with torch.no_grad():
+            hs = model(input_ids=ids, attention_mask=attn).hidden_states[-2]   # [B,S,H]
+        m = attn.bool().unsqueeze(-1).expand_as(hs)
+        store.append(hs[m].view(-1, hs.shape[-1]).float())   # fp32: Arrow/NumPy can't store bf16
+    store.finalize(metadata={"model_name": args.model, "layer": layer, "hidden_dim": model.config.hidden_size})
+
+if __name__ == "__main__":
+    main()
+```
+
+`load_inputs` is the only model-specific code: **ESM2** → tokenize protein FASTA with `AutoTokenizer`; **Geneformer** → cells are already token lists (`input_ids`), just pad to batch max with `pad_token_id=0` and set `attention_mask = (ids != 0)`.
+
+### 2. Train — copy `evo2/scripts/train.py` verbatim, run with the validated config
+
+[`evo2/scripts/train.py`](../evo2/scripts/train.py) is the only train CLI on `main` wiring all four opt-in flags. Copy it (change only the docstring + `--wandb-project`), then:
+
+```bash
+python scripts/train.py --cache-dir <parquet-dir> --model-path <model-id> --layer <L> \
+  --expansion-factor 16 --top-k 128 --normalize-input \
+  --aggregate-loss --dead-count-global --mix-shards 10 --presample-shards 8 \
+  --n-epochs 3 --batch-size 4096 --lr 1e-4 --lr-schedule cosine --checkpoint-dir <ckpt>
+```
+
+These flags are **not cosmetic**: on identical data they roughly **halve FVU (≈0.21 → ≈0.10)** and lift variance-explained to **~90% vs ~79%** with dead latents near zero. Copying a flagless default gives the losing config. Re-tune `--top-k`/`--expansion-factor` per model, but keep the four flags on unless you have a reason not to (CodonFM is the documented 0/4 exception). Do **not** add `--max-steps`; let the schedule run the epochs.
+
+### 3. Verify (this IS the definition of done)
+
+End the run by printing — and writing to `metrics.json` — a single line the grader/reviewer can read:
+
+```
+RESULT: trained=true checkpoint=<path> FVU=<x> dead_pct=<y> var_explained=<z>
+```
+
+Read the final `Step … | fvu: … | dead_latents (%): … | var_exp: …` line from the train log, echo it as `RESULT:`, and `json.dump` the same fields to `metrics.json`. Do not stop at "the files are written" — a healthy SAE (`FVU<1`, low dead-%) printed in the output is the goal.
+
+---
+
+**Reference recipes for this path:** [`esm2/scripts/extract.py`](../esm2/scripts/extract.py) (HF `AutoModel`), [`sae/src/sae/activation_store.py`](../../sae/src/sae/activation_store.py) (the contract). For **Megatron models (Evo2)** — MBridge + streaming `predict_<model>` reuse — follow the full path below.
+
 ## Prerequisites (check these first)
 
 This skill assumes the model is **already integrated into bionemo** — i.e. there's a setup in `bionemo-recipes/recipes/` to build on. If one of these is false, that's upstream work, not part of the SAE recipe:
