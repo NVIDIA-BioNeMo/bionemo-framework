@@ -64,6 +64,11 @@ To reach a remote box, tunnel the Vite port only (Vite proxies `/api` on the box
 tsh ssh -L 5176:localhost:5176 <gpu-box>        # then open http://localhost:5176
 ```
 
+If instead you open the dev server through a **public hostname** (brev `*.brevlab.com`, ngrok,
+Codespaces `*.github.dev`) rather than a `localhost` tunnel, Vite's Host check applies. Those
+domains are pre-allowed in `vite.config.js` (`server.allowedHosts`); for a different tunnel, add
+its host there (or set `allowedHosts: true` to allow any).
+
 ### 3. Offline / static — no backend
 
 The dashboard degrades gracefully: it probes `/api/health`, and when there's **no live backend** it
