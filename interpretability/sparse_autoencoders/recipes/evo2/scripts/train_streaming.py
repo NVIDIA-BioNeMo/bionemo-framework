@@ -228,6 +228,7 @@ class Evo2ActivationProducer:
 
         thread = threading.Thread(target=run_predict, name="evo2-predict-producer", daemon=True)
         thread.start()
+        checked = False
         try:
             while True:
                 item = q.get()
@@ -235,29 +236,18 @@ class Evo2ActivationProducer:
                     break
                 if isinstance(item, BaseException):
                     raise item
+                if not checked:
+                    # Fail clearly if --input-dim disagrees with the layer's true residual
+                    # width, instead of an opaque matmul shape error inside the SAE encoder.
+                    if item.shape[1] != args.input_dim:
+                        raise ValueError(
+                            f"--input-dim={args.input_dim} but streamed Evo2 activations are width "
+                            f"{item.shape[1]} (embedding-layer {args.layer}); set --input-dim to match."
+                        )
+                    checked = True
                 yield item
         finally:
             thread.join(timeout=30.0)
-
-
-def init_pre_bias_from_stream(sae: torch.nn.Module, producer: Evo2ActivationProducer, sample_size: int) -> None:
-    """Initialize SAE pre_bias from the first streamed activation rows.
-
-    NOTE: this runs a *separate* full predict pass (Evo2 reloads the model per
-    run), so it roughly doubles cost. Prefer --no-init-pre-bias for smoke runs.
-    """
-    rows = []
-    n_rows = 0
-    for chunk in producer():
-        rows.append(chunk)
-        n_rows += chunk.shape[0]
-        if n_rows >= sample_size:
-            break
-    if not rows:
-        raise RuntimeError("No activation rows produced for pre-bias initialization")
-    sample = torch.cat(rows, dim=0)[:sample_size].float()
-    sae.init_pre_bias_from_data(sample)
-    print(f"pre_bias initialized from {len(sample):,} streamed activation rows")
 
 
 def main() -> None:
@@ -275,8 +265,17 @@ def main() -> None:
     print(f"SAE: {args.model_type}, input_dim={input_dim}, hidden_dim={sae.hidden_dim}")
 
     producer = Evo2ActivationProducer(args)
-    if args.init_pre_bias and hasattr(sae, "init_pre_bias_from_data"):
-        init_pre_bias_from_stream(sae, producer, args.pre_bias_sample_size)
+    if args.init_pre_bias:
+        # Streaming pre-bias init would need a *second* Evo2 `predict` pass to sample
+        # activations before training. `predict` initializes Megatron global state
+        # (num-microbatches calculator, model-parallel groups) that it never tears down,
+        # so a second pass crashes with "num microbatches calculator is already
+        # initialized". Fail loudly instead of dying cryptically mid-run. Tracked for a
+        # single-pass fix (sample the first rows off the one training stream).
+        raise NotImplementedError(
+            "--init-pre-bias is not supported by the streaming path (a second Evo2 predict "
+            "pass collides with Megatron global state). Re-run with --no-init-pre-bias."
+        )
 
     dataloader = make_streaming_dataloader(
         producer,
