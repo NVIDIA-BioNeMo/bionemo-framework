@@ -134,8 +134,18 @@ jobs:
         working-directory: interpretability/sparse_autoencoders/recipes/evo2
         run: bash .ci_build.sh
 
-      - name: Run tests
+      - name: Run recipe tests
         working-directory: interpretability/sparse_autoencoders/recipes/evo2
         run: |
           source .ci_test_env.sh
           pytest -v tests/
+
+      # The recipe builds on the shared SAE library (sparse_autoencoders/sae), installed
+      # editable by .ci_build.sh. Its own suite (kernels, topk, streaming, steering, and the
+      # tensor-parallel math tests) isn't under recipes/evo2/tests, so run it as a separate
+      # step (own pytest session — distinct failure attribution) using the same venv.
+      - name: Run SAE library tests
+        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+        run: |
+          source .ci_test_env.sh
+          pytest -v ../../sae/tests/
