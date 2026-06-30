@@ -8,10 +8,14 @@ name: "BioNeMo Interpretability Recipes CI"
 # the job also checks out recipes/evo2_megatron (which pulls its bionemo-core /
 # bionemo-recipeutils deps from git).
 #
-# This lane is intentionally mergeable to main BEFORE the evo2 SAE recipe lands (#1622): a
-# presence guard makes the build/test steps a green no-op when
-# interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh is absent, and they
-# auto-activate once that recipe is on the ref under test.
+# A cheap ubuntu `gate` job decides whether to spin up the GPU runner at all:
+#   * Presence guard - lets this lane merge to main BEFORE the evo2 SAE recipe lands (#1622).
+#     When .ci_build.sh is absent the GPU job is skipped and the lane is a green no-op; it
+#     auto-activates once that recipe is on the ref under test.
+#   * Relevance guard - push (pull-request/*) is already path-filtered at the workflow level
+#     and schedule is a full nightly, so both always run. merge_group ignores `paths`, so the
+#     gate diffs against origin/main and only runs the GPU suite when interpretability/evo2
+#     files actually changed - otherwise every merge into main would build the Evo2 1B.
 
 on:
   push:
@@ -36,7 +40,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  gate:
+    # Cheap ubuntu pre-job: decide whether the (expensive) GPU job should run. Keeps the L4
+    # runner idle for no-op refs and for merge groups that don't touch the SAE recipe.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether to run GPU tests
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Presence guard: the evo2 SAE recipe (and its .ci_build.sh) may not be on this ref
+          # yet - this lane lands before #1622. When absent, never spin up the GPU runner.
+          if [ ! -f interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh ]; then
+            echo "::notice::evo2 SAE recipe not present on this ref yet; skipping GPU tests (green no-op)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Relevance guard. push (pull-request/*) is already path-filtered at the workflow
+          # level and schedule is a full nightly run, so both are always relevant. merge_group
+          # ignores `paths`, so diff against origin/main and gate on our globs - otherwise every
+          # merge into main rebuilds the Evo2 1B regardless of what changed.
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            MERGE_BASE=$(git merge-base HEAD origin/main)
+            echo "Merge-base: $MERGE_BASE"
+            CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
+            echo "Changed files:"; echo "$CHANGED" | sed 's/^/  - /'
+            if echo "$CHANGED" | grep -qE '^(interpretability/sparse_autoencoders/|recipes/evo2_megatron/|\.github/workflows/unit-tests-interpretability-recipes\.yaml$)'; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::merge group has no interpretability/evo2 changes; skipping GPU tests."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   unit-tests:
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' }}
     runs-on: linux-amd64-gpu-l4-latest-1
     name: "interpretability-unit-tests (evo2)"
     permissions:
@@ -68,21 +121,7 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      # Presence guard: lets this lane merge to main before the evo2 SAE recipe (#1622). When
-      # .ci_build.sh is absent the build/test steps are skipped and the job is a green no-op;
-      # once the recipe is on the ref under test, they run for real.
-      - name: Check evo2 SAE recipe present
-        id: check
-        run: |
-          if [ -f interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::evo2 SAE recipe not present on this ref yet; skipping build/test (green no-op)."
-          fi
-
       - name: Cache Hugging Face models
-        if: steps.check.outputs.present == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: /cache/huggingface
@@ -92,12 +131,10 @@ jobs:
             ${{ runner.os }}-huggingface-
 
       - name: Install dependencies
-        if: steps.check.outputs.present == 'true'
         working-directory: interpretability/sparse_autoencoders/recipes/evo2
         run: bash .ci_build.sh
 
       - name: Run tests
-        if: steps.check.outputs.present == 'true'
         working-directory: interpretability/sparse_autoencoders/recipes/evo2
         run: |
           source .ci_test_env.sh
