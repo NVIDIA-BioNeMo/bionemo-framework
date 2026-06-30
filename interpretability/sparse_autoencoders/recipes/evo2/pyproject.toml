@@ -12,14 +12,17 @@ dependencies = [
     "sae",
     "torch>=2.0",
     "numpy>=1.20",
+    "pandas>=2.0",  # cli.py `batch` -> parquet
     "pyarrow>=23.0.0",
     "biopython>=1.80",  # genetic code / translation in labelers.py
     "pyrodigal>=3.0",  # prokaryotic gene calling in labelers.predict_cds / predict_codons
+    "fastapi>=0.110",  # server.py
+    "uvicorn>=0.29",  # serve CLI
+    "anyio>=4.0",  # server.py: threadpool concurrency cap (ships with fastapi, declared explicitly)
 ]
 
-# The `evo2_sae` package (src/) holds the live inference engine + steering hook;
-# scripts/ (extract, train) are standalone entry points alongside it. The FastAPI
-# server + CLI (and their fastapi/uvicorn deps) are added by the serve PR (#1637).
+# The `evo2_sae` package (src/) holds the live inference engine + steering hook + the FastAPI
+# server and CLI; scripts/ (extract, train) are standalone entry points alongside it.
 [tool.setuptools.packages.find]
 where = ["src"]
 

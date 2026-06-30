@@ -862,7 +862,7 @@ def run_auto_interp(
                 vpo = m.get("var_pos_offset")
                 if ref and alt:
                     meta_parts.append(f"Variant: {ref}>{alt} at pos {vpo}")
-                for score_col in ["1b_cdwt", "5b_cdwt", "1b", "5b"]:
+                for score_col in ["1b_cdwt", "1b"]:
                     sc = m.get(score_col)
                     if sc is not None:
                         meta_parts.append(f"Model score ({score_col}): {float(sc):.3f}")

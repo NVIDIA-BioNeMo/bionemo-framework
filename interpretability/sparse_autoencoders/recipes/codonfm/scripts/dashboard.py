@@ -362,7 +362,7 @@ def compute_variant_analysis(
     """Compute per-feature variant analysis with multi-score, local deltas, and distribution metrics.
 
     For each feature computes:
-      - mean_variant_{col} for each available score column (1b_cdwt, 5b_cdwt, 5b)
+      - mean_variant_{col} for each available score column (1b_cdwt, 1b)
       - Global deltas (variant - ref, max over full sequence)
       - Local deltas (variant - ref, max over 3-codon window around variant site)
       - Site deltas (variant - ref, at exact variant position)
@@ -372,7 +372,7 @@ def compute_variant_analysis(
     """
     from collections import defaultdict
 
-    SCORE_COLUMNS = ["1b_cdwt", "5b_cdwt", "5b"]
+    SCORE_COLUMNS = ["1b_cdwt", "1b"]
     WINDOW_RADIUS = 3  # codons each side of variant
 
     n_features = sae.hidden_dim

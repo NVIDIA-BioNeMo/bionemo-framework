@@ -86,6 +86,9 @@ from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_
 from bionemo.evo2.models.evo2_lora import Evo2LoRA
 from bionemo.evo2.models.evo2_provider import (
     Hyena1bModelProvider,
+    Hyena7bModelProvider,
+    Hyena40bARCLongContextModelProvider,
+    Hyena40bModelProvider,
     HyenaModelProvider,
     HyenaOptimizerConfigOverrideProvider,
 )
@@ -296,6 +299,31 @@ class Hyena1bClassifierProvider(Hyena1bModelProvider, HyenaForSequenceClassifica
     """1B Evo2 backbone with a classification head."""
 
 
+@dataclass
+class Hyena7bClassifierProvider(Hyena7bModelProvider, HyenaForSequenceClassificationProvider):
+    """7B Evo2 backbone (8k context) with a classification head."""
+
+
+@dataclass
+class Hyena40bBaseClassifierProvider(Hyena40bModelProvider, HyenaForSequenceClassificationProvider):
+    """40B Evo2 backbone (8k context, unpadded FFN) with a classification head."""
+
+
+@dataclass
+class Hyena40bClassifierProvider(Hyena40bARCLongContextModelProvider, HyenaForSequenceClassificationProvider):
+    """40B Evo2 backbone (ARC long-context checkpoint, padded FFN) with a classification head."""
+
+
+# Maps the --model-size key to the classifier provider that wraps that backbone with a
+# sequence-classification head.
+CLASSIFIER_PROVIDER_OPTIONS: dict[str, type[HyenaForSequenceClassificationProvider]] = {
+    "evo2_1b_base": Hyena1bClassifierProvider,
+    "evo2_7b_base": Hyena7bClassifierProvider,
+    "evo2_40b_base": Hyena40bBaseClassifierProvider,
+    "evo2_40b": Hyena40bClassifierProvider,
+}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataset
 # ─────────────────────────────────────────────────────────────────────────────
@@ -482,6 +510,8 @@ def evo2_1b_classifier_config(  # noqa: D417
     num_classes: int,
     result_dir: Path,
     experiment_name: str,
+    model_size: str = "evo2_1b_base",
+    tensor_model_parallel_size: int = 1,
     seq_length_tokens: int = 512,
     backbone_seq_length: int = 8192,
     train_iters: int = 300,
@@ -508,6 +538,8 @@ def evo2_1b_classifier_config(  # noqa: D417
     tokenizer_path: str = DEFAULT_HF_TOKENIZER_MODEL_PATH_512,
     no_activation_checkpointing: bool = True,
     precision_recipe: str = "bf16_mixed",
+    log_throughput_to_tensorboard: bool = True,
+    throughput_window_size: int = 20,
     wandb_project: Optional[str] = None,
     wandb_entity: Optional[str] = None,
     wandb_run_name: Optional[str] = None,
@@ -519,10 +551,23 @@ def evo2_1b_classifier_config(  # noqa: D417
         base_ckpt_dir: Path to a pretrained MBridge backbone checkpoint
             (parent of ``iter_*`` subdirs is auto-resolved).
         num_classes: Number of classification labels.
+        model_size: Backbone-size key in :data:`CLASSIFIER_PROVIDER_OPTIONS`
+            (e.g. ``"evo2_1b_base"``, ``"evo2_7b_base"``, ``"evo2_40b"``). Must
+            match the ``--model-size`` used to convert ``base_ckpt_dir``,
+            otherwise the backbone weight shapes will not line up.
+        tensor_model_parallel_size: Shard the backbone across this many GPUs with
+            tensor parallelism. Needed for backbones that do not fit on one GPU
+            (e.g. 40b). The classification head runs on the full (TP-replicated)
+            hidden state, so no pipeline parallelism is involved. ``world_size``
+            must be divisible by this value.
         use_lora: If ``False``, run the head-only baseline — backbone is
             loaded and frozen, but no LoRA adapters are added.
         no_activation_checkpointing: Disable Hyena's full recompute. Short
             sequences fit comfortably without it.
+        log_throughput_to_tensorboard: Emit ``throughput/tokens_per_sec``.
+        throughput_window_size: Rolling-average window (in iterations) for the
+            throughput metrics; the first point is logged once this many
+            iterations have elapsed.
 
     Remaining keyword arguments are forwarded to the corresponding fields of
     the underlying mbridge config dataclasses (``TrainingConfig``,
@@ -536,13 +581,16 @@ def evo2_1b_classifier_config(  # noqa: D417
         raise ValueError(f"num_classes must be ≥ 2 for classification, got {num_classes}.")
 
     # ── Model provider ────────────────────────────────────────────────────
-    model_cfg = Hyena1bClassifierProvider(
+    if model_size not in CLASSIFIER_PROVIDER_OPTIONS:
+        raise ValueError(f"Unknown model_size {model_size!r}. Options: {sorted(CLASSIFIER_PROVIDER_OPTIONS)}.")
+    classifier_provider_cls = CLASSIFIER_PROVIDER_OPTIONS[model_size]
+    model_cfg = classifier_provider_cls(
         num_classes=num_classes,
         classifier_hidden_size=classifier_hidden_size,
         classifier_dropout=classifier_dropout,
         pool=pool,
         seq_length=backbone_seq_length,
-        tensor_model_parallel_size=1,
+        tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=1,
         context_parallel_size=1,
         sequence_parallel=False,
@@ -628,6 +676,8 @@ def evo2_1b_classifier_config(  # noqa: D417
             tensorboard_dir=str(tensorboard_dir),
             log_params_norm=False,
             log_throughput=False,
+            log_throughput_to_tensorboard=log_throughput_to_tensorboard,
+            throughput_window_size=throughput_window_size,
             log_progress=True,
             wandb_project=wandb_project or "",
             wandb_exp_name=wandb_run_name or experiment_name,
@@ -952,10 +1002,14 @@ def predict(
 
 
 __all__ = [
+    "CLASSIFIER_PROVIDER_OPTIONS",
     "DEFAULT_LORA_TARGET_MODULES",
     "Evo2ClassifierDataset",
     "Evo2ClassifierDatasetProvider",
     "Hyena1bClassifierProvider",
+    "Hyena7bClassifierProvider",
+    "Hyena40bBaseClassifierProvider",
+    "Hyena40bClassifierProvider",
     "HyenaForSequenceClassification",
     "HyenaForSequenceClassificationProvider",
     "classifier_forward_step",
@@ -990,6 +1044,19 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     p.add_argument("--experiment-name", required=True, help="Subdirectory of --result-dir for this run.")
     p.add_argument("--num-classes", type=int, required=True)
+    p.add_argument(
+        "--model-size",
+        choices=sorted(CLASSIFIER_PROVIDER_OPTIONS.keys()),
+        default="evo2_1b_base",
+        help="Backbone size. Must match the --model-size used to convert --base-ckpt-dir.",
+    )
+    p.add_argument(
+        "--tensor-model-parallel-size",
+        type=int,
+        default=1,
+        help="Shard the backbone across this many GPUs via tensor parallelism "
+        "(--nproc_per_node must be a multiple of this).",
+    )
     p.add_argument("--seq-length-tokens", type=int, default=512)
     p.add_argument("--backbone-seq-length", type=int, default=8192)
     p.add_argument("--train-iters", type=int, default=300)
@@ -1025,6 +1092,25 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     p.add_argument("--tokenizer-path", default=DEFAULT_HF_TOKENIZER_MODEL_PATH_512)
     p.add_argument("--precision-recipe", default="bf16_mixed")
+    p.add_argument(
+        "--activation-checkpointing",
+        action="store_true",
+        help="Enable full activation recomputation in the backbone.",
+    )
+    p.add_argument(
+        "--log-token-throughput",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="log_throughput_to_tensorboard",
+        help="Log throughput/tokens_per_sec (and samples/batches per sec) to W&B.",
+    )
+    p.add_argument(
+        "--throughput-window-size",
+        type=int,
+        default=20,
+        help="Rolling-average window (in iterations) for throughput metrics. The first "
+        "throughput point is logged once this many iterations have elapsed.",
+    )
     p.add_argument("--wandb-project", default=None, help="W&B project name. Disables wandb when omitted.")
     p.add_argument("--wandb-entity", default=None, help="W&B team/user posting the run.")
     p.add_argument("--wandb-run-name", default=None, help="W&B run name. Defaults to --experiment-name.")
@@ -1044,6 +1130,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         num_classes=args.num_classes,
         result_dir=args.result_dir,
         experiment_name=args.experiment_name,
+        model_size=args.model_size,
+        tensor_model_parallel_size=args.tensor_model_parallel_size,
         seq_length_tokens=args.seq_length_tokens,
         backbone_seq_length=args.backbone_seq_length,
         train_iters=args.train_iters,
@@ -1068,7 +1156,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         lora_dropout=args.lora_dropout,
         lora_target_modules=args.lora_target_modules,
         tokenizer_path=args.tokenizer_path,
+        no_activation_checkpointing=not args.activation_checkpointing,
         precision_recipe=args.precision_recipe,
+        log_throughput_to_tensorboard=args.log_throughput_to_tensorboard,
+        throughput_window_size=args.throughput_window_size,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_run_name=args.wandb_run_name,
@@ -1079,5 +1170,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 if __name__ == "__main__":
     Hyena1bClassifierProvider.__module__ = "evo2_classifier"
+    Hyena7bClassifierProvider.__module__ = "evo2_classifier"
+    Hyena40bBaseClassifierProvider.__module__ = "evo2_classifier"
+    Hyena40bClassifierProvider.__module__ = "evo2_classifier"
     Evo2ClassifierDatasetProvider.__module__ = "evo2_classifier"
     main(sys.argv[1:])

@@ -133,7 +133,6 @@ python scripts/launch_dashboard.py --data-dir ./outputs/encodon_1b/dashboard
 | Encodon 80M  | 80M    | 6      | 1024       | 32         | `model=80m`  |
 | Encodon 600M | 600M   | 12     | 2048       | 16         | `model=600m` |
 | Encodon 1B   | 1B     | 18     | 2048       | 8          | `model=1b`   |
-| Encodon 5B   | 5B     | 24     | 4096       | 2          | `model=5b`   |
 
 ## Configuration
 
