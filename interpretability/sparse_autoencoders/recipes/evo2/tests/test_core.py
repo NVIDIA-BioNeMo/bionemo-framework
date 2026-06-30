@@ -112,3 +112,9 @@ def test_generate_rejects_empty_prompt():
     # "None (raw DNA)" has an empty tag, so an empty prompt leaves nothing to seed generation.
     with pytest.raises(ValueError):
         _engine().generate(prompt="", organism="None (raw DNA)")
+
+
+def test_generate_rejects_overlong_prompt():
+    # An over-context prompt is rejected (server -> 413), not silently truncated by tokenize().
+    with pytest.raises(ValueError, match="too long"):
+        _engine(max_seq_len=16).generate(prompt="A" * 32, organism="None (raw DNA)")

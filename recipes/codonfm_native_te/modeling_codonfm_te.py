@@ -156,12 +156,6 @@ MODEL_PRESETS: dict[str, dict] = {
         "num_attention_heads": 16,
         "num_hidden_layers": 18,
     },
-    "encodon_5b": {
-        "hidden_size": 4096,
-        "intermediate_size": 16384,
-        "num_attention_heads": 32,
-        "num_hidden_layers": 24,
-    },
 }
 
 
