@@ -1,0 +1,104 @@
+name: "BioNeMo Interpretability Recipes CI"
+
+# CI for the SAE interpretability recipes (interpretability/sparse_autoencoders).
+#
+# Runner is modeled on the evo2_megatron GPU lane in unit-tests-recipes.yml: same L4 GPU
+# runner, squashed pytorch26.04 image, --shm-size=16G, pinned action SHAs, and the HF cache.
+# Scoped to the evo2 SAE recipe, whose engine builds on the mbridge bionemo.evo2 recipe, so
+# the job also checks out recipes/evo2_megatron (which pulls its bionemo-core /
+# bionemo-recipeutils deps from git).
+#
+# This lane is intentionally mergeable to main BEFORE the evo2 SAE recipe lands (#1622): a
+# presence guard makes the build/test steps a green no-op when
+# interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh is absent, and they
+# auto-activate once that recipe is on the ref under test.
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+      - "dependabot/**"
+    paths:
+      - "interpretability/sparse_autoencoders/**"
+      - "recipes/evo2_megatron/**" # engine builds on bionemo.evo2
+      - ".github/workflows/unit-tests-interpretability-recipes.yaml"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "0 9 * * *" # Runs at 9 AM UTC daily (2 AM MST)
+
+defaults:
+  run:
+    shell: bash -x -e -u -o pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: linux-amd64-gpu-l4-latest-1
+    name: "interpretability-unit-tests (evo2)"
+    permissions:
+      contents: read
+    container:
+      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+      options: --shm-size=16G
+      env:
+        CI: true
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_HOME: /cache/huggingface
+
+    steps:
+      - name: Show GPU info
+        run: nvidia-smi
+
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@14229018fe157c83e03c008f27d183d8e99bc67c
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # The evo2 SAE recipe builds on bionemo.evo2 (recipes/evo2_megatron); evo2_megatron
+          # pulls its bionemo-core / bionemo-recipeutils deps from git, so only these two are
+          # needed.
+          sparse-checkout: |
+            interpretability/sparse_autoencoders
+            recipes/evo2_megatron
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # Presence guard: lets this lane merge to main before the evo2 SAE recipe (#1622). When
+      # .ci_build.sh is absent the build/test steps are skipped and the job is a green no-op;
+      # once the recipe is on the ref under test, they run for real.
+      - name: Check evo2 SAE recipe present
+        id: check
+        run: |
+          if [ -f interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::evo2 SAE recipe not present on this ref yet; skipping build/test (green no-op)."
+          fi
+
+      - name: Cache Hugging Face models
+        if: steps.check.outputs.present == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: /cache/huggingface
+          key: ${{ runner.os }}-huggingface-interp-evo2-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-huggingface-interp-evo2-
+            ${{ runner.os }}-huggingface-
+
+      - name: Install dependencies
+        if: steps.check.outputs.present == 'true'
+        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+        run: bash .ci_build.sh
+
+      - name: Run tests
+        if: steps.check.outputs.present == 'true'
+        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+        run: |
+          source .ci_test_env.sh
+          pytest -v tests/
