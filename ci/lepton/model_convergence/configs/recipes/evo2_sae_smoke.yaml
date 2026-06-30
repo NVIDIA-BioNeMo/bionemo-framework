@@ -1,0 +1,206 @@
+# @package _global_
+defaults:
+  - /base
+  - _self_
+
+############################################################
+# lepton job info
+############################################################
+node_group: yo-bom-lepton-001
+mount_from: node-nfs:fs1
+num_nodes: 1
+device_type: gpu
+num_devices: 1
+gpu_type: h100-sxm
+resource_shape: gpu.h100-sxm
+
+job_name: "evo2-sae-1b-smoke"
+
+############################################################
+# Container
+# The base convergence image lacks Megatron/TransformerEngine, which the Evo2
+# producer (bionemo.evo2.run.predict) needs. Use the same image the evo2 GPU
+# unit-test lane builds against.
+############################################################
+container:
+  image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+  registry_auth: lepton-nvidia-jwilber
+
+############################################################
+# Telemetry
+############################################################
+# Disabled by default because this is an example smoke run. Set both
+# log_to_wandb=true and train_wandb_enabled=true to collect W&B metrics.
+log_to_wandb: false
+log_to_kratos: false
+kratos_subject: "interpretability_sae_examples_v0.0.1"
+wandb_dir: /workspace/bionemo-framework/interpretability/sparse_autoencoders/recipes/evo2/wandb
+
+############################################################
+# recipe identifiers
+############################################################
+recipe_subdir: interpretability/sparse_autoencoders/recipes/evo2
+model_type: evo2_sae
+variant: smoke
+framework: sae
+precision: bf16
+te_enabled: true
+fp8_enabled: false
+extras: []
+
+total_gpus: ${multiply:${num_devices},${num_nodes}}
+
+wandb_init_args:
+  project: "interpretability_sae_examples__${sanitize:${branch}}"
+  group: "${model_type}__${variant}__${total_gpus}gpus__${sanitize:${gpu_type}}"
+  job_type: "${recipe_subdir}"
+  name: null
+  entity: clara-discovery
+  mode: online
+
+############################################################
+# Evo2 SAE streaming smoke settings
+############################################################
+run_name: lepton_evo2_1b_sae_smoke
+
+# Fetched by identifier and converted to MBridge in-job; nothing is pre-staged.
+model_tag: evo2/1b-8k-bf16:1.0
+model_size: evo2_1b_base
+seq_length: 8192
+bionemo_data_source: ""  # set to "pbss" if NGC is unreachable from the job
+ckpt_dir: ${output_base}/evo2_1b_mbridge
+layer: 12
+input_dim: 1920  # 1B residual-stream width (Hyena1bModelProvider.hidden_size)
+micro_batch_size: 4
+max_tokens: 100000
+chunk_bp: 8192
+extract_dtype: fp32
+
+dp_size: 1
+train_n_epochs: 1
+max_steps: 20
+train_batch_size: 256
+expansion_factor: 8
+top_k: 32
+auxk: 256
+learning_rate: 1e-4
+log_interval: 10
+checkpoint_steps: 999999
+init_pre_bias: false
+train_wandb_enabled: false
+queue_size: 4
+shuffle_buffer_size: 8192
+
+data_dir: /data/interpretability/sae/evo2_smoke/data
+output_base: /data/interpretability/sae/evo2_smoke/outputs
+
+products:
+  - config: evo2_1b_smoke
+
+############################################################
+# Checkout Script
+############################################################
+checkout_script: |
+  set -euo pipefail
+  cd /workspace
+  git clone https://github.com/NVIDIA/bionemo-framework.git
+  cd bionemo-framework
+  if [ -n "${commit_sha}" ]; then
+    echo "Checking out commit: ${commit_sha}"
+    git checkout "${commit_sha}"
+  elif [ "${branch}" != "main" ]; then
+    echo "Checking out branch: ${branch}"
+    git checkout "${branch}"
+  fi
+  # Builds evo2_megatron's venv (bionemo.evo2 / predict) + installs sae + evo2_sae on top.
+  cd interpretability/sparse_autoencoders/recipes/evo2
+  bash .ci_build.sh
+
+############################################################
+# run script
+############################################################
+run_script: |
+  cd /workspace/bionemo-framework/interpretability/sparse_autoencoders/recipes/evo2
+  # The recipe shares evo2_megatron's venv (see .ci_build.sh / .ci_test_env.sh).
+  source ../../../../recipes/evo2_megatron/.venv/bin/activate
+
+  WANDB_FLAG="--no-wandb"
+  if [ "${train_wandb_enabled}" = "true" ]; then
+    WANDB_FLAG="--wandb"
+  fi
+
+  INIT_PRE_BIAS_FLAG="--no-init-pre-bias"
+  if [ "${init_pre_bias}" = "true" ]; then
+    INIT_PRE_BIAS_FLAG="--init-pre-bias"
+  fi
+
+  # Read EVO2_CKPT_DIR via printenv so Hydra does not treat it as an interpolation.
+  CKPT_DIR="$(printenv EVO2_CKPT_DIR || true)"
+  if [ -z "$CKPT_DIR" ]; then
+    if [ -n "${bionemo_data_source}" ]; then
+      export BIONEMO_DATA_SOURCE="${bionemo_data_source}"
+    fi
+    python scripts/prepare_1b_checkpoint.py \
+      --mbridge-ckpt-dir ${ckpt_dir} \
+      --model-tag ${model_tag} \
+      --model-size ${model_size} \
+      --seq-length ${seq_length}
+    CKPT_DIR="${ckpt_dir}"
+  fi
+
+  # Synthesize a tiny FASTA and chunk it to <= chunk_bp bp.
+  mkdir -p "${data_dir}"
+  RAW_FASTA="${data_dir}/smoke_raw.fasta"
+  CHUNKED_FASTA="${data_dir}/smoke_chunked${chunk_bp}.fasta"
+  python - "$RAW_FASTA" <<'PY'
+  import random, sys
+  random.seed(42)
+  with open(sys.argv[1], "w") as f:
+      for i in range(4):
+          seq = "".join(random.choice("ACGT") for _ in range(4096))
+          f.write(f">smoke_{i}\n{seq}\n")
+  PY
+  python scripts/chunk_fasta.py --input "$RAW_FASTA" --output "$CHUNKED_FASTA" --window ${chunk_bp}
+
+  # Producer/consumer streaming: predict feeds activations into a queue; the SAE
+  # Trainer consumes them. Under torchrun (predict needs the distributed env).
+  torchrun --nproc_per_node 1 scripts/train_streaming.py \
+    --ckpt-dir "$CKPT_DIR" \
+    --fasta "$CHUNKED_FASTA" \
+    --embedding-layer ${layer} \
+    --input-dim ${input_dim} \
+    --micro-batch-size ${micro_batch_size} \
+    --max-tokens ${max_tokens} \
+    --dtype ${extract_dtype} \
+    --model-type topk \
+    --expansion-factor ${expansion_factor} \
+    --top-k ${top_k} \
+    --normalize-input \
+    --auxk ${auxk} \
+    --auxk-coef 0.03125 \
+    $INIT_PRE_BIAS_FLAG \
+    --n-epochs ${train_n_epochs} \
+    --max-steps ${max_steps} \
+    --batch-size ${train_batch_size} \
+    --lr ${learning_rate} \
+    --log-interval ${log_interval} \
+    --queue-size ${queue_size} \
+    --shuffle-buffer-size ${shuffle_buffer_size} \
+    $WANDB_FLAG \
+    --wandb-project ${wandb_init_args.project} \
+    --wandb-run-name ${run_name} \
+    --wandb-group ${wandb_init_args.group} \
+    --wandb-job-type ${wandb_init_args.job_type} \
+    --dp-size ${dp_size} \
+    --seed 42 \
+    --output-dir ${output_base}/${run_name} \
+    --checkpoint-dir ${output_base}/${run_name}/checkpoints \
+    --checkpoint-steps ${checkpoint_steps}
+
+  # Fail loudly on a silent no-op (streaming produced nothing / training skipped).
+  CKPT="${output_base}/${run_name}/checkpoints/checkpoint_final.pt"
+  if [ ! -f "$CKPT" ]; then
+    echo "ERROR: expected SAE checkpoint not written: $CKPT" >&2
+    exit 1
+  fi
+  echo "SMOKE OK: $CKPT"
