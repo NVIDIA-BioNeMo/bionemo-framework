@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for sae.steering: the delta-clamp adds exactly decode(clamped) - decode(orig)."""
+"""CPU tests for evo2_sae.steering: the delta-clamp adds exactly decode(clamped) - decode(orig)."""
 
 import torch
+from evo2_sae.steering import clamp_hook, steer
 from sae.architectures import TopKSAE
-from sae.steering import clamp_hook, steer
 from torch import nn
 
 

@@ -25,7 +25,7 @@ CHUNK_BP="${CHUNK_BP:-8192}"
 # An Evo2 7B MBridge checkpoint directory (see prerequisites above).
 CKPT_DIR="${CKPT_DIR:?Set CKPT_DIR to an Evo2 7B MBridge checkpoint directory (see header)}"
 FASTA="${FASTA:?Set FASTA to the (prok+euk) input sequences}"
-WORK_ROOT="${WORK_ROOT:-/data/interp/evo2}"
+WORK_ROOT="${WORK_ROOT:?Set WORK_ROOT to a (large, multi-TB) output dir for activations + SAE checkpoints}"
 
 NPROC="${NPROC:-8}"            # GPUs / DP ranks
 MAX_TOKENS="${MAX_TOKENS:-1000000000}"
