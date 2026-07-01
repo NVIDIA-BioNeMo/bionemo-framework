@@ -497,7 +497,7 @@ class Evo2SAE:
             with self._lock:
                 comp = self._ensure_engine()
                 hook_layer = self.model.decoder.layers[self.layer]  # same module encode reads; steer here
-                from sae.steering import clamp_hook
+                from evo2_sae.steering import clamp_hook
 
                 feat_meta = [{"id": fid, "label": self.labels.get(fid), "strength": s} for fid, s in clamps.items()]
 

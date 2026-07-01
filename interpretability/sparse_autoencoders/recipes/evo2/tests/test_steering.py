@@ -32,7 +32,7 @@ from evo2_sae.core import MAX_CLAMP_STRENGTH, _is_unrecoverable_cuda, _sanitize_
 
 
 # The delta-clamp math + decode-only/prefill behavior is covered against the production
-# hook in sae/tests/test_steering.py (sae.steering.clamp_hook). This file covers the
+# hook in tests/test_clamp.py (evo2_sae.steering.clamp_hook). This file covers the
 # engine-level input guards (CPU) and the live steering smoke tests (GPU).
 
 
