@@ -1,30 +1,27 @@
 name: "BioNeMo Interpretability Recipes CI"
 
-# CI for the SAE interpretability recipes (interpretability/sparse_autoencoders).
+# CI for the SAE interpretability recipes under interpretability/sparse_autoencoders/recipes/*.
+# Generic matrix, modeled on the repo-wide unit-tests-recipes.yml but scoped to the interp subtree:
+#   * `changed-dirs` (cheap ubuntu) discovers which interp recipes to test and emits a matrix.
+#   * `unit-tests` runs each selected recipe on the L4: its own `.ci_build.sh` + `pytest tests/`.
 #
-# Runner is modeled on the evo2_megatron GPU lane in unit-tests-recipes.yml: same L4 GPU
-# runner, squashed pytorch26.04 image, --shm-size=16G, pinned action SHAs, and the HF cache.
-# Scoped to the evo2 SAE recipe, whose engine builds on the mbridge bionemo.evo2 recipe, so
-# the job also checks out recipes/evo2_megatron (which pulls its bionemo-core /
-# bionemo-recipeutils deps from git).
+# Eligible recipes = any interp recipe with its own `.ci_build.sh`. Today that's `evo2`; codonfm/esm2
+# have no `.ci_build.sh`/tests yet, so they are skipped until they add them. This also makes the lane
+# a green no-op before the evo2 SAE recipe lands (#1622) — the presence guard is "has a .ci_build.sh".
 #
-# A cheap ubuntu `gate` job decides whether to spin up the GPU runner at all:
-#   * Presence guard - lets this lane merge to main BEFORE the evo2 SAE recipe lands (#1622).
-#     When .ci_build.sh is absent the GPU job is skipped and the lane is a green no-op; it
-#     auto-activates once that recipe is on the ref under test.
-#   * Relevance guard - there is NO workflow-level `paths:` filter (it doesn't match the blossom
-#     mirror push, so the lane would never trigger). Instead the gate diffs against origin/main
-#     and only runs the GPU suite when the evo2 SAE recipe OR evo2_megatron (its base model)
-#     actually changed - otherwise every PR push and merge would build the Evo2 1B. A change to
-#     the shared `sae` lib or other recipes does NOT trigger this lane. schedule (nightly) always runs.
+# What runs when:
+#   * change under a recipe's own dir            -> that recipe.
+#   * change to the shared `sae` lib, or to this workflow file, or the nightly schedule
+#                                                -> ALL eligible recipes (they all depend on sae).
+#   * change to an unrelated recipe / elsewhere  -> nothing (empty matrix, green no-op).
+# Each recipe's `.ci_build.sh` owns its own build (evo2 -> mbridge bionemo.evo2; esm2 -> HF; etc.),
+# so a codonfm/esm2 change never triggers the Evo2 megatron build, and vice-versa.
 
 on:
   push:
     branches:
       - "pull-request/[0-9]+"
       - "dependabot/**"
-    # No workflow-level `paths:` filter: it doesn't match the blossom mirror push, so the lane
-    # would never trigger. Relevance is decided in the `gate` job (diff vs origin/main) instead.
   merge_group:
     types: [checks_requested]
   schedule:
@@ -39,14 +36,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gate:
-    # Cheap ubuntu pre-job: decide whether the (expensive) GPU job should run. Keeps the L4
-    # runner idle for no-op refs and for merge groups that don't touch the SAE recipe.
+  changed-dirs:
+    # Cheap ubuntu pre-job: decide which interp recipes to test and emit the matrix.
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
-      run: ${{ steps.decide.outputs.run }}
+      dirs: ${{ steps.set-dirs.outputs.dirs }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -54,55 +50,62 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Decide whether to run GPU tests
-        id: decide
+      - name: Determine which interp recipes to run
+        id: set-dirs
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          # Presence guard: the evo2 SAE recipe (and its .ci_build.sh) may not be on this ref
-          # yet - this lane lands before #1622. When absent, never spin up the GPU runner.
-          if [ ! -f interpretability/sparse_autoencoders/recipes/evo2/.ci_build.sh ]; then
-            echo "::notice::evo2 SAE recipe not present on this ref yet; skipping GPU tests (green no-op)."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          RROOT="interpretability/sparse_autoencoders/recipes"
+          SAE="interpretability/sparse_autoencoders/sae"
+          WF=".github/workflows/unit-tests-interpretability-recipes.yaml"
 
-          # Relevance guard. There is no workflow-level `paths:` filter (it doesn't match the
-          # blossom mirror push), so relevance is decided HERE for both push and merge_group by
-          # diffing against origin/main - otherwise, with no paths filter, every PR push and every
-          # merge into main would rebuild the Evo2 1B regardless of what changed. `schedule` is the
-          # full nightly, so it always runs. Scope: the evo2 SAE recipe + evo2_megatron (the base it
-          # wraps via internal bionemo.evo2 APIs, so a megatron change can break it). The shared `sae`
-          # lib + codonfm/esm2 are NOT in scope - a change there does not trigger this lane.
-          if [ "$EVENT_NAME" = "schedule" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          # Eligible recipes = those with their own .ci_build.sh (others are green no-ops until
+          # they add one; empty before #1622 lands -> whole lane is a no-op).
+          ALL=$(for d in "$RROOT"/*/; do [ -f "${d}.ci_build.sh" ] && echo "${d%/}"; done \
+                | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "Eligible recipes (have .ci_build.sh): $ALL"
+
           MERGE_BASE=$(git merge-base HEAD origin/main)
-          echo "Merge-base: $MERGE_BASE"
           CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
           echo "Changed files:"; echo "$CHANGED" | sed 's/^/  - /'
-          if echo "$CHANGED" | grep -qE '^(interpretability/sparse_autoencoders/recipes/evo2/|recipes/evo2_megatron/|\.github/workflows/unit-tests-interpretability-recipes\.yaml$)'; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
+
+          # sae lib / this workflow / nightly -> run EVERY eligible recipe (all depend on sae).
+          if [ "$EVENT_NAME" = "schedule" ] || echo "$CHANGED" | grep -qE "^(${SAE}/|${WF}$)"; then
+            DIRS="$ALL"
           else
-            echo "::notice::no evo2 SAE recipe / evo2_megatron changes; skipping GPU tests."
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            # otherwise -> only eligible recipes that have a changed file under them.
+            DIRS=$(echo "$ALL" | jq -c --arg changed "$CHANGED" '
+              ($changed | split("\n")) as $cf
+              | map(select(. as $d | $cf | any(startswith($d + "/"))))
+            ')
           fi
+          echo "Recipes to run: $DIRS"
+
+          # Attach the runner image (the dockerhub-cached squashed pytorch, like the repo-wide lane).
+          IMG="svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed"
+          MATRIX=$(echo "$DIRS" | jq -c --arg img "$IMG" \
+            'map({dir: ., name: (. | split("/") | last), image: $img})')
+          echo "dirs=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "matrix: $MATRIX"
 
   unit-tests:
-    needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
+    needs: changed-dirs
+    if: ${{ needs.changed-dirs.outputs.dirs != '' && needs.changed-dirs.outputs.dirs != '[]' }}
     runs-on: linux-amd64-gpu-l4-latest-1
-    name: "interpretability-unit-tests (evo2)"
+    name: "interp-unit-tests (${{ matrix.recipe.name }})"
     permissions:
       contents: read
     container:
-      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+      image: ${{ matrix.recipe.image }}
       options: --shm-size=16G
       env:
         CI: true
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         HF_HOME: /cache/huggingface
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.changed-dirs.outputs.dirs) }}
 
     steps:
       - name: Show GPU info
@@ -114,9 +117,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          # The evo2 SAE recipe builds on bionemo.evo2 (recipes/evo2_megatron); evo2_megatron
-          # pulls its bionemo-core / bionemo-recipeutils deps from git, so only these two are
-          # needed.
+          # Interp recipes live under interpretability/sparse_autoencoders (recipe + shared sae);
+          # evo2 additionally builds on recipes/evo2_megatron. Check out both so any recipe's
+          # .ci_build.sh has what it needs.
           sparse-checkout: |
             interpretability/sparse_autoencoders
             recipes/evo2_megatron
@@ -127,17 +130,17 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: /cache/huggingface
-          key: ${{ runner.os }}-huggingface-interp-evo2-${{ github.sha }}
+          key: ${{ runner.os }}-huggingface-interp-${{ matrix.recipe.name }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-huggingface-interp-evo2-
+            ${{ runner.os }}-huggingface-interp-${{ matrix.recipe.name }}-
             ${{ runner.os }}-huggingface-
 
       - name: Install dependencies
-        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+        working-directory: ${{ matrix.recipe.dir }}
         run: bash .ci_build.sh
 
-      - name: Run recipe tests
-        working-directory: interpretability/sparse_autoencoders/recipes/evo2
+      - name: Run tests
+        working-directory: ${{ matrix.recipe.dir }}
         run: |
-          source .ci_test_env.sh
+          [ -f .ci_test_env.sh ] && source .ci_test_env.sh
           pytest -v tests/
