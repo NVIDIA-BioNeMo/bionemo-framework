@@ -12,20 +12,19 @@ name: "BioNeMo Interpretability Recipes CI"
 #   * Presence guard - lets this lane merge to main BEFORE the evo2 SAE recipe lands (#1622).
 #     When .ci_build.sh is absent the GPU job is skipped and the lane is a green no-op; it
 #     auto-activates once that recipe is on the ref under test.
-#   * Relevance guard - push (pull-request/*) is already path-filtered at the workflow level
-#     and schedule is a full nightly, so both always run. merge_group ignores `paths`, so the
-#     gate diffs against origin/main and only runs the GPU suite when interpretability/evo2
-#     files actually changed - otherwise every merge into main would build the Evo2 1B.
+#   * Relevance guard - there is NO workflow-level `paths:` filter (it doesn't match the blossom
+#     mirror push, so the lane would never trigger). Instead the gate diffs against origin/main
+#     and only runs the GPU suite when the evo2 SAE recipe / shared `sae` lib / evo2_megatron
+#     actually changed - otherwise every PR push and merge would build the Evo2 1B. schedule
+#     (nightly) always runs the full suite.
 
 on:
   push:
     branches:
       - "pull-request/[0-9]+"
       - "dependabot/**"
-    paths:
-      - "interpretability/sparse_autoencoders/**"
-      - "recipes/evo2_megatron/**" # engine builds on bionemo.evo2
-      - ".github/workflows/unit-tests-interpretability-recipes.yaml"
+    # No workflow-level `paths:` filter: it doesn't match the blossom mirror push, so the lane
+    # would never trigger. Relevance is decided in the `gate` job (diff vs origin/main) instead.
   merge_group:
     types: [checks_requested]
   schedule:
@@ -68,23 +67,25 @@ jobs:
             exit 0
           fi
 
-          # Relevance guard. push (pull-request/*) is already path-filtered at the workflow
-          # level and schedule is a full nightly run, so both are always relevant. merge_group
-          # ignores `paths`, so diff against origin/main and gate on our globs - otherwise every
-          # merge into main rebuilds the Evo2 1B regardless of what changed.
-          if [ "$EVENT_NAME" = "merge_group" ]; then
-            MERGE_BASE=$(git merge-base HEAD origin/main)
-            echo "Merge-base: $MERGE_BASE"
-            CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
-            echo "Changed files:"; echo "$CHANGED" | sed 's/^/  - /'
-            if echo "$CHANGED" | grep -qE '^(interpretability/sparse_autoencoders/|recipes/evo2_megatron/|\.github/workflows/unit-tests-interpretability-recipes\.yaml$)'; then
-              echo "run=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "::notice::merge group has no interpretability/evo2 changes; skipping GPU tests."
-              echo "run=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
+          # Relevance guard. There is no workflow-level `paths:` filter (it doesn't match the
+          # blossom mirror push), so relevance is decided HERE for both push and merge_group by
+          # diffing against origin/main - otherwise, with no paths filter, every PR push and every
+          # merge into main would rebuild the Evo2 1B regardless of what changed. `schedule` is the
+          # full nightly, so it always runs. Scope is the evo2 SAE recipe + the shared `sae` lib
+          # (this lane runs sae/tests + the recipe depends on it) + evo2_megatron (the engine base).
+          if [ "$EVENT_NAME" = "schedule" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          MERGE_BASE=$(git merge-base HEAD origin/main)
+          echo "Merge-base: $MERGE_BASE"
+          CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
+          echo "Changed files:"; echo "$CHANGED" | sed 's/^/  - /'
+          if echo "$CHANGED" | grep -qE '^(interpretability/sparse_autoencoders/recipes/evo2/|interpretability/sparse_autoencoders/sae/|recipes/evo2_megatron/|\.github/workflows/unit-tests-interpretability-recipes\.yaml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no evo2 SAE / sae / evo2_megatron changes; skipping GPU tests."
+            echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
   unit-tests:
