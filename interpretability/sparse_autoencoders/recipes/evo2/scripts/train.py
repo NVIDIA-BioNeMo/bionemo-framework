@@ -50,7 +50,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from sae.activation_store import load_activations
-from sae.architectures import ReLUSAE, TopKSAE
+from sae.architectures import TopKSAE
 from sae.perf_logger import PerfLogger
 from sae.training import ParallelConfig, Trainer, TrainingConfig, WandbConfig
 from sae.utils import get_device, set_seed
@@ -69,7 +69,6 @@ def parse_args():  # noqa: D103
 
     # SAE architecture
     sae_group = p.add_argument_group("SAE model")
-    sae_group.add_argument("--model-type", type=str, default="topk", choices=["topk", "relu"])
     sae_group.add_argument("--expansion-factor", type=int, default=8)
     sae_group.add_argument("--top-k", type=int, default=32)
     sae_group.add_argument("--normalize-input", action=argparse.BooleanOptionalAction, default=False)
@@ -77,7 +76,6 @@ def parse_args():  # noqa: D103
     sae_group.add_argument("--auxk-coef", type=float, default=1 / 32)
     sae_group.add_argument("--dead-tokens-threshold", type=int, default=10_000_000)
     sae_group.add_argument("--init-pre-bias", action=argparse.BooleanOptionalAction, default=False)
-    sae_group.add_argument("--l1-coeff", type=float, default=1e-2, help="L1 coefficient (relu only)")
     # Opt-in training-quality fixes (sae package). Defaults reproduce previous behavior.
     sae_group.add_argument(
         "--aggregate-loss",
@@ -164,27 +162,17 @@ def parse_args():  # noqa: D103
 
 def build_sae(args, input_dim: int) -> torch.nn.Module:  # noqa: D103
     hidden_dim = input_dim * args.expansion_factor
-
-    if args.model_type == "topk":
-        return TopKSAE(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            top_k=args.top_k,
-            normalize_input=args.normalize_input,
-            auxk=args.auxk,
-            auxk_coef=args.auxk_coef,
-            dead_tokens_threshold=args.dead_tokens_threshold,
-            aggregate_loss=args.aggregate_loss,
-            dead_count_global=args.dead_count_global,
-        )
-    elif args.model_type == "relu":
-        return ReLUSAE(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            l1_coeff=args.l1_coeff,
-        )
-    else:
-        raise ValueError(f"Unknown model type: {args.model_type}")
+    return TopKSAE(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        top_k=args.top_k,
+        normalize_input=args.normalize_input,
+        auxk=args.auxk,
+        auxk_coef=args.auxk_coef,
+        dead_tokens_threshold=args.dead_tokens_threshold,
+        aggregate_loss=args.aggregate_loss,
+        dead_count_global=args.dead_count_global,
+    )
 
 
 def build_training_config(args, device: str) -> TrainingConfig:  # noqa: D103
@@ -267,7 +255,7 @@ def main():  # noqa: D103
 
     input_dim = meta["hidden_dim"]
     sae = build_sae(args, input_dim)
-    print(f"SAE: {args.model_type}, input_dim={input_dim}, hidden_dim={sae.hidden_dim}")
+    print(f"SAE: TopK, input_dim={input_dim}, hidden_dim={sae.hidden_dim}")
 
     # Initialize pre_bias from the geometric median of a sample of activations. With
     # --presample-shards N>1, draw the sample across N shards spanning the store (avoids

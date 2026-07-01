@@ -1,0 +1,11 @@
+# Per-Dockerfile ignore (BuildKit uses <dockerfile>.dockerignore when present). Paths are relative
+# to the build context (the repo root). Keep generated/heavy trees out of the context so they
+# neither bloat the upload nor bust the COPY cache when they change locally.
+**/node_modules/
+**/dist/
+**/.vite/
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/.pytest_cache/
+.git/
