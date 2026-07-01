@@ -4,7 +4,7 @@
 # To build a development image:
 # docker build -t <image_name> --target development --build-arg USERNAME=$(whoami) --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
 
-ARG FROM_IMAGE_NAME=nvcr.io/nvidia/pytorch:25.08-py3
+ARG FROM_IMAGE_NAME=nvcr.io/nvidia/pytorch:26.06-py3
 FROM ${FROM_IMAGE_NAME} AS base
 
 ENV CUDA_HOME=/usr/local/cuda
