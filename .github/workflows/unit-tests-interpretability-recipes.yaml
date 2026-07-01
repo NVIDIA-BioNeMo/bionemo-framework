@@ -14,9 +14,9 @@ name: "BioNeMo Interpretability Recipes CI"
 #     auto-activates once that recipe is on the ref under test.
 #   * Relevance guard - there is NO workflow-level `paths:` filter (it doesn't match the blossom
 #     mirror push, so the lane would never trigger). Instead the gate diffs against origin/main
-#     and only runs the GPU suite when the evo2 SAE recipe / shared `sae` lib / evo2_megatron
-#     actually changed - otherwise every PR push and merge would build the Evo2 1B. schedule
-#     (nightly) always runs the full suite.
+#     and only runs the GPU suite when the evo2 SAE recipe OR evo2_megatron (its base model)
+#     actually changed - otherwise every PR push and merge would build the Evo2 1B. A change to
+#     the shared `sae` lib or other recipes does NOT trigger this lane. schedule (nightly) always runs.
 
 on:
   push:
@@ -71,8 +71,9 @@ jobs:
           # blossom mirror push), so relevance is decided HERE for both push and merge_group by
           # diffing against origin/main - otherwise, with no paths filter, every PR push and every
           # merge into main would rebuild the Evo2 1B regardless of what changed. `schedule` is the
-          # full nightly, so it always runs. Scope is the evo2 SAE recipe + the shared `sae` lib
-          # (this lane runs sae/tests + the recipe depends on it) + evo2_megatron (the engine base).
+          # full nightly, so it always runs. Scope: the evo2 SAE recipe + evo2_megatron (the base it
+          # wraps via internal bionemo.evo2 APIs, so a megatron change can break it). The shared `sae`
+          # lib + codonfm/esm2 are NOT in scope - a change there does not trigger this lane.
           if [ "$EVENT_NAME" = "schedule" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -81,10 +82,10 @@ jobs:
           echo "Merge-base: $MERGE_BASE"
           CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
           echo "Changed files:"; echo "$CHANGED" | sed 's/^/  - /'
-          if echo "$CHANGED" | grep -qE '^(interpretability/sparse_autoencoders/recipes/evo2/|interpretability/sparse_autoencoders/sae/|recipes/evo2_megatron/|\.github/workflows/unit-tests-interpretability-recipes\.yaml$)'; then
+          if echo "$CHANGED" | grep -qE '^(interpretability/sparse_autoencoders/recipes/evo2/|recipes/evo2_megatron/|\.github/workflows/unit-tests-interpretability-recipes\.yaml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::no evo2 SAE / sae / evo2_megatron changes; skipping GPU tests."
+            echo "::notice::no evo2 SAE recipe / evo2_megatron changes; skipping GPU tests."
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -140,13 +141,3 @@ jobs:
         run: |
           source .ci_test_env.sh
           pytest -v tests/
-
-      # The recipe builds on the shared SAE library (sparse_autoencoders/sae), installed
-      # editable by .ci_build.sh. Its own suite (kernels, topk, streaming, steering, and the
-      # tensor-parallel math tests) isn't under recipes/evo2/tests, so run it as a separate
-      # step (own pytest session — distinct failure attribution) using the same venv.
-      - name: Run SAE library tests
-        working-directory: interpretability/sparse_autoencoders/recipes/evo2
-        run: |
-          source .ci_test_env.sh
-          pytest -v ../../sae/tests/
