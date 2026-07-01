@@ -16,7 +16,7 @@
 """SAE feature-steering analysis: the engine-driven harness + the pure metrics it scores with.
 
 ``run_steering`` clamps a feature via the production ``Evo2SAE.generate`` path (the same
-decode-only ``sae.steering`` hook the server/CLI use) and quantifies the causal effect:
+decode-only ``evo2_sae.steering`` hook the server/CLI use) and quantifies the causal effect:
 
   - divergence:    how far a steered continuation departs from the baseline
   - dose_response: how that effect scales with clamp strength
