@@ -65,19 +65,21 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
         {
             "reward_valid_nt_chars": [1.0, 1.0],
             "reward_external_tropism": [1.0, 0.5],
-            "reward_external_training_data_identity": [1.0, 0.0],
             "reward_external_synteny": [0.25, 0.75],
             "reward_external_average_protein_identity": [1.0, 0.5],
             "reward_external_required_genes": [1.0, 0.0],
-            "reward_external_reference_genome_identity": [1.0, 0.5],
             "prompt_nt_length": [10, 10],
             "genome_length": [5000, 3900],
             "tropism_protein_mmseqs_percent_identity": [75.0, 30.0],
-            "training_data_mmseqs_percent_identity": [0.0, 100.0],
+            "tropism_protein_measured_hit": [1.0, 1.0],
+            "synteny_pair_score": [0.25, 0.75],
+            "synteny_pair_distance": [3.0, 1.0],
             "average_protein_percent_identity": [80.0, 97.5],
+            "average_protein_identity_gene_count": [10, 9],
+            "average_protein_identity_evidence_score": [1.0, 0.9],
             "required_genes_matched_count": [9, 4],
             "required_genes_total_count": [9, 9],
-            "reference_genome_mmseqs_percent_identity": [80.0, 99.45],
+            "required_genes_evidence_score": [1.0, 1.0],
             "reward": [0.8, 0.4],
         }
     )
@@ -87,11 +89,9 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
         RewardWeights(
             valid_nt_chars=1.0,
             tropism=1.0,
-            training_data_identity=1.0,
             synteny=1.0,
             average_protein_identity=1.0,
             required_genes=1.0,
-            reference_genome_identity=1.0,
         ),
     )
 
@@ -99,20 +99,22 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["valid_nt_chars_score_mean"] == 1.0
     assert metrics["tropism_score_mean"] == 0.75
     assert metrics["tropism_pass_rate"] == 0.5
-    assert metrics["training_data_identity_score_mean"] == 0.5
     assert metrics["synteny_score_mean"] == 0.5
     assert metrics["average_protein_identity_score_mean"] == 0.75
     assert metrics["required_genes_pass_rate"] == 0.5
-    assert metrics["reference_genome_identity_score_mean"] == 0.75
     assert metrics["prompt_nt_length_mean"] == 10.0
     assert metrics["prompt_nt_length_min"] == 10.0
     assert metrics["prompt_nt_length_max"] == 10.0
     assert metrics["genome_length_mean"] == 4450.0
     assert metrics["tropism_protein_mmseqs_percent_identity_mean"] == 52.5
-    assert metrics["training_data_mmseqs_percent_identity_mean"] == 50.0
+    assert metrics["tropism_protein_measured_hit_mean"] == 1.0
+    assert metrics["synteny_pair_score_mean"] == 0.5
+    assert metrics["synteny_pair_distance_mean"] == 2.0
     assert metrics["average_protein_percent_identity_mean"] == 88.75
+    assert metrics["average_protein_identity_gene_count_mean"] == 9.5
+    assert metrics["average_protein_identity_evidence_score_mean"] == 0.95
     assert metrics["required_genes_matched_count_mean"] == 6.5
-    assert metrics["reference_genome_mmseqs_percent_identity_mean"] == 89.725
+    assert metrics["required_genes_evidence_score_mean"] == 1.0
 
 
 def test_global_post_process_metrics_accepts_rollout_total_reward(monkeypatch):

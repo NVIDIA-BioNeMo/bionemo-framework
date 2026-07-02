@@ -135,3 +135,50 @@ def test_patched_arc_synteny_missing_lovis4u_output_fails_closed(tmp_path):
     assert output["num_syntenic_genes"].tolist() == [0]
     assert output["non_syntenic_genes"].fillna("").tolist() == [""]
     assert output["missing_synteny_output"].tolist() == [True]
+
+
+def test_patched_arc_mmseqs_protein_search_fails_closed(tmp_path, monkeypatch):
+    """Failed MMseqs protein searches should produce an empty hit table."""
+    pipeline_path = (
+        Path(__file__).parents[3]
+        / "data"
+        / "arc_pipeline_patched"
+        / "genome_design_filtering_pipeline.py"
+    )
+    sys.path.insert(0, str(pipeline_path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location("patched_arc_pipeline_mmseqs_test", pipeline_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+
+    query_fasta = tmp_path / "query.fasta"
+    query_fasta.write_text(">umi1_ORF.1\nM\n")
+    mmseqs_db = tmp_path / "mmseqs_db"
+    mmseqs_db.mkdir()
+    output_csv = tmp_path / "hits.csv"
+
+    def fail_mmseqs(*_args, **_kwargs):
+        raise module.subprocess.CalledProcessError(returncode=1, cmd="mmseqs")
+
+    monkeypatch.setattr(module.subprocess, "run", fail_mmseqs)
+
+    hits = module.run_mmseqs_search_proteins(
+        query_fasta=str(query_fasta),
+        mmseqs_db=str(mmseqs_db),
+        results_dir=str(tmp_path / "mmseqs_results"),
+        output_csv=str(output_csv),
+        descriptive_prefix="protein_database",
+    )
+
+    assert hits.empty
+    assert list(hits.columns) == [
+        "id_prompt",
+        "sequence",
+        "protein_database_mmseqs_target",
+        "protein_database_mmseqs_e_value",
+        "protein_database_mmseqs_percent_identity",
+    ]
+    assert output_csv.exists()

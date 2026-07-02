@@ -100,13 +100,12 @@ mmseqs_protein_database_results_dir_save_location: "qc4_mmseqs_results_protein_d
 mmseqs_protein_database_sensitivity: 4.0
 protein_database_hit_count: 7
 
-training_data_sequence_identity_filter: true
+training_data_sequence_identity_filter: false
 training_data_genomes_fasta: "recipes/evo2_phage_gen/data/external/zenodo/microviridae_sft_training_data_raw.fna"
 mmseqs_training_data_results_dir_save_location: "qc4_mmseqs_results_training_data"
 mmseqs_training_data_sensitivity: 7.5
 training_data_sequence_identity_range: [0, 98.9]
 training_data_sequence_identity_metrics_file_save_location: "qc4_training_data_sequence_identity_metrics.csv"
-training_data_identity_random_baseline: 0.0
 
 checkv_filter: false
 checkv_threads: 16
@@ -117,7 +116,7 @@ reference_genome_sequence_identity_filter: false
 reference_genome_fasta: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
 reference_genome_sequence_identity_range: [60, 100]
 
-genetic_architecture_filter: true
+genetic_architecture_filter: false
 genetic_architecture_reference_genome: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
 genetic_architecture_score_range: [0, 10]
 
@@ -145,14 +144,13 @@ mmseqs_clustering_filter: false
 mmseqs_clustering_min_sequence_identity: 0.99
 mmseqs_clustering_results_dir_save_location: "qc5_mmseqs_results_clustering"
 
-mmseqs_reference_genome_sequence_identity_remove_filter: true
+mmseqs_reference_genome_sequence_identity_remove_filter: false
 mmseqs_reference_genome_sequence_identity_keep_range: [0, 98.9]
 mmseqs_reference_genome_sensitivity: 7.5
 mmseqs_reference_genome_results_dir_save_location: "qc5_mmseqs_results_reference_genome"
 reference_genome_sequence_identity_metrics_file_save_location: "qc5_reference_genome_sequence_identity_metrics.csv"
-reference_genome_identity_random_baseline: 0.0
 
-genetic_architecture_remove_filter: true
+genetic_architecture_remove_filter: false
 genetic_architecture_score_mode: "genome"
 genetic_architecture_score_range_to_remove: [0.9, 1.1]
 
@@ -176,8 +174,6 @@ allow_gff_product_order_synteny_fallback: false
 average_protein_sequence_identity_filter: true
 average_protein_sequence_identity_range: [0, 95]
 average_protein_sequence_identity_metrics_file_save_location: "qc6_average_protein_sequence_identity_metrics.csv"
-average_protein_identity_random_baseline: 0.0
-average_protein_identity_reward_floor: 0.75
 
 required_genes_filter: true
 required_genes_list:
@@ -191,7 +187,7 @@ required_genes_list:
   - "nan"
   - "pilot protein for DNA ejection"
 required_genes_metrics_file_save_location: "qc6_required_genes_metrics.csv"
-required_genes_random_baseline: 0.5
+required_genes_evidence_target: 9.0
 
 syntenic_gene_count_filter: true
 # Strict Arc-template/paper-ready automated synteny gate.
@@ -199,7 +195,6 @@ syntenic_gene_count_range: [10, 12]
 total_gene_count_range: [10, 12]
 syntenic_total_gene_count_remove:
   - [11, 11]
-synteny_removed_pair_score_floor: 0.75
 
 gff_dir_save_location: "qc6_gff_files"
 gbk_dir_save_location: "qc6_gbk_files"

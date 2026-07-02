@@ -1,6 +1,6 @@
 # Fast Evo2 phage GRPO diagnostic.
 #
-# Use this before any full 100-step run. It keeps full-length lab-facing scoring enabled, but
+# Use this before any full RL100/RL500 run. It keeps full-length lab-facing scoring enabled, but
 # reduces rollout count and disables checkpointing so we can check reward/pass behavior quickly.
 
 defaults: "grpo_phage_megatron_rl100.yaml"
@@ -21,7 +21,7 @@ policy:
   logprob_batch_size: 1
   generation:
     max_new_tokens: 5990
-    temperature: 1.1
+    temperature: 1.0
     top_p: 1.0
     top_k: 4
 

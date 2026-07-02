@@ -93,26 +93,22 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "max_nt_homopolymer_length",
         "protein_database_hit_count",
         "tropism_protein_mmseqs_percent_identity",
-        "genetic_architecture_score",
-        "training_data_mmseqs_percent_identity",
-        "training_data_identity_raw_score",
+        "tropism_protein_measured_hit",
         "num_syntenic_genes",
         "total_num_genes",
         "syntenic_gene_count_score",
-        "synteny_required_gene_score",
-        "synteny_order_score",
+        "synteny_pair_score",
+        "synteny_pair_distance",
         "synteny_total_gene_score",
-        "synteny_removed_pair_score",
-        "synteny_proxy_gene_count",
         "average_protein_percent_identity",
+        "average_protein_identity_gene_count",
         "average_protein_identity_raw_score",
+        "average_protein_identity_novelty_score",
+        "average_protein_identity_evidence_score",
         "required_genes_matched_count",
         "required_genes_total_count",
         "required_genes_raw_score",
-        "reference_genome_mmseqs_percent_identity",
-        "reference_genome_identity_raw_score",
-        "mmseqs_cluster_size",
-        "diversity_raw",
+        "required_genes_evidence_score",
         "reward",
         "reward_binary_pass",
     ]:
@@ -153,15 +149,9 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 coding_density=float(cfg.get("weight_coding_density", 0.0)),
                 protein_hit_count=float(cfg.get("weight_protein_hit_count", 0.0)),
                 tropism=float(cfg.get("weight_tropism", 0.0)),
-                genetic_architecture=float(cfg.get("weight_genetic_architecture", 0.0)),
-                checkv=float(cfg.get("weight_checkv", 0.0)),
-                training_data_identity=float(cfg.get("weight_training_data_identity", 0.0)),
                 synteny=float(cfg.get("weight_synteny", 0.0)),
                 average_protein_identity=float(cfg.get("weight_average_protein_identity", 0.0)),
                 required_genes=float(cfg.get("weight_required_genes", 0.0)),
-                reference_genome_identity=float(cfg.get("weight_reference_genome_identity", 0.0)),
-                mmseqs_clustering=float(cfg.get("weight_mmseqs_clustering", 0.0)),
-                diversity=float(cfg.get("weight_diversity", 0.0)),
             )
             external_qc_cfg = cfg.get("external_qc", {}) or {}
             self.external_qc = ExternalQCRewardConfig(
@@ -173,44 +163,18 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                     "pipeline_script", "data/arc_pipeline_patched/genome_design_filtering_pipeline.py"
                 ),
                 work_dir=external_qc_cfg.get("work_dir", "data/checkpoints/phage_grpo_external_qc"),
-                checkv_db_path=external_qc_cfg.get("checkv_db_path", "data/external/checkv/checkv-db-v1.5"),
                 keep_artifacts=bool(external_qc_cfg.get("keep_artifacts", False)),
-                enable_orf=bool(external_qc_cfg.get("enable_orf", True)),
-                enable_coding_density=bool(external_qc_cfg.get("enable_coding_density", True)),
+                enable_orf=bool(external_qc_cfg.get("enable_orf", False)),
+                enable_coding_density=bool(external_qc_cfg.get("enable_coding_density", False)),
                 enable_protein_hit_count=bool(external_qc_cfg.get("enable_protein_hit_count", True)),
                 enable_tropism=bool(external_qc_cfg.get("enable_tropism", True)),
-                enable_genetic_architecture=bool(external_qc_cfg.get("enable_genetic_architecture", True)),
-                enable_checkv=bool(external_qc_cfg.get("enable_checkv", False)),
-                enable_training_data_identity=bool(external_qc_cfg.get("enable_training_data_identity", False)),
                 enable_synteny=bool(external_qc_cfg.get("enable_synteny", False)),
                 synteny_mode=str(external_qc_cfg.get("synteny_mode", "proxy")),
                 enable_average_protein_identity=bool(
                     external_qc_cfg.get("enable_average_protein_identity", False)
                 ),
                 enable_required_genes=bool(external_qc_cfg.get("enable_required_genes", False)),
-                enable_reference_genome_identity=bool(
-                    external_qc_cfg.get("enable_reference_genome_identity", False)
-                ),
-                training_data_identity_random_baseline=float(
-                    external_qc_cfg.get("training_data_identity_random_baseline", 0.0)
-                ),
-                average_protein_identity_random_baseline=float(
-                    external_qc_cfg.get("average_protein_identity_random_baseline", 0.0)
-                ),
-                average_protein_identity_reward_floor=float(
-                    external_qc_cfg.get("average_protein_identity_reward_floor", 0.75)
-                ),
-                required_genes_random_baseline=float(external_qc_cfg.get("required_genes_random_baseline", 0.5)),
-                reference_genome_identity_random_baseline=float(
-                    external_qc_cfg.get("reference_genome_identity_random_baseline", 0.0)
-                ),
-                synteny_removed_pair_score_floor=float(
-                    external_qc_cfg.get("synteny_removed_pair_score_floor", 0.75)
-                ),
-                enable_mmseqs_clustering=bool(external_qc_cfg.get("enable_mmseqs_clustering", False)),
-                enable_diversity=bool(external_qc_cfg.get("enable_diversity", False)),
-                diversity_quality_threshold=float(external_qc_cfg.get("diversity_quality_threshold", 0.6)),
-                diversity_kmer_size=int(external_qc_cfg.get("diversity_kmer_size", 8)),
+                required_genes_evidence_target=float(external_qc_cfg.get("required_genes_evidence_target", 9.0)),
             )
 
         def step(

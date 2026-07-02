@@ -111,44 +111,61 @@ def test_grpo_rl100_config_targets_best_paper_region():
         for line in validation_path.read_text().splitlines()
         if line.strip()
     ]
-    assert [len(prompt) for prompt in prompts] == [8, 9, 10, 10, 10, 10, 10, 11]
+    assert [len(prompt) for prompt in prompts] == [4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11]
     assert len(validation_prompts) == 64
     assert {len(prompt) for prompt in validation_prompts} == {10}
     assert config["data"]["validation"]["env_name"] == "phage_qc"
     assert config["grpo"]["max_num_epochs"] >= config["grpo"]["max_num_steps"]
     assert config["grpo"]["max_num_steps"] == 100
-    assert config["grpo"]["num_generations_per_prompt"] == 64
+    assert config["grpo"]["num_generations_per_prompt"] == 96
     assert config["grpo"]["val_period"] == 10
     assert config["grpo"]["val_at_end"] is True
-    assert config["grpo"]["val_batch_size"] == 64
-    assert config["grpo"]["max_val_samples"] == 64
-    assert config["policy"]["generation_batch_size"] == 64
+    assert config["grpo"]["val_batch_size"] == 96
+    assert config["grpo"]["max_val_samples"] == 96
+    assert config["policy"]["generation_batch_size"] == 96
     assert generation_config["max_new_tokens"] == 5989
-    assert generation_config["temperature"] == 1.1
+    assert generation_config["temperature"] == 1.0
     assert generation_config["top_k"] == 4
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 1.0
+    for removed_weight in [
+        "weight_orf",
+        "weight_coding_density",
+        "weight_genetic_architecture",
+        "weight_checkv",
+        "weight_training_data_identity",
+        "weight_reference_genome_identity",
+        "weight_mmseqs_clustering",
+        "weight_diversity",
+    ]:
+        assert removed_weight not in config["env"]["phage_qc"]
     assert config["env"]["phage_qc"]["external_qc"]["enabled"] is True
     assert config["env"]["phage_qc"]["external_qc"]["enable_tropism"] is True
     assert config["env"]["phage_qc"]["external_qc"]["enable_synteny"] is True
     assert config["env"]["phage_qc"]["external_qc"]["synteny_mode"] == "full"
-    assert config["env"]["phage_qc"]["external_qc"]["enable_training_data_identity"] is True
+    for removed_flag in [
+        "checkv_db_path",
+        "enable_orf",
+        "enable_coding_density",
+        "enable_genetic_architecture",
+        "enable_checkv",
+        "enable_training_data_identity",
+        "enable_reference_genome_identity",
+        "enable_mmseqs_clustering",
+        "enable_diversity",
+    ]:
+        assert removed_flag not in config["env"]["phage_qc"]["external_qc"]
     assert config["env"]["phage_qc"]["external_qc"]["enable_average_protein_identity"] is True
     assert config["env"]["phage_qc"]["external_qc"]["enable_required_genes"] is True
-    assert config["env"]["phage_qc"]["external_qc"]["enable_reference_genome_identity"] is True
-    assert config["env"]["phage_qc"]["weight_training_data_identity"] == 0.25
     assert config["env"]["phage_qc"]["weight_synteny"] == 0.25
     assert config["env"]["phage_qc"]["weight_average_protein_identity"] == 0.25
-    assert config["env"]["phage_qc"]["weight_required_genes"] == 0.25
-    assert config["env"]["phage_qc"]["weight_reference_genome_identity"] == 0.25
-    assert config["env"]["phage_qc"]["external_qc"]["average_protein_identity_reward_floor"] == 0.75
-    assert config["env"]["phage_qc"]["external_qc"]["synteny_removed_pair_score_floor"] == 0.75
-    assert config["env"]["phage_qc"]["weight_diversity"] == 0.0
+    assert config["env"]["phage_qc"]["weight_required_genes"] == 0.1
+    assert config["env"]["phage_qc"]["external_qc"]["required_genes_evidence_target"] == 9.0
     assert config["logger"]["wandb_enabled"] is True
-    assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl"
-    assert config["logger"]["wandb"]["name"] == "grpo-phage-rl100-full-qc-batched64"
+    assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
+    assert config["logger"]["wandb"]["name"] == "grpo-phage-rl100-full-qc-batched96"
     mcore_generation_config = generation_config["mcore_generation_config"]
-    assert mcore_generation_config["prompt_batch_size"] == 64
-    assert mcore_generation_config["max_requests"] == 64
+    assert mcore_generation_config["prompt_batch_size"] == 96
+    assert mcore_generation_config["max_requests"] == 96
     assert mcore_generation_config["enable_chunked_prefill"] is False
     assert (
         mcore_generation_config["generation_adapter"]
@@ -156,16 +173,53 @@ def test_grpo_rl100_config_targets_best_paper_region():
     )
 
     arc_config = yaml.safe_load((RECIPE_ROOT / "configs" / "arc_genome_design_filtering_local.yaml").read_text())
-    assert arc_config["training_data_sequence_identity_filter"] is True
+    assert arc_config["training_data_sequence_identity_filter"] is False
     assert arc_config["training_data_sequence_identity_range"] == [0, 98.9]
-    assert arc_config["mmseqs_reference_genome_sequence_identity_remove_filter"] is True
+    assert arc_config["genetic_architecture_filter"] is False
+    assert arc_config["mmseqs_reference_genome_sequence_identity_remove_filter"] is False
+    assert arc_config["genetic_architecture_remove_filter"] is False
     assert arc_config["mmseqs_reference_genome_sequence_identity_keep_range"] == [0, 98.9]
     assert arc_config["syntenic_gene_count_range"] == [10, 12]
     assert arc_config["total_gene_count_range"] == [10, 12]
     assert arc_config["syntenic_total_gene_count_remove"] == [[11, 11]]
-    assert arc_config["average_protein_identity_reward_floor"] == 0.75
-    assert arc_config["synteny_removed_pair_score_floor"] == 0.75
+    assert arc_config["required_genes_evidence_target"] == 9.0
     assert arc_config["allow_gff_product_order_synteny_fallback"] is False
+
+
+def test_grpo_rl500_config_extends_current_full_qc_rollout():
+    """The 500-step config should directly carry the current full-QC rollout settings."""
+    config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron_rl500.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    generation_config = config["policy"]["generation"]
+    mcore_generation_config = generation_config["mcore_generation_config"]
+
+    assert config["defaults"] == "grpo_phage_megatron.yaml"
+    assert config["grpo"]["max_num_epochs"] == 500
+    assert config["grpo"]["num_generations_per_prompt"] == 96
+    assert config["grpo"]["max_num_steps"] == 500
+    assert config["grpo"]["val_batch_size"] == 96
+    assert config["grpo"]["max_val_samples"] == 96
+    assert config["policy"]["train_global_batch_size"] == 96
+    assert config["policy"]["generation_batch_size"] == 96
+    assert generation_config["max_new_tokens"] == 5989
+    assert generation_config["temperature"] == 1.0
+    assert generation_config["top_k"] == 4
+    assert mcore_generation_config["prompt_batch_size"] == 96
+    assert mcore_generation_config["max_requests"] == 96
+    assert (
+        mcore_generation_config["generation_adapter"]
+        == "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
+    )
+    assert config["data"]["train"]["data_path"] == "data/phage_prompts_paper_useful_rl.jsonl"
+    assert config["data"]["validation"]["data_path"] == "data/phage_prompts_paper_useful_rl_validation_prompt10.jsonl"
+    assert config["env"]["phage_qc"]["weight_synteny"] == 0.25
+    assert config["env"]["phage_qc"]["weight_average_protein_identity"] == 0.25
+    assert config["env"]["phage_qc"]["weight_required_genes"] == 0.1
+    assert config["logger"]["log_dir"] == "data/checkpoints/phage_grpo_logs_rl500"
+    assert config["logger"]["wandb_enabled"] is True
+    assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
+    assert config["logger"]["wandb"]["name"] == "grpo-phage-rl500-full-qc-batched96"
+    assert config["checkpointing"]["checkpoint_dir"] == "data/checkpoints/phage_grpo_rl500"
 
 
 def test_grpo_diagnostic_config_keeps_full_length_scoring_but_smaller_rollouts():
@@ -178,7 +232,7 @@ def test_grpo_diagnostic_config_keeps_full_length_scoring_but_smaller_rollouts()
     assert config["grpo"]["num_generations_per_prompt"] == 8
     assert config["policy"]["train_global_batch_size"] == 8
     assert generation_config["max_new_tokens"] == 5990
-    assert generation_config["temperature"] == 1.1
+    assert generation_config["temperature"] == 1.0
     assert generation_config["top_k"] == 4
     assert config["checkpointing"]["enabled"] is False
 

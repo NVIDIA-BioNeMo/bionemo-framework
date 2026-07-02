@@ -99,50 +99,25 @@ env:
     weight_gc_content: 1.0
     weight_nt_homopolymer: 1.0
     weight_nucleotide_pass: 0.0
-    weight_orf: 1.0
-    weight_coding_density: 1.0
     weight_protein_hit_count: 1.0
     weight_tropism: 1.0
-    weight_genetic_architecture: 1.0
-    weight_checkv: 1.0
-    # Novelty/diversification terms are preferences, not hard paper-candidate gates.
-    weight_training_data_identity: 0.25
+    # Focused quality terms are soft preferences, not hard paper-candidate gates.
     weight_synteny: 0.25
     weight_average_protein_identity: 0.25
-    weight_required_genes: 0.25
-    weight_reference_genome_identity: 0.25
-    weight_mmseqs_clustering: 0.25
-    # Small normalized diversity bonus. Set to 0.0 for the diversity ablation.
-    weight_diversity: 0.05
+    weight_required_genes: 0.1
     external_qc:
       enabled: true
       config_path: "configs/arc_genome_design_filtering_local.yaml"
       pipeline_script: "data/arc_pipeline_patched/genome_design_filtering_pipeline.py"
       work_dir: "data/checkpoints/phage_grpo_external_qc"
-      checkv_db_path: "data/external/checkv/checkv-db-v1.5"
       keep_artifacts: false
-      enable_orf: true
-      enable_coding_density: true
       enable_protein_hit_count: true
       enable_tropism: true
-      enable_genetic_architecture: true
-      enable_checkv: true
-      enable_training_data_identity: true
       enable_synteny: true
       synteny_mode: "full"
       enable_average_protein_identity: true
       enable_required_genes: true
-      enable_reference_genome_identity: true
-      training_data_identity_random_baseline: 0.0
-      average_protein_identity_random_baseline: 0.0
-      average_protein_identity_reward_floor: 0.75
-      required_genes_random_baseline: 0.5
-      reference_genome_identity_random_baseline: 0.0
-      synteny_removed_pair_score_floor: 0.75
-      enable_mmseqs_clustering: true
-      enable_diversity: true
-      diversity_quality_threshold: 0.6
-      diversity_kmer_size: 8
+      required_genes_evidence_target: 9.0
 
 logger:
   log_dir: "data/checkpoints/phage_grpo_logs"
