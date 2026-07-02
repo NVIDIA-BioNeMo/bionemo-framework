@@ -94,12 +94,7 @@ def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
 
 def test_patched_arc_synteny_missing_lovis4u_output_fails_closed(tmp_path):
     """Missing LoVis4u files should zero synteny metrics instead of aborting RL reward scoring."""
-    pipeline_path = (
-        Path(__file__).parents[3]
-        / "data"
-        / "arc_pipeline_patched"
-        / "genome_design_filtering_pipeline.py"
-    )
+    pipeline_path = Path(__file__).parents[3] / "data" / "arc_pipeline_patched" / "genome_design_filtering_pipeline.py"
     sys.path.insert(0, str(pipeline_path.parent))
     try:
         spec = importlib.util.spec_from_file_location("patched_arc_pipeline_for_test", pipeline_path)
@@ -113,9 +108,7 @@ def test_patched_arc_synteny_missing_lovis4u_output_fails_closed(tmp_path):
     gff_dir = tmp_path / "gff"
     (metadata_dir / "genome_1").mkdir(parents=True)
     gff_dir.mkdir()
-    (gff_dir / "genome_1.gff").write_text(
-        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=major spike protein\n"
-    )
+    (gff_dir / "genome_1.gff").write_text("contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=major spike protein\n")
     input_csv = tmp_path / "input.csv"
     output_csv = tmp_path / "output.csv"
     pd.DataFrame({"id_prompt": ["umi1"], "genome_id": ["genome_1"], "total_num_genes": [1]}).to_csv(
@@ -137,14 +130,64 @@ def test_patched_arc_synteny_missing_lovis4u_output_fails_closed(tmp_path):
     assert output["missing_synteny_output"].tolist() == [True]
 
 
+def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_missing_outputs(tmp_path):
+    """LoVis4u consumer should score real clustering output and mark missing artifacts per input."""
+    pipeline_path = Path(__file__).parents[3] / "data" / "arc_pipeline_patched" / "genome_design_filtering_pipeline.py"
+    sys.path.insert(0, str(pipeline_path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location("patched_arc_pipeline_contract_test", pipeline_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+
+    metadata_dir = tmp_path / "metadata"
+    gff_dir = tmp_path / "gff"
+    positive_mmseqs_dir = metadata_dir / "genome_1" / "mmseqs"
+    (metadata_dir / "genome_2").mkdir(parents=True)
+    positive_mmseqs_dir.mkdir(parents=True)
+    gff_dir.mkdir()
+
+    positive_mmseqs = positive_mmseqs_dir / "mmseqs_clustering.tsv"
+    positive_mmseqs.write_text("genome_1-ORF.1\treference-ORF.1\ngenome_1-ORF.2\treference-ORF.2\n")
+    assert positive_mmseqs.exists()
+
+    (gff_dir / "genome_1.gff").write_text(
+        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=major spike protein\n"
+        "contig\ttool\tCDS\t100\t180\t.\t+\t0\tID=ORF.2;product=minor capsid protein\n"
+    )
+    (gff_dir / "genome_2.gff").write_text(
+        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=negative control protein\n"
+    )
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    pd.DataFrame(
+        {
+            "id_prompt": ["genome_1", "genome_2"],
+            "genome_id": ["genome_1", "genome_2"],
+        }
+    ).to_csv(input_csv, index=False)
+
+    module.count_syntenic_genes_all(
+        root_dir=str(metadata_dir),
+        gff_dir=str(gff_dir),
+        input_csv=str(input_csv),
+        output_csv=str(output_csv),
+        reference_gff_path=None,
+    )
+    module.count_total_num_genes(str(gff_dir), str(output_csv))
+
+    output = pd.read_csv(output_csv)
+    assert output["id_prompt"].tolist() == ["genome_1", "genome_2"]
+    assert output["num_syntenic_genes"].tolist() == [2, 0]
+    assert output["total_num_genes"].tolist() == [2, 1]
+    assert output["missing_synteny_output"].tolist() == [False, True]
+
+
 def test_patched_arc_mmseqs_protein_search_fails_closed(tmp_path, monkeypatch):
     """Failed MMseqs protein searches should produce an empty hit table."""
-    pipeline_path = (
-        Path(__file__).parents[3]
-        / "data"
-        / "arc_pipeline_patched"
-        / "genome_design_filtering_pipeline.py"
-    )
+    pipeline_path = Path(__file__).parents[3] / "data" / "arc_pipeline_patched" / "genome_design_filtering_pipeline.py"
     sys.path.insert(0, str(pipeline_path.parent))
     try:
         spec = importlib.util.spec_from_file_location("patched_arc_pipeline_mmseqs_test", pipeline_path)

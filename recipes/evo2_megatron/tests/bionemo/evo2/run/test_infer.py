@@ -47,7 +47,12 @@ import torch
 from bionemo.common.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
-from bionemo.evo2.run.infer import _NativeDynamicResult, _native_stop_token_ids, _result_to_jsonl_record
+from bionemo.evo2.run.infer import (
+    _native_stop_token_ids,
+    _NativeDynamicResult,
+    _result_to_jsonl_record,
+    _sampling_log_probs_from_logits,
+)
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge
 
@@ -110,6 +115,18 @@ def test_result_to_jsonl_record_honors_explicit_stop_reason():
     assert record["completion"] == "ACGT"
     assert record["finish_reason"] == "stop"
     assert record["usage"]["completion_tokens"] == 4
+
+
+def test_sampling_log_probs_use_temperature_scaled_top_k_support():
+    """Recorded generation log-probs should match the filtered distribution used to sample."""
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]], dtype=torch.float32)
+
+    log_probs = _sampling_log_probs_from_logits(logits, temperature=2.0, top_k=2, top_p=0.0)
+    expected = torch.log_softmax(torch.tensor([[2.0, 1.5]], dtype=torch.float32), dim=-1)
+
+    torch.testing.assert_close(log_probs[0, :2], expected[0])
+    assert torch.isneginf(log_probs[0, 2])
+    assert torch.isneginf(log_probs[0, 3])
 
 
 def test_infer_runs(mbridge_checkpoint_path, tmp_path):
@@ -1013,8 +1030,7 @@ def test_parallel_inference_accuracy_evo2_batched_decode_same_prefix_preserves_a
     }
 
     exact_matches = {
-        seq_id: serial_by_id[seq_id]["completion"] == batched_by_id[seq_id]["completion"]
-        for seq_id in targets_by_id
+        seq_id: serial_by_id[seq_id]["completion"] == batched_by_id[seq_id]["completion"] for seq_id in targets_by_id
     }
 
     def _max_homopolymer(sequence: str) -> int:

@@ -361,7 +361,8 @@ def _write_external_qc_config(
     config["required_genes_filter"] = bool(external_qc.enable_required_genes)
     config["syntenic_gene_count_filter"] = full_synteny_enabled
     if paper_synteny_stage_enabled:
-        if not bool(config.get("allow_gff_product_order_synteny_fallback", False)):
+        config["use_reference_genome"] = full_synteny_enabled
+        if not full_synteny_enabled and not bool(config.get("allow_gff_product_order_synteny_fallback", False)):
             config["reference_genome_gff_file_save_location"] = None
         config.setdefault(
             "average_protein_sequence_identity_metrics_file_save_location",
@@ -388,6 +389,19 @@ def _sequence_ids_from_csv(path: Path) -> set[str]:
 def _genome_ids_from_orf_hits(hits_df: pd.DataFrame) -> pd.Series:
     """Map Arc ORF-level MMseqs query IDs back to genome IDs."""
     return hits_df["id_prompt"].astype(str).str.split("_").str[:-1].str.join("_")
+
+
+def _genome_ids_from_orf_ids(orf_ids: pd.Series) -> pd.Series:
+    """Map Arc ORF IDs back to genome IDs."""
+    return orf_ids.astype(str).str.split("_").str[:-1].str.join("_")
+
+
+def _fasta_header_ids(path: Path) -> list[str]:
+    """Read FASTA record IDs without loading sequence payloads."""
+    if not path.exists():
+        return []
+    with path.open() as handle:
+        return [line[1:].strip().split()[0] for line in handle if line.startswith(">")]
 
 
 def _as_arc_pass_mask(scored_df: pd.DataFrame, pass_ids: set[str]) -> pd.Series:
@@ -425,6 +439,72 @@ def _load_phrog_annotations(annotation_file: str | Path) -> pd.DataFrame:
         if column not in annotations:
             annotations[column] = ""
     return annotations[["phrog_number", "annot", "category"]]
+
+
+def _canonical_function(value: object) -> str:
+    """Normalize PHROGs annotation text for supplementary unique-function metrics."""
+    function = str(value).strip().lower()
+    if function in {"", "nan", "none", "unknown", "unknown gene", "hypothetical protein"}:
+        return ""
+    return re.sub(r"\s+", " ", function)
+
+
+def _add_predicted_orf_counts(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
+    """Add predicted ORF counts from Arc's ORF FASTA when available."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    proteins_path = run_dir / config.get("orfipy_proteins_file_save_location", "qc4_orfipy_proteins.fasta")
+    orf_ids = pd.Series(_fasta_header_ids(proteins_path), dtype="object")
+    if orf_ids.empty:
+        return scored_df
+    predicted_counts = _genome_ids_from_orf_ids(orf_ids).value_counts()
+    scored_df["predicted_orf_count"] = scored_df[id_column].map(predicted_counts).fillna(0).astype(int)
+    return scored_df
+
+
+def _add_phrogs_hit_metrics(scored_df: pd.DataFrame, hits_df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Add supplementary PHROGs metrics without changing Arc-compatible hit counts."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    hits_df = hits_df.copy()
+    hits_df["arc_qc_id"] = _genome_ids_from_orf_hits(hits_df)
+    hits_df["phrog_number"] = hits_df["protein_database_mmseqs_target"].map(_normalize_phrog_target)
+    annotations = _load_phrog_annotations(config.get("protein_annotation_file", ""))
+    hits_df = hits_df.merge(annotations, on="phrog_number", how="left")
+    hits_df["canonical_function"] = hits_df["annot"].map(_canonical_function)
+
+    rows = []
+    for arc_qc_id, group in hits_df.groupby("arc_qc_id"):
+        rows.append(
+            {
+                "arc_qc_id": arc_qc_id,
+                "phrogs_hit_orf_count": int(group["id_prompt"].nunique()),
+                "phrogs_annotated_orf_count": int(group.loc[group["canonical_function"] != "", "id_prompt"].nunique()),
+                "unique_phrog_family_count": int(group["phrog_number"].nunique()),
+                "unique_canonical_function_count": int(
+                    group.loc[group["canonical_function"] != "", "canonical_function"].nunique()
+                ),
+            }
+        )
+
+    if not rows:
+        return scored_df
+    metrics_df = pd.DataFrame(rows).set_index("arc_qc_id")
+    for column in [
+        "phrogs_hit_orf_count",
+        "phrogs_annotated_orf_count",
+        "unique_phrog_family_count",
+        "unique_canonical_function_count",
+    ]:
+        scored_df[column] = scored_df[id_column].map(metrics_df[column]).fillna(0).astype(int)
+    if "predicted_orf_count" in scored_df:
+        scored_df["phrogs_hit_fraction"] = [
+            float(hit_count) / float(predicted_count) if float(predicted_count) > 0 else 0.0
+            for hit_count, predicted_count in zip(
+                scored_df["phrogs_hit_orf_count"],
+                scored_df["predicted_orf_count"],
+                strict=False,
+            )
+        ]
+    return scored_df
 
 
 def _required_gene_score(products: list[str], required_products: list[str]) -> float:
@@ -535,6 +615,9 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
 def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Add continuous synteny rewards from Arc/LoVis4u syntenic-gene artifacts."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    scored_df["synteny_stage_reached"] = 0.0
+    scored_df["synteny_measurement_available"] = 0.0
+    scored_df["synteny_missing_artifact"] = 0.0
     metrics_path = run_dir / config.get("synteny_metrics_file_save_location", "qc6_synteny_filter_metrics.csv")
     if not metrics_path.exists():
         metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
@@ -543,23 +626,35 @@ def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: di
         metrics_df = pd.read_csv(metrics_path)
         if {"id_prompt", "num_syntenic_genes", "total_num_genes"}.issubset(metrics_df.columns):
             metrics_df = metrics_df.copy()
-            metrics_df["num_syntenic_genes"] = pd.to_numeric(metrics_df["num_syntenic_genes"], errors="coerce").fillna(
-                0.0
-            )
-            metrics_df["total_num_genes"] = pd.to_numeric(metrics_df["total_num_genes"], errors="coerce").fillna(0.0)
+            metrics_df["num_syntenic_genes"] = pd.to_numeric(metrics_df["num_syntenic_genes"], errors="coerce")
+            metrics_df["total_num_genes"] = pd.to_numeric(metrics_df["total_num_genes"], errors="coerce")
+            if "missing_synteny_output" not in metrics_df:
+                metrics_df["missing_synteny_output"] = False
+            metrics_df["missing_synteny_output"] = metrics_df["missing_synteny_output"].astype(bool)
             metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
-            scored_df["num_syntenic_genes"] = (
-                scored_df[id_column].astype(str).map(metrics_by_id["num_syntenic_genes"]).fillna(0.0)
+            row_ids = scored_df[id_column].astype(str)
+            stage_reached = row_ids.isin(metrics_by_id.index)
+            missing_artifact = row_ids.map(metrics_by_id["missing_synteny_output"]).eq(True)
+            scored_df["num_syntenic_genes"] = row_ids.map(metrics_by_id["num_syntenic_genes"])
+            scored_df["total_num_genes"] = row_ids.map(metrics_by_id["total_num_genes"])
+            measured = (
+                stage_reached
+                & ~missing_artifact
+                & scored_df["num_syntenic_genes"].notna()
+                & scored_df["total_num_genes"].notna()
             )
-            scored_df["total_num_genes"] = (
-                scored_df[id_column].astype(str).map(metrics_by_id["total_num_genes"]).fillna(0.0)
-            )
+            scored_df["synteny_stage_reached"] = stage_reached.astype(float)
+            scored_df["synteny_measurement_available"] = measured.astype(float)
+            scored_df["synteny_missing_artifact"] = missing_artifact.astype(float)
 
             scores = [
                 _synteny_distance_score(float(num_syntenic), float(total_genes))
-                for num_syntenic, total_genes in zip(
+                if is_measured
+                else (0.0, pd.NA, pd.NA, pd.NA)
+                for num_syntenic, total_genes, is_measured in zip(
                     scored_df["num_syntenic_genes"],
                     scored_df["total_num_genes"],
+                    measured,
                     strict=False,
                 )
             ]
@@ -583,6 +678,9 @@ def _add_average_protein_identity_rewards(
 ) -> pd.DataFrame:
     """Add continuous rewards for Arc's average protein percent-identity filter."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    scored_df["average_protein_identity_stage_reached"] = 0.0
+    scored_df["average_protein_identity_measurement_available"] = 0.0
+    scored_df["average_protein_identity_missing_artifact"] = 0.0
     metrics_path = run_dir / config.get(
         "average_protein_sequence_identity_metrics_file_save_location",
         "qc6_average_protein_sequence_identity_metrics.csv",
@@ -590,10 +688,12 @@ def _add_average_protein_identity_rewards(
     if not metrics_path.exists():
         metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
     if not metrics_path.exists():
+        scored_df["average_protein_identity_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = pd.read_csv(metrics_path)
     if not {"id_prompt", "average_protein_percent_identity"}.issubset(metrics_df.columns):
+        scored_df["average_protein_identity_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = metrics_df.copy()
@@ -608,6 +708,10 @@ def _add_average_protein_identity_rewards(
     metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
     mapped_identity = scored_df[id_column].astype(str).map(metrics_by_id["average_protein_percent_identity"])
     has_identity_metric = mapped_identity.notna()
+    scored_df["average_protein_identity_stage_reached"] = (
+        scored_df[id_column].astype(str).isin(metrics_by_id.index).astype(float)
+    )
+    scored_df["average_protein_identity_measurement_available"] = has_identity_metric.astype(float)
     scored_df["average_protein_percent_identity"] = mapped_identity.fillna(0.0)
     mapped_evidence = (
         scored_df[id_column].astype(str).map(metrics_by_id[evidence_column])
@@ -640,15 +744,20 @@ def _add_required_gene_rewards(
 ) -> pd.DataFrame:
     """Add continuous rewards for Arc's required-gene annotation filter."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    scored_df["required_genes_stage_reached"] = 0.0
+    scored_df["required_genes_measurement_available"] = 0.0
+    scored_df["required_genes_missing_artifact"] = 0.0
     metrics_path = run_dir / config.get("required_genes_metrics_file_save_location", "qc6_required_genes_metrics.csv")
     if not metrics_path.exists():
         metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
     if not metrics_path.exists():
+        scored_df["required_genes_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = pd.read_csv(metrics_path)
     required_columns = {"id_prompt", "required_genes_matched_count", "required_genes_total_count"}
     if not required_columns.issubset(metrics_df.columns):
+        scored_df["required_genes_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = metrics_df.copy()
@@ -658,6 +767,10 @@ def _add_required_gene_rewards(
     mapped_matched = scored_df[id_column].astype(str).map(metrics_by_id["required_genes_matched_count"])
     mapped_total = scored_df[id_column].astype(str).map(metrics_by_id["required_genes_total_count"])
     has_required_gene_metric = mapped_matched.notna() & mapped_total.notna()
+    scored_df["required_genes_stage_reached"] = (
+        scored_df[id_column].astype(str).isin(metrics_by_id.index).astype(float)
+    )
+    scored_df["required_genes_measurement_available"] = has_required_gene_metric.astype(float)
     scored_df["required_genes_matched_count"] = mapped_matched.fillna(0.0)
     scored_df["required_genes_total_count"] = mapped_total.fillna(0.0)
     scored_df["required_genes_raw_score"] = [
@@ -688,21 +801,37 @@ def _add_required_gene_rewards(
 def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Add protein-hit-count and tropism rewards from Arc MMseqs outputs."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    scored_df = _add_predicted_orf_counts(scored_df, run_dir, config)
     phrogs_dir = config.get("mmseqs_protein_database_results_dir_save_location")
     phrogs_hits_path = run_dir / phrogs_dir / "mmseqs2_hits.csv" if phrogs_dir else None
+    scored_df["protein_database_hit_count_stage_reached"] = 0.0
+    scored_df["protein_database_hit_count_measurement_available"] = 0.0
+    scored_df["protein_database_hit_count_missing_artifact"] = 0.0
     if phrogs_hits_path and phrogs_hits_path.exists():
+        scored_df["protein_database_hit_count_stage_reached"] = 1.0
+        scored_df["protein_database_hit_count_measurement_available"] = 1.0
         hits_df = pd.read_csv(phrogs_hits_path)
-        if "id_prompt" in hits_df:
+        if {"id_prompt", "protein_database_mmseqs_target"}.issubset(hits_df.columns):
+            scored_df = _add_phrogs_hit_metrics(scored_df, hits_df, config)
             genome_counts = _genome_ids_from_orf_hits(hits_df).value_counts()
             min_hits = int(config.get("protein_database_hit_count", 7))
             scored_df["protein_database_hit_count"] = scored_df[id_column].map(genome_counts).fillna(0).astype(int)
             scored_df["reward_external_protein_hit_count"] = scored_df["protein_database_hit_count"].map(
                 lambda value: _lower_bound_ratio_score(float(value), float(min_hits))
             )
+            scored_df["reward_external_protein_hit_count_pass"] = (
+                scored_df["protein_database_hit_count"] >= min_hits
+            ).astype(float)
+    elif phrogs_hits_path:
+        scored_df["protein_database_hit_count_missing_artifact"] = 1.0
 
     tropism_dir = config.get("mmseqs_tropism_protein_results_dir_save_location")
     tropism_hits_path = run_dir / tropism_dir / "mmseqs2_hits.csv" if tropism_dir else None
+    scored_df["tropism_stage_reached"] = 0.0
+    scored_df["tropism_measurement_available"] = 0.0
+    scored_df["tropism_missing_artifact"] = 0.0
     if tropism_hits_path and tropism_hits_path.exists():
+        scored_df["tropism_stage_reached"] = 1.0
         hits_df = pd.read_csv(tropism_hits_path)
         if {"id_prompt", "tropism_protein_mmseqs_percent_identity"}.issubset(hits_df.columns):
             hits_df = hits_df.copy()
@@ -716,6 +845,7 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             measured_hit = mapped_identity.notna()
             scored_df["tropism_protein_mmseqs_percent_identity"] = mapped_identity.fillna(0.0)
             scored_df["tropism_protein_measured_hit"] = measured_hit.astype(float)
+            scored_df["tropism_measurement_available"] = measured_hit.astype(float)
             scored_df["reward_external_tropism"] = [
                 _spike_identity_score(identity, has_hit, float(lower))
                 for identity, has_hit in zip(
@@ -727,6 +857,8 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             scored_df["reward_external_tropism_pass"] = (
                 measured_hit & (scored_df["tropism_protein_mmseqs_percent_identity"] >= float(lower))
             ).astype(float)
+    elif tropism_hits_path:
+        scored_df["tropism_missing_artifact"] = 1.0
     return scored_df
 
 

@@ -15,6 +15,7 @@
 
 """NeMo-RL environment wrapper for online phage sequence rewards."""
 
+from numbers import Number
 from typing import Any
 
 import pandas as pd
@@ -79,11 +80,22 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         return {"num_sequences": 0}
 
     metrics: dict[str, float | int] = {"num_sequences": len(scored)}
+    active_components = [
+        (float(getattr(weights, component.weight_attr)), component)
+        for component in REWARD_COMPONENTS
+        if float(getattr(weights, component.weight_attr)) > 0.0 and component.score_column in scored
+    ]
+    total_weight = sum(weight for weight, _ in active_components)
     for component in REWARD_COMPONENTS:
         if component.score_column in scored:
-            metrics[f"{component.name}_score_mean"] = float(scored[component.score_column].astype(float).mean())
-            metrics[f"{component.name}_pass_rate"] = float(
-                (scored[component.score_column].astype(float) >= 1.0).mean()
+            score_values = pd.to_numeric(scored[component.score_column], errors="coerce")
+            metrics[f"{component.name}_score_mean"] = float(score_values.mean())
+            metrics[f"{component.name}_pass_rate"] = float((score_values >= 1.0).mean())
+    if total_weight > 0.0:
+        for weight, component in active_components:
+            score_values = pd.to_numeric(scored[component.score_column], errors="coerce")
+            metrics[f"{component.name}_weighted_contribution_mean"] = float(
+                ((weight / total_weight) * score_values).mean()
             )
 
     for column in [
@@ -92,20 +104,41 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "gc_content",
         "max_nt_homopolymer_length",
         "protein_database_hit_count",
+        "predicted_orf_count",
+        "phrogs_hit_orf_count",
+        "phrogs_annotated_orf_count",
+        "unique_phrog_family_count",
+        "unique_canonical_function_count",
+        "phrogs_hit_fraction",
+        "protein_database_hit_count_stage_reached",
+        "protein_database_hit_count_measurement_available",
+        "protein_database_hit_count_missing_artifact",
+        "tropism_stage_reached",
+        "tropism_measurement_available",
+        "tropism_missing_artifact",
         "tropism_protein_mmseqs_percent_identity",
         "tropism_protein_measured_hit",
         "num_syntenic_genes",
         "total_num_genes",
+        "synteny_stage_reached",
+        "synteny_measurement_available",
+        "synteny_missing_artifact",
         "syntenic_gene_count_score",
         "synteny_pair_score",
         "synteny_pair_distance",
         "synteny_total_gene_score",
         "synteny_proxy_hit_gene_count",
+        "average_protein_identity_stage_reached",
+        "average_protein_identity_measurement_available",
+        "average_protein_identity_missing_artifact",
         "average_protein_percent_identity",
         "average_protein_identity_gene_count",
         "average_protein_identity_raw_score",
         "average_protein_identity_novelty_score",
         "average_protein_identity_evidence_score",
+        "required_genes_stage_reached",
+        "required_genes_measurement_available",
+        "required_genes_missing_artifact",
         "required_genes_matched_count",
         "required_genes_total_count",
         "required_genes_raw_score",
@@ -114,19 +147,89 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "reward_binary_pass",
     ]:
         if column in scored:
-            values = pd.to_numeric(scored[column], errors="coerce").fillna(0.0)
-            metrics[f"{column}_mean"] = float(values.mean())
+            values = pd.to_numeric(scored[column], errors="coerce")
+            if values.notna().any():
+                metrics[f"{column}_mean"] = float(values.mean())
             if column == "prompt_nt_length":
                 metrics[f"{column}_min"] = float(values.min())
                 metrics[f"{column}_max"] = float(values.max())
 
-    metrics["binary_overall_pass_rate"] = float(binary_overall_pass_mask(scored, weights).astype(float).mean())
+    status_score_columns = {
+        "protein_database_hit_count": "reward_external_protein_hit_count",
+        "tropism": "reward_external_tropism",
+        "synteny": "reward_external_synteny",
+        "average_protein_identity": "reward_external_average_protein_identity",
+        "required_genes": "reward_external_required_genes",
+    }
+    status_pass_columns = {
+        "protein_database_hit_count": "reward_external_protein_hit_count_pass",
+        "tropism": "reward_external_tropism_pass",
+        "synteny": "reward_external_synteny_pass",
+        "average_protein_identity": "reward_external_average_protein_identity_pass",
+        "required_genes": "reward_external_required_genes_pass",
+    }
+    status_prefixes = sorted(
+        column[: -len("_measurement_available")]
+        for column in scored.columns
+        if column.endswith("_measurement_available")
+    )
+    for prefix in status_prefixes:
+        available = pd.to_numeric(scored[f"{prefix}_measurement_available"], errors="coerce").fillna(0.0) > 0.0
+        stage_column = f"{prefix}_stage_reached"
+        if stage_column in scored:
+            stage_reached = pd.to_numeric(scored[stage_column], errors="coerce").fillna(0.0) > 0.0
+            metrics[f"{prefix}_stage_reached_rate"] = float(stage_reached.mean())
+        metrics[f"{prefix}_measurement_available_rate"] = float(available.mean())
+        metrics[f"{prefix}_n_measured"] = int(available.sum())
+        missing_artifact_column = f"{prefix}_missing_artifact"
+        if missing_artifact_column in scored:
+            missing_artifact = pd.to_numeric(scored[missing_artifact_column], errors="coerce").fillna(0.0) > 0.0
+            metrics[f"{prefix}_missing_artifact_count"] = int(missing_artifact.sum())
+        score_column = status_score_columns.get(prefix)
+        if score_column in scored and available.any():
+            scores = pd.to_numeric(scored.loc[available, score_column], errors="coerce")
+            metrics[f"{prefix}_conditional_score_mean"] = float(scores.mean())
+        pass_column = status_pass_columns.get(prefix)
+        if pass_column in scored and available.any():
+            passes = pd.to_numeric(scored.loc[available, pass_column], errors="coerce")
+            metrics[f"{prefix}_conditional_pass_rate"] = float((passes >= 1.0).mean())
+
+    core_pass_rate = float(binary_overall_pass_mask(scored, weights).astype(float).mean())
+    metrics["core_qc_pass_rate"] = core_pass_rate
+    metrics["binary_overall_pass_rate"] = core_pass_rate
+
+    if "prompt_nt_length" in scored:
+        prompt_lengths = pd.to_numeric(scored["prompt_nt_length"], errors="coerce")
+        for prompt_length in sorted(prompt_lengths.dropna().astype(int).unique()):
+            prompt_mask = prompt_lengths == prompt_length
+            prompt_scored = scored.loc[prompt_mask]
+            prefix = f"by_prompt_nt_length/{prompt_length}"
+            metrics[f"{prefix}/num_sequences"] = int(prompt_mask.sum())
+            if "reward" in prompt_scored:
+                metrics[f"{prefix}/reward_mean"] = float(
+                    pd.to_numeric(prompt_scored["reward"], errors="coerce").mean()
+                )
+            metrics[f"{prefix}/core_qc_pass_rate"] = float(
+                binary_overall_pass_mask(prompt_scored, weights).astype(float).mean()
+            )
+            for component in REWARD_COMPONENTS:
+                if component.score_column in prompt_scored:
+                    score_values = pd.to_numeric(prompt_scored[component.score_column], errors="coerce")
+                    metrics[f"{prefix}/{component.name}_score_mean"] = float(score_values.mean())
+                    metrics[f"{prefix}/{component.name}_pass_rate"] = float((score_values >= 1.0).mean())
     return metrics
 
 
 def _scored_records(scored: pd.DataFrame) -> list[dict[str, Any]]:
-    """Convert per-sequence scores into metadata-safe plain dictionaries."""
-    return scored.where(pd.notna(scored), None).to_dict("records")
+    """Convert per-sequence scores into metadata-safe numeric/status dictionaries."""
+    return [
+        {
+            key: value
+            for key, value in row.items()
+            if isinstance(value, Number | bool) or key.endswith(("_pass", "_available", "_artifact"))
+        }
+        for row in scored.where(pd.notna(scored), None).to_dict("records")
+    ]
 
 
 def _scored_from_batch_metadata(batch: Any) -> pd.DataFrame:

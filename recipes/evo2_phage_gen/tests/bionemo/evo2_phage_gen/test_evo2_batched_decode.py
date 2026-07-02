@@ -32,6 +32,7 @@ from bionemo.evo2.run.infer import (
 )
 from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
     _batched_sampling_value,
+    _native_generated_token_ids,
     _PromptTokenProxy,
 )
 
@@ -91,6 +92,21 @@ def test_native_batched_generation_requires_max_new_tokens_param():
     """Missing max-token sampling params should not silently generate zero tokens."""
     with pytest.raises(ValueError, match="num_tokens_to_generate"):
         _batched_sampling_value([SimpleNamespace(temperature=1.0)], "num_tokens_to_generate", required=True)
+
+
+def test_native_generated_token_ids_do_not_fall_back_to_text_retokenization():
+    """The NeMo adapter should use original sampled IDs, not decode->encode replay."""
+    result = SimpleNamespace(generated_text="AC", generated_tokens=[10, 20], generated_log_probs=[-0.1, -0.2])
+
+    assert _native_generated_token_ids(result) == [10, 20]
+
+
+def test_native_generated_token_ids_require_sampled_ids():
+    """Missing sampled IDs should fail loudly instead of retokenizing generated text."""
+    result = SimpleNamespace(generated_text="AC", generated_log_probs=[-0.1, -0.2])
+
+    with pytest.raises(ValueError, match="generated token IDs"):
+        _native_generated_token_ids(result)
 
 
 def test_batched_decode_reshape_round_trips_flattened_requests():

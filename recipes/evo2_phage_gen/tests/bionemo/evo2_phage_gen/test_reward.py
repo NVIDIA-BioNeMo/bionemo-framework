@@ -202,7 +202,7 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
         "mmseqs_db_tropism_protein": "",
         "genetic_architecture_visualization_script": "",
         "protein_annotation_file": "",
-        "reference_genome_gff_file_save_location": "",
+        "reference_genome_gff_file_save_location": "reference.gff",
     }
     base_config_path = tmp_path / "arc_config.yaml"
     base_config_path.write_text(yaml.safe_dump(base_config))
@@ -229,13 +229,16 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     assert run_config["syntenic_gene_count_filter"] is True
     assert run_config["average_protein_sequence_identity_filter"] is True
     assert run_config["required_genes_filter"] is True
-    assert run_config["reference_genome_gff_file_save_location"] is None
+    assert run_config["use_reference_genome"] is True
+    assert run_config["reference_genome_gff_file_save_location"].endswith("reference.gff")
 
 
 def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monkeypatch):
     """The external Arc wrapper should map staged outputs back to per-sequence rewards."""
     annotation_file = tmp_path / "phrog_annot_v4.tsv"
-    annotation_file.write_text("phrog\tannot\tcategory\nphrog_1\tterminase\tpackaging\nphrog_2\tendolysin\tlysis\n")
+    annotation_file.write_text(
+        "phrog\tannot\tcategory\nphrog_1\tterminase\tpackaging\nphrog_2\tendolysin\tlysis\nphrog_3\tnan\tunknown\n"
+    )
     base_config = {
         "results_save_dir": "unused",
         "current_config_file": "unused",
@@ -243,6 +246,7 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
         "overwrite_sequence_ids": False,
         "orf_filter_seqs_csv_file_save_location": "qc3_orf_filter_seqs.csv",
         "homology_filter_seqs_csv_file_save_location": "qc4_homology_filter_seqs.csv",
+        "orfipy_proteins_file_save_location": "qc4_orfipy_proteins.fasta",
         "mmseqs_protein_database_results_dir_save_location": "qc4_mmseqs_results_protein_database",
         "mmseqs_tropism_protein_results_dir_save_location": "qc4_mmseqs_results_tropism_protein",
         "synteny_filter_seqs_csv_file_save_location": "qc6_synteny_filter_seqs.csv",
@@ -271,13 +275,16 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
             run_dir / "qc4_homology_filter_seqs.csv",
             index=False,
         )
+        (run_dir / "qc4_orfipy_proteins.fasta").write_text(
+            ">umi1_ORF.1\nM\n>umi1_ORF.2\nM\n>umi1_ORF.3\nM\n>umi2_ORF.1\nM\n"
+        )
         phrogs_dir = run_dir / "qc4_mmseqs_results_protein_database"
         phrogs_dir.mkdir()
         pd.DataFrame(
             {
                 "id_prompt": ["umi1_ORF.1", "umi1_ORF.2", "umi2_ORF.1"],
                 "sequence": ["M", "M", "M"],
-                "protein_database_mmseqs_target": ["phrog_1", "phrog_2", "phrog_1"],
+                "protein_database_mmseqs_target": ["phrog_1", "phrog_2", "phrog_3"],
                 "protein_database_mmseqs_e_value": [1e-5, 1e-6, 1e-4],
                 "protein_database_mmseqs_percent_identity": [80.0, 75.0, 70.0],
             }
@@ -353,6 +360,14 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     assert scored.loc[1, "reward_external_protein_hit_count"] == 0.5
     assert scored.loc[1, "reward_external_tropism"] == 0.5
     assert scored.loc[1, "reward_external_synteny"] == 0.5
+    assert scored["predicted_orf_count"].tolist() == [3, 1]
+    assert scored["phrogs_hit_orf_count"].tolist() == [2, 1]
+    assert scored["phrogs_annotated_orf_count"].tolist() == [2, 0]
+    assert scored["unique_phrog_family_count"].tolist() == [2, 1]
+    assert scored["unique_canonical_function_count"].tolist() == [2, 0]
+    assert scored["phrogs_hit_fraction"].tolist() == [2 / 3, 1.0]
+    assert scored["average_protein_identity_measurement_available"].tolist() == [1.0, 1.0]
+    assert scored["required_genes_measurement_available"].tolist() == [1.0, 1.0]
 
 
 def test_external_qc_subprocess_failure_fails_closed(tmp_path, monkeypatch):
@@ -426,6 +441,42 @@ def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):
 
     assert scored["reward_external_synteny"].tolist() == [1.0, 1.0, 0.5, 0.5, 0.25, 0.0]
     assert scored["synteny_pair_distance"].tolist() == [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+
+
+def test_full_synteny_reward_does_not_score_unmeasured_rows(tmp_path):
+    """Missing Arc/LoVis4u measurement rows should be unavailable, not partial biological scores."""
+    run_dir = tmp_path / "arc_run"
+    run_dir.mkdir()
+    pd.DataFrame(
+        {
+            "id_prompt": ["measured", "artifact_missing"],
+            "num_syntenic_genes": [10, 0],
+            "total_num_genes": [10, 0],
+            "missing_synteny_output": [False, True],
+        }
+    ).to_csv(run_dir / "qc6_synteny_filter_metrics.csv", index=False)
+    df = pd.DataFrame(
+        {
+            "arc_qc_id": ["measured", "not_reached", "artifact_missing"],
+            "reward_external_synteny": [0.0, 0.0, 0.0],
+        }
+    )
+
+    scored = _add_full_synteny_rewards(
+        df,
+        run_dir,
+        {
+            "synteny_metrics_file_save_location": "qc6_synteny_filter_metrics.csv",
+            "synteny_filter_seqs_csv_file_save_location": "qc6_synteny_filter_seqs.csv",
+        },
+    )
+
+    assert scored["reward_external_synteny"].tolist() == [1.0, 0.0, 0.0]
+    assert scored["synteny_stage_reached"].tolist() == [1.0, 0.0, 1.0]
+    assert scored["synteny_measurement_available"].tolist() == [1.0, 0.0, 0.0]
+    assert scored["synteny_missing_artifact"].tolist() == [0.0, 0.0, 1.0]
+    assert pd.isna(scored.loc[1, "num_syntenic_genes"])
+    assert pd.isna(scored.loc[1, "synteny_pair_score"])
 
 
 def test_synteny_distance_score_matches_planned_examples():

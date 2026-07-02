@@ -21,6 +21,7 @@ import torch
 
 import bionemo.evo2_phage_gen.nemo_rl_env as nemo_rl_env
 from bionemo.evo2_phage_gen.nemo_rl_env import (
+    _scored_records,
     extract_assistant_sequence,
     extract_scored_sequence,
     phage_qc_metrics_from_scored,
@@ -72,8 +73,16 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
             "reward_external_required_genes": [1.0, 0.0],
             "prompt_nt_length": [10, 10],
             "genome_length": [5000, 3900],
+            "tropism_stage_reached": [1.0, 1.0],
+            "tropism_measurement_available": [1.0, 1.0],
+            "tropism_missing_artifact": [0.0, 0.0],
+            "reward_external_tropism_pass": [1.0, 0.0],
             "tropism_protein_mmseqs_percent_identity": [75.0, 30.0],
             "tropism_protein_measured_hit": [1.0, 1.0],
+            "synteny_stage_reached": [1.0, 1.0],
+            "synteny_measurement_available": [1.0, 0.0],
+            "synteny_missing_artifact": [0.0, 1.0],
+            "reward_external_synteny_pass": [0.0, 0.0],
             "synteny_pair_score": [0.25, 0.75],
             "synteny_pair_distance": [3.0, 1.0],
             "average_protein_percent_identity": [80.0, 97.5],
@@ -101,7 +110,13 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["valid_nt_chars_score_mean"] == 1.0
     assert metrics["tropism_score_mean"] == 0.75
     assert metrics["tropism_pass_rate"] == 0.5
+    assert metrics["tropism_stage_reached_rate"] == 1.0
+    assert metrics["tropism_measurement_available_rate"] == 1.0
+    assert metrics["tropism_n_measured"] == 2
+    assert metrics["tropism_conditional_score_mean"] == 0.75
+    assert metrics["tropism_conditional_pass_rate"] == 0.5
     assert metrics["synteny_score_mean"] == 0.5
+    assert metrics["synteny_weighted_contribution_mean"] == 0.1
     assert metrics["average_protein_identity_score_mean"] == 0.75
     assert metrics["required_genes_pass_rate"] == 0.5
     assert metrics["prompt_nt_length_mean"] == 10.0
@@ -112,11 +127,55 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["tropism_protein_measured_hit_mean"] == 1.0
     assert metrics["synteny_pair_score_mean"] == 0.5
     assert metrics["synteny_pair_distance_mean"] == 2.0
+    assert metrics["synteny_stage_reached_rate"] == 1.0
+    assert metrics["synteny_measurement_available_rate"] == 0.5
+    assert metrics["synteny_n_measured"] == 1
+    assert metrics["synteny_missing_artifact_count"] == 1
+    assert metrics["synteny_conditional_score_mean"] == 0.25
+    assert metrics["synteny_conditional_pass_rate"] == 0.0
     assert metrics["average_protein_percent_identity_mean"] == 88.75
     assert metrics["average_protein_identity_gene_count_mean"] == 9.5
     assert metrics["average_protein_identity_evidence_score_mean"] == 0.95
     assert metrics["required_genes_matched_count_mean"] == 6.5
     assert metrics["required_genes_evidence_score_mean"] == 1.0
+
+
+def test_phage_qc_metrics_groups_training_metrics_by_prompt_prefix_length():
+    """Prompt-length groups let W&B compare each prefix only with matching prefixes."""
+    scored = pd.DataFrame(
+        {
+            "prompt_nt_length": [4, 4, 10],
+            "reward_valid_nt_chars": [1.0, 0.0, 1.0],
+            "reward": [1.0, 0.0, 0.5],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, RewardWeights(valid_nt_chars=1.0))
+
+    assert metrics["by_prompt_nt_length/4/num_sequences"] == 2
+    assert metrics["by_prompt_nt_length/4/reward_mean"] == 0.5
+    assert metrics["by_prompt_nt_length/4/valid_nt_chars_score_mean"] == 0.5
+    assert metrics["by_prompt_nt_length/4/core_qc_pass_rate"] == 0.5
+    assert metrics["by_prompt_nt_length/10/num_sequences"] == 1
+    assert metrics["by_prompt_nt_length/10/reward_mean"] == 0.5
+    assert metrics["by_prompt_nt_length/10/core_qc_pass_rate"] == 1.0
+
+
+def test_scored_records_exclude_full_sequence_from_rollout_metadata():
+    """Rollout metadata should carry scalar scores/status, not full generated sequences."""
+    scored = pd.DataFrame(
+        {
+            "sequence": ["A" * 6000],
+            "id_prompt": ["seq1"],
+            "reward": [0.5],
+            "synteny_measurement_available": [1.0],
+            "missing_status": ["unavailable"],
+        }
+    )
+
+    records = _scored_records(scored)
+
+    assert records == [{"reward": 0.5, "synteny_measurement_available": 1.0}]
 
 
 def test_global_post_process_metrics_accepts_rollout_total_reward():

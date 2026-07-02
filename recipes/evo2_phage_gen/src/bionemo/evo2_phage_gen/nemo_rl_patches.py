@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib
 import importlib.util
 import shutil
 import subprocess
@@ -34,6 +36,12 @@ REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.data.processors",
     "nemo_rl.models.generation.megatron.megatron_worker",
     "nemo_rl.models.megatron.setup",
+]
+EXPECTED_PATCHED_SYMBOLS = [
+    ("nemo_rl.experience.rollouts", "collect_environment_metrics"),
+    ("nemo_rl.models.generation.megatron.megatron_generation", "_load_generation_adapter"),
+    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin._load_generation_adapter"),
+    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin.generate_with_adapter"),
 ]
 
 
@@ -56,6 +64,33 @@ def _run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str
     )
 
 
+def patch_sha256(patch_path: Path = DEFAULT_PATCH) -> str:
+    """Return the SHA256 hash of the maintained NeMo-RL patch."""
+    return hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
+
+
+def assert_nemo_rl_patch_symbols() -> None:
+    """Fail early if the runtime NeMo-RL package is missing symbols installed by the patch."""
+    missing = []
+    for module_name, qualified_symbol in EXPECTED_PATCHED_SYMBOLS:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            missing.append(f"{module_name}:{qualified_symbol}")
+            continue
+        obj = module
+        for attr in qualified_symbol.split("."):
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                missing.append(f"{module_name}:{qualified_symbol}")
+                break
+    if missing:
+        raise RuntimeError(
+            "NeMo-RL is missing Evo2 phage patch symbols: "
+            f"{', '.join(missing)}. Run evo2_phage_patch_nemo_rl --repair-install before launching GRPO."
+        )
+
+
 def _nemo_rl_source_pin() -> tuple[str, str]:
     """Read the pinned NeMo-RL source URL and revision from this recipe."""
     pyproject = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
@@ -76,7 +111,9 @@ def _is_complete_nemo_rl_install() -> bool:
 
 def _uv_cache_dir() -> Path | None:
     """Return uv's cache dir when uv is available."""
-    result = subprocess.run(["uv", "cache", "dir"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    result = subprocess.run(
+        ["uv", "cache", "dir"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+    )
     if result.returncode != 0:
         return None
     return Path(result.stdout.strip()).expanduser()
@@ -170,16 +207,16 @@ def apply_nemo_rl_patch(patch_path: Path = DEFAULT_PATCH, *, check_only: bool = 
         raise FileNotFoundError(f"Patch file not found: {patch_path}")
     source_root = _nemo_rl_source_root()
 
-    dry_run = _run_patch(["--dry-run", "-p1", "-i", str(patch_path)], cwd=source_root)
+    dry_run = _run_patch(["--batch", "--dry-run", "-p1", "-i", str(patch_path)], cwd=source_root)
     if dry_run.returncode == 0:
         if check_only:
             return f"patch can apply cleanly to {source_root}"
-        applied = _run_patch(["-p1", "-i", str(patch_path)], cwd=source_root)
+        applied = _run_patch(["--batch", "-p1", "-i", str(patch_path)], cwd=source_root)
         if applied.returncode != 0:
             raise RuntimeError(applied.stdout)
         return f"patch applied to {source_root}"
 
-    reverse_dry_run = _run_patch(["--dry-run", "-R", "-p1", "-i", str(patch_path)], cwd=source_root)
+    reverse_dry_run = _run_patch(["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_path)], cwd=source_root)
     if reverse_dry_run.returncode == 0:
         return f"patch already applied to {source_root}"
 

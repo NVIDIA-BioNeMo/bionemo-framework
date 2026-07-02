@@ -122,6 +122,17 @@ def prepare_mmseqs_gpu(
     return PreparedAsset("mmseqs2_gpu", link_path, f"downloaded from {mmseqs_url}")
 
 
+def configure_lovis4u_mmseqs(mmseqs_bin: Path = DEFAULT_BIN_DIR / "mmseqs") -> PreparedAsset:
+    """Point LoVis4u at the MMseqs binary prepared for this recipe."""
+    mmseqs_bin = Path(mmseqs_bin)
+    if not mmseqs_bin.exists():
+        raise FileNotFoundError(f"Cannot configure LoVis4u; mmseqs binary does not exist: {mmseqs_bin}")
+
+    subprocess.run(["lovis4u", "--linux"], check=True)
+    subprocess.run(["lovis4u", "-smp", str(mmseqs_bin.resolve())], check=True)
+    return PreparedAsset("lovis4u_mmseqs_config", mmseqs_bin, "configured LoVis4u to use recipe MMseqs")
+
+
 def prepare_diamond(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
@@ -321,6 +332,7 @@ def prepare_external_assets(
     download_arc_evo2: bool = True,
     download_large_databases: bool = False,
     download_checkv: bool = True,
+    configure_lovis4u: bool = True,
     mmseqs_url: str = DEFAULT_MMSEQS_GPU_URL,
     diamond_url: str = DEFAULT_DIAMOND_URL,
     hmmer_url: str = DEFAULT_HMMER_URL,
@@ -334,16 +346,18 @@ def prepare_external_assets(
     external_dir = Path(external_dir)
     target_bin_dir = Path(bin_dir) if bin_dir is not None else external_dir / "bin"
     assets = [prepare_pyrodigal_wrapper(target_bin_dir)]
+    mmseqs_asset = None
     if download_mmseqs:
-        assets.append(
-            prepare_mmseqs_gpu(
-                external_dir,
-                bin_dir=target_bin_dir,
-                mmseqs_url=mmseqs_url,
-                overwrite=overwrite,
-                insecure_downloads=insecure_downloads,
-            )
+        mmseqs_asset = prepare_mmseqs_gpu(
+            external_dir,
+            bin_dir=target_bin_dir,
+            mmseqs_url=mmseqs_url,
+            overwrite=overwrite,
+            insecure_downloads=insecure_downloads,
         )
+        assets.append(mmseqs_asset)
+    if configure_lovis4u and mmseqs_asset is not None:
+        assets.append(configure_lovis4u_mmseqs(mmseqs_asset.path))
     if download_diamond:
         assets.append(
             prepare_diamond(
@@ -365,7 +379,9 @@ def prepare_external_assets(
             )
         )
     if download_phrogs_annotation:
-        assets.append(prepare_phrogs_annotation(external_dir, overwrite=overwrite, insecure_downloads=insecure_downloads))
+        assets.append(
+            prepare_phrogs_annotation(external_dir, overwrite=overwrite, insecure_downloads=insecure_downloads)
+        )
     if download_arc_evo2:
         assets.append(prepare_arc_evo2_checkout(external_dir, repo_url=arc_evo2_repo_url, overwrite=overwrite))
     if download_large_databases:
@@ -394,8 +410,11 @@ def main() -> None:
     """CLI entry point for preparing external analysis assets."""
     parser = argparse.ArgumentParser(description="Prepare external tools/databases for Evo2 phage QC")
     parser.add_argument("--external-dir", type=Path, default=DEFAULT_EXTERNAL_DIR)
-    parser.add_argument("--bin-dir", type=Path, default=None, help="Directory for exposed tool links (default: external-dir/bin)")
+    parser.add_argument(
+        "--bin-dir", type=Path, default=None, help="Directory for exposed tool links (default: external-dir/bin)"
+    )
     parser.add_argument("--skip-mmseqs", action="store_true", help="Do not download MMseqs2-GPU")
+    parser.add_argument("--skip-lovis4u-config", action="store_true", help="Do not configure LoVis4u's MMseqs path")
     parser.add_argument("--skip-diamond", action="store_true", help="Do not download the upstream DIAMOND binary")
     parser.add_argument("--skip-hmmer", action="store_true", help="Do not download HMMER")
     parser.add_argument("--skip-phrogs-annotation", action="store_true", help="Do not download PHROGs annotation TSV")
@@ -428,6 +447,7 @@ def main() -> None:
         download_arc_evo2=not args.skip_arc_evo2,
         download_large_databases=args.download_large_databases,
         download_checkv=not args.skip_checkv,
+        configure_lovis4u=not args.skip_lovis4u_config,
         mmseqs_url=args.mmseqs_url,
         diamond_url=args.diamond_url,
         hmmer_url=args.hmmer_url,

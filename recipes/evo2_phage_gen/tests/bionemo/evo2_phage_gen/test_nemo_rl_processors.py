@@ -50,3 +50,9 @@ def test_phage_prompt_data_processor_tokenizes_openai_user_message_without_chat_
     assert message["role"] == "user"
     assert message["content"] == "ACGT"
     assert torch.equal(message["token_ids"], torch.tensor([65, 67, 71, 84], dtype=torch.long))
+    assert output["extra_env_info"] == {
+        "prompt": "ACGT",
+        "prompt_nt_length": 4,
+        "prompt_prefix": "ACGT",
+        "prompt_index": 3,
+    }

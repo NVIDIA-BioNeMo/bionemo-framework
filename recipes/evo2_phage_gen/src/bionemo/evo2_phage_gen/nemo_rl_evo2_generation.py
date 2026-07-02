@@ -69,6 +69,9 @@ class Evo2GenerationResult:
     prompt_tokens: torch.Tensor
     generated_tokens: list[int]
     generated_log_probs: list[float]
+    finish_reason: str = "length"
+    stopped_on_eos: bool = False
+    truncated: bool = False
 
 
 class _PromptTokenProxy:
@@ -117,6 +120,16 @@ def _batched_sampling_value(sampling_params: list[Any], name: str, *, required: 
                 f"{name} differs at batch index {idx}: {value!r} != {first_value!r}"
             )
     return first_value
+
+
+def _native_generated_token_ids(result: Any) -> list[int]:
+    """Return native generated token IDs without detokenize/tokenize replay."""
+    generated_tokens = getattr(result, "generated_tokens", None)
+    if generated_tokens is None:
+        generated_tokens = getattr(result, "generated_token_ids", None)
+    if generated_tokens is None:
+        raise ValueError("Evo2 native generation result did not include generated token IDs")
+    return [int(token_id) for token_id in generated_tokens]
 
 
 def generate_evo2_native_batched(
@@ -188,18 +201,29 @@ def generate_evo2_native_batched(
         result_callback=None,
     )
 
-    return [
-        Evo2GenerationResult(
-            prompt_tokens=torch.tensor(
-                result.prompt_tokens,
-                dtype=torch.long,
-                device=prompt_tokens_tensor.device,
-            ),
-            generated_tokens=list(tokenizer.tokenize(result.generated_text)) if result.generated_text else [],
-            generated_log_probs=list(result.generated_log_probs or []),
+    results = []
+    for result in native_results:
+        generated_tokens = _native_generated_token_ids(result)
+        generated_log_probs = list(result.generated_log_probs or [])
+        assert len(generated_tokens) == len(generated_log_probs), (
+            "Evo2 native generation returned mismatched token/log-prob lengths: "
+            f"{len(generated_tokens)} tokens != {len(generated_log_probs)} log-probs"
         )
-        for result in native_results
-    ]
+        results.append(
+            Evo2GenerationResult(
+                prompt_tokens=torch.tensor(
+                    result.prompt_tokens,
+                    dtype=torch.long,
+                    device=prompt_tokens_tensor.device,
+                ),
+                generated_tokens=generated_tokens,
+                generated_log_probs=generated_log_probs,
+                finish_reason=str(getattr(result, "finish_reason", "length")),
+                stopped_on_eos=bool(getattr(result, "stopped_on_eos", False)),
+                truncated=bool(getattr(result, "truncated", False)),
+            )
+        )
+    return results
 
 
 class Evo2MegatronGenerationAdapter:

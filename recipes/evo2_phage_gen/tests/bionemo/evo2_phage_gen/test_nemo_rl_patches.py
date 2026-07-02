@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import types
 from pathlib import Path
 
 from bionemo.evo2_phage_gen import nemo_rl_patches
@@ -48,8 +49,8 @@ def test_apply_nemo_rl_patch_applies_against_installed_package_root(tmp_path: Pa
 
     assert result == f"patch applied to {source_root}"
     assert calls == [
-        (["--dry-run", "-p1", "-i", str(patch_file)], source_root),
-        (["-p1", "-i", str(patch_file)], source_root),
+        (["--batch", "--dry-run", "-p1", "-i", str(patch_file)], source_root),
+        (["--batch", "-p1", "-i", str(patch_file)], source_root),
     ]
 
 
@@ -81,7 +82,7 @@ def test_patch_nemo_rl_packaging_metadata_includes_subpackages(tmp_path: Path) -
     """The repair helper should make upstream NeMo-RL package all submodules."""
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        '\n'.join(
+        "\n".join(
             [
                 "[tool.setuptools]",
                 'packages = ["nemo_rl"]',
@@ -97,3 +98,61 @@ def test_patch_nemo_rl_packaging_metadata_includes_subpackages(tmp_path: Path) -
     patched = pyproject.read_text()
     assert 'packages = { find = { include = ["nemo_rl*"] } }' in patched
     assert 'requires-python = ">=3.10"' in patched
+
+
+def test_run_patch_uses_real_batch_dry_run(tmp_path: Path) -> None:
+    """The maintained check path should use a real noninteractive patch dry-run."""
+    source_file = tmp_path / "nemo_rl" / "example.py"
+    source_file.parent.mkdir()
+    source_file.write_text("old\n")
+    patch_file = tmp_path / "change.patch"
+    patch_file.write_text(
+        "\n".join(
+            [
+                "diff --git a/nemo_rl/example.py b/nemo_rl/example.py",
+                "index 1111111..2222222 100644",
+                "--- a/nemo_rl/example.py",
+                "+++ b/nemo_rl/example.py",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+                "",
+            ]
+        )
+    )
+
+    result = nemo_rl_patches._run_patch(["--batch", "--dry-run", "-p1", "-i", str(patch_file)], cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert source_file.read_text() == "old\n"
+
+
+def test_patch_sha256_reports_patch_content_hash(tmp_path: Path) -> None:
+    """The launcher should be able to log the exact maintained patch content."""
+    patch_file = tmp_path / "patch.diff"
+    patch_file.write_text("patch contents\n")
+
+    assert nemo_rl_patches.patch_sha256(patch_file) == (
+        "3e21aed045526cbe401bb21136236cf0b768acfb13d71101e953f78792549fa1"
+    )
+
+
+def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypatch) -> None:
+    """Startup should accept a runtime with all expected patched symbols."""
+    rollouts = types.SimpleNamespace(collect_environment_metrics=object())
+    megatron_generation = types.SimpleNamespace(_load_generation_adapter=object())
+    generation_mixin_cls = type(
+        "MegatronGenerationMixin",
+        (),
+        {"_load_generation_adapter": object(), "generate_with_adapter": object()},
+    )
+    megatron_worker = types.SimpleNamespace(MegatronGenerationMixin=generation_mixin_cls)
+    modules = {
+        "nemo_rl.experience.rollouts": rollouts,
+        "nemo_rl.models.generation.megatron.megatron_generation": megatron_generation,
+        "nemo_rl.models.generation.megatron.megatron_worker": megatron_worker,
+    }
+
+    monkeypatch.setattr(nemo_rl_patches.importlib, "import_module", lambda name: modules[name])
+
+    nemo_rl_patches.assert_nemo_rl_patch_symbols()
