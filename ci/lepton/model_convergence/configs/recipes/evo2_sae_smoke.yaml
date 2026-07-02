@@ -18,12 +18,14 @@ job_name: "evo2-sae-1b-smoke"
 
 ############################################################
 # Container
-# The base convergence image lacks Megatron/TransformerEngine, which the Evo2
-# producer (bionemo.evo2.run.predict) needs. Use the same image the evo2 GPU
-# unit-test lane builds against.
+# Base NGC PyTorch image (same as the other convergence recipes). Its CUDA
+# forward-compat libs run on the workspace's current node driver (CUDA 12.4);
+# the evo2 GPU-lane image (pytorch26.04-squashed) needs driver >= 12.8 and dies
+# on those nodes with "Inference requires CUDA". Megatron/TransformerEngine are
+# added in-job by .ci_build.sh (checkout_script), so this base image is enough.
 ############################################################
 container:
-  image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+  image: nvcr.io/nvidia/pytorch:26.02-py3
   registry_auth: lepton-nvidia-jwilber
 
 ############################################################
