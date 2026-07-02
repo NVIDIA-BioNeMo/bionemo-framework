@@ -24,6 +24,8 @@ from bionemo.evo2_phage_gen.qc import (
     calculate_nt_homopolymer_len,
     has_valid_nt_chars,
     run_nucleotide_qc,
+    save_fasta,
+    trim_at_first_eos,
 )
 
 
@@ -33,6 +35,14 @@ def test_nucleotide_metrics_match_arc_filter_semantics():
     assert not has_valid_nt_chars("ACGTN")
     assert calculate_gc_content("ACGT") == 50.0
     assert calculate_nt_homopolymer_len("AAACCGTTTT") == 4
+
+
+def test_trim_at_first_eos_handles_literal_markers():
+    """Decoded EOS text should not be treated as biological sequence."""
+    assert trim_at_first_eos("ACGT STOP ignored") == "ACGT"
+    assert trim_at_first_eos("ACGT<EOS>ignored") == "ACGT"
+    assert trim_at_first_eos("ACGTEODignored") == "ACGT"
+    assert trim_at_first_eos("ACGT") == "ACGT"
 
 
 def test_apply_nucleotide_qc_tracks_staged_counts():
@@ -78,3 +88,13 @@ def test_run_nucleotide_qc_writes_arc_style_outputs(tmp_path):
     assert outputs["nucleotide_counts_csv"].exists()
     assert outputs["nucleotide_csv"].exists()
     assert outputs["nucleotide_fasta"].exists()
+
+
+def test_save_fasta_replaces_non_ascii_generated_tokens(tmp_path):
+    """Generated Unicode tokens should fail QC as invalid bases rather than crashing FASTA output."""
+    output_fasta = tmp_path / "unicode.fasta"
+    df = pd.DataFrame({"id_prompt": ["seq1"], "sequence": ["ACGT\u013bACGT"]})
+
+    save_fasta(df, output_fasta)
+
+    assert output_fasta.read_text() == ">seq1\nACGTNACGT\n"

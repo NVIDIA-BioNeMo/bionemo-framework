@@ -316,12 +316,17 @@ def compute_evo2_paged_kv_buffer_size_gb(
     ssm_bytes = math.prod(mamba_state_config.ssm_states_shape) * mamba_state_config.ssm_states_dtype.itemsize
     mamba_per_request = (conv_bytes + ssm_bytes) * num_mamba_layers
 
-    # --- Target KV block count: requested sequence + dummy block + safety. ---
-    target_blocks = math.ceil(int(max_sequence_length) / block_size_tokens) + 1 + int(safety_blocks)
+    # --- Target KV block count: every active request needs its own sequence blocks. ---
+    blocks_per_request = math.ceil(int(max_sequence_length) / block_size_tokens)
+    target_blocks = int(max_requests) * blocks_per_request + 1 + int(safety_blocks)
     target_blocks = max(2, target_blocks)  # mcore floors block_count at 2 (active + dummy)
 
-    # --- Invert mcore's hybrid block-count formula for the no-mamba-ratio path. ---
-    total_bytes = target_blocks * (block_size_bytes + mamba_per_request)
+    # --- Invert mcore's hybrid max_requests path. ---
+    # DynamicInferenceContext first reserves ``max_requests * mamba_per_request`` bytes, then derives
+    # KV block count from the remaining active buffer. Short max_sequence_length smoke tests can have
+    # fewer target KV blocks than active requests, so multiplying mamba state by target_blocks
+    # underallocates the total buffer.
+    total_bytes = target_blocks * block_size_bytes + int(max_requests) * mamba_per_request
     return (total_bytes + 1) / (1024**3)
 
 

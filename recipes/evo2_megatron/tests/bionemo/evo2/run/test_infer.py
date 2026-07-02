@@ -47,6 +47,7 @@ import torch
 from bionemo.common.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
+from bionemo.evo2.run.infer import _NativeDynamicResult, _native_stop_token_ids, _result_to_jsonl_record
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge
 
@@ -73,6 +74,42 @@ def _read_jsonl_results(output_file: Path) -> list[dict]:
             if stripped:
                 records.append(json.loads(stripped))
     return records
+
+
+def test_native_stop_token_ids_resolves_eos_text_token():
+    """The Evo2 tokenizer uses token id 0 / <EOS> to mark generation end."""
+
+    class _FakeBackendTokenizer:
+        @staticmethod
+        def token_to_id(token: str) -> int | None:
+            return {"<EOS>": 0}.get(token)
+
+    class _FakeTokenizer:
+        eos = "<EOS>"
+        tokenizer = _FakeBackendTokenizer()
+
+    assert _native_stop_token_ids(_FakeTokenizer()) == {0}
+
+
+def test_result_to_jsonl_record_honors_explicit_stop_reason():
+    """EOS-stopped native results should not be reclassified as length-finished."""
+    result = _NativeDynamicResult(
+        generated_text="ACGT",
+        generated_length=4,
+        prompt_tokens=[43, 126, 71, 65, 71, 84],
+        finish_reason="stop",
+    )
+
+    record = _result_to_jsonl_record(
+        request_id="seq",
+        prompt="+~GAGT",
+        result=result,
+        max_new_tokens=4,
+    )
+
+    assert record["completion"] == "ACGT"
+    assert record["finish_reason"] == "stop"
+    assert record["usage"]["completion_tokens"] == 4
 
 
 def test_infer_runs(mbridge_checkpoint_path, tmp_path):
@@ -566,6 +603,10 @@ def run_infer_subprocess_parallel(
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
+    max_batch_size: int | None = None,
+    evo2_batched_decode_size: int | None = None,
+    cuda_graph_impl: str | None = None,
+    expected_log_substrings: tuple[str, ...] = (),
 ) -> list[dict]:
     """Run inference as a subprocess with model parallelism.
 
@@ -584,6 +625,10 @@ def run_infer_subprocess_parallel(
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
+        max_batch_size: If set, pass --max-batch-size to the CLI.
+        evo2_batched_decode_size: If set, pass --evo2-batched-decode-size to the CLI.
+        cuda_graph_impl: If set, pass --cuda-graph-impl.
+        expected_log_substrings: Strings that must appear in stdout or stderr.
 
     Returns:
         List of parsed JSONL result dicts.
@@ -621,6 +666,12 @@ def run_infer_subprocess_parallel(
         "--context-parallel-size",
         str(context_parallel_size),
     ]
+    if max_batch_size is not None:
+        cmd.extend(["--max-batch-size", str(max_batch_size)])
+    if evo2_batched_decode_size is not None:
+        cmd.extend(["--evo2-batched-decode-size", str(evo2_batched_decode_size)])
+    if cuda_graph_impl is not None:
+        cmd.extend(["--cuda-graph-impl", str(cuda_graph_impl)])
 
     env = copy.deepcopy(PRETEST_ENV)
     # Prepend the source src/ directory to PYTHONPATH so that local model code
@@ -638,6 +689,11 @@ def run_infer_subprocess_parallel(
     )
 
     assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    for substring in expected_log_substrings:
+        assert substring in combined_output, (
+            f"Expected infer output to contain {substring!r}.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
     assert output_file.exists(), "Output file was not created"
 
     return _read_jsonl_results(output_file)
@@ -858,6 +914,142 @@ def test_parallel_inference_accuracy(mbridge_checkpoint_path, tmp_path, dna_sequ
 
     assert all(match_percents[sid] >= 0.90 * expected_by_id[sid] for sid in targets_by_id), (
         f"Expected at least 90% of {matchperc_print_expected}, got {matchperc_print}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+@pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI")
+def test_parallel_inference_accuracy_evo2_batched_decode_same_prefix_preserves_accuracy(
+    mbridge_checkpoint_path,
+    tmp_path,
+    dna_sequences,
+):
+    """Same-prefix batched decode may diverge from serial, but should preserve target accuracy.
+
+    The true Evo2 batched-decode path only accepts same-length prompts, so this uses a common prefix
+    length across the DNA accuracy prompts for both serial and batched subprocess inference. Greedy
+    serial-vs-batched completions can diverge after small numerical differences; when they do, the
+    batched completion should remain similarly close to the real next-window target.
+    """
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Batched decode inference accuracy test requires a GPU")
+
+    num_tokens = 500
+    prompt_len = min(len(seq) // 2 for seq in dna_sequences)
+    prompt_len = min(prompt_len, 2048)
+    batch_size = len(dna_sequences)
+
+    targets_by_id: dict[str, str] = {}
+    jsonl_entries = []
+    for i, seq in enumerate(dna_sequences):
+        seq_id = f"seq_{i}"
+        targets_by_id[seq_id] = seq[prompt_len : prompt_len + num_tokens]
+        jsonl_entries.append((seq_id, seq[:prompt_len]))
+
+    serial_prompt_file = tmp_path / "serial_prompts.jsonl"
+    serial_output_file = tmp_path / "serial_outputs.jsonl"
+    batched_prompt_file = tmp_path / "batched_prompts.jsonl"
+    batched_output_file = tmp_path / "batched_outputs.jsonl"
+    _write_prompts_jsonl(serial_prompt_file, jsonl_entries)
+    _write_prompts_jsonl(batched_prompt_file, jsonl_entries)
+
+    serial_records = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=serial_prompt_file,
+        output_file=serial_output_file,
+        max_new_tokens=num_tokens,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        max_batch_size=1,
+        evo2_batched_decode_size=1,
+    )
+    batched_records = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=batched_prompt_file,
+        output_file=batched_output_file,
+        max_new_tokens=num_tokens,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        max_batch_size=batch_size,
+        evo2_batched_decode_size=batch_size,
+        expected_log_substrings=(
+            f"[evo2-native] opt-in batched decode active: size={batch_size}",
+            f"[evo2-native] batched prompt prefill: requests={batch_size}",
+        ),
+    )
+
+    serial_by_id = {r["id"]: r for r in serial_records}
+    batched_by_id = {r["id"]: r for r in batched_records}
+    assert set(serial_by_id) == set(batched_by_id) == set(targets_by_id)
+
+    serial_match_percents: dict[str, float] = {}
+    batched_match_percents: dict[str, float] = {}
+    for seq_id, target in targets_by_id.items():
+        serial_identity = calculate_sequence_identity(target, serial_by_id[seq_id]["completion"]) or 0.0
+        batched_identity = calculate_sequence_identity(target, batched_by_id[seq_id]["completion"]) or 0.0
+        serial_match_percents[seq_id] = serial_identity
+        batched_match_percents[seq_id] = batched_identity
+
+    serial_vs_batched_percents = {
+        seq_id: calculate_sequence_identity(serial_by_id[seq_id]["completion"], batched_by_id[seq_id]["completion"])
+        or 0.0
+        for seq_id in targets_by_id
+    }
+    first_diffs = {
+        seq_id: next(
+            (
+                idx
+                for idx, (serial_base, batched_base) in enumerate(
+                    zip(serial_by_id[seq_id]["completion"], batched_by_id[seq_id]["completion"])
+                )
+                if serial_base != batched_base
+            ),
+            None,
+        )
+        for seq_id in targets_by_id
+    }
+
+    exact_matches = {
+        seq_id: serial_by_id[seq_id]["completion"] == batched_by_id[seq_id]["completion"]
+        for seq_id in targets_by_id
+    }
+
+    def _max_homopolymer(sequence: str) -> int:
+        best = 0
+        current = 0
+        previous = None
+        for base in sequence:
+            current = current + 1 if base == previous else 1
+            best = max(best, current)
+            previous = base
+        return best
+
+    batched_completion_stats = {
+        seq_id: {
+            "length": len(batched_by_id[seq_id]["completion"]),
+            "valid_dna": set(batched_by_id[seq_id]["completion"]) <= {"A", "C", "G", "T", "N"},
+            "max_homopolymer": _max_homopolymer(batched_by_id[seq_id]["completion"]),
+        }
+        for seq_id in targets_by_id
+    }
+
+    serial_match_print = {k: f"{v:.2f}%" for k, v in serial_match_percents.items()}
+    batched_match_print = {k: f"{v:.2f}%" for k, v in batched_match_percents.items()}
+    serial_vs_batched_print = {k: f"{v:.2f}%" for k, v in serial_vs_batched_percents.items()}
+    exact_match_print = {k: str(v) for k, v in exact_matches.items()}
+    assert all(stat["length"] == num_tokens and stat["valid_dna"] for stat in batched_completion_stats.values()), (
+        f"Expected full-length DNA completions from batched decode, got {batched_completion_stats=}"
+    )
+    assert all(stat["max_homopolymer"] <= 20 for stat in batched_completion_stats.values()), (
+        f"Expected non-degenerate batched DNA completions, got {batched_completion_stats=}"
+    )
+    assert all(batched_match_percents[sid] >= serial_match_percents[sid] - 5.0 for sid in targets_by_id), (
+        "Expected batched decode to stay within 5 identity points of same-prefix serial target "
+        f"accuracy, got {serial_match_print=}, {batched_match_print=}, "
+        f"{serial_vs_batched_print=}, {exact_match_print=}, and {first_diffs=}"
     )
 
 

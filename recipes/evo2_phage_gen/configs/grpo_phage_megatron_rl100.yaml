@@ -1,0 +1,113 @@
+# Evo2 phage GRPO 100-step rollout config.
+#
+# This is the first non-smoke RL config for the paper-faithful scoring work:
+# - uses the best downstream HPO region from the 16k sweep (prompt length 10, temp 1.1);
+# - weights training prompts toward length 10 with light 8/9/11 exploration;
+# - uses the Evo2-native batched generation adapter for train and fixed-length validation batches.
+
+defaults: "grpo_phage_megatron.yaml"
+
+grpo:
+  max_num_epochs: 100
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 64
+  max_num_steps: 100
+  val_period: 10
+  # Validation uses a repeated fixed-length prompt set, so full validation batches keep one prompt length
+  # while still producing enough samples for useful metrics.
+  val_batch_size: 64
+  max_val_samples: 64
+  val_at_start: false
+  val_at_end: true
+
+policy:
+  train_global_batch_size: 64
+  train_micro_batch_size: 1
+  generation_batch_size: 64
+  logprob_batch_size: 1
+  generation:
+    # Prompt length 10 is the best downstream Arc cell in the 16k sweep. The train prompt file
+    # keeps light 8/9/11 exploration, so 5989 keeps prompt+completion within the paper's
+    # 4-6 kb length window even for the 11 nt prompt.
+    max_new_tokens: 5989
+    temperature: 1.1
+    top_p: 1.0
+    # Match the paper-HPO generation regime. The no-top-k smoke rollout produced severe homopolymers.
+    top_k: 4
+    mcore_generation_config:
+      cuda_graph_impl: "local"
+      inference_cuda_graph_scope: "block"
+      use_cuda_graphs_for_non_decode_steps: true
+      max_requests: 64
+      prompt_batch_size: 64
+      enable_chunked_prefill: false
+      generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
+      generation_adapter_config:
+        seed_stride: 1000003
+
+data:
+  train:
+    data_path: "data/phage_prompts_paper_useful_rl.jsonl"
+  validation:
+    dataset_name: "openai_format"
+    data_path: "data/phage_prompts_paper_useful_rl_validation_prompt10.jsonl"
+    env_name: "phage_qc"
+    prompt_file: null
+    system_prompt_file: null
+
+env:
+  phage_qc:
+    weight_valid_nt_chars: 1.0
+    weight_genome_length: 1.0
+    weight_gc_content: 1.0
+    weight_nt_homopolymer: 1.0
+    weight_nucleotide_pass: 1.0
+    weight_orf: 1.0
+    weight_coding_density: 1.0
+    weight_protein_hit_count: 1.0
+    weight_tropism: 1.0
+    weight_genetic_architecture: 1.0
+    weight_checkv: 1.0
+    # Novelty/diversification terms are preferences, not hard paper-candidate gates. Keep them
+    # lighter so known viable high-tropism phages are not enriched against.
+    weight_training_data_identity: 0.25
+    weight_synteny: 0.25
+    weight_average_protein_identity: 0.25
+    weight_required_genes: 0.25
+    weight_reference_genome_identity: 0.25
+    weight_mmseqs_clustering: 0.25
+    # Keep diversity out of the initial scalar objective; binary pass-rate monitoring excludes
+    # diversity, and this avoids making reward==1 require batch-relative diversity.
+    weight_diversity: 0.0
+    external_qc:
+      enabled: true
+      enable_orf: true
+      enable_coding_density: true
+      enable_protein_hit_count: true
+      enable_tropism: true
+      enable_genetic_architecture: true
+      enable_checkv: true
+      enable_training_data_identity: true
+      enable_synteny: true
+      synteny_mode: "full"
+      enable_average_protein_identity: true
+      enable_required_genes: true
+      enable_reference_genome_identity: true
+      training_data_identity_random_baseline: 0.0
+      average_protein_identity_random_baseline: 0.0
+      average_protein_identity_reward_floor: 0.75
+      required_genes_random_baseline: 0.5
+      reference_genome_identity_random_baseline: 0.0
+      synteny_removed_pair_score_floor: 0.75
+      enable_mmseqs_clustering: true
+      enable_diversity: false
+
+logger:
+  log_dir: "data/checkpoints/phage_grpo_logs_rl100"
+  wandb_enabled: true
+  wandb:
+    project: "evo2_phage_design_rl"
+    name: "grpo-phage-rl100-full-qc-batched64"
+
+checkpointing:
+  checkpoint_dir: "data/checkpoints/phage_grpo_rl100"

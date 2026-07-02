@@ -76,6 +76,19 @@ def test_batched_decode_reshape_round_trips_flattened_requests():
     torch.testing.assert_close(restored, features)
 
 
+def test_batched_decode_reshape_accepts_already_batched_requests():
+    """NeMo-RL can present decode tokens as Hyena-compatible request batch rows."""
+    context = _DummyDynamicContext([1, 1, 1, 1])
+    features = torch.arange(4 * 4 * 1, dtype=torch.float32).reshape(4, 4, 1)
+
+    unpacked, layout = _reshape_dynamic_context_requests(features, context)
+    restored = _restore_dynamic_context_requests(unpacked, layout)
+
+    assert layout is None
+    torch.testing.assert_close(unpacked, features)
+    torch.testing.assert_close(restored, features)
+
+
 def test_batched_decode_reshape_rejects_mixed_query_lengths():
     """The opt-in path should fail loudly instead of mixing per-request recurrent state."""
     context = _DummyDynamicContext([2, 3])

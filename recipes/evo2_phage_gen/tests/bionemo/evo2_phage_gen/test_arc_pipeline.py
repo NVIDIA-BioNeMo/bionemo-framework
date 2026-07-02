@@ -15,13 +15,29 @@
 
 """Tests for ``bionemo.evo2_phage_gen.arc_pipeline``."""
 
+import importlib.util
+import sys
+from pathlib import Path
+
+import pandas as pd
+
 from bionemo.evo2_phage_gen.arc_pipeline import (
     ARC_LEGACY_CHECKV_ENV,
+    ARC_LEGACY_EMPTY_DIVERSIFICATION_ANCHOR,
+    ARC_LEGACY_EMPTY_HOMOLOGY_ANCHOR,
+    ARC_LEGACY_EMPTY_ORF_ANCHOR,
+    ARC_LEGACY_EMPTY_SYNTENY_ANCHOR,
     ARC_LEGACY_LOVIS4U_CONDA_WRAPPER,
+    ARC_LEGACY_MMSEQS_EMPTY_GUARD_ANCHOR,
     ARC_LEGACY_PRODIGAL_CMD,
     ARC_PIPELINE_FILES,
     PATCHED_CHECKV_ENV,
+    PATCHED_EMPTY_DIVERSIFICATION_GUARD,
+    PATCHED_EMPTY_HOMOLOGY_GUARD,
+    PATCHED_EMPTY_ORF_GUARD,
+    PATCHED_EMPTY_SYNTENY_GUARD,
     PATCHED_LOVIS4U_CONDA_WRAPPER,
+    PATCHED_MMSEQS_EMPTY_GUARD,
     PATCHED_PRODIGAL_CMD,
     prepare_arc_pipeline_workdir,
 )
@@ -37,7 +53,16 @@ def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
         if filename == "genetic_architecture.py":
             content = f'fasta_file = "{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"\n'
         if filename == "genome_design_filtering_pipeline.py":
-            content = f"{ARC_LEGACY_PRODIGAL_CMD}\n{ARC_LEGACY_CHECKV_ENV}\n{ARC_LEGACY_LOVIS4U_CONDA_WRAPPER}\n"
+            content = (
+                f"{ARC_LEGACY_PRODIGAL_CMD}\n"
+                f"{ARC_LEGACY_CHECKV_ENV}\n"
+                f"{ARC_LEGACY_LOVIS4U_CONDA_WRAPPER}\n"
+                f"{ARC_LEGACY_MMSEQS_EMPTY_GUARD_ANCHOR}\n"
+                f"{ARC_LEGACY_EMPTY_ORF_ANCHOR}\n"
+                f"{ARC_LEGACY_EMPTY_HOMOLOGY_ANCHOR}\n"
+                f"{ARC_LEGACY_EMPTY_DIVERSIFICATION_ANCHOR}\n"
+                f"{ARC_LEGACY_EMPTY_SYNTENY_ANCHOR}\n"
+            )
         (source_dir / filename).write_text(content)
     phix174_fasta = tmp_path / "NC_001422_1.fna"
     phix174_fasta.write_text(">NC_001422.1\nACGT\n")
@@ -60,3 +85,53 @@ def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
     assert PATCHED_PRODIGAL_CMD in pipeline_text
     assert PATCHED_CHECKV_ENV in pipeline_text
     assert PATCHED_LOVIS4U_CONDA_WRAPPER in pipeline_text
+    assert PATCHED_MMSEQS_EMPTY_GUARD in pipeline_text
+    assert PATCHED_EMPTY_ORF_GUARD in pipeline_text
+    assert PATCHED_EMPTY_HOMOLOGY_GUARD in pipeline_text
+    assert PATCHED_EMPTY_DIVERSIFICATION_GUARD in pipeline_text
+    assert PATCHED_EMPTY_SYNTENY_GUARD in pipeline_text
+
+
+def test_patched_arc_synteny_missing_lovis4u_output_fails_closed(tmp_path):
+    """Missing LoVis4u files should zero synteny metrics instead of aborting RL reward scoring."""
+    pipeline_path = (
+        Path(__file__).parents[3]
+        / "data"
+        / "arc_pipeline_patched"
+        / "genome_design_filtering_pipeline.py"
+    )
+    sys.path.insert(0, str(pipeline_path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location("patched_arc_pipeline_for_test", pipeline_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+
+    metadata_dir = tmp_path / "metadata"
+    gff_dir = tmp_path / "gff"
+    (metadata_dir / "genome_1").mkdir(parents=True)
+    gff_dir.mkdir()
+    (gff_dir / "genome_1.gff").write_text(
+        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=major spike protein\n"
+    )
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    pd.DataFrame({"id_prompt": ["umi1"], "genome_id": ["genome_1"], "total_num_genes": [1]}).to_csv(
+        input_csv,
+        index=False,
+    )
+
+    module.count_syntenic_genes_all(
+        root_dir=str(metadata_dir),
+        gff_dir=str(gff_dir),
+        input_csv=str(input_csv),
+        output_csv=str(output_csv),
+        reference_gff_path=None,
+    )
+
+    output = pd.read_csv(output_csv)
+    assert output["num_syntenic_genes"].tolist() == [0]
+    assert output["non_syntenic_genes"].fillna("").tolist() == [""]
+    assert output["missing_synteny_output"].tolist() == [True]

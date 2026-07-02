@@ -53,15 +53,72 @@ class RewardWeights:
     genome_length: float = 1.0
     gc_content: float = 1.0
     nt_homopolymer: float = 1.0
+    nucleotide_pass: float = 0.0
     orf: float = 0.0
     coding_density: float = 0.0
     protein_hit_count: float = 0.0
     tropism: float = 0.0
     genetic_architecture: float = 0.0
     checkv: float = 0.0
+    training_data_identity: float = 0.0
     synteny: float = 0.0
+    average_protein_identity: float = 0.0
+    required_genes: float = 0.0
+    reference_genome_identity: float = 0.0
     mmseqs_clustering: float = 0.0
     diversity: float = 0.0
+
+
+@dataclass(frozen=True)
+class RewardComponent:
+    """A swappable 0-1 reward component used by the aggregate RL score."""
+
+    name: str
+    weight_attr: str
+    score_column: str
+    required_for_binary_pass: bool = True
+
+
+REWARD_COMPONENTS: tuple[RewardComponent, ...] = (
+    RewardComponent("valid_nt_chars", "valid_nt_chars", "reward_valid_nt_chars"),
+    RewardComponent("genome_length", "genome_length", "reward_genome_length"),
+    RewardComponent("gc_content", "gc_content", "reward_gc_content"),
+    RewardComponent("nt_homopolymer", "nt_homopolymer", "reward_nt_homopolymer"),
+    RewardComponent("nucleotide_pass", "nucleotide_pass", "reward_nucleotide_pass"),
+    RewardComponent("orf", "orf", "reward_external_orf"),
+    RewardComponent("coding_density", "coding_density", "reward_external_coding_density"),
+    RewardComponent("protein_hit_count", "protein_hit_count", "reward_external_protein_hit_count"),
+    RewardComponent("tropism", "tropism", "reward_external_tropism"),
+    RewardComponent("genetic_architecture", "genetic_architecture", "reward_external_genetic_architecture"),
+    RewardComponent("checkv", "checkv", "reward_external_checkv", required_for_binary_pass=False),
+    RewardComponent(
+        "training_data_identity",
+        "training_data_identity",
+        "reward_external_training_data_identity",
+        required_for_binary_pass=False,
+    ),
+    RewardComponent("synteny", "synteny", "reward_external_synteny", required_for_binary_pass=False),
+    RewardComponent(
+        "average_protein_identity",
+        "average_protein_identity",
+        "reward_external_average_protein_identity",
+        required_for_binary_pass=False,
+    ),
+    RewardComponent("required_genes", "required_genes", "reward_external_required_genes", required_for_binary_pass=False),
+    RewardComponent(
+        "reference_genome_identity",
+        "reference_genome_identity",
+        "reward_external_reference_genome_identity",
+        required_for_binary_pass=False,
+    ),
+    RewardComponent(
+        "mmseqs_clustering",
+        "mmseqs_clustering",
+        "reward_external_mmseqs_clustering",
+        required_for_binary_pass=False,
+    ),
+    RewardComponent("diversity", "diversity", "reward_diversity", required_for_binary_pass=False),
+)
 
 
 @dataclass(frozen=True)
@@ -80,7 +137,18 @@ class ExternalQCRewardConfig:
     enable_tropism: bool = True
     enable_genetic_architecture: bool = True
     enable_checkv: bool = False
+    enable_training_data_identity: bool = False
     enable_synteny: bool = False
+    synteny_mode: str = "proxy"
+    enable_average_protein_identity: bool = False
+    enable_required_genes: bool = False
+    enable_reference_genome_identity: bool = False
+    training_data_identity_random_baseline: float = 0.0
+    average_protein_identity_random_baseline: float = 0.0
+    average_protein_identity_reward_floor: float = 0.75
+    required_genes_random_baseline: float = 0.5
+    reference_genome_identity_random_baseline: float = 0.0
+    synteny_removed_pair_score_floor: float = 0.75
     enable_mmseqs_clustering: bool = False
     enable_diversity: bool = False
     diversity_quality_threshold: float = 0.6
@@ -122,6 +190,118 @@ def _interval_score(value: float, lower: float, upper: float) -> float:
     return max(0.0, 1.0 - distance / width)
 
 
+def _upper_bound_ratio_score(value: float, upper: float) -> float:
+    """Return a dense score for upper-bound-only metrics such as homopolymer length."""
+    if value <= upper:
+        return 1.0
+    if value <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, upper / value))
+
+
+def _lower_bound_ratio_score(value: float, lower: float) -> float:
+    """Return a dense capped score for lower-bound thresholds."""
+    if value >= lower:
+        return 1.0
+    if lower <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, value / lower))
+
+
+def _bounded_range_score(value: float, lower: float, upper: float) -> float:
+    """Return 1 inside a target range and bounded partial credit outside it."""
+    if lower <= value <= upper:
+        return 1.0
+    if value < lower:
+        return _lower_bound_ratio_score(value, lower)
+    return _upper_bound_ratio_score(value, upper)
+
+
+def _bounded_percent_range_score(value: float, lower: float, upper: float) -> float:
+    """Return 1 in a percent range and linearly decay to 0 at 0 or 100 outside it."""
+    value = max(0.0, min(100.0, float(value)))
+    lower = max(0.0, min(100.0, float(lower)))
+    upper = max(0.0, min(100.0, float(upper)))
+    if lower <= value <= upper:
+        return 1.0
+    if value < lower:
+        return 0.0 if lower <= 0.0 else max(0.0, min(1.0, value / lower))
+    return 0.0 if upper >= 100.0 else max(0.0, min(1.0, (100.0 - value) / (100.0 - upper)))
+
+
+def _scale_score_above_random_baseline(score: float, random_baseline: float) -> float:
+    """Map a configured random-baseline score to 0 while preserving 1 as pass."""
+    score = max(0.0, min(1.0, float(score)))
+    random_baseline = max(0.0, min(0.999999, float(random_baseline)))
+    if score <= random_baseline:
+        return 0.0
+    return max(0.0, min(1.0, (score - random_baseline) / (1.0 - random_baseline)))
+
+
+def _apply_reward_floor(score: float, floor: float) -> float:
+    """Keep soft-preference scores from becoming hard rejection signals."""
+    score = max(0.0, min(1.0, float(score)))
+    floor = max(0.0, min(1.0, float(floor)))
+    return max(floor, score)
+
+
+def _checkv_quality_score(quality: str) -> float:
+    """Map CheckV quality labels to a steep bounded reward."""
+    quality_scores = {
+        "Complete": 1.0,
+        "High-quality": 0.7,
+        "Medium-quality": 0.35,
+        "Low-quality": 0.1,
+        "Not-determined": 0.0,
+    }
+    return quality_scores.get(str(quality), 0.0)
+
+
+def _active_reward_components(weights: RewardWeights, scored_df: pd.DataFrame) -> list[tuple[float, RewardComponent]]:
+    """Return weighted reward components whose score columns are available."""
+    active_components = []
+    for component in REWARD_COMPONENTS:
+        weight = float(getattr(weights, component.weight_attr))
+        if weight > 0.0 and component.score_column in scored_df:
+            active_components.append((weight, component))
+    return active_components
+
+
+def _aggregate_reward(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.DataFrame:
+    """Aggregate available 0-1 component scores into the scalar RL reward."""
+    active_components = _active_reward_components(weights, scored_df)
+    if not active_components:
+        raise ValueError("At least one available reward weight must be positive.")
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for weight, component in active_components:
+        scored_df[component.score_column] = scored_df[component.score_column].astype(float).clip(0.0, 1.0)
+        weighted_sum = weighted_sum + weight * scored_df[component.score_column]
+        total_weight += weight
+
+    scored_df["reward"] = weighted_sum / total_weight
+    scored_df["reward_active_components"] = ",".join(component.name for _, component in active_components)
+    scored_df["reward_total_weight"] = total_weight
+    scored_df["reward_binary_pass"] = binary_overall_pass_mask(scored_df, weights).astype(float)
+    return scored_df
+
+
+def binary_overall_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Series:
+    """Return the lab-facing binary pass mask for active non-diversity criteria."""
+    active_components = [
+        component
+        for _, component in _active_reward_components(weights, scored_df)
+        if component.required_for_binary_pass
+    ]
+    if not active_components:
+        return pd.Series(False, index=scored_df.index)
+    pass_mask = pd.Series(True, index=scored_df.index)
+    for component in active_components:
+        pass_mask &= scored_df[component.score_column].astype(float) >= 1.0
+    return pass_mask
+
+
 def score_nucleotide_metrics(
     sequences_df: pd.DataFrame,
     config: NucleotideQCConfig = NucleotideQCConfig(),
@@ -138,34 +318,19 @@ def score_nucleotide_metrics(
         lambda value: _interval_score(value, config.gc_content_min, config.gc_content_max)
     )
     df["reward_nt_homopolymer"] = df["max_nt_homopolymer_length"].map(
-        lambda value: _interval_score(value, config.homopolymer_min, config.homopolymer_max)
+        lambda value: _upper_bound_ratio_score(value, config.homopolymer_max)
     )
+    df["reward_nucleotide_pass"] = (
+        df["valid_nt_chars"]
+        & df["genome_length"].between(config.genome_length_min, config.genome_length_max)
+        & df["gc_content"].between(config.gc_content_min, config.gc_content_max)
+        & (df["max_nt_homopolymer_length"] <= config.homopolymer_max)
+    ).astype(float)
 
     if external_qc and external_qc.enabled:
         df = add_external_qc_rewards(df, external_qc)
 
-    reward_terms = [
-        (weights.valid_nt_chars, "reward_valid_nt_chars"),
-        (weights.genome_length, "reward_genome_length"),
-        (weights.gc_content, "reward_gc_content"),
-        (weights.nt_homopolymer, "reward_nt_homopolymer"),
-        (weights.orf, "reward_external_orf"),
-        (weights.coding_density, "reward_external_coding_density"),
-        (weights.protein_hit_count, "reward_external_protein_hit_count"),
-        (weights.tropism, "reward_external_tropism"),
-        (weights.genetic_architecture, "reward_external_genetic_architecture"),
-        (weights.checkv, "reward_external_checkv"),
-        (weights.synteny, "reward_external_synteny"),
-        (weights.mmseqs_clustering, "reward_external_mmseqs_clustering"),
-        (weights.diversity, "reward_diversity"),
-    ]
-    active_terms = [(weight, column) for weight, column in reward_terms if weight > 0.0]
-    weighted_sum = sum(weight * df[column] for weight, column in active_terms if column in df)
-    total_weight = sum(weight for weight, column in active_terms if column in df)
-    if total_weight == 0.0:
-        raise ValueError("At least one available reward weight must be positive.")
-    df["reward"] = weighted_sum / total_weight
-    return df
+    return _aggregate_reward(df, weights)
 
 
 def _write_external_qc_config(
@@ -187,14 +352,28 @@ def _write_external_qc_config(
         if config.get(key):
             config[key] = str(_repo_path(config[key]))
 
-    orf_enabled = external_qc.enable_orf or external_qc.enable_coding_density
+    synteny_mode = str(external_qc.synteny_mode).lower()
+    if synteny_mode not in {"proxy", "full"}:
+        raise ValueError(f"Unsupported synteny_mode={external_qc.synteny_mode!r}; expected 'proxy' or 'full'.")
+    full_synteny_enabled = bool(external_qc.enable_synteny and synteny_mode == "full")
+    paper_synteny_stage_enabled = bool(
+        full_synteny_enabled
+        or external_qc.enable_average_protein_identity
+        or external_qc.enable_required_genes
+    )
+
+    orf_enabled = external_qc.enable_orf or external_qc.enable_coding_density or paper_synteny_stage_enabled
     homology_enabled = (
         external_qc.enable_protein_hit_count
         or external_qc.enable_tropism
         or external_qc.enable_genetic_architecture
         or external_qc.enable_checkv
+        or external_qc.enable_training_data_identity
         or external_qc.enable_synteny
+        or external_qc.enable_average_protein_identity
+        or external_qc.enable_required_genes
         or external_qc.enable_mmseqs_clustering
+        or external_qc.enable_reference_genome_identity
     )
 
     config["orf_filtering"] = bool(orf_enabled)
@@ -207,18 +386,48 @@ def _write_external_qc_config(
     config["homology_filtering"] = bool(homology_enabled)
     config["use_orf_filtered_df"] = bool(orf_enabled)
     config["use_nucleotide_filtered_df_instead"] = not bool(orf_enabled)
-    config["protein_database_hit_count_filter"] = bool(external_qc.enable_protein_hit_count)
+    config["protein_database_hit_count_filter"] = bool(
+        external_qc.enable_protein_hit_count or paper_synteny_stage_enabled
+    )
+    config["training_data_sequence_identity_filter"] = bool(external_qc.enable_training_data_identity)
     config["genetic_architecture_filter"] = bool(external_qc.enable_genetic_architecture)
     config["tropism_protein_sequence_identity_filter"] = bool(external_qc.enable_tropism)
     config["checkv_filter"] = bool(external_qc.enable_checkv)
+    config.setdefault(
+        "training_data_sequence_identity_metrics_file_save_location",
+        "qc4_training_data_sequence_identity_metrics.csv",
+    )
 
-    config["diversification_filtering"] = bool(external_qc.enable_mmseqs_clustering)
+    config["diversification_filtering"] = bool(
+        external_qc.enable_mmseqs_clustering or external_qc.enable_reference_genome_identity
+    )
     config["use_homology_filtered_df"] = True
     config["use_orf_filtered_df_instead"] = False
     config["use_nucleotide_filtered_df_instead_2"] = False
     config["mmseqs_clustering_filter"] = bool(external_qc.enable_mmseqs_clustering)
+    config["mmseqs_reference_genome_sequence_identity_remove_filter"] = bool(
+        external_qc.enable_reference_genome_identity
+    )
+    config.setdefault(
+        "reference_genome_sequence_identity_metrics_file_save_location",
+        "qc5_reference_genome_sequence_identity_metrics.csv",
+    )
     config["genetic_architecture_remove_filter"] = False
-    config["genetic_architecture_visualization_and_synteny_filtering"] = False
+    config["genetic_architecture_visualization_and_synteny_filtering"] = paper_synteny_stage_enabled
+    config["average_protein_sequence_identity_filter"] = bool(external_qc.enable_average_protein_identity)
+    config["required_genes_filter"] = bool(external_qc.enable_required_genes)
+    config["syntenic_gene_count_filter"] = full_synteny_enabled
+    if paper_synteny_stage_enabled:
+        if not bool(config.get("allow_gff_product_order_synteny_fallback", False)):
+            config["reference_genome_gff_file_save_location"] = None
+        config.setdefault(
+            "average_protein_sequence_identity_metrics_file_save_location",
+            "qc6_average_protein_sequence_identity_metrics.csv",
+        )
+        config.setdefault("required_genes_metrics_file_save_location", "qc6_required_genes_metrics.csv")
+        config.setdefault("synteny_metrics_file_save_location", "qc6_synteny_filter_metrics.csv")
+        config["average_protein_identity_reward_floor"] = float(external_qc.average_protein_identity_reward_floor)
+        config["synteny_removed_pair_score_floor"] = float(external_qc.synteny_removed_pair_score_floor)
 
     run_config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     return run_config_path
@@ -325,7 +534,34 @@ def _add_checkv_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) ->
     quality_by_id = quality_df.set_index("contig_id")["checkv_quality"]
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
     scored_df["checkv_quality"] = scored_df[id_column].map(quality_by_id).fillna("")
-    scored_df["reward_external_checkv"] = scored_df["checkv_quality"].isin(allowed).astype(float)
+    scored_df["reward_external_checkv_pass"] = scored_df["checkv_quality"].isin(allowed).astype(float)
+    scored_df["reward_external_checkv"] = scored_df["checkv_quality"].map(
+        lambda quality: 1.0 if quality in allowed else _checkv_quality_score(str(quality))
+    )
+    return scored_df
+
+
+def _add_genetic_architecture_rewards(scored_df: pd.DataFrame, homology_df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Add architecture rewards only for rows that have Arc-produced architecture metrics."""
+    if homology_df.empty:
+        return scored_df
+
+    score_column = "genetic_architecture_score"
+    if score_column not in homology_df:
+        return scored_df
+
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    lower, upper = config.get("genetic_architecture_score_range", [0, 10])
+    metrics_df = homology_df.copy()
+    metrics_df[score_column] = pd.to_numeric(metrics_df[score_column], errors="coerce")
+    architecture_scores = metrics_df.groupby(metrics_df["id_prompt"].astype(str))[score_column].max()
+    mapped_score = scored_df[id_column].astype(str).map(architecture_scores)
+    scored_df[score_column] = mapped_score.fillna(0.0)
+    scored_df["reward_external_genetic_architecture"] = mapped_score.map(
+        lambda value: _bounded_range_score(float(value), float(lower), float(upper))
+        if pd.notna(value)
+        else 0.0
+    )
     return scored_df
 
 
@@ -358,7 +594,7 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
                 "arc_qc_id": arc_qc_id,
                 "synteny_required_gene_score": _required_gene_score(products, required_products),
                 "synteny_order_score": _ordered_required_gene_score(products, required_products),
-                "synteny_total_gene_score": _interval_score(
+                "synteny_total_gene_score": _bounded_range_score(
                     total_gene_count,
                     float(total_gene_range[0]),
                     float(total_gene_range[1]),
@@ -379,23 +615,267 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
             scored_df[column] = scored_df[id_column].map(synteny_df[column]).fillna(0.0)
         scored_df["reward_external_synteny"] = (
             scored_df["synteny_required_gene_score"]
-            + scored_df["synteny_order_score"]
-            + scored_df["synteny_total_gene_score"]
-        ) / 3.0
+            * scored_df["synteny_order_score"]
+            * scored_df["synteny_total_gene_score"]
+        )
 
     synteny_csv = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
     if synteny_csv.exists():
-        scored_df["reward_external_synteny"] = _as_arc_pass_mask(scored_df, _sequence_ids_from_csv(synteny_csv)).astype(float)
+        pass_mask = _as_arc_pass_mask(scored_df, _sequence_ids_from_csv(synteny_csv))
+        scored_df["reward_external_synteny_pass"] = pass_mask.astype(float)
+        scored_df.loc[pass_mask, "reward_external_synteny"] = 1.0
+    return scored_df
+
+
+def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
+    """Add continuous synteny rewards from Arc/LoVis4u syntenic-gene artifacts."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    metrics_path = run_dir / config.get("synteny_metrics_file_save_location", "qc6_synteny_filter_metrics.csv")
+    if not metrics_path.exists():
+        metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
+
+    if metrics_path.exists():
+        metrics_df = pd.read_csv(metrics_path)
+        if {"id_prompt", "num_syntenic_genes", "total_num_genes"}.issubset(metrics_df.columns):
+            metrics_df = metrics_df.copy()
+            metrics_df["num_syntenic_genes"] = pd.to_numeric(
+                metrics_df["num_syntenic_genes"], errors="coerce"
+            ).fillna(0.0)
+            metrics_df["total_num_genes"] = pd.to_numeric(
+                metrics_df["total_num_genes"], errors="coerce"
+            ).fillna(0.0)
+            metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
+            scored_df["num_syntenic_genes"] = scored_df[id_column].astype(str).map(
+                metrics_by_id["num_syntenic_genes"]
+            ).fillna(0.0)
+            scored_df["total_num_genes"] = scored_df[id_column].astype(str).map(
+                metrics_by_id["total_num_genes"]
+            ).fillna(0.0)
+
+            syntenic_range = config.get("syntenic_gene_count_range", [10, 12])
+            total_gene_range = config.get("total_gene_count_range", [10, 12])
+            removed_pairs = {tuple(pair) for pair in config.get("syntenic_total_gene_count_remove", [])}
+            removed_pair_floor = float(config.get("synteny_removed_pair_score_floor", 0.75))
+            scored_df["syntenic_gene_count_score"] = scored_df["num_syntenic_genes"].map(
+                lambda value: _bounded_range_score(
+                    float(value),
+                    float(syntenic_range[0]),
+                    float(syntenic_range[1]),
+                )
+            )
+            scored_df["synteny_total_gene_score"] = scored_df["total_num_genes"].map(
+                lambda value: _bounded_range_score(
+                    float(value),
+                    float(total_gene_range[0]),
+                    float(total_gene_range[1]),
+                )
+            )
+            scored_df["synteny_removed_pair_score"] = [
+                removed_pair_floor if (int(num_syntenic), int(total_genes)) in removed_pairs else 1.0
+                for num_syntenic, total_genes in zip(
+                    scored_df["num_syntenic_genes"],
+                    scored_df["total_num_genes"],
+                    strict=False,
+                )
+            ]
+            scored_df["reward_external_synteny"] = (
+                scored_df["syntenic_gene_count_score"]
+                * scored_df["synteny_total_gene_score"]
+                * scored_df["synteny_removed_pair_score"]
+            )
+
+    synteny_csv = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
+    if synteny_csv.exists():
+        pass_mask = _as_arc_pass_mask(scored_df, _sequence_ids_from_csv(synteny_csv))
+        scored_df["reward_external_synteny_pass"] = pass_mask.astype(float)
+        scored_df.loc[pass_mask, "reward_external_synteny"] = 1.0
+    return scored_df
+
+
+def _add_average_protein_identity_rewards(
+    scored_df: pd.DataFrame,
+    run_dir: Path,
+    config: dict,
+    random_baseline: float,
+    reward_floor: float,
+) -> pd.DataFrame:
+    """Add continuous rewards for Arc's average protein percent-identity filter."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    metrics_path = run_dir / config.get(
+        "average_protein_sequence_identity_metrics_file_save_location",
+        "qc6_average_protein_sequence_identity_metrics.csv",
+    )
+    if not metrics_path.exists():
+        metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
+    if not metrics_path.exists():
+        return scored_df
+
+    metrics_df = pd.read_csv(metrics_path)
+    if not {"id_prompt", "average_protein_percent_identity"}.issubset(metrics_df.columns):
+        return scored_df
+
+    metrics_df = metrics_df.copy()
+    metrics_df["average_protein_percent_identity"] = pd.to_numeric(
+        metrics_df["average_protein_percent_identity"], errors="coerce"
+    ).fillna(0.0)
+    metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
+    mapped_identity = scored_df[id_column].astype(str).map(metrics_by_id["average_protein_percent_identity"])
+    has_identity_metric = mapped_identity.notna()
+    scored_df["average_protein_percent_identity"] = mapped_identity.fillna(0.0)
+
+    lower, upper = config.get("average_protein_sequence_identity_range", [0, 95])
+    raw_scores = mapped_identity.map(
+        lambda value: _bounded_percent_range_score(float(value), float(lower), float(upper))
+        if pd.notna(value)
+        else 0.0
+    )
+    scored_df["average_protein_identity_raw_score"] = raw_scores
+    scored_df["reward_external_average_protein_identity"] = raw_scores.map(
+        lambda score: _apply_reward_floor(
+            _scale_score_above_random_baseline(float(score), random_baseline),
+            reward_floor,
+        )
+    ).where(has_identity_metric, 0.0)
+    scored_df["reward_external_average_protein_identity_pass"] = (
+        has_identity_metric & mapped_identity.between(float(lower), float(upper))
+    ).astype(float)
+    return scored_df
+
+
+def _add_percent_identity_rewards(
+    scored_df: pd.DataFrame,
+    run_dir: Path,
+    config: dict,
+    metric_file_key: str,
+    default_metric_file: str,
+    identity_column: str,
+    range_key: str,
+    default_range: list[float],
+    score_column: str,
+    raw_score_column: str,
+    pass_column: str,
+    random_baseline: float,
+) -> pd.DataFrame:
+    """Add continuous rewards for paper-stage percent-identity filters."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    metrics_path = run_dir / config.get(metric_file_key, default_metric_file)
+    if not metrics_path.exists():
+        return scored_df
+
+    metrics_df = pd.read_csv(metrics_path)
+    if not {"id_prompt", identity_column}.issubset(metrics_df.columns):
+        return scored_df
+
+    metrics_df = metrics_df.copy()
+    metrics_df[identity_column] = pd.to_numeric(metrics_df[identity_column], errors="coerce").fillna(0.0)
+    metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
+    mapped_identity = scored_df[id_column].astype(str).map(metrics_by_id[identity_column])
+    has_identity_metric = mapped_identity.notna()
+    scored_df[identity_column] = mapped_identity.fillna(0.0)
+
+    lower, upper = config.get(range_key, default_range)
+    raw_scores = mapped_identity.map(
+        lambda value: _bounded_percent_range_score(float(value), float(lower), float(upper))
+        if pd.notna(value)
+        else 0.0
+    )
+    scored_df[raw_score_column] = raw_scores
+    scored_df[score_column] = raw_scores.map(
+        lambda score: _scale_score_above_random_baseline(float(score), random_baseline)
+    ).where(has_identity_metric, 0.0)
+    scored_df[pass_column] = (has_identity_metric & mapped_identity.between(float(lower), float(upper))).astype(float)
+    return scored_df
+
+
+def _add_required_gene_rewards(
+    scored_df: pd.DataFrame,
+    run_dir: Path,
+    config: dict,
+    random_baseline: float,
+) -> pd.DataFrame:
+    """Add continuous rewards for Arc's required-gene annotation filter."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    metrics_path = run_dir / config.get("required_genes_metrics_file_save_location", "qc6_required_genes_metrics.csv")
+    if not metrics_path.exists():
+        metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
+    if not metrics_path.exists():
+        return scored_df
+
+    metrics_df = pd.read_csv(metrics_path)
+    required_columns = {"id_prompt", "required_genes_matched_count", "required_genes_total_count"}
+    if not required_columns.issubset(metrics_df.columns):
+        return scored_df
+
+    metrics_df = metrics_df.copy()
+    for column in ["required_genes_matched_count", "required_genes_total_count"]:
+        metrics_df[column] = pd.to_numeric(metrics_df[column], errors="coerce").fillna(0.0)
+    metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
+    mapped_matched = scored_df[id_column].astype(str).map(metrics_by_id["required_genes_matched_count"])
+    mapped_total = scored_df[id_column].astype(str).map(metrics_by_id["required_genes_total_count"])
+    has_required_gene_metric = mapped_matched.notna() & mapped_total.notna()
+    scored_df["required_genes_matched_count"] = mapped_matched.fillna(0.0)
+    scored_df["required_genes_total_count"] = mapped_total.fillna(0.0)
+    scored_df["required_genes_raw_score"] = [
+        0.0 if not has_metric else 1.0 if total <= 0 else max(0.0, min(1.0, matched / total))
+        for matched, total, has_metric in zip(
+            scored_df["required_genes_matched_count"],
+            scored_df["required_genes_total_count"],
+            has_required_gene_metric,
+            strict=False,
+        )
+    ]
+    scored_df["reward_external_required_genes"] = scored_df["required_genes_raw_score"].map(
+        lambda score: _scale_score_above_random_baseline(float(score), random_baseline)
+    )
+    scored_df["reward_external_required_genes_pass"] = (
+        has_required_gene_metric
+        & (
+            (scored_df["required_genes_total_count"] <= 0)
+            | (scored_df["required_genes_matched_count"] >= scored_df["required_genes_total_count"])
+        )
+    ).astype(float)
     return scored_df
 
 
 def _add_mmseqs_clustering_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Reward sequences that remain as MMseqs clustering representatives."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    clusters_tsv = (
+        run_dir
+        / config.get("mmseqs_clustering_results_dir_save_location", "")
+        / "mmseqs_results"
+        / "clusters.tsv"
+    )
+    if clusters_tsv.exists():
+        clusters_df = pd.read_csv(clusters_tsv, sep="\t", header=None, names=["representative_id", "member_id"])
+        if {"representative_id", "member_id"}.issubset(clusters_df.columns):
+            cluster_sizes = clusters_df.groupby("representative_id")["member_id"].nunique()
+            member_to_representative = clusters_df.set_index("member_id")["representative_id"]
+            sequence_ids = scored_df[id_column].astype(str)
+            representatives = sequence_ids.map(member_to_representative)
+            known_cluster_member = representatives.notna()
+            sizes = representatives.map(cluster_sizes).fillna(0.0).astype(float)
+            scored_df["mmseqs_cluster_size"] = sizes
+            scored_df["reward_external_mmseqs_clustering_pass"] = (
+                known_cluster_member & (sequence_ids == representatives)
+            ).astype(float)
+            partial_scores = pd.Series(0.0, index=scored_df.index)
+            partial_scores.loc[known_cluster_member] = (
+                1.0 / sizes.loc[known_cluster_member].clip(lower=1.0)
+            )
+            scored_df["reward_external_mmseqs_clustering"] = scored_df[
+                "reward_external_mmseqs_clustering_pass"
+            ].where(scored_df["reward_external_mmseqs_clustering_pass"] >= 1.0, partial_scores).clip(
+                lower=0.0,
+                upper=1.0,
+            )
+            return scored_df
+
     clustered_csv = run_dir / config.get("diversification_filter_seqs_csv_file_save_location", "")
     if clustered_csv.exists():
-        scored_df["reward_external_mmseqs_clustering"] = _as_arc_pass_mask(
-            scored_df, _sequence_ids_from_csv(clustered_csv)
-        ).astype(float)
+        pass_mask = _as_arc_pass_mask(scored_df, _sequence_ids_from_csv(clustered_csv))
+        scored_df["reward_external_mmseqs_clustering_pass"] = pass_mask.astype(float)
+        scored_df.loc[pass_mask, "reward_external_mmseqs_clustering"] = 1.0
     return scored_df
 
 
@@ -416,7 +896,7 @@ def _zscore(values: pd.Series) -> pd.Series:
 
 
 def _add_diversity_rewards(scored_df: pd.DataFrame, external_qc: ExternalQCRewardConfig) -> pd.DataFrame:
-    """Add gated batch k-mer diversity reward, normalized like a GRPO group bonus."""
+    """Add gated 0-1 batch k-mer diversity reward."""
     if len(scored_df) <= 1:
         scored_df["diversity_raw"] = 0.0
         scored_df["reward_diversity"] = 0.0
@@ -435,7 +915,7 @@ def _add_diversity_rewards(scored_df: pd.DataFrame, external_qc: ExternalQCRewar
         raw_scores.append(sum(distances) / len(distances) if distances else 0.0)
 
     scored_df["diversity_raw"] = raw_scores
-    normalized = _zscore(pd.Series(raw_scores, index=scored_df.index)).clip(-2.0, 2.0)
+    normalized = _zscore(pd.Series(raw_scores, index=scored_df.index)).clip(0.0, 2.0) / 2.0
     quality_columns = [
         "reward_valid_nt_chars",
         "reward_genome_length",
@@ -446,7 +926,11 @@ def _add_diversity_rewards(scored_df: pd.DataFrame, external_qc: ExternalQCRewar
         "reward_external_tropism",
         "reward_external_genetic_architecture",
         "reward_external_checkv",
+        "reward_external_training_data_identity",
         "reward_external_synteny",
+        "reward_external_average_protein_identity",
+        "reward_external_required_genes",
+        "reward_external_reference_genome_identity",
     ]
     available_quality_columns = [column for column in quality_columns if column in scored_df]
     quality = scored_df[available_quality_columns].mean(axis=1) if available_quality_columns else pd.Series(1.0, index=scored_df.index)
@@ -465,9 +949,9 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             genome_counts = _genome_ids_from_orf_hits(hits_df).value_counts()
             min_hits = int(config.get("protein_database_hit_count", 7))
             scored_df["protein_database_hit_count"] = scored_df[id_column].map(genome_counts).fillna(0).astype(int)
-            scored_df["reward_external_protein_hit_count"] = (
-                scored_df["protein_database_hit_count"] >= min_hits
-            ).astype(float)
+            scored_df["reward_external_protein_hit_count"] = scored_df["protein_database_hit_count"].map(
+                lambda value: _lower_bound_ratio_score(float(value), float(min_hits))
+            )
 
     tropism_hits_path = run_dir / config["mmseqs_tropism_protein_results_dir_save_location"] / "mmseqs2_hits.csv"
     if tropism_hits_path.exists():
@@ -485,7 +969,7 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             )
             scored_df["reward_external_tropism"] = scored_df[
                 "tropism_protein_mmseqs_percent_identity"
-            ].between(float(lower), float(upper)).astype(float)
+            ].map(lambda value: _bounded_range_score(float(value), float(lower), float(upper)))
     return scored_df
 
 
@@ -514,7 +998,11 @@ def add_external_qc_rewards(
         "reward_external_tropism",
         "reward_external_genetic_architecture",
         "reward_external_checkv",
+        "reward_external_training_data_identity",
         "reward_external_synteny",
+        "reward_external_average_protein_identity",
+        "reward_external_required_genes",
+        "reward_external_reference_genome_identity",
         "reward_external_mmseqs_clustering",
         "reward_diversity",
     ]:
@@ -541,24 +1029,62 @@ def add_external_qc_rewards(
 
         homology_csv = run_dir / config["homology_filter_seqs_csv_file_save_location"]
         homology_df = pd.read_csv(homology_csv) if homology_csv.exists() else pd.DataFrame()
-        if external_qc.enable_genetic_architecture and not homology_df.empty:
-            lower, upper = config.get("genetic_architecture_score_range", [0, 10])
-            score_column = "genetic_architecture_score"
-            if score_column in homology_df:
-                arch_pass_ids = set(
-                    homology_df[
-                        pd.to_numeric(homology_df[score_column], errors="coerce").between(float(lower), float(upper))
-                    ]["id_prompt"].astype(str)
-                )
-                df["reward_external_genetic_architecture"] = (
-                    df["arc_qc_id"].astype(str).isin(arch_pass_ids).astype(float)
-                )
+        if external_qc.enable_genetic_architecture:
+            df = _add_genetic_architecture_rewards(df, homology_df, config)
 
         df = _add_mmseqs_hit_rewards(df, run_dir, config)
+        if external_qc.enable_training_data_identity:
+            df = _add_percent_identity_rewards(
+                df,
+                run_dir,
+                config,
+                metric_file_key="training_data_sequence_identity_metrics_file_save_location",
+                default_metric_file="qc4_training_data_sequence_identity_metrics.csv",
+                identity_column="training_data_mmseqs_percent_identity",
+                range_key="training_data_sequence_identity_range",
+                default_range=[0, 98.9],
+                score_column="reward_external_training_data_identity",
+                raw_score_column="training_data_identity_raw_score",
+                pass_column="reward_external_training_data_identity_pass",
+                random_baseline=external_qc.training_data_identity_random_baseline,
+            )
         if external_qc.enable_checkv:
             df = _add_checkv_rewards(df, run_dir, config)
         if external_qc.enable_synteny:
-            df = _add_synteny_proxy_rewards(df, run_dir, config)
+            if str(external_qc.synteny_mode).lower() == "full":
+                df = _add_full_synteny_rewards(df, run_dir, config)
+            else:
+                df = _add_synteny_proxy_rewards(df, run_dir, config)
+        if external_qc.enable_average_protein_identity:
+            df = _add_average_protein_identity_rewards(
+                df,
+                run_dir,
+                config,
+                external_qc.average_protein_identity_random_baseline,
+                external_qc.average_protein_identity_reward_floor,
+            )
+        if external_qc.enable_required_genes:
+            df = _add_required_gene_rewards(
+                df,
+                run_dir,
+                config,
+                external_qc.required_genes_random_baseline,
+            )
+        if external_qc.enable_reference_genome_identity:
+            df = _add_percent_identity_rewards(
+                df,
+                run_dir,
+                config,
+                metric_file_key="reference_genome_sequence_identity_metrics_file_save_location",
+                default_metric_file="qc5_reference_genome_sequence_identity_metrics.csv",
+                identity_column="reference_genome_mmseqs_percent_identity",
+                range_key="mmseqs_reference_genome_sequence_identity_keep_range",
+                default_range=[0, 98.9],
+                score_column="reward_external_reference_genome_identity",
+                raw_score_column="reference_genome_identity_raw_score",
+                pass_column="reward_external_reference_genome_identity_pass",
+                random_baseline=external_qc.reference_genome_identity_random_baseline,
+            )
         if external_qc.enable_mmseqs_clustering:
             df = _add_mmseqs_clustering_rewards(df, run_dir, config)
         if external_qc.enable_diversity:

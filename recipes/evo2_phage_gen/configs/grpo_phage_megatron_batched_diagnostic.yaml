@@ -1,0 +1,33 @@
+# One-step Evo2 phage GRPO diagnostic for batched MCore generation.
+#
+# The serial NeMo-RL generation path produces pathological repeats for Evo2. Use this config to
+# test whether NeMo-RL can use the same batched decode regime that standalone HPO generation needs.
+
+defaults: "grpo_phage_megatron_diagnostic.yaml"
+
+grpo:
+  max_num_epochs: 1
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 8
+  max_num_steps: 1
+
+policy:
+  train_global_batch_size: 8
+  train_micro_batch_size: 1
+  generation_batch_size: 8
+  logprob_batch_size: 1
+  generation:
+    mcore_generation_config:
+      max_requests: 8
+      prompt_batch_size: 8
+      enable_chunked_prefill: false
+      generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
+      generation_adapter_config:
+        seed_stride: 1000003
+
+logger:
+  log_dir: "data/checkpoints/phage_grpo_logs_batched_diagnostic"
+
+checkpointing:
+  enabled: false
+  checkpoint_dir: "data/checkpoints/phage_grpo_batched_diagnostic"

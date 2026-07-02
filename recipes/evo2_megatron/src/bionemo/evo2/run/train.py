@@ -396,6 +396,11 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         "resuming training from a zarr checkpoint.",
     )  # DONE
     parser.add_argument(
+        "--no-save-optim",
+        action="store_true",
+        help="Do not save optimizer state in checkpoints. Useful for memory-constrained finetune probes.",
+    )
+    parser.add_argument(
         "--eod-pad-in-loss-mask",
         action="store_true",
         default=False,
@@ -841,7 +846,7 @@ def train(args: argparse.Namespace) -> None:
     cfg.checkpoint.async_save = args.ckpt_async_save
     cfg.checkpoint.ckpt_format = args.ckpt_format
     cfg.checkpoint.save_interval = args.eval_interval
-    cfg.checkpoint.save_optim = True
+    cfg.checkpoint.save_optim = not args.no_save_optim
     cfg.checkpoint.save_rng = True
     cfg.checkpoint.fully_parallel_load = True
     cfg.checkpoint.fully_parallel_save = True

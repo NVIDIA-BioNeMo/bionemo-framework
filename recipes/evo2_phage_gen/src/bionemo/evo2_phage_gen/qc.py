@@ -33,6 +33,7 @@ from Bio.SeqRecord import SeqRecord
 
 
 DNA_ALPHABET = frozenset("ACGTacgt")
+EOS_TEXT_MARKERS = ("<EOS>", "<EOD>", "<STOP>", "EOS", "EOD", "STOP")
 
 
 @dataclass(frozen=True)
@@ -48,8 +49,19 @@ class NucleotideQCConfig:
 
 
 def trim_at_first_eos(sequence: str) -> str:
-    """Keep sequence content before the first whitespace EOS separator."""
-    return sequence.split(" ", maxsplit=1)[0]
+    """Keep sequence content before textual EOS/EOD/STOP markers."""
+    sequence = str(sequence)
+    stop_index = len(sequence)
+    for idx, char in enumerate(sequence):
+        if char.isspace():
+            stop_index = min(stop_index, idx)
+            break
+    upper_sequence = sequence.upper()
+    for marker in EOS_TEXT_MARKERS:
+        marker_index = upper_sequence.find(marker)
+        if marker_index != -1:
+            stop_index = min(stop_index, marker_index)
+    return sequence[:stop_index]
 
 
 def clean_sequence(sequence: str, keep_only_up_to_first_eos: bool = True) -> str:
@@ -137,10 +149,15 @@ def apply_nucleotide_qc(
 def save_fasta(sequences_df: pd.DataFrame, output_path: Path) -> None:
     """Write dataframe rows with ``id_prompt`` and ``sequence`` columns to FASTA."""
     records = [
-        SeqRecord(Seq(row.sequence), id=str(row.id_prompt), description="")
+        SeqRecord(Seq(_ascii_safe_sequence(row.sequence)), id=str(row.id_prompt), description="")
         for row in sequences_df[["id_prompt", "sequence"]].itertuples(index=False)
     ]
     SeqIO.write(records, str(output_path), "fasta")
+
+
+def _ascii_safe_sequence(sequence: str) -> str:
+    """Replace FASTA-unsafe/generated tokens so QC rejects them instead of corrupting records."""
+    return "".join(char if char in DNA_ALPHABET else "N" for char in str(sequence))
 
 
 def run_nucleotide_qc(

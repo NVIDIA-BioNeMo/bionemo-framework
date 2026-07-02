@@ -1,0 +1,33 @@
+# Fast Evo2 phage GRPO diagnostic.
+#
+# Use this before any full 100-step run. It keeps full-length lab-facing scoring enabled, but
+# reduces rollout count and disables checkpointing so we can check reward/pass behavior quickly.
+
+defaults: "grpo_phage_megatron_rl100.yaml"
+
+grpo:
+  max_num_epochs: 2
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 8
+  max_num_steps: 2
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+policy:
+  train_global_batch_size: 8
+  train_micro_batch_size: 1
+  generation_batch_size: 1
+  logprob_batch_size: 1
+  generation:
+    max_new_tokens: 5990
+    temperature: 1.1
+    top_p: 1.0
+    top_k: 4
+
+logger:
+  log_dir: "data/checkpoints/phage_grpo_logs_diagnostic"
+
+checkpointing:
+  enabled: false
+  checkpoint_dir: "data/checkpoints/phage_grpo_diagnostic"

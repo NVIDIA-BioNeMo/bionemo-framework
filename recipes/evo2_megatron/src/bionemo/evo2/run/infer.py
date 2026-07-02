@@ -481,7 +481,8 @@ def setup_inference_engine(
             auto-sizing. The context is CUDA-graph-pinned, so the budget cannot change in place — in
             auto mode a later prompt that needs more triggers a one-time rebuild + graph re-capture at
             a larger size; a manual cap never grows (an over-long prompt then just stops early).
-        max_batch_size: Maximum batch size for inference.
+        max_batch_size: Prompt-file chunk size and Megatron setup micro-batch metadata. This does
+            not control the number of prompt-file generations or Evo2 native decode concurrency.
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
@@ -759,6 +760,7 @@ class _NativeDynamicResult:
     generated_length: int
     prompt_tokens: List[int]
     generated_log_probs: Optional[List[float]] = None
+    finish_reason: str = "length"
 
 
 def _sample_from_logits(
@@ -827,22 +829,59 @@ def _sample_from_logits(
     return sampled
 
 
+def _extract_generation_logits(dyn_ctx, logits: torch.Tensor) -> torch.Tensor:
+    """Return one vocab-logit row per active generation request."""
+    if getattr(dyn_ctx, "materialize_only_last_token_logits", False):
+        assert logits.size(0) == 1, f"logits.size(0) ({tuple(logits.shape)}) != 1"
+        return logits.squeeze(0)[: dyn_ctx.num_last_token_logits].float()
+    return dyn_ctx.last_token_logits(logits).float()
+
+
 _BATCHED_DECODE_TEXT_STOP_MARKERS = ("STOP", "EOS", "EOD")
 
 
 def _native_stop_token_ids(tokenizer: Any) -> set[int]:
     """Best-effort set of tokenizer EOD/EOS ids for fixed-shape native decode."""
     stop_token_ids: set[int] = set()
-    for attr_name in ("eod", "eos", "eos_token_id"):
+
+    def _add_token_id(token_id: Any) -> None:
+        if token_id is None:
+            return
+        if isinstance(token_id, (list, tuple, set)):
+            for item in token_id:
+                _add_token_id(item)
+            return
+        if hasattr(token_id, "tolist"):
+            _add_token_id(token_id.tolist())
+            return
+        if isinstance(token_id, str):
+            mapped_id = None
+            for token_lookup_owner in (tokenizer, getattr(tokenizer, "tokenizer", None)):
+                token_to_id = getattr(token_lookup_owner, "token_to_id", None)
+                if callable(token_to_id):
+                    mapped_id = token_to_id(token_id)
+                    if mapped_id is not None:
+                        break
+            if mapped_id is None and hasattr(tokenizer, "tokenize"):
+                tokenized = tokenizer.tokenize(token_id)
+                if isinstance(tokenized, int):
+                    mapped_id = tokenized
+                elif hasattr(tokenized, "tolist"):
+                    tokenized = tokenized.tolist()
+                if isinstance(tokenized, (list, tuple)) and len(tokenized) == 1:
+                    mapped_id = tokenized[0]
+            if mapped_id is not None:
+                stop_token_ids.add(int(mapped_id))
+            return
+        stop_token_ids.add(int(token_id))
+
+    for attr_name in ("eod", "eod_id", "eod_token", "eos", "eos_id", "eos_token", "eos_token_id"):
         token_id = getattr(tokenizer, attr_name, None)
         if token_id is None and hasattr(tokenizer, "tokenizer"):
             token_id = getattr(tokenizer.tokenizer, attr_name, None)
-        if token_id is None:
-            continue
-        if isinstance(token_id, (list, tuple, set)):
-            stop_token_ids.update(int(item) for item in token_id if item is not None)
-        else:
-            stop_token_ids.add(int(token_id))
+        _add_token_id(token_id)
+    for token_text in ("<EOS>", "<EOD>"):
+        _add_token_id(token_text)
     return stop_token_ids
 
 
@@ -868,8 +907,10 @@ def _native_generated_ids_hit_stop(tokenizer: Any, generated_ids: list[int], sto
         return False
     if generated_ids[-1] in stop_token_ids:
         return True
-    generated_text = tokenizer.detokenize(generated_ids)
-    return _trim_native_text_stop_markers(generated_text) != generated_text
+    # Avoid detokenizing the full generated prefix on every decode step. Textual markers are short
+    # ("STOP", "EOS", "EOD") and may be split across character tokens, so a small suffix is enough.
+    suffix_text = tokenizer.detokenize(generated_ids[-8:])
+    return _trim_native_text_stop_markers(suffix_text) != suffix_text
 
 
 def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx: Any, device: torch.device) -> None:
@@ -1046,7 +1087,7 @@ def _get_or_build_shared_dynamic_context(
             use_cuda_graphs_for_non_decode_steps=False,
         ),
     )
-    dyn_ctx.materialize_only_last_token_logits = False
+    dyn_ctx.materialize_only_last_token_logits = True
     dyn_ctx.evo2_max_batched_decode_requests = int(max_active_requests)
     dyn_ctx.initialize_all_tensors()
     if nd.cuda_graphs_enabled:
@@ -1190,8 +1231,11 @@ def _generate_native_dynamic(
 
         generated_ids: List[int] = []
         generated_logprobs: List[float] = []
+        stop_token_ids = _native_stop_token_ids(tokenizer)
+        stopped_on_eos = False
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
+            nonlocal stopped_on_eos
             dyn_ctx.initialize_attention_state()
             input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
             try:
@@ -1211,7 +1255,7 @@ def _generate_native_dynamic(
             # HyenaModel returns [B, S, vocab]; last_token_logits expects [1, S, H] and
             # selects the per-request final position -> [num_requests, vocab]. Sample in fp32 so
             # stochastic filters and logprobs do not depend on the model activation dtype.
-            last_logits = dyn_ctx.last_token_logits(logits).float()
+            last_logits = _extract_generation_logits(dyn_ctx, logits)
             sampled = _sample_from_logits(
                 last_logits,
                 temperature=float(temperature),
@@ -1220,16 +1264,20 @@ def _generate_native_dynamic(
                 generator=sampling_rng,
                 vocab_size=tokenizer.vocab_size,
             )
+            sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
             if count_generated:
-                next_tok_id = int(sampled[0].item())
-                generated_ids.append(next_tok_id)
-                if return_log_probs:
+                next_tok_id = int(sampled_cpu[0].item())
+                if next_tok_id in stop_token_ids:
+                    stopped_on_eos = True
+                else:
+                    generated_ids.append(next_tok_id)
+                if return_log_probs and not stopped_on_eos:
                     logprob = torch.log_softmax(last_logits[0].float(), dim=-1)[next_tok_id].item()
                     generated_logprobs.append(logprob)
             active_after_sample = torch.tensor(
-                [not count_generated or len(generated_ids) < max_new_tokens], dtype=torch.bool, device=device
+                [not count_generated or (not stopped_on_eos and len(generated_ids) < max_new_tokens)], dtype=torch.bool
             )
-            dyn_ctx.update_requests(active_after_sample, sampled.to(dtype=torch.int64, device=device))
+            dyn_ctx.update_requests(active_after_sample, sampled_cpu)
             return bool(active_after_sample[0].item())
 
         try:
@@ -1294,6 +1342,7 @@ def _generate_native_dynamic(
             generated_length=len(generated_ids),
             prompt_tokens=prompt_token_ids,
             generated_log_probs=generated_logprobs if return_log_probs else None,
+            finish_reason="stop" if stopped_on_eos else "length",
         )
 
     def _run_batched_prompts(prompt_token_id_batch: list[list[int]]) -> list[_NativeDynamicResult]:
@@ -1307,6 +1356,7 @@ def _generate_native_dynamic(
                     generated_length=0,
                     prompt_tokens=prompt_token_ids,
                     generated_log_probs=[] if return_log_probs else None,
+                    finish_reason="length",
                 )
                 for prompt_token_ids in prompt_token_id_batch
             ]
@@ -1319,11 +1369,8 @@ def _generate_native_dynamic(
         n_prompt = prompt_lengths.pop()
         generated_ids: list[list[int]] = [[] for _ in range(batch_request_count)]
         generated_logprobs: list[list[float]] = [[] for _ in range(batch_request_count)]
-        done = [False for _ in range(batch_request_count)]
         stop_token_ids = _native_stop_token_ids(tokenizer)
-
-        def _all_rows_done() -> bool:
-            return all(done[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens for request_idx in range(batch_request_count))
+        stopped_on_eos = [False for _ in range(batch_request_count)]
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
             dyn_ctx.initialize_attention_state()
@@ -1342,7 +1389,7 @@ def _generate_native_dynamic(
                     inference_context=dyn_ctx,
                     runtime_gather_output=True,
                 )
-            last_logits = dyn_ctx.last_token_logits(logits).float()
+            last_logits = _extract_generation_logits(dyn_ctx, logits)
             if last_logits.shape[0] < batch_request_count:
                 raise RuntimeError(
                     "Evo2 batched decode expected one logit row per active request; "
@@ -1357,24 +1404,27 @@ def _generate_native_dynamic(
                 generator=sampling_rng,
                 vocab_size=tokenizer.vocab_size,
             )
+            sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
+            sampled_ids = sampled_cpu.tolist()
             if count_generated:
                 if return_log_probs:
                     log_probs = torch.log_softmax(active_logits.float(), dim=-1)
-                for request_idx, next_tok_tensor in enumerate(sampled):
-                    if done[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens:
+                for request_idx, next_tok_id in enumerate(sampled_ids):
+                    if stopped_on_eos[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens:
                         continue
-                    next_tok_id = int(next_tok_tensor.item())
+                    if next_tok_id in stop_token_ids:
+                        stopped_on_eos[request_idx] = True
+                        continue
                     generated_ids[request_idx].append(next_tok_id)
                     if return_log_probs:
                         generated_logprobs[request_idx].append(log_probs[request_idx, next_tok_id].item())
-                    if _native_generated_ids_hit_stop(tokenizer, generated_ids[request_idx], stop_token_ids):
-                        done[request_idx] = True
 
-            # Keep every slot alive until the whole fixed-shape batch is complete; per-row compaction
-            # would require rebinding Hyena recurrent-state views after MCore moves active requests.
-            keep_group_active = (not count_generated) or not _all_rows_done()
-            active_after_sample = torch.full((batch_request_count,), keep_group_active, dtype=torch.bool, device=device)
-            dyn_ctx.update_requests(active_after_sample, sampled.to(dtype=torch.int64, device=device))
+            keep_group_active = (not count_generated) or any(
+                not stopped_on_eos[request_idx] and len(request_generated_ids) < max_new_tokens
+                for request_idx, request_generated_ids in enumerate(generated_ids)
+            )
+            active_after_sample = torch.full((batch_request_count,), keep_group_active, dtype=torch.bool)
+            dyn_ctx.update_requests(active_after_sample, sampled_cpu)
             if int(getattr(dyn_ctx, "paused_request_count", 0)) != 0:
                 raise RuntimeError("Evo2 batched decode does not yet support paused dynamic requests")
             return keep_group_active
@@ -1401,7 +1451,7 @@ def _generate_native_dynamic(
                     )
 
                 _forward_sample_update(count_generated=True)
-                while not _all_rows_done():
+                while any(len(request_generated_ids) < max_new_tokens for request_generated_ids in generated_ids):
                     if not dyn_ctx.has_unfinished_requests():
                         break
                     _forward_sample_update(count_generated=True)
@@ -1411,14 +1461,11 @@ def _generate_native_dynamic(
 
         return [
             _NativeDynamicResult(
-                generated_text=(
-                    _trim_native_text_stop_markers(tokenizer.detokenize(request_generated_ids))
-                    if request_generated_ids
-                    else ""
-                ),
+                generated_text=tokenizer.detokenize(request_generated_ids) if request_generated_ids else "",
                 generated_length=len(request_generated_ids),
                 prompt_tokens=prompt_token_ids,
                 generated_log_probs=generated_logprobs[request_idx] if return_log_probs else None,
+                finish_reason="stop" if stopped_on_eos[request_idx] else "length",
             )
             for request_idx, (prompt_token_ids, request_generated_ids) in enumerate(
                 zip(prompt_token_id_batch, generated_ids)
@@ -1444,8 +1491,8 @@ def _generate_native_dynamic(
             _append_results(_run_batched_prompts(group), prompt_offset=group_start)
         except Exception as exc:
             if rank == 0:
-                logger.warning(
-                    "[evo2-native] batched decode group failed (%s); falling back to single-request decode",
+                logger.exception(
+                    "[evo2-native] batched decode group failed (%r); falling back to single-request decode",
                     exc,
                 )
             fallback_results = [_run_single_prompt(prompt_token_ids) for prompt_token_ids in group]
@@ -1524,7 +1571,9 @@ def _result_to_jsonl_record(
     generated_length = result.generated_length or 0
     prompt_tokens_count = len(result.prompt_tokens) if result.prompt_tokens is not None else 0
 
-    finish_reason = "length" if generated_length >= max_new_tokens else "stop"
+    finish_reason = getattr(result, "finish_reason", None)
+    if finish_reason is None:
+        finish_reason = "length" if generated_length >= max_new_tokens else "stop"
 
     record: Dict[str, Any] = {
         "id": request_id,
@@ -1654,20 +1703,25 @@ def parse_args() -> argparse.Namespace:
         "re-capture); set --max-seq-length to pin a fixed size and avoid regrows.",
     )
     ap.add_argument(
-        "--max-batch-size",
+        "--prompt-batch-size",
         type=int,
-        default=1,
-        help="Maximum batch size for inference. The inference engine pre-allocates GPU memory "
-        "proportional to this value (KV caches, attention masks, internal buffers). "
-        "For large models (e.g. 40b), only batch_size=1 may fit in memory.",
+        default=None,
+        help="Number of prompt-file rows to decode concurrently in the Evo2 native path. This does "
+        "not change the number of generations, which is exactly the number of prompt-file rows.",
     )
     ap.add_argument(
         "--evo2-batched-decode-size",
+        dest="evo2_batched_decode_size",
         type=int,
-        default=1,
-        help="Opt-in Evo2 native batched next-token decode size for same-length prompts. "
-        "Values >1 keep that many prompts active in one dynamic-context step. "
-        "Unsupported groups fall back to the original single-request path.",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    ap.add_argument(
+        "--max-batch-size",
+        dest="max_batch_size",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     ap.add_argument(
         "--use-subquadratic-ops",
@@ -1805,8 +1859,8 @@ def infer(
             (default) auto-sizes the engine from the prompt token lengths and grows on demand.
         max_seq_length_num_prompts: When auto-sizing, size from the longest of the first N prompts
             (``<= 0`` = all). A longer later prompt grows the context on demand rather than erroring.
-        max_batch_size: Maximum batch size for inference. The inference engine pre-allocates
-            GPU memory proportional to this value. For large models, only 1 may fit.
+        max_batch_size: Prompt-file chunk size and Megatron setup micro-batch metadata. This does
+            not control the number of prompt-file generations or Evo2 native decode concurrency.
         evo2_batched_decode_size: Opt-in number of same-length Evo2 prompts to keep active for
             native Hyena next-token decode. ``1`` preserves the original single-request path.
         use_subquadratic_ops: Use fused subquadratic-ops kernels in the inference path.
@@ -1994,6 +2048,13 @@ def main() -> None:
     else:
         prompts = [{"id": "0", "prompt": args.prompt}]
 
+    prompt_batch_size = args.prompt_batch_size
+    if prompt_batch_size is None:
+        prompt_batch_size = args.evo2_batched_decode_size
+    if prompt_batch_size is None:
+        prompt_batch_size = 1
+    prompt_file_chunk_size = args.max_batch_size if args.max_batch_size is not None else prompt_batch_size
+
     infer(
         prompts=prompts,
         ckpt_dir=args.ckpt_dir,
@@ -2012,8 +2073,8 @@ def main() -> None:
         vortex_style_fp8=args.vortex_style_fp8,
         max_seq_length=max_seq_length,
         max_seq_length_num_prompts=args.max_seq_length_num_prompts,
-        max_batch_size=args.max_batch_size,
-        evo2_batched_decode_size=args.evo2_batched_decode_size,
+        max_batch_size=prompt_file_chunk_size,
+        evo2_batched_decode_size=prompt_batch_size,
         use_subquadratic_ops=args.use_subquadratic_ops,
         cuda_graph_impl=args.cuda_graph_impl,
         enable_chunked_prefill=args.enable_chunked_prefill,

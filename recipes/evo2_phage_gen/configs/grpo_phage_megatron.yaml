@@ -32,7 +32,9 @@ policy:
     chat_template_kwargs: null
   train_global_batch_size: 4
   train_micro_batch_size: 1
-  generation_batch_size: 8
+  # Serial generation is the current known-good GRPO path for Evo2. Larger
+  # prompt batches hit MCore's dynamic KV-cache append assertion during decode.
+  generation_batch_size: 1
   logprob_batch_size: 1
   max_total_sequence_length: 10240
   precision: "bfloat16"
@@ -52,16 +54,23 @@ policy:
       - "bionemo.common."
   generation:
     backend: "megatron"
-    max_new_tokens: 6000
+    # Prompt bases are included in reward/QC scoring. The bundled RL prompts are
+    # `+~NNNN`, so 5996 new tokens keeps full-length genomes within the 6000 bp
+    # Arc hard upper bound after adding the 4-base prompt prefix.
+    max_new_tokens: 5996
+    # Keep rollouts stochastic using temperature only. Top-k/top-p truncation changes
+    # the sampled policy support and can make replay/reference logprobs inconsistent
+    # as the policy changes; null maps to MCore top_k=0 (disabled).
     temperature: 0.8
-    top_p: 0.95
+    top_p: 1.0
     top_k: null
     mcore_generation_config:
       cuda_graph_impl: "local"
       inference_cuda_graph_scope: "block"
       use_cuda_graphs_for_non_decode_steps: true
-      max_requests: 8
-      evo2_batched_decode_size: 8
+      # Must be divisible by tensor_model_parallel_size=2 even when prompt batching is serial.
+      max_requests: 2
+      prompt_batch_size: 1
 
 data:
   max_input_seq_length: 512
@@ -89,14 +98,20 @@ env:
     weight_genome_length: 1.0
     weight_gc_content: 1.0
     weight_nt_homopolymer: 1.0
+    weight_nucleotide_pass: 0.0
     weight_orf: 1.0
     weight_coding_density: 1.0
     weight_protein_hit_count: 1.0
     weight_tropism: 1.0
     weight_genetic_architecture: 1.0
     weight_checkv: 1.0
-    weight_synteny: 1.0
-    weight_mmseqs_clustering: 1.0
+    # Novelty/diversification terms are preferences, not hard paper-candidate gates.
+    weight_training_data_identity: 0.25
+    weight_synteny: 0.25
+    weight_average_protein_identity: 0.25
+    weight_required_genes: 0.25
+    weight_reference_genome_identity: 0.25
+    weight_mmseqs_clustering: 0.25
     # Small normalized diversity bonus. Set to 0.0 for the diversity ablation.
     weight_diversity: 0.05
     external_qc:
@@ -112,7 +127,18 @@ env:
       enable_tropism: true
       enable_genetic_architecture: true
       enable_checkv: true
+      enable_training_data_identity: true
       enable_synteny: true
+      synteny_mode: "full"
+      enable_average_protein_identity: true
+      enable_required_genes: true
+      enable_reference_genome_identity: true
+      training_data_identity_random_baseline: 0.0
+      average_protein_identity_random_baseline: 0.0
+      average_protein_identity_reward_floor: 0.75
+      required_genes_random_baseline: 0.5
+      reference_genome_identity_random_baseline: 0.0
+      synteny_removed_pair_score_floor: 0.75
       enable_mmseqs_clustering: true
       enable_diversity: true
       diversity_quality_threshold: 0.6

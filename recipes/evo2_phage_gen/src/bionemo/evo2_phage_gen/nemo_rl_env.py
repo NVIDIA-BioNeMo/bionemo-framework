@@ -20,7 +20,13 @@ from typing import Any
 import pandas as pd
 
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
-from bionemo.evo2_phage_gen.reward import ExternalQCRewardConfig, RewardWeights, score_nucleotide_metrics
+from bionemo.evo2_phage_gen.reward import (
+    ExternalQCRewardConfig,
+    REWARD_COMPONENTS,
+    RewardWeights,
+    binary_overall_pass_mask,
+    score_nucleotide_metrics,
+)
 
 
 try:  # pragma: no cover - exercised only when NeMo-RL is installed.
@@ -60,10 +66,65 @@ def score_message_logs(
     sequences_df = pd.DataFrame(
         {
             "id_prompt": [str(i) for i in range(len(message_log_batch))],
+            "prompt_nt_length": [len(_prompt_nucleotides(message_log)) for message_log in message_log_batch],
             "sequence": [extract_scored_sequence(message_log) for message_log in message_log_batch],
         }
     )
     return score_nucleotide_metrics(sequences_df, config=config, weights=weights, external_qc=external_qc)
+
+
+def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -> dict[str, float | int]:
+    """Summarize per-sequence phage QC scores into scalar logger metrics."""
+    if scored.empty:
+        return {"num_sequences": 0}
+
+    metrics: dict[str, float | int] = {"num_sequences": int(len(scored))}
+    for component in REWARD_COMPONENTS:
+        if component.score_column in scored:
+            metrics[f"{component.name}_score_mean"] = float(scored[component.score_column].astype(float).mean())
+            metrics[f"{component.name}_pass_rate"] = float(
+                (scored[component.score_column].astype(float) >= 1.0).mean()
+            )
+
+    for column in [
+        "prompt_nt_length",
+        "genome_length",
+        "gc_content",
+        "max_nt_homopolymer_length",
+        "protein_database_hit_count",
+        "tropism_protein_mmseqs_percent_identity",
+        "genetic_architecture_score",
+        "training_data_mmseqs_percent_identity",
+        "training_data_identity_raw_score",
+        "num_syntenic_genes",
+        "total_num_genes",
+        "syntenic_gene_count_score",
+        "synteny_required_gene_score",
+        "synteny_order_score",
+        "synteny_total_gene_score",
+        "synteny_removed_pair_score",
+        "synteny_proxy_gene_count",
+        "average_protein_percent_identity",
+        "average_protein_identity_raw_score",
+        "required_genes_matched_count",
+        "required_genes_total_count",
+        "required_genes_raw_score",
+        "reference_genome_mmseqs_percent_identity",
+        "reference_genome_identity_raw_score",
+        "mmseqs_cluster_size",
+        "diversity_raw",
+        "reward",
+        "reward_binary_pass",
+    ]:
+        if column in scored:
+            values = pd.to_numeric(scored[column], errors="coerce").fillna(0.0)
+            metrics[f"{column}_mean"] = float(values.mean())
+            if column == "prompt_nt_length":
+                metrics[f"{column}_min"] = float(values.min())
+                metrics[f"{column}_max"] = float(values.max())
+
+    metrics["binary_overall_pass_rate"] = float(binary_overall_pass_mask(scored, weights).astype(float).mean())
+    return metrics
 
 
 if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
@@ -87,13 +148,18 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 genome_length=float(cfg.get("weight_genome_length", 1.0)),
                 gc_content=float(cfg.get("weight_gc_content", 1.0)),
                 nt_homopolymer=float(cfg.get("weight_nt_homopolymer", 1.0)),
+                nucleotide_pass=float(cfg.get("weight_nucleotide_pass", 0.0)),
                 orf=float(cfg.get("weight_orf", 0.0)),
                 coding_density=float(cfg.get("weight_coding_density", 0.0)),
                 protein_hit_count=float(cfg.get("weight_protein_hit_count", 0.0)),
                 tropism=float(cfg.get("weight_tropism", 0.0)),
                 genetic_architecture=float(cfg.get("weight_genetic_architecture", 0.0)),
                 checkv=float(cfg.get("weight_checkv", 0.0)),
+                training_data_identity=float(cfg.get("weight_training_data_identity", 0.0)),
                 synteny=float(cfg.get("weight_synteny", 0.0)),
+                average_protein_identity=float(cfg.get("weight_average_protein_identity", 0.0)),
+                required_genes=float(cfg.get("weight_required_genes", 0.0)),
+                reference_genome_identity=float(cfg.get("weight_reference_genome_identity", 0.0)),
                 mmseqs_clustering=float(cfg.get("weight_mmseqs_clustering", 0.0)),
                 diversity=float(cfg.get("weight_diversity", 0.0)),
             )
@@ -115,7 +181,32 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 enable_tropism=bool(external_qc_cfg.get("enable_tropism", True)),
                 enable_genetic_architecture=bool(external_qc_cfg.get("enable_genetic_architecture", True)),
                 enable_checkv=bool(external_qc_cfg.get("enable_checkv", False)),
+                enable_training_data_identity=bool(external_qc_cfg.get("enable_training_data_identity", False)),
                 enable_synteny=bool(external_qc_cfg.get("enable_synteny", False)),
+                synteny_mode=str(external_qc_cfg.get("synteny_mode", "proxy")),
+                enable_average_protein_identity=bool(
+                    external_qc_cfg.get("enable_average_protein_identity", False)
+                ),
+                enable_required_genes=bool(external_qc_cfg.get("enable_required_genes", False)),
+                enable_reference_genome_identity=bool(
+                    external_qc_cfg.get("enable_reference_genome_identity", False)
+                ),
+                training_data_identity_random_baseline=float(
+                    external_qc_cfg.get("training_data_identity_random_baseline", 0.0)
+                ),
+                average_protein_identity_random_baseline=float(
+                    external_qc_cfg.get("average_protein_identity_random_baseline", 0.0)
+                ),
+                average_protein_identity_reward_floor=float(
+                    external_qc_cfg.get("average_protein_identity_reward_floor", 0.75)
+                ),
+                required_genes_random_baseline=float(external_qc_cfg.get("required_genes_random_baseline", 0.5)),
+                reference_genome_identity_random_baseline=float(
+                    external_qc_cfg.get("reference_genome_identity_random_baseline", 0.0)
+                ),
+                synteny_removed_pair_score_floor=float(
+                    external_qc_cfg.get("synteny_removed_pair_score_floor", 0.75)
+                ),
                 enable_mmseqs_clustering=bool(external_qc_cfg.get("enable_mmseqs_clustering", False)),
                 enable_diversity=bool(external_qc_cfg.get("enable_diversity", False)),
                 diversity_quality_threshold=float(external_qc_cfg.get("diversity_quality_threshold", 0.6)),
@@ -134,6 +225,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 weights=self.weights,
                 external_qc=self.external_qc,
             )
+            self._last_scored = scored
             rewards = torch.tensor(scored["reward"].tolist(), dtype=torch.float32).cpu()
             observations = [
                 {"role": "environment", "content": f"phage_qc_reward={reward:.6f}"}
@@ -152,12 +244,27 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             self, batch: BatchedDataDict
         ) -> tuple[BatchedDataDict, dict[str, float | int]]:
             """Report rollout-level reward metrics."""
-            rewards = batch["rewards"] if batch["rewards"].ndim == 1 else batch["rewards"][:, 0]
+            if "rewards" in batch:
+                rewards = batch["rewards"] if batch["rewards"].ndim == 1 else batch["rewards"][:, 0]
+            else:
+                rewards = batch["total_reward"]
+            scored = getattr(self, "_last_scored", pd.DataFrame())
+            binary_pass_rate = 0.0
+            if not scored.empty:
+                if "reward_binary_pass" in scored:
+                    binary_pass_rate = float(scored["reward_binary_pass"].astype(float).mean())
+                else:
+                    binary_pass_rate = float(binary_overall_pass_mask(scored, self.weights).astype(float).mean())
             metrics = {
                 "mean_reward": rewards.float().mean().item(),
-                "pass_rate": (rewards >= 1.0).float().mean().item(),
+                "pass_rate": binary_pass_rate,
+                "binary_overall_pass_rate": binary_pass_rate,
+                "dense_reward_ge_1_rate": (rewards >= 1.0).float().mean().item(),
                 "num_sequences": int(rewards.shape[0]),
             }
+            if not scored.empty:
+                for key, value in phage_qc_metrics_from_scored(scored, self.weights).items():
+                    metrics[f"phage_qc/{key}"] = value
             return batch, metrics
 
 else:

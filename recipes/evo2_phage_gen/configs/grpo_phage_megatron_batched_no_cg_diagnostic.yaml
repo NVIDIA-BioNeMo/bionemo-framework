@@ -1,0 +1,30 @@
+# One-step Evo2 phage GRPO diagnostic for batched MCore generation without CUDA graphs.
+#
+# The first batched NeMo-RL diagnostic failed immediately after CUDA graph warmup with MCore's
+# dynamic KV append assertion. This variant keeps the same 8-way generation batch but runs eager
+# inference to test whether graph warmup is the trigger.
+
+defaults: "grpo_phage_megatron_batched_diagnostic.yaml"
+
+grpo:
+  max_num_epochs: 1
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 8
+  max_num_steps: 1
+
+policy:
+  train_global_batch_size: 8
+  train_micro_batch_size: 1
+  generation_batch_size: 8
+  logprob_batch_size: 1
+  generation:
+    mcore_generation_config:
+      max_requests: 8
+      prompt_batch_size: 8
+      enable_chunked_prefill: false
+      generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
+      generation_adapter_config:
+        seed_stride: 1000003
+      cuda_graph_impl: "none"
+      inference_cuda_graph_scope: "none"
+      use_cuda_graphs_for_non_decode_steps: false

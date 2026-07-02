@@ -20,6 +20,8 @@ import json
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from bionemo.evo2_phage_gen.qc import trim_at_first_eos
+
 
 PHIX174_REFERENCE_START = "GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAA"
 DEFAULT_PROMPT_LENGTHS = tuple(range(1, 12))
@@ -69,8 +71,8 @@ def write_prompt_sweep_jsonl(
 
 
 def _sequence_before_eos(sequence: str) -> str:
-    """Return generated sequence content before the first whitespace EOS marker."""
-    return str(sequence).replace("\n", "").strip().split(maxsplit=1)[0]
+    """Return generated sequence content before textual EOS markers."""
+    return trim_at_first_eos(str(sequence).replace("\n", "").strip())
 
 
 def _prompt_nucleotides(prompt: str) -> str:

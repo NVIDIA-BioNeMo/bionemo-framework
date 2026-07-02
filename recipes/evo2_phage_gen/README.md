@@ -584,7 +584,7 @@ Run these from the repository root.
       --seed 7 \
       --tensor-parallel-size 1 \
       --max-seq-length 128 \
-      --max-batch-size 1 \
+      --prompt-batch-size 1 \
       --output-file recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
     ```
 
@@ -706,8 +706,7 @@ infer_evo2 \
   --seed 7 \
   --tensor-parallel-size 1 \
   --max-seq-length 6144 \
-  --max-batch-size 1000 \
-  --evo2-batched-decode-size 8 \
+  --prompt-batch-size 128 \
   --stream-output \
   --output-file recipes/evo2_phage_gen/data/checkpoints/generation/phix174_prompt4_temp0.7.jsonl
 ```
@@ -731,7 +730,7 @@ infer_evo2 \
   --seed 11 \
   --tensor-parallel-size 1 \
   --max-seq-length 128 \
-  --max-batch-size 1 \
+  --prompt-batch-size 1 \
   --output-file recipes/evo2_phage_gen/data/checkpoints/generation/mini_smoke/mini_prompt4_temp0.7.jsonl
 
 evo2_phage_generation jsonl-to-fasta \
@@ -751,7 +750,13 @@ through the valid-nucleotide filter. Both records are expected to fail
 genome-length QC because this smoke intentionally generates 20 nt sequences,
 not 4-6 kb candidate genomes.
 
-Run the full first-pass Evo2 sweep:
+Run the exact paper-style prompt/temperature HPO sweep when reproducing the
+published retention-rate analysis. This is 55 parameter cells: prompt lengths
+1-11 crossed with temperatures 0.3, 0.5, 0.7, 0.9, and 1.1. Use `top-k=4` and
+`top-p=1.0` for every cell, then evaluate retention after quality control,
+tropism, and diversification filters.
+
+For a smaller first pass, run the useful-regime Evo2 sweep:
 
 ```bash
 mkdir -p \
@@ -776,8 +781,7 @@ for temp in 0.7 0.8 0.9; do
       --seed 7 \
       --tensor-parallel-size 1 \
       --max-seq-length 6144 \
-      --max-batch-size 1000 \
-      --evo2-batched-decode-size 8 \
+      --prompt-batch-size 128 \
       --stream-output \
       --output-file recipes/evo2_phage_gen/data/checkpoints/generation/jsonl/phix174_prompt${prompt_len}_temp${temp}.jsonl
   done
@@ -1048,7 +1052,7 @@ infer_evo2 \
   --seed 7 \
   --tensor-parallel-size 1 \
   --max-seq-length 128 \
-  --max-batch-size 1 \
+  --prompt-batch-size 1 \
   --output-file recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
 ```
 

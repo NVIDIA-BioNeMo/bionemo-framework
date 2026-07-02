@@ -1,8 +1,135 @@
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 00000000..00000000 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -571,7 +571,37 @@ def calculate_rewards(
+         answers=answers,
+     )
+ 
+ 
++def collect_environment_metrics(
++    batch: BatchedDataDict[DatumSpec],
++    task_to_env: dict[str, EnvironmentInterface],
++) -> dict[str, Any]:
++    """Collect optional scalar rollout metrics from environments."""
++    task_names = batch["task_name"]
++    futures = []
++    future_task_names = []
++    for task_name, env in task_to_env.items():
++        metric_method = getattr(env, "global_post_process_and_metrics", None)
++        if metric_method is None:
++            continue
++        indices = [i for i, batch_task_name in enumerate(task_names) if batch_task_name == task_name]
++        if not indices:
++            continue
++        selected_batch = batch.select_indices(torch.tensor(indices, dtype=torch.long))
++        futures.append(metric_method.remote(selected_batch))  # type: ignore[attr-defined]
++        future_task_names.append(task_name)
++
++    metrics: dict[str, Any] = {}
++    if not futures:
++        return metrics
++    for task_name, result in zip(future_task_names, ray.get(futures), strict=False):
++        _, env_metrics = result
++        for key, value in env_metrics.items():
++            metric_key = key if key not in metrics else f"{task_name}/{key}"
++            metrics[metric_key] = value
++    return metrics
++
++
+ def run_multi_turn_rollout(
+     policy_generation: GenerationInterface,
+     input_batch: BatchedDataDict[DatumSpec],
+@@ -823,4 +852,5 @@ def run_multi_turn_rollout(
+             sample_env_token_counts.float().mean().item()
+         ),
+     }
++    rollout_metrics.update(collect_environment_metrics(current_batch, task_to_env))
+     return current_batch, rollout_metrics
+ 
+ 
+diff --git a/nemo_rl/models/generation/megatron/megatron_generation.py b/nemo_rl/models/generation/megatron/megatron_generation.py
+index 5b8ba7e1..6f4f7e21 100644
+--- a/nemo_rl/models/generation/megatron/megatron_generation.py
++++ b/nemo_rl/models/generation/megatron/megatron_generation.py
+@@ -12,7 +12,8 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
++import importlib
++from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
+ 
+ import ray
+ from transformers import AutoProcessor
+@@ -31,7 +32,35 @@ from nemo_rl.models.policy import PolicyConfig
+ if TYPE_CHECKING:
+     from nemo_rl.models.policy.lm_policy import Policy
+ 
+ 
++def _load_generation_adapter(generation_config: dict[str, Any]) -> Any | None:
++    """Load an optional generation adapter from ``mcore_generation_config``."""
++    mcore_generation_config = generation_config.get("mcore_generation_config", {}) or {}
++    adapter_path = mcore_generation_config.get("generation_adapter")
++    if not adapter_path:
++        return None
++
++    try:
++        module_name, class_name = adapter_path.split(":", 1)
++    except ValueError as exc:
++        raise ValueError(
++            "generation_adapter must use 'module:ClassName' import-path syntax"
++        ) from exc
++
++    module = importlib.import_module(module_name)
++    adapter_cls = getattr(module, class_name)
++    adapter_config = mcore_generation_config.get("generation_adapter_config", {}) or {}
++    return adapter_cls(adapter_config)
++
++
++def _adapter_requires_all_workers(adapter: Any, generation_config: dict[str, Any]) -> bool:
++    """Return whether an adapter must run on all model-parallel workers."""
++    requires_all_workers = getattr(adapter, "requires_all_workers", False)
++    if callable(requires_all_workers):
++        return bool(requires_all_workers(generation_config))
++    return bool(requires_all_workers)
++
++
+ class MegatronGeneration(GenerationInterface):
+     """Generation interface backed by Megatron (colocated or non-colocated)."""
+ 
+@@ -178,6 +207,22 @@ class MegatronGeneration(GenerationInterface):
+         Returns:
+             BatchedDataDict conforming to GenerationOutputSpec.
+         """
++        adapter = _load_generation_adapter(self.cfg)
++        if adapter is not None and _adapter_requires_all_workers(adapter, self.cfg):
++            futures = self._policy.worker_group.run_all_workers_single_data(
++                "generate_with_adapter",
++                run_rank_0_only_axes=["data_parallel"],
++                data=data,
++                greedy=greedy,
++            )
++            results = ray.get(futures)
++            for result in results:
++                if result is not None:
++                    return result
++            raise RuntimeError(
++                "Generation adapter returned no result from any model-parallel worker."
++            )
++
+         future = self._policy.worker_group.run_single_worker_single_data(
+             method_name="generate",
+             worker_idx=0,
 diff --git a/nemo_rl/models/generation/megatron/megatron_worker.py b/nemo_rl/models/generation/megatron/megatron_worker.py
-index 0a0721dd..cfd80fcf 100644
+index 0a0721dd..2e031cdc 100644
 --- a/nemo_rl/models/generation/megatron/megatron_worker.py
 +++ b/nemo_rl/models/generation/megatron/megatron_worker.py
-@@ -18,6 +18,7 @@ import os
+@@ -15,9 +15,11 @@
+ import asyncio
+ import gc
++import importlib
+ import os
  import threading
  import time
  import warnings
@@ -10,7 +137,49 @@ index 0a0721dd..cfd80fcf 100644
  from typing import AsyncGenerator, Optional
  
  import requests
-@@ -79,7 +80,6 @@ class MegatronGenerationMixin:
+@@ -60,6 +62,41 @@ class MegatronGenerationMixin:
+         self._inference_loop = None
+         self._inference_thread = None
+ 
++    def _load_generation_adapter(self):
++        """Load an optional generation adapter configured by import path."""
++        mcore_generation_config = self.cfg["generation"].get(
++            "mcore_generation_config", {}
++        ) or {}
++        adapter_path = mcore_generation_config.get("generation_adapter")
++        if not adapter_path:
++            return None
++
++        cached_adapter = getattr(self, "_generation_adapter", None)
++        cached_path = getattr(self, "_generation_adapter_path", None)
++        cached_config = getattr(self, "_generation_adapter_config", None)
++        adapter_config = mcore_generation_config.get("generation_adapter_config", {}) or {}
++        if (
++            cached_adapter is not None
++            and cached_path == adapter_path
++            and cached_config == adapter_config
++        ):
++            return cached_adapter
++
++        try:
++            module_name, class_name = adapter_path.split(":", 1)
++        except ValueError as exc:
++            raise ValueError(
++                "generation_adapter must use 'module:ClassName' import-path syntax"
++            ) from exc
++
++        module = importlib.import_module(module_name)
++        adapter_cls = getattr(module, class_name)
++        adapter = adapter_cls(adapter_config)
++        self._generation_adapter = adapter
++        self._generation_adapter_path = adapter_path
++        self._generation_adapter_config = dict(adapter_config)
++        return adapter
++
+     def _initialize_inference_engine(self, mcore_generation_config: dict) -> None:
+         """Initialize the persistent inference engine and client."""
+         # TODO: Switch to standardized Megatron API.
+@@ -79,7 +114,6 @@ class MegatronGenerationMixin:
          if self._inference_engine_initialized:
              return
  
@@ -18,11 +187,15 @@ index 0a0721dd..cfd80fcf 100644
          from megatron.core.inference.contexts.dynamic_context import (
              DynamicInferenceContext,
          )
-@@ -113,9 +113,34 @@ class MegatronGenerationMixin:
+@@ -113,9 +113,38 @@ class MegatronGenerationMixin:
              "materialize_only_last_token_logits"
          ]
          num_speculative_tokens = mcore_generation_config["num_speculative_tokens"]
-+        evo2_batched_decode_size = int(mcore_generation_config.get("evo2_batched_decode_size", 1) or 1)
++        evo2_batched_decode_size = int(
++            mcore_generation_config.get("prompt_batch_size")
++            or mcore_generation_config.get("evo2_batched_decode_size")
++            or 1
++        )
          max_requests = mcore_generation_config.get("max_requests")
 +        if evo2_batched_decode_size > 1:
 +            max_requests = max(int(max_requests or 0), evo2_batched_decode_size)
@@ -54,7 +227,7 @@ index 0a0721dd..cfd80fcf 100644
          is_hybrid_model = mamba_inference_state_config is not None
          if is_hybrid_model:
              if (
-@@ -182,6 +207,28 @@ class MegatronGenerationMixin:
+@@ -182,6 +211,28 @@ class MegatronGenerationMixin:
          self.inference_context = DynamicInferenceContext(
              self.model.config, inference_config
          )
@@ -83,17 +256,37 @@ index 0a0721dd..cfd80fcf 100644
          self.inference_wrapped_model = GPTInferenceWrapper(
              self.model, self.inference_context
          )
-@@ -428,6 +475,9 @@ class MegatronGenerationMixin:
+@@ -453,6 +510,15 @@ class MegatronGenerationMixin:
+         if self.is_generation_colocated:
+             gc.collect()
+             torch.cuda.empty_cache()
++
++        adapter = self._load_generation_adapter()
++        finish_worker = (
++            getattr(adapter, "finish_worker", None) if adapter is not None else None
++        )
++        if callable(finish_worker):
++            finish_worker(self)
++            gc.collect()
++            torch.cuda.empty_cache()
+ 
+         log_gpu_memory("finish_generation END")
+ 
+@@ -428,6 +479,13 @@ class MegatronGenerationMixin:
          top_p_val = (
              0.0 if greedy else (float(top_p_cfg) if top_p_cfg is not None else 0.0)
          )
 +        mcore_generation_config = self.cfg["generation"].get("mcore_generation_config", {})
-+        evo2_batched_decode_size = int(mcore_generation_config.get("evo2_batched_decode_size", 1) or 1)
++        evo2_batched_decode_size = int(
++            mcore_generation_config.get("prompt_batch_size")
++            or mcore_generation_config.get("evo2_batched_decode_size")
++            or 1
++        )
 +        termination_id = -1 if evo2_batched_decode_size > 1 else self.megatron_tokenizer.eod
  
          return SamplingParams(
              temperature=self.cfg["generation"]["temperature"] if not greedy else 0,
-@@ -436,7 +486,7 @@ class MegatronGenerationMixin:
+@@ -436,7 +494,7 @@ class MegatronGenerationMixin:
              skip_prompt_log_probs=True,
              return_log_probs=True,
              num_tokens_to_generate=self.cfg["generation"]["max_new_tokens"],
@@ -102,6 +295,23 @@ index 0a0721dd..cfd80fcf 100644
              stop_words=stop_words,
          )
  
+@@ -591,6 +656,16 @@ class MegatronGenerationMixin:
+ 
+         return self._parse_result_to_batched_data_dict(data, result)
+ 
++    @wrap_with_nvtx_name("megatron_policy_worker/generate_with_adapter")
++    def generate_with_adapter(
++        self, *, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
++    ):
++        """Run a configured generation adapter on this worker."""
++        adapter = self._load_generation_adapter()
++        if adapter is None:
++            raise RuntimeError("generate_with_adapter called without generation_adapter configured.")
++        return adapter.generate_worker(self, data=data, greedy=greedy)
++
+     async def generate_async(
+         self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
+     ) -> AsyncGenerator[tuple[int, BatchedDataDict[GenerationOutputSpec]], None]:
 diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
 index b0d5be4d..6f7dca0c 100644
 --- a/nemo_rl/models/megatron/setup.py
