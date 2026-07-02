@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,7 +89,9 @@ REWARD_COMPONENTS: tuple[RewardComponent, ...] = (
         "reward_external_average_protein_identity",
         required_for_binary_pass=False,
     ),
-    RewardComponent("required_genes", "required_genes", "reward_external_required_genes", required_for_binary_pass=False),
+    RewardComponent(
+        "required_genes", "required_genes", "reward_external_required_genes", required_for_binary_pass=False
+    ),
 )
 
 
@@ -124,7 +127,7 @@ def _repo_path(path: str | Path) -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
-def _external_qc_env(external_qc: ExternalQCRewardConfig) -> dict[str, str]:
+def _external_qc_env() -> dict[str, str]:
     """Build the environment for Arc external-QC subprocesses."""
     return os.environ.copy()
 
@@ -165,18 +168,6 @@ def _bounded_range_score(value: float, lower: float, upper: float) -> float:
     return _upper_bound_ratio_score(value, upper)
 
 
-def _bounded_percent_range_score(value: float, lower: float, upper: float) -> float:
-    """Return 1 in a percent range and linearly decay to 0 at 0 or 100 outside it."""
-    value = max(0.0, min(100.0, float(value)))
-    lower = max(0.0, min(100.0, float(lower)))
-    upper = max(0.0, min(100.0, float(upper)))
-    if lower <= value <= upper:
-        return 1.0
-    if value < lower:
-        return 0.0 if lower <= 0.0 else max(0.0, min(1.0, value / lower))
-    return 0.0 if upper >= 100.0 else max(0.0, min(1.0, (100.0 - value) / (100.0 - upper)))
-
-
 def _spike_identity_score(identity: float | None, measured_hit: bool, threshold: float = 60.0) -> float:
     """Plateau spike/tropism reward at the paper identity threshold."""
     if not measured_hit:
@@ -202,9 +193,7 @@ def _aai_evidence_score(num_aai_entries: float) -> float:
     return max(0.0, min(1.0, float(num_aai_entries) / 10.0))
 
 
-ARC_VALID_SYNTENY_PAIRS: frozenset[tuple[int, int]] = frozenset(
-    {(10, 10), (10, 11), (10, 12), (11, 12), (12, 12)}
-)
+ARC_VALID_SYNTENY_PAIRS: frozenset[tuple[int, int]] = frozenset({(10, 10), (10, 11), (10, 12), (11, 12), (12, 12)})
 
 
 def _distance_to_interval(value: float, lower: float, upper: float) -> float:
@@ -330,9 +319,7 @@ def _write_external_qc_config(
         raise ValueError(f"Unsupported synteny_mode={external_qc.synteny_mode!r}; expected 'proxy' or 'full'.")
     full_synteny_enabled = bool(external_qc.enable_synteny and synteny_mode == "full")
     paper_synteny_stage_enabled = bool(
-        full_synteny_enabled
-        or external_qc.enable_average_protein_identity
-        or external_qc.enable_required_genes
+        full_synteny_enabled or external_qc.enable_average_protein_identity or external_qc.enable_required_genes
     )
 
     orf_enabled = external_qc.enable_orf or external_qc.enable_coding_density
@@ -479,7 +466,10 @@ def _ordered_required_gene_score(products: list[str], required_products: list[st
 
 def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Add a synteny-correlated score from PHROGs/ORF artifacts used by Arc synteny."""
-    phrogs_hits_path = run_dir / config["mmseqs_protein_database_results_dir_save_location"] / "mmseqs2_hits.csv"
+    phrogs_dir = config.get("mmseqs_protein_database_results_dir_save_location")
+    if not phrogs_dir:
+        return scored_df
+    phrogs_hits_path = run_dir / phrogs_dir / "mmseqs2_hits.csv"
     if not phrogs_hits_path.exists():
         return scored_df
     hits_df = pd.read_csv(phrogs_hits_path)
@@ -500,18 +490,20 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
     rows = []
     for arc_qc_id, group in hits_df.sort_values(["arc_qc_id", "orf_order"]).groupby("arc_qc_id"):
         products = group["annot"].astype(str).tolist()
-        total_gene_count = int(group["id_prompt"].nunique())
+        # Proxy mode only sees ORFs with PHROGs hits, not the true total ORF count.
+        hit_gene_count = int(group["id_prompt"].nunique())
         rows.append(
             {
                 "arc_qc_id": arc_qc_id,
                 "synteny_required_gene_score": _required_gene_score(products, required_products),
                 "synteny_order_score": _ordered_required_gene_score(products, required_products),
                 "synteny_total_gene_score": _bounded_range_score(
-                    total_gene_count,
+                    hit_gene_count,
                     float(total_gene_range[0]),
                     float(total_gene_range[1]),
                 ),
-                "synteny_proxy_gene_count": total_gene_count,
+                "synteny_proxy_hit_gene_count": hit_gene_count,
+                "synteny_proxy_gene_count": hit_gene_count,
             }
         )
 
@@ -522,6 +514,7 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
             "synteny_required_gene_score",
             "synteny_order_score",
             "synteny_total_gene_score",
+            "synteny_proxy_hit_gene_count",
             "synteny_proxy_gene_count",
         ]:
             scored_df[column] = scored_df[id_column].map(synteny_df[column]).fillna(0.0)
@@ -550,19 +543,17 @@ def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: di
         metrics_df = pd.read_csv(metrics_path)
         if {"id_prompt", "num_syntenic_genes", "total_num_genes"}.issubset(metrics_df.columns):
             metrics_df = metrics_df.copy()
-            metrics_df["num_syntenic_genes"] = pd.to_numeric(
-                metrics_df["num_syntenic_genes"], errors="coerce"
-            ).fillna(0.0)
-            metrics_df["total_num_genes"] = pd.to_numeric(
-                metrics_df["total_num_genes"], errors="coerce"
-            ).fillna(0.0)
+            metrics_df["num_syntenic_genes"] = pd.to_numeric(metrics_df["num_syntenic_genes"], errors="coerce").fillna(
+                0.0
+            )
+            metrics_df["total_num_genes"] = pd.to_numeric(metrics_df["total_num_genes"], errors="coerce").fillna(0.0)
             metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
-            scored_df["num_syntenic_genes"] = scored_df[id_column].astype(str).map(
-                metrics_by_id["num_syntenic_genes"]
-            ).fillna(0.0)
-            scored_df["total_num_genes"] = scored_df[id_column].astype(str).map(
-                metrics_by_id["total_num_genes"]
-            ).fillna(0.0)
+            scored_df["num_syntenic_genes"] = (
+                scored_df[id_column].astype(str).map(metrics_by_id["num_syntenic_genes"]).fillna(0.0)
+            )
+            scored_df["total_num_genes"] = (
+                scored_df[id_column].astype(str).map(metrics_by_id["total_num_genes"]).fillna(0.0)
+            )
 
             scores = [
                 _synteny_distance_score(float(num_syntenic), float(total_genes))
@@ -619,16 +610,14 @@ def _add_average_protein_identity_rewards(
     has_identity_metric = mapped_identity.notna()
     scored_df["average_protein_percent_identity"] = mapped_identity.fillna(0.0)
     mapped_evidence = (
-        scored_df[id_column].astype(str).map(metrics_by_id[evidence_column]) if evidence_column else pd.Series(0.0, index=scored_df.index)
+        scored_df[id_column].astype(str).map(metrics_by_id[evidence_column])
+        if evidence_column
+        else pd.Series(0.0, index=scored_df.index)
     )
     scored_df["average_protein_identity_gene_count"] = mapped_evidence.fillna(0.0)
 
     lower, upper = config.get("average_protein_sequence_identity_range", [0, 95])
-    novelty_scores = mapped_identity.map(
-        lambda value: _aai_novelty_score(float(value))
-        if pd.notna(value)
-        else 0.0
-    )
+    novelty_scores = mapped_identity.map(lambda value: _aai_novelty_score(float(value)) if pd.notna(value) else 0.0)
     evidence_scores = mapped_evidence.map(lambda value: _aai_evidence_score(float(value)) if pd.notna(value) else 0.0)
     scored_df["average_protein_identity_raw_score"] = novelty_scores
     scored_df["average_protein_identity_novelty_score"] = novelty_scores
@@ -680,9 +669,11 @@ def _add_required_gene_rewards(
             strict=False,
         )
     ]
-    scored_df["required_genes_evidence_score"] = scored_df["required_genes_total_count"].map(
-        lambda total: max(0.0, min(1.0, float(total) / max(float(evidence_target), 1.0)))
-    ).where(has_required_gene_metric & (scored_df["required_genes_total_count"] > 0), 0.0)
+    scored_df["required_genes_evidence_score"] = (
+        scored_df["required_genes_total_count"]
+        .map(lambda total: max(0.0, min(1.0, float(total) / max(float(evidence_target), 1.0))))
+        .where(has_required_gene_metric & (scored_df["required_genes_total_count"] > 0), 0.0)
+    )
     scored_df["reward_external_required_genes"] = (
         scored_df["required_genes_raw_score"] * scored_df["required_genes_evidence_score"]
     )
@@ -697,8 +688,9 @@ def _add_required_gene_rewards(
 def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Add protein-hit-count and tropism rewards from Arc MMseqs outputs."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
-    phrogs_hits_path = run_dir / config["mmseqs_protein_database_results_dir_save_location"] / "mmseqs2_hits.csv"
-    if phrogs_hits_path.exists():
+    phrogs_dir = config.get("mmseqs_protein_database_results_dir_save_location")
+    phrogs_hits_path = run_dir / phrogs_dir / "mmseqs2_hits.csv" if phrogs_dir else None
+    if phrogs_hits_path and phrogs_hits_path.exists():
         hits_df = pd.read_csv(phrogs_hits_path)
         if "id_prompt" in hits_df:
             genome_counts = _genome_ids_from_orf_hits(hits_df).value_counts()
@@ -708,8 +700,9 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
                 lambda value: _lower_bound_ratio_score(float(value), float(min_hits))
             )
 
-    tropism_hits_path = run_dir / config["mmseqs_tropism_protein_results_dir_save_location"] / "mmseqs2_hits.csv"
-    if tropism_hits_path.exists():
+    tropism_dir = config.get("mmseqs_tropism_protein_results_dir_save_location")
+    tropism_hits_path = run_dir / tropism_dir / "mmseqs2_hits.csv" if tropism_dir else None
+    if tropism_hits_path and tropism_hits_path.exists():
         hits_df = pd.read_csv(tropism_hits_path)
         if {"id_prompt", "tropism_protein_mmseqs_percent_identity"}.issubset(hits_df.columns):
             hits_df = hits_df.copy()
@@ -768,18 +761,31 @@ def add_external_qc_rewards(
 
     try:
         df["arc_qc_id"] = [f"umi{i + 1}" for i in range(len(df))]
-        save_fasta(df.rename(columns={"id_prompt": "original_id_prompt", "arc_qc_id": "id_prompt"})[["id_prompt", "sequence"]], input_fasta)
-        run_config_path = _write_external_qc_config(base_config_path, run_dir, input_fasta, external_qc)
-        subprocess.run(
-            ["python", str(pipeline_script), str(run_config_path)],
-            check=True,
-            cwd=str(pipeline_script.parent),
-            env=_external_qc_env(external_qc),
+        save_fasta(
+            df.rename(columns={"id_prompt": "original_id_prompt", "arc_qc_id": "id_prompt"})[
+                ["id_prompt", "sequence"]
+            ],
+            input_fasta,
         )
+        run_config_path = _write_external_qc_config(base_config_path, run_dir, input_fasta, external_qc)
+        try:
+            subprocess.run(
+                ["python", str(pipeline_script), str(run_config_path)],
+                check=True,
+                cwd=str(pipeline_script.parent),
+                env=_external_qc_env(),
+            )
+        except subprocess.CalledProcessError as exc:
+            warnings.warn(
+                f"Arc external QC failed for {run_dir}; leaving external reward columns at 0.0: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return df
         config = yaml.safe_load(run_config_path.read_text())
 
-        orf_csv = run_dir / config["orf_filter_seqs_csv_file_save_location"]
-        orf_pass_ids = _sequence_ids_from_csv(orf_csv)
+        orf_csv_name = config.get("orf_filter_seqs_csv_file_save_location")
+        orf_pass_ids = _sequence_ids_from_csv(run_dir / orf_csv_name) if orf_csv_name else set()
         if external_qc.enable_orf:
             df["reward_external_orf"] = df["arc_qc_id"].astype(str).isin(orf_pass_ids).astype(float)
         if external_qc.enable_coding_density:

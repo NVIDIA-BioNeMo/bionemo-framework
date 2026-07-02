@@ -53,7 +53,9 @@ def test_extract_scored_sequence_keeps_prompt_dna_and_drops_soft_tokens():
 
 def test_score_message_logs_uses_phage_reward():
     """A passing assistant sequence should receive reward 1."""
-    scored = score_message_logs([[{"role": "user", "content": "+~GAGT"}, {"role": "assistant", "content": "ACGT" * 1000}]])
+    scored = score_message_logs(
+        [[{"role": "user", "content": "+~GAGT"}, {"role": "assistant", "content": "ACGT" * 1000}]]
+    )
 
     assert scored["reward"].tolist() == [1.0]
     assert scored["prompt_nt_length"].tolist() == [4]
@@ -117,8 +119,30 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["required_genes_evidence_score_mean"] == 1.0
 
 
-def test_global_post_process_metrics_accepts_rollout_total_reward(monkeypatch):
+def test_global_post_process_metrics_accepts_rollout_total_reward():
     """Rollout batches expose total_reward rather than per-turn rewards."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
+    env = object.__new__(env_cls)
+    env.weights = RewardWeights(valid_nt_chars=1.0)
+    batch = {
+        "total_reward": torch.tensor([1.0, 0.0]),
+        "extra_env_info": [
+            {"_phage_qc_scored": {"reward_valid_nt_chars": 1.0, "reward": 1.0, "reward_binary_pass": 1.0}},
+            {"_phage_qc_scored": {"reward_valid_nt_chars": 0.0, "reward": 0.0, "reward_binary_pass": 0.0}},
+        ],
+    }
+    returned_batch, metrics = env_cls.global_post_process_and_metrics(env, batch)
+
+    assert returned_batch is batch
+    assert metrics["mean_reward"] == 0.5
+    assert metrics["phage_qc/valid_nt_chars_score_mean"] == 0.5
+
+
+def test_global_post_process_metrics_falls_back_to_last_scored_for_old_rollout_metadata():
+    """The actor-local fallback keeps compatibility with unpatched NeMo-RL rollout batches."""
     if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
         pytest.skip("NeMo-RL is unavailable")
 
@@ -133,9 +157,9 @@ def test_global_post_process_metrics_accepts_rollout_total_reward(monkeypatch):
         }
     )
 
-    batch = {"total_reward": torch.tensor([1.0, 0.0])}
-    returned_batch, metrics = env_cls.global_post_process_and_metrics(env, batch)
+    _returned_batch, metrics = env_cls.global_post_process_and_metrics(
+        env,
+        {"total_reward": torch.tensor([1.0, 0.0])},
+    )
 
-    assert returned_batch is batch
-    assert metrics["mean_reward"] == 0.5
     assert metrics["phage_qc/valid_nt_chars_score_mean"] == 0.5

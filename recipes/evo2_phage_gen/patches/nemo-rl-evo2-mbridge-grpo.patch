@@ -5,8 +5,8 @@ index 1111111..2222222 100644
 @@ -571,7 +571,37 @@ def calculate_rewards(
          answers=answers,
      )
- 
- 
+
+
 +def collect_environment_metrics(
 +    batch: BatchedDataDict[DatumSpec],
 +    task_to_env: dict[str, EnvironmentInterface],
@@ -46,16 +46,16 @@ index 1111111..2222222 100644
      }
 +    rollout_metrics.update(collect_environment_metrics(current_batch, task_to_env))
      return current_batch, rollout_metrics
- 
- 
+
+
 @@ -1293,6 +1323,7 @@ def run_async_multi_turn_rollout(
          rollout_metrics["histogram/total_tokens_length"] = [
              t for m in all_sample_metrics for t in m["turn_total_tokens"]
          ]
 +        rollout_metrics.update(collect_environment_metrics(final_batch, task_to_env))
- 
+
          return final_batch, rollout_metrics
- 
+
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
 index 1111111..2222222 100644
 --- a/nemo_rl/algorithms/grpo.py
@@ -65,13 +65,13 @@ index 1111111..2222222 100644
          total_lengths = []
          all_message_logs = []  # Collect all message logs
 +        validation_rollout_metrics = []
- 
+
          max_batches = (
              master_config.grpo["max_val_samples"]
 @@ -3009,7 +3010,6 @@ def validate(
              if batch_idx >= max_batches:
                  break
- 
+
 -            additional_metrics_to_report = dict()
              # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
              # Use async rollouts when enabled by config/backend defaults.
@@ -87,15 +87,15 @@ index 1111111..2222222 100644
 @@ -3049,6 +3048,7 @@ def validate(
                      greedy=False,
                  )
- 
+
 +            validation_rollout_metrics.append(gen_metrics)
              total_rewards.extend(val_batch["total_reward"].tolist())
              total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
- 
+
 @@ -3074,6 +3074,17 @@ def validate(
              sum(total_lengths) / len(total_lengths) if len(total_lengths) > 0 else 0.0
          )
- 
+
 +        if len(validation_rollout_metrics) == 1:
 +            additional_metrics_to_report = validation_rollout_metrics[0]
 +        else:
@@ -117,18 +117,18 @@ index 5b8ba7e1..6f4f7e21 100644
 @@ -12,7 +12,8 @@
  # See the License for the specific language governing permissions and
  # limitations under the License.
- 
+
 -from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
 +import importlib
 +from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
- 
+
  import ray
  from transformers import AutoProcessor
 @@ -31,7 +32,35 @@ from nemo_rl.models.policy import PolicyConfig
  if TYPE_CHECKING:
      from nemo_rl.models.policy.lm_policy import Policy
- 
- 
+
+
 +def _load_generation_adapter(generation_config: dict[str, Any]) -> Any | None:
 +    """Load an optional generation adapter from ``mcore_generation_config``."""
 +    mcore_generation_config = generation_config.get("mcore_generation_config", {}) or {}
@@ -159,7 +159,7 @@ index 5b8ba7e1..6f4f7e21 100644
 +
  class MegatronGeneration(GenerationInterface):
      """Generation interface backed by Megatron (colocated or non-colocated)."""
- 
+
 @@ -178,6 +207,22 @@ class MegatronGeneration(GenerationInterface):
          Returns:
              BatchedDataDict conforming to GenerationOutputSpec.
@@ -197,12 +197,12 @@ index 0a0721dd..2e031cdc 100644
  import warnings
 +from types import MethodType
  from typing import AsyncGenerator, Optional
- 
+
  import requests
 @@ -60,6 +62,41 @@ class MegatronGenerationMixin:
          self._inference_loop = None
          self._inference_thread = None
- 
+
 +    def _load_generation_adapter(self):
 +        """Load an optional generation adapter configured by import path."""
 +        mcore_generation_config = self.cfg["generation"].get(
@@ -244,7 +244,7 @@ index 0a0721dd..2e031cdc 100644
 @@ -79,7 +114,6 @@ class MegatronGenerationMixin:
          if self._inference_engine_initialized:
              return
- 
+
 -        from megatron.core.inference.config import MambaInferenceStateConfig
          from megatron.core.inference.contexts.dynamic_context import (
              DynamicInferenceContext,
@@ -283,7 +283,7 @@ index 0a0721dd..2e031cdc 100644
 +            evo2_bind_hyena_packed_views_batch = bind_hyena_packed_views_to_dynamic_context_batch
 +        else:
 +            from megatron.core.inference.config import MambaInferenceStateConfig
- 
+
 -        mamba_inference_state_config = MambaInferenceStateConfig.from_model(self.model)
 +            mamba_inference_state_config = MambaInferenceStateConfig.from_model(self.model)
          is_hybrid_model = mamba_inference_state_config is not None
@@ -331,9 +331,9 @@ index 0a0721dd..2e031cdc 100644
 +            finish_worker(self)
 +            gc.collect()
 +            torch.cuda.empty_cache()
- 
+
          log_gpu_memory("finish_generation END")
- 
+
 @@ -428,6 +479,13 @@ class MegatronGenerationMixin:
          top_p_val = (
              0.0 if greedy else (float(top_p_cfg) if top_p_cfg is not None else 0.0)
@@ -345,7 +345,7 @@ index 0a0721dd..2e031cdc 100644
 +            or 1
 +        )
 +        termination_id = -1 if evo2_batched_decode_size > 1 else self.megatron_tokenizer.eod
- 
+
          return SamplingParams(
              temperature=self.cfg["generation"]["temperature"] if not greedy else 0,
 @@ -436,7 +494,7 @@ class MegatronGenerationMixin:
@@ -356,11 +356,11 @@ index 0a0721dd..2e031cdc 100644
 +            termination_id=termination_id,
              stop_words=stop_words,
          )
- 
+
 @@ -591,6 +656,16 @@ class MegatronGenerationMixin:
- 
+
          return self._parse_result_to_batched_data_dict(data, result)
- 
+
 +    @wrap_with_nvtx_name("megatron_policy_worker/generate_with_adapter")
 +    def generate_with_adapter(
 +        self, *, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
@@ -380,8 +380,8 @@ index b0d5be4d..6f7dca0c 100644
 +++ b/nemo_rl/models/megatron/setup.py
 @@ -98,6 +98,40 @@ from nemo_rl.models.value.config import ValueConfig
  TokenizerType = TypeVar("TokenizerType", bound=PreTrainedTokenizerBase)
- 
- 
+
+
 +def _apply_target_allowlist_prefixes(config: PolicyConfig) -> None:
 +    """Allow extra Megatron config ``_target_`` prefixes requested by policy config."""
 +    prefixes = config["megatron_cfg"].get("target_allowlist_prefixes", [])
@@ -418,11 +418,11 @@ index b0d5be4d..6f7dca0c 100644
 +
  def destroy_parallel_state():
      """Safely destroy parallel state and reset async call tracking.
- 
+
 @@ -464,6 +498,7 @@ def setup_model_config(
                  "directory not mounted on this node. Please check."
              )
- 
+
 +        _apply_target_allowlist_prefixes(config)
          try:
              cfg_from_pretrained = ConfigContainer.from_yaml(
@@ -433,7 +433,7 @@ index b0d5be4d..6f7dca0c 100644
      }
 +    tokenizer_cfg = config.get("tokenizer") or {}
 +    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
- 
+
      return ConfigContainer(
          model=model_cfg,
 @@ -986,7 +1023,7 @@ def _create_megatron_config(
@@ -444,11 +444,11 @@ index b0d5be4d..6f7dca0c 100644
 +            tokenizer_model=tokenizer_model,
          ),
      )
- 
+
 @@ -1554,9 +1591,11 @@ def finalize_megatron_setup(
          pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
      )
- 
+
 +    tokenizer_cfg = config.get("tokenizer") or {}
 +    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
      tokenizer_config = TokenizerConfig(
@@ -460,7 +460,7 @@ index b0d5be4d..6f7dca0c 100644
              "use_fast": True,
 @@ -1571,9 +1610,10 @@ def finalize_megatron_setup(
      )
- 
+
      dp_size = worker_sharding_annotations.get_axis_size("data_parallel")
 -    megatron_bridge = AutoBridge.from_hf_pretrained(
 -        hf_model_name, trust_remote_code=True
@@ -469,7 +469,7 @@ index b0d5be4d..6f7dca0c 100644
 +        megatron_bridge = NoRefitMegatronBridge(transformer_config=getattr(model, "config", None))
 +    else:
 +        megatron_bridge = AutoBridge.from_hf_pretrained(hf_model_name, trust_remote_code=True)
- 
+
      should_disable_forward_pre_hook = (
          config["megatron_cfg"]["optimizer"]["use_distributed_optimizer"]
 diff --git a/nemo_rl/models/policy/lm_policy.py b/nemo_rl/models/policy/lm_policy.py
@@ -484,7 +484,7 @@ index f1a5d705..0b86a145 100644
 +        except (OSError, ValueError) as e:
              self.flops_tracker = None
              print(f"FLOPS tracker not supported for model {config['model_name']}: {e}")
- 
+
 diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
 index e517e029..84ef1f1b 100644
 --- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
@@ -501,5 +501,5 @@ index e517e029..84ef1f1b 100644
 +            return {}
 +
          self.refit_param_info_mcore = self._calculate_refit_param_info()
- 
+
          # Collect tensor metadata for refit / hf side info

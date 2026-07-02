@@ -21,8 +21,8 @@ import pandas as pd
 
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 from bionemo.evo2_phage_gen.reward import (
-    ExternalQCRewardConfig,
     REWARD_COMPONENTS,
+    ExternalQCRewardConfig,
     RewardWeights,
     binary_overall_pass_mask,
     score_nucleotide_metrics,
@@ -78,7 +78,7 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
     if scored.empty:
         return {"num_sequences": 0}
 
-    metrics: dict[str, float | int] = {"num_sequences": int(len(scored))}
+    metrics: dict[str, float | int] = {"num_sequences": len(scored)}
     for component in REWARD_COMPONENTS:
         if component.score_column in scored:
             metrics[f"{component.name}_score_mean"] = float(scored[component.score_column].astype(float).mean())
@@ -100,6 +100,7 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "synteny_pair_score",
         "synteny_pair_distance",
         "synteny_total_gene_score",
+        "synteny_proxy_hit_gene_count",
         "average_protein_percent_identity",
         "average_protein_identity_gene_count",
         "average_protein_identity_raw_score",
@@ -123,9 +124,24 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
     return metrics
 
 
+def _scored_records(scored: pd.DataFrame) -> list[dict[str, Any]]:
+    """Convert per-sequence scores into metadata-safe plain dictionaries."""
+    return scored.where(pd.notna(scored), None).to_dict("records")
+
+
+def _scored_from_batch_metadata(batch: Any) -> pd.DataFrame:
+    """Recover scored rows carried through rollout metadata."""
+    rows = [
+        info["_phage_qc_scored"]
+        for info in batch.get("extra_env_info", []) or []
+        if isinstance(info, dict) and isinstance(info.get("_phage_qc_scored"), dict)
+    ]
+    return pd.DataFrame(rows)
+
+
 if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
 
-    @ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)
+    @ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1)
     class PhageQCEnvironment(EnvironmentInterface[dict[str, Any]]):
         """Single-turn NeMo-RL environment for phage sequence QC reward."""
 
@@ -156,9 +172,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             external_qc_cfg = cfg.get("external_qc", {}) or {}
             self.external_qc = ExternalQCRewardConfig(
                 enabled=bool(external_qc_cfg.get("enabled", False)),
-                config_path=external_qc_cfg.get(
-                    "config_path", "configs/arc_genome_design_filtering_local.yaml"
-                ),
+                config_path=external_qc_cfg.get("config_path", "configs/arc_genome_design_filtering_local.yaml"),
                 pipeline_script=external_qc_cfg.get(
                     "pipeline_script", "data/arc_pipeline_patched/genome_design_filtering_pipeline.py"
                 ),
@@ -170,9 +184,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 enable_tropism=bool(external_qc_cfg.get("enable_tropism", True)),
                 enable_synteny=bool(external_qc_cfg.get("enable_synteny", False)),
                 synteny_mode=str(external_qc_cfg.get("synteny_mode", "proxy")),
-                enable_average_protein_identity=bool(
-                    external_qc_cfg.get("enable_average_protein_identity", False)
-                ),
+                enable_average_protein_identity=bool(external_qc_cfg.get("enable_average_protein_identity", False)),
                 enable_required_genes=bool(external_qc_cfg.get("enable_required_genes", False)),
                 required_genes_evidence_target=float(external_qc_cfg.get("required_genes_evidence_target", 9.0)),
             )
@@ -190,6 +202,12 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 external_qc=self.external_qc,
             )
             self._last_scored = scored
+            scored_records = _scored_records(scored)
+            returned_metadata = []
+            for item, scored_record in zip(metadata, scored_records, strict=True):
+                item_dict = dict(item or {})
+                item_dict["_phage_qc_scored"] = scored_record
+                returned_metadata.append(item_dict)
             rewards = torch.tensor(scored["reward"].tolist(), dtype=torch.float32).cpu()
             observations = [
                 {"role": "environment", "content": f"phage_qc_reward={reward:.6f}"}
@@ -197,7 +215,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             ]
             return EnvironmentReturn(
                 observations=observations,
-                metadata=metadata,
+                metadata=returned_metadata,
                 next_stop_strings=[None] * len(message_log_batch),
                 rewards=rewards,
                 terminateds=torch.ones_like(rewards).cpu(),
@@ -212,7 +230,9 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 rewards = batch["rewards"] if batch["rewards"].ndim == 1 else batch["rewards"][:, 0]
             else:
                 rewards = batch["total_reward"]
-            scored = getattr(self, "_last_scored", pd.DataFrame())
+            scored = _scored_from_batch_metadata(batch)
+            if scored.empty:
+                scored = getattr(self, "_last_scored", pd.DataFrame())
             binary_pass_rate = 0.0
             if not scored.empty:
                 if "reward_binary_pass" in scored:

@@ -46,24 +46,20 @@ def _unwrap_evo2_model(model: Any) -> Any:
     return current
 
 
-def should_use_evo2_native_batched_generation(
-    cfg: dict[str, Any], model: Any, batch_size: int
-) -> bool:
+def should_use_evo2_native_batched_generation(cfg: dict[str, Any], model: Any, batch_size: int) -> bool:
     """Return whether NeMo-RL should bypass MCore's generic coordinator for Evo2."""
     generation = cfg.get("generation", {}) or {}
     mcore_generation_config = generation.get("mcore_generation_config", {}) or {}
     adapter_path = str(mcore_generation_config.get("generation_adapter") or "")
-    enabled = bool(
-        mcore_generation_config.get("evo2_native_batched_generation", False)
-    ) or adapter_path.endswith(":Evo2MegatronGenerationAdapter")
+    enabled = bool(mcore_generation_config.get("evo2_native_batched_generation", False)) or adapter_path.endswith(
+        ":Evo2MegatronGenerationAdapter"
+    )
     if not enabled:
         return False
     if batch_size < 1 or _evo2_batched_decode_size(cfg) <= 1:
         return False
     raw_model = _unwrap_evo2_model(model)
-    return hasattr(
-        getattr(raw_model, "decoder", raw_model), "hyena_state_shapes_per_request"
-    )
+    return hasattr(getattr(raw_model, "decoder", raw_model), "hyena_state_shapes_per_request")
 
 
 @dataclass
@@ -80,10 +76,7 @@ class _PromptTokenProxy:
 
     def __init__(self, tokenizer: Any, prompt_token_ids: list[list[int]]):
         self._tokenizer = tokenizer
-        self.prompts = [
-            f"__nemo_rl_evo2_prompt_{idx}__"
-            for idx in range(len(prompt_token_ids))
-        ]
+        self.prompts = [f"__nemo_rl_evo2_prompt_{idx}__" for idx in range(len(prompt_token_ids))]
         self._prompt_tokens = dict(zip(self.prompts, prompt_token_ids, strict=True))
 
     def tokenize(self, text: str) -> list[int]:
@@ -95,11 +88,35 @@ class _PromptTokenProxy:
         return self._tokenizer.detokenize(token_ids)
 
     def __getattr__(self, name: str) -> Any:
+        if name == "_tokenizer":
+            raise AttributeError(name)
         return getattr(self._tokenizer, name)
 
 
 def _sampling_value(sampling_params: Any, name: str, default: Any) -> Any:
     return getattr(sampling_params, name, default)
+
+
+def _required_sampling_value(sampling_params: Any, name: str) -> Any:
+    if not hasattr(sampling_params, name):
+        raise ValueError(f"Evo2 native batched generation requires sampling_params.{name}")
+    return getattr(sampling_params, name)
+
+
+def _batched_sampling_value(sampling_params: list[Any], name: str, *, required: bool, default: Any = None) -> Any:
+    first_value = (
+        _required_sampling_value(sampling_params[0], name)
+        if required
+        else _sampling_value(sampling_params[0], name, default)
+    )
+    for idx, params in enumerate(sampling_params[1:], start=1):
+        value = _required_sampling_value(params, name) if required else _sampling_value(params, name, default)
+        if value != first_value:
+            raise ValueError(
+                "Evo2 native batched generation requires homogeneous sampling params; "
+                f"{name} differs at batch index {idx}: {value!r} != {first_value!r}"
+            )
+    return first_value
 
 
 def generate_evo2_native_batched(
@@ -125,9 +142,7 @@ def generate_evo2_native_batched(
     mcore_generation_config = worker.cfg["generation"]["mcore_generation_config"]
     batched_decode_size = _evo2_batched_decode_size(worker.cfg)
     initial_seed = int(
-        evo2_seed
-        if evo2_seed is not None
-        else mcore_generation_config.get("seed", torch.initial_seed() % (2**31))
+        evo2_seed if evo2_seed is not None else mcore_generation_config.get("seed", torch.initial_seed() % (2**31))
     )
     prompt_token_ids = [
         row[: int(prompt_len.item())].detach().cpu().tolist()
@@ -153,25 +168,22 @@ def generate_evo2_native_batched(
         model=native_dynamic.forward_model,
         native_dynamic=native_dynamic,
     )
-    first_sampling_params = sampling_params[0]
+    max_new_tokens = int(_batched_sampling_value(sampling_params, "num_tokens_to_generate", required=True))
+    temperature = float(_batched_sampling_value(sampling_params, "temperature", required=False, default=1.0))
+    top_k = int(_batched_sampling_value(sampling_params, "top_k", required=False, default=0))
+    top_p = float(_batched_sampling_value(sampling_params, "top_p", required=False, default=0.0))
     native_results = _generate_native_dynamic(
         components,
         tokenizer.prompts,
-        max_new_tokens=int(
-            _sampling_value(first_sampling_params, "num_tokens_to_generate", 0)
-        ),
-        temperature=float(_sampling_value(first_sampling_params, "temperature", 1.0)),
-        top_k=int(_sampling_value(first_sampling_params, "top_k", 0)),
-        top_p=float(_sampling_value(first_sampling_params, "top_p", 0.0)),
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
         return_log_probs=True,
-        enable_chunked_prefill=bool(
-            mcore_generation_config.get("enable_chunked_prefill", False)
-        )
+        enable_chunked_prefill=bool(mcore_generation_config.get("enable_chunked_prefill", False))
         and batched_decode_size <= 1,
         inference_dynamic_batching_max_tokens=mcore_generation_config.get("max_tokens"),
-        inference_dynamic_batching_block_size=int(
-            mcore_generation_config.get("block_size_tokens", 256)
-        ),
+        inference_dynamic_batching_block_size=int(mcore_generation_config.get("block_size_tokens", 256)),
         evo2_batched_decode_size=batched_decode_size,
         result_callback=None,
     )
@@ -183,9 +195,7 @@ def generate_evo2_native_batched(
                 dtype=torch.long,
                 device=prompt_tokens_tensor.device,
             ),
-            generated_tokens=list(
-                result.generated_text and tokenizer.tokenize(result.generated_text) or []
-            ),
+            generated_tokens=list(tokenizer.tokenize(result.generated_text)) if result.generated_text else [],
             generated_log_probs=list(result.generated_log_probs or []),
         )
         for result in native_results
@@ -198,6 +208,7 @@ class Evo2MegatronGenerationAdapter:
     requires_all_workers = True
 
     def __init__(self, config: dict[str, Any] | None = None):
+        """Create an adapter from NeMo-RL generation adapter config."""
         self.config = dict(config or {})
         self.return_rank = int(self.config.get("return_rank", 0))
         self.seed_stride = int(self.config.get("seed_stride", 1_000_003))
@@ -208,9 +219,7 @@ class Evo2MegatronGenerationAdapter:
         return int(getattr(worker, "rank", 0))
 
     def _next_seed(self, worker: Any) -> int:
-        mcore_generation_config = (
-            worker.cfg["generation"].get("mcore_generation_config", {}) or {}
-        )
+        mcore_generation_config = worker.cfg["generation"].get("mcore_generation_config", {}) or {}
         base_seed = int(
             self.config.get(
                 "seed",
@@ -242,8 +251,8 @@ class Evo2MegatronGenerationAdapter:
         greedy: bool = False,
     ) -> Any | None:
         """Generate on every model-parallel worker and return output from one rank."""
-        prompt_tokens_tensor, prompt_lengths_tensor, sampling_params = (
-            worker._prepare_data_for_generation(data, greedy)
+        prompt_tokens_tensor, prompt_lengths_tensor, sampling_params = worker._prepare_data_for_generation(
+            data, greedy
         )
         if not should_use_evo2_native_batched_generation(
             worker.cfg, worker.model, batch_size=prompt_tokens_tensor.size(0)

@@ -30,8 +30,7 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     return parser.parse_known_args()
 
 
-def _select_grpo_trainer(master_config):
-    dp_cfg = master_config.data_plane or {}
+def _select_grpo_trainer(dp_cfg: dict):
     if dp_cfg.get("enabled", False):
         from nemo_rl.algorithms.grpo_sync import grpo_train_sync
 
@@ -45,17 +44,20 @@ def _select_grpo_trainer(master_config):
 
 def _register_recipe_extensions() -> None:
     """Register recipe-specific NeMo-RL processors and environments."""
-    from nemo_rl.data.processors import register_processor
+    from nemo_rl.data.processors import PROCESSOR_REGISTRY, register_processor
     from nemo_rl.distributed.ray_actor_environment_registry import ACTOR_ENVIRONMENT_REGISTRY
     from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
     from nemo_rl.environments.utils import register_env
 
     from bionemo.evo2_phage_gen.nemo_rl_processors import phage_prompt_data_processor
 
-    try:
-        register_processor("phage_prompt_data_processor", phage_prompt_data_processor)
-    except ValueError:
+    processor_name = "phage_prompt_data_processor"
+    if PROCESSOR_REGISTRY.get(processor_name) is phage_prompt_data_processor:
         pass
+    elif processor_name in PROCESSOR_REGISTRY:
+        raise ValueError(f"Dataset processor {processor_name} is already registered to a different function")
+    else:
+        register_processor("phage_prompt_data_processor", phage_prompt_data_processor)
     register_env("phage_qc", "bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment")
     ACTOR_ENVIRONMENT_REGISTRY["bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"] = PY_EXECUTABLES.SYSTEM
 
@@ -154,7 +156,7 @@ def main() -> None:
             max_trajectory_age_steps=async_config["max_trajectory_age_steps"],
         )
     else:
-        trainer = _select_grpo_trainer(master_config)
+        trainer = _select_grpo_trainer(dp_cfg)
         trainer(
             policy,
             policy_generation,

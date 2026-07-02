@@ -15,22 +15,23 @@
 
 """Tests for ``bionemo.evo2_phage_gen.reward``."""
 
+import subprocess
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import yaml
 
 from bionemo.evo2_phage_gen.reward import (
-    ExternalQCRewardConfig,
     REWARD_COMPONENTS,
+    ExternalQCRewardConfig,
     RewardWeights,
+    _aai_evidence_score,
+    _aai_novelty_score,
     _add_average_protein_identity_rewards,
     _add_full_synteny_rewards,
     _add_required_gene_rewards,
     _aggregate_reward,
-    _aai_evidence_score,
-    _aai_novelty_score,
-    _bounded_percent_range_score,
     _bounded_range_score,
     _lower_bound_ratio_score,
     _spike_identity_score,
@@ -104,12 +105,14 @@ def test_score_nucleotide_metrics_can_weight_nucleotide_pass_bonus():
 def test_reward_components_are_registered_and_clipped_to_unit_interval():
     """The aggregate RL score should be easy to reweight and stay in [0, 1]."""
     component_names = {component.name for component in REWARD_COMPONENTS}
-    assert {"valid_nt_chars", "genome_length", "gc_content", "protein_hit_count", "tropism"}.issubset(
-        component_names
-    )
-    assert {"checkv", "training_data_identity", "reference_genome_identity", "mmseqs_clustering", "diversity"}.isdisjoint(
-        component_names
-    )
+    assert {"valid_nt_chars", "genome_length", "gc_content", "protein_hit_count", "tropism"}.issubset(component_names)
+    assert {
+        "checkv",
+        "training_data_identity",
+        "reference_genome_identity",
+        "mmseqs_clustering",
+        "diversity",
+    }.isdisjoint(component_names)
 
     df = pd.DataFrame(
         {
@@ -144,11 +147,6 @@ def test_threshold_reward_helpers_plateau_at_pass_criteria():
     assert _bounded_range_score(9, 7, 9) == 1.0
     assert _bounded_range_score(3.5, 7, 9) == 0.5
     assert _bounded_range_score(18, 7, 9) == 0.5
-
-    assert _bounded_percent_range_score(0, 0, 95) == 1.0
-    assert _bounded_percent_range_score(95, 0, 95) == 1.0
-    assert _bounded_percent_range_score(97.5, 0, 95) == 0.5
-    assert _bounded_percent_range_score(100, 0, 95) == 0.0
 
 
 def test_spike_identity_score_plateaus_at_paper_threshold():
@@ -355,6 +353,48 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     assert scored.loc[1, "reward_external_protein_hit_count"] == 0.5
     assert scored.loc[1, "reward_external_tropism"] == 0.5
     assert scored.loc[1, "reward_external_synteny"] == 0.5
+
+
+def test_external_qc_subprocess_failure_fails_closed(tmp_path, monkeypatch):
+    """Transient Arc subprocess failures should zero external rewards without killing RL."""
+    config_path = tmp_path / "arc_config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "results_save_dir": "unused",
+                "current_config_file": "unused",
+                "evo_gen_seqs_fasta_file_save_location": "unused",
+            }
+        )
+    )
+    pipeline_script = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_script.write_text("raise SystemExit(1)\n")
+
+    def fail_run(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, ["python", str(pipeline_script)])
+
+    monkeypatch.setattr("subprocess.run", fail_run)
+
+    with pytest.warns(RuntimeWarning, match="Arc external QC failed"):
+        scored = score_nucleotide_metrics(
+            pd.DataFrame({"id_prompt": ["seq0"], "sequence": ["ACGT" * 1000]}),
+            weights=RewardWeights(
+                valid_nt_chars=0,
+                genome_length=0,
+                gc_content=0,
+                nt_homopolymer=0,
+                protein_hit_count=1,
+            ),
+            external_qc=ExternalQCRewardConfig(
+                enabled=True,
+                config_path=config_path,
+                pipeline_script=pipeline_script,
+                work_dir=tmp_path / "work",
+            ),
+        )
+
+    assert scored["reward_external_protein_hit_count"].tolist() == [0.0]
+    assert scored["reward"].tolist() == [0.0]
 
 
 def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):

@@ -15,9 +15,10 @@
 
 """Tests for opt-in Evo2 batched dynamic decode helpers."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
-from types import SimpleNamespace
 
 from bionemo.evo2.models.evo2_provider import bind_hyena_packed_views_to_dynamic_context_batch
 from bionemo.evo2.models.megatron.hyena.hyena_mixer import (
@@ -28,6 +29,10 @@ from bionemo.evo2.run.infer import (
     _native_generated_ids_hit_stop,
     _native_stop_token_ids,
     _trim_native_text_stop_markers,
+)
+from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
+    _batched_sampling_value,
+    _PromptTokenProxy,
 )
 
 
@@ -58,6 +63,34 @@ class _DummyTokenizer:
             99: "<EOS>",
         }
         return "".join(token_text[token_id] for token_id in token_ids)
+
+    def tokenize(self, text: str) -> list[int]:
+        return [1 if char == "A" else 2 for char in text]
+
+
+def test_prompt_token_proxy_rejects_missing_tokenizer_without_recursing():
+    """A partially constructed proxy should fail with AttributeError, not recursive lookup."""
+    proxy = object.__new__(_PromptTokenProxy)
+
+    with pytest.raises(AttributeError, match="_tokenizer"):
+        proxy._tokenizer
+
+
+def test_native_batched_generation_requires_homogeneous_sampling_params():
+    """Batched Evo2 generation should fail loudly if NeMo-RL sends mixed sampling params."""
+    params = [
+        SimpleNamespace(num_tokens_to_generate=8, temperature=1.0),
+        SimpleNamespace(num_tokens_to_generate=16, temperature=1.0),
+    ]
+
+    with pytest.raises(ValueError, match="num_tokens_to_generate differs"):
+        _batched_sampling_value(params, "num_tokens_to_generate", required=True)
+
+
+def test_native_batched_generation_requires_max_new_tokens_param():
+    """Missing max-token sampling params should not silently generate zero tokens."""
+    with pytest.raises(ValueError, match="num_tokens_to_generate"):
+        _batched_sampling_value([SimpleNamespace(temperature=1.0)], "num_tokens_to_generate", required=True)
 
 
 def test_batched_decode_reshape_round_trips_flattened_requests():
