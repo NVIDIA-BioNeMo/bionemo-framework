@@ -1,5 +1,5 @@
 diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
-index 00000000..00000000 100644
+index 1111111..2222222 100644
 --- a/nemo_rl/experience/rollouts.py
 +++ b/nemo_rl/experience/rollouts.py
 @@ -571,7 +571,37 @@ def calculate_rewards(
@@ -48,6 +48,68 @@ index 00000000..00000000 100644
      return current_batch, rollout_metrics
  
  
+@@ -1293,6 +1323,7 @@ def run_async_multi_turn_rollout(
+         rollout_metrics["histogram/total_tokens_length"] = [
+             t for m in all_sample_metrics for t in m["turn_total_tokens"]
+         ]
++        rollout_metrics.update(collect_environment_metrics(final_batch, task_to_env))
+ 
+         return final_batch, rollout_metrics
+ 
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 1111111..2222222 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -2999,6 +2999,7 @@ def validate(
+         total_rewards = []
+         total_lengths = []
+         all_message_logs = []  # Collect all message logs
++        validation_rollout_metrics = []
+ 
+         max_batches = (
+             master_config.grpo["max_val_samples"]
+@@ -3009,7 +3010,6 @@ def validate(
+             if batch_idx >= max_batches:
+                 break
+ 
+-            additional_metrics_to_report = dict()
+             # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
+             # Use async rollouts when enabled by config/backend defaults.
+             # We cascade NeMo-Gym first since NeMo-Gym also uses async rollouts.
+@@ -3028,7 +3028,6 @@ def validate(
+                 )
+                 val_batch = nemo_gym_rollout_result.final_batch
+                 gen_metrics = nemo_gym_rollout_result.rollout_metrics
+-                additional_metrics_to_report = gen_metrics
+             elif _should_use_async_rollouts(master_config):
+                 val_batch, gen_metrics = run_async_multi_turn_rollout(
+                     policy_generation,
+@@ -3049,6 +3048,7 @@ def validate(
+                     greedy=False,
+                 )
+ 
++            validation_rollout_metrics.append(gen_metrics)
+             total_rewards.extend(val_batch["total_reward"].tolist())
+             total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
+ 
+@@ -3074,6 +3074,17 @@ def validate(
+             sum(total_lengths) / len(total_lengths) if len(total_lengths) > 0 else 0.0
+         )
+ 
++        if len(validation_rollout_metrics) == 1:
++            additional_metrics_to_report = validation_rollout_metrics[0]
++        else:
++            grouped_validation_metrics: dict[str, list] = {}
++            for batch_metrics in validation_rollout_metrics:
++                for key, value in batch_metrics.items():
++                    grouped_validation_metrics.setdefault(key, []).append(value)
++            additional_metrics_to_report = aggregate_rollout_metrics(
++                grouped_validation_metrics
++            )
++
+         val_metrics = {
+             "accuracy": accuracy,
+             "avg_length": avg_length,
 diff --git a/nemo_rl/models/generation/megatron/megatron_generation.py b/nemo_rl/models/generation/megatron/megatron_generation.py
 index 5b8ba7e1..6f4f7e21 100644
 --- a/nemo_rl/models/generation/megatron/megatron_generation.py
