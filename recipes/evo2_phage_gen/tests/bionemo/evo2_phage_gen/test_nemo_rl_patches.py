@@ -18,9 +18,12 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import types
 from pathlib import Path
+
+import pytest
 
 from bionemo.evo2_phage_gen import nemo_rl_patches
 
@@ -100,6 +103,20 @@ def test_patch_nemo_rl_packaging_metadata_includes_subpackages(tmp_path: Path) -
     assert 'requires-python = ">=3.10"' in patched
 
 
+def test_find_cached_nemo_rl_source_rejects_dirty_checkout(tmp_path: Path, monkeypatch) -> None:
+    """Repair installs must not reuse uv checkouts that already contain local patch drift."""
+    checkout = tmp_path / "cache" / "git-v0" / "checkouts" / "repo" / "rev"
+    (checkout / "nemo_rl" / "algorithms").mkdir(parents=True)
+    (checkout / "nemo_rl" / "algorithms" / "grpo.py").write_text("")
+    (checkout / "pyproject.toml").write_text("")
+
+    monkeypatch.setattr(nemo_rl_patches, "_uv_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(nemo_rl_patches, "_git_head", lambda path: "abc123")
+    monkeypatch.setattr(nemo_rl_patches, "_git_worktree_is_clean", lambda path: False)
+
+    assert nemo_rl_patches._find_cached_nemo_rl_source("abc123") is None
+
+
 def test_run_patch_uses_real_batch_dry_run(tmp_path: Path) -> None:
     """The maintained check path should use a real noninteractive patch dry-run."""
     source_file = tmp_path / "nemo_rl" / "example.py"
@@ -137,6 +154,50 @@ def test_patch_sha256_reports_patch_content_hash(tmp_path: Path) -> None:
     )
 
 
+def test_maintained_patch_applies_to_pinned_nemo_rl_source(tmp_path: Path) -> None:
+    """The actual maintained patch should apply against the pinned clean NeMo-RL source."""
+    _, revision = nemo_rl_patches._nemo_rl_source_pin()
+    source_root = nemo_rl_patches._find_cached_nemo_rl_source(revision)
+    if source_root is None:
+        pytest.skip("Pinned NeMo-RL source is not present in the uv git cache")
+
+    build_root = tmp_path / "nemo-rl-source"
+    shutil.copytree(source_root / "nemo_rl", build_root / "nemo_rl")
+    result = nemo_rl_patches._run_patch(
+        ["--batch", "--dry-run", "-p1", "-i", str(nemo_rl_patches.DEFAULT_PATCH)],
+        cwd=build_root,
+    )
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Path, monkeypatch) -> None:
+    """Runtime verification should prove the installed package matches the maintained patch."""
+    patch_file = tmp_path / "evo2.patch"
+    patch_file.write_text("diff --git a/nemo_rl/example.py b/nemo_rl/example.py\n")
+    source_root = tmp_path / "site-packages"
+    package_dir = source_root / "nemo_rl"
+    package_dir.mkdir(parents=True)
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("")
+    spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
+
+    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+    monkeypatch.setattr(nemo_rl_patches, "assert_nemo_rl_patch_symbols", lambda: None)
+
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append((args, cwd))
+        return subprocess.CompletedProcess(["patch", *args], 0, stdout="ok")
+
+    monkeypatch.setattr(nemo_rl_patches, "_run_patch", fake_run_patch)
+
+    nemo_rl_patches.assert_nemo_rl_patch_runtime(patch_file)
+
+    assert calls == [(["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_file.resolve())], source_root)]
+
+
 def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypatch) -> None:
     """Startup should accept a runtime with all expected patched symbols."""
     rollouts = types.SimpleNamespace(collect_environment_metrics=object())
@@ -147,10 +208,16 @@ def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypat
         {"_load_generation_adapter": object(), "generate_with_adapter": object()},
     )
     megatron_worker = types.SimpleNamespace(MegatronGenerationMixin=generation_mixin_cls)
+    megatron_setup = types.SimpleNamespace(
+        _apply_target_allowlist_prefixes=object(),
+        NoRefitMegatronBridge=object(),
+        _uses_colocated_megatron_generation=object(),
+    )
     modules = {
         "nemo_rl.experience.rollouts": rollouts,
         "nemo_rl.models.generation.megatron.megatron_generation": megatron_generation,
         "nemo_rl.models.generation.megatron.megatron_worker": megatron_worker,
+        "nemo_rl.models.megatron.setup": megatron_setup,
     }
 
     monkeypatch.setattr(nemo_rl_patches.importlib, "import_module", lambda name: modules[name])

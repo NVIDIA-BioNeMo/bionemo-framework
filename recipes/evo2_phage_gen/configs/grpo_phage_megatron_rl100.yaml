@@ -71,6 +71,8 @@ env:
     weight_required_genes: 0.1
     external_qc:
       enabled: true
+      fail_on_error: true
+      timeout_seconds: 1800
       enable_protein_hit_count: true
       enable_tropism: true
       enable_synteny: true

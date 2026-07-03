@@ -27,6 +27,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from bionemo.evo2_phage_gen.arc_pipeline import ARC_EVO2_GIT_URL, ARC_EVO2_REV, _assert_arc_source_revision
+
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_EXTERNAL_DIR = RECIPE_ROOT / "data" / "external"
@@ -35,7 +37,8 @@ DEFAULT_MMSEQS_GPU_URL = "https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz"
 DEFAULT_PHROGS_ANNOTATION_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv"
 DEFAULT_PHROGS_MMSEQS_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/phrogs_mmseqs_db.tar.gz"
 DEFAULT_PHROGS_FASTA_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz"
-DEFAULT_ARC_EVO2_REPO_URL = "https://github.com/ArcInstitute/evo2.git"
+DEFAULT_ARC_EVO2_REPO_URL = ARC_EVO2_GIT_URL
+DEFAULT_ARC_EVO2_REPO_REV = ARC_EVO2_REV
 DEFAULT_DIAMOND_URL = "https://github.com/bbuchfink/diamond/releases/download/v2.1.24/diamond-linux64.tar.gz"
 DEFAULT_HMMER_URL = "https://conda.anaconda.org/bioconda/linux-64/hmmer-3.4-hb6cb901_4.tar.bz2"
 
@@ -308,17 +311,20 @@ def prepare_arc_evo2_checkout(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
     repo_url: str = DEFAULT_ARC_EVO2_REPO_URL,
+    repo_rev: str = DEFAULT_ARC_EVO2_REPO_REV,
     overwrite: bool = False,
 ) -> PreparedAsset:
     """Clone Arc's Evo2 repository for phage reference data and QC scripts."""
     checkout_dir = Path(external_dir) / "arc_evo2"
     if checkout_dir.exists() and not overwrite:
-        return PreparedAsset("arc_evo2", checkout_dir, "existing Arc Evo2 checkout")
+        _assert_arc_source_revision(checkout_dir, repo_rev)
+        return PreparedAsset("arc_evo2", checkout_dir, f"existing Arc Evo2 checkout at {repo_rev}")
     if checkout_dir.exists() and overwrite:
         shutil.rmtree(checkout_dir)
     checkout_dir.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "--depth", "1", repo_url, str(checkout_dir)], check=True)
-    return PreparedAsset("arc_evo2", checkout_dir, f"cloned from {repo_url}")
+    subprocess.run(["git", "clone", "--filter=blob:none", repo_url, str(checkout_dir)], check=True)
+    subprocess.run(["git", "-C", str(checkout_dir), "checkout", repo_rev], check=True)
+    return PreparedAsset("arc_evo2", checkout_dir, f"cloned from {repo_url}@{repo_rev}")
 
 
 def prepare_external_assets(
@@ -339,6 +345,7 @@ def prepare_external_assets(
     phrogs_mmseqs_url: str = DEFAULT_PHROGS_MMSEQS_URL,
     phrogs_fasta_url: str = DEFAULT_PHROGS_FASTA_URL,
     arc_evo2_repo_url: str = DEFAULT_ARC_EVO2_REPO_URL,
+    arc_evo2_repo_rev: str = DEFAULT_ARC_EVO2_REPO_REV,
     overwrite: bool = False,
     insecure_downloads: bool = False,
 ) -> list[PreparedAsset]:
@@ -383,7 +390,14 @@ def prepare_external_assets(
             prepare_phrogs_annotation(external_dir, overwrite=overwrite, insecure_downloads=insecure_downloads)
         )
     if download_arc_evo2:
-        assets.append(prepare_arc_evo2_checkout(external_dir, repo_url=arc_evo2_repo_url, overwrite=overwrite))
+        assets.append(
+            prepare_arc_evo2_checkout(
+                external_dir,
+                repo_url=arc_evo2_repo_url,
+                repo_rev=arc_evo2_repo_rev,
+                overwrite=overwrite,
+            )
+        )
     if download_large_databases:
         assets.append(
             prepare_phrogs_mmseqs_db(
@@ -429,6 +443,7 @@ def main() -> None:
     parser.add_argument("--phrogs-mmseqs-url", default=DEFAULT_PHROGS_MMSEQS_URL)
     parser.add_argument("--phrogs-fasta-url", default=DEFAULT_PHROGS_FASTA_URL)
     parser.add_argument("--arc-evo2-repo-url", default=DEFAULT_ARC_EVO2_REPO_URL)
+    parser.add_argument("--arc-evo2-repo-rev", default=DEFAULT_ARC_EVO2_REPO_REV)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--insecure-downloads",
@@ -454,6 +469,7 @@ def main() -> None:
         phrogs_mmseqs_url=args.phrogs_mmseqs_url,
         phrogs_fasta_url=args.phrogs_fasta_url,
         arc_evo2_repo_url=args.arc_evo2_repo_url,
+        arc_evo2_repo_rev=args.arc_evo2_repo_rev,
         overwrite=args.overwrite,
         insecure_downloads=args.insecure_downloads,
     )

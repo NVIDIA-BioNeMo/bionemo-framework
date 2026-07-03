@@ -199,6 +199,8 @@ def test_grpo_rl500_config_extends_current_full_qc_rollout():
     assert config["grpo"]["max_num_steps"] == 500
     assert config["grpo"]["val_batch_size"] == 96
     assert config["grpo"]["max_val_samples"] == 96
+    assert config["grpo"]["val_at_start"] is True
+    assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
     assert config["policy"]["train_global_batch_size"] == 96
     assert config["policy"]["generation_batch_size"] == 96
     assert generation_config["max_new_tokens"] == 5989
@@ -210,6 +212,7 @@ def test_grpo_rl500_config_extends_current_full_qc_rollout():
         mcore_generation_config["generation_adapter"]
         == "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
     )
+    assert mcore_generation_config["generation_adapter_config"]["seed"] == 42
     assert config["data"]["train"]["data_path"] == "data/phage_prompts_paper_useful_rl.jsonl"
     assert config["data"]["validation"]["data_path"] == "data/phage_prompts_paper_useful_rl_validation_prompt10.jsonl"
     assert config["env"]["phage_qc"]["weight_synteny"] == 0.25
@@ -219,7 +222,7 @@ def test_grpo_rl500_config_extends_current_full_qc_rollout():
     assert config["logger"]["wandb_enabled"] is True
     assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
     assert config["logger"]["wandb"]["name"] == "grpo-phage-rl500-full-qc-batched96"
-    assert config["checkpointing"]["checkpoint_dir"] == "data/checkpoints/phage_grpo_rl500"
+    assert config["checkpointing"]["checkpoint_dir"] == "data/checkpoints/phage_grpo_rl500_round2"
 
 
 def test_grpo_diagnostic_config_keeps_full_length_scoring_but_smaller_rollouts():

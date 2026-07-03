@@ -14,8 +14,9 @@ grpo:
   val_period: 10
   val_batch_size: 96
   max_val_samples: 96
-  val_at_start: false
+  val_at_start: true
   val_at_end: true
+  seq_logprob_error_threshold: 1.5
 
 policy:
   train_global_batch_size: 96
@@ -36,6 +37,7 @@ policy:
       enable_chunked_prefill: false
       generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
       generation_adapter_config:
+        seed: 42
         seed_stride: 1000003
 
 data:
@@ -62,6 +64,8 @@ env:
     weight_required_genes: 0.1
     external_qc:
       enabled: true
+      fail_on_error: true
+      timeout_seconds: 1800
       enable_protein_hit_count: true
       enable_tropism: true
       enable_synteny: true
@@ -78,4 +82,4 @@ logger:
     name: "grpo-phage-rl500-full-qc-batched96"
 
 checkpointing:
-  checkpoint_dir: "data/checkpoints/phage_grpo_rl500"
+  checkpoint_dir: "data/checkpoints/phage_grpo_rl500_round2"

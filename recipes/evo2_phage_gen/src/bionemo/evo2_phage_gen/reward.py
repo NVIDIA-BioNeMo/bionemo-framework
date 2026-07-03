@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -104,6 +105,8 @@ class ExternalQCRewardConfig:
     pipeline_script: Path = Path("data/arc_pipeline_patched/genome_design_filtering_pipeline.py")
     work_dir: Path = Path("data/checkpoints/phage_grpo_external_qc")
     keep_artifacts: bool = False
+    fail_on_error: bool = True
+    timeout_seconds: float | None = 1800.0
     enable_orf: bool = False
     enable_coding_density: bool = False
     enable_protein_hit_count: bool = True
@@ -807,6 +810,7 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
     scored_df["protein_database_hit_count_stage_reached"] = 0.0
     scored_df["protein_database_hit_count_measurement_available"] = 0.0
     scored_df["protein_database_hit_count_missing_artifact"] = 0.0
+    scored_df["protein_database_hit_count_hit_present"] = 0.0
     if phrogs_hits_path and phrogs_hits_path.exists():
         scored_df["protein_database_hit_count_stage_reached"] = 1.0
         scored_df["protein_database_hit_count_measurement_available"] = 1.0
@@ -816,6 +820,9 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             genome_counts = _genome_ids_from_orf_hits(hits_df).value_counts()
             min_hits = int(config.get("protein_database_hit_count", 7))
             scored_df["protein_database_hit_count"] = scored_df[id_column].map(genome_counts).fillna(0).astype(int)
+            scored_df["protein_database_hit_count_hit_present"] = (scored_df["protein_database_hit_count"] > 0).astype(
+                float
+            )
             scored_df["reward_external_protein_hit_count"] = scored_df["protein_database_hit_count"].map(
                 lambda value: _lower_bound_ratio_score(float(value), float(min_hits))
             )
@@ -830,6 +837,7 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
     scored_df["tropism_stage_reached"] = 0.0
     scored_df["tropism_measurement_available"] = 0.0
     scored_df["tropism_missing_artifact"] = 0.0
+    scored_df["tropism_hit_present"] = 0.0
     if tropism_hits_path and tropism_hits_path.exists():
         scored_df["tropism_stage_reached"] = 1.0
         hits_df = pd.read_csv(tropism_hits_path)
@@ -846,6 +854,7 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             scored_df["tropism_protein_mmseqs_percent_identity"] = mapped_identity.fillna(0.0)
             scored_df["tropism_protein_measured_hit"] = measured_hit.astype(float)
             scored_df["tropism_measurement_available"] = measured_hit.astype(float)
+            scored_df["tropism_hit_present"] = measured_hit.astype(float)
             scored_df["reward_external_tropism"] = [
                 _spike_identity_score(identity, has_hit, float(lower))
                 for identity, has_hit in zip(
@@ -890,7 +899,10 @@ def add_external_qc_rewards(
         "reward_external_required_genes",
     ]:
         df[column] = 0.0
+    df["external_qc_tool_succeeded"] = 0.0
+    df["external_qc_measurement_available"] = 0.0
 
+    external_qc_failed = False
     try:
         df["arc_qc_id"] = [f"umi{i + 1}" for i in range(len(df))]
         save_fasta(
@@ -902,18 +914,24 @@ def add_external_qc_rewards(
         run_config_path = _write_external_qc_config(base_config_path, run_dir, input_fasta, external_qc)
         try:
             subprocess.run(
-                ["python", str(pipeline_script), str(run_config_path)],
+                [sys.executable, str(pipeline_script), str(run_config_path)],
                 check=True,
                 cwd=str(pipeline_script.parent),
                 env=_external_qc_env(),
+                timeout=external_qc.timeout_seconds,
             )
-        except subprocess.CalledProcessError as exc:
-            warnings.warn(
-                f"Arc external QC failed for {run_dir}; leaving external reward columns at 0.0: {exc}",
-                RuntimeWarning,
-                stacklevel=2,
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            external_qc_failed = True
+            message = (
+                f"Arc external QC failed for {run_dir}; failed artifacts were retained and "
+                "external reward columns remain at 0.0"
             )
+            if external_qc.fail_on_error:
+                raise RuntimeError(message) from exc
+            warnings.warn(f"{message}: {exc}", RuntimeWarning, stacklevel=2)
             return df
+        df["external_qc_tool_succeeded"] = 1.0
+        df["external_qc_measurement_available"] = 1.0
         config = yaml.safe_load(run_config_path.read_text())
 
         orf_csv_name = config.get("orf_filter_seqs_csv_file_save_location")
@@ -943,7 +961,7 @@ def add_external_qc_rewards(
                 external_qc.required_genes_evidence_target,
             )
     finally:
-        if not external_qc.keep_artifacts:
+        if not external_qc.keep_artifacts and not external_qc_failed:
             shutil.rmtree(run_dir, ignore_errors=True)
     return df
 

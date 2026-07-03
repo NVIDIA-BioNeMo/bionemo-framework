@@ -16,6 +16,7 @@
 """Tests for ``bionemo.evo2_phage_gen.reward``."""
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -264,7 +265,9 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     pipeline_script = tmp_path / "genome_design_filtering_pipeline.py"
     pipeline_script.write_text("print('mock pipeline')\n")
 
-    def fake_run(args, check, cwd, env):
+    def fake_run(args, check, cwd, env, timeout):
+        assert args[0] == sys.executable
+        assert timeout == 1800.0
         run_config_path = Path(args[-1])
         run_config = yaml.safe_load(run_config_path.read_text())
         run_dir = Path(run_config["results_save_dir"])
@@ -371,7 +374,7 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
 
 
 def test_external_qc_subprocess_failure_fails_closed(tmp_path, monkeypatch):
-    """Transient Arc subprocess failures should zero external rewards without killing RL."""
+    """Explicit fail-closed mode should zero external rewards without killing offline scoring."""
     config_path = tmp_path / "arc_config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -385,8 +388,11 @@ def test_external_qc_subprocess_failure_fails_closed(tmp_path, monkeypatch):
     pipeline_script = tmp_path / "genome_design_filtering_pipeline.py"
     pipeline_script.write_text("raise SystemExit(1)\n")
 
-    def fail_run(*_args, **_kwargs):
-        raise subprocess.CalledProcessError(1, ["python", str(pipeline_script)])
+    calls = []
+
+    def fail_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise subprocess.CalledProcessError(1, [sys.executable, str(pipeline_script)])
 
     monkeypatch.setattr("subprocess.run", fail_run)
 
@@ -405,11 +411,59 @@ def test_external_qc_subprocess_failure_fails_closed(tmp_path, monkeypatch):
                 config_path=config_path,
                 pipeline_script=pipeline_script,
                 work_dir=tmp_path / "work",
+                fail_on_error=False,
+                timeout_seconds=123,
             ),
         )
 
     assert scored["reward_external_protein_hit_count"].tolist() == [0.0]
     assert scored["reward"].tolist() == [0.0]
+    assert scored["external_qc_tool_succeeded"].tolist() == [0.0]
+    assert scored["external_qc_measurement_available"].tolist() == [0.0]
+    assert calls[0][0][0][0] == sys.executable
+    assert calls[0][1]["timeout"] == 123
+    assert any((tmp_path / "work").glob("batch_*"))
+
+
+def test_external_qc_subprocess_failure_raises_by_default_and_retains_artifacts(tmp_path, monkeypatch):
+    """Full-QC RL should fail fast if Arc itself fails instead of turning that into biological zero."""
+    config_path = tmp_path / "arc_config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "results_save_dir": "unused",
+                "current_config_file": "unused",
+                "evo_gen_seqs_fasta_file_save_location": "unused",
+            }
+        )
+    )
+    pipeline_script = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_script.write_text("raise SystemExit(1)\n")
+
+    def fail_run(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, [sys.executable, str(pipeline_script)])
+
+    monkeypatch.setattr("subprocess.run", fail_run)
+
+    with pytest.raises(RuntimeError, match="Arc external QC failed"):
+        score_nucleotide_metrics(
+            pd.DataFrame({"id_prompt": ["seq0"], "sequence": ["ACGT" * 1000]}),
+            weights=RewardWeights(
+                valid_nt_chars=0,
+                genome_length=0,
+                gc_content=0,
+                nt_homopolymer=0,
+                protein_hit_count=1,
+            ),
+            external_qc=ExternalQCRewardConfig(
+                enabled=True,
+                config_path=config_path,
+                pipeline_script=pipeline_script,
+                work_dir=tmp_path / "work",
+            ),
+        )
+
+    assert any((tmp_path / "work").glob("batch_*"))
 
 
 def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):

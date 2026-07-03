@@ -18,8 +18,14 @@
 import tarfile
 from pathlib import Path
 
+import pytest
+
+from bionemo.evo2_phage_gen.arc_pipeline import ARC_EVO2_GIT_URL, ARC_EVO2_REV
 from bionemo.evo2_phage_gen.external_assets import (
+    DEFAULT_ARC_EVO2_REPO_REV,
+    DEFAULT_ARC_EVO2_REPO_URL,
     configure_lovis4u_mmseqs,
+    prepare_arc_evo2_checkout,
     prepare_checkv_database,
     prepare_diamond,
     prepare_external_assets,
@@ -121,6 +127,39 @@ def test_prepare_external_assets_can_skip_network_downloads(tmp_path):
     )
 
     assert [asset.name for asset in assets] == ["prodigal_wrapper"]
+
+
+def test_prepare_arc_evo2_checkout_clones_single_pinned_revision(tmp_path, monkeypatch):
+    """Arc checkout preparation should use the same pinned revision as the maintained patch."""
+    calls = []
+
+    def fake_run(cmd, check):
+        calls.append((cmd, check))
+        if cmd[:2] == ["git", "clone"]:
+            Path(cmd[-1]).mkdir(parents=True)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    asset = prepare_arc_evo2_checkout(tmp_path / "external")
+
+    checkout_dir = tmp_path / "external" / "arc_evo2"
+    assert DEFAULT_ARC_EVO2_REPO_URL == ARC_EVO2_GIT_URL
+    assert DEFAULT_ARC_EVO2_REPO_REV == ARC_EVO2_REV
+    assert asset.path == checkout_dir
+    assert calls == [
+        (["git", "clone", "--filter=blob:none", ARC_EVO2_GIT_URL, str(checkout_dir)], True),
+        (["git", "-C", str(checkout_dir), "checkout", ARC_EVO2_REV], True),
+    ]
+
+
+def test_prepare_arc_evo2_checkout_rejects_existing_wrong_revision(tmp_path, monkeypatch):
+    """Existing Arc checkouts should not silently drift away from the patch revision."""
+    checkout_dir = tmp_path / "external" / "arc_evo2"
+    checkout_dir.mkdir(parents=True)
+    monkeypatch.setattr("bionemo.evo2_phage_gen.arc_pipeline._git_head", lambda path: "wrong-revision")
+
+    with pytest.raises(RuntimeError, match=ARC_EVO2_REV):
+        prepare_arc_evo2_checkout(tmp_path / "external")
 
 
 def test_prepare_external_assets_configures_lovis4u_when_mmseqs_is_prepared(tmp_path, monkeypatch):
