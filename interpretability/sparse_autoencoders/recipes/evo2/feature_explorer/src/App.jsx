@@ -6,17 +6,15 @@ import FeatureCard from './FeatureCard'
 import FeatureList from './FeatureList'
 import EmbeddingView from './EmbeddingView'
 import Histogram from './Histogram'
-import { Sun, Moon } from 'lucide-react'
 import { styles } from './styles'
-import { userLabel } from './components'
+import { userLabel, useUserLabels } from './components'
 
-export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "Real SAE features — Evo 2, layer 26" }) {
-  const [darkMode, setDarkMode] = useState(true)
-
-  // Toggle dark class on document root
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', darkMode)
-  }, [darkMode])
+// Theme is owned by the Dashboard shell (one global Sun/Moon toggle); it sets the document `dark`
+// class and passes `dark` down. The atlas previously had its OWN toggle + class effect here — removed,
+// since it duplicated the shell's control and fought it over the `dark` class. `dark` is now read-only.
+export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "Real SAE features — Evo 2, layer 26", dark = true }) {
+  useUserLabels() // re-render when a feature is renamed in any tab
+  const darkMode = dark // embedding viz reads this; theme itself comes from the shell
 
   const [features, setFeatures] = useState([])
   const [loading, setLoading] = useState(true)
@@ -168,8 +166,11 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
 
 
         const safeUrl = parquetUrl.replace(/'/g, "''")  // escape quotes for the SQL string literal
+        // IF NOT EXISTS: React StrictMode (dev) runs this init effect twice on mount and the DuckDB
+        // coordinator is a global singleton, so a plain CREATE TABLE throws "already exists" on the
+        // second pass — which aborted the whole atlas init (no map, no examples). Idempotent = safe.
         await vg.coordinator().exec(`
-          CREATE TABLE features AS
+          CREATE TABLE IF NOT EXISTS features AS
           SELECT * FROM read_parquet('${safeUrl}')
         `)
 
@@ -900,23 +901,6 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
             }}
           >
             Export Edited
-          </button>
-          <button
-            onClick={() => setDarkMode(d => !d)}
-            title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-            style={{
-              padding: '6px',
-              border: '1px solid var(--border-input)',
-              borderRadius: '6px',
-              background: 'var(--bg-input)',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--text-secondary)',
-            }}
-          >
-            {darkMode ? <Sun size={16} /> : <Moon size={16} />}
           </button>
         </div>
       </div>

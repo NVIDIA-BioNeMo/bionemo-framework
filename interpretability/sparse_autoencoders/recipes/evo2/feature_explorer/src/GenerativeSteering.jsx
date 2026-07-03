@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useHealth, postJSON, getJSON, cleanDNA } from './backend'
-import { BackendBanner, OrganismField, FeaturePicker, resolveFeatureId, Row, userLabel } from './components'
+import { useHealth, postJSON, getJSON, cleanDNA, workTimeout } from './backend'
+import { BackendBanner, OrganismField, FeaturePicker, RestartEngineButton, resolveFeatureId, Row, userLabel, useUserLabels } from './components'
 
 // Render a LaTeX string with KaTeX (loaded from the CDN in index.html — no npm dep).
 function Tex({ expr, block = false }) {
@@ -20,6 +20,7 @@ function Tex({ expr, block = false }) {
 const BASES_PER_LINE = 80
 
 export default function GenerativeSteering() {
+  useUserLabels() // re-render when a feature is renamed in any tab
   const health = useHealth()
   const organismTags = health.info?.organism_tags
 
@@ -44,25 +45,51 @@ export default function GenerativeSteering() {
     if (!catalog.length) getJSON('/features').then(setCatalog).catch(() => {})
   }, [health.status, organismTags])
 
+  // Clear the "Engine restarting…" note once the worker is back (BackendBanner then shows it live again).
+  useEffect(() => {
+    if (health.status === 'ready') setError((e) => (typeof e === 'string' && e.startsWith('Engine restarting') ? null : e))
+  }, [health.status])
+
   const nFeatures = health.info?.n_features
   const clamps = rows
     .map((r) => ({ id: resolveFeatureId(catalog, r.q), strength: Number(r.strength) }))
     .filter((c) => c.id != null && (nFeatures == null || (c.id >= 0 && c.id < nFeatures)))
 
+  // Context budget: tag + prompt + generated tokens must fit the model's bp window. genMax = tokens
+  // still generatable; promptTooLong = the prompt alone already overflows (Steering rejects rather
+  // than clamps — so we block it client-side instead of round-tripping to a 413).
+  const maxSeqLen = health.info?.max_seq_len || 8192
+  const tagLen = (tag ?? organismTags?.[organism] ?? '').length
+  const promptBp = cleanDNA(prompt).length
+  const genMax = Math.max(1, maxSeqLen - tagLen - promptBp)
+  const promptTooLong = tagLen + promptBp > maxSeqLen
+  // Rough runtime estimate: decode measured at ~37 tok/s (unsteered); steering + a baseline pass make
+  // it slower, so use a conservative ~30 tok/s and double for the baseline. Just a heads-up, not exact.
+  const TOK_PER_S = 30
+  const estSec = Math.round((Number(nTokens) || 0) * (compareBaseline ? 2 : 1) / TOK_PER_S)
+  const estStr = estSec < 90 ? `~${estSec}s` : `~${(estSec / 60).toFixed(1)} min`
+
   const generate = async () => {
     setBusy(true)
     setError(null)
     try {
+      const nTok = Math.max(1, Math.min(genMax, Number(nTokens) || 1)) // never request past the budget
       const body = {
         prompt: cleanDNA(prompt),
         organism,
         tag: tag ?? (organismTags?.[organism] ?? ''),
         features: clamps.map((c) => ({ feature_id: c.id, strength: c.strength })),
-        n_tokens: Number(nTokens),
+        n_tokens: nTok,
         temperature: Number(temperature),
         compare_baseline: compareBaseline,
       }
-      setResult(await postJSON('/generate', body))
+      // Autoregressive: wall-clock scales with tokens generated (x2 when also generating an unsteered
+      // baseline). A 120-token sample fails fast; a full 8192-token continuation gets the minutes it needs.
+      setResult(await postJSON('/generate', body, {
+        // Ceiling raised to 30 min: a full 8192-token steered run with a baseline pass can take many
+        // minutes, and the old 15-min default was cutting it off. perUnit stays generous headroom.
+        timeoutMs: workTimeout(nTok * (compareBaseline ? 2 : 1), { perUnit: 120, baseMs: 45000, ceilMs: 1_800_000 }),
+      }))
     } catch (e) {
       setError(String(e.message || e))
       setResult(null)
@@ -72,6 +99,7 @@ export default function GenerativeSteering() {
   }
 
   const canRun = health.status === 'ready' && !busy // clamps optional — [] = plain generation
+
 
   return (
     <div style={S.wrap}>
@@ -85,7 +113,7 @@ export default function GenerativeSteering() {
           <div style={{ flex: 1 }}>
             <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={2} style={S.textarea}
               placeholder="DNA to seed generation — leave blank to generate from the organism tag alone. Clamping is applied to what's generated AFTER this prompt." />
-            <div style={S.hint}>{cleanDNA(prompt).length} bp seed · clamp applies to the generated continuation only</div>
+            <div style={S.hint}>{cleanDNA(prompt).length} bp seed · clamp applies to the generated continuation only{promptTooLong && <span style={{ color: '#ef4444' }}> · over the {maxSeqLen} bp context (incl. the {organism} tag) — shorten to generate</span>}</div>
           </div>
         </Row>
 
@@ -102,9 +130,9 @@ export default function GenerativeSteering() {
 
         <Row label="Length:">
           <span style={S.inlineField}>tokens&nbsp;
-            <input type="number" min={1} max={health.info?.max_seq_len || 8192} value={nTokens}
-              onChange={(e) => setNTokens(e.target.value)} style={S.num} />
-            <span style={S.help}>up to {health.info?.max_seq_len || 8192} bp (engine context; relaunch with higher MAX_SEQ_LEN for longer)</span>
+            <input type="number" min={1} max={genMax} value={nTokens}
+              onChange={(e) => { const v = e.target.value; setNTokens(v === '' ? '' : Math.min(genMax, Math.max(1, Number(v) || 1))) }} style={S.num} />
+            <span style={S.help}>up to {genMax} more bp (prompt + generation must fit the {maxSeqLen} bp context) · est. {estStr}{compareBaseline ? ' (incl. baseline)' : ''}</span>
           </span>
         </Row>
 
@@ -117,9 +145,11 @@ export default function GenerativeSteering() {
         </Row>
 
         <div style={S.actions}>
-          <button onClick={generate} disabled={!canRun} style={{ ...S.primary, opacity: canRun ? 1 : 0.5 }}>
+          <button onClick={generate} disabled={!canRun || promptTooLong} style={{ ...S.primary, opacity: canRun && !promptTooLong ? 1 : 0.5 }}>
             {busy ? 'Generating…' : clamps.length ? `Generate (clamp ${clamps.length} feature${clamps.length === 1 ? '' : 's'})` : 'Generate (no clamp)'}
           </button>
+          <RestartEngineButton enabled={!!health.info?.restart_enabled} busy={busy}
+            onRestart={() => { setBusy(false); setResult(null); setError('Engine restarting — reloading the model (~1 min)…') }} />
           {health.status !== 'ready' && <span style={S.down}>× backend {health.status === 'offline' ? 'down' : 'loading'}</span>}
           {error && <span style={S.down}>× {error}</span>}
         </div>

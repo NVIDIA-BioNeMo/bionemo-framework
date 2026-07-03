@@ -92,6 +92,17 @@ export async function fetchWithTimeout(url, opts = {}, timeoutMs = 120000) {
   }
 }
 
+// Size a client timeout to the declared work of a model call. A single fixed value can't fit both a
+// 200 bp paste and a full 8192-token generation: too short for the big one, too slow to surface a
+// hung backend on the small one. So: a floor (baseMs) that still fails fast, a linear per-unit term
+// for the real cost, and a hard ceiling so a dead backend can't hang the tab forever. The per-unit /
+// base numbers are rough, conservative upper bounds on single-GPU 7B latency — bump them if the model
+// or GPU changes. Err generous: the abort only abandons the fetch; the server keeps computing until
+// its cancel-on-disconnect checkpoint fires, so a premature timeout still wastes GPU.
+export function workTimeout(units, { perUnit, baseMs = 30000, ceilMs = 900000 } = {}) {
+  return Math.round(Math.min(ceilMs, baseMs + perUnit * Math.max(0, units || 0)))
+}
+
 export async function postJSON(path, body, { timeoutMs = 120000 } = {}) {
   const r = await fetchWithTimeout(
     `${BACKEND}${path}`,

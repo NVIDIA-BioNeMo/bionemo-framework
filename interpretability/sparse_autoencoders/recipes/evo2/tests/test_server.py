@@ -66,7 +66,11 @@ def test_annotate_rejects_too_long(client, fake_engine):
 
 def test_features(client):
     rows = client.get("/api/features").json()
-    assert {"id", "label", "natural_peak"} <= set(rows[0])
+    assert {"id", "label", "natural_peak", "steerable", "description", "auroc"} <= set(rows[0])
+    by_id = {r["id"]: r for r in rows}
+    # curated extras flow through from engine.feature_extra, keyed per feature
+    assert by_id[0]["steerable"] is True and by_id[0]["description"] == "fires on feat0 motifs"
+    assert by_id[1]["steerable"] is False and by_id[1]["description"] is None  # no extra → sensible defaults
 
 
 def test_annotate_returns_per_base_activations(client):
@@ -138,35 +142,75 @@ def test_gene_embed_returns_decodable_matrix(client):
     assert g.size == b["n_genes"] * b["n_features"]  # [n_genes x n_firing_features], what the client UMAPs
     # accounting fields so the UI can warn instead of silently embedding fewer than submitted —
     # lock the full set the banner interpolates (counts + the limits it names in the message).
-    assert b["n_received"] == 2 and b["n_skipped_short"] == 0 and b["n_skipped_too_long"] == 0
+    assert b["n_received"] == 2 and b["n_skipped_short"] == 0 and b["n_clamped"] == 0
     assert b["n_dropped_over_cap"] == 0
     assert b["max_seq_len"] > 0 and b["max_genes"] == 1000  # referenced verbatim in the UI warning
 
 
-def test_gene_embed_reports_skipped_sequences(client, fake_engine):
-    """Too-short and over-length sequences are dropped but REPORTED (not silently truncated)."""
+def test_gene_embed_clamps_overlength(client, fake_engine):
+    """Over-length sequences are CLAMPED to the context window and still embedded (reported via
+    n_clamped) — the UMAP tab keeps every point rather than dropping. Too-short ones are dropped+reported."""
     genes = [
         {"symbol": "ok", "sequence": "ACGTACGT"},
-        {"symbol": "short", "sequence": "AC"},  # < 3 bases -> skipped
-        {"symbol": "toolong", "sequence": "A" * (fake_engine.max_seq_len + 1)},  # > context -> skipped, not truncated
+        {"symbol": "short", "sequence": "AC"},  # < 3 bases -> dropped
+        {"symbol": "toolong", "sequence": "A" * (fake_engine.max_seq_len + 1)},  # > context -> clamped, embedded
     ]
     b = client.post("/api/gene_embed", json={"genes": genes, "min_firing": 1}).json()
     assert b["n_received"] == 3
-    assert b["n_genes"] == 1  # only the valid one is embedded
-    assert b["n_skipped_short"] == 1 and b["n_skipped_too_long"] == 1
+    assert b["n_genes"] == 2  # the valid one + the clamped one
+    assert b["n_skipped_short"] == 1 and b["n_clamped"] == 1
 
 
 def test_gene_embed_all_invalid_400(client, fake_engine):
-    """If nothing is embeddable, 400 with a message accounting for why (no silent empty result)."""
-    r = client.post("/api/gene_embed", json={"genes": [{"sequence": "A" * (fake_engine.max_seq_len + 1)}]})
+    """If nothing is embeddable (all too short), 400 with a message accounting for why."""
+    r = client.post("/api/gene_embed", json={"genes": [{"sequence": "AC"}, {"sequence": "A"}]})
     assert r.status_code == 400
-    assert "context limit" in r.json()["detail"]
+    assert "too short" in r.json()["detail"]
 
 
 def test_gene_embed_rejects_unknown_organism(client):
     # unknown organism (no preset tag, no custom tag) -> 400 before embedding, not a 500
     r = client.post("/api/gene_embed", json={"genes": [{"sequence": "ACGT"}], "organism": "Klingon"})
     assert r.status_code == 400
+
+
+def test_embed_bundle_forwards_cancel(fake_engine):
+    """The real embed_bundle must forward its cancel predicate to encode_batch so a disconnected
+    /gene_embed stops between micro-batches instead of encoding every sequence. Exercises the real
+    core.Evo2SAE.embed_bundle (bound onto FakeEngine) + the fake's cooperative-cancel checkpoint;
+    the TestClient can't simulate a mid-request disconnect, so this locks the plumbing directly."""
+    from evo2_sae.core import RequestAborted
+
+    with pytest.raises(RequestAborted):
+        fake_engine.embed_bundle(["ACGTACGT", "TTTTGGGG"], 0, [{}, {}], cancel=lambda: True)
+    # cancel=None (the default / non-server path) must never trip the checkpoint.
+    assert fake_engine.embed_bundle(["ACGTACGT"], 0, [{}], cancel=None) is not None
+
+
+def test_restart_disabled_by_default_403(client):
+    """POST /restart is gated: without ALLOW_ENGINE_RESTART it returns 403 (never exits the process).
+    The enabled path calls os._exit, so it's validated live, not in-process here."""
+    r = client.post("/api/restart")
+    assert r.status_code == 403
+    assert "not enabled" in r.json()["detail"].lower()
+
+
+def test_health_reports_restart_disabled(client):
+    assert client.get("/api/health").json()["restart_enabled"] is False
+
+
+def test_generate_409_when_engine_busy(client):
+    """Single-flight: a request arriving while the engine is occupied gets a fast 409, not a silent
+    queue behind the running one. (Hold the module busy-lock to simulate an in-flight request.)"""
+    import evo2_sae.server as srv
+
+    assert srv._engine_busy.acquire(blocking=False)
+    try:
+        r = client.post("/api/generate", json={"prompt": "ACGT"})
+        assert r.status_code == 409
+        assert "busy" in r.json()["detail"].lower()
+    finally:
+        srv._engine_busy.release()
 
 
 def test_generate_rejects_out_of_range_feature(client):

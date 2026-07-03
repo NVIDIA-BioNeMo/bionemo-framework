@@ -49,6 +49,7 @@ fi
 # backoff, capped so a persistent failure (e.g. port already bound) doesn't loop forever.
 if [[ "${1:-}" == "serve" ]]; then
   export EXIT_ON_CUDA_WEDGE=1
+  export ALLOW_ENGINE_RESTART=1  # enables POST /api/restart (user-driven "cancel + reload"); safe only under this respawn loop
   child=""
   stop=0
   trap 'stop=1; [[ -n "$child" ]] && kill -TERM "$child" 2>/dev/null || true' TERM INT
@@ -61,6 +62,13 @@ if [[ "${1:-}" == "serve" ]]; then
     child=""
     # stop on a clean exit or when a signal asked us to (143 SIGTERM / 130 SIGINT belt-and-suspenders).
     [[ "$stop" -eq 1 || "$rc" -eq 0 || "$rc" -eq 143 || "$rc" -eq 130 ]] && break
+    # A user-requested restart (POST /api/restart -> exit 42) is intentional, not a crash: respawn
+    # immediately and don't spend the crash budget on it.
+    if [[ "$rc" -eq 42 ]]; then
+      echo "[launch] engine restart requested — respawning a fresh worker" >&2
+      fails=0
+      continue
+    fi
     fails=$((fails + 1))
     if [[ "$fails" -ge 10 ]]; then
       echo "[launch] serve exited ($rc) $fails times — giving up; fix the cause." >&2
