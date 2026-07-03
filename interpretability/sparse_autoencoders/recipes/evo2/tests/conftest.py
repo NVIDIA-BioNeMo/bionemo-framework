@@ -135,6 +135,9 @@ class FakeEngine:
         self.n_features = 4
         self.labels = {0: "feat0", 1: "feat1"}
         self.peaks = {0: 0.5}
+        # Curated per-feature extras (steerable/description/auroc) — feat0 is flagged steerable so tests
+        # can assert these flow through /features; feat1 has none (defaults to steerable=False).
+        self.feature_extra = {0: {"steerable": True, "description": "fires on feat0 motifs", "auroc": 0.91}}
         self.organism_tags = {"None (raw DNA)": "", "Human": "|tag|"}
         self.device = "cpu"
         self.sae_ckpt_path = "fake.pt"
@@ -154,7 +157,11 @@ class FakeEngine:
         codes[:, 0] = 1.0  # feature 0 fires everywhere
         return codes
 
-    def encode_batch(self, seqs, batch_size=8):
+    def encode_batch(self, seqs, batch_size=8, cancel=None):
+        # Mirror the real engine's cooperative-cancel checkpoint (real encode_batch checks between
+        # micro-batches). embed_bundle — bound from the real Evo2SAE below — forwards cancel here.
+        if cancel is not None and cancel():
+            raise core.RequestAborted("cancelled")
         return [self.encode(s) for s in seqs]
 
     def top_features(self, codes, tag_len=0, k=8):

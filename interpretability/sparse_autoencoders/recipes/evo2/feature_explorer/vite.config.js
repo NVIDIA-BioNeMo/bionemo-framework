@@ -23,6 +23,12 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8001',
         changeOrigin: true,
+        // A /generate can run minutes with NO interim bytes (it's not streamed), so the dev proxy must
+        // not cut the idle connection. 30 min covers a full 8192-token steered run + baseline.
+        // proxyTimeout = how long to wait on the backend response; timeout = the incoming socket.
+        // (Note: an external tunnel — tsh/Teleport — may impose its own idle timeout this can't override.)
+        proxyTimeout: 1800000,
+        timeout: 1800000,
       },
     },
   },

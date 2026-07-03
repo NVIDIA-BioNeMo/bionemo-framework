@@ -27,6 +27,7 @@ const ALL_TABS = [
     limits: [
       'A clamp sets an absolute SAE activation value (capped at ±300); large magnitudes can push the model off-distribution into repetitive or degenerate DNA.',
       'Steering affects only the generated continuation, at the SAE’s layer — the prompt itself is not rewritten.',
+      'Prompt + generation must fit the 8192 bp context: an over-length prompt is rejected, and the number of generated tokens is capped to what’s left after the prompt (and its organism tag).',
       'A clamp changes output only if the feature is actually causal for what it appears to encode; a dead or non-causal feature leaves generation unchanged.',
       'One GPU, serialized — concurrent generations queue, and long generations can take a while.',
     ],
@@ -37,7 +38,7 @@ const ALL_TABS = [
     limits: [
       'Activations are read at the SAE’s single training layer only — not the whole network.',
       'A phylogenetic tag is prepended to the sequence; its leading positions are shown but excluded from the top-k ranking.',
-      'Sequences longer than the model’s context (max_seq_len) are rejected, not truncated.',
+      'Sequences longer than the model’s 8192 bp context are rejected, not truncated.',
       'Top-k ranks by each feature’s peak activation over the DNA region, so broad-but-weak features can rank below sharp local ones.',
     ],
   },
@@ -48,10 +49,12 @@ const ALL_TABS = [
       'UMAP is stochastic and only 2-D: the same sequences can land in different spots between runs, and cluster sizes/distances aren’t quantitative.',
       'Each sequence is pooled (mean or max) over its DNA region into one vector — within-sequence position is lost.',
       'Only features firing in at least min_firing sequences are kept, so rare features drop out of the layout.',
-      'Up to 1000 sequences per request; sequences past the cap or longer than the context limit (~8192 bases) are dropped — the tab reports how many rather than silently truncating. The offline bundle is a fixed precomputed set.',
+      'Up to 1000 sequences per request; sequences past the cap are dropped, and those longer than the 8192 bp context are clamped to it (embedded from their first 8192 bp) — the tab reports the counts. The offline bundle is a fixed precomputed set.',
     ],
   },
 ]
+
+const TAB_COMPONENTS = { atlas: App, steering: GenerativeSteering, inspector: SequenceInspector, sequmap: SequenceUMAPView }
 
 export default function Dashboard() {
   const [tab, setTab] = useState('atlas')
@@ -59,6 +62,17 @@ export default function Dashboard() {
   const health = useHealth()
   const online = health.status === 'ready'
   const [hasBundle, setHasBundle] = useState(false)
+  // Keep-alive: remember which tabs have been opened. We mount a tab on first visit and keep it
+  // mounted (just hidden) thereafter, so switching tabs never unmounts one. Unmounting is what made
+  // the backend appear to "reload" (each tab's useHealth reset to loading) and dropped typed input
+  // (a steering prompt/clamps, a loaded UMAP set) on every tab switch.
+  const [visited, setVisited] = useState({ atlas: true })
+  useEffect(() => { setVisited((v) => (v[tab] ? v : { ...v, [tab]: true })) }, [tab])
+  // Once the backend has ever been ready, keep the backend-backed tabs in the bar even if it briefly
+  // drops (e.g. an engine restart) — otherwise they'd vanish and bounce you to the atlas for the whole
+  // ~30-45s reload. A pure static deploy that was never ready still hides them (nothing to reconnect to).
+  const [everReady, setEverReady] = useState(false)
+  useEffect(() => { if (health.status === 'ready') setEverReady(true) }, [health.status])
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
@@ -72,8 +86,8 @@ export default function Dashboard() {
   }, [])
 
   const TABS = useMemo(
-    () => ALL_TABS.filter((t) => online || t.offline === true || (t.offline === 'bundle' && hasBundle)),
-    [online, hasBundle],
+    () => ALL_TABS.filter((t) => online || everReady || t.offline === true || (t.offline === 'bundle' && hasBundle)),
+    [online, everReady, hasBundle],
   )
 
   // If the active tab is no longer available (backend dropped), fall back to the atlas.
@@ -116,10 +130,16 @@ export default function Dashboard() {
       })()}
 
       <div style={{ ...S.content, overflow: tab === 'atlas' ? 'hidden' : 'auto' }}>
-        {tab === 'atlas' && <App />}
-        {tab === 'steering' && <GenerativeSteering />}
-        {tab === 'inspector' && <SequenceInspector />}
-        {tab === 'sequmap' && <SequenceUMAPView />}
+        {ALL_TABS.map((t) => {
+          if (!visited[t.id]) return null // not opened yet — don't mount eagerly
+          const Comp = TAB_COMPONENTS[t.id]
+          // Kept mounted once visited; only the active tab is shown. State + health persist across switches.
+          return (
+            <div key={t.id} style={{ display: t.id === tab ? 'block' : 'none', height: '100%' }}>
+              <Comp dark={dark} />
+            </div>
+          )
+        })}
       </div>
     </div>
   )

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { useHealth, postJSON, getJSON, cleanDNA } from './backend'
-import { S, BASES_PER_LINE, Heat, Legend, resolveFeatureId, FeaturePicker, OrganismField, BackendBanner, Row, Toggle } from './components'
+import { useHealth, postJSON, getJSON, cleanDNA, workTimeout } from './backend'
+import { S, BASES_PER_LINE, Heat, Legend, resolveFeatureId, FeaturePicker, OrganismField, BackendBanner, RestartEngineButton, Row, Toggle, useUserLabels } from './components'
 
 // Sequence inspector: paste DNA -> per-base SAE activations from the live backend
 // (/annotate). DNA-only display; absolute 0->max coloring (clear -> green).
@@ -13,6 +13,7 @@ const DEFAULT_SEQ = 'ATGGCTGAAAAGCTGGAAGCGGCAATTGAGCAGGCTGCAGTGGCAAATCAAGCG'
 export { resolveFeatureId, userLabel } from './components'
 
 export default function SequenceInspector() {
+  useUserLabels() // re-render when a feature is renamed in any tab
   const health = useHealth()
   const organismTags = health.info?.organism_tags
   const [catalog, setCatalog] = useState([])
@@ -34,6 +35,11 @@ export default function SequenceInspector() {
     if (!catalog.length) getJSON('/features').then(setCatalog).catch(() => {})
   }, [health.status, organismTags])
 
+  // Clear the "Engine restarting…" note once the worker is back (BackendBanner then shows it live again).
+  useEffect(() => {
+    if (health.status === 'ready') setError((e) => (typeof e === 'string' && e.startsWith('Engine restarting') ? null : e))
+  }, [health.status])
+
   const cleaned = useMemo(() => cleanDNA(sequence), [sequence])
 
   const annotate = async () => {
@@ -45,7 +51,9 @@ export default function SequenceInspector() {
         body.feature_ids = pickRows.map((r) => resolveFeatureId(catalog, r.q)).filter((x) => x != null)
         if (!body.feature_ids.length) throw new Error('pick at least one feature by name or #id')
       }
-      setResult(await postJSON('/annotate', body))
+      // One forward pass; scale the wait with sequence length (a full 8192 bp seq gets ~3.5 min,
+      // a short paste still fails fast if the backend is hung). See workTimeout in backend.js.
+      setResult(await postJSON('/annotate', body, { timeoutMs: workTimeout(cleaned.length, { perUnit: 25, ceilMs: 300000 }) }))
     } catch (e) {
       setError(String(e.message || e))
       setResult(null)
@@ -93,6 +101,8 @@ export default function SequenceInspector() {
             style={{ ...S.primary, opacity: busy || !cleaned.length || health.status !== 'ready' ? 0.5 : 1 }}>
             {busy ? 'Annotating…' : 'Annotate sequence'}
           </button>
+          <RestartEngineButton enabled={!!health.info?.restart_enabled} busy={busy}
+            onRestart={() => { setBusy(false); setResult(null); setError('Engine restarting — reloading the model (~1 min)…') }} />
           {health.status !== 'ready' && <span style={S.down}>× backend {health.status === 'offline' ? 'down' : 'loading'}</span>}
           {error && <span style={S.down}>× {error}</span>}
         </div>

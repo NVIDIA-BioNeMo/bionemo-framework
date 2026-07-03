@@ -5,8 +5,8 @@
 // steering, …). These used to live inside SequenceInspector.jsx, which made one pane a
 // dependency of another; they belong in a neutral module both panes import from.
 
-import React, { useMemo } from 'react'
-import { activationColor, legendGradient } from './backend'
+import React, { useMemo, useState, useEffect } from 'react'
+import { BACKEND, activationColor, legendGradient } from './backend'
 
 export const BASES_PER_LINE = 80
 
@@ -79,8 +79,23 @@ export function userLabel(id) {
   }
 }
 
-// Persist (or clear when blank) a user-provided feature title. Safe in private-mode/quota:
-// a throwing localStorage is swallowed rather than crashing the card.
+// Subscribers that re-render when any feature is renamed. Needed because tabs are now kept mounted
+// (keep-alive), so they no longer remount-and-reread localStorage on a tab switch — without this, a
+// rename in one tab wouldn't show in the others until they happened to re-render.
+const _labelListeners = new Set()
+
+// Call in any component that displays feature names, so it re-renders when a rename happens anywhere.
+export function useUserLabels() {
+  const [, bump] = useState(0)
+  useEffect(() => {
+    const fn = () => bump((n) => n + 1)
+    _labelListeners.add(fn)
+    return () => _labelListeners.delete(fn)
+  }, [])
+}
+
+// Persist (or clear when blank) a user-provided feature title, then notify subscribers so every
+// mounted tab updates. Safe in private-mode/quota: a throwing localStorage is swallowed.
 export function setUserLabel(id, text) {
   try {
     const t = (text || '').trim()
@@ -89,6 +104,7 @@ export function setUserLabel(id, text) {
   } catch {
     /* private mode / quota exceeded — ignore */
   }
+  _labelListeners.forEach((fn) => { try { fn() } catch { /* ignore */ } })
 }
 
 // Shared by-name feature picker (used by both tabs). withStrength adds a clamp value.
@@ -108,7 +124,7 @@ export function FeaturePicker({ catalog, rows, setRows, withStrength, nFeatures 
           <div key={i} style={S.pickRow}>
             <input list="evo2-feature-catalog" value={r.q} onChange={(e) => setRow(i, { q: e.target.value })}
               placeholder="feature name or #id…" style={S.featInput} />
-            <span style={{ ...S.resolved, ...(outOfRange ? { color: '#ef4444' } : {}) }}>
+            <span title={f?.description || undefined} style={{ ...S.resolved, ...(outOfRange ? { color: '#ef4444' } : {}) }}>
               {outOfRange
                 ? `✗ #${fid} out of range (0–${nFeatures - 1})`
                 : ul
@@ -162,6 +178,30 @@ export function BackendBanner({ health }) {
   }
   if (health.status === 'loading') return <div style={{ ...S.banner, ...S.bannerWarn }}>◐ Backend loading model + SAE… (~1 min at startup)</div>
   return <div style={{ ...S.banner, ...S.bannerWarn }}>Backend offline. Start the backend: <code>launch_inference.sh serve</code> on port 8001 (7B, layer 26).</div>
+}
+
+// Shared "restart the engine" control for the backend-backed tabs. Shown only when the server enables
+// it (`ALLOW_ENGINE_RESTART`, set by launch_inference.sh — it runs under the supervisor that respawns
+// the worker). Kills the in-flight request and reloads the model (~1 min) — the only way to free the
+// single GPU mid-run. `onRestart` lets the tab clear its own busy/result state and show a note;
+// useHealth then polls back to ready on its own.
+export function RestartEngineButton({ enabled, busy, onRestart }) {
+  if (!enabled) return null
+  const click = async () => {
+    if (!window.confirm('Restart the engine? This kills the running request and reloads the model (~1 min), affecting all tabs.')) return
+    onRestart?.()
+    try {
+      await fetch(`${BACKEND}/restart`, { method: 'POST' })
+    } catch {
+      /* the connection drops as the worker exits — expected */
+    }
+  }
+  return (
+    <button onClick={click} title="Kill the running request and reload the model (~1 min)"
+      style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border,#555)', background: 'transparent', color: 'var(--text)', cursor: 'pointer', fontSize: 12 }}>
+      {busy ? 'Cancel — restart engine' : 'Restart engine'}
+    </button>
+  )
 }
 
 export function Row({ label, children }) {
