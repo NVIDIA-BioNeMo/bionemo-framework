@@ -61,7 +61,10 @@ jobs:
 
           # Eligible recipes = those with their own .ci_build.sh (others are green no-ops until
           # they add one; empty before #1622 lands -> whole lane is a no-op).
-          ALL=$(for d in "$RROOT"/*/; do [ -f "${d}.ci_build.sh" ] && echo "${d%/}"; done \
+          # Use `if` (not `[ -f ] && echo`): the short-circuit leaves exit 1 when the last dir
+          # lacks a .ci_build.sh, which `set -e` would turn into a job failure instead of an
+          # empty (green no-op) matrix.
+          ALL=$(for d in "$RROOT"/*/; do if [ -f "${d}.ci_build.sh" ]; then echo "${d%/}"; fi; done \
                 | jq -R -s -c 'split("\n") | map(select(length > 0))')
           echo "Eligible recipes (have .ci_build.sh): $ALL"
 
