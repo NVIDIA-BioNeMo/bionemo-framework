@@ -1,0 +1,149 @@
+name: "BioNeMo Interpretability Recipes CI"
+
+# CI for the SAE interpretability recipes under interpretability/sparse_autoencoders/recipes/*.
+# Generic matrix, modeled on the repo-wide unit-tests-recipes.yml but scoped to the interp subtree:
+#   * `changed-dirs` (cheap ubuntu) discovers which interp recipes to test and emits a matrix.
+#   * `unit-tests` runs each selected recipe on the L4: its own `.ci_build.sh` + `pytest tests/`.
+#
+# Eligible recipes = any interp recipe with its own `.ci_build.sh`. Today that's `evo2`; codonfm/esm2
+# have no `.ci_build.sh`/tests yet, so they are skipped until they add them. This also makes the lane
+# a green no-op before the evo2 SAE recipe lands (#1622) — the presence guard is "has a .ci_build.sh".
+#
+# What runs when:
+#   * change under a recipe's own dir            -> that recipe.
+#   * change to the shared `sae` lib, or to this workflow file, or the nightly schedule
+#                                                -> ALL eligible recipes (they all depend on sae).
+#   * change to an unrelated recipe / elsewhere  -> nothing (empty matrix, green no-op).
+# Each recipe's `.ci_build.sh` owns its own build (evo2 -> mbridge bionemo.evo2; esm2 -> HF; etc.),
+# so a codonfm/esm2 change never triggers the Evo2 megatron build, and vice-versa.
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+      - "dependabot/**"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "0 9 * * *" # Runs at 9 AM UTC daily (2 AM MST)
+
+defaults:
+  run:
+    shell: bash -x -e -u -o pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed-dirs:
+    # Cheap ubuntu pre-job: decide which interp recipes to test and emit the matrix.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      dirs: ${{ steps.set-dirs.outputs.dirs }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine which interp recipes to run
+        id: set-dirs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          RROOT="interpretability/sparse_autoencoders/recipes"
+          SAE="interpretability/sparse_autoencoders/sae"
+          WF=".github/workflows/unit-tests-interpretability-recipes.yaml"
+
+          # Eligible recipes = those with their own .ci_build.sh (others are green no-ops until
+          # they add one; empty before #1622 lands -> whole lane is a no-op).
+          # Use `if` (not `[ -f ] && echo`): the short-circuit leaves exit 1 when the last dir
+          # lacks a .ci_build.sh, which `set -e` would turn into a job failure instead of an
+          # empty (green no-op) matrix.
+          ALL=$(for d in "$RROOT"/*/; do if [ -f "${d}.ci_build.sh" ]; then echo "${d%/}"; fi; done \
+                | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "Eligible recipes (have .ci_build.sh): $ALL"
+
+          MERGE_BASE=$(git merge-base HEAD origin/main)
+          CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
+          echo "Changed files:"; echo "$CHANGED" | sed 's/^/  - /'
+
+          # sae lib / this workflow / nightly -> run EVERY eligible recipe (all depend on sae).
+          if [ "$EVENT_NAME" = "schedule" ] || echo "$CHANGED" | grep -qE "^(${SAE}/|${WF}$)"; then
+            DIRS="$ALL"
+          else
+            # otherwise -> only eligible recipes that have a changed file under them.
+            DIRS=$(echo "$ALL" | jq -c --arg changed "$CHANGED" '
+              ($changed | split("\n")) as $cf
+              | map(select(. as $d | $cf | any(startswith($d + "/"))))
+            ')
+          fi
+          echo "Recipes to run: $DIRS"
+
+          # Attach the runner image (the dockerhub-cached squashed pytorch, like the repo-wide lane).
+          IMG="svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed"
+          MATRIX=$(echo "$DIRS" | jq -c --arg img "$IMG" \
+            'map({dir: ., name: (. | split("/") | last), image: $img})')
+          echo "dirs=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "matrix: $MATRIX"
+
+  unit-tests:
+    needs: changed-dirs
+    if: ${{ needs.changed-dirs.outputs.dirs != '' && needs.changed-dirs.outputs.dirs != '[]' }}
+    runs-on: linux-amd64-gpu-l4-latest-1
+    name: "interp-unit-tests (${{ matrix.recipe.name }})"
+    permissions:
+      contents: read
+    container:
+      image: ${{ matrix.recipe.image }}
+      options: --shm-size=16G
+      env:
+        CI: true
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_HOME: /cache/huggingface
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.changed-dirs.outputs.dirs) }}
+
+    steps:
+      - name: Show GPU info
+        run: nvidia-smi
+
+      - name: Setup proxy cache
+        uses: nv-gha-runners/setup-proxy-cache@14229018fe157c83e03c008f27d183d8e99bc67c
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # Interp recipes live under interpretability/sparse_autoencoders (recipe + shared sae);
+          # evo2 additionally builds on recipes/evo2_megatron. Check out both so any recipe's
+          # .ci_build.sh has what it needs.
+          sparse-checkout: |
+            interpretability/sparse_autoencoders
+            recipes/evo2_megatron
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: /cache/huggingface
+          key: ${{ runner.os }}-huggingface-interp-${{ matrix.recipe.name }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-huggingface-interp-${{ matrix.recipe.name }}-
+            ${{ runner.os }}-huggingface-
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.recipe.dir }}
+        run: bash .ci_build.sh
+
+      - name: Run tests
+        working-directory: ${{ matrix.recipe.dir }}
+        run: |
+          [ -f .ci_test_env.sh ] && source .ci_test_env.sh
+          pytest -v tests/
