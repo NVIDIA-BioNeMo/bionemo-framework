@@ -224,7 +224,7 @@ export default function SequenceUMAPView({ height = 600 }) {
             body: JSON.stringify({ genes, organism }),
             // Slowest call — one encode per sequence on the single GPU — so scale the wait with the
             // count (1000 seqs -> ~12 min) instead of a fixed cap that's too short for a big batch.
-          }, workTimeout(genes.length, { perUnit: 700, baseMs: 45000 })).catch(() => null)
+          }, workTimeout(genes.length, { perUnit: 700, baseMs: 45000, ceilMs: 3_600_000 })).catch(() => null)
         : null
       let r
       if (live && live.ok) {

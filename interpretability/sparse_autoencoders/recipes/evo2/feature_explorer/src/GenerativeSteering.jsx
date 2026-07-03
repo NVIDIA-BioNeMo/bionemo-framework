@@ -88,7 +88,7 @@ export default function GenerativeSteering() {
       setResult(await postJSON('/generate', body, {
         // Ceiling raised to 30 min: a full 8192-token steered run with a baseline pass can take many
         // minutes, and the old 15-min default was cutting it off. perUnit stays generous headroom.
-        timeoutMs: workTimeout(nTok * (compareBaseline ? 2 : 1), { perUnit: 120, baseMs: 45000, ceilMs: 1_800_000 }),
+        timeoutMs: workTimeout(nTok * (compareBaseline ? 2 : 1), { perUnit: 120, baseMs: 45000, ceilMs: 3_600_000 }),
       }))
     } catch (e) {
       setError(String(e.message || e))

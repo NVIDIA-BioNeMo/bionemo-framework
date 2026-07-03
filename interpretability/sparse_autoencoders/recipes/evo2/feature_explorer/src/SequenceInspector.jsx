@@ -53,7 +53,7 @@ export default function SequenceInspector() {
       }
       // One forward pass; scale the wait with sequence length (a full 8192 bp seq gets ~3.5 min,
       // a short paste still fails fast if the backend is hung). See workTimeout in backend.js.
-      setResult(await postJSON('/annotate', body, { timeoutMs: workTimeout(cleaned.length, { perUnit: 25, ceilMs: 300000 }) }))
+      setResult(await postJSON('/annotate', body, { timeoutMs: workTimeout(cleaned.length, { perUnit: 25, ceilMs: 900000 }) }))
     } catch (e) {
       setError(String(e.message || e))
       setResult(null)
