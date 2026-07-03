@@ -219,12 +219,15 @@ def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_miss
     (gff_dir / "genome_2.gff").write_text(
         "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=negative control protein\n"
     )
+    (gff_dir / "genome_3.gff").write_text(
+        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=no lovis output protein\n"
+    )
     input_csv = tmp_path / "input.csv"
     output_csv = tmp_path / "output.csv"
     pd.DataFrame(
         {
-            "id_prompt": ["genome_1", "genome_2"],
-            "genome_id": ["genome_1", "genome_2"],
+            "id_prompt": ["genome_1", "genome_2", "genome_3"],
+            "genome_id": ["genome_1", "genome_2", "genome_3"],
         }
     ).to_csv(input_csv, index=False)
 
@@ -238,14 +241,14 @@ def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_miss
     module.count_total_num_genes(str(gff_dir), str(output_csv))
 
     output = pd.read_csv(output_csv)
-    assert output["id_prompt"].tolist() == ["genome_1", "genome_2"]
-    assert output["num_syntenic_genes"].tolist() == [2, 0]
-    assert output["total_num_genes"].tolist() == [2, 1]
-    assert output["missing_synteny_output"].tolist() == [False, True]
+    assert output["id_prompt"].tolist() == ["genome_1", "genome_2", "genome_3"]
+    assert output["num_syntenic_genes"].tolist() == [2, 0, 0]
+    assert output["total_num_genes"].tolist() == [2, 1, 1]
+    assert output["missing_synteny_output"].tolist() == [False, True, True]
 
 
-def test_patched_arc_mmseqs_protein_search_fails_closed(tmp_path, monkeypatch):
-    """Failed MMseqs protein searches should produce an empty hit table."""
+def test_patched_arc_mmseqs_protein_search_raises_on_command_failure(tmp_path, monkeypatch):
+    """Failed MMseqs protein searches should abort so full-QC RL can fail fast."""
     module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_mmseqs_test")
 
     query_fasta = tmp_path / "query.fasta"
@@ -258,6 +261,30 @@ def test_patched_arc_mmseqs_protein_search_fails_closed(tmp_path, monkeypatch):
         raise module.subprocess.CalledProcessError(returncode=1, cmd="mmseqs")
 
     monkeypatch.setattr(module.subprocess, "run", fail_mmseqs)
+
+    with pytest.raises(module.subprocess.CalledProcessError):
+        module.run_mmseqs_search_proteins(
+            query_fasta=str(query_fasta),
+            mmseqs_db=str(mmseqs_db),
+            results_dir=str(tmp_path / "mmseqs_results"),
+            output_csv=str(output_csv),
+            descriptive_prefix="protein_database",
+        )
+
+
+def test_patched_arc_mmseqs_protein_search_allows_successful_empty_hits(tmp_path, monkeypatch):
+    """A successful MMseqs run with no hits should still produce an empty hit table."""
+    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_empty_mmseqs_test")
+    query_fasta = tmp_path / "query.fasta"
+    query_fasta.write_text(">umi1_ORF.1\nM\n")
+    mmseqs_db = tmp_path / "mmseqs_db"
+    mmseqs_db.mkdir()
+    output_csv = tmp_path / "hits.csv"
+    mmseqs_out = tmp_path / "mmseqs_results" / "mmseqs_out.tsv"
+    mmseqs_out.parent.mkdir()
+    mmseqs_out.write_text("")
+
+    monkeypatch.setattr(module, "mmseqs_search_proteins", lambda *_args, **_kwargs: str(mmseqs_out))
 
     hits = module.run_mmseqs_search_proteins(
         query_fasta=str(query_fasta),

@@ -57,8 +57,12 @@ def _nemo_rl_source_root() -> Path:
 
 
 def _run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run GNU patch in noninteractive forward-only mode."""
+    patch_args = list(args)
+    if "--forward" not in patch_args:
+        patch_args.insert(0, "--forward")
     return subprocess.run(
-        ["patch", *args],
+        ["patch", *patch_args],
         cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,

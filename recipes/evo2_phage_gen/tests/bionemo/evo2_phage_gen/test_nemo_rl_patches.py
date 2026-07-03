@@ -141,7 +141,43 @@ def test_run_patch_uses_real_batch_dry_run(tmp_path: Path) -> None:
     result = nemo_rl_patches._run_patch(["--batch", "--dry-run", "-p1", "-i", str(patch_file)], cwd=tmp_path)
 
     assert result.returncode == 0
+    assert "--forward" in result.args
     assert source_file.read_text() == "old\n"
+
+
+def test_apply_nemo_rl_patch_is_forward_only_and_idempotent(tmp_path: Path, monkeypatch) -> None:
+    """Rerunning the patcher on an already-patched runtime must not reverse the patch."""
+    source_root = tmp_path / "site-packages"
+    package_dir = source_root / "nemo_rl"
+    package_dir.mkdir(parents=True)
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("")
+    source_file = package_dir / "example.py"
+    source_file.write_text("old\n")
+    patch_file = tmp_path / "evo2.patch"
+    patch_file.write_text(
+        "\n".join(
+            [
+                "diff --git a/nemo_rl/example.py b/nemo_rl/example.py",
+                "index 1111111..2222222 100644",
+                "--- a/nemo_rl/example.py",
+                "+++ b/nemo_rl/example.py",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+                "",
+            ]
+        )
+    )
+    spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
+    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+
+    first_result = nemo_rl_patches.apply_nemo_rl_patch(patch_file)
+    second_result = nemo_rl_patches.apply_nemo_rl_patch(patch_file)
+
+    assert first_result == f"patch applied to {source_root}"
+    assert second_result == f"patch already applied to {source_root}"
+    assert source_file.read_text() == "new\n"
 
 
 def test_patch_sha256_reports_patch_content_hash(tmp_path: Path) -> None:
