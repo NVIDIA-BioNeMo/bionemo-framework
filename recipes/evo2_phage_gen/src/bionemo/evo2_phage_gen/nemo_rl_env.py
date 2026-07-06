@@ -74,6 +74,36 @@ def score_message_logs(
     return score_nucleotide_metrics(sequences_df, config=config, weights=weights, external_qc=external_qc)
 
 
+def _binary_pass_from_columns(scored: pd.DataFrame, pass_column: str, score_column: str) -> pd.Series | None:
+    """Return a strict pass mask from an explicit pass column or score fallback."""
+    if pass_column in scored:
+        return pd.to_numeric(scored[pass_column], errors="coerce").fillna(0.0) >= 1.0
+    if score_column in scored:
+        return pd.to_numeric(scored[score_column], errors="coerce").fillna(0.0) >= 1.0
+    return None
+
+
+def strict_overall_pass_mask(scored: pd.DataFrame, weights: RewardWeights) -> pd.Series | None:
+    """Return core candidate readiness gated by strict synteny and AAI novelty."""
+    if scored.empty:
+        return pd.Series(dtype=bool)
+
+    if "reward_binary_pass" in scored:
+        strict_pass = pd.to_numeric(scored["reward_binary_pass"], errors="coerce").fillna(0.0) >= 1.0
+    else:
+        strict_pass = binary_overall_pass_mask(scored, weights)
+
+    for pass_column, score_column in [
+        ("reward_external_synteny_pass", "reward_external_synteny"),
+        ("reward_external_average_protein_identity_pass", "reward_external_average_protein_identity"),
+    ]:
+        component_pass = _binary_pass_from_columns(scored, pass_column, score_column)
+        if component_pass is None:
+            return None
+        strict_pass &= component_pass
+    return strict_pass
+
+
 def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -> dict[str, float | int]:
     """Summarize per-sequence phage QC scores into scalar logger metrics."""
     if scored.empty:
@@ -201,6 +231,10 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
     core_pass_rate = float(binary_overall_pass_mask(scored, weights).astype(float).mean())
     metrics["core_qc_pass_rate"] = core_pass_rate
     metrics["binary_overall_pass_rate"] = core_pass_rate
+    strict_pass_mask = strict_overall_pass_mask(scored, weights)
+    if strict_pass_mask is not None:
+        metrics["strict_overall_pass_rate"] = float(strict_pass_mask.astype(float).mean())
+        metrics["strict_overall_pass_count"] = int(strict_pass_mask.sum())
 
     if "prompt_nt_length" in scored:
         prompt_lengths = pd.to_numeric(scored["prompt_nt_length"], errors="coerce")
@@ -216,6 +250,11 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
             metrics[f"{prefix}/core_qc_pass_rate"] = float(
                 binary_overall_pass_mask(prompt_scored, weights).astype(float).mean()
             )
+            strict_prompt_pass_mask = strict_overall_pass_mask(prompt_scored, weights)
+            if strict_prompt_pass_mask is not None:
+                metrics[f"{prefix}/strict_overall_pass_rate"] = float(
+                    strict_prompt_pass_mask.astype(float).mean()
+                )
             for component in REWARD_COMPONENTS:
                 if component.score_column in prompt_scored:
                     score_values = pd.to_numeric(prompt_scored[component.score_column], errors="coerce")

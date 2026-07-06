@@ -140,6 +140,30 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["required_genes_evidence_score_mean"] == 1.0
 
 
+def test_phage_qc_metrics_reports_strict_overall_pass_rate():
+    """Strict overall pass should require core pass plus synteny and AAI novelty."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 1.0, 1.0, 0.0],
+            "reward_external_tropism": [1.0, 1.0, 0.5, 1.0],
+            "reward_external_synteny_pass": [1.0, 0.0, 1.0, 1.0],
+            "reward_external_average_protein_identity_pass": [1.0, 1.0, 1.0, 1.0],
+            "prompt_nt_length": [10, 10, 10, 4],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(
+        scored,
+        RewardWeights(valid_nt_chars=1.0, tropism=1.0),
+    )
+
+    assert metrics["binary_overall_pass_rate"] == 0.5
+    assert metrics["strict_overall_pass_rate"] == 0.25
+    assert metrics["strict_overall_pass_count"] == 1
+    assert metrics["by_prompt_nt_length/10/strict_overall_pass_rate"] == pytest.approx(1 / 3)
+    assert metrics["by_prompt_nt_length/4/strict_overall_pass_rate"] == 0.0
+
+
 def test_phage_qc_metrics_groups_training_metrics_by_prompt_prefix_length():
     """Prompt-length groups let W&B compare each prefix only with matching prefixes."""
     scored = pd.DataFrame(

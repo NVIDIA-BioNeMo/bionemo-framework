@@ -364,7 +364,7 @@ index 0a0721dd..a274278a 100644
              stop_words=stop_words,
          )
 
-@@ -580,6 +683,16 @@ class MegatronGenerationMixin:
+@@ -580,6 +683,19 @@ class MegatronGenerationMixin:
 
          return self._parse_result_to_batched_data_dict(data, result)
 
@@ -376,6 +376,9 @@ index 0a0721dd..a274278a 100644
 +        adapter = self._load_generation_adapter()
 +        if adapter is None:
 +            return None
++        generate_worker = getattr(adapter, "generate_worker", None)
++        if callable(generate_worker):
++            return generate_worker(self, data=data, greedy=greedy)
 +        return adapter.generate(self, data=data, greedy=greedy)
 +
      async def generate_async(

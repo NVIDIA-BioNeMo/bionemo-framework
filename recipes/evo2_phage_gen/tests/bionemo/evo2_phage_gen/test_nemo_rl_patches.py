@@ -207,6 +207,14 @@ def test_maintained_patch_applies_to_pinned_nemo_rl_source(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout
 
 
+def test_maintained_patch_calls_adapter_generate_worker() -> None:
+    """The NeMo worker patch should use the Evo2 adapter's worker-side entry point."""
+    patch_text = nemo_rl_patches.DEFAULT_PATCH.read_text()
+
+    assert 'getattr(adapter, "generate_worker", None)' in patch_text
+    assert "return generate_worker(self, data=data, greedy=greedy)" in patch_text
+
+
 def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Path, monkeypatch) -> None:
     """Runtime verification should prove the installed package matches the maintained patch."""
     patch_file = tmp_path / "evo2.patch"
