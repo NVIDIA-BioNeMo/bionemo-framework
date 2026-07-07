@@ -4,6 +4,12 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   root: '.',
+  // embedding-atlas (the Feature Atlas lib) ships a web worker (clustering.worker.js) that Vite's
+  // dep pre-bundler mishandles ("file does not exist in the optimize deps directory"), so exclude it
+  // from optimizeDeps and let it load as ESM. Prevents the atlas failing to load on a fresh install.
+  optimizeDeps: {
+    exclude: ['embedding-atlas'],
+  },
   build: {
     outDir: 'dist',
   },
