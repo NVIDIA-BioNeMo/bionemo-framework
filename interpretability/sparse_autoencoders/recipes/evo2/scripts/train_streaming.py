@@ -37,9 +37,15 @@ Launch
 ------
 Run under ``torchrun --nproc_per_node 1`` (NOT bare ``python``): ``predict``
 calls ``initialize_inference_distributed`` and needs ``RANK``/``WORLD_SIZE``/
-``MASTER_*``. SAE training uses ``--dp-size 1``. Only ``--dp-size 1`` is
-supported here (single producer/consumer on one GPU); multi-GPU streaming would
-need one predict replica per rank.
+``MASTER_*``. It is one predict rank (``--dp-size 1``); this is a producer/consumer
+pipeline, NOT data parallelism.
+
+Two GPUs: because producer and consumer are separate stages, a second GPU is used to
+run them concurrently rather than to data-parallel. When >1 GPU is visible the SAE
+consumer trains on ``cuda:1`` while the Evo2 producer runs its forwards on ``cuda:0``
+(LOCAL_RANK 0), so the two stages stop contending for one device. Activations cross
+the boundary as CPU tensors via the queue, so no NCCL/DDP is involved. ``--dp-size``
+stays 1; pass ``--device`` to override the consumer's GPU.
 
     torchrun --nproc_per_node 1 train_streaming.py \
         --ckpt-dir CKPT --fasta SEQS.fasta --embedding-layer 12 --input-dim 1920 \
@@ -56,7 +62,6 @@ import queue
 import sys
 import tempfile
 import threading
-from pathlib import Path
 
 import torch
 from sae.architectures import ReLUSAE, TopKSAE
@@ -169,6 +174,7 @@ class Evo2ActivationProducer:
     """
 
     def __init__(self, args: argparse.Namespace):
+        """Store the parsed args; the activation generator is built lazily on ``__call__``."""
         self.args = args
 
     def _make_writer(self, q: "queue.Queue", state: dict):
@@ -201,6 +207,7 @@ class Evo2ActivationProducer:
         return writer
 
     def __call__(self):
+        """Return a fresh generator yielding ``[n_tokens, hidden_dim]`` CPU activation chunks."""
         args = self.args
         q: "queue.Queue" = queue.Queue(maxsize=args.queue_size)
         state = {"n_tokens": 0}
@@ -213,15 +220,26 @@ class Evo2ActivationProducer:
             predict_mod._write_predictions_batch = self._make_writer(q, state)
             sys.argv = [
                 "predict_evo2",
-                "--ckpt-dir", args.ckpt_dir,
-                "--fasta", args.fasta,
-                "--embedding-layer", str(args.layer),
-                "--micro-batch-size", str(args.micro_batch_size),
-                "--write-interval", "batch",
-                "--output-dir", scratch,
+                "--ckpt-dir",
+                args.ckpt_dir,
+                "--fasta",
+                args.fasta,
+                "--embedding-layer",
+                str(args.layer),
+                "--micro-batch-size",
+                str(args.micro_batch_size),
+                "--write-interval",
+                "batch",
+                "--output-dir",
+                scratch,
             ]
             try:
-                predict_mod.main()
+                # Evo2's params are bf16; TransformerEngine asserts param/input dtypes match
+                # unless inside an autocast region, and predict's minimal-arg path sets none.
+                # Wrap the forward loop (mirrors core.Evo2SAE._forward_hidden) so the streamed
+                # forwards run under bf16 autocast instead of tripping that assertion.
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    predict_mod.main()
                 q.put(_DONE)
             except BaseException as exc:  # surface producer failure to the consumer
                 q.put(exc)
@@ -257,8 +275,17 @@ def main() -> None:
         raise ValueError("train_streaming.py supports only --dp-size 1; use one GPU for this streaming path.")
 
     set_seed(args.seed)
-    device = args.device or get_device()
-    print(f"Using device: {device}")
+    # Producer/consumer split across GPUs (this is a pipeline, not data-parallel): the Evo2
+    # producer (predict) pins the first visible GPU (LOCAL_RANK 0 -> cuda:0); put the SAE
+    # consumer on a second GPU when one is available so the two stages run concurrently
+    # instead of sharing one device. --device overrides; single-GPU falls back to that device.
+    if args.device:
+        device = args.device
+    elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        device = "cuda:1"
+    else:
+        device = get_device()
+    print(f"SAE consumer device: {device}  (Evo2 producer runs on cuda:0)")
 
     input_dim = args.input_dim
     sae = build_sae(args, input_dim)

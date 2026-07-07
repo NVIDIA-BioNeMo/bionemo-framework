@@ -4,29 +4,18 @@ defaults:
   - _self_
 
 ############################################################
-# lepton job info
+# lepton job info  (node_group + mount_from are inherited from /base)
 ############################################################
-node_group: yo-bom-lepton-001
-mount_from: node-nfs:fs1
 num_nodes: 1
 device_type: gpu
-num_devices: 1
+# Two GPUs as a producer/consumer pipeline (NOT data parallel): the Evo2 producer runs
+# forwards on cuda:0 and the SAE consumer trains on cuda:1 (train_streaming.py auto-places
+# the consumer on the 2nd GPU). Still one predict rank: --nproc_per_node 1, --dp-size 1.
+num_devices: 2
 gpu_type: h100-sxm
-resource_shape: gpu.h100-sxm
+resource_shape: "${device_type}.${num_devices}x${gpu_type}"
 
 job_name: "evo2-sae-1b-smoke"
-
-############################################################
-# Container
-# Base NGC PyTorch image (same as the other convergence recipes). Its CUDA
-# forward-compat libs run on the workspace's current node driver (CUDA 12.4);
-# the evo2 GPU-lane image (pytorch26.04-squashed) needs driver >= 12.8 and dies
-# on those nodes with "Inference requires CUDA". Megatron/TransformerEngine are
-# added in-job by .ci_build.sh (checkout_script), so this base image is enough.
-############################################################
-container:
-  image: nvcr.io/nvidia/pytorch:26.02-py3
-  registry_auth: lepton-nvidia-jwilber
 
 ############################################################
 # Telemetry
@@ -46,9 +35,6 @@ model_type: evo2_sae
 variant: smoke
 framework: sae
 precision: bf16
-te_enabled: true
-fp8_enabled: false
-extras: []
 
 total_gpus: ${multiply:${num_devices},${num_nodes}}
 
