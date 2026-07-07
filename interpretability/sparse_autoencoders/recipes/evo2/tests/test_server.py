@@ -164,8 +164,9 @@ def test_gene_embed_clamps_overlength(client, fake_engine):
 def test_gene_embed_all_invalid_400(client, fake_engine):
     """If nothing is embeddable (all too short), 400 with a message accounting for why."""
     r = client.post("/api/gene_embed", json={"genes": [{"sequence": "AC"}, {"sequence": "A"}]})
-    assert r.status_code == 400
-    assert "too short" in r.json()["detail"]
+    # /gene_embed streams keepalives, so a mid-run error is framed in the 200 body, not an HTTP status.
+    err = r.json()["__error__"]
+    assert err["status"] == 400 and "too short" in err["detail"]
 
 
 def test_gene_embed_rejects_unknown_organism(client):
@@ -215,12 +216,14 @@ def test_generate_409_when_engine_busy(client):
 
 def test_generate_rejects_out_of_range_feature(client):
     r = client.post("/api/generate", json={"prompt": "ACGT", "features": [{"feature_id": 999}]})
-    assert r.status_code == 400  # the wedge guard, surfaced to the client
+    # streamed -> the wedge guard's error is framed in the 200 body, not an HTTP status.
+    assert r.json()["__error__"]["status"] == 400
 
 
 def test_generate_rejects_too_long(client, fake_engine):
     seq = "A" * (fake_engine.max_seq_len + 1)  # exceeds the context budget -> 413 (parity w/ annotate)
-    assert client.post("/api/generate", json={"prompt": seq}).status_code == 413
+    # streamed -> the too-long error is framed in the 200 body, not an HTTP status.
+    assert client.post("/api/generate", json={"prompt": seq}).json()["__error__"]["status"] == 413
 
 
 def test_generate_compare_baseline(client):

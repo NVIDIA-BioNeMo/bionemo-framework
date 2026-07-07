@@ -117,7 +117,13 @@ export async function postJSON(path, body, { timeoutMs = 120000 } = {}) {
     } catch (_) {}
     throw new Error(detail)
   }
-  return r.json()
+  // /generate and /gene_embed stream keepalive whitespace (so an idle proxy/tunnel can't kill a long
+  // silent request) then the JSON. Leading whitespace is valid JSON, so r.json() parses the result
+  // unchanged. A server-side error is framed as {__error__:{status,detail}} in a 200 body (the status
+  // is already sent once streaming began) — re-raise it so callers' catch blocks behave as before.
+  const data = await r.json()
+  if (data && data.__error__) throw new Error(data.__error__.detail || `HTTP ${data.__error__.status}`)
+  return data
 }
 
 export async function getJSON(path, { timeoutMs = 30000 } = {}) {
