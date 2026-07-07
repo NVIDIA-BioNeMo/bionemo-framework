@@ -24,6 +24,8 @@ work lives in `core.Evo2SAE`.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import threading
@@ -33,7 +35,7 @@ from typing import Optional
 
 import anyio
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -163,6 +165,63 @@ async def _run_cancellable_inner(request: Request, work):
     if "error" in box:
         raise box["error"]
     return box["result"]
+
+
+KEEPALIVE_SECS = float(os.getenv("KEEPALIVE_SECS", "10"))
+
+
+async def _stream_cancellable(request: Request, work):
+    """Single-flight guard + a keepalive stream so an idle-timeout proxy/tunnel can't kill a long request.
+
+    ``/generate`` and ``/gene_embed`` can run for minutes with NO interim bytes (the model call isn't
+    incremental), and an intermediate hop — a Brev/ingress reverse proxy, an SSH/Teleport tunnel — may
+    drop a connection that's idle for ~60-120s, no matter how generous our client/Vite timeouts are.
+    So while the blocking ``work(cancel)`` runs in the threadpool we stream whitespace heartbeats;
+    leading whitespace keeps the body valid JSON, so the client parses the final object with
+    ``response.json()`` unchanged. A server-side error is framed as ``{"__error__": {status, detail}}``
+    in the body (the HTTP status is already 200 once streaming has begun) and the client re-raises it.
+    409 (busy) is still a real status — raised here before any streaming starts.
+    """
+    if not _engine_busy.acquire(blocking=False):
+        raise HTTPException(409, _BUSY_MSG)
+
+    async def _gen():
+        cancelled = threading.Event()
+        worker = None
+        try:
+            worker = asyncio.ensure_future(anyio.to_thread.run_sync(lambda: work(cancelled.is_set)))
+            # Heartbeat until the model call finishes (or errors); poll disconnect between beats so a
+            # dropped client still cancels the GPU work at its next checkpoint.
+            while True:
+                try:
+                    await asyncio.wait_for(asyncio.shield(worker), timeout=KEEPALIVE_SECS)
+                    break  # worker finished — result/exception retrieved below
+                except asyncio.TimeoutError:
+                    yield b" "  # heartbeat: keeps the connection non-idle through any proxy/tunnel
+                    if await request.is_disconnected():
+                        cancelled.set()
+                except Exception:
+                    break  # worker raised; surfaced via worker.result() below
+            try:
+                result = worker.result()
+            except core.RequestAborted:
+                logger.info("client disconnected mid-request — aborted, GPU freed")
+                return
+            except ValueError as e:
+                yield json.dumps({"__error__": {"status": 413 if "too long" in str(e) else 400, "detail": str(e)}}).encode()
+                return
+            except Exception as e:  # surface a clean message, not a mid-stream 500 traceback
+                logger.exception("streamed work failed")
+                yield json.dumps({"__error__": {"status": 500, "detail": str(e)}}).encode()
+                return
+            yield json.dumps(result).encode()
+        finally:
+            cancelled.set()  # if the client dropped mid-stream, stop the worker at its next checkpoint
+            if worker is not None and not worker.done():
+                worker.add_done_callback(lambda t: t.cancelled() or t.exception())  # swallow "never retrieved"
+            _engine_busy.release()
+
+    return StreamingResponse(_gen(), media_type="application/json")
 
 
 def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
@@ -323,26 +382,20 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
         # async + threadpool (not a plain sync endpoint) so we can watch for a client disconnect and
         # cancel: /generate can run for minutes, and the client-side timeout only abandons the fetch —
         # the GPU keeps churning unless we stop it. See _run_cancellable / core.generate(cancel=...).
-        try:
-            return await _run_cancellable(
-                request,
-                lambda cancel: engine.generate(
-                    prompt=req.prompt,
-                    organism=req.organism,
-                    tag=req.tag,
-                    features=[f.model_dump() for f in req.features],
-                    n_tokens=req.n_tokens,
-                    temperature=req.temperature,
-                    top_k=req.top_k,
-                    compare_baseline=req.compare_baseline,
-                    cancel=cancel,
-                ),
-            )
-        except core.RequestAborted:
-            logger.info("client disconnected during /generate — aborted, GPU freed")
-            return Response(status_code=499)  # nginx's "client closed request"; nobody's listening
-        except ValueError as e:
-            raise HTTPException(413 if "too long" in str(e) else 400, str(e))
+        return await _stream_cancellable(
+            request,
+            lambda cancel: engine.generate(
+                prompt=req.prompt,
+                organism=req.organism,
+                tag=req.tag,
+                features=[f.model_dump() for f in req.features],
+                n_tokens=req.n_tokens,
+                temperature=req.temperature,
+                top_k=req.top_k,
+                compare_baseline=req.compare_baseline,
+                cancel=cancel,
+            ),
+        )
 
     # Per-request sequence cap for /gene_embed (one encode each on the single GPU). Surfaced in the
     # response (max_genes) and enforced by reporting overflow rather than silently dropping it.
@@ -390,33 +443,27 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
         # dashboard.py precompute so the static bundle is the same shape as this response. This is the
         # heavy part (one encode per sequence, up to MAX_GENES on the single GPU) and the longest call
         # the server serves, so run it cancellably: if the client gives up, stop between micro-batches.
-        try:
-            bundle = (
-                await _run_cancellable(
-                    request,
-                    lambda cancel: engine.embed_bundle(seqs, len(tag), meta, min_firing=req.min_firing, cancel=cancel),
+        # Assemble the full bundle inside the streamed work so the heavy encode + the reporting fields
+        # ship together; a "nothing embeddable" case raises ValueError -> framed 400 by _stream_cancellable.
+        def _build(cancel):
+            bundle = engine.embed_bundle(seqs, len(tag), meta, min_firing=req.min_firing, cancel=cancel)
+            if bundle is None:
+                raise ValueError(
+                    f"No embeddable sequences (received {n_received}: {n_too_short} too short, "
+                    f"{n_over_cap} past the {MAX_GENES}-sequence cap)"
                 )
-                if seqs
-                else None
-            )
-        except core.RequestAborted:
-            logger.info("client disconnected during /gene_embed — aborted, GPU freed")
-            return Response(status_code=499)  # nginx's "client closed request"; nobody's listening
-        if bundle is None:
-            raise HTTPException(
-                400,
-                f"No embeddable sequences (received {n_received}: {n_too_short} too short, "
-                f"{n_over_cap} past the {MAX_GENES}-sequence cap)",
-            )
-        # Report what we changed so the UI can warn the user, rather than silently returning a UMAP that
-        # differs from what they submitted: over-cap and too-short are dropped; over-length are clamped.
-        bundle["n_received"] = n_received
-        bundle["n_skipped_short"] = n_too_short
-        bundle["n_clamped"] = n_clamped
-        bundle["n_dropped_over_cap"] = n_over_cap
-        bundle["max_seq_len"] = engine.max_seq_len
-        bundle["max_genes"] = MAX_GENES
-        return bundle
+            # Report what we changed so the UI can warn the user, rather than silently returning a UMAP
+            # that differs from what they submitted: over-cap/too-short are dropped; over-length clamped.
+            bundle["n_received"] = n_received
+            bundle["n_skipped_short"] = n_too_short
+            bundle["n_clamped"] = n_clamped
+            bundle["n_dropped_over_cap"] = n_over_cap
+            bundle["max_seq_len"] = engine.max_seq_len
+            bundle["max_genes"] = MAX_GENES
+            return bundle
+
+        # Long call (one encode per sequence on the single GPU) with no interim bytes -> stream keepalives.
+        return await _stream_cancellable(request, _build)
 
     app.include_router(api, prefix="/api")
 
