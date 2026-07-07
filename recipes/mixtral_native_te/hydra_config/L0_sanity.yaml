@@ -1,0 +1,44 @@
+defaults:
+  - defaults
+  - _self_
+
+config_name_or_path: ./model_configs/mixtral_tiny
+config_kwargs:
+  attn_input_format: "bshd"
+  vocab_size: 50257
+
+parallelism:
+  dp_size: 1
+  ep_size: 2
+
+num_train_steps: 10
+
+use_meta_device: false
+use_torch_compile: false
+
+dataset:
+  tokenizer_name_or_path: gpt2
+  micro_batch_size: 1
+  max_seq_length: 128
+  stride: 64
+  text_column: "text"
+  load_dataset_kwargs:
+    path: "parquet"
+    data_files: "dlcm_sanity_dataset.parquet"
+    split: "train"
+    streaming: True
+
+wandb:
+  name: "mixtral_tiny_ep2_sanity"
+  mode: "offline"
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 2
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: false
+  resume_from_checkpoint: false
+
+logger:
+  frequency: 1
