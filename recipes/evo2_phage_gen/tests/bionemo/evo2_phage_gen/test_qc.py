@@ -15,11 +15,16 @@
 
 """Tests for ``bionemo.evo2_phage_gen.qc``."""
 
+import random
+from pathlib import Path
+
 import pandas as pd
 
 from bionemo.evo2_phage_gen.qc import (
     NucleotideQCConfig,
+    add_nucleotide_metrics,
     apply_nucleotide_qc,
+    calculate_dustmask_metrics,
     calculate_gc_content,
     calculate_nt_homopolymer_len,
     has_valid_nt_chars,
@@ -27,6 +32,12 @@ from bionemo.evo2_phage_gen.qc import (
     save_fasta,
     trim_at_first_eos,
 )
+
+
+def _deterministic_dna(length: int) -> str:
+    """Build a reproducible DNA sequence without long simple terminal runs."""
+    rng = random.Random(7)
+    return "".join(rng.choice("ACGT") for _ in range(length))
 
 
 def test_nucleotide_metrics_match_arc_filter_semantics():
@@ -98,3 +109,56 @@ def test_save_fasta_replaces_non_ascii_generated_tokens(tmp_path):
     save_fasta(df, output_fasta)
 
     assert output_fasta.read_text() == ">seq1\nACGTNACGT\n"
+
+
+def test_dustmask_fallback_flags_low_complexity_sequence_ends():
+    """The fallback DUST-style scorer should catch simple generated tails."""
+    sequence = _deterministic_dna(400) + "A" * 160
+
+    metrics = calculate_dustmask_metrics(
+        sequence,
+        window=64,
+        level=20.0,
+        end_window=200,
+        max_end_fraction=0.5,
+    )
+
+    assert metrics.right_end_masked_fraction > 0.5
+    assert metrics.max_end_masked_fraction > 0.5
+    assert not metrics.end_pass
+
+
+def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeypatch):
+    """When enabled, nucleotide metrics should call NCBI dustmasker once per batch."""
+    calls = []
+
+    def fake_run(args, check, capture_output, text):
+        calls.append((args, check, capture_output, text))
+        output_path = args[args.index("-out") + 1]
+        Path(output_path).write_text(">seq_0\n0 - 79\n>seq_1\n320 - 399\n")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    df = pd.DataFrame(
+        {
+            "id_prompt": ["left", "right"],
+            "sequence": [_deterministic_dna(400), _deterministic_dna(400)],
+        }
+    )
+
+    scored = add_nucleotide_metrics(
+        df,
+        NucleotideQCConfig(
+            dustmask_filter=True,
+            dustmasker_bin="fake-dustmasker",
+            dustmask_use_external=True,
+            dustmask_end_window=100,
+            dustmask_max_end_fraction=0.9,
+        ),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0][0] == "fake-dustmasker"
+    assert calls[0][0][calls[0][0].index("-outfmt") + 1] == "interval"
+    assert scored["dustmask_left_end_masked_fraction"].tolist() == [0.8, 0.0]
+    assert scored["dustmask_right_end_masked_fraction"].tolist() == [0.0, 0.8]
+    assert scored["dustmask_end_pass"].tolist() == [False, False]

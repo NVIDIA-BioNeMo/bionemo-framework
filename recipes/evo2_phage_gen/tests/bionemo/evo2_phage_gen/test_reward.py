@@ -15,21 +15,24 @@
 
 """Tests for ``bionemo.evo2_phage_gen.reward``."""
 
+import random
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
+from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 from bionemo.evo2_phage_gen.reward import (
-    ExternalQCRewardConfig,
     REWARD_COMPONENTS,
+    ExternalQCRewardConfig,
+    MMseqsClusterDiversityConfig,
     RewardWeights,
+    _aai_evidence_score,
+    _aai_novelty_score,
     _add_average_protein_identity_rewards,
     _add_full_synteny_rewards,
     _add_required_gene_rewards,
     _aggregate_reward,
-    _aai_evidence_score,
-    _aai_novelty_score,
     _bounded_percent_range_score,
     _bounded_range_score,
     _lower_bound_ratio_score,
@@ -40,6 +43,12 @@ from bionemo.evo2_phage_gen.reward import (
     score_fasta,
     score_nucleotide_metrics,
 )
+
+
+def _deterministic_dna(length: int) -> str:
+    """Build reproducible DNA for dustmask reward tests."""
+    rng = random.Random(11)
+    return "".join(rng.choice("ACGT") for _ in range(length))
 
 
 def test_score_nucleotide_metrics_rewards_passing_sequence():
@@ -101,15 +110,51 @@ def test_score_nucleotide_metrics_can_weight_nucleotide_pass_bonus():
     assert scored["reward"].tolist() == [1.0, 0.0]
 
 
+def test_score_nucleotide_metrics_penalizes_low_complexity_sequence_ends():
+    """The dustmask reward should give low-complexity sequence ends less credit."""
+    good_sequence = _deterministic_dna(4200)
+    bad_sequence = _deterministic_dna(4000) + "A" * 200
+    df = pd.DataFrame({"id_prompt": ["good", "bad_tail"], "sequence": [good_sequence, bad_sequence]})
+
+    scored = score_nucleotide_metrics(
+        df,
+        config=NucleotideQCConfig(
+            dustmask_filter=True,
+            dustmask_use_external=False,
+            dustmask_window=64,
+            dustmask_level=20.0,
+            dustmask_end_window=200,
+            dustmask_max_end_fraction=0.9,
+        ),
+        weights=RewardWeights(
+            valid_nt_chars=0.0,
+            genome_length=0.0,
+            gc_content=0.0,
+            nt_homopolymer=0.0,
+            dustmask_end=1.0,
+        ),
+    )
+
+    assert scored.loc[0, "reward_dustmask_end"] > scored.loc[1, "reward_dustmask_end"]
+    assert scored.loc[1, "dustmask_max_end_masked_fraction"] > 0.5
+    assert scored.loc[1, "reward_nucleotide_pass"] == 0.0
+    assert scored["reward"].tolist() == scored["reward_dustmask_end"].tolist()
+
+
 def test_reward_components_are_registered_and_clipped_to_unit_interval():
     """The aggregate RL score should be easy to reweight and stay in [0, 1]."""
     component_names = {component.name for component in REWARD_COMPONENTS}
-    assert {"valid_nt_chars", "genome_length", "gc_content", "protein_hit_count", "tropism"}.issubset(
-        component_names
-    )
-    assert {"checkv", "training_data_identity", "reference_genome_identity", "mmseqs_clustering", "diversity"}.isdisjoint(
-        component_names
-    )
+    assert {"valid_nt_chars", "genome_length", "gc_content", "protein_hit_count", "tropism"}.issubset(component_names)
+    assert "mmseqs_cluster_diversity" in component_names
+    assert "dustmask_end" in component_names
+    removed_components = {
+        "checkv",
+        "training_data_identity",
+        "reference_genome_identity",
+        "mmseqs_clustering",
+        "diversity",
+    }
+    assert removed_components.isdisjoint(component_names)
 
     df = pd.DataFrame(
         {
@@ -124,8 +169,55 @@ def test_reward_components_are_registered_and_clipped_to_unit_interval():
 
     assert scored["reward_valid_nt_chars"].tolist() == [1.0, 0.0]
     assert scored["reward"].tolist() == [0.75, 0.125]
-    assert scored["reward_binary_pass"].tolist() == [0.0, 0.0]
+    assert scored["reward_binary_core_pass"].tolist() == [0.0, 0.0]
     assert scored["reward_active_components"].tolist() == ["valid_nt_chars,gc_content"] * 2
+
+
+def test_mmseqs_cluster_diversity_reward_uses_inverse_cluster_size(tmp_path, monkeypatch):
+    """Batch-local MMseqs clusters should give each valid member 1 / cluster_size."""
+    commands = []
+
+    def fake_run(args, check):
+        commands.append(args)
+        assert check is True
+        assert args[:2] == ["fake-mmseqs", "easy-cluster"]
+        assert args[args.index("--min-seq-id") + 1] == "0.99"
+        assert args[args.index("-c") + 1] == "0"
+        assert args[args.index("--cov-mode") + 1] == "0"
+        assert args[args.index("--seq-id-mode") + 1] == "0"
+        assert args[args.index("--cluster-mode") + 1] == "0"
+        Path(f"{args[3]}_cluster.tsv").write_text("seq_0\tseq_0\nseq_0\tseq_1\nseq_2\tseq_2\n")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    df = pd.DataFrame(
+        {
+            "id_prompt": ["seq0", "seq1", "seq2", "invalid"],
+            "sequence": ["ACGT" * 1000, "ACGT" * 1000, "TGCA" * 1000, "NNNN"],
+        }
+    )
+
+    scored = score_nucleotide_metrics(
+        df,
+        weights=RewardWeights(
+            valid_nt_chars=0.0,
+            genome_length=0.0,
+            gc_content=0.0,
+            nt_homopolymer=0.0,
+            mmseqs_cluster_diversity=1.0,
+        ),
+        mmseqs_cluster_diversity=MMseqsClusterDiversityConfig(
+            enabled=True,
+            mmseqs_bin="fake-mmseqs",
+            work_dir=tmp_path,
+        ),
+    )
+
+    assert len(commands) == 1
+    assert scored["reward_mmseqs_cluster_diversity"].tolist() == [0.5, 0.5, 1.0, 0.0]
+    assert scored["reward"].tolist() == [0.5, 0.5, 1.0, 0.0]
+    assert scored["mmseqs_cluster_size"].tolist() == [2, 2, 1, 0]
+    assert scored["mmseqs_cluster_valid_for_clustering"].tolist() == [1.0, 1.0, 1.0, 0.0]
+    assert scored["mmseqs_cluster_missing_from_output"].tolist() == [0.0, 0.0, 0.0, 0.0]
 
 
 def test_threshold_reward_helpers_plateau_at_pass_criteria():
@@ -175,7 +267,7 @@ def test_soft_preference_components_do_not_gate_binary_pass():
         RewardWeights(valid_nt_chars=1.0, synteny=1.0, average_protein_identity=1.0),
     )
 
-    assert scored["reward_binary_pass"].tolist() == [1.0]
+    assert scored["reward_binary_core_pass"].tolist() == [1.0]
 
 
 def test_score_fasta_writes_reward_csv(tmp_path):
@@ -231,6 +323,11 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     assert run_config["syntenic_gene_count_filter"] is True
     assert run_config["average_protein_sequence_identity_filter"] is True
     assert run_config["required_genes_filter"] is True
+    assert run_config["lovis4u_parallel_jobs"] == 12
+    assert run_config["n_parallel_jobs"] == 12
+    assert run_config["lovis4u_chunk_size"] == 12
+    assert run_config["chunk_size"] == 12
+    assert run_config["lovis4u_collect_pdfs"] is False
     assert run_config["reference_genome_gff_file_save_location"] is None
 
 

@@ -94,10 +94,18 @@ env:
     gc_content_min: 30.0
     gc_content_max: 65.0
     homopolymer_max: 10
+    dustmask_filter: true
+    dustmasker_bin: "dustmasker"
+    dustmask_use_external: true
+    dustmask_window: 64
+    dustmask_level: 20.0
+    dustmask_end_window: 200
+    dustmask_max_end_fraction: 0.9
     weight_valid_nt_chars: 1.0
     weight_genome_length: 1.0
     weight_gc_content: 1.0
     weight_nt_homopolymer: 1.0
+    weight_dustmask_end: 1.0
     weight_nucleotide_pass: 0.0
     weight_protein_hit_count: 1.0
     weight_tropism: 1.0
@@ -118,6 +126,9 @@ env:
       enable_average_protein_identity: true
       enable_required_genes: true
       required_genes_evidence_target: 9.0
+      # Per external-QC reward run; set lower if several environment actors score concurrently.
+      lovis4u_parallel_jobs: 12
+      lovis4u_collect_pdfs: false
 
 logger:
   log_dir: "data/checkpoints/phage_grpo_logs"

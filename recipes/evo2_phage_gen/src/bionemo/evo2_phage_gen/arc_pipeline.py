@@ -38,7 +38,7 @@ PATCHED_CHECKV_ENV = "env = os.environ.copy()"
 ARC_LEGACY_LOVIS4U_CONDA_WRAPPER = '''def run_lovis4u_in_conda_env(env_name: str, command: str) -> None:
     """
     Activate a Conda environment and run a command within it.
-    
+
     Args:
         env_name (str): The name of the Conda environment to activate.
         command (str): The command to run inside the activated environment.
@@ -67,11 +67,11 @@ PATCHED_LOVIS4U_CONDA_WRAPPER = '''def run_lovis4u_in_conda_env(env_name: str, c
         print(f"Error while running LoVis4u command with active environment instead of {env_name}: {e}")
         raise
 '''
-ARC_LEGACY_MMSEQS_EMPTY_GUARD_ANCHOR = '''    # Drop the sequences column in mmseqs_df (if any) since we don't want to redundantly add it to sequences_df
+ARC_LEGACY_MMSEQS_EMPTY_GUARD_ANCHOR = """    # Drop the sequences column in mmseqs_df (if any) since we don't want to redundantly add it to sequences_df
     if 'sequence' in mmseqs_df.columns:
         mmseqs_df = mmseqs_df.drop(columns=['sequence'])
-'''
-PATCHED_MMSEQS_EMPTY_GUARD = '''    if mmseqs_df.empty:
+"""
+PATCHED_MMSEQS_EMPTY_GUARD = """    if mmseqs_df.empty:
         sequences_df[f'valid_{descriptive_prefix}_pident'] = False
         sequences_df[f'{descriptive_prefix}_mmseqs_percent_identity'] = pd.NA
         return sequences_df[sequences_df[f'valid_{descriptive_prefix}_pident']]
@@ -79,12 +79,12 @@ PATCHED_MMSEQS_EMPTY_GUARD = '''    if mmseqs_df.empty:
     # Drop the sequences column in mmseqs_df (if any) since we don't want to redundantly add it to sequences_df
     if 'sequence' in mmseqs_df.columns:
         mmseqs_df = mmseqs_df.drop(columns=['sequence'])
-'''
-ARC_LEGACY_EMPTY_DIVERSIFICATION_ANCHOR = '''            else:
+"""
+ARC_LEGACY_EMPTY_DIVERSIFICATION_ANCHOR = """            else:
                 raise ValueError("Unsupported file format. Please provide a .fna or .fasta file.")
         filtered_df = seq_df.copy()
-'''
-PATCHED_EMPTY_DIVERSIFICATION_GUARD = '''            else:
+"""
+PATCHED_EMPTY_DIVERSIFICATION_GUARD = """            else:
                 raise ValueError("Unsupported file format. Please provide a .fna or .fasta file.")
         filtered_df = seq_df.copy()
         if len(filtered_df) == 0:
@@ -92,14 +92,14 @@ PATCHED_EMPTY_DIVERSIFICATION_GUARD = '''            else:
             config["mmseqs_clustering_filter"] = False
             config["mmseqs_reference_genome_sequence_identity_remove_filter"] = False
             config["genetic_architecture_remove_filter"] = False
-'''
-ARC_LEGACY_EMPTY_ORF_ANCHOR = '''        ### Initialize counts ###
+"""
+ARC_LEGACY_EMPTY_ORF_ANCHOR = """        ### Initialize counts ###
         filter_counts_df['count_initial_before_orf_metrics'] = len(seq_df)
         print(f"Initializing ORF filtering. Sequences to filter: {filter_counts_df['count_initial_before_orf_metrics'].values[0]}.")
 
         ### Run Prodigal to call ORFs ###
-'''
-PATCHED_EMPTY_ORF_GUARD = '''        ### Initialize counts ###
+"""
+PATCHED_EMPTY_ORF_GUARD = """        ### Initialize counts ###
         filter_counts_df['count_initial_before_orf_metrics'] = len(seq_df)
         print(f"Initializing ORF filtering. Sequences to filter: {filter_counts_df['count_initial_before_orf_metrics'].values[0]}.")
         filtered_df = seq_df.copy()
@@ -108,8 +108,8 @@ PATCHED_EMPTY_ORF_GUARD = '''        ### Initialize counts ###
             config["prodigal_based_filters"] = False
 
         ### Run Prodigal to call ORFs ###
-'''
-ARC_LEGACY_EMPTY_HOMOLOGY_ANCHOR = '''        ### Run orfipy to call ORFs ###
+"""
+ARC_LEGACY_EMPTY_HOMOLOGY_ANCHOR = """        ### Run orfipy to call ORFs ###
         # Pseudo-circularize ORFs
         print(f"Pseudo-circularizing {len(seq_df)} genomes...")
         append_upstream_of_last_frame_stop(seq_fasta, f'{config["results_save_dir"]}/{config["homology_filter_seqs_circular_fasta_file_save_location"]}')
@@ -123,11 +123,11 @@ ARC_LEGACY_EMPTY_HOMOLOGY_ANCHOR = '''        ### Run orfipy to call ORFs ###
                     config["orfipy_min_max_orf_lengths"][0],
                     config["orfipy_min_max_orf_lengths"][1],
                     config["results_save_dir"],
-                    config["orfipy_orfs_file_save_location"], 
-                    config["orfipy_tmp_proteins_file_save_location"], 
+                    config["orfipy_orfs_file_save_location"],
+                    config["orfipy_tmp_proteins_file_save_location"],
                     config["orfipy_proteins_file_save_location"])
-'''
-PATCHED_EMPTY_HOMOLOGY_GUARD = '''        filtered_df = seq_df.copy()
+"""
+PATCHED_EMPTY_HOMOLOGY_GUARD = """        filtered_df = seq_df.copy()
         if len(filtered_df) == 0:
             print("No sequences available for homology filtering; writing empty homology outputs.")
             config["protein_database_hit_count_filter"] = False
@@ -152,14 +152,14 @@ PATCHED_EMPTY_HOMOLOGY_GUARD = '''        filtered_df = seq_df.copy()
                         config["orfipy_min_max_orf_lengths"][0],
                         config["orfipy_min_max_orf_lengths"][1],
                         config["results_save_dir"],
-                        config["orfipy_orfs_file_save_location"], 
-                        config["orfipy_tmp_proteins_file_save_location"], 
+                        config["orfipy_orfs_file_save_location"],
+                        config["orfipy_tmp_proteins_file_save_location"],
                         config["orfipy_proteins_file_save_location"])
-'''
-ARC_LEGACY_EMPTY_SYNTENY_ANCHOR = '''    ### Annotate & visualize genomes ###
+"""
+ARC_LEGACY_EMPTY_SYNTENY_ANCHOR = """    ### Annotate & visualize genomes ###
     if config["genetic_architecture_visualization_and_synteny_filtering"] == True:
-'''
-PATCHED_EMPTY_SYNTENY_GUARD = '''    ### Annotate & visualize genomes ###
+"""
+PATCHED_EMPTY_SYNTENY_GUARD = """    ### Annotate & visualize genomes ###
     if config["genetic_architecture_visualization_and_synteny_filtering"] == True:
         if config["diversification_filtering"] == True:
             synteny_input_csv = f'{config["results_save_dir"]}/{config["diversification_filter_seqs_csv_file_save_location"]}'
@@ -179,7 +179,75 @@ PATCHED_EMPTY_SYNTENY_GUARD = '''    ### Annotate & visualize genomes ###
                 config["genetic_architecture_visualization_and_synteny_filtering"] = False
 
     if config["genetic_architecture_visualization_and_synteny_filtering"] == True:
-'''
+"""
+ARC_LEGACY_LOVIS4U_PDF_COLLECTION = """        move_genetic_architecture_pdfs(f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
+                                       f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}')
+"""
+PATCHED_LOVIS4U_PDF_COLLECTION = """        if config.get("lovis4u_collect_pdfs", True):
+            move_genetic_architecture_pdfs(f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
+                                           f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}')
+        else:
+            print("Skipping LoVis4u PDF collection; synteny, AAI, and required-gene metrics do not need copied PDFs.")
+"""
+ARC_LEGACY_LOVIS4U_PARALLEL_CONFIG = """        # Get parallelization settings from config if available
+        max_workers = config.get("n_parallel_jobs", None)
+        chunk_size = config.get("chunk_size", 10)
+"""
+PATCHED_LOVIS4U_PARALLEL_CONFIG = """        # Get parallelization settings from config if available
+        max_workers = config.get("lovis4u_parallel_jobs", config.get("n_parallel_jobs", None))
+        chunk_size = config.get("lovis4u_chunk_size", config.get("chunk_size", 10))
+"""
+ARC_LEGACY_MMSEQS_PROTEIN_SEARCH_RUN = """    mmseqs_out = mmseqs_search_proteins(query_fasta, mmseqs_db, results_dir, threads, split, sensitivity)
+    hits = parse_mmseqs_results(mmseqs_out)
+    df = mmseqs_results_to_df(hits, query_fasta, output_csv, descriptive_prefix, only_top_hits)
+"""
+PATCHED_MMSEQS_PROTEIN_SEARCH_RUN = """    try:
+        mmseqs_out = mmseqs_search_proteins(query_fasta, mmseqs_db, results_dir, threads, split, sensitivity)
+        hits = parse_mmseqs_results(mmseqs_out)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"MMseqs protein search failed closed with empty {descriptive_prefix} hit table: {e}")
+        hits = []
+    if not hits:
+        df = pd.DataFrame(
+            columns=[
+                "id_prompt",
+                "sequence",
+                f"{descriptive_prefix}_mmseqs_target",
+                f"{descriptive_prefix}_mmseqs_e_value",
+                f"{descriptive_prefix}_mmseqs_percent_identity",
+            ]
+        )
+        df.to_csv(output_csv, index=False)
+        return df
+    df = mmseqs_results_to_df(hits, query_fasta, output_csv, descriptive_prefix, only_top_hits)
+"""
+ARC_LEGACY_SYNTENY_COUNT_SIGNATURE = """def count_syntenic_genes_all(root_dir: str, gff_dir: str, input_csv: str, output_csv: str) -> None:
+"""
+PATCHED_SYNTENY_COUNT_SIGNATURE = """def count_syntenic_genes_all(root_dir: str, gff_dir: str, input_csv: str, output_csv: str, reference_gff_path=None) -> None:
+"""
+ARC_LEGACY_SYNTENY_MISSING_ROOT = """    if not os.path.exists(root_dir):
+        print(f"Error: Directory '{root_dir}' does not exist.")
+        return
+"""
+PATCHED_SYNTENY_MISSING_ROOT = """    if not os.path.exists(root_dir):
+        print(f"Error: Directory '{root_dir}' does not exist; writing zero synteny metrics.")
+        input_df = pd.read_csv(input_csv)
+        input_df["num_syntenic_genes"] = 0
+        input_df["non_syntenic_genes"] = ""
+        input_df["non_syntenic_annotations"] = ""
+        input_df["missing_synteny_output"] = True
+        input_df.to_csv(output_csv, index=False)
+        return
+"""
+ARC_LEGACY_SYNTENY_OUTPUT_COLUMNS = """    input_df["num_syntenic_genes"] = input_df["genome_id"].map(syntenic_counts).fillna(0).astype(int)
+    input_df["non_syntenic_genes"] = input_df["genome_id"].map(non_syntenic_genes_dict).fillna("")
+    input_df["non_syntenic_annotations"] = input_df["genome_id"].map(non_syntenic_annotations_dict).fillna("")
+"""
+PATCHED_SYNTENY_OUTPUT_COLUMNS = """    input_df["num_syntenic_genes"] = input_df["genome_id"].map(syntenic_counts).fillna(0).astype(int)
+    input_df["non_syntenic_genes"] = input_df["genome_id"].map(non_syntenic_genes_dict).fillna("")
+    input_df["non_syntenic_annotations"] = input_df["genome_id"].map(non_syntenic_annotations_dict).fillna("")
+    input_df["missing_synteny_output"] = ~input_df["genome_id"].astype(str).isin(syntenic_counts)
+"""
 ARC_PIPELINE_FILES = (
     "genome_design_filtering_pipeline.py",
     "genetic_architecture.py",
@@ -231,6 +299,11 @@ def prepare_arc_pipeline_workdir(
         text.replace(ARC_LEGACY_PRODIGAL_CMD, PATCHED_PRODIGAL_CMD)
         .replace(ARC_LEGACY_CHECKV_ENV, PATCHED_CHECKV_ENV)
         .replace(ARC_LEGACY_LOVIS4U_CONDA_WRAPPER, PATCHED_LOVIS4U_CONDA_WRAPPER)
+        .replace(ARC_LEGACY_LOVIS4U_PDF_COLLECTION, PATCHED_LOVIS4U_PDF_COLLECTION)
+        .replace(ARC_LEGACY_MMSEQS_PROTEIN_SEARCH_RUN, PATCHED_MMSEQS_PROTEIN_SEARCH_RUN)
+        .replace(ARC_LEGACY_SYNTENY_COUNT_SIGNATURE, PATCHED_SYNTENY_COUNT_SIGNATURE)
+        .replace(ARC_LEGACY_SYNTENY_MISSING_ROOT, PATCHED_SYNTENY_MISSING_ROOT)
+        .replace(ARC_LEGACY_SYNTENY_OUTPUT_COLUMNS, PATCHED_SYNTENY_OUTPUT_COLUMNS)
         .replace(ARC_LEGACY_MMSEQS_EMPTY_GUARD_ANCHOR, PATCHED_MMSEQS_EMPTY_GUARD)
         .replace(ARC_LEGACY_EMPTY_ORF_ANCHOR, PATCHED_EMPTY_ORF_GUARD)
         .replace(ARC_LEGACY_EMPTY_HOMOLOGY_ANCHOR, PATCHED_EMPTY_HOMOLOGY_GUARD)
@@ -244,6 +317,16 @@ def prepare_arc_pipeline_workdir(
         missing_patches.append("CheckV environment")
     if ARC_LEGACY_LOVIS4U_CONDA_WRAPPER in text and PATCHED_LOVIS4U_CONDA_WRAPPER not in patched_text:
         missing_patches.append("LoVis4u environment")
+    if ARC_LEGACY_LOVIS4U_PDF_COLLECTION in text and PATCHED_LOVIS4U_PDF_COLLECTION not in patched_text:
+        missing_patches.append("LoVis4u PDF collection")
+    if ARC_LEGACY_MMSEQS_PROTEIN_SEARCH_RUN in text and PATCHED_MMSEQS_PROTEIN_SEARCH_RUN not in patched_text:
+        missing_patches.append("fail-closed MMseqs protein search")
+    if ARC_LEGACY_SYNTENY_COUNT_SIGNATURE in text and PATCHED_SYNTENY_COUNT_SIGNATURE not in patched_text:
+        missing_patches.append("synteny count reference_gff_path compatibility")
+    if ARC_LEGACY_SYNTENY_MISSING_ROOT in text and PATCHED_SYNTENY_MISSING_ROOT not in patched_text:
+        missing_patches.append("missing synteny root guard")
+    if ARC_LEGACY_SYNTENY_OUTPUT_COLUMNS in text and PATCHED_SYNTENY_OUTPUT_COLUMNS not in patched_text:
+        missing_patches.append("missing synteny output flag")
     if ARC_LEGACY_MMSEQS_EMPTY_GUARD_ANCHOR in text and PATCHED_MMSEQS_EMPTY_GUARD not in patched_text:
         missing_patches.append("empty MMseqs hit guard")
     if ARC_LEGACY_EMPTY_ORF_ANCHOR in text and PATCHED_EMPTY_ORF_GUARD not in patched_text:
@@ -257,6 +340,13 @@ def prepare_arc_pipeline_workdir(
     if missing_patches:
         raise ValueError(f"Failed to patch {', '.join(missing_patches)} in {filtering_pipeline_path}")
     filtering_pipeline_path.write_text(patched_text)
+
+    visualization_path = output_dir / "genetic_architecture_visualization.py"
+    text = visualization_path.read_text()
+    patched_text = text.replace(ARC_LEGACY_LOVIS4U_PARALLEL_CONFIG, PATCHED_LOVIS4U_PARALLEL_CONFIG)
+    if ARC_LEGACY_LOVIS4U_PARALLEL_CONFIG in text and PATCHED_LOVIS4U_PARALLEL_CONFIG not in patched_text:
+        raise ValueError(f"Failed to patch LoVis4u parallel config in {visualization_path}")
+    visualization_path.write_text(patched_text)
     return written_paths
 
 

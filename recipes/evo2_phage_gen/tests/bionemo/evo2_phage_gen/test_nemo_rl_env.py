@@ -21,8 +21,10 @@ import torch
 
 import bionemo.evo2_phage_gen.nemo_rl_env as nemo_rl_env
 from bionemo.evo2_phage_gen.nemo_rl_env import (
+    GDPOObjective,
     extract_assistant_sequence,
     extract_scored_sequence,
+    gdpo_objective_scores_from_scored,
     phage_qc_metrics_from_scored,
     score_message_logs,
 )
@@ -53,10 +55,43 @@ def test_extract_scored_sequence_keeps_prompt_dna_and_drops_soft_tokens():
 
 def test_score_message_logs_uses_phage_reward():
     """A passing assistant sequence should receive reward 1."""
-    scored = score_message_logs([[{"role": "user", "content": "+~GAGT"}, {"role": "assistant", "content": "ACGT" * 1000}]])
+    scored = score_message_logs(
+        [[{"role": "user", "content": "+~GAGT"}, {"role": "assistant", "content": "ACGT" * 1000}]]
+    )
 
     assert scored["reward"].tolist() == [1.0]
     assert scored["prompt_nt_length"].tolist() == [4]
+
+
+def test_gdpo_objective_scores_reduce_named_columns_positionally():
+    """GDPO helper should build a stable [B, K] objective table without adding aggregate reward."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 0.0],
+            "reward_genome_length": [1.0, 0.5],
+            "reward_external_tropism": [0.25, 0.75],
+        }
+    )
+
+    objectives = (
+        GDPOObjective("feasibility", ("reward_valid_nt_chars", "reward_genome_length"), "mean"),
+        GDPOObjective("function", ("reward_external_tropism",), "mean"),
+    )
+    objective_scores = gdpo_objective_scores_from_scored(scored, objectives)
+
+    assert list(objective_scores.columns) == ["feasibility", "function"]
+    assert objective_scores.to_numpy().tolist() == [[1.0, 0.25], [0.25, 0.75]]
+
+
+def test_gdpo_objective_scores_reject_missing_columns():
+    """Config mistakes should fail before NeMo-RL receives a malformed reward tensor."""
+    scored = pd.DataFrame({"reward_valid_nt_chars": [1.0]})
+
+    with pytest.raises(ValueError, match="missing reward column"):
+        gdpo_objective_scores_from_scored(
+            scored,
+            (GDPOObjective("novelty", ("reward_mmseqs_cluster_diversity",), "mean"),),
+        )
 
 
 def test_phage_qc_metrics_from_scored_flattens_reward_components():
@@ -65,9 +100,13 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
         {
             "reward_valid_nt_chars": [1.0, 1.0],
             "reward_external_tropism": [1.0, 0.5],
+            "reward_dustmask_end": [1.0, 0.5],
             "reward_external_synteny": [0.25, 0.75],
+            "reward_external_synteny_pass": [1.0, 0.0],
             "reward_external_average_protein_identity": [1.0, 0.5],
+            "reward_external_average_protein_identity_pass": [1.0, 0.0],
             "reward_external_required_genes": [1.0, 0.0],
+            "reward_external_required_genes_pass": [1.0, 0.0],
             "prompt_nt_length": [10, 10],
             "genome_length": [5000, 3900],
             "tropism_protein_mmseqs_percent_identity": [75.0, 30.0],
@@ -80,6 +119,11 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
             "required_genes_matched_count": [9, 4],
             "required_genes_total_count": [9, 9],
             "required_genes_evidence_score": [1.0, 1.0],
+            "reward_mmseqs_cluster_diversity": [1.0, 0.5],
+            "mmseqs_cluster_id": ["group0:seq_0", "group0:seq_1"],
+            "mmseqs_cluster_size": [1, 2],
+            "mmseqs_cluster_is_singleton": [1.0, 0.0],
+            "mmseqs_cluster_valid_for_clustering": [1.0, 1.0],
             "reward": [0.8, 0.4],
         }
     )
@@ -89,15 +133,18 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
         RewardWeights(
             valid_nt_chars=1.0,
             tropism=1.0,
+            dustmask_end=1.0,
             synteny=1.0,
             average_protein_identity=1.0,
             required_genes=1.0,
+            mmseqs_cluster_diversity=1.0,
         ),
     )
 
     assert metrics["num_sequences"] == 2
     assert metrics["valid_nt_chars_score_mean"] == 1.0
     assert metrics["tropism_score_mean"] == 0.75
+    assert metrics["dustmask_end_score_mean"] == 0.75
     assert metrics["tropism_pass_rate"] == 0.5
     assert metrics["synteny_score_mean"] == 0.5
     assert metrics["average_protein_identity_score_mean"] == 0.75
@@ -115,6 +162,66 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["average_protein_identity_evidence_score_mean"] == 0.95
     assert metrics["required_genes_matched_count_mean"] == 6.5
     assert metrics["required_genes_evidence_score_mean"] == 1.0
+    assert metrics["mmseqs_cluster_diversity_score_mean"] == 0.75
+    assert metrics["mmseqs_cluster_num_clusters"] == 2
+    assert metrics["mmseqs_cluster_clusters_per_sequence"] == 1.0
+    assert metrics["mmseqs_cluster_singleton_fraction"] == 0.5
+    assert metrics["mmseqs_cluster_largest_cluster_fraction"] == 1.0
+    assert metrics["mmseqs_cluster_size_histogram/size_1"] == 1
+    assert metrics["mmseqs_cluster_size_histogram/size_2"] == 1
+    assert metrics["binary_core_pass_count"] == 1
+    assert metrics["binary_core_pass_rate"] == 0.5
+    assert metrics["binary_full_qc_pass_count"] == 1
+    assert metrics["binary_full_qc_pass_rate"] == 0.5
+    assert metrics["binary_full_qc_pass_cluster_deduplicated_count"] == 1
+    assert metrics["binary_full_qc_pass_cluster_deduplicated_rate"] == 0.5
+
+
+def test_phage_qc_metrics_deduplicates_binary_passes_by_mmseqs_cluster():
+    """Collapsed passing clusters should count once in the headline pass metric."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 1.0, 1.0, 0.0],
+            "mmseqs_cluster_id": ["group0:seq_0", "group0:seq_0", "group0:seq_2", ""],
+            "mmseqs_cluster_size": [2, 2, 1, 0],
+            "mmseqs_cluster_valid_for_clustering": [1.0, 1.0, 1.0, 0.0],
+            "reward": [1.0, 1.0, 1.0, 0.0],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, RewardWeights(valid_nt_chars=1.0))
+
+    assert metrics["binary_core_pass_count"] == 3
+    assert metrics["binary_core_pass_rate"] == 0.75
+    assert metrics["binary_core_pass_cluster_deduplicated_count"] == 2
+    assert metrics["binary_core_pass_cluster_deduplicated_rate"] == 0.5
+    assert metrics["binary_core_pass_cluster_duplicate_count"] == 1
+    assert metrics["binary_core_pass_cluster_deduplication_fraction"] == 2 / 3
+
+
+def test_phage_qc_metrics_deduplicates_full_qc_passes_by_mmseqs_cluster():
+    """Full-QC paper gates should have their own cluster-deduplicated headline metrics."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 1.0, 1.0, 1.0],
+            "reward_external_synteny_pass": [1.0, 1.0, 0.0, 1.0],
+            "reward_external_average_protein_identity_pass": [1.0, 1.0, 1.0, 1.0],
+            "reward_external_required_genes_pass": [1.0, 1.0, 1.0, 1.0],
+            "mmseqs_cluster_id": ["group0:seq_0", "group0:seq_0", "group0:seq_2", ""],
+            "mmseqs_cluster_size": [2, 2, 1, 0],
+            "mmseqs_cluster_valid_for_clustering": [1.0, 1.0, 1.0, 0.0],
+            "reward": [1.0, 1.0, 1.0, 1.0],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, RewardWeights(valid_nt_chars=1.0))
+
+    assert metrics["binary_core_pass_count"] == 4
+    assert metrics["binary_core_pass_cluster_deduplicated_count"] == 3
+    assert metrics["binary_full_qc_pass_count"] == 3
+    assert metrics["binary_full_qc_pass_cluster_deduplicated_count"] == 2
+    assert metrics["binary_full_qc_pass_cluster_duplicate_count"] == 1
+    assert metrics["binary_full_qc_pass_cluster_deduplication_fraction"] == 2 / 3
 
 
 def test_global_post_process_metrics_accepts_rollout_total_reward(monkeypatch):
@@ -129,7 +236,7 @@ def test_global_post_process_metrics_accepts_rollout_total_reward(monkeypatch):
         {
             "reward_valid_nt_chars": [1.0, 0.0],
             "reward": [1.0, 0.0],
-            "reward_binary_pass": [1.0, 0.0],
+            "reward_binary_core_pass": [1.0, 0.0],
         }
     )
 

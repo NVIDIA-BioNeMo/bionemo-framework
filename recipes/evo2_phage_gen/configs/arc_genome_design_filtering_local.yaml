@@ -166,6 +166,11 @@ genetic_architecture_visualization_and_synteny_filtering: false
 genetic_architecture_visualization_script: "recipes/evo2_phage_gen/data/arc_pipeline_patched/genetic_architecture_visualization.py"
 protein_annotation_file: "recipes/evo2_phage_gen/data/external/phrogs/phrog_annot_v4.tsv"
 lovis4u_conda_env: "genome_visualization"
+# Per Arc pipeline run. Arc's visualization helper also receives this as n_parallel_jobs.
+lovis4u_parallel_jobs: 12
+lovis4u_chunk_size: 12
+# RL scoring needs LoVis4u's MMseqs metadata, AAI, and required-gene metrics, but not copied PDFs.
+lovis4u_collect_pdfs: false
 
 use_reference_genome: false
 reference_genome_gff_file_save_location: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422.1_pseudocircular.gff"

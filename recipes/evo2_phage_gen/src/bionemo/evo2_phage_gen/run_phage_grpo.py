@@ -13,33 +13,89 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Recipe-local NeMo-RL GRPO launcher for Evo2 phage optimization."""
+"""Recipe-local NeMo-RL GRPO/GDPO launcher for Evo2 phage optimization."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import pprint
+from pathlib import Path
 
 from omegaconf import OmegaConf
 
 
-def _parse_args() -> tuple[argparse.Namespace, list[str]]:
-    parser = argparse.ArgumentParser(description="Run Evo2 phage GRPO training")
-    parser.add_argument("--config", type=str, default="configs/grpo_phage_megatron.yaml")
+RECIPE_ROOT = Path(__file__).resolve().parents[3]
+PAPER_RL_PROMPT_FILENAMES = {
+    "phage_prompts_paper_useful_rl.jsonl",
+    "phage_prompts_paper_useful_rl_validation_prompt10.jsonl",
+}
+
+
+def _parse_args(default_config: str, default_algorithm: str) -> tuple[argparse.Namespace, list[str]]:
+    parser = argparse.ArgumentParser(description="Run Evo2 phage GRPO or GDPO training")
+    parser.add_argument("--config", type=str, default=default_config)
+    parser.add_argument(
+        "--algorithm",
+        choices=("config", "grpo", "gdpo"),
+        default=default_algorithm,
+        help="Use config reward_output_mode, force scalar GRPO, or force positional multi-reward GDPO.",
+    )
     return parser.parse_known_args()
 
 
-def _select_grpo_trainer(master_config):
+def _apply_algorithm_override(config, algorithm: str) -> tuple[object, str]:
+    """Apply launcher-level GRPO/GDPO reward mode overrides."""
+    if algorithm == "config":
+        reward_mode = str(OmegaConf.select(config, "env.phage_qc.reward_output_mode", default="scalar")).lower()
+        return config, "gdpo" if reward_mode == "gdpo" else "grpo"
+
+    reward_mode = "gdpo" if algorithm == "gdpo" else "scalar"
+    OmegaConf.update(config, "env.phage_qc.reward_output_mode", reward_mode, merge=True)
+    return config, algorithm
+
+
+def _config_path(path_like: str | None) -> Path | None:
+    """Resolve recipe-relative config data paths while preserving absolute paths."""
+    if not path_like:
+        return None
+    path = Path(path_like)
+    return path if path.is_absolute() else RECIPE_ROOT / path
+
+
+def _ensure_prompt_data_files(config) -> None:
+    """Materialize deterministic recipe-owned prompt data referenced by configs."""
+    configured_paths = [
+        _config_path(OmegaConf.select(config, "data.train.data_path")),
+        _config_path(OmegaConf.select(config, "data.validation.data_path")),
+    ]
+    prompt_paths = [path for path in configured_paths if path is not None and path.name in PAPER_RL_PROMPT_FILENAMES]
+    if not prompt_paths:
+        return
+
+    missing_paths = [path for path in prompt_paths if not path.exists()]
+    if not missing_paths:
+        return
+
+    from bionemo.evo2_phage_gen.generation import ensure_paper_useful_rl_prompt_files
+
+    data_dir = missing_paths[0].parent
+    written_paths = ensure_paper_useful_rl_prompt_files(data_dir)
+    print("Materialized missing paper-useful RL prompt data:")
+    for path in written_paths.values():
+        print(f"  {path}")
+
+
+def _select_grpo_trainer(master_config, algorithm: str):
     dp_cfg = master_config.data_plane or {}
     if dp_cfg.get("enabled", False):
         from nemo_rl.algorithms.grpo_sync import grpo_train_sync
 
-        print("Running synchronous GRPO training (TransferQueue)")
+        print(f"Running synchronous {algorithm.upper()} training (TransferQueue)")
         return grpo_train_sync
     from nemo_rl.algorithms.grpo import grpo_train
 
-    print("Running synchronous GRPO training (legacy)")
+    print(f"Running synchronous {algorithm.upper()} training (legacy)")
     return grpo_train
 
 
@@ -60,8 +116,8 @@ def _register_recipe_extensions() -> None:
     ACTOR_ENVIRONMENT_REGISTRY["bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"] = PY_EXECUTABLES.SYSTEM
 
 
-def main() -> None:
-    """Run GRPO with recipe-local Evo2 phage extensions."""
+def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algorithm: str = "config") -> None:
+    """Run GRPO or GDPO with recipe-local Evo2 phage extensions."""
     os.environ.setdefault("NEMO_RL_PY_EXECUTABLES_SYSTEM", "1")
     try:
         from nemo_rl.algorithms.grpo import MasterConfig, async_grpo_train, setup
@@ -73,19 +129,22 @@ def main() -> None:
         from nemo_rl.utils.logger import get_next_experiment_dir
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "NeMo-RL and its runtime dependencies are required for GRPO. "
+            "NeMo-RL and its runtime dependencies are required for GRPO/GDPO. "
             "Install the recipe environment, or repair an existing environment with "
-            "evo2_phage_patch_nemo_rl --repair-install, before launching GRPO."
+            "evo2_phage_patch_nemo_rl --repair-install, before launching GRPO or GDPO."
         ) from exc
 
     _register_recipe_extensions()
     register_omegaconf_resolvers()
-    args, overrides = _parse_args()
+    args, overrides = _parse_args(default_config, default_algorithm)
     config = load_config(args.config)
     print(f"Loaded configuration from: {args.config}")
     if overrides:
         print(f"Overrides: {overrides}")
         config = parse_hydra_overrides(config, overrides)
+    config, algorithm = _apply_algorithm_override(config, args.algorithm)
+    _ensure_prompt_data_files(config)
+    print(f"Using RL algorithm frontend: {algorithm.upper()}")
 
     config = MasterConfig(**OmegaConf.to_container(config, resolve=True))
     print("Applied CLI overrides")
@@ -99,7 +158,7 @@ def main() -> None:
 
     init_ray()
     tokenizer = get_tokenizer(config.policy["tokenizer"])
-    assert config.policy["generation"] is not None, "A generation config is required for GRPO"
+    assert config.policy["generation"] is not None, "A generation config is required for GRPO/GDPO"
     has_refit_draft_weights = bool(config.policy["draft"]["enabled"])
     megatron_cfg = config.policy.get("megatron_cfg") or {}
     trains_mtp = bool(megatron_cfg.get("mtp_num_layers"))
@@ -137,7 +196,7 @@ def main() -> None:
 
     if "async_grpo" in config.grpo and config.grpo["async_grpo"]["enabled"]:
         async_config = config.grpo["async_grpo"]
-        print("Running async GRPO training")
+        print(f"Running async {algorithm.upper()} training")
         async_grpo_train(
             policy=policy,
             policy_generation=policy_generation,
@@ -154,7 +213,7 @@ def main() -> None:
             max_trajectory_age_steps=async_config["max_trajectory_age_steps"],
         )
     else:
-        trainer = _select_grpo_trainer(master_config)
+        trainer = _select_grpo_trainer(master_config, algorithm)
         trainer(
             policy,
             policy_generation,

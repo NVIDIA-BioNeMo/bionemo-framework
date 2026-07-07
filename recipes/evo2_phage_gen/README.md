@@ -64,6 +64,8 @@ NeMo-RL package integration:
 
 - The GRPO launcher lives in `bionemo.evo2_phage_gen.run_phage_grpo` and calls
   NeMo-RL package APIs directly.
+- The GDPO frontend lives in `bionemo.evo2_phage_gen.run_phage_gdpo` and uses
+  `configs/gdpo_phage_megatron.yaml` to return positional multi-objective rewards.
 - The GRPO defaults inherited by `configs/grpo_phage_megatron.yaml` are copied
   into `configs/nemo_rl_defaults`.
 - `.ci_build_env.sh` runs `evo2_phage_patch_nemo_rl --repair-install` after
@@ -667,10 +669,15 @@ sampling temperature 0.7-0.9, with approximately 1000 sequences per
 prompt/temperature parameter combination in the sweep. All sampling runs used
 `top-k = 4` and `top-p = 1`.
 
+The RL100/RL500/GDPO prompt JSONL files under `data/phage_prompts_paper_useful_rl*.jsonl` are
+deterministic artifacts generated from this same PhiX174 reference-start sequence, not externally
+downloaded datasets. Materialize them with `evo2_phage_generation prepare-rl-prompts`; the RL
+launcher also creates them automatically if a referenced file is missing.
+
 For this recipe, start with the following prompt set:
 
-| Prompt length | Prompt      |
-| ------------- | ----------- |
+| Prompt length | Prompt        |
+| ------------- | ------------- |
 | 4             | `+~GAGT`      |
 | 5             | `+~GAGTT`     |
 | 6             | `+~GAGTTT`    |
@@ -875,8 +882,8 @@ tree:
 export PATH="$PWD/recipes/evo2_phage_gen/data/external/bin:$PATH"
 
 # Lightweight setup: creates a prodigal wrapper backed by pyrodigal, downloads
-# the official MMseqs2-GPU binary, upstream DIAMOND, HMMER/hmmsearch, and the
-# PHROGs v4 annotation.
+# the official MMseqs2-GPU binary, NCBI BLAST+/dustmasker, upstream DIAMOND,
+# HMMER/hmmsearch, and the PHROGs v4 annotation.
 evo2_phage_prepare_external_assets \
   --mmseqs-url https://dev.mmseqs.com/latest/mmseqs-linux-gpu-cuda13.tar.gz
 
@@ -885,6 +892,7 @@ evo2_phage_prepare_external_assets \
 # MMseqs sequence DB at data/external/phrogs/phrogs_gpu_seq_db_pad.
 evo2_phage_prepare_external_assets \
   --skip-mmseqs \
+  --skip-dustmasker \
   --skip-arc-evo2 \
   --download-large-databases \
   --skip-checkv \
@@ -894,6 +902,7 @@ evo2_phage_prepare_external_assets \
 # HMMER/hmmsearch into .venv/bin; this command downloads the CheckV database.
 evo2_phage_prepare_external_assets \
   --skip-mmseqs \
+  --skip-dustmasker \
   --skip-diamond \
   --skip-hmmer \
   --skip-phrogs-annotation \
@@ -906,9 +915,9 @@ export CHECKVDB="$PWD/recipes/evo2_phage_gen/data/external/checkv/checkv-db-v1.5
 including `checkv`, `orfipy`, `lovis4u`, `pyrodigal`, `pyrodigal-gv`,
 `biopython`, `biotite`, and plotting/data-analysis packages. The asset command
 handles the pieces that are not normal Python package dependencies: the
-MMseqs2-GPU executable, upstream DIAMOND, the Prodigal-compatible wrapper,
-HMMER/hmmsearch, PHROGs files, and the CheckV database. In CI, the small native
-tools are installed into `.venv/bin` by `.ci_build_env.sh`, so sourcing
+MMseqs2-GPU executable, NCBI BLAST+/dustmasker, upstream DIAMOND, the
+Prodigal-compatible wrapper, HMMER/hmmsearch, PHROGs files, and the CheckV
+database. In CI, the small native tools are installed into `.venv/bin` by `.ci_build_env.sh`, so sourcing
 `.ci_test_env.sh` is enough to put them on `PATH`.
 
 The expected populated paths are:
@@ -925,6 +934,8 @@ The expected populated paths are:
   for the tropism filter.
 - A CheckV database, `CHECKVDB` environment setting, `hmmsearch`, and DIAMOND
   binary for CheckV quality filtering.
+- `recipes/evo2_phage_gen/data/external/bin/dustmasker`, symlinked from the
+  downloaded NCBI BLAST+ tarball, for low-complexity end masking.
 - A Prodigal-compatible executable discoverable on `PATH`; the asset command
   creates `recipes/evo2_phage_gen/data/external/bin/prodigal` as a wrapper around
   `pyrodigal`.
@@ -1155,12 +1166,24 @@ prompt processor, then calls NeMo-RL's GRPO APIs directly. The config sets
 `policy.generation.backend: "megatron"`, initializes from the converted
 Microviridae MBridge checkpoint, and uses the configured phage reward as the
 environment score. The reward can run only cheap nucleotide checks or enable the
-heavier Arc-style stack: Prodigal/Orfipy ORF checks, PHROGs/MMseqs protein hit
-count, tropism, genetic architecture, CheckV, MMseqs clustering, a
+heavier Arc-style stack: NCBI dustmasker low-complexity end filtering,
+Prodigal/Orfipy ORF checks, PHROGs/MMseqs protein hit count, tropism,
+genetic architecture, CheckV, MMseqs clustering, a
 synteny-correlated annotation/order proxy, and a gated normalized diversity
 bonus. GRPO generation uses MCore local CUDA graphs via
 `policy.generation.mcore_generation_config.cuda_graph_impl: "local"` and
-`use_cuda_graphs_for_non_decode_steps: true`.
+`use_cuda_graphs_for_non_decode_steps: true`. The GDPO config keeps the same
+trainer path but returns a `[batch, objective]` reward tensor with feasibility,
+function, architecture, and novelty objectives; novelty includes an MMseqs
+`easy-cluster` diversity reward that assigns each feasible sequence `1 / cluster_size`.
+For rollout, `configs/gdpo_phage_megatron.yaml` also lowers the Megatron
+optimizer LR to `1e-6`, raises the reference-policy KL penalty to `0.05`,
+and checkpoints on `val:phage_qc/binary_core_pass_cluster_deduplicated_rate` so collapsed clusters count once in the headline pass number.
+The dustmasker-backed RL filter masks generated sequences with NCBI
+`dustmasker -outfmt interval` and penalizes the maximum masked fraction in
+the first or last 200 bases; configs enable it through `weight_dustmask_end`
+and keep `dustmasker_bin: "dustmasker"` so the binary is supplied by the same
+`data/external/bin` path as the other native tools.
 
 NeMo Gym is the direction NeMo-RL is taking for multi-step environment
 orchestration: a Resources Server owns tool/verifier logic and NeMo-RL can call

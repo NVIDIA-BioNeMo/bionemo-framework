@@ -53,6 +53,7 @@ class RewardWeights:
     genome_length: float = 1.0
     gc_content: float = 1.0
     nt_homopolymer: float = 1.0
+    dustmask_end: float = 0.0
     nucleotide_pass: float = 0.0
     orf: float = 0.0
     coding_density: float = 0.0
@@ -61,6 +62,7 @@ class RewardWeights:
     synteny: float = 0.0
     average_protein_identity: float = 0.0
     required_genes: float = 0.0
+    mmseqs_cluster_diversity: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ REWARD_COMPONENTS: tuple[RewardComponent, ...] = (
     RewardComponent("genome_length", "genome_length", "reward_genome_length"),
     RewardComponent("gc_content", "gc_content", "reward_gc_content"),
     RewardComponent("nt_homopolymer", "nt_homopolymer", "reward_nt_homopolymer"),
+    RewardComponent("dustmask_end", "dustmask_end", "reward_dustmask_end"),
     RewardComponent("nucleotide_pass", "nucleotide_pass", "reward_nucleotide_pass"),
     RewardComponent("protein_hit_count", "protein_hit_count", "reward_external_protein_hit_count"),
     RewardComponent("tropism", "tropism", "reward_external_tropism"),
@@ -88,7 +91,18 @@ REWARD_COMPONENTS: tuple[RewardComponent, ...] = (
         "reward_external_average_protein_identity",
         required_for_binary_pass=False,
     ),
-    RewardComponent("required_genes", "required_genes", "reward_external_required_genes", required_for_binary_pass=False),
+    RewardComponent(
+        "required_genes",
+        "required_genes",
+        "reward_external_required_genes",
+        required_for_binary_pass=False,
+    ),
+    RewardComponent(
+        "mmseqs_cluster_diversity",
+        "mmseqs_cluster_diversity",
+        "reward_mmseqs_cluster_diversity",
+        required_for_binary_pass=False,
+    ),
 )
 
 
@@ -110,6 +124,25 @@ class ExternalQCRewardConfig:
     enable_average_protein_identity: bool = False
     enable_required_genes: bool = False
     required_genes_evidence_target: float = 9.0
+    lovis4u_parallel_jobs: int | None = 12
+    lovis4u_chunk_size: int | None = None
+    lovis4u_collect_pdfs: bool = False
+
+
+@dataclass(frozen=True)
+class MMseqsClusterDiversityConfig:
+    """Configuration for batch-local MMseqs cluster-diversity rewards."""
+
+    enabled: bool = False
+    mmseqs_bin: str = "mmseqs"
+    work_dir: Path = Path("data/checkpoints/phage_grpo_mmseqs_cluster_diversity")
+    keep_artifacts: bool = False
+    min_seq_id: float = 0.99
+    coverage: float = 0.0
+    cov_mode: int = 0
+    seq_id_mode: int = 0
+    cluster_mode: int = 0
+    threads: int | None = None
 
 
 def _recipe_path(path: str | Path) -> Path:
@@ -127,6 +160,177 @@ def _repo_path(path: str | Path) -> Path:
 def _external_qc_env(external_qc: ExternalQCRewardConfig) -> dict[str, str]:
     """Build the environment for Arc external-QC subprocesses."""
     return os.environ.copy()
+
+
+def _resolve_executable_path(executable: str) -> str:
+    """Resolve recipe-relative executable paths while leaving PATH lookups alone."""
+    path = Path(executable)
+    if path.is_absolute() or len(path.parts) > 1:
+        return str(_recipe_path(path))
+    return executable
+
+
+def _basic_feasibility_mask(scored_df: pd.DataFrame, config: NucleotideQCConfig) -> pd.Series:
+    """Return the nucleotide feasibility gate used before expensive diversity scoring."""
+    return (
+        scored_df["valid_nt_chars"].astype(bool)
+        & scored_df["genome_length"].between(config.genome_length_min, config.genome_length_max)
+        & scored_df["gc_content"].between(config.gc_content_min, config.gc_content_max)
+        & (scored_df["max_nt_homopolymer_length"] <= config.homopolymer_max)
+    )
+
+
+def _mmseqs_cluster_command(
+    config: MMseqsClusterDiversityConfig,
+    input_fasta: Path,
+    result_prefix: Path,
+    tmp_dir: Path,
+) -> list[str]:
+    """Build the pinned MMseqs easy-cluster command for batch diversity rewards."""
+    command = [
+        _resolve_executable_path(config.mmseqs_bin),
+        "easy-cluster",
+        str(input_fasta),
+        str(result_prefix),
+        str(tmp_dir),
+        "--min-seq-id",
+        f"{float(config.min_seq_id):.6g}",
+        "-c",
+        f"{float(config.coverage):.6g}",
+        "--cov-mode",
+        str(int(config.cov_mode)),
+        "--seq-id-mode",
+        str(int(config.seq_id_mode)),
+        "--cluster-mode",
+        str(int(config.cluster_mode)),
+    ]
+    if config.threads is not None:
+        command.extend(["--threads", str(int(config.threads))])
+    return command
+
+
+def _parse_mmseqs_cluster_tsv(cluster_tsv: Path) -> dict[str, set[str]]:
+    """Read an MMseqs cluster TSV into representative-to-member sets."""
+    clusters: dict[str, set[str]] = {}
+    with cluster_tsv.open() as handle:
+        for line in handle:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 2:
+                continue
+            representative, member = parts[0], parts[1]
+            clusters.setdefault(representative, set()).add(member)
+    return clusters
+
+
+def _cluster_valid_sequence_group(
+    group_df: pd.DataFrame,
+    run_dir: Path,
+    group_index: int,
+    config: MMseqsClusterDiversityConfig,
+) -> tuple[dict[object, tuple[str, int, float]], int, int]:
+    """Cluster one prompt group and return row-index rewards plus cluster counts."""
+    if group_df.empty:
+        return {}, 0, 0
+    if len(group_df) == 1:
+        row_index = group_df.index[0]
+        return {row_index: (f"group{group_index}:seq_0", 1, 1.0)}, 1, 1
+
+    group_dir = run_dir / f"prompt_group_{group_index:04d}"
+    group_dir.mkdir(parents=True, exist_ok=True)
+    input_fasta = group_dir / "input_sequences.fasta"
+    result_prefix = group_dir / "clusters"
+    tmp_dir = group_dir / "tmp"
+    sequence_ids = [f"seq_{position}" for position in range(len(group_df))]
+    row_by_sequence_id = dict(zip(sequence_ids, group_df.index.tolist(), strict=True))
+    fasta_df = pd.DataFrame(
+        {
+            "id_prompt": sequence_ids,
+            "sequence": group_df["sequence"].astype(str).tolist(),
+        }
+    )
+    save_fasta(fasta_df, input_fasta)
+
+    subprocess.run(_mmseqs_cluster_command(config, input_fasta, result_prefix, tmp_dir), check=True)
+    cluster_tsv = Path(f"{result_prefix}_cluster.tsv")
+    if not cluster_tsv.exists():
+        raise FileNotFoundError(f"MMseqs cluster TSV not found: {cluster_tsv}")
+
+    clusters = _parse_mmseqs_cluster_tsv(cluster_tsv)
+    rewards_by_row: dict[object, tuple[str, int, float]] = {}
+    valid_cluster_count = 0
+    for representative, members in clusters.items():
+        known_members = sorted(member for member in members if member in row_by_sequence_id)
+        cluster_size = len(known_members)
+        if cluster_size == 0:
+            continue
+        valid_cluster_count += 1
+        cluster_id = f"group{group_index}:{representative}"
+        reward = 1.0 / float(cluster_size)
+        for member in known_members:
+            rewards_by_row[row_by_sequence_id[member]] = (cluster_id, cluster_size, reward)
+
+    missing_members = set(sequence_ids) - {
+        member for members in clusters.values() for member in members if member in row_by_sequence_id
+    }
+    for member in missing_members:
+        row_index = row_by_sequence_id[member]
+        rewards_by_row[row_index] = ("", 0, 0.0)
+    return rewards_by_row, valid_cluster_count, len(missing_members)
+
+
+def add_mmseqs_cluster_diversity_rewards(
+    scored_df: pd.DataFrame,
+    config: NucleotideQCConfig,
+    mmseqs_config: MMseqsClusterDiversityConfig,
+) -> pd.DataFrame:
+    """Add ``1 / cluster_size`` rewards from batch-local MMseqs clustering."""
+    df = scored_df.copy()
+    df["reward_mmseqs_cluster_diversity"] = 0.0
+    df["mmseqs_cluster_id"] = ""
+    df["mmseqs_cluster_size"] = 0
+    df["mmseqs_cluster_is_singleton"] = 0.0
+    df["mmseqs_cluster_valid_for_clustering"] = _basic_feasibility_mask(df, config).astype(float)
+    df["mmseqs_cluster_missing_from_output"] = 0.0
+    if not mmseqs_config.enabled:
+        return df
+
+    valid_df = df[df["mmseqs_cluster_valid_for_clustering"].astype(bool)]
+    if valid_df.empty:
+        return df
+
+    work_dir = _recipe_path(mmseqs_config.work_dir)
+    run_dir = work_dir / f"batch_{uuid.uuid4().hex}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        prompt_groups = (
+            valid_df["prompt_group"] if "prompt_group" in valid_df else pd.Series("__all__", index=valid_df.index)
+        )
+        total_clusters = 0
+        total_missing = 0
+        for group_index, (_prompt_group, group_df) in enumerate(valid_df.groupby(prompt_groups, sort=False)):
+            rewards_by_row, num_clusters, num_missing = _cluster_valid_sequence_group(
+                group_df,
+                run_dir,
+                group_index,
+                mmseqs_config,
+            )
+            total_clusters += num_clusters
+            total_missing += num_missing
+            for row_index, (cluster_id, cluster_size, reward) in rewards_by_row.items():
+                df.loc[row_index, "mmseqs_cluster_id"] = cluster_id
+                df.loc[row_index, "mmseqs_cluster_size"] = int(cluster_size)
+                df.loc[row_index, "reward_mmseqs_cluster_diversity"] = float(reward)
+                df.loc[row_index, "mmseqs_cluster_is_singleton"] = 1.0 if cluster_size == 1 else 0.0
+        df["mmseqs_cluster_num_clusters"] = total_clusters
+        df["mmseqs_cluster_num_missing_from_output"] = total_missing
+        missing_output_mask = df["mmseqs_cluster_valid_for_clustering"].astype(bool) & (
+            df["mmseqs_cluster_size"].astype(int) == 0
+        )
+        df.loc[missing_output_mask, "mmseqs_cluster_missing_from_output"] = 1.0
+    finally:
+        if not mmseqs_config.keep_artifacts:
+            shutil.rmtree(run_dir, ignore_errors=True)
+    return df
 
 
 def _interval_score(value: float, lower: float, upper: float) -> float:
@@ -202,9 +406,7 @@ def _aai_evidence_score(num_aai_entries: float) -> float:
     return max(0.0, min(1.0, float(num_aai_entries) / 10.0))
 
 
-ARC_VALID_SYNTENY_PAIRS: frozenset[tuple[int, int]] = frozenset(
-    {(10, 10), (10, 11), (10, 12), (11, 12), (12, 12)}
-)
+ARC_VALID_SYNTENY_PAIRS: frozenset[tuple[int, int]] = frozenset({(10, 10), (10, 11), (10, 12), (11, 12), (12, 12)})
 
 
 def _distance_to_interval(value: float, lower: float, upper: float) -> float:
@@ -256,11 +458,23 @@ def _aggregate_reward(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Dat
     scored_df["reward"] = weighted_sum / total_weight
     scored_df["reward_active_components"] = ",".join(component.name for _, component in active_components)
     scored_df["reward_total_weight"] = total_weight
-    scored_df["reward_binary_pass"] = binary_overall_pass_mask(scored_df, weights).astype(float)
+    binary_pass = binary_core_pass_mask(scored_df, weights)
+    scored_df["reward_binary_core_pass"] = binary_pass.astype(float)
+    scored_df["reward_binary_core_cluster_deduplicated_pass"] = binary_cluster_deduplicated_pass_mask(
+        scored_df,
+        binary_pass,
+    ).astype(float)
+    full_qc_pass = binary_full_qc_pass_mask(scored_df, binary_pass)
+    if full_qc_pass is not None:
+        scored_df["reward_binary_full_qc_pass"] = full_qc_pass.astype(float)
+        scored_df["reward_binary_full_qc_cluster_deduplicated_pass"] = binary_cluster_deduplicated_pass_mask(
+            scored_df,
+            full_qc_pass,
+        ).astype(float)
     return scored_df
 
 
-def binary_overall_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Series:
+def binary_core_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Series:
     """Return the lab-facing binary pass mask for active non-diversity criteria."""
     active_components = [
         component
@@ -275,14 +489,57 @@ def binary_overall_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) ->
     return pass_mask
 
 
+def binary_cluster_deduplicated_pass_mask(scored_df: pd.DataFrame, pass_mask: pd.Series) -> pd.Series:
+    """Return one passing representative per MMseqs cluster when cluster data is available."""
+    pass_mask = pass_mask.astype(bool)
+    deduplicated = pd.Series(False, index=scored_df.index)
+    if not {"mmseqs_cluster_id", "mmseqs_cluster_size"}.issubset(scored_df.columns):
+        deduplicated.loc[pass_mask] = True
+        return deduplicated
+
+    cluster_sizes = pd.to_numeric(scored_df["mmseqs_cluster_size"], errors="coerce").fillna(0).astype(int)
+    cluster_ids = scored_df["mmseqs_cluster_id"].astype(str)
+    clustered_pass = pass_mask & (cluster_sizes > 0) & (cluster_ids != "")
+    for _cluster_id, cluster_df in scored_df.loc[clustered_pass].groupby(cluster_ids[clustered_pass], sort=False):
+        deduplicated.loc[cluster_df.index[0]] = True
+
+    if "mmseqs_cluster_valid_for_clustering" in scored_df:
+        valid_for_clustering = (
+            pd.to_numeric(scored_df["mmseqs_cluster_valid_for_clustering"], errors="coerce").fillna(0.0) > 0.0
+        )
+        nonclusterable_pass = pass_mask & ~valid_for_clustering
+    else:
+        nonclusterable_pass = pass_mask & ~clustered_pass
+    deduplicated.loc[nonclusterable_pass] = True
+    return deduplicated
+
+
+def binary_full_qc_pass_mask(scored_df: pd.DataFrame, binary_pass: pd.Series) -> pd.Series | None:
+    """Return binary pass plus available full Arc QC gates such as synteny, AAI, and required genes."""
+    full_qc_pass_columns = [
+        "reward_external_synteny_pass",
+        "reward_external_average_protein_identity_pass",
+        "reward_external_required_genes_pass",
+    ]
+    active_pass_columns = [column for column in full_qc_pass_columns if column in scored_df]
+    if not active_pass_columns:
+        return None
+
+    pass_mask = binary_pass.astype(bool).copy()
+    for column in active_pass_columns:
+        pass_mask &= pd.to_numeric(scored_df[column], errors="coerce").fillna(0.0) >= 1.0
+    return pass_mask
+
+
 def score_nucleotide_metrics(
     sequences_df: pd.DataFrame,
     config: NucleotideQCConfig = NucleotideQCConfig(),
     weights: RewardWeights = RewardWeights(),
     external_qc: ExternalQCRewardConfig | None = None,
+    mmseqs_cluster_diversity: MMseqsClusterDiversityConfig | None = None,
 ) -> pd.DataFrame:
-    """Score sequences with nucleotide QC and optional Arc external-QC components."""
-    df = add_nucleotide_metrics(sequences_df)
+    """Score sequences with nucleotide QC, optional external QC, and optional batch diversity."""
+    df = add_nucleotide_metrics(sequences_df, config=config)
     df["reward_valid_nt_chars"] = df["valid_nt_chars"].astype(float)
     df["reward_genome_length"] = df["genome_length"].map(
         lambda value: _interval_score(value, config.genome_length_min, config.genome_length_max)
@@ -293,15 +550,24 @@ def score_nucleotide_metrics(
     df["reward_nt_homopolymer"] = df["max_nt_homopolymer_length"].map(
         lambda value: _upper_bound_ratio_score(value, config.homopolymer_max)
     )
+    df["reward_dustmask_end"] = df["dustmask_max_end_masked_fraction"].map(
+        lambda value: _upper_bound_ratio_score(value, config.dustmask_max_end_fraction)
+    )
+    dustmask_end_pass = (
+        df["dustmask_end_pass"].astype(bool) if config.dustmask_filter else pd.Series(True, index=df.index)
+    )
     df["reward_nucleotide_pass"] = (
         df["valid_nt_chars"]
         & df["genome_length"].between(config.genome_length_min, config.genome_length_max)
         & df["gc_content"].between(config.gc_content_min, config.gc_content_max)
         & (df["max_nt_homopolymer_length"] <= config.homopolymer_max)
+        & dustmask_end_pass
     ).astype(float)
 
     if external_qc and external_qc.enabled:
         df = add_external_qc_rewards(df, external_qc)
+    if mmseqs_cluster_diversity and mmseqs_cluster_diversity.enabled:
+        df = add_mmseqs_cluster_diversity_rewards(df, config, mmseqs_cluster_diversity)
 
     return _aggregate_reward(df, weights)
 
@@ -330,9 +596,7 @@ def _write_external_qc_config(
         raise ValueError(f"Unsupported synteny_mode={external_qc.synteny_mode!r}; expected 'proxy' or 'full'.")
     full_synteny_enabled = bool(external_qc.enable_synteny and synteny_mode == "full")
     paper_synteny_stage_enabled = bool(
-        full_synteny_enabled
-        or external_qc.enable_average_protein_identity
-        or external_qc.enable_required_genes
+        full_synteny_enabled or external_qc.enable_average_protein_identity or external_qc.enable_required_genes
     )
 
     orf_enabled = external_qc.enable_orf or external_qc.enable_coding_density
@@ -373,6 +637,19 @@ def _write_external_qc_config(
     config["average_protein_sequence_identity_filter"] = bool(external_qc.enable_average_protein_identity)
     config["required_genes_filter"] = bool(external_qc.enable_required_genes)
     config["syntenic_gene_count_filter"] = full_synteny_enabled
+    if external_qc.lovis4u_parallel_jobs is not None:
+        parallel_jobs = max(1, int(external_qc.lovis4u_parallel_jobs))
+        config["lovis4u_parallel_jobs"] = parallel_jobs
+        config["n_parallel_jobs"] = parallel_jobs
+    if external_qc.lovis4u_chunk_size is not None:
+        chunk_size = max(1, int(external_qc.lovis4u_chunk_size))
+    elif external_qc.lovis4u_parallel_jobs is not None:
+        chunk_size = max(1, int(external_qc.lovis4u_parallel_jobs))
+    else:
+        chunk_size = int(config.get("chunk_size", 10))
+    config["lovis4u_chunk_size"] = chunk_size
+    config["chunk_size"] = chunk_size
+    config["lovis4u_collect_pdfs"] = bool(external_qc.lovis4u_collect_pdfs)
     if paper_synteny_stage_enabled:
         if not bool(config.get("allow_gff_product_order_synteny_fallback", False)):
             config["reference_genome_gff_file_save_location"] = None
@@ -550,19 +827,17 @@ def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: di
         metrics_df = pd.read_csv(metrics_path)
         if {"id_prompt", "num_syntenic_genes", "total_num_genes"}.issubset(metrics_df.columns):
             metrics_df = metrics_df.copy()
-            metrics_df["num_syntenic_genes"] = pd.to_numeric(
-                metrics_df["num_syntenic_genes"], errors="coerce"
-            ).fillna(0.0)
-            metrics_df["total_num_genes"] = pd.to_numeric(
-                metrics_df["total_num_genes"], errors="coerce"
-            ).fillna(0.0)
+            metrics_df["num_syntenic_genes"] = pd.to_numeric(metrics_df["num_syntenic_genes"], errors="coerce").fillna(
+                0.0
+            )
+            metrics_df["total_num_genes"] = pd.to_numeric(metrics_df["total_num_genes"], errors="coerce").fillna(0.0)
             metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
-            scored_df["num_syntenic_genes"] = scored_df[id_column].astype(str).map(
-                metrics_by_id["num_syntenic_genes"]
-            ).fillna(0.0)
-            scored_df["total_num_genes"] = scored_df[id_column].astype(str).map(
-                metrics_by_id["total_num_genes"]
-            ).fillna(0.0)
+            scored_df["num_syntenic_genes"] = (
+                scored_df[id_column].astype(str).map(metrics_by_id["num_syntenic_genes"]).fillna(0.0)
+            )
+            scored_df["total_num_genes"] = (
+                scored_df[id_column].astype(str).map(metrics_by_id["total_num_genes"]).fillna(0.0)
+            )
 
             scores = [
                 _synteny_distance_score(float(num_syntenic), float(total_genes))
@@ -619,16 +894,14 @@ def _add_average_protein_identity_rewards(
     has_identity_metric = mapped_identity.notna()
     scored_df["average_protein_percent_identity"] = mapped_identity.fillna(0.0)
     mapped_evidence = (
-        scored_df[id_column].astype(str).map(metrics_by_id[evidence_column]) if evidence_column else pd.Series(0.0, index=scored_df.index)
+        scored_df[id_column].astype(str).map(metrics_by_id[evidence_column])
+        if evidence_column
+        else pd.Series(0.0, index=scored_df.index)
     )
     scored_df["average_protein_identity_gene_count"] = mapped_evidence.fillna(0.0)
 
     lower, upper = config.get("average_protein_sequence_identity_range", [0, 95])
-    novelty_scores = mapped_identity.map(
-        lambda value: _aai_novelty_score(float(value))
-        if pd.notna(value)
-        else 0.0
-    )
+    novelty_scores = mapped_identity.map(lambda value: _aai_novelty_score(float(value)) if pd.notna(value) else 0.0)
     evidence_scores = mapped_evidence.map(lambda value: _aai_evidence_score(float(value)) if pd.notna(value) else 0.0)
     scored_df["average_protein_identity_raw_score"] = novelty_scores
     scored_df["average_protein_identity_novelty_score"] = novelty_scores
@@ -680,9 +953,11 @@ def _add_required_gene_rewards(
             strict=False,
         )
     ]
-    scored_df["required_genes_evidence_score"] = scored_df["required_genes_total_count"].map(
-        lambda total: max(0.0, min(1.0, float(total) / max(float(evidence_target), 1.0)))
-    ).where(has_required_gene_metric & (scored_df["required_genes_total_count"] > 0), 0.0)
+    scored_df["required_genes_evidence_score"] = (
+        scored_df["required_genes_total_count"]
+        .map(lambda total: max(0.0, min(1.0, float(total) / max(float(evidence_target), 1.0))))
+        .where(has_required_gene_metric & (scored_df["required_genes_total_count"] > 0), 0.0)
+    )
     scored_df["reward_external_required_genes"] = (
         scored_df["required_genes_raw_score"] * scored_df["required_genes_evidence_score"]
     )
@@ -765,10 +1040,21 @@ def add_external_qc_rewards(
         "reward_external_required_genes",
     ]:
         df[column] = 0.0
+    if external_qc.enable_synteny:
+        df["reward_external_synteny_pass"] = 0.0
+    if external_qc.enable_average_protein_identity:
+        df["reward_external_average_protein_identity_pass"] = 0.0
+    if external_qc.enable_required_genes:
+        df["reward_external_required_genes_pass"] = 0.0
 
     try:
         df["arc_qc_id"] = [f"umi{i + 1}" for i in range(len(df))]
-        save_fasta(df.rename(columns={"id_prompt": "original_id_prompt", "arc_qc_id": "id_prompt"})[["id_prompt", "sequence"]], input_fasta)
+        save_fasta(
+            df.rename(columns={"id_prompt": "original_id_prompt", "arc_qc_id": "id_prompt"})[
+                ["id_prompt", "sequence"]
+            ],
+            input_fasta,
+        )
         run_config_path = _write_external_qc_config(base_config_path, run_dir, input_fasta, external_qc)
         subprocess.run(
             ["python", str(pipeline_script), str(run_config_path)],
@@ -815,10 +1101,16 @@ def score_fasta(
     output_csv: Path,
     config: NucleotideQCConfig = NucleotideQCConfig(),
     weights: RewardWeights = RewardWeights(),
+    mmseqs_cluster_diversity: MMseqsClusterDiversityConfig | None = None,
 ) -> Path:
     """Score a FASTA file and write per-sequence reward diagnostics."""
     sequences_df = load_fasta_records(input_fasta)
-    scored_df = score_nucleotide_metrics(sequences_df, config=config, weights=weights)
+    scored_df = score_nucleotide_metrics(
+        sequences_df,
+        config=config,
+        weights=weights,
+        mmseqs_cluster_diversity=mmseqs_cluster_diversity,
+    )
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     scored_df.to_csv(output_csv, index=False)
     return output_csv
@@ -834,6 +1126,13 @@ def main() -> None:
     parser.add_argument("--gc-content-min", type=float, default=30.0)
     parser.add_argument("--gc-content-max", type=float, default=65.0)
     parser.add_argument("--homopolymer-max", type=int, default=10)
+    parser.add_argument("--dustmask-filter", action="store_true")
+    parser.add_argument("--dustmasker-bin", default="dustmasker")
+    parser.add_argument("--dustmask-use-fallback", action="store_true")
+    parser.add_argument("--dustmask-window", type=int, default=64)
+    parser.add_argument("--dustmask-level", type=float, default=20.0)
+    parser.add_argument("--dustmask-end-window", type=int, default=200)
+    parser.add_argument("--dustmask-max-end-fraction", type=float, default=0.9)
     args = parser.parse_args()
 
     output = score_fasta(
@@ -845,6 +1144,13 @@ def main() -> None:
             gc_content_min=args.gc_content_min,
             gc_content_max=args.gc_content_max,
             homopolymer_max=args.homopolymer_max,
+            dustmask_filter=args.dustmask_filter,
+            dustmasker_bin=args.dustmasker_bin,
+            dustmask_use_external=not args.dustmask_use_fallback,
+            dustmask_window=args.dustmask_window,
+            dustmask_level=args.dustmask_level,
+            dustmask_end_window=args.dustmask_end_window,
+            dustmask_max_end_fraction=args.dustmask_max_end_fraction,
         ),
     )
     print(f"reward_csv: {output}")

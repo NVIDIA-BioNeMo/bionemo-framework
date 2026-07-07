@@ -1,8 +1,7 @@
-# Evo2 phage GRPO 500-step rollout config.
+# Evo2 phage GDPO rollout config.
 #
-# This mirrors the current full-QC RL100 sampling setup, but inherits directly
-# from the base GRPO phage config so readiness checks and launches do not depend
-# on recursive config-default resolution.
+# GDPO uses the same NeMo-RL GRPO trainer frontend, but the phage environment
+# returns a positional [B, K] reward tensor instead of the scalar aggregate.
 
 defaults: "grpo_phage_megatron.yaml"
 
@@ -17,11 +16,21 @@ grpo:
   val_at_start: false
   val_at_end: true
 
+loss_fn:
+  # Conservative rollout setting: keep policy drift tighter than the smoke/base GRPO config.
+  reference_policy_kl_penalty: 0.05
+
 policy:
   train_global_batch_size: 96
   train_micro_batch_size: 1
   generation_batch_size: 96
   logprob_batch_size: 1
+  megatron_cfg:
+    optimizer:
+      lr: 1.0e-6
+      min_lr: 1.0e-7
+    scheduler:
+      lr_warmup_init: 1.0e-7
   generation:
     max_new_tokens: 5989
     temperature: 1.0
@@ -57,6 +66,7 @@ env:
     dustmask_level: 20.0
     dustmask_end_window: 200
     dustmask_max_end_fraction: 0.9
+    reward_output_mode: "gdpo"
     weight_valid_nt_chars: 1.0
     weight_genome_length: 1.0
     weight_gc_content: 1.0
@@ -68,6 +78,32 @@ env:
     weight_synteny: 0.25
     weight_average_protein_identity: 0.25
     weight_required_genes: 0.1
+    weight_mmseqs_cluster_diversity: 1.0
+    gdpo_objectives:
+      - name: "feasibility"
+        reducer: "mean"
+        columns:
+          - "reward_valid_nt_chars"
+          - "reward_genome_length"
+          - "reward_gc_content"
+          - "reward_nt_homopolymer"
+          - "reward_dustmask_end"
+          - "reward_nucleotide_pass"
+      - name: "function"
+        reducer: "mean"
+        columns:
+          - "reward_external_protein_hit_count"
+          - "reward_external_tropism"
+          - "reward_external_required_genes"
+      - name: "architecture"
+        reducer: "mean"
+        columns:
+          - "reward_external_synteny"
+      - name: "novelty"
+        reducer: "mean"
+        columns:
+          - "reward_external_average_protein_identity"
+          - "reward_mmseqs_cluster_diversity"
     external_qc:
       enabled: true
       enable_protein_hit_count: true
@@ -80,13 +116,26 @@ env:
       # Per external-QC reward run; set lower if several environment actors score concurrently.
       lovis4u_parallel_jobs: 12
       lovis4u_collect_pdfs: false
+    mmseqs_cluster_diversity:
+      enabled: true
+      mmseqs_bin: "mmseqs"
+      work_dir: "data/checkpoints/phage_gdpo_mmseqs_cluster_diversity"
+      keep_artifacts: false
+      min_seq_id: 0.99
+      coverage: 0.0
+      cov_mode: 0
+      seq_id_mode: 0
+      cluster_mode: 0
+      threads: null
 
 logger:
-  log_dir: "data/checkpoints/phage_grpo_logs_rl500"
+  log_dir: "data/checkpoints/phage_gdpo_logs"
   wandb_enabled: true
   wandb:
     project: "evo2_phage_design_rl_focused_qc"
-    name: "grpo-phage-rl500-full-qc-batched96"
+    name: "gdpo-phage-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.05-batched96"
 
 checkpointing:
-  checkpoint_dir: "data/checkpoints/phage_grpo_rl500"
+  checkpoint_dir: "data/checkpoints/phage_gdpo"
+  metric_name: "val:phage_qc/binary_core_pass_cluster_deduplicated_rate"
+  higher_is_better: true

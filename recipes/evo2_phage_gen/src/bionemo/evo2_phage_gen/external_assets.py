@@ -32,6 +32,9 @@ RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_EXTERNAL_DIR = RECIPE_ROOT / "data" / "external"
 DEFAULT_BIN_DIR = DEFAULT_EXTERNAL_DIR / "bin"
 DEFAULT_MMSEQS_GPU_URL = "https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz"
+DEFAULT_BLAST_PLUS_URL = (
+    "https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/ncbi-blast-2.17.0+-x64-linux.tar.gz"
+)
 DEFAULT_PHROGS_ANNOTATION_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv"
 DEFAULT_PHROGS_MMSEQS_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/phrogs_mmseqs_db.tar.gz"
 DEFAULT_PHROGS_FASTA_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz"
@@ -120,6 +123,37 @@ def prepare_mmseqs_gpu(
         link_path.unlink()
     link_path.symlink_to(mmseqs_bin.resolve())
     return PreparedAsset("mmseqs2_gpu", link_path, f"downloaded from {mmseqs_url}")
+
+
+def prepare_dustmasker(
+    external_dir: Path = DEFAULT_EXTERNAL_DIR,
+    *,
+    bin_dir: Path | None = None,
+    blast_plus_url: str = DEFAULT_BLAST_PLUS_URL,
+    overwrite: bool = False,
+    insecure_downloads: bool = False,
+) -> PreparedAsset:
+    """Download and expose NCBI BLAST+'s ``dustmasker`` binary."""
+    external_dir = Path(external_dir)
+    archive_path = _download(
+        blast_plus_url,
+        external_dir / "downloads" / Path(blast_plus_url).name,
+        overwrite=overwrite,
+        insecure=insecure_downloads,
+    )
+    extracted_dir = _extract_tar(archive_path, external_dir / "tools" / "ncbi-blast-plus", overwrite=overwrite)
+    dustmasker_candidates = sorted(extracted_dir.glob("**/bin/dustmasker")) + sorted(
+        extracted_dir.glob("**/dustmasker")
+    )
+    if not dustmasker_candidates:
+        raise FileNotFoundError(f"No dustmasker binary found after extracting {archive_path} to {extracted_dir}")
+    dustmasker_bin = dustmasker_candidates[0]
+    link_path = Path(bin_dir) / "dustmasker" if bin_dir is not None else external_dir / "bin" / "dustmasker"
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    if link_path.exists() or link_path.is_symlink():
+        link_path.unlink()
+    link_path.symlink_to(dustmasker_bin.resolve())
+    return PreparedAsset("dustmasker", link_path, f"downloaded from {blast_plus_url}")
 
 
 def prepare_diamond(
@@ -315,6 +349,7 @@ def prepare_external_assets(
     *,
     bin_dir: Path | None = None,
     download_mmseqs: bool = True,
+    download_dustmasker: bool = True,
     download_diamond: bool = True,
     download_hmmer: bool = True,
     download_phrogs_annotation: bool = True,
@@ -322,6 +357,7 @@ def prepare_external_assets(
     download_large_databases: bool = False,
     download_checkv: bool = True,
     mmseqs_url: str = DEFAULT_MMSEQS_GPU_URL,
+    blast_plus_url: str = DEFAULT_BLAST_PLUS_URL,
     diamond_url: str = DEFAULT_DIAMOND_URL,
     hmmer_url: str = DEFAULT_HMMER_URL,
     phrogs_mmseqs_url: str = DEFAULT_PHROGS_MMSEQS_URL,
@@ -340,6 +376,16 @@ def prepare_external_assets(
                 external_dir,
                 bin_dir=target_bin_dir,
                 mmseqs_url=mmseqs_url,
+                overwrite=overwrite,
+                insecure_downloads=insecure_downloads,
+            )
+        )
+    if download_dustmasker:
+        assets.append(
+            prepare_dustmasker(
+                external_dir,
+                bin_dir=target_bin_dir,
+                blast_plus_url=blast_plus_url,
                 overwrite=overwrite,
                 insecure_downloads=insecure_downloads,
             )
@@ -365,7 +411,9 @@ def prepare_external_assets(
             )
         )
     if download_phrogs_annotation:
-        assets.append(prepare_phrogs_annotation(external_dir, overwrite=overwrite, insecure_downloads=insecure_downloads))
+        assets.append(
+            prepare_phrogs_annotation(external_dir, overwrite=overwrite, insecure_downloads=insecure_downloads)
+        )
     if download_arc_evo2:
         assets.append(prepare_arc_evo2_checkout(external_dir, repo_url=arc_evo2_repo_url, overwrite=overwrite))
     if download_large_databases:
@@ -394,8 +442,11 @@ def main() -> None:
     """CLI entry point for preparing external analysis assets."""
     parser = argparse.ArgumentParser(description="Prepare external tools/databases for Evo2 phage QC")
     parser.add_argument("--external-dir", type=Path, default=DEFAULT_EXTERNAL_DIR)
-    parser.add_argument("--bin-dir", type=Path, default=None, help="Directory for exposed tool links (default: external-dir/bin)")
+    parser.add_argument(
+        "--bin-dir", type=Path, default=None, help="Directory for exposed tool links (default: external-dir/bin)"
+    )
     parser.add_argument("--skip-mmseqs", action="store_true", help="Do not download MMseqs2-GPU")
+    parser.add_argument("--skip-dustmasker", action="store_true", help="Do not download NCBI BLAST+/dustmasker")
     parser.add_argument("--skip-diamond", action="store_true", help="Do not download the upstream DIAMOND binary")
     parser.add_argument("--skip-hmmer", action="store_true", help="Do not download HMMER")
     parser.add_argument("--skip-phrogs-annotation", action="store_true", help="Do not download PHROGs annotation TSV")
@@ -405,6 +456,7 @@ def main() -> None:
     )
     parser.add_argument("--skip-checkv", action="store_true", help="Do not download/build the CheckV database")
     parser.add_argument("--mmseqs-url", default=DEFAULT_MMSEQS_GPU_URL)
+    parser.add_argument("--blast-plus-url", default=DEFAULT_BLAST_PLUS_URL)
     parser.add_argument("--diamond-url", default=DEFAULT_DIAMOND_URL)
     parser.add_argument("--hmmer-url", default=DEFAULT_HMMER_URL)
     parser.add_argument("--phrogs-mmseqs-url", default=DEFAULT_PHROGS_MMSEQS_URL)
@@ -422,6 +474,7 @@ def main() -> None:
         args.external_dir,
         bin_dir=args.bin_dir,
         download_mmseqs=not args.skip_mmseqs,
+        download_dustmasker=not args.skip_dustmasker,
         download_diamond=not args.skip_diamond,
         download_hmmer=not args.skip_hmmer,
         download_phrogs_annotation=not args.skip_phrogs_annotation,
@@ -429,6 +482,7 @@ def main() -> None:
         download_large_databases=args.download_large_databases,
         download_checkv=not args.skip_checkv,
         mmseqs_url=args.mmseqs_url,
+        blast_plus_url=args.blast_plus_url,
         diamond_url=args.diamond_url,
         hmmer_url=args.hmmer_url,
         phrogs_mmseqs_url=args.phrogs_mmseqs_url,

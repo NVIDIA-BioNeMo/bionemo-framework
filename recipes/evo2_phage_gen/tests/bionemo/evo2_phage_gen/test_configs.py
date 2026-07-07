@@ -20,6 +20,8 @@ from pathlib import Path
 
 import yaml
 
+from bionemo.evo2_phage_gen.generation import ensure_paper_useful_rl_prompt_files
+
 
 RECIPE_ROOT = Path(__file__).parents[3]
 
@@ -81,6 +83,10 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
 
     assert generation_config["max_new_tokens"] == config["env"]["phage_qc"]["genome_length_max"] - 4
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 0.0
+    assert config["env"]["phage_qc"]["dustmask_filter"] is True
+    assert config["env"]["phage_qc"]["dustmasker_bin"] == "dustmasker"
+    assert config["env"]["phage_qc"]["dustmask_use_external"] is True
+    assert config["env"]["phage_qc"]["weight_dustmask_end"] == 1.0
     assert generation_config["temperature"] > 0.0
     assert generation_config["top_k"] is None
     assert generation_config["top_p"] == 1.0
@@ -99,6 +105,7 @@ def test_grpo_rl100_config_targets_best_paper_region():
     validation_path = RECIPE_ROOT / config["data"]["validation"]["data_path"]
     generation_config = config["policy"]["generation"]
 
+    ensure_paper_useful_rl_prompt_files(RECIPE_ROOT / "data")
     assert prompt_path.exists()
     assert validation_path.exists()
     prompts = [
@@ -127,6 +134,9 @@ def test_grpo_rl100_config_targets_best_paper_region():
     assert generation_config["temperature"] == 1.0
     assert generation_config["top_k"] == 4
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 1.0
+    assert config["env"]["phage_qc"]["dustmask_filter"] is True
+    assert config["env"]["phage_qc"]["dustmask_end_window"] == 200
+    assert config["env"]["phage_qc"]["weight_dustmask_end"] == 1.0
     for removed_weight in [
         "weight_orf",
         "weight_coding_density",
@@ -160,6 +170,8 @@ def test_grpo_rl100_config_targets_best_paper_region():
     assert config["env"]["phage_qc"]["weight_average_protein_identity"] == 0.25
     assert config["env"]["phage_qc"]["weight_required_genes"] == 0.1
     assert config["env"]["phage_qc"]["external_qc"]["required_genes_evidence_target"] == 9.0
+    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_parallel_jobs"] == 12
+    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_collect_pdfs"] is False
     assert config["logger"]["wandb_enabled"] is True
     assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
     assert config["logger"]["wandb"]["name"] == "grpo-phage-rl100-full-qc-batched96"
@@ -183,6 +195,9 @@ def test_grpo_rl100_config_targets_best_paper_region():
     assert arc_config["total_gene_count_range"] == [10, 12]
     assert arc_config["syntenic_total_gene_count_remove"] == [[11, 11]]
     assert arc_config["required_genes_evidence_target"] == 9.0
+    assert arc_config["lovis4u_parallel_jobs"] == 12
+    assert arc_config["lovis4u_chunk_size"] == 12
+    assert arc_config["lovis4u_collect_pdfs"] is False
     assert arc_config["allow_gff_product_order_synteny_fallback"] is False
 
 
@@ -215,11 +230,62 @@ def test_grpo_rl500_config_extends_current_full_qc_rollout():
     assert config["env"]["phage_qc"]["weight_synteny"] == 0.25
     assert config["env"]["phage_qc"]["weight_average_protein_identity"] == 0.25
     assert config["env"]["phage_qc"]["weight_required_genes"] == 0.1
+    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_parallel_jobs"] == 12
+    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_collect_pdfs"] is False
+    assert config["env"]["phage_qc"]["dustmask_filter"] is True
+    assert config["env"]["phage_qc"]["weight_dustmask_end"] == 1.0
     assert config["logger"]["log_dir"] == "data/checkpoints/phage_grpo_logs_rl500"
     assert config["logger"]["wandb_enabled"] is True
     assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
     assert config["logger"]["wandb"]["name"] == "grpo-phage-rl500-full-qc-batched96"
     assert config["checkpointing"]["checkpoint_dir"] == "data/checkpoints/phage_grpo_rl500"
+
+
+def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
+    """GDPO should return macro-objective rewards and pin MMseqs clustering semantics."""
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    env_config = config["env"]["phage_qc"]
+    mmseqs_config = env_config["mmseqs_cluster_diversity"]
+    objectives = env_config["gdpo_objectives"]
+
+    assert config["defaults"] == "grpo_phage_megatron.yaml"
+    assert env_config["reward_output_mode"] == "gdpo"
+    assert config["loss_fn"]["reference_policy_kl_penalty"] == 0.05
+    assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6
+    assert config["policy"]["megatron_cfg"]["optimizer"]["min_lr"] == 1.0e-7
+    assert config["policy"]["megatron_cfg"]["scheduler"]["lr_warmup_init"] == 1.0e-7
+    assert config["checkpointing"]["metric_name"] == "val:phage_qc/binary_core_pass_cluster_deduplicated_rate"
+    assert [objective["name"] for objective in objectives] == [
+        "feasibility",
+        "function",
+        "architecture",
+        "novelty",
+    ]
+    assert all("reward" not in objective["columns"] for objective in objectives)
+    assert "reward_mmseqs_cluster_diversity" in objectives[-1]["columns"]
+    assert "reward_dustmask_end" in objectives[0]["columns"]
+    assert env_config["weight_mmseqs_cluster_diversity"] == 1.0
+    assert env_config["dustmask_filter"] is True
+    assert env_config["weight_dustmask_end"] == 1.0
+    assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 12
+    assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
+    assert mmseqs_config == {
+        "enabled": True,
+        "mmseqs_bin": "mmseqs",
+        "work_dir": "data/checkpoints/phage_gdpo_mmseqs_cluster_diversity",
+        "keep_artifacts": False,
+        "min_seq_id": 0.99,
+        "coverage": 0.0,
+        "cov_mode": 0,
+        "seq_id_mode": 0,
+        "cluster_mode": 0,
+        "threads": None,
+    }
+    assert config["grpo"]["num_generations_per_prompt"] == 96
+    assert config["policy"]["generation_batch_size"] == 96
+    assert "lr1e-6-kl0.05" in config["logger"]["wandb"]["name"]
+    assert config["logger"]["wandb"]["name"].startswith("gdpo-phage")
 
 
 def test_grpo_diagnostic_config_keeps_full_length_scoring_but_smaller_rollouts():

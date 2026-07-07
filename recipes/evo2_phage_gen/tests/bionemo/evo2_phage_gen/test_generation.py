@@ -17,7 +17,12 @@
 
 import json
 
-from bionemo.evo2_phage_gen.generation import infer_jsonl_to_fasta, phix174_prompts, write_prompt_sweep_jsonl
+from bionemo.evo2_phage_gen.generation import (
+    ensure_paper_useful_rl_prompt_files,
+    infer_jsonl_to_fasta,
+    phix174_prompts,
+    write_prompt_sweep_jsonl,
+)
 
 
 def test_phix174_prompts_use_reference_prefixes():
@@ -27,6 +32,24 @@ def test_phix174_prompts_use_reference_prefixes():
         5: "+~GAGTT",
         9: "+~GAGTTTTAT",
     }
+
+
+def test_ensure_paper_useful_rl_prompt_files_materializes_openai_jsonl(tmp_path):
+    """Paper-useful RL prompt files are deterministic PhiX174-start prompt artifacts."""
+    paths = ensure_paper_useful_rl_prompt_files(tmp_path)
+
+    train_records = [json.loads(line) for line in paths["train"].read_text().splitlines()]
+    validation_records = [json.loads(line) for line in paths["validation"].read_text().splitlines()]
+    train_prompts = [record["messages"][0]["content"].removeprefix("+~") for record in train_records]
+    validation_prompts = [record["messages"][0]["content"].removeprefix("+~") for record in validation_records]
+
+    assert [len(prompt) for prompt in train_prompts] == [4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11]
+    assert len(validation_prompts) == 64
+    assert set(validation_prompts) == {"GAGTTTTATC"}
+    assert train_records[0]["messages"] == [
+        {"role": "user", "content": "+~GAGT"},
+        {"role": "assistant", "content": ""},
+    ]
 
 
 def test_write_prompt_sweep_jsonl_repeats_prompts(tmp_path):

@@ -26,7 +26,11 @@ from bionemo.evo2_phage_gen.qc import trim_at_first_eos
 PHIX174_REFERENCE_START = "GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAA"
 DEFAULT_PROMPT_LENGTHS = tuple(range(1, 12))
 DEFAULT_PROMPT_PREFIX = "+~"
+PAPER_USEFUL_RL_PROMPT_LENGTHS = (4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11)
+PAPER_USEFUL_RL_VALIDATION_PROMPT_LENGTH = 10
+PAPER_USEFUL_RL_VALIDATION_RECORDS = 64
 DNA_ALPHABET = frozenset("ACGTacgt")
+RECIPE_ROOT = Path(__file__).resolve().parents[3]
 
 
 def phix174_prompts(
@@ -44,6 +48,43 @@ def phix174_prompts(
             raise ValueError(f"Prompt length {prompt_len} exceeds reference length {len(reference_start)}")
         prompts[int(prompt_len)] = f"{prompt_prefix}{reference_start[:prompt_len]}"
     return prompts
+
+
+def _openai_prompt_record(prompt: str) -> dict[str, list[dict[str, str]]]:
+    """Return the OpenAI-style prompt record consumed by the phage RL processor."""
+    return {"messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": ""}]}
+
+
+def write_openai_prompt_jsonl(path: Path, prompts: Sequence[str]) -> Path:
+    """Write OpenAI-style user-message prompts to one JSONL file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as handle:
+        for prompt in prompts:
+            handle.write(json.dumps(_openai_prompt_record(prompt)) + "\n")
+    return path
+
+
+def ensure_paper_useful_rl_prompt_files(
+    data_dir: Path | None = None,
+    *,
+    overwrite: bool = False,
+) -> dict[str, Path]:
+    """Materialize deterministic paper-useful RL prompt JSONL files when absent."""
+    data_dir = data_dir or RECIPE_ROOT / "data"
+    prompts_by_length = phix174_prompts(prompt_lengths=sorted(set(PAPER_USEFUL_RL_PROMPT_LENGTHS)))
+    train_path = data_dir / "phage_prompts_paper_useful_rl.jsonl"
+    validation_path = data_dir / "phage_prompts_paper_useful_rl_validation_prompt10.jsonl"
+
+    if overwrite or not train_path.exists():
+        train_prompts = [prompts_by_length[prompt_len] for prompt_len in PAPER_USEFUL_RL_PROMPT_LENGTHS]
+        write_openai_prompt_jsonl(train_path, train_prompts)
+    if overwrite or not validation_path.exists():
+        validation_prompt = prompts_by_length[PAPER_USEFUL_RL_VALIDATION_PROMPT_LENGTH]
+        write_openai_prompt_jsonl(
+            validation_path,
+            [validation_prompt] * PAPER_USEFUL_RL_VALIDATION_RECORDS,
+        )
+    return {"train": train_path, "validation": validation_path}
 
 
 def write_prompt_sweep_jsonl(
@@ -124,6 +165,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evo2 phage generation replication helpers")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    rl_prompt_parser = subparsers.add_parser(
+        "prepare-rl-prompts",
+        help="Materialize deterministic paper-useful RL prompt JSONL files",
+    )
+    rl_prompt_parser.add_argument("--data-dir", type=Path, default=RECIPE_ROOT / "data")
+    rl_prompt_parser.add_argument("--overwrite", action="store_true")
+
     prompt_parser = subparsers.add_parser("write-prompts", help="Write PhiX174 prompt sweep JSONL files")
     prompt_parser.add_argument("--output-dir", type=Path, required=True)
     prompt_parser.add_argument("--reference-start", type=str, default=PHIX174_REFERENCE_START)
@@ -140,7 +188,10 @@ def main() -> None:
     fasta_parser.add_argument("--no-source-stem", action="store_true")
 
     args = parser.parse_args()
-    if args.command == "write-prompts":
+    if args.command == "prepare-rl-prompts":
+        for path in ensure_paper_useful_rl_prompt_files(args.data_dir, overwrite=args.overwrite).values():
+            print(path)
+    elif args.command == "write-prompts":
         for path in write_prompt_sweep_jsonl(
             args.output_dir,
             reference_start=args.reference_start,
