@@ -28,6 +28,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_mixer import (
 from bionemo.evo2.run.infer import (
     _native_generated_ids_hit_stop,
     _native_stop_token_ids,
+    _sampling_rng_for_native_dynamic,
     _trim_native_text_stop_markers,
 )
 from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
@@ -92,6 +93,25 @@ def test_native_batched_generation_requires_max_new_tokens_param():
     """Missing max-token sampling params should not silently generate zero tokens."""
     with pytest.raises(ValueError, match="num_tokens_to_generate"):
         _batched_sampling_value([SimpleNamespace(temperature=1.0)], "num_tokens_to_generate", required=True)
+
+
+def test_native_sampling_rng_persists_across_generate_calls():
+    """Repeated prompt-file chunks should continue the RNG stream instead of reseeding."""
+    native_dynamic = SimpleNamespace(evo2_seed=1234, sampling_rng=None)
+    device = torch.device("cpu")
+
+    first_rng = _sampling_rng_for_native_dynamic(native_dynamic, device)
+    first_draw = torch.rand(8, generator=first_rng)
+
+    second_rng = _sampling_rng_for_native_dynamic(native_dynamic, device)
+    second_draw = torch.rand(8, generator=second_rng)
+
+    fresh_rng = torch.Generator(device=device)
+    fresh_rng.manual_seed(1234)
+
+    assert second_rng is first_rng
+    torch.testing.assert_close(first_draw, torch.rand(8, generator=fresh_rng))
+    assert not torch.equal(first_draw, second_draw)
 
 
 def test_native_generated_token_ids_do_not_fall_back_to_text_retokenization():

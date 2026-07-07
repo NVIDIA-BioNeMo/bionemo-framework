@@ -303,6 +303,10 @@ class Evo2NativeDynamicComponents:
     # by the context-affecting generate() options so it is rebuilt only if those change.
     shared_dyn_ctx: Optional[Any] = None
     shared_dyn_ctx_key: Optional[tuple] = None
+    # Sampling RNG is intentionally persistent across generate() calls. The CLI invokes generate()
+    # once per prompt-file chunk, and reseeding each chunk would replay identical samples for
+    # repeated prompts.
+    sampling_rng: Optional[torch.Generator] = None
     # True when ``max_seq_length`` was auto-sized from prompts (vs a manual cap). In auto mode a prompt
     # that needs more than the frozen budget is a hard error (the context cannot grow); in manual mode
     # the request just stops early on overflow, as before.
@@ -859,6 +863,27 @@ def _sample_from_logits(
     return sampled
 
 
+def _sampling_rng_for_native_dynamic(nd: Evo2NativeDynamicComponents, device: torch.device) -> torch.Generator:
+    """Return the persistent sampling RNG for an inference engine.
+
+    The native CLI processes prompt files in chunks but should sample those chunks as one continuous
+    stream. Keeping the generator on ``nd`` avoids replaying the same RNG sequence when many chunks
+    contain identical prompts.
+    """
+    rng = nd.sampling_rng
+    if rng is not None:
+        try:
+            if torch.device(rng.device) == torch.device(device):
+                return rng
+        except RuntimeError:
+            pass
+
+    rng = torch.Generator(device=device)
+    rng.manual_seed(int(nd.evo2_seed))
+    nd.sampling_rng = rng
+    return rng
+
+
 def _extract_generation_logits(dyn_ctx, logits: torch.Tensor) -> torch.Tensor:
     """Return one vocab-logit row per active generation request."""
     if getattr(dyn_ctx, "materialize_only_last_token_logits", False):
@@ -1176,8 +1201,7 @@ def _generate_native_dynamic(
     # (top_k>0 AND top_p>0); honor top-k first for compatibility with SamplingParams.
     eff_top_k = max(0, int(top_k))
     eff_top_p = float(top_p) if (top_p and top_p > 0 and eff_top_k == 0) else 0.0
-    sampling_rng = torch.Generator(device=device)
-    sampling_rng.manual_seed(int(nd.evo2_seed))
+    sampling_rng = _sampling_rng_for_native_dynamic(nd, device)
 
     results: List[_NativeDynamicResult] = []
     if not prompts:
