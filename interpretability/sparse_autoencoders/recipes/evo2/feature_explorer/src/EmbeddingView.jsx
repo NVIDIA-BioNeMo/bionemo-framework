@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import { EmbeddingViewMosaic } from 'embedding-atlas'
+import { userLabel } from './components'
 
 // Color palette for categories (D3 category10 + extended)
 const CATEGORY_COLORS = [
@@ -45,7 +46,10 @@ class FeatureTooltip {
       return
     }
     const featureId = tooltip.identifier ?? ""
-    const label = tooltip.fields?.label ?? tooltip.text ?? ""
+    // Prefer a user rename. This runs on every hover (embedding-atlas calls update() per point), so it's
+    // always live — no DuckDB label_display column or atlas rebuild needed. Auto point-labels are off
+    // (autoLabelEnabled:false), so the hover tooltip is the only per-point name surface on the map.
+    const label = userLabel(featureId) || tooltip.fields?.label || tooltip.text || ""
     const logFreq = tooltip.fields?.log_frequency
     const maxAct = tooltip.fields?.max_activation
     const colorField = tooltip.fields?.color_field
@@ -87,7 +91,7 @@ export default function EmbeddingView({ brush, categoryColumn, categoryColumns, 
 
       // Build tooltip fields
       const fields = {
-        label: feature?.label || `Feature ${highlightedFeatureId}`,
+        label: userLabel(highlightedFeatureId) || feature?.label || `Feature ${highlightedFeatureId}`,
         log_frequency: feature?.log_frequency || feature?.activation_freq || 0,
         max_activation: feature?.max_activation || 0,
         color_field: null
@@ -157,104 +161,127 @@ export default function EmbeddingView({ brush, categoryColumn, categoryColumns, 
   useEffect(() => {
     if (!containerRef.current || !brush) return
 
-    // Clear previous view
+    // Tear down any existing instance before recreating (a real brush-driven remount). innerHTML
+    // alone leaks the WebGPU device + clustering worker; destroy() releases what the library lets us.
     if (viewRef.current) {
+      try { viewRef.current.destroy() } catch (err) { console.warn('EmbeddingViewMosaic destroy failed:', err) }
+      viewRef.current = null
       containerRef.current.innerHTML = ''
     }
 
-    // Determine category column and colors
-    let categoryColName = null
-    let colors = Array(50).fill(DEFAULT_COLOR)
-    let additionalFields = {
-      label: "label",
-      log_frequency: "log_frequency",
-      max_activation: "max_activation",
-    }
+    // Defer creation by one frame so React StrictMode's dev mount->cleanup->mount collapses to a
+    // SINGLE instance. embedding-atlas's WebGPU bring-up is an unguarded async (requestAdapter ->
+    // requestDevice -> configure -> submit) with no destroyed-flag, and its destroy() frees neither
+    // the GPUDevice nor the clustering worker. So a synchronous `new EmbeddingViewMosaic` on the
+    // throwaway first mount starts a GPU init the immediate StrictMode cleanup cannot cancel, which
+    // then submits to a torn-down canvas ("Invalid CommandBuffer") and orphans the worker
+    // ("clustering.worker.js Failed to fetch"). Scheduling the create lets cleanup cancel the
+    // throwaway mount before any GPU/worker work begins; only the surviving mount instantiates.
+    let cancelled = false
+    const create = () => {
+      if (cancelled || !containerRef.current) return
 
-    if (categoryColumn && categoryColumn !== "none") {
-      const colInfo = categoryColumns?.find(c => c.name === categoryColumn)
-      if (colInfo) {
-        if (colInfo.type === 'sequential') {
-          // Sequential column - use binned version and sequential colors
-          categoryColName = `${categoryColumn}_bin`
-          colors = SEQUENTIAL_COLORS
-        } else if (colInfo.type === 'string') {
-          // Categorical string column
-          categoryColName = `${categoryColumn}_cat`
-          colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
-        } else {
-          // Integer categorical column
-          categoryColName = categoryColumn
-          colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
+      // Determine category column and colors
+      let categoryColName = null
+      let colors = Array(50).fill(DEFAULT_COLOR)
+      let additionalFields = {
+        label: "label",
+        log_frequency: "log_frequency",
+        max_activation: "max_activation",
+      }
+
+      if (categoryColumn && categoryColumn !== "none") {
+        const colInfo = categoryColumns?.find(c => c.name === categoryColumn)
+        if (colInfo) {
+          if (colInfo.type === 'sequential') {
+            // Sequential column - use binned version and sequential colors
+            categoryColName = `${categoryColumn}_bin`
+            colors = SEQUENTIAL_COLORS
+          } else if (colInfo.type === 'string') {
+            // Categorical string column
+            categoryColName = `${categoryColumn}_cat`
+            colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
+          } else {
+            // Integer categorical column
+            categoryColName = categoryColumn
+            colors = CATEGORY_COLORS.slice(0, Math.max(colInfo.nUnique, 10))
+          }
+          additionalFields.color_field = categoryColumn
         }
-        additionalFields.color_field = categoryColumn
+      }
+
+      const width = containerRef.current.clientWidth
+      const height = containerRef.current.clientHeight
+
+      try {
+        viewRef.current = new EmbeddingViewMosaic(
+          containerRef.current,
+          {
+            table: "features",
+            x: "x",
+            y: "y",
+            category: categoryColName,
+            text: "label",
+            identifier: "feature_id",
+            filter: brush,
+            rangeSelection: brush,
+            selection: highlightedFeatureId != null ? [highlightedFeatureId] : null,
+            viewportState: viewportState,
+            categoryColors: colors,
+            width: width,
+            height: height,
+            labels: labels || null,
+            config: {
+              mode: "points",
+              colorScheme: document.documentElement.classList.contains('dark') ? "dark" : "light",
+              autoLabelEnabled: false,
+            },
+            theme: {
+              brandingLink: {
+                text: "NVIDIA BioNeMo",
+                href: "https://github.com/NVIDIA/bionemo-framework",
+              },
+            },
+            additionalFields: additionalFields,
+            customTooltip: FeatureTooltip,
+            onSelection: (selection) => {
+              // selection is DataPoint[] | null
+              if (!onFeatureClickRef.current) return
+
+              if (selection && selection.length > 0) {
+                // Get the last clicked point (most recent selection)
+                const lastPoint = selection[selection.length - 1]
+                const featureId = lastPoint?.identifier ?? lastPoint
+                const x = lastPoint?.x
+                const y = lastPoint?.y
+                if (featureId != null) {
+                  onFeatureClickRef.current(featureId, x, y)
+                }
+              } else {
+                // Clicked on empty canvas - clear selection
+                onFeatureClickRef.current(null)
+              }
+            },
+            onViewportState: (vp) => {
+              if (onViewportChangeRef.current && vp) {
+                onViewportChangeRef.current(vp)
+              }
+            },
+          }
+        )
+      } catch (err) {
+        console.warn('Error creating EmbeddingViewMosaic:', err)
       }
     }
-
-    const width = containerRef.current.clientWidth
-    const height = containerRef.current.clientHeight
-
-    try {
-      viewRef.current = new EmbeddingViewMosaic(
-        containerRef.current,
-        {
-          table: "features",
-          x: "x",
-          y: "y",
-          category: categoryColName,
-          text: "label",
-          identifier: "feature_id",
-          filter: brush,
-          rangeSelection: brush,
-          selection: highlightedFeatureId != null ? [highlightedFeatureId] : null,
-          viewportState: viewportState,
-          categoryColors: colors,
-          width: width,
-          height: height,
-          labels: labels || null,
-          config: {
-            mode: "points",
-            colorScheme: document.documentElement.classList.contains('dark') ? "dark" : "light",
-            autoLabelEnabled: false,
-          },
-          theme: {
-            brandingLink: {
-              text: "NVIDIA BioNeMo",
-              href: "https://github.com/NVIDIA/bionemo-framework",
-            },
-          },
-          additionalFields: additionalFields,
-          customTooltip: FeatureTooltip,
-          onSelection: (selection) => {
-            // selection is DataPoint[] | null
-            if (!onFeatureClickRef.current) return
-
-            if (selection && selection.length > 0) {
-              // Get the last clicked point (most recent selection)
-              const lastPoint = selection[selection.length - 1]
-              const featureId = lastPoint?.identifier ?? lastPoint
-              const x = lastPoint?.x
-              const y = lastPoint?.y
-              if (featureId != null) {
-                onFeatureClickRef.current(featureId, x, y)
-              }
-            } else {
-              // Clicked on empty canvas - clear selection
-              onFeatureClickRef.current(null)
-            }
-          },
-          onViewportState: (vp) => {
-            if (onViewportChangeRef.current && vp) {
-              onViewportChangeRef.current(vp)
-            }
-          },
-        }
-      )
-    } catch (err) {
-      console.warn('Error creating EmbeddingViewMosaic:', err)
-    }
+    const rafId = requestAnimationFrame(create)
 
     return () => {
+      cancelled = true
+      cancelAnimationFrame(rafId)
+      if (viewRef.current) {
+        try { viewRef.current.destroy() } catch (err) { console.warn('EmbeddingViewMosaic destroy failed:', err) }
+        viewRef.current = null
+      }
       if (containerRef.current) {
         containerRef.current.innerHTML = ''
       }
