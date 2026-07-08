@@ -164,50 +164,58 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
         return rows
 
     @api.post("/annotate")
-    def annotate(req: AnnotateRequest):
+    async def annotate(req: AnnotateRequest, request: Request):
+        # Single-flight like /generate and /gene_embed: on the single GPU, annotate also has to take
+        # the core GPU lock (encode -> encode_batch), so a concurrent annotate during a long generate
+        # would silently queue behind it for minutes. Route it through the same guard so it fast-rejects
+        # with 409 "Engine busy" instead — one consistent signal across every GPU endpoint.
         _require_ready()
-        try:
-            dna, tag, codes, tag_len = core.annotate(engine, req.sequence, req.organism, req.tag)
-        except ValueError as e:
-            raise HTTPException(413 if "too long" in str(e) else 400, str(e))
-        full = tag + dna
-        if req.mode not in ("pick", "topk"):
-            raise HTTPException(400, f"Invalid mode {req.mode!r}: must be 'pick' or 'topk'")
-        if req.mode == "pick":
-            if not req.feature_ids:
-                raise HTTPException(400, "mode='pick' requires feature_ids")
-            chosen = [int(i) for i in req.feature_ids]
-            # Pick ids are user-supplied; an out-of-range id would IndexError (500) and a negative
-            # one would silently index the wrong feature via torch negative-indexing. Reject -> 400.
-            bad = sorted({i for i in chosen if not (0 <= i < engine.n_features)})
-            if bad:
-                raise HTTPException(400, f"feature_id(s) {bad} out of range [0, {engine.n_features})")
-        else:
-            k = max(1, min(int(req.k), 64))
-            chosen = [ft["feature_id"] for ft in engine.top_features(codes, tag_len=tag_len, k=k)]
-        feats = []
-        for fid in chosen:
-            col = codes[:, fid]
-            feats.append(
-                {
-                    "feature_id": fid,
-                    "label": engine.labels.get(fid),
-                    "max_activation": float(col[tag_len:].max().item())
-                    if codes.shape[0] > tag_len
-                    else float(col.max().item()),
-                    "activations": [round(float(v), 4) for v in col.tolist()],
-                }
-            )
-        return {
-            "sequence": dna,
-            "organism": req.organism,
-            "tag": tag,
-            "tag_len": tag_len,
-            "bases": list(full),
-            "n_tokens": codes.shape[0],
-            "layer": engine.layer,
-            "features": feats,
-        }
+
+        def work(cancel):
+            try:
+                dna, tag, codes, tag_len = core.annotate(engine, req.sequence, req.organism, req.tag)
+            except ValueError as e:
+                raise HTTPException(413 if "too long" in str(e) else 400, str(e))
+            full = tag + dna
+            if req.mode not in ("pick", "topk"):
+                raise HTTPException(400, f"Invalid mode {req.mode!r}: must be 'pick' or 'topk'")
+            if req.mode == "pick":
+                if not req.feature_ids:
+                    raise HTTPException(400, "mode='pick' requires feature_ids")
+                chosen = [int(i) for i in req.feature_ids]
+                # Pick ids are user-supplied; an out-of-range id would IndexError (500) and a negative
+                # one would silently index the wrong feature via torch negative-indexing. Reject -> 400.
+                bad = sorted({i for i in chosen if not (0 <= i < engine.n_features)})
+                if bad:
+                    raise HTTPException(400, f"feature_id(s) {bad} out of range [0, {engine.n_features})")
+            else:
+                k = max(1, min(int(req.k), 64))
+                chosen = [ft["feature_id"] for ft in engine.top_features(codes, tag_len=tag_len, k=k)]
+            feats = []
+            for fid in chosen:
+                col = codes[:, fid]
+                feats.append(
+                    {
+                        "feature_id": fid,
+                        "label": engine.labels.get(fid),
+                        "max_activation": float(col[tag_len:].max().item())
+                        if codes.shape[0] > tag_len
+                        else float(col.max().item()),
+                        "activations": [round(float(v), 4) for v in col.tolist()],
+                    }
+                )
+            return {
+                "sequence": dna,
+                "organism": req.organism,
+                "tag": tag,
+                "tag_len": tag_len,
+                "bases": list(full),
+                "n_tokens": codes.shape[0],
+                "layer": engine.layer,
+                "features": feats,
+            }
+
+        return await _run_cancellable(request, work)
 
     @api.post("/generate")
     def generate(req: GenerateRequest):
