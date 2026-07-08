@@ -6,7 +6,7 @@
 defaults: "grpo_phage_megatron.yaml"
 
 checkpointing:
-  checkpoint_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_decodefix_clusterfix_gdpo12"
+  checkpoint_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12"
   pretrained_checkpoint:
     # Start GDPO from the converted base Evo2 Microviridae checkpoint, not from a prior RL run.
     path: "data/checkpoints/evo2_7b_microviridae_mbridge"
@@ -25,12 +25,15 @@ grpo:
   val_at_start: false
   val_at_end: true
   seq_logprob_error_threshold: 1.5
+  # Keep both the legacy scalar path and the explicit GDPO estimator off
+  # leave-one-out normalization so the resolved config is unambiguous.
+  use_leave_one_out_baseline: false
   # Use the GDPO multi-reward estimator rather than scalar GRPO. This keeps
   # objective-wise advantage normalization active for the positional rewards.
   adv_estimator:
     name: "gdpo"
     normalize_rewards: true
-    use_leave_one_out_baseline: true
+    use_leave_one_out_baseline: false
     minus_baseline: true
 
 loss_fn:
@@ -128,7 +131,7 @@ env:
         columns: ["reward_mmseqs_cluster_diversity"]
     external_qc:
       enabled: true
-      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_decodefix_clusterfix_gdpo12_external_qc"
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_external_qc"
       fail_on_error: true
       timeout_seconds: 1800
       enable_protein_hit_count: true
@@ -144,7 +147,7 @@ env:
     mmseqs_cluster_diversity:
       enabled: true
       mmseqs_bin: "mmseqs"
-      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity"
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity"
       keep_artifacts: false
       min_seq_id: 0.99
       coverage: 0.0
@@ -155,9 +158,9 @@ env:
       verbosity: 0
 
 logger:
-  log_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_decodefix_clusterfix_gdpo12_logs"
+  log_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_logs"
   wandb_enabled: true
   wandb:
     project: "evo2_phage_design_rl_gdpo"
-    name: "gdpo-phage-base-microviridae-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.001-batched96-decodefix-clusterfix-gdpo12"
+    name: "gdpo-phage-base-microviridae-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.001-batched96-stockgdpo-fullfalse-decodefix-clusterfix-gdpo12"
 
