@@ -10,6 +10,7 @@ transformer_engine[pytorch]
 transformers
 wandb
 nvdlfw_inspect @ git+https://github.com/NVIDIA/nvidia-dlfw-inspect
+pytest
 # Pinned trio required by the fused MXFP8 GroupedMLP kernel (ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8)
 # used for the experts on Blackwell (sm_100+). Stock PyTorch 26.06 ships nvidia-cutlass-dsl 4.5.x,
 # which changes nvvm.AtomicRMWOp to require a `res` arg; cudnn-frontend 1.23 calls the old API and

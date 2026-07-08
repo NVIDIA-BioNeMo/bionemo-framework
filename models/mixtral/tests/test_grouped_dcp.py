@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from distributed_helpers import DistributedConfig, get_dummy_batch
-from test_te_capabilities import _sm_at_least
+from test_te_capabilities import _is_supported_blackwell
 
 from grouped_dcp import (
     load_consolidated,
@@ -69,7 +69,7 @@ def _fused_mxfp8_kernel_supported() -> bool:
 
 
 def _maybe_skip_discrete(quantized: bool) -> None:
-    if not _sm_at_least(10):
+    if not _is_supported_blackwell():
         pytest.skip("fused GroupedMLP requires datacenter Blackwell (sm_100+)")
     if quantized:
         from transformer_engine.pytorch import fp8

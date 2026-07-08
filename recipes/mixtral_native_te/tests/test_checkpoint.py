@@ -32,8 +32,8 @@ requires_multi_gpu = pytest.mark.skipif(
 )
 
 requires_sm100 = pytest.mark.skipif(
-    not (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10),
-    reason="fused_grouped_mlp expert path requires sm_100+",
+    not (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] == 10),
+    reason="fused_grouped_mlp expert path requires compute capability 10.x; 12.0 support is pending",
 )
 
 

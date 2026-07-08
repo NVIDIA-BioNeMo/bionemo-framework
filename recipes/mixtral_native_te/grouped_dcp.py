@@ -64,7 +64,7 @@ _OPTIMIZER_STATE_ATTRS = ("master_param", "exp_avg", "exp_avg_sq")
 
 def _is_discrete_grouped_linear(gl: torch.nn.Module) -> bool:
     """True when the module exposes per-expert ``weight{i}`` params instead of one GroupedTensor."""
-    return getattr(gl, "weight0", None) is not None
+    return gl._parameters.get("weight0") is not None
 
 
 def _count_discrete_expert_weights(gl: torch.nn.Module) -> int:

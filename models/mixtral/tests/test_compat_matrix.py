@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from distributed_helpers import DistributedConfig
-from test_te_capabilities import _sm_at_least
+from test_te_capabilities import _is_supported_blackwell
 
 from grouped_dcp import load_consolidated, save_consolidated
 
@@ -99,14 +99,14 @@ def _fused_mxfp8_kernel_supported() -> bool:
 
 def _cell_marks(cell: MatrixCell) -> list:
     marks: list = []
-    if cell.compute == "fused_grouped_mlp" and not _sm_at_least(10):
+    if cell.compute == "fused_grouped_mlp" and not _is_supported_blackwell():
         marks.append(pytest.mark.skip(reason="fused GroupedMLP requires datacenter Blackwell (sm_100+)"))
 
     if cell.precision == "mxfp8_autocast":
         ok, reason = _mxfp8_supported()
         if not ok:
             marks.append(pytest.mark.skip(reason=f"MXFP8 unsupported: {reason}"))
-        if cell.compute == "fused_grouped_mlp" and _sm_at_least(10) and not _fused_mxfp8_kernel_supported():
+        if cell.compute == "fused_grouped_mlp" and _is_supported_blackwell() and not _fused_mxfp8_kernel_supported():
             marks.append(
                 pytest.mark.skip(
                     reason=(
@@ -458,7 +458,7 @@ def test_fp8_parameters_persist_for_grouped_experts(compute):
 )
 def test_te_fused_adam_supports_grouped_mlp(unused_tcp_port, tmp_path):
     """A FusedAdam(master_weights=True) step over grouped experts should succeed; today it aborts."""
-    if not _sm_at_least(10) or not _fused_mxfp8_kernel_supported():
+    if not _is_supported_blackwell() or not _fused_mxfp8_kernel_supported():
         pytest.skip("fused CuteDSL MXFP8 kernel unavailable")
     # Run in a subprocess: the failure is an illegal memory access that would abort the pytest
     # process, so we isolate it and assert on the exit code.

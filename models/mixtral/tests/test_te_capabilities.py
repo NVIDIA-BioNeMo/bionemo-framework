@@ -33,13 +33,13 @@ import transformer_engine.pytorch as te
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 
 
-def _sm_at_least(major: int) -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= major
+def _is_supported_blackwell() -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] == 10
 
 
 requires_sm100 = pytest.mark.skipif(
-    not _sm_at_least(10),
-    reason="requires datacenter Blackwell (sm_100+); grouped GEMM / MXFP8 unsupported below",
+    not _is_supported_blackwell(),
+    reason="requires compute capability 10.x datacenter Blackwell; 12.0 support is pending",
 )
 
 
