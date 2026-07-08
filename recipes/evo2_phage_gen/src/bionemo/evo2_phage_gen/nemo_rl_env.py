@@ -328,7 +328,7 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
             passes = pd.to_numeric(scored.loc[available, pass_column], errors="coerce")
             metrics[f"{prefix}_conditional_pass_rate"] = float((passes >= 1.0).mean())
 
-    if "mmseqs_cluster_size" in scored:
+    if {"mmseqs_cluster_id", "mmseqs_cluster_size"}.issubset(scored.columns):
         cluster_sizes = pd.to_numeric(scored["mmseqs_cluster_size"], errors="coerce").fillna(0).astype(int)
         valid_cluster_mask = cluster_sizes > 0
         valid_cluster_count = int(valid_cluster_mask.sum())
@@ -374,12 +374,16 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
 
 
 def _scored_records(scored: pd.DataFrame) -> list[dict[str, Any]]:
-    """Convert per-sequence scores into metadata-safe numeric/status dictionaries."""
+    """Convert per-sequence scores into metadata-safe scalar/status dictionaries."""
     return [
         {
             key: value
             for key, value in row.items()
-            if isinstance(value, Number | bool) or key.endswith(("_pass", "_available", "_artifact"))
+            if (
+                isinstance(value, Number | bool)
+                or key == "mmseqs_cluster_id"
+                or key.endswith(("_pass", "_available", "_artifact"))
+            )
         }
         for row in scored.where(pd.notna(scored), None).to_dict("records")
     ]
@@ -477,6 +481,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 seq_id_mode=int(mmseqs_cfg.get("seq_id_mode", 0)),
                 cluster_mode=int(mmseqs_cfg.get("cluster_mode", 0)),
                 threads=mmseqs_cfg.get("threads"),
+                verbosity=int(mmseqs_cfg.get("verbosity", 0)),
             )
 
         def step(
@@ -545,8 +550,16 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             reward_tensor = batch["rewards"] if "rewards" in batch else batch["total_reward"]
             rewards = reward_tensor if reward_tensor.ndim == 1 else reward_tensor.float().mean(dim=1)
             scored = _scored_from_batch_metadata(batch)
+            last_scored = getattr(self, "_last_scored", pd.DataFrame())
             if scored.empty:
-                scored = getattr(self, "_last_scored", pd.DataFrame())
+                scored = last_scored
+            elif (
+                "mmseqs_cluster_size" in scored
+                and "mmseqs_cluster_id" not in scored
+                and isinstance(last_scored, pd.DataFrame)
+                and len(last_scored) == len(scored)
+            ):
+                scored = last_scored
             phage_metrics = phage_qc_metrics_from_scored(scored, self.weights) if not scored.empty else {}
             binary_pass_rate = float(phage_metrics.get("binary_core_pass_rate", 0.0))
             cluster_deduplicated_pass_rate = float(

@@ -261,6 +261,23 @@ def test_phage_qc_metrics_deduplicates_full_qc_passes_by_mmseqs_cluster():
     assert "binary_full_qc_pass_cluster_deduplication_fraction" not in metrics
 
 
+def test_phage_qc_metrics_tolerates_legacy_metadata_without_mmseqs_cluster_id():
+    """Partially preserved MMseqs metadata should not crash metric aggregation."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 1.0],
+            "mmseqs_cluster_size": [2, 2],
+            "reward": [1.0, 1.0],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, RewardWeights(valid_nt_chars=1.0))
+
+    assert metrics["binary_core_pass_rate"] == 1.0
+    assert metrics["binary_core_pass_cluster_deduplicated_rate"] == 1.0
+    assert "mmseqs_cluster_num_clusters" not in metrics
+
+
 def test_phage_qc_metrics_groups_training_metrics_by_prompt_prefix_length():
     """Prompt-length groups let W&B compare each prefix only with matching prefixes."""
     scored = pd.DataFrame(
@@ -291,12 +308,19 @@ def test_scored_records_exclude_full_sequence_from_rollout_metadata():
             "reward": [0.5],
             "synteny_measurement_available": [1.0],
             "missing_status": ["unavailable"],
+            "mmseqs_cluster_id": ["group0:seq_0"],
         }
     )
 
     records = _scored_records(scored)
 
-    assert records == [{"reward": 0.5, "synteny_measurement_available": 1.0}]
+    assert records == [
+        {
+            "reward": 0.5,
+            "synteny_measurement_available": 1.0,
+            "mmseqs_cluster_id": "group0:seq_0",
+        }
+    ]
 
 
 def test_global_post_process_metrics_accepts_rollout_total_reward():
@@ -360,3 +384,34 @@ def test_global_post_process_metrics_falls_back_to_last_scored_for_old_rollout_m
 
     assert metrics["pass_rate"] == 0.5
     assert metrics["phage_qc/valid_nt_chars_score_mean"] == 0.5
+
+
+def test_global_post_process_metrics_falls_back_when_metadata_drops_mmseqs_cluster_id():
+    """Old rollout metadata kept cluster sizes but dropped string cluster IDs; use full actor scores."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
+    env = object.__new__(env_cls)
+    env.weights = RewardWeights(valid_nt_chars=1.0)
+    env._last_scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 1.0],
+            "mmseqs_cluster_id": ["group0:seq_0", "group0:seq_0"],
+            "mmseqs_cluster_size": [2, 2],
+            "reward": [1.0, 1.0],
+        }
+    )
+    batch = {
+        "total_reward": torch.tensor([1.0, 1.0]),
+        "extra_env_info": [
+            {"_phage_qc_scored": {"reward_valid_nt_chars": 1.0, "mmseqs_cluster_size": 2, "reward": 1.0}},
+            {"_phage_qc_scored": {"reward_valid_nt_chars": 1.0, "mmseqs_cluster_size": 2, "reward": 1.0}},
+        ],
+    }
+
+    _returned_batch, metrics = env_cls.global_post_process_and_metrics(env, batch)
+
+    assert metrics["phage_qc/mmseqs_cluster_num_clusters"] == 1
+    assert metrics["phage_qc/binary_core_pass_cluster_deduplicated_count"] == 1
+    assert metrics["pass_rate"] == 0.5

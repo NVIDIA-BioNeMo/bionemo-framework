@@ -281,18 +281,19 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert mmseqs_config == {
         "enabled": True,
         "mmseqs_bin": "mmseqs",
-        "work_dir": "data/checkpoints/phage_gdpo_mmseqs_cluster_diversity",
+        "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched48_metricsfix_mmseqs_cluster_diversity",
         "keep_artifacts": False,
         "min_seq_id": 0.99,
         "coverage": 0.0,
         "cov_mode": 0,
         "seq_id_mode": 0,
         "cluster_mode": 0,
-        "threads": None,
+        "threads": 16,
+        "verbosity": 0,
     }
     assert config["grpo"]["num_generations_per_prompt"] == 96
     assert config["grpo"]["val_at_start"] is True
-    assert config["policy"]["generation_batch_size"] == 96
+    assert config["policy"]["generation_batch_size"] == 48
     assert "lr1e-6-kl0.05" in config["logger"]["wandb"]["name"]
     assert config["logger"]["wandb"]["name"].startswith("gdpo-phage")
 

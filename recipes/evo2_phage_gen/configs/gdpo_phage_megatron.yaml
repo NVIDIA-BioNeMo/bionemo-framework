@@ -5,14 +5,23 @@
 
 defaults: "grpo_phage_megatron.yaml"
 
+checkpointing:
+  checkpoint_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched48_metricsfix"
+  pretrained_checkpoint:
+    # Start GDPO from the converted base Evo2 Microviridae checkpoint, not from a prior RL run.
+    path: "data/checkpoints/evo2_7b_microviridae_mbridge"
+    format: "megatron_bridge"
+  metric_name: "val:phage_qc/binary_core_pass_cluster_deduplicated_rate"
+  higher_is_better: true
+
 grpo:
   max_num_epochs: 500
   num_prompts_per_step: 1
   num_generations_per_prompt: 96
   max_num_steps: 500
   val_period: 10
-  val_batch_size: 96
-  max_val_samples: 96
+  val_batch_size: 48
+  max_val_samples: 48
   val_at_start: true
   val_at_end: true
   seq_logprob_error_threshold: 1.5
@@ -24,7 +33,7 @@ loss_fn:
 policy:
   train_global_batch_size: 96
   train_micro_batch_size: 1
-  generation_batch_size: 96
+  generation_batch_size: 48
   logprob_batch_size: 1
   megatron_cfg:
     optimizer:
@@ -41,8 +50,8 @@ policy:
       cuda_graph_impl: "local"
       inference_cuda_graph_scope: "block"
       use_cuda_graphs_for_non_decode_steps: true
-      max_requests: 96
-      prompt_batch_size: 96
+      max_requests: 48
+      prompt_batch_size: 48
       enable_chunked_prefill: false
       generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
       generation_adapter_config:
@@ -112,6 +121,7 @@ env:
           - "reward_mmseqs_cluster_diversity"
     external_qc:
       enabled: true
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched48_metricsfix_external_qc"
       fail_on_error: true
       timeout_seconds: 1800
       enable_protein_hit_count: true
@@ -127,23 +137,20 @@ env:
     mmseqs_cluster_diversity:
       enabled: true
       mmseqs_bin: "mmseqs"
-      work_dir: "data/checkpoints/phage_gdpo_mmseqs_cluster_diversity"
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched48_metricsfix_mmseqs_cluster_diversity"
       keep_artifacts: false
       min_seq_id: 0.99
       coverage: 0.0
       cov_mode: 0
       seq_id_mode: 0
       cluster_mode: 0
-      threads: null
+      threads: 16
+      verbosity: 0
 
 logger:
-  log_dir: "data/checkpoints/phage_gdpo_logs"
+  log_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched48_metricsfix_logs"
   wandb_enabled: true
   wandb:
-    project: "evo2_phage_design_rl_focused_qc"
-    name: "gdpo-phage-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.05-batched96"
+    project: "evo2_phage_design_rl_gdpo"
+    name: "gdpo-phage-base-microviridae-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.05-batched48-metricsfix"
 
-checkpointing:
-  checkpoint_dir: "data/checkpoints/phage_gdpo"
-  metric_name: "val:phage_qc/binary_core_pass_cluster_deduplicated_rate"
-  higher_is_better: true

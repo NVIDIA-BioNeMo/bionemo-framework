@@ -161,6 +161,7 @@ class MMseqsClusterDiversityConfig:
     seq_id_mode: int = 0
     cluster_mode: int = 0
     threads: int | None = None
+    verbosity: int = 0
 
 
 def _recipe_path(path: str | Path) -> Path:
@@ -221,6 +222,8 @@ def _mmseqs_cluster_command(
         str(int(config.seq_id_mode)),
         "--cluster-mode",
         str(int(config.cluster_mode)),
+        "-v",
+        str(int(config.verbosity)),
     ]
     if config.threads is not None:
         command.extend(["--threads", str(int(config.threads))])

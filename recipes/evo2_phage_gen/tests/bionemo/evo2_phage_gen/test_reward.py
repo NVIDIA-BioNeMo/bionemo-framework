@@ -204,6 +204,7 @@ def test_mmseqs_cluster_diversity_reward_uses_inverse_cluster_size(tmp_path, mon
         assert args[args.index("--cov-mode") + 1] == "0"
         assert args[args.index("--seq-id-mode") + 1] == "0"
         assert args[args.index("--cluster-mode") + 1] == "0"
+        assert args[args.index("-v") + 1] == "0"
         Path(f"{args[3]}_cluster.tsv").write_text("seq_0\tseq_0\nseq_0\tseq_1\nseq_2\tseq_2\n")
 
     monkeypatch.setattr("subprocess.run", fake_run)
