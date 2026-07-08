@@ -11,9 +11,9 @@ top-level bionemo-framework repository.
 
 ### Supported Models and Training Features
 
-| Model                                      | BF16 | MXFP8<sup>[1]</sup> | Expert Parallelism | FSDP2 (over `dp`) | THD Sequence Packing |
-| ------------------------------------------ | ---- | ------------------- | ------------------ | ----------------- | -------------------- |
-| [Mixtral](../../models/mixtral/README.md)  | ✅   | ✅                  | ✅                 | ✅                | ✅                   |
+| Model                                     | BF16 | MXFP8<sup>[1]</sup> | Expert Parallelism | FSDP2 (over `dp`) | THD Sequence Packing |
+| ----------------------------------------- | ---- | ------------------- | ------------------ | ----------------- | -------------------- |
+| [Mixtral](../../models/mixtral/README.md) | ✅   | ✅                  | ✅                 | ✅                | ✅                   |
 
 ✅: Supported <br/>
 🚧: Under development <br/>
@@ -62,7 +62,7 @@ Training uses a 2D `(dp, ep)` device mesh via `build_mesh_and_wrap(model, dp_siz
 
 - **Experts** (`experts_gate_up` / `experts_down` discrete `weight{i}` in `fused_grouped_mlp` mode)
   are EP-sharded as **local tensors** on each rank — no runtime DTensor on live expert weights.
-- **Sharding depends on `dp_size`:** when `dp_size > 1`, whole decoder layers are FSDP2-``fully_shard``ed
+- **Sharding depends on `dp_size`:** when `dp_size > 1`, whole decoder layers are FSDP2-`fully_shard`ed
   over the `"dp"` sub-mesh (so both dense *and* expert params are additionally sharded over `dp`), and
   the replicated dense grads are all-reduced over `ep` each step. When `dp_size == 1` there is **no
   FSDP2 wrapping at all** (a size-1 FSDP mesh shards nothing yet trips a TE MXFP8/cross-group hazard):
@@ -105,11 +105,11 @@ DTensors). FP32 optimizer **master weights** are enabled automatically for persi
 (`quantized_model_init`), and can be enabled for bf16 via `optimizer_master_weights=true`
 (optionally with `optimizer_store_param_remainders=true` to halve the master footprint).
 
-| Mode | Config | Behavior |
-| ---- | ------ | -------- |
-| **(a) BF16** | `fp8_config.enabled=false` (default) | bf16 model params; no `te.autocast` |
-| **(b) MXFP8 via `te.autocast`** | `fp8_config.enabled=true`, `quantized_model_init_kwargs.enabled=false` | bf16 master weights; MXFP8 compute via per-layer `te.autocast(recipe=MXFP8BlockScaling)` |
-| **(c) MXFP8 persistent params** | `fp8_config.enabled=true`, `quantized_model_init_kwargs.enabled=true` | weights created in `te.quantized_model_init`; `FusedAdam(master_weights=True)` seeds FP32 masters from high-precision init values when `preserve_high_precision_init_val=true` |
+| Mode                            | Config                                                                 | Behavior                                                                                                                                                                       |
+| ------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **(a) BF16**                    | `fp8_config.enabled=false` (default)                                   | bf16 model params; no `te.autocast`                                                                                                                                            |
+| **(b) MXFP8 via `te.autocast`** | `fp8_config.enabled=true`, `quantized_model_init_kwargs.enabled=false` | bf16 master weights; MXFP8 compute via per-layer `te.autocast(recipe=MXFP8BlockScaling)`                                                                                       |
+| **(c) MXFP8 persistent params** | `fp8_config.enabled=true`, `quantized_model_init_kwargs.enabled=true`  | weights created in `te.quantized_model_init`; `FusedAdam(master_weights=True)` seeds FP32 masters from high-precision init values when `preserve_high_precision_init_val=true` |
 
 **BF16 baseline:**
 

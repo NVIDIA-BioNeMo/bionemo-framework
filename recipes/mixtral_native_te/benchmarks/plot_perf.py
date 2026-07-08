@@ -103,9 +103,7 @@ def main():
     ax.set_ylim(0, max(data.values()) * 1.18)
 
     # Right axis: tokens/s/GPU (exact linear rescale of the PFLOP/s/GPU left axis).
-    secax = ax.secondary_yaxis(
-        "right", functions=(lambda p: p * TOKENS_PER_PFLOP, lambda t: t / TOKENS_PER_PFLOP)
-    )
+    secax = ax.secondary_yaxis("right", functions=(lambda p: p * TOKENS_PER_PFLOP, lambda t: t / TOKENS_PER_PFLOP))
     secax.set_ylabel("tokens/s/GPU", fontsize=11)
     ax.legend(title="precision", frameon=False, fontsize=10, title_fontsize=10)
     ax.grid(axis="y", linestyle=":", alpha=0.4)

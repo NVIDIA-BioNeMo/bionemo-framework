@@ -1281,9 +1281,7 @@ class AllToAllTokenDispatcher:
         padded_tpe = padded_tpe.int()
 
         if self._ep_group is None:
-            handle = _AllToAllHandle(
-                row_id_map=row_id_map, restore_shape=hidden_states.shape, pad_offsets=pad_offsets
-            )
+            handle = _AllToAllHandle(row_id_map=row_id_map, restore_shape=hidden_states.shape, pad_offsets=pad_offsets)
             return DispatchOutput(
                 expert_input=permuted_hidden,
                 expert_probs=permuted_probs,
