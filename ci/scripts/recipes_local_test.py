@@ -40,6 +40,8 @@ DOCKER_RUN_ARGS = [
     "memlock=-1",
     "--ulimit",
     "stack=67108864",
+    "--env",
+    "CI=true",
     "-v",
     f"{PIP_CACHE_DIR}:/workspace/.cache/pip",
 ]
