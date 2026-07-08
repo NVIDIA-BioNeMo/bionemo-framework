@@ -126,6 +126,7 @@ def test_grpo_rl100_config_targets_best_paper_region():
     assert config["grpo"]["max_num_steps"] == 100
     assert config["grpo"]["num_generations_per_prompt"] == 96
     assert config["grpo"]["val_period"] == 10
+    assert config["grpo"]["val_at_start"] is True
     assert config["grpo"]["val_at_end"] is True
     assert config["grpo"]["val_batch_size"] == 96
     assert config["grpo"]["max_val_samples"] == 96
@@ -214,6 +215,8 @@ def test_grpo_rl500_config_extends_current_full_qc_rollout():
     assert config["grpo"]["max_num_steps"] == 500
     assert config["grpo"]["val_batch_size"] == 96
     assert config["grpo"]["max_val_samples"] == 96
+    assert config["grpo"]["val_at_start"] is True
+    assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
     assert config["policy"]["train_global_batch_size"] == 96
     assert config["policy"]["generation_batch_size"] == 96
     assert generation_config["max_new_tokens"] == 5989
@@ -225,6 +228,7 @@ def test_grpo_rl500_config_extends_current_full_qc_rollout():
         mcore_generation_config["generation_adapter"]
         == "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
     )
+    assert mcore_generation_config["generation_adapter_config"]["seed"] == 42
     assert config["data"]["train"]["data_path"] == "data/phage_prompts_paper_useful_rl.jsonl"
     assert config["data"]["validation"]["data_path"] == "data/phage_prompts_paper_useful_rl_validation_prompt10.jsonl"
     assert config["env"]["phage_qc"]["weight_synteny"] == 0.25
@@ -238,7 +242,7 @@ def test_grpo_rl500_config_extends_current_full_qc_rollout():
     assert config["logger"]["wandb_enabled"] is True
     assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
     assert config["logger"]["wandb"]["name"] == "grpo-phage-rl500-full-qc-batched96"
-    assert config["checkpointing"]["checkpoint_dir"] == "data/checkpoints/phage_grpo_rl500"
+    assert config["checkpointing"]["checkpoint_dir"] == "data/checkpoints/phage_grpo_rl500_round2"
 
 
 def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
@@ -252,6 +256,8 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["defaults"] == "grpo_phage_megatron.yaml"
     assert env_config["reward_output_mode"] == "gdpo"
     assert config["loss_fn"]["reference_policy_kl_penalty"] == 0.05
+    assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
+    assert config["policy"]["generation"]["mcore_generation_config"]["generation_adapter_config"]["seed"] == 42
     assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6
     assert config["policy"]["megatron_cfg"]["optimizer"]["min_lr"] == 1.0e-7
     assert config["policy"]["megatron_cfg"]["scheduler"]["lr_warmup_init"] == 1.0e-7
@@ -268,6 +274,8 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["weight_mmseqs_cluster_diversity"] == 1.0
     assert env_config["dustmask_filter"] is True
     assert env_config["weight_dustmask_end"] == 1.0
+    assert env_config["external_qc"]["fail_on_error"] is True
+    assert env_config["external_qc"]["timeout_seconds"] == 1800
     assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 12
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
     assert mmseqs_config == {
@@ -283,6 +291,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "threads": None,
     }
     assert config["grpo"]["num_generations_per_prompt"] == 96
+    assert config["grpo"]["val_at_start"] is True
     assert config["policy"]["generation_batch_size"] == 96
     assert "lr1e-6-kl0.05" in config["logger"]["wandb"]["name"]
     assert config["logger"]["wandb"]["name"].startswith("gdpo-phage")

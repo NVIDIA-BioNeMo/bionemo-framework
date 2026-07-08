@@ -161,4 +161,4 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     assert calls[0][0][calls[0][0].index("-outfmt") + 1] == "interval"
     assert scored["dustmask_left_end_masked_fraction"].tolist() == [0.8, 0.0]
     assert scored["dustmask_right_end_masked_fraction"].tolist() == [0.0, 0.8]
-    assert scored["dustmask_end_pass"].tolist() == [False, False]
+    assert scored["dustmask_end_pass"].tolist() == [True, True]

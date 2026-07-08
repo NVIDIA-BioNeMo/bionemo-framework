@@ -16,14 +16,18 @@
 """Tests for ``bionemo.evo2_phage_gen.reward``."""
 
 import random
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import yaml
 
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 from bionemo.evo2_phage_gen.reward import (
     REWARD_COMPONENTS,
+    TIMING_COLUMN_PREFIX,
     ExternalQCRewardConfig,
     MMseqsClusterDiversityConfig,
     RewardWeights,
@@ -33,7 +37,6 @@ from bionemo.evo2_phage_gen.reward import (
     _add_full_synteny_rewards,
     _add_required_gene_rewards,
     _aggregate_reward,
-    _bounded_percent_range_score,
     _bounded_range_score,
     _lower_bound_ratio_score,
     _spike_identity_score,
@@ -59,6 +62,21 @@ def test_score_nucleotide_metrics_rewards_passing_sequence():
 
     assert scored.loc[0, "reward"] == 1.0
     assert scored.loc[0, "reward_valid_nt_chars"] == 1.0
+
+
+def test_score_nucleotide_metrics_reports_reward_timing_columns():
+    """Reward timing columns should be present for NeMo-RL timing metric routing."""
+    df = pd.DataFrame({"id_prompt": ["pass"], "sequence": ["ACGT" * 1000]})
+
+    scored = score_nucleotide_metrics(df)
+
+    begin = scored.loc[0, f"{TIMING_COLUMN_PREFIX}reward/begin_unix_s"]
+    end = scored.loc[0, f"{TIMING_COLUMN_PREFIX}reward/end_unix_s"]
+    assert end >= begin
+    assert scored.loc[0, f"{TIMING_COLUMN_PREFIX}reward/total_s"] >= 0.0
+    assert scored.loc[0, f"{TIMING_COLUMN_PREFIX}reward/nucleotide_qc_s"] >= 0.0
+    assert scored.loc[0, f"{TIMING_COLUMN_PREFIX}reward/nucleotide_reward_scores_s"] >= 0.0
+    assert scored.loc[0, f"{TIMING_COLUMN_PREFIX}reward/aggregate_s"] >= 0.0
 
 
 def test_score_nucleotide_metrics_penalizes_invalid_sequence():
@@ -136,7 +154,7 @@ def test_score_nucleotide_metrics_penalizes_low_complexity_sequence_ends():
     )
 
     assert scored.loc[0, "reward_dustmask_end"] > scored.loc[1, "reward_dustmask_end"]
-    assert scored.loc[1, "dustmask_max_end_masked_fraction"] > 0.5
+    assert scored.loc[1, "dustmask_max_end_masked_fraction"] > 0.9
     assert scored.loc[1, "reward_nucleotide_pass"] == 0.0
     assert scored["reward"].tolist() == scored["reward_dustmask_end"].tolist()
 
@@ -237,11 +255,6 @@ def test_threshold_reward_helpers_plateau_at_pass_criteria():
     assert _bounded_range_score(3.5, 7, 9) == 0.5
     assert _bounded_range_score(18, 7, 9) == 0.5
 
-    assert _bounded_percent_range_score(0, 0, 95) == 1.0
-    assert _bounded_percent_range_score(95, 0, 95) == 1.0
-    assert _bounded_percent_range_score(97.5, 0, 95) == 0.5
-    assert _bounded_percent_range_score(100, 0, 95) == 0.0
-
 
 def test_spike_identity_score_plateaus_at_paper_threshold():
     """Spike/tropism score should stop increasing after the paper threshold."""
@@ -296,7 +309,7 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
         "mmseqs_db_tropism_protein": "",
         "genetic_architecture_visualization_script": "",
         "protein_annotation_file": "",
-        "reference_genome_gff_file_save_location": "",
+        "reference_genome_gff_file_save_location": "reference.gff",
     }
     base_config_path = tmp_path / "arc_config.yaml"
     base_config_path.write_text(yaml.safe_dump(base_config))
@@ -328,13 +341,16 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     assert run_config["lovis4u_chunk_size"] == 12
     assert run_config["chunk_size"] == 12
     assert run_config["lovis4u_collect_pdfs"] is False
-    assert run_config["reference_genome_gff_file_save_location"] is None
+    assert run_config["use_reference_genome"] is True
+    assert run_config["reference_genome_gff_file_save_location"].endswith("reference.gff")
 
 
 def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monkeypatch):
     """The external Arc wrapper should map staged outputs back to per-sequence rewards."""
     annotation_file = tmp_path / "phrog_annot_v4.tsv"
-    annotation_file.write_text("phrog\tannot\tcategory\nphrog_1\tterminase\tpackaging\nphrog_2\tendolysin\tlysis\n")
+    annotation_file.write_text(
+        "phrog\tannot\tcategory\nphrog_1\tterminase\tpackaging\nphrog_2\tendolysin\tlysis\nphrog_3\tnan\tunknown\n"
+    )
     base_config = {
         "results_save_dir": "unused",
         "current_config_file": "unused",
@@ -342,6 +358,7 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
         "overwrite_sequence_ids": False,
         "orf_filter_seqs_csv_file_save_location": "qc3_orf_filter_seqs.csv",
         "homology_filter_seqs_csv_file_save_location": "qc4_homology_filter_seqs.csv",
+        "orfipy_proteins_file_save_location": "qc4_orfipy_proteins.fasta",
         "mmseqs_protein_database_results_dir_save_location": "qc4_mmseqs_results_protein_database",
         "mmseqs_tropism_protein_results_dir_save_location": "qc4_mmseqs_results_tropism_protein",
         "synteny_filter_seqs_csv_file_save_location": "qc6_synteny_filter_seqs.csv",
@@ -359,7 +376,9 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     pipeline_script = tmp_path / "genome_design_filtering_pipeline.py"
     pipeline_script.write_text("print('mock pipeline')\n")
 
-    def fake_run(args, check, cwd, env):
+    def fake_run(args, check, cwd, env, timeout):
+        assert args[0] == sys.executable
+        assert timeout == 1800.0
         run_config_path = Path(args[-1])
         run_config = yaml.safe_load(run_config_path.read_text())
         run_dir = Path(run_config["results_save_dir"])
@@ -370,13 +389,16 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
             run_dir / "qc4_homology_filter_seqs.csv",
             index=False,
         )
+        (run_dir / "qc4_orfipy_proteins.fasta").write_text(
+            ">umi1_ORF.1\nM\n>umi1_ORF.2\nM\n>umi1_ORF.3\nM\n>umi2_ORF.1\nM\n"
+        )
         phrogs_dir = run_dir / "qc4_mmseqs_results_protein_database"
         phrogs_dir.mkdir()
         pd.DataFrame(
             {
                 "id_prompt": ["umi1_ORF.1", "umi1_ORF.2", "umi2_ORF.1"],
                 "sequence": ["M", "M", "M"],
-                "protein_database_mmseqs_target": ["phrog_1", "phrog_2", "phrog_1"],
+                "protein_database_mmseqs_target": ["phrog_1", "phrog_2", "phrog_3"],
                 "protein_database_mmseqs_e_value": [1e-5, 1e-6, 1e-4],
                 "protein_database_mmseqs_percent_identity": [80.0, 75.0, 70.0],
             }
@@ -452,6 +474,107 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     assert scored.loc[1, "reward_external_protein_hit_count"] == 0.5
     assert scored.loc[1, "reward_external_tropism"] == 0.5
     assert scored.loc[1, "reward_external_synteny"] == 0.5
+    assert scored["predicted_orf_count"].tolist() == [3, 1]
+    assert scored["phrogs_hit_orf_count"].tolist() == [2, 1]
+    assert scored["phrogs_annotated_orf_count"].tolist() == [2, 0]
+    assert scored["unique_phrog_family_count"].tolist() == [2, 1]
+    assert scored["unique_canonical_function_count"].tolist() == [2, 0]
+    assert scored["phrogs_hit_fraction"].tolist() == [2 / 3, 1.0]
+    assert scored["average_protein_identity_measurement_available"].tolist() == [1.0, 1.0]
+    assert scored["required_genes_measurement_available"].tolist() == [1.0, 1.0]
+
+
+def test_external_qc_subprocess_failure_fails_closed(tmp_path, monkeypatch):
+    """Explicit fail-closed mode should zero external rewards without killing offline scoring."""
+    config_path = tmp_path / "arc_config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "results_save_dir": "unused",
+                "current_config_file": "unused",
+                "evo_gen_seqs_fasta_file_save_location": "unused",
+            }
+        )
+    )
+    pipeline_script = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_script.write_text("raise SystemExit(1)\n")
+
+    calls = []
+
+    def fail_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise subprocess.CalledProcessError(1, [sys.executable, str(pipeline_script)])
+
+    monkeypatch.setattr("subprocess.run", fail_run)
+
+    with pytest.warns(RuntimeWarning, match="Arc external QC failed"):
+        scored = score_nucleotide_metrics(
+            pd.DataFrame({"id_prompt": ["seq0"], "sequence": ["ACGT" * 1000]}),
+            weights=RewardWeights(
+                valid_nt_chars=0,
+                genome_length=0,
+                gc_content=0,
+                nt_homopolymer=0,
+                protein_hit_count=1,
+            ),
+            external_qc=ExternalQCRewardConfig(
+                enabled=True,
+                config_path=config_path,
+                pipeline_script=pipeline_script,
+                work_dir=tmp_path / "work",
+                fail_on_error=False,
+                timeout_seconds=123,
+            ),
+        )
+
+    assert scored["reward_external_protein_hit_count"].tolist() == [0.0]
+    assert scored["reward"].tolist() == [0.0]
+    assert scored["external_qc_tool_succeeded"].tolist() == [0.0]
+    assert scored["external_qc_measurement_available"].tolist() == [0.0]
+    assert calls[0][0][0][0] == sys.executable
+    assert calls[0][1]["timeout"] == 123
+    assert any((tmp_path / "work").glob("batch_*"))
+
+
+def test_external_qc_subprocess_failure_raises_by_default_and_retains_artifacts(tmp_path, monkeypatch):
+    """Full-QC RL should fail fast if Arc itself fails instead of turning that into biological zero."""
+    config_path = tmp_path / "arc_config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "results_save_dir": "unused",
+                "current_config_file": "unused",
+                "evo_gen_seqs_fasta_file_save_location": "unused",
+            }
+        )
+    )
+    pipeline_script = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_script.write_text("raise SystemExit(1)\n")
+
+    def fail_run(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, [sys.executable, str(pipeline_script)])
+
+    monkeypatch.setattr("subprocess.run", fail_run)
+
+    with pytest.raises(RuntimeError, match="Arc external QC failed"):
+        score_nucleotide_metrics(
+            pd.DataFrame({"id_prompt": ["seq0"], "sequence": ["ACGT" * 1000]}),
+            weights=RewardWeights(
+                valid_nt_chars=0,
+                genome_length=0,
+                gc_content=0,
+                nt_homopolymer=0,
+                protein_hit_count=1,
+            ),
+            external_qc=ExternalQCRewardConfig(
+                enabled=True,
+                config_path=config_path,
+                pipeline_script=pipeline_script,
+                work_dir=tmp_path / "work",
+            ),
+        )
+
+    assert any((tmp_path / "work").glob("batch_*"))
 
 
 def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):
@@ -483,6 +606,42 @@ def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):
 
     assert scored["reward_external_synteny"].tolist() == [1.0, 1.0, 0.5, 0.5, 0.25, 0.0]
     assert scored["synteny_pair_distance"].tolist() == [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+
+
+def test_full_synteny_reward_does_not_score_unmeasured_rows(tmp_path):
+    """Missing Arc/LoVis4u measurement rows should be unavailable, not partial biological scores."""
+    run_dir = tmp_path / "arc_run"
+    run_dir.mkdir()
+    pd.DataFrame(
+        {
+            "id_prompt": ["measured", "artifact_missing"],
+            "num_syntenic_genes": [10, 0],
+            "total_num_genes": [10, 0],
+            "missing_synteny_output": [False, True],
+        }
+    ).to_csv(run_dir / "qc6_synteny_filter_metrics.csv", index=False)
+    df = pd.DataFrame(
+        {
+            "arc_qc_id": ["measured", "not_reached", "artifact_missing"],
+            "reward_external_synteny": [0.0, 0.0, 0.0],
+        }
+    )
+
+    scored = _add_full_synteny_rewards(
+        df,
+        run_dir,
+        {
+            "synteny_metrics_file_save_location": "qc6_synteny_filter_metrics.csv",
+            "synteny_filter_seqs_csv_file_save_location": "qc6_synteny_filter_seqs.csv",
+        },
+    )
+
+    assert scored["reward_external_synteny"].tolist() == [1.0, 0.0, 0.0]
+    assert scored["synteny_stage_reached"].tolist() == [1.0, 0.0, 1.0]
+    assert scored["synteny_measurement_available"].tolist() == [1.0, 0.0, 0.0]
+    assert scored["synteny_missing_artifact"].tolist() == [0.0, 0.0, 1.0]
+    assert pd.isna(scored.loc[1, "num_syntenic_genes"])
+    assert pd.isna(scored.loc[1, "synteny_pair_score"])
 
 
 def test_synteny_distance_score_matches_planned_examples():

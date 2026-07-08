@@ -22,6 +22,9 @@ from typing import Any
 from nemo_rl.data.interfaces import DatumSpec, TaskDataSpec
 
 
+DNA_ALPHABET = frozenset("ACGTacgt")
+
+
 def _extract_prompt(datum_dict: dict[str, Any]) -> str:
     if "prompt" in datum_dict:
         return str(datum_dict["prompt"])
@@ -35,6 +38,11 @@ def _extract_prompt(datum_dict: dict[str, Any]) -> str:
     raise ValueError("Expected a `prompt` field or an OpenAI-style user message.")
 
 
+def _prompt_nucleotides(prompt: str) -> str:
+    """Keep only nucleotide bases from a prompt that may include SFT soft tokens."""
+    return "".join(char for char in prompt if char in DNA_ALPHABET)
+
+
 def phage_prompt_data_processor(
     datum_dict: dict[str, Any],
     task_data_spec: TaskDataSpec,
@@ -46,6 +54,7 @@ def phage_prompt_data_processor(
     prompt = _extract_prompt(datum_dict)
     if task_data_spec.prompt:
         prompt = task_data_spec.prompt.format(prompt)
+    prompt_nucleotides = _prompt_nucleotides(prompt)
 
     token_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
     length = int(token_ids.shape[0])
@@ -58,7 +67,12 @@ def phage_prompt_data_processor(
     output: DatumSpec = {
         "message_log": [{"role": "user", "content": prompt, "token_ids": token_ids}],
         "length": length,
-        "extra_env_info": {"prompt": prompt},
+        "extra_env_info": {
+            "prompt": prompt,
+            "prompt_nt_length": len(prompt_nucleotides),
+            "prompt_prefix": prompt,
+            "prompt_index": idx,
+        },
         "loss_multiplier": loss_multiplier,
         "idx": idx,
     }

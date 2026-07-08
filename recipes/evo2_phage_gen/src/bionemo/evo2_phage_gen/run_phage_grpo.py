@@ -101,17 +101,20 @@ def _select_grpo_trainer(master_config, algorithm: str):
 
 def _register_recipe_extensions() -> None:
     """Register recipe-specific NeMo-RL processors and environments."""
-    from nemo_rl.data.processors import register_processor
+    from nemo_rl.data.processors import PROCESSOR_REGISTRY, register_processor
     from nemo_rl.distributed.ray_actor_environment_registry import ACTOR_ENVIRONMENT_REGISTRY
     from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
     from nemo_rl.environments.utils import register_env
 
     from bionemo.evo2_phage_gen.nemo_rl_processors import phage_prompt_data_processor
 
-    try:
-        register_processor("phage_prompt_data_processor", phage_prompt_data_processor)
-    except ValueError:
+    processor_name = "phage_prompt_data_processor"
+    if PROCESSOR_REGISTRY.get(processor_name) is phage_prompt_data_processor:
         pass
+    elif processor_name in PROCESSOR_REGISTRY:
+        raise ValueError(f"Dataset processor {processor_name} is already registered to a different function")
+    else:
+        register_processor(processor_name, phage_prompt_data_processor)
     register_env("phage_qc", "bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment")
     ACTOR_ENVIRONMENT_REGISTRY["bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"] = PY_EXECUTABLES.SYSTEM
 
@@ -134,6 +137,10 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
             "evo2_phage_patch_nemo_rl --repair-install, before launching GRPO or GDPO."
         ) from exc
 
+    from bionemo.evo2_phage_gen.nemo_rl_patches import assert_nemo_rl_patch_runtime, patch_sha256
+
+    print(f"Using NeMo-RL Evo2 patch SHA256: {patch_sha256()}")
+    assert_nemo_rl_patch_runtime()
     _register_recipe_extensions()
     register_omegaconf_resolvers()
     args, overrides = _parse_args(default_config, default_algorithm)

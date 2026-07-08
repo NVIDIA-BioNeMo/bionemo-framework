@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib
 import importlib.util
 import shutil
 import subprocess
@@ -35,6 +37,15 @@ REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.models.generation.megatron.megatron_worker",
     "nemo_rl.models.megatron.setup",
 ]
+EXPECTED_PATCHED_SYMBOLS = [
+    ("nemo_rl.experience.rollouts", "collect_environment_metrics"),
+    ("nemo_rl.models.generation.megatron.megatron_generation", "_load_generation_adapter"),
+    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin._load_generation_adapter"),
+    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin.generate_with_adapter"),
+    ("nemo_rl.models.megatron.setup", "_apply_target_allowlist_prefixes"),
+    ("nemo_rl.models.megatron.setup", "NoRefitMegatronBridge"),
+    ("nemo_rl.models.megatron.setup", "_uses_colocated_megatron_generation"),
+]
 
 
 def _nemo_rl_source_root() -> Path:
@@ -46,14 +57,62 @@ def _nemo_rl_source_root() -> Path:
 
 
 def _run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run GNU patch in noninteractive forward-only mode."""
+    patch_args = list(args)
+    if "--forward" not in patch_args:
+        patch_args.insert(0, "--forward")
     return subprocess.run(
-        ["patch", *args],
+        ["patch", *patch_args],
         cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
     )
+
+
+def patch_sha256(patch_path: Path = DEFAULT_PATCH) -> str:
+    """Return the SHA256 hash of the maintained NeMo-RL patch."""
+    return hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
+
+
+def assert_nemo_rl_patch_symbols() -> None:
+    """Fail early if the runtime NeMo-RL package is missing symbols installed by the patch."""
+    missing = []
+    for module_name, qualified_symbol in EXPECTED_PATCHED_SYMBOLS:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            missing.append(f"{module_name}:{qualified_symbol}")
+            continue
+        obj = module
+        for attr in qualified_symbol.split("."):
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                missing.append(f"{module_name}:{qualified_symbol}")
+                break
+    if missing:
+        raise RuntimeError(
+            "NeMo-RL is missing Evo2 phage patch symbols: "
+            f"{', '.join(missing)}. Run evo2_phage_patch_nemo_rl --repair-install before launching GRPO."
+        )
+
+
+def assert_nemo_rl_patch_runtime(patch_path: Path = DEFAULT_PATCH) -> None:
+    """Fail unless the importable NeMo-RL runtime matches the maintained patch."""
+    source_root = _nemo_rl_source_root()
+    patch_path = Path(patch_path).resolve()
+    reverse_dry_run = _run_patch(["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_path)], cwd=source_root)
+    if reverse_dry_run.returncode != 0:
+        forward_dry_run = _run_patch(["--batch", "--dry-run", "-p1", "-i", str(patch_path)], cwd=source_root)
+        raise RuntimeError(
+            "The importable NeMo-RL runtime is not reverse-patch-equivalent to the maintained Evo2 patch.\n"
+            f"Runtime root: {source_root}\n"
+            f"Patch SHA256: {patch_sha256(patch_path)}\n"
+            f"Reverse dry-run output:\n{reverse_dry_run.stdout}\n"
+            f"Forward dry-run output:\n{forward_dry_run.stdout}"
+        )
+    assert_nemo_rl_patch_symbols()
 
 
 def _nemo_rl_source_pin() -> tuple[str, str]:
@@ -76,7 +135,9 @@ def _is_complete_nemo_rl_install() -> bool:
 
 def _uv_cache_dir() -> Path | None:
     """Return uv's cache dir when uv is available."""
-    result = subprocess.run(["uv", "cache", "dir"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    result = subprocess.run(
+        ["uv", "cache", "dir"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+    )
     if result.returncode != 0:
         return None
     return Path(result.stdout.strip()).expanduser()
@@ -96,6 +157,18 @@ def _git_head(path: Path) -> str | None:
     return result.stdout.strip()
 
 
+def _git_worktree_is_clean(path: Path) -> bool:
+    """Return whether ``path`` is a Git checkout with no tracked or untracked changes."""
+    result = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == ""
+
+
 def _looks_like_nemo_rl_source(path: Path) -> bool:
     """Check for files that identify a full NeMo-RL source checkout."""
     return (path / "pyproject.toml").exists() and (path / "nemo_rl" / "algorithms" / "grpo.py").exists()
@@ -111,7 +184,11 @@ def _find_cached_nemo_rl_source(revision: str) -> Path | None:
         return None
     for pyproject_path in checkouts_dir.rglob("pyproject.toml"):
         candidate = pyproject_path.parent
-        if _looks_like_nemo_rl_source(candidate) and _git_head(candidate) == revision:
+        if (
+            _looks_like_nemo_rl_source(candidate)
+            and _git_head(candidate) == revision
+            and _git_worktree_is_clean(candidate)
+        ):
             return candidate
     return None
 
@@ -143,9 +220,9 @@ def _patch_nemo_rl_packaging_metadata(source_root: Path) -> None:
     pyproject_path.write_text(text)
 
 
-def repair_nemo_rl_install() -> str:
+def repair_nemo_rl_install(*, force_reinstall: bool = False) -> str:
     """Reinstall the pinned NeMo-RL checkout with complete package discovery."""
-    if _is_complete_nemo_rl_install():
+    if not force_reinstall and _is_complete_nemo_rl_install():
         return "nemo-rl install already contains required modules"
 
     git_url, revision = _nemo_rl_source_pin()
@@ -170,16 +247,16 @@ def apply_nemo_rl_patch(patch_path: Path = DEFAULT_PATCH, *, check_only: bool = 
         raise FileNotFoundError(f"Patch file not found: {patch_path}")
     source_root = _nemo_rl_source_root()
 
-    dry_run = _run_patch(["--dry-run", "-p1", "-i", str(patch_path)], cwd=source_root)
+    dry_run = _run_patch(["--batch", "--dry-run", "-p1", "-i", str(patch_path)], cwd=source_root)
     if dry_run.returncode == 0:
         if check_only:
             return f"patch can apply cleanly to {source_root}"
-        applied = _run_patch(["-p1", "-i", str(patch_path)], cwd=source_root)
+        applied = _run_patch(["--batch", "-p1", "-i", str(patch_path)], cwd=source_root)
         if applied.returncode != 0:
             raise RuntimeError(applied.stdout)
         return f"patch applied to {source_root}"
 
-    reverse_dry_run = _run_patch(["--dry-run", "-R", "-p1", "-i", str(patch_path)], cwd=source_root)
+    reverse_dry_run = _run_patch(["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_path)], cwd=source_root)
     if reverse_dry_run.returncode == 0:
         return f"patch already applied to {source_root}"
 
@@ -200,14 +277,27 @@ def main() -> None:
         action="store_true",
         help="Reinstall the pinned NeMo-RL checkout with all nemo_rl subpackages before applying the patch.",
     )
+    parser.add_argument(
+        "--force-reinstall",
+        action="store_true",
+        help="Force a fresh reinstall even if the current nemo-rl package looks complete.",
+    )
+    parser.add_argument(
+        "--verify-runtime",
+        action="store_true",
+        help="Verify the importable nemo-rl runtime is reverse-patch-equivalent to the maintained patch.",
+    )
     args = parser.parse_args()
     if args.repair_install:
-        print(repair_nemo_rl_install())
+        print(repair_nemo_rl_install(force_reinstall=args.force_reinstall))
         importlib.invalidate_caches()
         for module_name in list(sys.modules):
             if module_name == "nemo_rl" or module_name.startswith("nemo_rl."):
                 sys.modules.pop(module_name)
     print(apply_nemo_rl_patch(args.patch, check_only=args.check))
+    if args.verify_runtime:
+        assert_nemo_rl_patch_runtime(args.patch)
+        print(f"verified patched nemo-rl runtime with patch SHA256 {patch_sha256(args.patch)}")
 
 
 if __name__ == "__main__":

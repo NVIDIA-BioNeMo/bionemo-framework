@@ -18,7 +18,7 @@ grpo:
   # while still producing enough samples for useful metrics.
   val_batch_size: 96
   max_val_samples: 96
-  val_at_start: false
+  val_at_start: true
   val_at_end: true
 
 policy:
@@ -79,6 +79,8 @@ env:
     weight_required_genes: 0.1
     external_qc:
       enabled: true
+      fail_on_error: true
+      timeout_seconds: 1800
       enable_protein_hit_count: true
       enable_tropism: true
       enable_synteny: true

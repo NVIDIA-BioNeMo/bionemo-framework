@@ -100,8 +100,8 @@ from megatron.core.transformer.module import Float16Module
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import (
-    bind_hyena_packed_views_to_dynamic_context_batch,
     bind_hyena_packed_views_to_dynamic_context,
+    bind_hyena_packed_views_to_dynamic_context_batch,
     build_evo2_mamba_inference_state_config,
     compute_evo2_paged_kv_buffer_size_gb,
     make_evo2_dynamic_inference_context_cls,
@@ -303,6 +303,10 @@ class Evo2NativeDynamicComponents:
     # by the context-affecting generate() options so it is rebuilt only if those change.
     shared_dyn_ctx: Optional[Any] = None
     shared_dyn_ctx_key: Optional[tuple] = None
+    # Sampling RNG is intentionally persistent across generate() calls. The CLI invokes generate()
+    # once per prompt-file chunk, and reseeding each chunk would replay identical samples for
+    # repeated prompts.
+    sampling_rng: Optional[torch.Generator] = None
     # True when ``max_seq_length`` was auto-sized from prompts (vs a manual cap). In auto mode a prompt
     # that needs more than the frozen budget is a hard error (the context cannot grow); in manual mode
     # the request just stops early on overflow, as before.
@@ -722,6 +726,8 @@ def generate(
             When set and chunking is disabled, each prompt must fit within this value.
         inference_dynamic_batching_block_size: KV-cache block size for the dynamic context. This is
             not the prefill chunk size.
+        evo2_batched_decode_size: Number of same-length prompts to decode together in the native Evo2 path.
+        result_callback: Optional callback invoked with each prompt index and native result as it completes.
 
     Returns:
         List of :class:`_NativeDynamicResult` objects (mirroring the
@@ -759,35 +765,37 @@ class _NativeDynamicResult:
     generated_text: str
     generated_length: int
     prompt_tokens: List[int]
+    generated_tokens: Optional[List[int]] = None
     generated_log_probs: Optional[List[float]] = None
     finish_reason: str = "length"
+    stopped_on_eos: bool = False
+    truncated: bool = False
 
 
-def _sample_from_logits(
+def _sampling_log_probs_from_logits(
     last_token_logits: torch.Tensor,
     *,
     temperature: float,
     top_k: int,
     top_p: float,
-    generator: torch.Generator,
     vocab_size: Optional[int] = None,
 ) -> torch.Tensor:
-    """Sample next-token ids from logits (greedy / top-k / top-p / temperature).
+    """Return log-probs from the exact distribution used for generation sampling.
 
     Self-contained mcore-compatible sampler for the native dynamic path. Greedy
-    (``top_k == 1``) returns the argmax; otherwise this applies standard top-k / top-p
-    filtering followed by ``torch.multinomial`` with the provided RNG.
+    (``top_k == 1``) is represented as a one-token support distribution; otherwise
+    this applies standard temperature, top-k, and top-p filtering before
+    renormalization.
 
     Args:
         last_token_logits: Logits of shape ``[batch_size, vocab_size]``.
         temperature: Temperature scaling factor (applied only on the non-greedy path).
         top_k: Top-k filtering value (0 = disabled, 1 = greedy argmax).
         top_p: Top-p (nucleus) filtering value (0.0 = disabled).
-        generator: RNG used by ``torch.multinomial``.
         vocab_size: When provided, clamps sampled ids to ``[0, vocab_size - 1]``.
 
     Returns:
-        Sampled token ids of shape ``[batch_size]``.
+        Log probabilities of shape ``[batch_size, vocab_size]``.
     """
     assert isinstance(top_p, float)
     assert isinstance(top_k, int)
@@ -808,10 +816,13 @@ def _sample_from_logits(
         filter_ = filter_.scatter(1, sorted_indices, filter_)
         logits.masked_fill_(filter_, float("-Inf"))
 
-    if top_k == 1:
-        return torch.argmax(last_token_logits, dim=-1)
-
     last_token_logits = last_token_logits.clone()  # .div_/.masked_fill_ below are in-place
+    if top_k == 1:
+        argmax = torch.argmax(last_token_logits, dim=-1)
+        deterministic_logits = torch.full_like(last_token_logits, float("-Inf"))
+        deterministic_logits.scatter_(1, argmax.unsqueeze(1), 0.0)
+        return torch.log_softmax(deterministic_logits, dim=-1)
+
     if temperature != 1.0:
         last_token_logits.div_(temperature)
     if top_k > 1:
@@ -822,11 +833,55 @@ def _sample_from_logits(
     elif top_p > 0.0:
         _modify_for_top_p(last_token_logits, top_p)
 
-    probabilities = last_token_logits.softmax(dim=-1)
+    return torch.log_softmax(last_token_logits, dim=-1)
+
+
+def _sample_from_logits(
+    last_token_logits: torch.Tensor,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    generator: torch.Generator,
+    vocab_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Sample next-token ids from logits (greedy / top-k / top-p / temperature)."""
+    log_probs = _sampling_log_probs_from_logits(
+        last_token_logits,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        vocab_size=vocab_size,
+    )
+    if top_k == 1:
+        return torch.argmax(log_probs, dim=-1)
+
+    probabilities = log_probs.exp()
     sampled = torch.multinomial(probabilities, num_samples=1, generator=generator).view(-1)
     if vocab_size:
         sampled = torch.clamp(sampled, min=0, max=(vocab_size - 1))
     return sampled
+
+
+def _sampling_rng_for_native_dynamic(nd: Evo2NativeDynamicComponents, device: torch.device) -> torch.Generator:
+    """Return the persistent sampling RNG for an inference engine.
+
+    The native CLI processes prompt files in chunks but should sample those chunks as one continuous
+    stream. Keeping the generator on ``nd`` avoids replaying the same RNG sequence when many chunks
+    contain identical prompts.
+    """
+    rng = nd.sampling_rng
+    if rng is not None:
+        try:
+            if torch.device(rng.device) == torch.device(device):
+                return rng
+        except RuntimeError:
+            pass
+
+    rng = torch.Generator(device=device)
+    rng.manual_seed(int(nd.evo2_seed))
+    nd.sampling_rng = rng
+    return rng
 
 
 def _extract_generation_logits(dyn_ctx, logits: torch.Tensor) -> torch.Tensor:
@@ -1146,8 +1201,7 @@ def _generate_native_dynamic(
     # (top_k>0 AND top_p>0); honor top-k first for compatibility with SamplingParams.
     eff_top_k = max(0, int(top_k))
     eff_top_p = float(top_p) if (top_p and top_p > 0 and eff_top_k == 0) else 0.0
-    sampling_rng = torch.Generator(device=device)
-    sampling_rng.manual_seed(int(nd.evo2_seed))
+    sampling_rng = _sampling_rng_for_native_dynamic(nd, device)
 
     results: List[_NativeDynamicResult] = []
     if not prompts:
@@ -1256,6 +1310,13 @@ def _generate_native_dynamic(
             # selects the per-request final position -> [num_requests, vocab]. Sample in fp32 so
             # stochastic filters and logprobs do not depend on the model activation dtype.
             last_logits = _extract_generation_logits(dyn_ctx, logits)
+            sampled_log_probs = _sampling_log_probs_from_logits(
+                last_logits,
+                temperature=float(temperature),
+                top_k=eff_top_k,
+                top_p=eff_top_p,
+                vocab_size=tokenizer.vocab_size,
+            )
             sampled = _sample_from_logits(
                 last_logits,
                 temperature=float(temperature),
@@ -1272,7 +1333,7 @@ def _generate_native_dynamic(
                 else:
                     generated_ids.append(next_tok_id)
                 if return_log_probs and not stopped_on_eos:
-                    logprob = torch.log_softmax(last_logits[0].float(), dim=-1)[next_tok_id].item()
+                    logprob = sampled_log_probs[0, next_tok_id].item()
                     generated_logprobs.append(logprob)
             active_after_sample = torch.tensor(
                 [not count_generated or (not stopped_on_eos and len(generated_ids) < max_new_tokens)], dtype=torch.bool
@@ -1341,8 +1402,11 @@ def _generate_native_dynamic(
             generated_text=generated_text,
             generated_length=len(generated_ids),
             prompt_tokens=prompt_token_ids,
+            generated_tokens=generated_ids,
             generated_log_probs=generated_logprobs if return_log_probs else None,
             finish_reason="stop" if stopped_on_eos else "length",
+            stopped_on_eos=stopped_on_eos,
+            truncated=not stopped_on_eos and len(generated_ids) >= max_new_tokens,
         )
 
     def _run_batched_prompts(prompt_token_id_batch: list[list[int]]) -> list[_NativeDynamicResult]:
@@ -1355,8 +1419,11 @@ def _generate_native_dynamic(
                     generated_text="",
                     generated_length=0,
                     prompt_tokens=prompt_token_ids,
+                    generated_tokens=[],
                     generated_log_probs=[] if return_log_probs else None,
                     finish_reason="length",
+                    stopped_on_eos=False,
+                    truncated=False,
                 )
                 for prompt_token_ids in prompt_token_id_batch
             ]
@@ -1396,6 +1463,13 @@ def _generate_native_dynamic(
                     f"got {last_logits.shape[0]} rows for {batch_request_count} requests"
                 )
             active_logits = last_logits[:batch_request_count]
+            active_log_probs = _sampling_log_probs_from_logits(
+                active_logits,
+                temperature=float(temperature),
+                top_k=eff_top_k,
+                top_p=eff_top_p,
+                vocab_size=tokenizer.vocab_size,
+            )
             sampled = _sample_from_logits(
                 active_logits,
                 temperature=float(temperature),
@@ -1407,8 +1481,6 @@ def _generate_native_dynamic(
             sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
             sampled_ids = sampled_cpu.tolist()
             if count_generated:
-                if return_log_probs:
-                    log_probs = torch.log_softmax(active_logits.float(), dim=-1)
                 for request_idx, next_tok_id in enumerate(sampled_ids):
                     if stopped_on_eos[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens:
                         continue
@@ -1417,7 +1489,7 @@ def _generate_native_dynamic(
                         continue
                     generated_ids[request_idx].append(next_tok_id)
                     if return_log_probs:
-                        generated_logprobs[request_idx].append(log_probs[request_idx, next_tok_id].item())
+                        generated_logprobs[request_idx].append(active_log_probs[request_idx, next_tok_id].item())
 
             keep_group_active = (not count_generated) or any(
                 not stopped_on_eos[request_idx] and len(request_generated_ids) < max_new_tokens
@@ -1464,8 +1536,11 @@ def _generate_native_dynamic(
                 generated_text=tokenizer.detokenize(request_generated_ids) if request_generated_ids else "",
                 generated_length=len(request_generated_ids),
                 prompt_tokens=prompt_token_ids,
+                generated_tokens=request_generated_ids,
                 generated_log_probs=generated_logprobs[request_idx] if return_log_probs else None,
                 finish_reason="stop" if stopped_on_eos[request_idx] else "length",
+                stopped_on_eos=stopped_on_eos[request_idx],
+                truncated=not stopped_on_eos[request_idx] and len(request_generated_ids) >= max_new_tokens,
             )
             for request_idx, (prompt_token_ids, request_generated_ids) in enumerate(
                 zip(prompt_token_id_batch, generated_ids)
@@ -1475,6 +1550,7 @@ def _generate_native_dynamic(
     batched_decode_size = max(1, int(evo2_batched_decode_size))
     if batched_decode_size > 1 and rank == 0:
         logger.info("[evo2-native] opt-in batched decode active: size=%d", batched_decode_size)
+
     def _append_results(group_results: list[_NativeDynamicResult], *, prompt_offset: int) -> None:
         for local_idx, result in enumerate(group_results):
             prompt_idx = prompt_offset + local_idx

@@ -20,7 +20,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +46,19 @@ ARC_PATH_KEYS = (
     "protein_annotation_file",
     "reference_genome_gff_file_save_location",
 )
+TIMING_COLUMN_PREFIX = "timing/phage_qc/"
+
+
+def _attach_timing_columns(scored_df: pd.DataFrame, timings: dict[str, float]) -> pd.DataFrame:
+    """Attach batch-level timing values as per-row columns for rollout metric aggregation."""
+    for name, value in timings.items():
+        scored_df[f"{TIMING_COLUMN_PREFIX}{name}"] = float(value)
+    return scored_df
+
+
+def _record_elapsed(timings: dict[str, float], name: str, start: float) -> None:
+    """Record an elapsed perf-counter interval in seconds."""
+    timings[name] = time.perf_counter() - start
 
 
 @dataclass(frozen=True)
@@ -115,6 +131,8 @@ class ExternalQCRewardConfig:
     pipeline_script: Path = Path("data/arc_pipeline_patched/genome_design_filtering_pipeline.py")
     work_dir: Path = Path("data/checkpoints/phage_grpo_external_qc")
     keep_artifacts: bool = False
+    fail_on_error: bool = True
+    timeout_seconds: float | None = 1800.0
     enable_orf: bool = False
     enable_coding_density: bool = False
     enable_protein_hit_count: bool = True
@@ -157,7 +175,7 @@ def _repo_path(path: str | Path) -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
-def _external_qc_env(external_qc: ExternalQCRewardConfig) -> dict[str, str]:
+def _external_qc_env() -> dict[str, str]:
     """Build the environment for Arc external-QC subprocesses."""
     return os.environ.copy()
 
@@ -369,18 +387,6 @@ def _bounded_range_score(value: float, lower: float, upper: float) -> float:
     return _upper_bound_ratio_score(value, upper)
 
 
-def _bounded_percent_range_score(value: float, lower: float, upper: float) -> float:
-    """Return 1 in a percent range and linearly decay to 0 at 0 or 100 outside it."""
-    value = max(0.0, min(100.0, float(value)))
-    lower = max(0.0, min(100.0, float(lower)))
-    upper = max(0.0, min(100.0, float(upper)))
-    if lower <= value <= upper:
-        return 1.0
-    if value < lower:
-        return 0.0 if lower <= 0.0 else max(0.0, min(1.0, value / lower))
-    return 0.0 if upper >= 100.0 else max(0.0, min(1.0, (100.0 - value) / (100.0 - upper)))
-
-
 def _spike_identity_score(identity: float | None, measured_hit: bool, threshold: float = 60.0) -> float:
     """Plateau spike/tropism reward at the paper identity threshold."""
     if not measured_hit:
@@ -539,7 +545,14 @@ def score_nucleotide_metrics(
     mmseqs_cluster_diversity: MMseqsClusterDiversityConfig | None = None,
 ) -> pd.DataFrame:
     """Score sequences with nucleotide QC, optional external QC, and optional batch diversity."""
+    timings: dict[str, float] = {"reward/begin_unix_s": time.time()}
+    reward_start = time.perf_counter()
+
+    phase_start = time.perf_counter()
     df = add_nucleotide_metrics(sequences_df, config=config)
+    _record_elapsed(timings, "reward/nucleotide_qc_s", phase_start)
+
+    phase_start = time.perf_counter()
     df["reward_valid_nt_chars"] = df["valid_nt_chars"].astype(float)
     df["reward_genome_length"] = df["genome_length"].map(
         lambda value: _interval_score(value, config.genome_length_min, config.genome_length_max)
@@ -563,13 +576,23 @@ def score_nucleotide_metrics(
         & (df["max_nt_homopolymer_length"] <= config.homopolymer_max)
         & dustmask_end_pass
     ).astype(float)
+    _record_elapsed(timings, "reward/nucleotide_reward_scores_s", phase_start)
 
     if external_qc and external_qc.enabled:
+        phase_start = time.perf_counter()
         df = add_external_qc_rewards(df, external_qc)
+        timings.setdefault("reward/external_qc/total_s", time.perf_counter() - phase_start)
     if mmseqs_cluster_diversity and mmseqs_cluster_diversity.enabled:
+        phase_start = time.perf_counter()
         df = add_mmseqs_cluster_diversity_rewards(df, config, mmseqs_cluster_diversity)
+        _record_elapsed(timings, "reward/mmseqs_cluster_diversity_s", phase_start)
 
-    return _aggregate_reward(df, weights)
+    phase_start = time.perf_counter()
+    df = _aggregate_reward(df, weights)
+    _record_elapsed(timings, "reward/aggregate_s", phase_start)
+    timings["reward/end_unix_s"] = time.time()
+    timings["reward/total_s"] = time.perf_counter() - reward_start
+    return _attach_timing_columns(df, timings)
 
 
 def _write_external_qc_config(
@@ -651,7 +674,8 @@ def _write_external_qc_config(
     config["chunk_size"] = chunk_size
     config["lovis4u_collect_pdfs"] = bool(external_qc.lovis4u_collect_pdfs)
     if paper_synteny_stage_enabled:
-        if not bool(config.get("allow_gff_product_order_synteny_fallback", False)):
+        config["use_reference_genome"] = full_synteny_enabled
+        if not full_synteny_enabled and not bool(config.get("allow_gff_product_order_synteny_fallback", False)):
             config["reference_genome_gff_file_save_location"] = None
         config.setdefault(
             "average_protein_sequence_identity_metrics_file_save_location",
@@ -678,6 +702,19 @@ def _sequence_ids_from_csv(path: Path) -> set[str]:
 def _genome_ids_from_orf_hits(hits_df: pd.DataFrame) -> pd.Series:
     """Map Arc ORF-level MMseqs query IDs back to genome IDs."""
     return hits_df["id_prompt"].astype(str).str.split("_").str[:-1].str.join("_")
+
+
+def _genome_ids_from_orf_ids(orf_ids: pd.Series) -> pd.Series:
+    """Map Arc ORF IDs back to genome IDs."""
+    return orf_ids.astype(str).str.split("_").str[:-1].str.join("_")
+
+
+def _fasta_header_ids(path: Path) -> list[str]:
+    """Read FASTA record IDs without loading sequence payloads."""
+    if not path.exists():
+        return []
+    with path.open() as handle:
+        return [line[1:].strip().split()[0] for line in handle if line.startswith(">")]
 
 
 def _as_arc_pass_mask(scored_df: pd.DataFrame, pass_ids: set[str]) -> pd.Series:
@@ -715,6 +752,72 @@ def _load_phrog_annotations(annotation_file: str | Path) -> pd.DataFrame:
         if column not in annotations:
             annotations[column] = ""
     return annotations[["phrog_number", "annot", "category"]]
+
+
+def _canonical_function(value: object) -> str:
+    """Normalize PHROGs annotation text for supplementary unique-function metrics."""
+    function = str(value).strip().lower()
+    if function in {"", "nan", "none", "unknown", "unknown gene", "hypothetical protein"}:
+        return ""
+    return re.sub(r"\s+", " ", function)
+
+
+def _add_predicted_orf_counts(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
+    """Add predicted ORF counts from Arc's ORF FASTA when available."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    proteins_path = run_dir / config.get("orfipy_proteins_file_save_location", "qc4_orfipy_proteins.fasta")
+    orf_ids = pd.Series(_fasta_header_ids(proteins_path), dtype="object")
+    if orf_ids.empty:
+        return scored_df
+    predicted_counts = _genome_ids_from_orf_ids(orf_ids).value_counts()
+    scored_df["predicted_orf_count"] = scored_df[id_column].map(predicted_counts).fillna(0).astype(int)
+    return scored_df
+
+
+def _add_phrogs_hit_metrics(scored_df: pd.DataFrame, hits_df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Add supplementary PHROGs metrics without changing Arc-compatible hit counts."""
+    id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    hits_df = hits_df.copy()
+    hits_df["arc_qc_id"] = _genome_ids_from_orf_hits(hits_df)
+    hits_df["phrog_number"] = hits_df["protein_database_mmseqs_target"].map(_normalize_phrog_target)
+    annotations = _load_phrog_annotations(config.get("protein_annotation_file", ""))
+    hits_df = hits_df.merge(annotations, on="phrog_number", how="left")
+    hits_df["canonical_function"] = hits_df["annot"].map(_canonical_function)
+
+    rows = []
+    for arc_qc_id, group in hits_df.groupby("arc_qc_id"):
+        rows.append(
+            {
+                "arc_qc_id": arc_qc_id,
+                "phrogs_hit_orf_count": int(group["id_prompt"].nunique()),
+                "phrogs_annotated_orf_count": int(group.loc[group["canonical_function"] != "", "id_prompt"].nunique()),
+                "unique_phrog_family_count": int(group["phrog_number"].nunique()),
+                "unique_canonical_function_count": int(
+                    group.loc[group["canonical_function"] != "", "canonical_function"].nunique()
+                ),
+            }
+        )
+
+    if not rows:
+        return scored_df
+    metrics_df = pd.DataFrame(rows).set_index("arc_qc_id")
+    for column in [
+        "phrogs_hit_orf_count",
+        "phrogs_annotated_orf_count",
+        "unique_phrog_family_count",
+        "unique_canonical_function_count",
+    ]:
+        scored_df[column] = scored_df[id_column].map(metrics_df[column]).fillna(0).astype(int)
+    if "predicted_orf_count" in scored_df:
+        scored_df["phrogs_hit_fraction"] = [
+            float(hit_count) / float(predicted_count) if float(predicted_count) > 0 else 0.0
+            for hit_count, predicted_count in zip(
+                scored_df["phrogs_hit_orf_count"],
+                scored_df["predicted_orf_count"],
+                strict=False,
+            )
+        ]
+    return scored_df
 
 
 def _required_gene_score(products: list[str], required_products: list[str]) -> float:
@@ -756,7 +859,10 @@ def _ordered_required_gene_score(products: list[str], required_products: list[st
 
 def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Add a synteny-correlated score from PHROGs/ORF artifacts used by Arc synteny."""
-    phrogs_hits_path = run_dir / config["mmseqs_protein_database_results_dir_save_location"] / "mmseqs2_hits.csv"
+    phrogs_dir = config.get("mmseqs_protein_database_results_dir_save_location")
+    if not phrogs_dir:
+        return scored_df
+    phrogs_hits_path = run_dir / phrogs_dir / "mmseqs2_hits.csv"
     if not phrogs_hits_path.exists():
         return scored_df
     hits_df = pd.read_csv(phrogs_hits_path)
@@ -777,18 +883,20 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
     rows = []
     for arc_qc_id, group in hits_df.sort_values(["arc_qc_id", "orf_order"]).groupby("arc_qc_id"):
         products = group["annot"].astype(str).tolist()
-        total_gene_count = int(group["id_prompt"].nunique())
+        # Proxy mode only sees ORFs with PHROGs hits, not the true total ORF count.
+        hit_gene_count = int(group["id_prompt"].nunique())
         rows.append(
             {
                 "arc_qc_id": arc_qc_id,
                 "synteny_required_gene_score": _required_gene_score(products, required_products),
                 "synteny_order_score": _ordered_required_gene_score(products, required_products),
                 "synteny_total_gene_score": _bounded_range_score(
-                    total_gene_count,
+                    hit_gene_count,
                     float(total_gene_range[0]),
                     float(total_gene_range[1]),
                 ),
-                "synteny_proxy_gene_count": total_gene_count,
+                "synteny_proxy_hit_gene_count": hit_gene_count,
+                "synteny_proxy_gene_count": hit_gene_count,
             }
         )
 
@@ -799,6 +907,7 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
             "synteny_required_gene_score",
             "synteny_order_score",
             "synteny_total_gene_score",
+            "synteny_proxy_hit_gene_count",
             "synteny_proxy_gene_count",
         ]:
             scored_df[column] = scored_df[id_column].map(synteny_df[column]).fillna(0.0)
@@ -819,6 +928,9 @@ def _add_synteny_proxy_rewards(scored_df: pd.DataFrame, run_dir: Path, config: d
 def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Add continuous synteny rewards from Arc/LoVis4u syntenic-gene artifacts."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    scored_df["synteny_stage_reached"] = 0.0
+    scored_df["synteny_measurement_available"] = 0.0
+    scored_df["synteny_missing_artifact"] = 0.0
     metrics_path = run_dir / config.get("synteny_metrics_file_save_location", "qc6_synteny_filter_metrics.csv")
     if not metrics_path.exists():
         metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
@@ -827,23 +939,35 @@ def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: di
         metrics_df = pd.read_csv(metrics_path)
         if {"id_prompt", "num_syntenic_genes", "total_num_genes"}.issubset(metrics_df.columns):
             metrics_df = metrics_df.copy()
-            metrics_df["num_syntenic_genes"] = pd.to_numeric(metrics_df["num_syntenic_genes"], errors="coerce").fillna(
-                0.0
-            )
-            metrics_df["total_num_genes"] = pd.to_numeric(metrics_df["total_num_genes"], errors="coerce").fillna(0.0)
+            metrics_df["num_syntenic_genes"] = pd.to_numeric(metrics_df["num_syntenic_genes"], errors="coerce")
+            metrics_df["total_num_genes"] = pd.to_numeric(metrics_df["total_num_genes"], errors="coerce")
+            if "missing_synteny_output" not in metrics_df:
+                metrics_df["missing_synteny_output"] = False
+            metrics_df["missing_synteny_output"] = metrics_df["missing_synteny_output"].astype(bool)
             metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
-            scored_df["num_syntenic_genes"] = (
-                scored_df[id_column].astype(str).map(metrics_by_id["num_syntenic_genes"]).fillna(0.0)
+            row_ids = scored_df[id_column].astype(str)
+            stage_reached = row_ids.isin(metrics_by_id.index)
+            missing_artifact = row_ids.map(metrics_by_id["missing_synteny_output"]).eq(True)
+            scored_df["num_syntenic_genes"] = row_ids.map(metrics_by_id["num_syntenic_genes"])
+            scored_df["total_num_genes"] = row_ids.map(metrics_by_id["total_num_genes"])
+            measured = (
+                stage_reached
+                & ~missing_artifact
+                & scored_df["num_syntenic_genes"].notna()
+                & scored_df["total_num_genes"].notna()
             )
-            scored_df["total_num_genes"] = (
-                scored_df[id_column].astype(str).map(metrics_by_id["total_num_genes"]).fillna(0.0)
-            )
+            scored_df["synteny_stage_reached"] = stage_reached.astype(float)
+            scored_df["synteny_measurement_available"] = measured.astype(float)
+            scored_df["synteny_missing_artifact"] = missing_artifact.astype(float)
 
             scores = [
                 _synteny_distance_score(float(num_syntenic), float(total_genes))
-                for num_syntenic, total_genes in zip(
+                if is_measured
+                else (0.0, pd.NA, pd.NA, pd.NA)
+                for num_syntenic, total_genes, is_measured in zip(
                     scored_df["num_syntenic_genes"],
                     scored_df["total_num_genes"],
+                    measured,
                     strict=False,
                 )
             ]
@@ -867,6 +991,9 @@ def _add_average_protein_identity_rewards(
 ) -> pd.DataFrame:
     """Add continuous rewards for Arc's average protein percent-identity filter."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    scored_df["average_protein_identity_stage_reached"] = 0.0
+    scored_df["average_protein_identity_measurement_available"] = 0.0
+    scored_df["average_protein_identity_missing_artifact"] = 0.0
     metrics_path = run_dir / config.get(
         "average_protein_sequence_identity_metrics_file_save_location",
         "qc6_average_protein_sequence_identity_metrics.csv",
@@ -874,10 +1001,12 @@ def _add_average_protein_identity_rewards(
     if not metrics_path.exists():
         metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
     if not metrics_path.exists():
+        scored_df["average_protein_identity_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = pd.read_csv(metrics_path)
     if not {"id_prompt", "average_protein_percent_identity"}.issubset(metrics_df.columns):
+        scored_df["average_protein_identity_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = metrics_df.copy()
@@ -892,6 +1021,10 @@ def _add_average_protein_identity_rewards(
     metrics_by_id = metrics_df.set_index(metrics_df["id_prompt"].astype(str))
     mapped_identity = scored_df[id_column].astype(str).map(metrics_by_id["average_protein_percent_identity"])
     has_identity_metric = mapped_identity.notna()
+    scored_df["average_protein_identity_stage_reached"] = (
+        scored_df[id_column].astype(str).isin(metrics_by_id.index).astype(float)
+    )
+    scored_df["average_protein_identity_measurement_available"] = has_identity_metric.astype(float)
     scored_df["average_protein_percent_identity"] = mapped_identity.fillna(0.0)
     mapped_evidence = (
         scored_df[id_column].astype(str).map(metrics_by_id[evidence_column])
@@ -924,15 +1057,20 @@ def _add_required_gene_rewards(
 ) -> pd.DataFrame:
     """Add continuous rewards for Arc's required-gene annotation filter."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
+    scored_df["required_genes_stage_reached"] = 0.0
+    scored_df["required_genes_measurement_available"] = 0.0
+    scored_df["required_genes_missing_artifact"] = 0.0
     metrics_path = run_dir / config.get("required_genes_metrics_file_save_location", "qc6_required_genes_metrics.csv")
     if not metrics_path.exists():
         metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
     if not metrics_path.exists():
+        scored_df["required_genes_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = pd.read_csv(metrics_path)
     required_columns = {"id_prompt", "required_genes_matched_count", "required_genes_total_count"}
     if not required_columns.issubset(metrics_df.columns):
+        scored_df["required_genes_missing_artifact"] = 1.0
         return scored_df
 
     metrics_df = metrics_df.copy()
@@ -942,6 +1080,10 @@ def _add_required_gene_rewards(
     mapped_matched = scored_df[id_column].astype(str).map(metrics_by_id["required_genes_matched_count"])
     mapped_total = scored_df[id_column].astype(str).map(metrics_by_id["required_genes_total_count"])
     has_required_gene_metric = mapped_matched.notna() & mapped_total.notna()
+    scored_df["required_genes_stage_reached"] = (
+        scored_df[id_column].astype(str).isin(metrics_by_id.index).astype(float)
+    )
+    scored_df["required_genes_measurement_available"] = has_required_gene_metric.astype(float)
     scored_df["required_genes_matched_count"] = mapped_matched.fillna(0.0)
     scored_df["required_genes_total_count"] = mapped_total.fillna(0.0)
     scored_df["required_genes_raw_score"] = [
@@ -972,19 +1114,42 @@ def _add_required_gene_rewards(
 def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict) -> pd.DataFrame:
     """Add protein-hit-count and tropism rewards from Arc MMseqs outputs."""
     id_column = "arc_qc_id" if "arc_qc_id" in scored_df else "id_prompt"
-    phrogs_hits_path = run_dir / config["mmseqs_protein_database_results_dir_save_location"] / "mmseqs2_hits.csv"
-    if phrogs_hits_path.exists():
+    scored_df = _add_predicted_orf_counts(scored_df, run_dir, config)
+    phrogs_dir = config.get("mmseqs_protein_database_results_dir_save_location")
+    phrogs_hits_path = run_dir / phrogs_dir / "mmseqs2_hits.csv" if phrogs_dir else None
+    scored_df["protein_database_hit_count_stage_reached"] = 0.0
+    scored_df["protein_database_hit_count_measurement_available"] = 0.0
+    scored_df["protein_database_hit_count_missing_artifact"] = 0.0
+    scored_df["protein_database_hit_count_hit_present"] = 0.0
+    if phrogs_hits_path and phrogs_hits_path.exists():
+        scored_df["protein_database_hit_count_stage_reached"] = 1.0
+        scored_df["protein_database_hit_count_measurement_available"] = 1.0
         hits_df = pd.read_csv(phrogs_hits_path)
-        if "id_prompt" in hits_df:
+        if {"id_prompt", "protein_database_mmseqs_target"}.issubset(hits_df.columns):
+            scored_df = _add_phrogs_hit_metrics(scored_df, hits_df, config)
             genome_counts = _genome_ids_from_orf_hits(hits_df).value_counts()
             min_hits = int(config.get("protein_database_hit_count", 7))
             scored_df["protein_database_hit_count"] = scored_df[id_column].map(genome_counts).fillna(0).astype(int)
+            scored_df["protein_database_hit_count_hit_present"] = (scored_df["protein_database_hit_count"] > 0).astype(
+                float
+            )
             scored_df["reward_external_protein_hit_count"] = scored_df["protein_database_hit_count"].map(
                 lambda value: _lower_bound_ratio_score(float(value), float(min_hits))
             )
+            scored_df["reward_external_protein_hit_count_pass"] = (
+                scored_df["protein_database_hit_count"] >= min_hits
+            ).astype(float)
+    elif phrogs_hits_path:
+        scored_df["protein_database_hit_count_missing_artifact"] = 1.0
 
-    tropism_hits_path = run_dir / config["mmseqs_tropism_protein_results_dir_save_location"] / "mmseqs2_hits.csv"
-    if tropism_hits_path.exists():
+    tropism_dir = config.get("mmseqs_tropism_protein_results_dir_save_location")
+    tropism_hits_path = run_dir / tropism_dir / "mmseqs2_hits.csv" if tropism_dir else None
+    scored_df["tropism_stage_reached"] = 0.0
+    scored_df["tropism_measurement_available"] = 0.0
+    scored_df["tropism_missing_artifact"] = 0.0
+    scored_df["tropism_hit_present"] = 0.0
+    if tropism_hits_path and tropism_hits_path.exists():
+        scored_df["tropism_stage_reached"] = 1.0
         hits_df = pd.read_csv(tropism_hits_path)
         if {"id_prompt", "tropism_protein_mmseqs_percent_identity"}.issubset(hits_df.columns):
             hits_df = hits_df.copy()
@@ -998,6 +1163,8 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             measured_hit = mapped_identity.notna()
             scored_df["tropism_protein_mmseqs_percent_identity"] = mapped_identity.fillna(0.0)
             scored_df["tropism_protein_measured_hit"] = measured_hit.astype(float)
+            scored_df["tropism_measurement_available"] = measured_hit.astype(float)
+            scored_df["tropism_hit_present"] = measured_hit.astype(float)
             scored_df["reward_external_tropism"] = [
                 _spike_identity_score(identity, has_hit, float(lower))
                 for identity, has_hit in zip(
@@ -1009,6 +1176,8 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             scored_df["reward_external_tropism_pass"] = (
                 measured_hit & (scored_df["tropism_protein_mmseqs_percent_identity"] >= float(lower))
             ).astype(float)
+    elif tropism_hits_path:
+        scored_df["tropism_missing_artifact"] = 1.0
     return scored_df
 
 
@@ -1017,6 +1186,14 @@ def add_external_qc_rewards(
     external_qc: ExternalQCRewardConfig,
 ) -> pd.DataFrame:
     """Run Arc external QC on a batch and add binary staged reward columns."""
+    timings: dict[str, float] = {"reward/external_qc/begin_unix_s": time.time()}
+    external_start = time.perf_counter()
+
+    def finish_timing(df: pd.DataFrame) -> pd.DataFrame:
+        timings["reward/external_qc/end_unix_s"] = time.time()
+        timings["reward/external_qc/total_s"] = time.perf_counter() - external_start
+        return _attach_timing_columns(df, timings)
+
     base_config_path = _recipe_path(external_qc.config_path)
     pipeline_script = _recipe_path(external_qc.pipeline_script)
     work_dir = _recipe_path(external_qc.work_dir)
@@ -1046,8 +1223,12 @@ def add_external_qc_rewards(
         df["reward_external_average_protein_identity_pass"] = 0.0
     if external_qc.enable_required_genes:
         df["reward_external_required_genes_pass"] = 0.0
+    df["external_qc_tool_succeeded"] = 0.0
+    df["external_qc_measurement_available"] = 0.0
 
+    external_qc_failed = False
     try:
+        phase_start = time.perf_counter()
         df["arc_qc_id"] = [f"umi{i + 1}" for i in range(len(df))]
         save_fasta(
             df.rename(columns={"id_prompt": "original_id_prompt", "arc_qc_id": "id_prompt"})[
@@ -1056,44 +1237,75 @@ def add_external_qc_rewards(
             input_fasta,
         )
         run_config_path = _write_external_qc_config(base_config_path, run_dir, input_fasta, external_qc)
-        subprocess.run(
-            ["python", str(pipeline_script), str(run_config_path)],
-            check=True,
-            cwd=str(pipeline_script.parent),
-            env=_external_qc_env(external_qc),
-        )
-        config = yaml.safe_load(run_config_path.read_text())
+        _record_elapsed(timings, "reward/external_qc/prepare_inputs_s", phase_start)
+        try:
+            timings["reward/external_qc/subprocess_begin_unix_s"] = time.time()
+            phase_start = time.perf_counter()
+            try:
+                subprocess.run(
+                    [sys.executable, str(pipeline_script), str(run_config_path)],
+                    check=True,
+                    cwd=str(pipeline_script.parent),
+                    env=_external_qc_env(),
+                    timeout=external_qc.timeout_seconds,
+                )
+            finally:
+                _record_elapsed(timings, "reward/external_qc/subprocess_s", phase_start)
+                timings["reward/external_qc/subprocess_end_unix_s"] = time.time()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            external_qc_failed = True
+            message = (
+                f"Arc external QC failed for {run_dir}; failed artifacts were retained and "
+                "external reward columns remain at 0.0"
+            )
+            if external_qc.fail_on_error:
+                raise RuntimeError(message) from exc
+            warnings.warn(f"{message}: {exc}", RuntimeWarning, stacklevel=2)
+            return finish_timing(df)
+        df["external_qc_tool_succeeded"] = 1.0
+        df["external_qc_measurement_available"] = 1.0
 
-        orf_csv = run_dir / config["orf_filter_seqs_csv_file_save_location"]
-        orf_pass_ids = _sequence_ids_from_csv(orf_csv)
+        phase_start = time.perf_counter()
+        config = yaml.safe_load(run_config_path.read_text())
+        orf_csv_name = config.get("orf_filter_seqs_csv_file_save_location")
+        orf_pass_ids = _sequence_ids_from_csv(run_dir / orf_csv_name) if orf_csv_name else set()
         if external_qc.enable_orf:
             df["reward_external_orf"] = df["arc_qc_id"].astype(str).isin(orf_pass_ids).astype(float)
         if external_qc.enable_coding_density:
             df["reward_external_coding_density"] = df["arc_qc_id"].astype(str).isin(orf_pass_ids).astype(float)
+        _record_elapsed(timings, "reward/external_qc/parse_orf_s", phase_start)
 
+        phase_start = time.perf_counter()
         df = _add_mmseqs_hit_rewards(df, run_dir, config)
+        _record_elapsed(timings, "reward/external_qc/parse_protein_hit_count_tropism_s", phase_start)
         if external_qc.enable_synteny:
+            phase_start = time.perf_counter()
             if str(external_qc.synteny_mode).lower() == "full":
                 df = _add_full_synteny_rewards(df, run_dir, config)
             else:
                 df = _add_synteny_proxy_rewards(df, run_dir, config)
+            _record_elapsed(timings, "reward/external_qc/parse_synteny_s", phase_start)
         if external_qc.enable_average_protein_identity:
+            phase_start = time.perf_counter()
             df = _add_average_protein_identity_rewards(
                 df,
                 run_dir,
                 config,
             )
+            _record_elapsed(timings, "reward/external_qc/parse_average_protein_identity_s", phase_start)
         if external_qc.enable_required_genes:
+            phase_start = time.perf_counter()
             df = _add_required_gene_rewards(
                 df,
                 run_dir,
                 config,
                 external_qc.required_genes_evidence_target,
             )
+            _record_elapsed(timings, "reward/external_qc/parse_required_genes_s", phase_start)
     finally:
-        if not external_qc.keep_artifacts:
+        if not external_qc.keep_artifacts and not external_qc_failed:
             shutil.rmtree(run_dir, ignore_errors=True)
-    return df
+    return finish_timing(df)
 
 
 def score_fasta(

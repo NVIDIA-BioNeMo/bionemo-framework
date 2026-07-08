@@ -17,6 +17,7 @@
 
 import argparse
 import shutil
+import subprocess
 from pathlib import Path
 
 from bionemo.evo2_phage_gen.external_qc import ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA
@@ -26,6 +27,9 @@ RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ARC_PIPELINE_SOURCE_DIR = RECIPE_ROOT / "data" / "external" / "arc_evo2" / "phage_gen" / "pipelines"
 DEFAULT_ARC_PIPELINE_WORKDIR = RECIPE_ROOT / "data" / "arc_pipeline_patched"
 DEFAULT_PHIX174_FASTA = RECIPE_ROOT / "data" / "external" / "arc_evo2" / "phage_gen" / "data" / "NC_001422_1.fna"
+DEFAULT_ARC_PIPELINE_PATCH = RECIPE_ROOT / "patches" / "arc-evo2-genome-design-filtering.patch"
+ARC_EVO2_GIT_URL = "https://github.com/ArcInstitute/evo2.git"
+ARC_EVO2_REV = "53f195997257c56c00e5ef8d33a54f5baad143a6"
 ARC_LEGACY_PRODIGAL_CMD = (
     "cmd = f'/home/samuelking/prodigal/prodigal -i {input_sequences} "
     "-d {output_orf_file} -a {output_protein_file} -p meta'"
@@ -255,44 +259,51 @@ ARC_PIPELINE_FILES = (
 )
 
 
-def prepare_arc_pipeline_workdir(
-    source_dir: Path = DEFAULT_ARC_PIPELINE_SOURCE_DIR,
-    output_dir: Path = DEFAULT_ARC_PIPELINE_WORKDIR,
-    *,
-    phix174_fasta: Path = DEFAULT_PHIX174_FASTA,
-    overwrite: bool = False,
-) -> list[Path]:
-    """Copy Arc pipeline files and patch the import-time PhiX174 FASTA path."""
-    source_dir = Path(source_dir)
-    output_dir = Path(output_dir)
-    phix174_fasta = Path(phix174_fasta)
-    if not source_dir.exists():
-        raise FileNotFoundError(f"Arc pipeline source directory not found: {source_dir}")
-    if not phix174_fasta.exists():
-        raise FileNotFoundError(f"PhiX174 FASTA not found: {phix174_fasta}")
-    if output_dir.exists() and not overwrite:
-        raise FileExistsError(f"Output directory already exists: {output_dir}. Pass --overwrite to replace files.")
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _git_head(path: Path) -> str | None:
+    """Return the Git HEAD for ``path`` when it is inside a Git checkout."""
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
 
-    written_paths: list[Path] = []
-    for filename in ARC_PIPELINE_FILES:
-        src = source_dir / filename
-        if not src.exists():
-            raise FileNotFoundError(f"Required Arc pipeline file not found: {src}")
-        dst = output_dir / filename
-        shutil.copy2(src, dst)
-        written_paths.append(dst)
 
-    genetic_architecture_path = output_dir / "genetic_architecture.py"
-    text = genetic_architecture_path.read_text()
-    patched_text = text.replace(ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA, str(phix174_fasta))
-    if patched_text == text:
-        raise ValueError(
-            f"Did not find expected legacy PhiX174 path in {genetic_architecture_path}: "
-            f"{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"
+def _assert_arc_source_revision(source_dir: Path, expected_revision: str) -> None:
+    """Fail if the Arc source directory is not the pinned revision for the maintained patch."""
+    actual_revision = _git_head(source_dir)
+    if actual_revision is None:
+        raise RuntimeError(
+            f"Arc pipeline source {source_dir} is not in a Git checkout; "
+            f"the maintained patch expects {ARC_EVO2_GIT_URL}@{expected_revision}."
         )
-    genetic_architecture_path.write_text(patched_text)
+    if actual_revision != expected_revision:
+        raise RuntimeError(
+            f"Arc pipeline source revision mismatch for {source_dir}: expected "
+            f"{ARC_EVO2_GIT_URL}@{expected_revision}, found {actual_revision}."
+        )
 
+
+def _apply_arc_pipeline_patch(output_dir: Path, patch_path: Path) -> None:
+    """Apply the maintained Arc pipeline patch to a freshly copied workdir."""
+    result = subprocess.run(
+        ["patch", "--batch", "--forward", "--ignore-whitespace", "-p0", "-i", str(patch_path)],
+        cwd=output_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to apply Arc pipeline patch {patch_path}:\n{result.stdout}")
+
+
+def _apply_legacy_string_patches(output_dir: Path) -> None:
+    """Apply small string patches used by synthetic tests that omit the maintained patch."""
     filtering_pipeline_path = output_dir / "genome_design_filtering_pipeline.py"
     text = filtering_pipeline_path.read_text()
     patched_text = (
@@ -347,6 +358,57 @@ def prepare_arc_pipeline_workdir(
     if ARC_LEGACY_LOVIS4U_PARALLEL_CONFIG in text and PATCHED_LOVIS4U_PARALLEL_CONFIG not in patched_text:
         raise ValueError(f"Failed to patch LoVis4u parallel config in {visualization_path}")
     visualization_path.write_text(patched_text)
+
+
+def prepare_arc_pipeline_workdir(
+    source_dir: Path = DEFAULT_ARC_PIPELINE_SOURCE_DIR,
+    output_dir: Path = DEFAULT_ARC_PIPELINE_WORKDIR,
+    *,
+    phix174_fasta: Path = DEFAULT_PHIX174_FASTA,
+    pipeline_patch: Path | None = DEFAULT_ARC_PIPELINE_PATCH,
+    arc_revision: str | None = ARC_EVO2_REV,
+    overwrite: bool = False,
+) -> list[Path]:
+    """Copy Arc pipeline files and patch the import-time PhiX174 FASTA path."""
+    source_dir = Path(source_dir)
+    output_dir = Path(output_dir)
+    phix174_fasta = Path(phix174_fasta)
+    pipeline_patch = Path(pipeline_patch) if pipeline_patch is not None else None
+    if not source_dir.exists():
+        raise FileNotFoundError(f"Arc pipeline source directory not found: {source_dir}")
+    if not phix174_fasta.exists():
+        raise FileNotFoundError(f"PhiX174 FASTA not found: {phix174_fasta}")
+    if pipeline_patch is not None and not pipeline_patch.exists():
+        raise FileNotFoundError(f"Arc pipeline patch not found: {pipeline_patch}")
+    if pipeline_patch is not None and arc_revision:
+        _assert_arc_source_revision(source_dir, arc_revision)
+    if output_dir.exists() and not overwrite:
+        raise FileExistsError(f"Output directory already exists: {output_dir}. Pass --overwrite to replace files.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    written_paths: list[Path] = []
+    for filename in ARC_PIPELINE_FILES:
+        src = source_dir / filename
+        if not src.exists():
+            raise FileNotFoundError(f"Required Arc pipeline file not found: {src}")
+        dst = output_dir / filename
+        shutil.copy2(src, dst)
+        written_paths.append(dst)
+
+    genetic_architecture_path = output_dir / "genetic_architecture.py"
+    text = genetic_architecture_path.read_text()
+    patched_text = text.replace(ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA, str(phix174_fasta))
+    if patched_text == text:
+        raise ValueError(
+            f"Did not find expected legacy PhiX174 path in {genetic_architecture_path}: "
+            f"{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"
+        )
+    genetic_architecture_path.write_text(patched_text)
+
+    if pipeline_patch is not None:
+        _apply_arc_pipeline_patch(output_dir, pipeline_patch)
+    else:
+        _apply_legacy_string_patches(output_dir)
     return written_paths
 
 
@@ -356,6 +418,8 @@ def main() -> None:
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_ARC_PIPELINE_SOURCE_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_ARC_PIPELINE_WORKDIR)
     parser.add_argument("--phix174-fasta", type=Path, default=DEFAULT_PHIX174_FASTA)
+    parser.add_argument("--patch", type=Path, default=DEFAULT_ARC_PIPELINE_PATCH)
+    parser.add_argument("--arc-revision", type=str, default=ARC_EVO2_REV)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -363,6 +427,8 @@ def main() -> None:
         args.source_dir,
         args.output_dir,
         phix174_fasta=args.phix174_fasta,
+        pipeline_patch=args.patch,
+        arc_revision=args.arc_revision,
         overwrite=args.overwrite,
     ):
         print(path)

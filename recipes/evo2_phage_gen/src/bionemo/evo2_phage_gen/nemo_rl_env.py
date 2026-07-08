@@ -15,7 +15,9 @@
 
 """NeMo-RL environment wrapper for online phage sequence rewards."""
 
+import time
 from dataclasses import dataclass
+from numbers import Number
 from typing import Any
 
 import pandas as pd
@@ -23,6 +25,7 @@ import pandas as pd
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 from bionemo.evo2_phage_gen.reward import (
     REWARD_COMPONENTS,
+    TIMING_COLUMN_PREFIX,
     ExternalQCRewardConfig,
     MMseqsClusterDiversityConfig,
     RewardWeights,
@@ -40,6 +43,9 @@ class GDPOObjective:
     name: str
     columns: tuple[str, ...]
     reducer: str = "mean"
+
+
+TIMING_METRIC_MARKER_PREFIX = "__timing__/"
 
 
 DEFAULT_GDPO_OBJECTIVES: tuple[GDPOObjective, ...] = (
@@ -170,18 +176,62 @@ def score_message_logs(
     )
 
 
+def _mean_numeric(scored: pd.DataFrame, column: str) -> float | None:
+    """Return a numeric mean when at least one finite/coercible value exists."""
+    values = pd.to_numeric(scored[column], errors="coerce")
+    if not values.notna().any():
+        return None
+    return float(values.mean())
+
+
+def _add_binary_pass_metrics(
+    metrics: dict[str, float | int],
+    scored: pd.DataFrame,
+    weights: RewardWeights,
+    *,
+    prefix: str = "",
+) -> None:
+    """Add core/full binary pass counts and cluster-deduplicated rates."""
+    binary_pass = binary_core_pass_mask(scored, weights)
+    cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(scored, binary_pass)
+    key_prefix = f"{prefix}/" if prefix else ""
+    metrics[f"{key_prefix}binary_core_pass_count"] = int(binary_pass.sum())
+    metrics[f"{key_prefix}binary_core_pass_rate"] = float(binary_pass.astype(float).mean())
+    metrics[f"{key_prefix}binary_core_pass_cluster_deduplicated_count"] = int(cluster_deduplicated_pass.sum())
+    metrics[f"{key_prefix}binary_core_pass_cluster_deduplicated_rate"] = float(
+        cluster_deduplicated_pass.astype(float).mean()
+    )
+
+    full_qc_pass = binary_full_qc_pass_mask(scored, binary_pass)
+    if full_qc_pass is not None:
+        full_qc_cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(scored, full_qc_pass)
+        metrics[f"{key_prefix}binary_full_qc_pass_count"] = int(full_qc_pass.sum())
+        metrics[f"{key_prefix}binary_full_qc_pass_rate"] = float(full_qc_pass.astype(float).mean())
+        metrics[f"{key_prefix}binary_full_qc_pass_cluster_deduplicated_count"] = int(
+            full_qc_cluster_deduplicated_pass.sum()
+        )
+        metrics[f"{key_prefix}binary_full_qc_pass_cluster_deduplicated_rate"] = float(
+            full_qc_cluster_deduplicated_pass.astype(float).mean()
+        )
+
+
 def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -> dict[str, float | int]:
     """Summarize per-sequence phage QC scores into scalar logger metrics."""
     if scored.empty:
         return {"num_sequences": 0}
 
     metrics: dict[str, float | int] = {"num_sequences": len(scored)}
+    for column in sorted(str(column) for column in scored.columns if str(column).startswith(TIMING_COLUMN_PREFIX)):
+        mean_value = _mean_numeric(scored, column)
+        if mean_value is not None:
+            timing_name = column[len("timing/") :]
+            metrics[f"{TIMING_METRIC_MARKER_PREFIX}{timing_name}"] = mean_value
+
     for component in REWARD_COMPONENTS:
         if component.score_column in scored:
-            metrics[f"{component.name}_score_mean"] = float(scored[component.score_column].astype(float).mean())
-            metrics[f"{component.name}_pass_rate"] = float(
-                (scored[component.score_column].astype(float) >= 1.0).mean()
-            )
+            score_values = pd.to_numeric(scored[component.score_column], errors="coerce")
+            metrics[f"{component.name}_score_mean"] = float(score_values.mean())
+            metrics[f"{component.name}_pass_rate"] = float((score_values >= 1.0).mean())
 
     for column in [
         "prompt_nt_length",
@@ -195,8 +245,13 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "dustmask_right_end_masked_bases",
         "dustmask_right_end_masked_fraction",
         "dustmask_max_end_masked_fraction",
-        "reward_dustmask_end",
         "protein_database_hit_count",
+        "predicted_orf_count",
+        "phrogs_hit_orf_count",
+        "phrogs_annotated_orf_count",
+        "unique_phrog_family_count",
+        "unique_canonical_function_count",
+        "phrogs_hit_fraction",
         "tropism_protein_mmseqs_percent_identity",
         "tropism_protein_measured_hit",
         "num_syntenic_genes",
@@ -205,6 +260,7 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "synteny_pair_score",
         "synteny_pair_distance",
         "synteny_total_gene_score",
+        "synteny_proxy_hit_gene_count",
         "average_protein_percent_identity",
         "average_protein_identity_gene_count",
         "average_protein_identity_raw_score",
@@ -214,23 +270,63 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "required_genes_total_count",
         "required_genes_raw_score",
         "required_genes_evidence_score",
-        "reward_mmseqs_cluster_diversity",
         "mmseqs_cluster_size",
         "mmseqs_cluster_is_singleton",
         "mmseqs_cluster_valid_for_clustering",
         "mmseqs_cluster_missing_from_output",
-        "reward",
-        "reward_binary_core_pass",
-        "reward_binary_core_cluster_deduplicated_pass",
-        "reward_binary_full_qc_pass",
-        "reward_binary_full_qc_cluster_deduplicated_pass",
     ]:
         if column in scored:
-            values = pd.to_numeric(scored[column], errors="coerce").fillna(0.0)
-            metrics[f"{column}_mean"] = float(values.mean())
+            mean_value = _mean_numeric(scored, column)
+            if mean_value is not None:
+                metrics[f"{column}_mean"] = mean_value
             if column == "prompt_nt_length":
+                values = pd.to_numeric(scored[column], errors="coerce")
                 metrics[f"{column}_min"] = float(values.min())
                 metrics[f"{column}_max"] = float(values.max())
+
+    if "external_qc_tool_succeeded" in scored:
+        values = pd.to_numeric(scored["external_qc_tool_succeeded"], errors="coerce").fillna(0.0)
+        metrics["external_qc_tool_succeeded_rate"] = float((values > 0.0).mean())
+
+    status_score_columns = {
+        "protein_database_hit_count": "reward_external_protein_hit_count",
+        "tropism": "reward_external_tropism",
+        "synteny": "reward_external_synteny",
+        "average_protein_identity": "reward_external_average_protein_identity",
+        "required_genes": "reward_external_required_genes",
+    }
+    status_pass_columns = {
+        "protein_database_hit_count": "reward_external_protein_hit_count_pass",
+        "tropism": "reward_external_tropism_pass",
+        "synteny": "reward_external_synteny_pass",
+        "average_protein_identity": "reward_external_average_protein_identity_pass",
+        "required_genes": "reward_external_required_genes_pass",
+    }
+    status_prefixes = sorted(
+        column[: -len("_measurement_available")]
+        for column in scored.columns
+        if column.endswith("_measurement_available")
+    )
+    for prefix in status_prefixes:
+        available = pd.to_numeric(scored[f"{prefix}_measurement_available"], errors="coerce").fillna(0.0) > 0.0
+        stage_column = f"{prefix}_stage_reached"
+        if stage_column in scored:
+            stage_reached = pd.to_numeric(scored[stage_column], errors="coerce").fillna(0.0) > 0.0
+            metrics[f"{prefix}_stage_reached_rate"] = float(stage_reached.mean())
+        metrics[f"{prefix}_measurement_available_rate"] = float(available.mean())
+        metrics[f"{prefix}_n_measured"] = int(available.sum())
+        missing_artifact_column = f"{prefix}_missing_artifact"
+        if missing_artifact_column in scored:
+            missing_artifact = pd.to_numeric(scored[missing_artifact_column], errors="coerce").fillna(0.0) > 0.0
+            metrics[f"{prefix}_missing_artifact_count"] = int(missing_artifact.sum())
+        score_column = status_score_columns.get(prefix)
+        if score_column in scored and available.any():
+            scores = pd.to_numeric(scored.loc[available, score_column], errors="coerce")
+            metrics[f"{prefix}_conditional_score_mean"] = float(scores.mean())
+        pass_column = status_pass_columns.get(prefix)
+        if pass_column in scored and available.any():
+            passes = pd.to_numeric(scored.loc[available, pass_column], errors="coerce")
+            metrics[f"{prefix}_conditional_pass_rate"] = float((passes >= 1.0).mean())
 
     if "mmseqs_cluster_size" in scored:
         cluster_sizes = pd.to_numeric(scored["mmseqs_cluster_size"], errors="coerce").fillna(0).astype(int)
@@ -245,7 +341,6 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
             num_clusters = int(cluster_rows["mmseqs_cluster_id"].astype(str).nunique())
             metrics["mmseqs_cluster_num_clusters"] = num_clusters
             metrics["mmseqs_cluster_clusters_per_sequence"] = float(num_clusters / max(batch_size, 1))
-            metrics["mmseqs_cluster_clusters_per_valid_sequence"] = float(num_clusters / valid_cluster_count)
             metrics["mmseqs_cluster_singleton_fraction"] = float((cluster_sizes[valid_cluster_mask] == 1).mean())
             metrics["mmseqs_cluster_largest_cluster_fraction"] = float(cluster_sizes.max() / valid_cluster_count)
             for size, count in cluster_rows["mmseqs_cluster_size"].astype(int).value_counts().sort_index().items():
@@ -253,42 +348,51 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         else:
             metrics["mmseqs_cluster_num_clusters"] = 0
             metrics["mmseqs_cluster_clusters_per_sequence"] = 0.0
-            metrics["mmseqs_cluster_clusters_per_valid_sequence"] = 0.0
             metrics["mmseqs_cluster_singleton_fraction"] = 0.0
             metrics["mmseqs_cluster_largest_cluster_fraction"] = 0.0
 
-    binary_pass = binary_core_pass_mask(scored, weights)
-    cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(scored, binary_pass)
-    pass_count = int(binary_pass.sum())
-    cluster_deduplicated_count = int(cluster_deduplicated_pass.sum())
-    metrics["binary_core_pass_count"] = pass_count
-    metrics["binary_core_pass_rate"] = float(binary_pass.astype(float).mean())
-    metrics["binary_core_pass_cluster_deduplicated_count"] = cluster_deduplicated_count
-    metrics["binary_core_pass_cluster_deduplicated_rate"] = float(cluster_deduplicated_pass.astype(float).mean())
-    metrics["binary_core_pass_cluster_duplicate_count"] = max(0, pass_count - cluster_deduplicated_count)
-    metrics["binary_core_pass_cluster_deduplication_fraction"] = (
-        0.0 if pass_count == 0 else float(cluster_deduplicated_count / pass_count)
-    )
+    _add_binary_pass_metrics(metrics, scored, weights)
 
-    full_qc_pass = binary_full_qc_pass_mask(scored, binary_pass)
-    if full_qc_pass is not None:
-        full_qc_cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(scored, full_qc_pass)
-        full_qc_pass_count = int(full_qc_pass.sum())
-        full_qc_cluster_deduplicated_count = int(full_qc_cluster_deduplicated_pass.sum())
-        metrics["binary_full_qc_pass_count"] = full_qc_pass_count
-        metrics["binary_full_qc_pass_rate"] = float(full_qc_pass.astype(float).mean())
-        metrics["binary_full_qc_pass_cluster_deduplicated_count"] = full_qc_cluster_deduplicated_count
-        metrics["binary_full_qc_pass_cluster_deduplicated_rate"] = float(
-            full_qc_cluster_deduplicated_pass.astype(float).mean()
-        )
-        metrics["binary_full_qc_pass_cluster_duplicate_count"] = max(
-            0,
-            full_qc_pass_count - full_qc_cluster_deduplicated_count,
-        )
-        metrics["binary_full_qc_pass_cluster_deduplication_fraction"] = (
-            0.0 if full_qc_pass_count == 0 else float(full_qc_cluster_deduplicated_count / full_qc_pass_count)
-        )
+    if "prompt_nt_length" in scored:
+        prompt_lengths = pd.to_numeric(scored["prompt_nt_length"], errors="coerce")
+        for prompt_length in sorted(prompt_lengths.dropna().astype(int).unique()):
+            prompt_mask = prompt_lengths == prompt_length
+            prompt_scored = scored.loc[prompt_mask]
+            prefix = f"by_prompt_nt_length/{prompt_length}"
+            metrics[f"{prefix}/num_sequences"] = int(prompt_mask.sum())
+            if "reward" in prompt_scored:
+                metrics[f"{prefix}/reward_mean"] = float(
+                    pd.to_numeric(prompt_scored["reward"], errors="coerce").mean()
+                )
+            _add_binary_pass_metrics(metrics, prompt_scored, weights, prefix=prefix)
+            for component in REWARD_COMPONENTS:
+                if component.score_column in prompt_scored:
+                    score_values = pd.to_numeric(prompt_scored[component.score_column], errors="coerce")
+                    metrics[f"{prefix}/{component.name}_score_mean"] = float(score_values.mean())
+                    metrics[f"{prefix}/{component.name}_pass_rate"] = float((score_values >= 1.0).mean())
     return metrics
+
+
+def _scored_records(scored: pd.DataFrame) -> list[dict[str, Any]]:
+    """Convert per-sequence scores into metadata-safe numeric/status dictionaries."""
+    return [
+        {
+            key: value
+            for key, value in row.items()
+            if isinstance(value, Number | bool) or key.endswith(("_pass", "_available", "_artifact"))
+        }
+        for row in scored.where(pd.notna(scored), None).to_dict("records")
+    ]
+
+
+def _scored_from_batch_metadata(batch: Any) -> pd.DataFrame:
+    """Recover scored rows carried through rollout metadata."""
+    rows = [
+        info["_phage_qc_scored"]
+        for info in batch.get("extra_env_info", []) or []
+        if isinstance(info, dict) and isinstance(info.get("_phage_qc_scored"), dict)
+    ]
+    return pd.DataFrame(rows)
 
 
 if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
@@ -346,6 +450,8 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 ),
                 work_dir=external_qc_cfg.get("work_dir", "data/checkpoints/phage_grpo_external_qc"),
                 keep_artifacts=bool(external_qc_cfg.get("keep_artifacts", False)),
+                fail_on_error=bool(external_qc_cfg.get("fail_on_error", True)),
+                timeout_seconds=external_qc_cfg.get("timeout_seconds", 1800.0),
                 enable_orf=bool(external_qc_cfg.get("enable_orf", False)),
                 enable_coding_density=bool(external_qc_cfg.get("enable_coding_density", False)),
                 enable_protein_hit_count=bool(external_qc_cfg.get("enable_protein_hit_count", True)),
@@ -379,6 +485,9 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             metadata: list[dict[str, Any]],
         ) -> EnvironmentReturn[dict[str, Any]]:
             """Score generated assistant sequences and terminate each rollout."""
+            env_step_begin_unix_s = time.time()
+            env_step_start = time.perf_counter()
+            phase_start = time.perf_counter()
             scored = score_message_logs(
                 message_log_batch,
                 config=self.config,
@@ -386,21 +495,43 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 external_qc=self.external_qc,
                 mmseqs_cluster_diversity=self.mmseqs_cluster_diversity,
             )
-            self._last_scored = scored
+            reward_scoring_s = time.perf_counter() - phase_start
             if self.reward_output_mode == "gdpo":
+                phase_start = time.perf_counter()
                 objective_scores = gdpo_objective_scores_from_scored(scored, self.gdpo_objectives)
+                gdpo_objectives_s = time.perf_counter() - phase_start
                 self._last_gdpo_objective_scores = objective_scores
                 rewards = torch.tensor(objective_scores.to_numpy(dtype=float), dtype=torch.float32).cpu()
             else:
+                gdpo_objectives_s = 0.0
                 self._last_gdpo_objective_scores = pd.DataFrame()
                 rewards = torch.tensor(scored["reward"].tolist(), dtype=torch.float32).cpu()
+
+            env_step_end_unix_s = time.time()
+            env_step_timings = {
+                "env_step/begin_unix_s": env_step_begin_unix_s,
+                "env_step/end_unix_s": env_step_end_unix_s,
+                "env_step/total_s": time.perf_counter() - env_step_start,
+                "env_step/reward_scoring_s": reward_scoring_s,
+                "env_step/gdpo_objectives_s": gdpo_objectives_s,
+            }
+            for name, value in env_step_timings.items():
+                scored[f"{TIMING_COLUMN_PREFIX}{name}"] = float(value)
+
+            self._last_scored = scored
+            scored_records = _scored_records(scored)
+            returned_metadata = []
+            for item, scored_record in zip(metadata, scored_records, strict=True):
+                item_dict = dict(item or {})
+                item_dict["_phage_qc_scored"] = scored_record
+                returned_metadata.append(item_dict)
             observations = [
                 {"role": "environment", "content": f"phage_qc_reward={reward:.6f}"}
                 for reward in scored["reward"].tolist()
             ]
             return EnvironmentReturn(
                 observations=observations,
-                metadata=metadata,
+                metadata=returned_metadata,
                 next_stop_strings=[None] * len(message_log_batch),
                 rewards=rewards,
                 terminateds=torch.ones(rewards.shape[0], dtype=torch.bool).cpu(),
@@ -413,7 +544,9 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             """Report rollout-level reward metrics."""
             reward_tensor = batch["rewards"] if "rewards" in batch else batch["total_reward"]
             rewards = reward_tensor if reward_tensor.ndim == 1 else reward_tensor.float().mean(dim=1)
-            scored = getattr(self, "_last_scored", pd.DataFrame())
+            scored = _scored_from_batch_metadata(batch)
+            if scored.empty:
+                scored = getattr(self, "_last_scored", pd.DataFrame())
             phage_metrics = phage_qc_metrics_from_scored(scored, self.weights) if not scored.empty else {}
             binary_pass_rate = float(phage_metrics.get("binary_core_pass_rate", 0.0))
             cluster_deduplicated_pass_rate = float(
@@ -422,8 +555,6 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             metrics = {
                 "mean_reward": rewards.float().mean().item(),
                 "pass_rate": cluster_deduplicated_pass_rate,
-                "binary_core_pass_rate": binary_pass_rate,
-                "binary_core_pass_cluster_deduplicated_rate": cluster_deduplicated_pass_rate,
                 "dense_reward_ge_1_rate": (rewards >= 1.0).float().mean().item(),
                 "num_sequences": int(rewards.shape[0]),
             }
@@ -436,7 +567,10 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                     )
             if phage_metrics:
                 for key, value in phage_metrics.items():
-                    metrics[f"phage_qc/{key}"] = value
+                    if key.startswith(TIMING_METRIC_MARKER_PREFIX):
+                        metrics[key] = value
+                    else:
+                        metrics[f"phage_qc/{key}"] = value
             return batch, metrics
 
 else:

@@ -13,8 +13,9 @@ grpo:
   val_period: 10
   val_batch_size: 96
   max_val_samples: 96
-  val_at_start: false
+  val_at_start: true
   val_at_end: true
+  seq_logprob_error_threshold: 1.5
 
 loss_fn:
   # Conservative rollout setting: keep policy drift tighter than the smoke/base GRPO config.
@@ -45,6 +46,9 @@ policy:
       enable_chunked_prefill: false
       generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
       generation_adapter_config:
+        # Base seed for reproducibility. The adapter advances by seed_stride every generation call,
+        # so validation/train steps do not reuse the same sampling seed.
+        seed: 42
         seed_stride: 1000003
 
 data:
@@ -67,6 +71,8 @@ env:
     dustmask_end_window: 200
     dustmask_max_end_fraction: 0.9
     reward_output_mode: "gdpo"
+    # These weights do not post-weight GDPO objectives after normalization. They
+    # keep scalar diagnostics and binary pass metrics aligned with the RL500 gates.
     weight_valid_nt_chars: 1.0
     weight_genome_length: 1.0
     weight_gc_content: 1.0
@@ -106,6 +112,8 @@ env:
           - "reward_mmseqs_cluster_diversity"
     external_qc:
       enabled: true
+      fail_on_error: true
+      timeout_seconds: 1800
       enable_protein_hit_count: true
       enable_tropism: true
       enable_synteny: true

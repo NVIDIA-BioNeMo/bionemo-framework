@@ -1,4 +1,5 @@
 #!/bin/bash -x
+set -euo pipefail
 
 # FIXME: Fix for "No such file or directory: /workspace/TransformerEngine"
 #  Remove once bug has been addressed in the nvidia/pytorch container.
@@ -21,8 +22,8 @@ uv pip install -r build_requirements.txt --no-build-isolation
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
 
 # 6. Upstream NeMo-RL's current pyproject only packages the top-level nemo_rl module.
-# Reinstall the pinned checkout with complete package discovery, then apply this recipe's Evo2 patch.
-evo2_phage_patch_nemo_rl --repair-install
+# Reinstall the pinned checkout with complete package discovery, then apply and verify this recipe's Evo2 patch.
+evo2_phage_patch_nemo_rl --repair-install --force-reinstall --verify-runtime
 
 # 7. CI starts from the base devcontainer image, so keep native verifier tools
 # recipe-local instead of requiring apt/conda or a custom image. Installing into

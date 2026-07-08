@@ -119,6 +119,8 @@ env:
       pipeline_script: "data/arc_pipeline_patched/genome_design_filtering_pipeline.py"
       work_dir: "data/checkpoints/phage_grpo_external_qc"
       keep_artifacts: false
+      fail_on_error: true
+      timeout_seconds: 1800
       enable_protein_hit_count: true
       enable_tropism: true
       enable_synteny: true

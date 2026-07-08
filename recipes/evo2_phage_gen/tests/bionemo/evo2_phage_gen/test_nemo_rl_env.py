@@ -21,14 +21,16 @@ import torch
 
 import bionemo.evo2_phage_gen.nemo_rl_env as nemo_rl_env
 from bionemo.evo2_phage_gen.nemo_rl_env import (
+    TIMING_METRIC_MARKER_PREFIX,
     GDPOObjective,
+    _scored_records,
     extract_assistant_sequence,
     extract_scored_sequence,
     gdpo_objective_scores_from_scored,
     phage_qc_metrics_from_scored,
     score_message_logs,
 )
-from bionemo.evo2_phage_gen.reward import RewardWeights
+from bionemo.evo2_phage_gen.reward import TIMING_COLUMN_PREFIX, RewardWeights
 
 
 def test_extract_assistant_sequence_concatenates_assistant_messages():
@@ -100,6 +102,7 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
         {
             "reward_valid_nt_chars": [1.0, 1.0],
             "reward_external_tropism": [1.0, 0.5],
+            "reward_external_tropism_pass": [1.0, 0.0],
             "reward_dustmask_end": [1.0, 0.5],
             "reward_external_synteny": [0.25, 0.75],
             "reward_external_synteny_pass": [1.0, 0.0],
@@ -109,8 +112,14 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
             "reward_external_required_genes_pass": [1.0, 0.0],
             "prompt_nt_length": [10, 10],
             "genome_length": [5000, 3900],
+            "tropism_stage_reached": [1.0, 1.0],
+            "tropism_measurement_available": [1.0, 1.0],
+            "tropism_missing_artifact": [0.0, 0.0],
             "tropism_protein_mmseqs_percent_identity": [75.0, 30.0],
             "tropism_protein_measured_hit": [1.0, 1.0],
+            "synteny_stage_reached": [1.0, 1.0],
+            "synteny_measurement_available": [1.0, 0.0],
+            "synteny_missing_artifact": [0.0, 1.0],
             "synteny_pair_score": [0.25, 0.75],
             "synteny_pair_distance": [3.0, 1.0],
             "average_protein_percent_identity": [80.0, 97.5],
@@ -146,6 +155,11 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["tropism_score_mean"] == 0.75
     assert metrics["dustmask_end_score_mean"] == 0.75
     assert metrics["tropism_pass_rate"] == 0.5
+    assert metrics["tropism_stage_reached_rate"] == 1.0
+    assert metrics["tropism_measurement_available_rate"] == 1.0
+    assert metrics["tropism_n_measured"] == 2
+    assert metrics["tropism_conditional_score_mean"] == 0.75
+    assert metrics["tropism_conditional_pass_rate"] == 0.5
     assert metrics["synteny_score_mean"] == 0.5
     assert metrics["average_protein_identity_score_mean"] == 0.75
     assert metrics["required_genes_pass_rate"] == 0.5
@@ -157,6 +171,12 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["tropism_protein_measured_hit_mean"] == 1.0
     assert metrics["synteny_pair_score_mean"] == 0.5
     assert metrics["synteny_pair_distance_mean"] == 2.0
+    assert metrics["synteny_stage_reached_rate"] == 1.0
+    assert metrics["synteny_measurement_available_rate"] == 0.5
+    assert metrics["synteny_n_measured"] == 1
+    assert metrics["synteny_missing_artifact_count"] == 1
+    assert metrics["synteny_conditional_score_mean"] == 0.25
+    assert metrics["synteny_conditional_pass_rate"] == 1.0
     assert metrics["average_protein_percent_identity_mean"] == 88.75
     assert metrics["average_protein_identity_gene_count_mean"] == 9.5
     assert metrics["average_protein_identity_evidence_score_mean"] == 0.95
@@ -177,6 +197,23 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["binary_full_qc_pass_cluster_deduplicated_rate"] == 0.5
 
 
+def test_phage_qc_metrics_marks_timing_metrics_for_nemorl_timing_logger():
+    """Timing columns should be returned with a marker for NeMo-RL timing/train routing."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 0.0],
+            "reward": [1.0, 0.0],
+            f"{TIMING_COLUMN_PREFIX}reward/total_s": [2.0, 4.0],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, RewardWeights(valid_nt_chars=1.0))
+
+    timing_key = f"{TIMING_METRIC_MARKER_PREFIX}phage_qc/reward/total_s"
+    assert metrics[timing_key] == 3.0
+    assert "timing/phage_qc/reward/total_s" not in metrics
+
+
 def test_phage_qc_metrics_deduplicates_binary_passes_by_mmseqs_cluster():
     """Collapsed passing clusters should count once in the headline pass metric."""
     scored = pd.DataFrame(
@@ -195,8 +232,8 @@ def test_phage_qc_metrics_deduplicates_binary_passes_by_mmseqs_cluster():
     assert metrics["binary_core_pass_rate"] == 0.75
     assert metrics["binary_core_pass_cluster_deduplicated_count"] == 2
     assert metrics["binary_core_pass_cluster_deduplicated_rate"] == 0.5
-    assert metrics["binary_core_pass_cluster_duplicate_count"] == 1
-    assert metrics["binary_core_pass_cluster_deduplication_fraction"] == 2 / 3
+    assert "binary_core_pass_cluster_duplicate_count" not in metrics
+    assert "binary_core_pass_cluster_deduplication_fraction" not in metrics
 
 
 def test_phage_qc_metrics_deduplicates_full_qc_passes_by_mmseqs_cluster():
@@ -220,12 +257,89 @@ def test_phage_qc_metrics_deduplicates_full_qc_passes_by_mmseqs_cluster():
     assert metrics["binary_core_pass_cluster_deduplicated_count"] == 3
     assert metrics["binary_full_qc_pass_count"] == 3
     assert metrics["binary_full_qc_pass_cluster_deduplicated_count"] == 2
-    assert metrics["binary_full_qc_pass_cluster_duplicate_count"] == 1
-    assert metrics["binary_full_qc_pass_cluster_deduplication_fraction"] == 2 / 3
+    assert "binary_full_qc_pass_cluster_duplicate_count" not in metrics
+    assert "binary_full_qc_pass_cluster_deduplication_fraction" not in metrics
 
 
-def test_global_post_process_metrics_accepts_rollout_total_reward(monkeypatch):
+def test_phage_qc_metrics_groups_training_metrics_by_prompt_prefix_length():
+    """Prompt-length groups let W&B compare each prefix only with matching prefixes."""
+    scored = pd.DataFrame(
+        {
+            "prompt_nt_length": [4, 4, 10],
+            "reward_valid_nt_chars": [1.0, 0.0, 1.0],
+            "reward": [1.0, 0.0, 0.5],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, RewardWeights(valid_nt_chars=1.0))
+
+    assert metrics["by_prompt_nt_length/4/num_sequences"] == 2
+    assert metrics["by_prompt_nt_length/4/reward_mean"] == 0.5
+    assert metrics["by_prompt_nt_length/4/valid_nt_chars_score_mean"] == 0.5
+    assert metrics["by_prompt_nt_length/4/binary_core_pass_rate"] == 0.5
+    assert metrics["by_prompt_nt_length/10/num_sequences"] == 1
+    assert metrics["by_prompt_nt_length/10/reward_mean"] == 0.5
+    assert metrics["by_prompt_nt_length/10/binary_core_pass_rate"] == 1.0
+
+
+def test_scored_records_exclude_full_sequence_from_rollout_metadata():
+    """Rollout metadata should carry scalar scores/status, not full generated sequences."""
+    scored = pd.DataFrame(
+        {
+            "sequence": ["A" * 6000],
+            "id_prompt": ["seq1"],
+            "reward": [0.5],
+            "synteny_measurement_available": [1.0],
+            "missing_status": ["unavailable"],
+        }
+    )
+
+    records = _scored_records(scored)
+
+    assert records == [{"reward": 0.5, "synteny_measurement_available": 1.0}]
+
+
+def test_global_post_process_metrics_accepts_rollout_total_reward():
     """Rollout batches expose total_reward rather than per-turn rewards."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
+    env = object.__new__(env_cls)
+    env.weights = RewardWeights(valid_nt_chars=1.0)
+    batch = {
+        "total_reward": torch.tensor([1.0, 0.0]),
+        "extra_env_info": [
+            {
+                "_phage_qc_scored": {
+                    "reward_valid_nt_chars": 1.0,
+                    "reward": 1.0,
+                    f"{TIMING_COLUMN_PREFIX}reward/total_s": 2.0,
+                }
+            },
+            {
+                "_phage_qc_scored": {
+                    "reward_valid_nt_chars": 0.0,
+                    "reward": 0.0,
+                    f"{TIMING_COLUMN_PREFIX}reward/total_s": 4.0,
+                }
+            },
+        ],
+    }
+    returned_batch, metrics = env_cls.global_post_process_and_metrics(env, batch)
+
+    assert returned_batch is batch
+    assert metrics["mean_reward"] == 0.5
+    assert metrics["pass_rate"] == 0.5
+    assert "binary_core_pass_rate" not in metrics
+    assert metrics["phage_qc/valid_nt_chars_score_mean"] == 0.5
+    assert metrics["phage_qc/binary_core_pass_rate"] == 0.5
+    assert metrics[f"{TIMING_METRIC_MARKER_PREFIX}phage_qc/reward/total_s"] == 3.0
+    assert "phage_qc/__timing__/phage_qc/reward/total_s" not in metrics
+
+
+def test_global_post_process_metrics_falls_back_to_last_scored_for_old_rollout_metadata():
+    """The actor-local fallback keeps compatibility with unpatched NeMo-RL rollout batches."""
     if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
         pytest.skip("NeMo-RL is unavailable")
 
@@ -236,13 +350,13 @@ def test_global_post_process_metrics_accepts_rollout_total_reward(monkeypatch):
         {
             "reward_valid_nt_chars": [1.0, 0.0],
             "reward": [1.0, 0.0],
-            "reward_binary_core_pass": [1.0, 0.0],
         }
     )
 
-    batch = {"total_reward": torch.tensor([1.0, 0.0])}
-    returned_batch, metrics = env_cls.global_post_process_and_metrics(env, batch)
+    _returned_batch, metrics = env_cls.global_post_process_and_metrics(
+        env,
+        {"total_reward": torch.tensor([1.0, 0.0])},
+    )
 
-    assert returned_batch is batch
-    assert metrics["mean_reward"] == 0.5
+    assert metrics["pass_rate"] == 0.5
     assert metrics["phage_qc/valid_nt_chars_score_mean"] == 0.5
