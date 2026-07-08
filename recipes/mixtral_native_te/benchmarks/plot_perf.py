@@ -51,7 +51,7 @@ DEFAULT_SUBTITLE = (
 N_ACTIVE = 12_748_587_008
 TOKENS_PER_PFLOP = 1e15 / (6 * N_ACTIVE)  # tokens/s/GPU per PFLOP/s/GPU
 
-COLORS = {"fp8": "#76B900", "bf16": "#3f8500"}
+COLORS = {"fp8": "#76B900", "bf16": "#636363"}
 LABELS = {"fp8": "MXFP8", "bf16": "BF16"}
 # (dp, ep) -> group label. Order left-to-right.
 GROUPS = [
