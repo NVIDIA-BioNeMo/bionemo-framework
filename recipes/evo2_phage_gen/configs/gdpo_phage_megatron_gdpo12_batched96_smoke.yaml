@@ -1,0 +1,49 @@
+# One-step true GDPO-12 smoke test for 96-request Evo2 native generation.
+# Inherits the active GDPO-12/KL0.001 config, but skips validation at start so
+# the first CUDA-graph/context allocation is the 96-sample training rollout.
+
+defaults: "gdpo_phage_megatron.yaml"
+
+checkpointing:
+  checkpoint_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_gdpo12_smoke_val96"
+  pretrained_checkpoint:
+    path: "data/checkpoints/evo2_7b_microviridae_mbridge"
+    format: "megatron_bridge"
+
+grpo:
+  max_num_epochs: 1
+  max_num_steps: 1
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 96
+  val_batch_size: 96
+  max_val_samples: 96
+  val_at_start: false
+  val_at_end: true
+
+data:
+  validation:
+    data_path: "data/phage_prompts_paper_useful_rl_validation_prompt10_96.jsonl"
+
+policy:
+  train_global_batch_size: 96
+  train_micro_batch_size: 1
+  generation_batch_size: 96
+  logprob_batch_size: 1
+  generation:
+    mcore_generation_config:
+      max_requests: 96
+      prompt_batch_size: 96
+
+env:
+  phage_qc:
+    external_qc:
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_gdpo12_smoke_val96_external_qc"
+    mmseqs_cluster_diversity:
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_gdpo12_smoke_val96_mmseqs_cluster_diversity"
+
+logger:
+  log_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_gdpo12_smoke_val96_logs"
+  wandb_enabled: true
+  wandb:
+    project: "evo2_phage_design_rl_gdpo"
+    name: "gdpo-phage-base-microviridae-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.001-batched96-gdpo12-smoke-val96"

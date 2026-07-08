@@ -52,6 +52,8 @@ from bionemo.evo2.run.infer import (
     _NativeDynamicResult,
     _result_to_jsonl_record,
     _sampling_log_probs_from_logits,
+    _sample_from_log_probs,
+    _selected_log_probs_for_sampled_tokens,
 )
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge
@@ -127,6 +129,29 @@ def test_sampling_log_probs_use_temperature_scaled_top_k_support():
     torch.testing.assert_close(log_probs[0, :2], expected[0])
     assert torch.isneginf(log_probs[0, 2])
     assert torch.isneginf(log_probs[0, 3])
+
+
+def test_sample_from_log_probs_uses_prefiltered_distribution():
+    """Native decode should sample from the log-probs it already computed."""
+    logits = torch.tensor([[1.0, 5.0, 4.0]], dtype=torch.float32)
+    log_probs = _sampling_log_probs_from_logits(logits, temperature=1.0, top_k=1, top_p=0.0)
+
+    sampled = _sample_from_log_probs(log_probs, top_k=1, generator=torch.Generator())
+
+    assert sampled.tolist() == [1]
+
+
+def test_selected_log_probs_for_sampled_tokens_gathers_batch_once():
+    """Batched decode should avoid one Python scalar sync per request."""
+    log_probs = torch.log_softmax(
+        torch.tensor([[1.0, 2.0, 3.0], [6.0, 5.0, 4.0]], dtype=torch.float32),
+        dim=-1,
+    )
+    sampled_tokens = torch.tensor([2, 0], dtype=torch.long)
+
+    selected = _selected_log_probs_for_sampled_tokens(log_probs, sampled_tokens)
+
+    assert selected == pytest.approx([log_probs[0, 2].item(), log_probs[1, 0].item()])
 
 
 def test_infer_runs(mbridge_checkpoint_path, tmp_path):

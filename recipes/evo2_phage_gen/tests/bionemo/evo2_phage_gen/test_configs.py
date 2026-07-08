@@ -281,7 +281,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert mmseqs_config == {
         "enabled": True,
         "mmseqs_bin": "mmseqs",
-        "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched48_metricsfix_mmseqs_cluster_diversity",
+        "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched48_decodefix_clusterfix_mmseqs_cluster_diversity",
         "keep_artifacts": False,
         "min_seq_id": 0.99,
         "coverage": 0.0,

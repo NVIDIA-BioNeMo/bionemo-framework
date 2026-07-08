@@ -48,11 +48,23 @@ def _apply_algorithm_override(config, algorithm: str) -> tuple[object, str]:
     """Apply launcher-level GRPO/GDPO reward mode overrides."""
     if algorithm == "config":
         reward_mode = str(OmegaConf.select(config, "env.phage_qc.reward_output_mode", default="scalar")).lower()
-        return config, "gdpo" if reward_mode == "gdpo" else "grpo"
+        resolved_algorithm = "gdpo" if reward_mode == "gdpo" else "grpo"
+    else:
+        resolved_algorithm = algorithm
+        reward_mode = "gdpo" if algorithm == "gdpo" else "scalar"
+        OmegaConf.update(config, "env.phage_qc.reward_output_mode", reward_mode, merge=True)
 
-    reward_mode = "gdpo" if algorithm == "gdpo" else "scalar"
-    OmegaConf.update(config, "env.phage_qc.reward_output_mode", reward_mode, merge=True)
-    return config, algorithm
+    OmegaConf.update(config, "grpo.adv_estimator.name", resolved_algorithm, merge=True)
+    if OmegaConf.select(config, "grpo.adv_estimator.normalize_rewards", default=None) is None:
+        OmegaConf.update(config, "grpo.adv_estimator.normalize_rewards", "${grpo.normalize_rewards}", merge=True)
+    if OmegaConf.select(config, "grpo.adv_estimator.use_leave_one_out_baseline", default=None) is None:
+        OmegaConf.update(
+            config,
+            "grpo.adv_estimator.use_leave_one_out_baseline",
+            "${grpo.use_leave_one_out_baseline}",
+            merge=True,
+        )
+    return config, resolved_algorithm
 
 
 def _config_path(path_like: str | None) -> Path | None:

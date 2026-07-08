@@ -197,6 +197,41 @@ def test_phage_qc_metrics_from_scored_flattens_reward_components():
     assert metrics["binary_full_qc_pass_cluster_deduplicated_rate"] == 0.5
 
 
+def test_phage_qc_metrics_interprets_mmseqs_cluster_sizes_with_full_batch_denominator():
+    """Cluster scalar metrics should reflect cluster rows while keeping batch-size denominators explicit."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0, 1.0, 1.0, 0.0],
+            "reward_mmseqs_cluster_diversity": [0.5, 0.5, 1.0, 0.0],
+            "mmseqs_cluster_id": ["group0:seq_0", "group0:seq_0", "group0:seq_2", ""],
+            "mmseqs_cluster_size": [2, 2, 1, 0],
+            "mmseqs_cluster_is_singleton": [0.0, 0.0, 1.0, 0.0],
+            "mmseqs_cluster_valid_for_clustering": [1.0, 1.0, 1.0, 0.0],
+            "mmseqs_cluster_missing_from_output": [0.0, 0.0, 0.0, 0.0],
+            "reward": [0.5, 0.5, 1.0, 0.0],
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(
+        scored,
+        RewardWeights(
+            valid_nt_chars=1.0,
+            mmseqs_cluster_diversity=1.0,
+        ),
+    )
+
+    assert metrics["num_sequences"] == 4
+    assert metrics["mmseqs_cluster_diversity_score_mean"] == 0.5
+    assert metrics["mmseqs_cluster_size_mean"] == 1.25
+    assert metrics["mmseqs_cluster_valid_for_clustering_mean"] == 0.75
+    assert metrics["mmseqs_cluster_num_clusters"] == 2
+    assert metrics["mmseqs_cluster_clusters_per_sequence"] == 0.5
+    assert metrics["mmseqs_cluster_singleton_fraction"] == pytest.approx(1.0 / 3.0)
+    assert metrics["mmseqs_cluster_largest_cluster_fraction"] == pytest.approx(2.0 / 3.0)
+    assert metrics["mmseqs_cluster_size_histogram/size_1"] == 1
+    assert metrics["mmseqs_cluster_size_histogram/size_2"] == 1
+
+
 def test_phage_qc_metrics_marks_timing_metrics_for_nemorl_timing_logger():
     """Timing columns should be returned with a marker for NeMo-RL timing/train routing."""
     scored = pd.DataFrame(

@@ -10,7 +10,13 @@ index e5647ba..dbe8910 100644
              )  # type: ignore
 +            timing_metrics.update(rollout_timing_metrics)
              # track example with high token mult prob error above 1.05
-@@ -2978,2 +2980,17 @@ def grpo_train(
+@@ -2917,4 +2919,2 @@ def grpo_train(
+-            for k, v in sorted(
+-                timing_metrics.items(), key=lambda item: item[1], reverse=True
+-            ):
++            for k, v in _iter_display_timing_metrics(timing_metrics):
+                 if k != "total_step_time":
+@@ -2978,2 +2980,28 @@ def grpo_train(
 
 +ENV_TIMING_METRIC_PREFIX = "__timing__/"
 +
@@ -25,6 +31,17 @@ index e5647ba..dbe8910 100644
 +        else:
 +            regular_metrics[key] = value
 +    return regular_metrics, timing_metrics
++
++
++def _iter_display_timing_metrics(timing_metrics: dict[str, float]):
++    """Yield timing metrics suitable for the human-readable console summary."""
++    return (
++        (key, value)
++        for key, value in sorted(
++            timing_metrics.items(), key=lambda item: item[1], reverse=True
++        )
++        if not key.endswith("_unix_s")
++    )
 +
 +
  def validate(
@@ -74,6 +91,12 @@ index e5647ba..dbe8910 100644
              )
 +            timing_metrics.update(rollout_timing_metrics)
 
+@@ -4082,4 +4127,2 @@ def async_grpo_train(
+-            for k, v in sorted(
+-                timing_metrics.items(), key=lambda item: item[1], reverse=True
+-            ):
++            for k, v in _iter_display_timing_metrics(timing_metrics):
+                 if k != "total_step_time":
 diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
 index 44a11cd..c12ec4e 100644
 --- a/nemo_rl/experience/rollouts.py

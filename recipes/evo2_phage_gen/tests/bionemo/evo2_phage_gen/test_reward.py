@@ -239,6 +239,142 @@ def test_mmseqs_cluster_diversity_reward_uses_inverse_cluster_size(tmp_path, mon
     assert scored["mmseqs_cluster_missing_from_output"].tolist() == [0.0, 0.0, 0.0, 0.0]
 
 
+def test_mmseqs_cluster_diversity_missing_output_gets_zero_reward(tmp_path, monkeypatch):
+    """A valid sequence omitted from MMseqs output should get no cluster-diversity credit."""
+    commands = []
+
+    def fake_run(args, check):
+        commands.append(args)
+        assert check is True
+        Path(f"{args[3]}_cluster.tsv").write_text("seq_0\tseq_0\nseq_0\tseq_1\n")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    df = pd.DataFrame(
+        {
+            "id_prompt": ["seq0", "seq1", "seq2"],
+            "sequence": ["ACGT" * 1000, "TGCA" * 1000, "GTAC" * 1000],
+        }
+    )
+
+    scored = score_nucleotide_metrics(
+        df,
+        weights=RewardWeights(
+            valid_nt_chars=0.0,
+            genome_length=0.0,
+            gc_content=0.0,
+            nt_homopolymer=0.0,
+            mmseqs_cluster_diversity=1.0,
+        ),
+        mmseqs_cluster_diversity=MMseqsClusterDiversityConfig(
+            enabled=True,
+            mmseqs_bin="fake-mmseqs",
+            work_dir=tmp_path,
+        ),
+    )
+
+    assert len(commands) == 1
+    assert scored["reward_mmseqs_cluster_diversity"].tolist() == [0.5, 0.5, 0.0]
+    assert scored["reward"].tolist() == [0.5, 0.5, 0.0]
+    assert scored["mmseqs_cluster_id"].tolist() == ["group0:seq_0", "group0:seq_0", ""]
+    assert scored["mmseqs_cluster_size"].tolist() == [2, 2, 0]
+    assert scored["mmseqs_cluster_missing_from_output"].tolist() == [0.0, 0.0, 1.0]
+    assert scored["mmseqs_cluster_num_missing_from_output"].tolist() == [1, 1, 1]
+
+
+def test_mmseqs_cluster_diversity_singleton_group_is_not_missing(tmp_path, monkeypatch):
+    """A singleton prompt group should be a valid one-member cluster, not missing MMseqs output."""
+
+    def fake_run(*_args, **_kwargs):
+        raise AssertionError("singleton groups should not invoke MMseqs")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    df = pd.DataFrame(
+        {
+            "id_prompt": ["seq0"],
+            "prompt_group": ["prompt-a"],
+            "sequence": ["ACGT" * 1000],
+        }
+    )
+
+    scored = score_nucleotide_metrics(
+        df,
+        weights=RewardWeights(
+            valid_nt_chars=0.0,
+            genome_length=0.0,
+            gc_content=0.0,
+            nt_homopolymer=0.0,
+            mmseqs_cluster_diversity=1.0,
+        ),
+        mmseqs_cluster_diversity=MMseqsClusterDiversityConfig(
+            enabled=True,
+            mmseqs_bin="fake-mmseqs",
+            work_dir=tmp_path,
+        ),
+    )
+
+    assert scored["reward_mmseqs_cluster_diversity"].tolist() == [1.0]
+    assert scored["reward"].tolist() == [1.0]
+    assert scored["mmseqs_cluster_id"].tolist() == ["group0:seq_0"]
+    assert scored["mmseqs_cluster_size"].tolist() == [1]
+    assert scored["mmseqs_cluster_num_clusters"].tolist() == [1]
+    assert scored["mmseqs_cluster_num_missing_from_output"].tolist() == [0]
+    assert scored["mmseqs_cluster_missing_from_output"].tolist() == [0.0]
+
+
+def test_mmseqs_cluster_diversity_is_prompt_group_local(tmp_path, monkeypatch):
+    """Cluster sizes and inverse-size rewards should be computed within each prompt group."""
+    commands = []
+
+    def fake_run(args, check):
+        commands.append(args)
+        assert check is True
+        result_prefix = Path(args[3])
+        if result_prefix.parent.name == "prompt_group_0000":
+            Path(f"{result_prefix}_cluster.tsv").write_text("seq_0\tseq_0\nseq_0\tseq_1\n")
+        elif result_prefix.parent.name == "prompt_group_0001":
+            Path(f"{result_prefix}_cluster.tsv").write_text("seq_0\tseq_0\nseq_1\tseq_1\n")
+        else:
+            raise AssertionError(f"unexpected prompt group directory: {result_prefix.parent}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    df = pd.DataFrame(
+        {
+            "id_prompt": ["a0", "a1", "b0", "b1"],
+            "prompt_group": ["prompt-a", "prompt-a", "prompt-b", "prompt-b"],
+            "sequence": ["ACGT" * 1000, "TGCA" * 1000, "GTAC" * 1000, "CAGT" * 1000],
+        }
+    )
+
+    scored = score_nucleotide_metrics(
+        df,
+        weights=RewardWeights(
+            valid_nt_chars=0.0,
+            genome_length=0.0,
+            gc_content=0.0,
+            nt_homopolymer=0.0,
+            mmseqs_cluster_diversity=1.0,
+        ),
+        mmseqs_cluster_diversity=MMseqsClusterDiversityConfig(
+            enabled=True,
+            mmseqs_bin="fake-mmseqs",
+            work_dir=tmp_path,
+        ),
+    )
+
+    assert len(commands) == 2
+    assert scored["reward_mmseqs_cluster_diversity"].tolist() == [0.5, 0.5, 1.0, 1.0]
+    assert scored["reward"].tolist() == [0.5, 0.5, 1.0, 1.0]
+    assert scored["mmseqs_cluster_id"].tolist() == [
+        "group0:seq_0",
+        "group0:seq_0",
+        "group1:seq_0",
+        "group1:seq_1",
+    ]
+    assert scored["mmseqs_cluster_size"].tolist() == [2, 2, 1, 1]
+    assert scored["mmseqs_cluster_num_clusters"].tolist() == [3, 3, 3, 3]
+    assert scored["mmseqs_cluster_num_missing_from_output"].tolist() == [0, 0, 0, 0]
+
+
 def test_threshold_reward_helpers_plateau_at_pass_criteria():
     """Continuous threshold scores should not prefer over-matching acceptable criteria."""
     assert _lower_bound_ratio_score(7, 7) == 1.0

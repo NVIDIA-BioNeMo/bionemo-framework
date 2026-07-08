@@ -863,6 +863,30 @@ def _sample_from_logits(
     return sampled
 
 
+def _sample_from_log_probs(
+    log_probs: torch.Tensor,
+    *,
+    top_k: int,
+    generator: torch.Generator,
+    vocab_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Sample next-token ids from pre-filtered log-probabilities."""
+    if top_k == 1:
+        return torch.argmax(log_probs, dim=-1)
+
+    probabilities = log_probs.exp()
+    sampled = torch.multinomial(probabilities, num_samples=1, generator=generator).view(-1)
+    if vocab_size:
+        sampled = torch.clamp(sampled, min=0, max=(vocab_size - 1))
+    return sampled
+
+
+def _selected_log_probs_for_sampled_tokens(log_probs: torch.Tensor, sampled_tokens: torch.Tensor) -> list[float]:
+    """Return sampled-token log-probs with one tensor gather and one host transfer."""
+    sampled_indices = sampled_tokens.to(device=log_probs.device, dtype=torch.long).view(-1, 1)
+    return log_probs.gather(1, sampled_indices).squeeze(1).detach().cpu().tolist()
+
+
 def _sampling_rng_for_native_dynamic(nd: Evo2NativeDynamicComponents, device: torch.device) -> torch.Generator:
     """Return the persistent sampling RNG for an inference engine.
 
@@ -1317,13 +1341,14 @@ def _generate_native_dynamic(
                 top_p=eff_top_p,
                 vocab_size=tokenizer.vocab_size,
             )
-            sampled = _sample_from_logits(
-                last_logits,
-                temperature=float(temperature),
+            sampled = _sample_from_log_probs(
+                sampled_log_probs,
                 top_k=eff_top_k,
-                top_p=eff_top_p,
                 generator=sampling_rng,
                 vocab_size=tokenizer.vocab_size,
+            )
+            selected_log_probs = (
+                _selected_log_probs_for_sampled_tokens(sampled_log_probs, sampled) if return_log_probs else []
             )
             sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
             if count_generated:
@@ -1333,8 +1358,7 @@ def _generate_native_dynamic(
                 else:
                     generated_ids.append(next_tok_id)
                 if return_log_probs and not stopped_on_eos:
-                    logprob = sampled_log_probs[0, next_tok_id].item()
-                    generated_logprobs.append(logprob)
+                    generated_logprobs.append(float(selected_log_probs[0]))
             active_after_sample = torch.tensor(
                 [not count_generated or (not stopped_on_eos and len(generated_ids) < max_new_tokens)], dtype=torch.bool
             )
@@ -1470,13 +1494,14 @@ def _generate_native_dynamic(
                 top_p=eff_top_p,
                 vocab_size=tokenizer.vocab_size,
             )
-            sampled = _sample_from_logits(
-                active_logits,
-                temperature=float(temperature),
+            sampled = _sample_from_log_probs(
+                active_log_probs,
                 top_k=eff_top_k,
-                top_p=eff_top_p,
                 generator=sampling_rng,
                 vocab_size=tokenizer.vocab_size,
+            )
+            selected_log_probs = (
+                _selected_log_probs_for_sampled_tokens(active_log_probs, sampled) if return_log_probs else []
             )
             sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
             sampled_ids = sampled_cpu.tolist()
@@ -1489,7 +1514,7 @@ def _generate_native_dynamic(
                         continue
                     generated_ids[request_idx].append(next_tok_id)
                     if return_log_probs:
-                        generated_logprobs[request_idx].append(active_log_probs[request_idx, next_tok_id].item())
+                        generated_logprobs[request_idx].append(float(selected_log_probs[request_idx]))
 
             keep_group_active = (not count_generated) or any(
                 not stopped_on_eos[request_idx] and len(request_generated_ids) < max_new_tokens

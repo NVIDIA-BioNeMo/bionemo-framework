@@ -254,7 +254,7 @@ def _cluster_valid_sequence_group(
         return {}, 0, 0
     if len(group_df) == 1:
         row_index = group_df.index[0]
-        return {row_index: (f"group{group_index}:seq_0", 1, 1.0)}, 1, 1
+        return {row_index: (f"group{group_index}:seq_0", 1, 1.0)}, 1, 0
 
     group_dir = run_dir / f"prompt_group_{group_index:04d}"
     group_dir.mkdir(parents=True, exist_ok=True)
