@@ -255,6 +255,7 @@ threadpoolctl==3.6.0
 tinycss2==1.4.0
 tokenizers==0.22.1
 toml==0.10.2
+torchao==0.17.0
 torchmetrics==1.8.2
 torchprofile==0.0.4
 torchx==0.7.0

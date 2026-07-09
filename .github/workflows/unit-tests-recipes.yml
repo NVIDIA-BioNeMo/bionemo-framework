@@ -205,6 +205,11 @@ jobs:
             ${{ runner.os }}-huggingface-${{ matrix.recipe.name }}-
             ${{ runner.os }}-huggingface-
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          enable-cache: true
+
       - name: Install dependencies
         working-directory: ${{ matrix.recipe.dir }}
         run: |
@@ -278,6 +283,11 @@ jobs:
             ${{ runner.os }}-huggingface-evo2_megatron-notebooks-
             ${{ runner.os }}-huggingface-evo2_megatron-
             ${{ runner.os }}-huggingface-
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          enable-cache: true
 
       - name: Install dependencies
         working-directory: recipes/evo2_megatron
