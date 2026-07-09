@@ -102,7 +102,14 @@ def run_tests_in_docker(work_dir: str) -> bool:
 
         echo "Checking for dependency files..."
         # Install dependencies based on available files
-        if [ -f pyproject.toml ] || [ -f setup.py ]; then
+        if [ -f .ci_build.sh ]; then
+            echo "Running .ci_build.sh..."
+            if ! command -v uv >/dev/null 2>&1; then
+                PIP_CACHE_DIR=/workspace/.cache/pip python -m pip install uv
+            fi
+            bash .ci_build.sh
+            echo "Finished .ci_build.sh"
+        elif [ -f pyproject.toml ] || [ -f setup.py ]; then
             echo "Installing package in editable mode..."
             PIP_CACHE_DIR=/workspace/.cache/pip pip install -e .
             echo "Installed package as editable package"
@@ -116,6 +123,9 @@ def run_tests_in_docker(work_dir: str) -> bool:
         fi
 
         echo "Running tests..."
+        if [ -f .ci_test_env.sh ]; then
+            source .ci_test_env.sh
+        fi
         python -m pytest -v .
         """)
 

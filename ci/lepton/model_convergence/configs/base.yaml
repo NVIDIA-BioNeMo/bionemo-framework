@@ -11,7 +11,7 @@ template_type: convergence_tests
 # Defines the base Docker image and registry auth needed
 ############################################################
 container:
-  image: nvcr.io/nvidia/pytorch:26.02-py3
+  image: nvcr.io/nvidia/pytorch:26.06-py3
   registry_auth: lepton-nvidia-jwilber
 
 ############################################################

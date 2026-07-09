@@ -1,6 +1,6 @@
 datasets
 hydra-core
-peft @ git+https://github.com/balvisio/peft.git@support-te-lora
+peft==0.19.1
 torch
 torchao!=0.14.0
 torchmetrics
