@@ -1,4 +1,9 @@
 #!/bin/bash -x
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 
 # FIXME: Fix for "No such file or directory: /workspace/TransformerEngine"
 #  Remove once bug has been addressed in the nvidia/pytorch container.
