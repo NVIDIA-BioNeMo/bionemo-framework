@@ -27,6 +27,10 @@ RECIPE_ROOT = Path(__file__).resolve().parent.parent
 if str(RECIPE_ROOT) not in sys.path:
     sys.path.insert(0, str(RECIPE_ROOT))
 
+pythonpath_entries = os.environ.get("PYTHONPATH", "").split(os.pathsep) if os.environ.get("PYTHONPATH") else []
+if str(RECIPE_ROOT) not in pythonpath_entries:
+    os.environ["PYTHONPATH"] = os.pathsep.join([str(RECIPE_ROOT), *pythonpath_entries])
+
 
 @pytest.fixture
 def recipe_path() -> Path:
