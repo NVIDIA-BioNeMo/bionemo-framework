@@ -24,6 +24,23 @@ import transformer_engine.pytorch as te
 from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear, TELinear
 from megatron.core.post_training.modelopt.layers import Linear as MTLinear
 from transformer_engine.common.recipe import DelayedScaling, Format
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+
+def _set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
+    """Restore the Transformer Engine 2.14 setter used by Megatron-Core CUDA graphs."""
+    state = cls.quantization_state
+    if state.skip_fp8_weight_update_tensor is None:
+        state.skip_fp8_weight_update_tensor = torch.empty(1, dtype=torch.float32, device="cuda")
+    state.skip_fp8_weight_update_tensor.fill_(skip)
+
+
+if not hasattr(FP8GlobalStateManager, "set_skip_fp8_weight_update_tensor"):
+    setattr(
+        FP8GlobalStateManager,
+        "set_skip_fp8_weight_update_tensor",
+        classmethod(_set_skip_fp8_weight_update_tensor),
+    )
 
 
 @lru_cache

@@ -19,22 +19,42 @@ import json
 import shutil
 from pathlib import Path
 
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import convert
 from modeling_mixtral_te import AUTO_MAP
 
 
-def export_hf_checkpoint(tag: str, export_path: Path):
+def export_hf_checkpoint(
+    tag: str,
+    export_path: Path,
+    *,
+    torch_dtype: torch.dtype | None = None,
+    low_cpu_mem_usage: bool = False,
+    **config_kwargs,
+) -> None:
     """Export a Hugging Face checkpoint to a Transformer Engine checkpoint.
 
     Args:
-        tag: The tag of the checkpoint to export.
+        tag: The tag (or local path) of the Hugging Face checkpoint to export.
         export_path: The parent path to export the checkpoint to.
+        torch_dtype: Optional dtype to load the source model in (e.g. ``torch.bfloat16`` for
+            large models such as Mixtral-8x7B). ``None`` keeps the source checkpoint dtype.
+        low_cpu_mem_usage: Forwarded to ``from_pretrained``; enable for large models to avoid
+            materializing a second CPU copy of the weights during load.
+        **config_kwargs: Extra ``NVMixtralConfig`` overrides forwarded to
+            :func:`convert.convert_mixtral_hf_to_te`, e.g. ``expert_ffn_mode="fused_grouped_mlp"``,
+            ``attn_input_format="bshd"``, ``self_attn_mask_type="causal"``.
     """
-    model_hf = AutoModelForCausalLM.from_pretrained(tag)
+    model_hf = AutoModelForCausalLM.from_pretrained(tag, torch_dtype=torch_dtype, low_cpu_mem_usage=low_cpu_mem_usage)
 
-    model_te = convert.convert_mixtral_hf_to_te(model_hf)
+    model_te = convert.convert_mixtral_hf_to_te(model_hf, **config_kwargs)
+    del model_hf
+
+    # save_pretrained works for every expert_ffn_mode: NVMixtralPreTrainedModel.state_dict() drops the
+    # duplicate _experts_ffn_op.* aliases so the safetensors writer sees exactly one copy of each
+    # (fused) expert weight.
     model_te.save_pretrained(export_path)
 
     tokenizer = AutoTokenizer.from_pretrained(tag)

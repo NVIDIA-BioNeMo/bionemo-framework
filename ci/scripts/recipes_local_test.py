@@ -40,6 +40,8 @@ DOCKER_RUN_ARGS = [
     "memlock=-1",
     "--ulimit",
     "stack=67108864",
+    "--env",
+    "CI=true",
     "-v",
     f"{PIP_CACHE_DIR}:/workspace/.cache/pip",
 ]
@@ -48,14 +50,7 @@ CUSTOM_CONTAINERS = {
     "models/amplify": "svcbionemo023/bionemo-framework:amplify-model-devcontainer-082025",
 }
 
-# DEFAULT_CONTAINER = "nvcr.io/nvidia/pytorch:26.02-py3"
-
-# This is a squashed version of the pytorch:26.02-py3 image, generated with
-# docker-squash nvcr.io/nvidia/pytorch:26.02-py3 -t svcbionemo023/bionemo-framework:pytorch26.02-py3-squashed
-# --output type=registry,compression=zstd,force-compression=true,oci-mediatypes=true,compression-level=15
-# and pushed to the dockerhub registry. Our github actions are able to cache image pulls from dockerhub but not nvcr, so
-# hopefully this cuts down slightly on CI time at the expense of having a slightly in-directed image location.
-DEFAULT_CONTAINER = "svcbionemo023/bionemo-framework:pytorch26.02-py3-squashed"
+DEFAULT_CONTAINER = "nvcr.io/nvidia/pytorch:26.06-py3"
 
 
 def get_git_root() -> str:
@@ -107,7 +102,14 @@ def run_tests_in_docker(work_dir: str) -> bool:
 
         echo "Checking for dependency files..."
         # Install dependencies based on available files
-        if [ -f pyproject.toml ] || [ -f setup.py ]; then
+        if [ -f .ci_build.sh ]; then
+            echo "Running .ci_build.sh..."
+            if ! command -v uv >/dev/null 2>&1; then
+                PIP_CACHE_DIR=/workspace/.cache/pip python -m pip install uv
+            fi
+            bash .ci_build.sh
+            echo "Finished .ci_build.sh"
+        elif [ -f pyproject.toml ] || [ -f setup.py ]; then
             echo "Installing package in editable mode..."
             PIP_CACHE_DIR=/workspace/.cache/pip pip install -e .
             echo "Installed package as editable package"
@@ -121,6 +123,9 @@ def run_tests_in_docker(work_dir: str) -> bool:
         fi
 
         echo "Running tests..."
+        if [ -f .ci_test_env.sh ]; then
+            source .ci_test_env.sh
+        fi
         python -m pytest -v .
         """)
 
