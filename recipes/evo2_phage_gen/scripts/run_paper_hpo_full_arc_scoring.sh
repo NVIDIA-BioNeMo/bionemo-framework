@@ -9,6 +9,7 @@
 #   CELL_GLOB='phix174_prompt4_temp0.7.manifest1000.fasta'  # run one cell
 #   DRY_RUN=1                                               # write configs only
 #   OVERWRITE=1                                             # rerun existing Arc outputs
+#   GENETIC_ARCHITECTURE_REMOVE_FILTER=0                    # retain architecture-similar representatives
 
 set -Eeuo pipefail
 
@@ -27,6 +28,11 @@ TARGET_RECORDS="${TARGET_RECORDS:-1000}"
 CELL_GLOB="${CELL_GLOB:-phix174_prompt*_temp*.manifest${TARGET_RECORDS}.fasta}"
 OVERWRITE="${OVERWRITE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+GENETIC_ARCHITECTURE_REMOVE_FILTER="${GENETIC_ARCHITECTURE_REMOVE_FILTER:-1}"
+if [[ "${GENETIC_ARCHITECTURE_REMOVE_FILTER}" != "0" && "${GENETIC_ARCHITECTURE_REMOVE_FILTER}" != "1" ]]; then
+  printf 'ERROR: GENETIC_ARCHITECTURE_REMOVE_FILTER must be 0 or 1, got %s\n' "${GENETIC_ARCHITECTURE_REMOVE_FILTER}" >&2
+  exit 2
+fi
 
 BASE_CONFIG="${BASE_CONFIG:-${HPO_RECIPE_DIR}/configs/arc_genome_design_filtering_local.yaml}"
 PIPELINE_SCRIPT="${PIPELINE_SCRIPT:-${HPO_RECIPE_DIR}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py}"
@@ -44,7 +50,7 @@ python "${HPO_SCRIPT_DIR}/score_paper_hpo_generation.py" \
   --target-records "${TARGET_RECORDS}"
 
 printf 'Preparing full Arc configs under %s\n' "${ARC_CONFIG_DIR}"
-python - "$BASE_CONFIG" "$FASTA_DIR" "$ARC_CONFIG_DIR" "$ARC_ROOT" "$CELL_GLOB" <<'PY'
+python - "$BASE_CONFIG" "$FASTA_DIR" "$ARC_CONFIG_DIR" "$ARC_ROOT" "$CELL_GLOB" "$GENETIC_ARCHITECTURE_REMOVE_FILTER" <<'PY'
 from pathlib import Path
 import sys
 import yaml
@@ -54,6 +60,7 @@ fasta_dir = Path(sys.argv[2])
 arc_config_dir = Path(sys.argv[3])
 arc_root = Path(sys.argv[4])
 cell_glob = sys.argv[5]
+genetic_architecture_remove_filter = sys.argv[6] == "1"
 
 template = yaml.safe_load(base_config.read_text())
 
@@ -86,7 +93,7 @@ for fasta_path in sorted(fasta_dir.glob(cell_glob)):
     config["use_orf_filtered_df_instead"] = False
     config["use_nucleotide_filtered_df_instead_2"] = False
     config["mmseqs_clustering_filter"] = True
-    config["genetic_architecture_remove_filter"] = True
+    config["genetic_architecture_remove_filter"] = genetic_architecture_remove_filter
 
     config["genetic_architecture_visualization_and_synteny_filtering"] = True
     config["use_reference_genome"] = True
