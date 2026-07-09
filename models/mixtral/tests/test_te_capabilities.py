@@ -32,6 +32,9 @@ import transformer_engine.pytorch as te
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 
+GROUPED_LINEAR_PARITY_ATOL = 1e-2
+GROUPED_LINEAR_PARITY_RTOL = 1e-2
+
 
 def _is_supported_blackwell() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] == 10
@@ -76,6 +79,19 @@ def test_ops_fused_grouped_mlp_importable():
         except Exception:
             swiglu_ok = False
     assert swiglu_ok, "Neither ScaledSwiGLU nor SwiGLU is importable from transformer_engine.pytorch.ops"
+
+
+def _assert_same_tolerance_rejects_shifted(reference: torch.Tensor, actual: torch.Tensor) -> None:
+    """Guard against over-loose tolerances by checking a token-shuffled baseline fails."""
+    assert actual.shape[0] > 1, "negative control needs at least two tokens"
+    shifted = torch.roll(actual, shifts=1, dims=0)
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(
+            reference,
+            shifted,
+            atol=GROUPED_LINEAR_PARITY_ATOL,
+            rtol=GROUPED_LINEAR_PARITY_RTOL,
+        )
 
 
 @requires_cuda
@@ -123,11 +139,18 @@ def test_single_grouped_weight_matches_discrete_forward_backward():
 
     out_d = discrete(x, m_splits=m_splits)
     out_s = single(x2, m_splits=m_splits)
-    torch.testing.assert_close(out_s, out_d, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(out_s, out_d, atol=GROUPED_LINEAR_PARITY_ATOL, rtol=GROUPED_LINEAR_PARITY_RTOL)
+    _assert_same_tolerance_rejects_shifted(out_d, out_s)
 
     out_d.sum().backward()
     out_s.sum().backward()
-    torch.testing.assert_close(x2.grad, x.grad, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        x2.grad,
+        x.grad,
+        atol=GROUPED_LINEAR_PARITY_ATOL,
+        rtol=GROUPED_LINEAR_PARITY_RTOL,
+    )
+    _assert_same_tolerance_rejects_shifted(x.grad, x2.grad)
 
 
 # Spike finding (TE 2.16.0+4220403e, RTX 5090): DTensor.from_local(gl.weight, mesh, [Shard(0)])

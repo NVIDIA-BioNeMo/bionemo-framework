@@ -25,9 +25,6 @@ import torch
 from torch.distributed.tensor import DTensor
 
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent))
-
 DP_SIZE = 2
 EP_SIZE = 2
 TRAIN_SEED = 42

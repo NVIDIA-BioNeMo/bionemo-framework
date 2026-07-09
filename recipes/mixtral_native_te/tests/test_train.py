@@ -26,10 +26,6 @@ import torch
 from hydra import compose, initialize_config_dir
 
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent))
-
-
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires a GPU")
 
 requires_multi_gpu = pytest.mark.skipif(

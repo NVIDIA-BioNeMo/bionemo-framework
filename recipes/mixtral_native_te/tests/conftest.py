@@ -23,14 +23,15 @@ import pytest
 
 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "0"
 
-sys.path.append(Path(__file__).parent.parent.as_posix())
-sys.path.append(Path(__file__).parent.as_posix())
+RECIPE_ROOT = Path(__file__).resolve().parent.parent
+if str(RECIPE_ROOT) not in sys.path:
+    sys.path.insert(0, str(RECIPE_ROOT))
 
 
 @pytest.fixture
 def recipe_path() -> Path:
     """Return the root directory of the recipe."""
-    return Path(__file__).parent.parent
+    return RECIPE_ROOT
 
 
 @pytest.fixture

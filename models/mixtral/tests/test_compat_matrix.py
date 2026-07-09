@@ -56,8 +56,6 @@ from test_te_capabilities import _is_supported_blackwell
 from grouped_dcp import load_consolidated, save_consolidated
 
 
-RESULTS_PATH = Path(__file__).parent / "compat_matrix_results.json"
-
 # Fused CuteDSL MXFP8 grouped GEMM requires each group's token count divisible by 256.
 TOKENS_PER_EXPERT = 256
 HIDDEN = 128
@@ -260,13 +258,13 @@ def _batch(num_local: int, device: str = "cuda") -> dict:
     return {"input_ids": ids, "labels": labels, "tokens": tokens}
 
 
-def _record(cell: MatrixCell, status: str, detail: str = "") -> None:
+def _record(results_path: Path, cell: MatrixCell, status: str, detail: str = "") -> None:
     data: dict = {}
-    if RESULTS_PATH.exists():
-        data = json.loads(RESULTS_PATH.read_text())
+    if results_path.exists():
+        data = json.loads(results_path.read_text())
     key = f"{cell.compute}|{cell.precision}|ep{cell.ep_size}|ckpt={cell.checkpoint}"
     data[key] = {"status": status, "detail": detail}
-    RESULTS_PATH.write_text(json.dumps(data, indent=2))
+    results_path.write_text(json.dumps(data, indent=2))
 
 
 def _loss(model: nn.Module, batch: dict, mxfp8: bool) -> torch.Tensor:
@@ -274,19 +272,13 @@ def _loss(model: nn.Module, batch: dict, mxfp8: bool) -> torch.Tensor:
     return torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB), batch["labels"].reshape(-1))
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _clear_results():
-    if RESULTS_PATH.exists():
-        RESULTS_PATH.unlink()
-    yield
-
-
 @pytest.mark.parametrize("cell", MATRIX)
 def test_compat_matrix_cell(cell: MatrixCell, unused_tcp_port, tmp_path):
     """Run one matrix cell (subprocess for EP>1)."""
+    results_path = tmp_path / "compat_matrix_results.json"
     if cell.ep_size == 1:
         _run_cell_local(cell, tmp_path)
-        _record(cell, "PASS")
+        _record(results_path, cell, "PASS")
         return
 
     cmd = [
@@ -313,9 +305,9 @@ def test_compat_matrix_cell(cell: MatrixCell, unused_tcp_port, tmp_path):
         check=False,
     )
     if result.returncode != 0:
-        _record(cell, "FAIL", result.stderr[-500:])
+        _record(results_path, cell, "FAIL", result.stderr[-500:])
         pytest.fail(f"cell {cell} failed:\n{result.stdout}\n{result.stderr}")
-    _record(cell, "PASS")
+    _record(results_path, cell, "PASS")
 
 
 def _train_and_maybe_checkpoint(cell: MatrixCell, num_local: int, ep_mesh, tmp_path, device) -> None:

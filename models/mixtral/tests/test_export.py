@@ -27,6 +27,12 @@ from modeling_mixtral_te import NVMixtralForCausalLM
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 
+# Fused GroupedMLP and module GroupedLinear run different BF16 kernels/accumulation paths. Keep the
+# parity tolerance explicit and pair each use with a same-tolerance negative control below so this
+# cannot silently become a non-discriminating comparison.
+LOGIT_PARITY_ATOL = 2e-2
+LOGIT_PARITY_RTOL = 2e-2
+
 
 def _fused_grouped_mlp_available() -> bool:
     if not (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10):
@@ -70,6 +76,14 @@ def _make_tiny_inputs(batch_size: int = 2, seq_len: int = 256) -> dict:
     input_ids = torch.randint(0, 256, (batch_size, seq_len), device="cuda")
     attention_mask = torch.ones_like(input_ids)
     return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+
+def _assert_same_tolerance_rejects_shifted_logits(reference: torch.Tensor, actual: torch.Tensor) -> None:
+    """Guard against over-loose tolerances by checking a token-logit shuffle fails."""
+    assert actual.shape[-1] > 1, "negative control needs at least two vocabulary logits"
+    shifted = torch.roll(actual, shifts=1, dims=-1)
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(reference, shifted, atol=LOGIT_PARITY_ATOL, rtol=LOGIT_PARITY_RTOL)
 
 
 @pytest.mark.skipif(os.getenv("CI", "false") == "true", reason="Skipping test in CI, requires Mini-Mixtral download.")
@@ -129,7 +143,8 @@ def test_fused_grouped_mlp_hf_te_hf_roundtrip():
         ref_logits = model_hf(**inputs).logits
         rt_logits = model_hf_rt(**inputs).logits
 
-    torch.testing.assert_close(ref_logits, rt_logits, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(ref_logits, rt_logits, atol=LOGIT_PARITY_ATOL, rtol=LOGIT_PARITY_RTOL)
+    _assert_same_tolerance_rejects_shifted_logits(ref_logits, rt_logits)
 
 
 @requires_cuda
@@ -210,7 +225,8 @@ def test_fused_vs_grouped_linear_logit_parity():
     max_diff = (logits_baseline - logits_fused).abs().max().item()
     print(f"max logit diff (grouped_linear vs fused_grouped_mlp): {max_diff}")
 
-    torch.testing.assert_close(logits_baseline, logits_fused, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(logits_baseline, logits_fused, atol=LOGIT_PARITY_ATOL, rtol=LOGIT_PARITY_RTOL)
+    _assert_same_tolerance_rejects_shifted_logits(logits_baseline, logits_fused)
 
 
 @requires_cuda

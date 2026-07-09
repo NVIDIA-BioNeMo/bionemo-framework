@@ -24,8 +24,6 @@ import pytest
 import torch
 
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 requires_multi_gpu = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.device_count() < 2,
     reason="Test requires at least 2 GPUs",
