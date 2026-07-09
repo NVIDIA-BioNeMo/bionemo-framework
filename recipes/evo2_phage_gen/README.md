@@ -68,7 +68,7 @@ NeMo-RL package integration:
   `configs/gdpo_phage_megatron.yaml` to return positional multi-objective rewards.
 - The GRPO defaults inherited by `configs/grpo_phage_megatron.yaml` are copied
   into `configs/nemo_rl_defaults`.
-- `.ci_build_env.sh` runs `evo2_phage_patch_nemo_rl --repair-install` after
+- `.ci_build.sh` runs `evo2_phage_patch_nemo_rl --repair-install` after
   dependency installation. This repairs upstream NeMo-RL package discovery so
   all `nemo_rl.*` modules are installed, then applies the Evo2/MBridge patch.
 - Processor, environment, and Megatron-model adapter registration should be
@@ -455,14 +455,14 @@ Run these from the repository root.
 
     ```bash
     cd recipes/evo2_phage_gen
-    ./.ci_build_env.sh
+    ./.ci_build.sh
     source .ci_test_env.sh
     cd ../..
     ```
 
     If the install fails while building CUDA extension packages because they
     cannot import the container's preinstalled PyTorch, retry the build command
-    as `UV_NO_MANAGED_PYTHON=1 ./.ci_build_env.sh`. This can happen when `uv`
+    as `UV_NO_MANAGED_PYTHON=1 ./.ci_build.sh`. This can happen when `uv`
     selects a managed Python whose system site packages do not include the
     container CUDA/PyTorch stack.
 
@@ -473,7 +473,7 @@ Run these from the repository root.
     docker build -f recipes/evo2_phage_gen/Dockerfile -t evo2-phage-gen .
     ```
 
-    The Dockerfile intentionally reuses `.ci_build_env.sh`: Python dependencies
+    The Dockerfile intentionally reuses `.ci_build.sh`: Python dependencies
     are managed by `uv`, while small native verifier tools are downloaded into
     `.venv/bin`. Large databases and checkpoints should still be mounted or
     prepared under `recipes/evo2_phage_gen/data` at runtime rather than baked
@@ -606,19 +606,7 @@ Run these from the repository root.
       --output-csv recipes/evo2_phage_gen/data/checkpoints/phage_qc_smoke/rewards.csv
     ```
 
-11. Re-run the checkpoint-prior analysis used by the converter:
-
-    ```bash
-    evo2_analyze_inverse_prior \
-      --checkpoint-dir "$HOME/.cache/bionemo/d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990-nemo2_evo2_1b_8k.tar.gz.untar" \
-      --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_1b_8k_prior.json
-
-    evo2_analyze_inverse_prior \
-      --checkpoint-dir "$HOME/.cache/bionemo/78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655-nemo2_evo2_7b_8k.tar.gz.untar" \
-      --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_7b_8k_prior.json
-    ```
-
-12. Check the NeMo-RL GRPO scaffold readiness:
+11. Check the NeMo-RL GRPO scaffold readiness:
 
     ```bash
     evo2_phage_check_rl --allow-template-gaps --warn-only
@@ -631,7 +619,7 @@ Run these from the repository root.
     NeMo-RL package discovery and applies the Evo2/MBridge patch to the
     importable `nemo_rl` package.
 
-13. Inspect the NeMo-RL GRPO scaffold:
+12. Inspect the NeMo-RL GRPO scaffold:
 
     ```bash
     cd recipes/evo2_phage_gen
@@ -917,7 +905,7 @@ including `checkv`, `orfipy`, `lovis4u`, `pyrodigal`, `pyrodigal-gv`,
 handles the pieces that are not normal Python package dependencies: the
 MMseqs2-GPU executable, NCBI BLAST+/dustmasker, upstream DIAMOND, the
 Prodigal-compatible wrapper, HMMER/hmmsearch, PHROGs files, and the CheckV
-database. In CI, the small native tools are installed into `.venv/bin` by `.ci_build_env.sh`, so sourcing
+database. In CI, the small native tools are installed into `.venv/bin` by `.ci_build.sh`, so sourcing
 `.ci_test_env.sh` is enough to put them on `PATH`.
 
 The expected populated paths are:
@@ -984,134 +972,11 @@ for raw rollouts; later RL phases should add ORF, tropism, architecture, and
 novelty terms as batched/offline reward components once their external tools and
 databases are configured.
 
-## Checkpoint Conversion Plan
+## Checkpoint Conversion Details
 
-Arc's Hugging Face repository for
-`evo-design/evo-2-7b-8k-microviridae` contains one 13 GB Vortex checkpoint:
-`evo2_7b_microviridae.pt`. The model card states that it is a 10,240-token,
-12,000-iteration fine-tune from `arcinstitute/evo2_7b_base`.
-
-The general conversion tool should be added to `recipes/evo2_megatron`, next to
-the existing MBridge-to-Vortex exporter:
-
-- Add `bionemo.evo2.utils.checkpoint.vortex_to_mbridge`.
-- Add a CLI such as `evo2_convert_vortex_to_mbridge` to both
-  `recipes/evo2_megatron/pyproject.toml` and
-  `recipes/evo2_phage_gen/pyproject.toml`, because this recipe exposes Evo2
-  through a symlink.
-- Reuse the existing MBridge checkpoint packaging path from
-  `savanna_to_mbridge.py`.
-- Add focused tests that round-trip synthetic state dicts through
-  MBridge-to-Vortex and Vortex-to-MBridge for the ambiguous layer families.
-- Add a CI-runnable full checkpoint round-trip test that downloads the smaller
-  public 1B Vortex checkpoint from `arcinstitute/evo2_1b_base`, converts it to
-  MBridge state-dict form, converts back to Vortex, and asserts exact key and
-  value equality for every tensor or byte-metadata value.
-
-CI checkpoint test:
-
-```bash
-EVO2_CHECKPOINT_CACHE_DIR=recipes/evo2_phage_gen/data/checkpoints \
-python -m pytest \
-  recipes/evo2_megatron/tests/bionemo/evo2/utils/checkpoint/test_vortex_to_mbridge.py \
-  -q
-```
-
-This exercises `arcinstitute/evo2_1b_base/evo2_1b_base.pt` with the
-`evo2_1b_base` provider and is not skipped in CI.
-
-Microviridae bootstrap status:
-
-```bash
-evo2_convert_vortex_to_mbridge \
-  --vortex-ckpt-path recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt \
-  --mbridge-ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-  --model-size evo2_7b_base \
-  --seq-length 10240 \
-  --tokenizer-path recipes/evo2_phage_gen/tokenizers/nucleotide_fast_tokenizer_512
-
-evo2_export_mbridge_to_vortex \
-  --mbridge-ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-  --output-path recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt \
-  --model-size evo2_7b_base
-```
-
-The cached validation run compared
-`recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae.pt` with
-`recipes/evo2_phage_gen/data/checkpoints/converted_evo2_7b_microviridae.pt` and passed exact equality:
-386 original keys, 386 converted keys, zero missing/extra keys, and exact tensor
-or byte equality for every value.
-
-The packaged MBridge checkpoint lives at
-`recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge`. The DCP model state is kept
-loadable for Megatron training/inference; Vortex-only metadata needed for exact
-export is stored in `vortex_passthrough.pt` beside the checkpoint. The
-validation path loads the packaged checkpoint, restores that sidecar through
-`load_mbridge_state_dict`, exports back to Vortex, and passes exact equality
-against the original Hugging Face checkpoint: 386 original keys, 386 round-trip
-keys, zero missing/extra keys, and exact tensor or byte equality.
-
-Megatron inference smoke test:
-
-```bash
-infer_evo2 \
-  --ckpt-dir recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge \
-  --prompt GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAAAAATTATCTT \
-  --max-new-tokens 8 \
-  --temperature 0.8 \
-  --top-k 4 \
-  --seed 7 \
-  --tensor-parallel-size 1 \
-  --max-seq-length 128 \
-  --prompt-batch-size 1 \
-  --output-file recipes/evo2_phage_gen/data/checkpoints/generation/smoke_microviridae.jsonl
-```
-
-This loads the converted 7B checkpoint with MCore local CUDA graphs and
-generates `GATAAAGC` for the short smoke prompt. A steady-state TP=2 CUDA graph
-run on 2xH100 reaches about 109 completion tokens/sec for a 1024-token
-completion.
-
-Ambiguous reverse mappings need a principled initialization projection:
-
-- Long Hyena filters: MBridge parameters `p` and `gamma` map to Vortex
-  `log_poles = -exp(p) * exp(gamma)`. Reverse conversion searches nearby fp32
-  values for an exact round-trip pair and prefers a balanced split,
-  `p ~= gamma ~= 0.5 * log(-log_poles)`. This is data-driven: prior analysis
-  on the original BioNeMo 1B and 7B checkpoints shows trained `p` and `gamma`
-  both move close to zero and track each other, rather than staying close to
-  the initial `gamma = log(U(0.01, 0.1))` support.
-- Medium explicit filters: MBridge `h` and `decay` map to Vortex `filter.h`
-  through a product after truncation. The current exact-reproduction converter
-  chooses `decay = 1` and `h = filter.h` so exporting back to Vortex is bitwise
-  identical. Use `evo2_analyze_inverse_prior` on original 1B/7B checkpoints to
-  decide whether a future training-oriented inverse should instead project
-  toward the trained decay distribution.
-- Non-ambiguous mappings, such as MLP `w1/w2` split from concatenated
-  `linear_fc1.weight`, attention projections, RMSNorm scales, and short-conv
-  reshaping, should directly invert `mbridge_to_vortex.py`.
-
-The implementation should instantiate the target Evo2 provider with the same
-model size, sequence length, dtype, initialization settings, and RNG seed used
-for training so the initialization anchors are reproducible.
-
-Prior-analysis status:
-
-```bash
-evo2_analyze_inverse_prior \
-  --checkpoint-dir "$HOME/.cache/bionemo/d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990-nemo2_evo2_1b_8k.tar.gz.untar" \
-  --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_1b_8k_prior.json
-
-evo2_analyze_inverse_prior \
-  --checkpoint-dir "$HOME/.cache/bionemo/78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655-nemo2_evo2_7b_8k.tar.gz.untar" \
-  --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_7b_8k_prior.json
-```
-
-Both reports show less than 0.01 percent of `gamma` values inside the original
-log-init support. The 7B medians are approximately `p=-0.048` and
-`gamma=-0.049`; the 1B medians are approximately `p=-0.144` and
-`gamma=-0.186`. This supports the balanced inverse prior for continuing
-training from a converted Vortex checkpoint.
+The Vortex-to-MBridge converter, inverse-prior analysis utility, and converter
+implementation notes live with the Evo2 checkpoint tools in
+[`../evo2_megatron/src/bionemo/evo2/utils/checkpoint/README.md`](../evo2_megatron/src/bionemo/evo2/utils/checkpoint/README.md).
 
 ## Nucleotide QC And Online Reward
 
@@ -1207,7 +1072,7 @@ that checkpoint config, tokenizer, prompt JSONL, Megatron generation backend,
 topology, and the Evo2 policy finalization hook.
 
 The recipe keeps upstreamable NeMo-RL changes in
-`patches/nemo-rl-evo2-mbridge-grpo.patch`. `.ci_build_env.sh` applies them as
+`patches/nemo-rl-evo2-mbridge-grpo.patch`. `.ci_build.sh` applies them as
 part of environment setup. For an existing environment, repair and patch the
 installed package with:
 

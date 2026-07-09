@@ -98,7 +98,7 @@ evo2_convert_nemo2_to_mbridge = "bionemo.evo2.utils.checkpoint.nemo2_to_mbridge:
 evo2_convert_savanna_to_mbridge = "bionemo.evo2.utils.checkpoint.savanna_to_mbridge:main"
 evo2_export_mbridge_to_vortex = "bionemo.evo2.utils.checkpoint.mbridge_to_vortex:main"
 evo2_convert_vortex_to_mbridge = "bionemo.evo2.utils.checkpoint.vortex_to_mbridge:main"
-evo2_analyze_inverse_prior = "bionemo.evo2_phage_gen.checkpoint_prior:main"
+evo2_analyze_inverse_prior = "bionemo.evo2.utils.checkpoint.checkpoint_prior:main"
 evo2_phage_prepare_external_assets = "bionemo.evo2_phage_gen.external_assets:main"
 evo2_phage_prepare_arc_pipeline = "bionemo.evo2_phage_gen.arc_pipeline:main"
 evo2_phage_check_external_qc = "bionemo.evo2_phage_gen.external_qc:main"
@@ -172,7 +172,7 @@ causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = 
 nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v1.1.4.post6" }
 
 # nvidia-resiliency-ext is intentionally left to Megatron-Bridge so the transitive pin stays consistent.
-# .ci_build_env.sh repairs upstream package discovery and applies patches/nemo-rl-evo2-mbridge-grpo.patch.
+# .ci_build.sh repairs upstream package discovery and applies patches/nemo-rl-evo2-mbridge-grpo.patch.
 nemo-rl = { git = "https://github.com/NVIDIA-NeMo/RL.git", rev = "d83dc4ba009438c67b3ba4f5872405ab17a0476c" }
 
 # Megatron Bundle. MCore is sourced from the same Megatron-Bridge release tag.

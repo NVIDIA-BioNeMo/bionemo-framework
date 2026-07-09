@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for ``bionemo.evo2_phage_gen.checkpoint_prior``."""
+"""Tests for ``bionemo.evo2.utils.checkpoint.checkpoint_prior``."""
 
 import torch
 
+from bionemo.evo2.utils.checkpoint.checkpoint_prior import _decay_prior_stats, _gamma_prior_stats, _p_prior_stats
 from bionemo.evo2.utils.checkpoint.vortex_to_mbridge import _compute_initial_medium_decay
-from bionemo.evo2_phage_gen.checkpoint_prior import _decay_prior_stats, _gamma_prior_stats, _p_prior_stats
 
 
 def test_gamma_prior_stats_reports_init_range_membership():
