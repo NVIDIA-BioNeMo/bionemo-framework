@@ -126,15 +126,14 @@ def _train_step(model, batch):
 # ---------------------------------------------------------------------------
 
 
-def _run_torchrun(test_fn_name: str, port: int, nproc: int = 2):
+def _run_torchrun(test_fn_name: str, nproc: int = 2):
     """Run a named worker function via torchrun."""
     model_dir = str(Path(__file__).resolve().parent.parent)
     script = str(Path(__file__).resolve())
     cmd = [
         "torchrun",
+        "--standalone",
         f"--nproc_per_node={nproc}",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         script,
         test_fn_name,
     ]
@@ -154,21 +153,21 @@ def _run_torchrun(test_fn_name: str, port: int, nproc: int = 2):
 
 
 @requires_2_gpus
-def test_fsdp2_ep1(unused_tcp_port):
+def test_fsdp2_ep1():
     """Test FSDP=2, EP=1: data-parallel training with all experts on each rank."""
-    _run_torchrun("fsdp2_ep1", unused_tcp_port, nproc=2)
+    _run_torchrun("fsdp2_ep1", nproc=2)
 
 
 @requires_2_gpus
-def test_fsdp1_ep2(unused_tcp_port):
+def test_fsdp1_ep2():
     """Test FSDP=1, EP=2: expert-parallel training without data parallelism."""
-    _run_torchrun("fsdp1_ep2", unused_tcp_port, nproc=2)
+    _run_torchrun("fsdp1_ep2", nproc=2)
 
 
 @requires_4_gpus
-def test_fsdp2_ep2(unused_tcp_port):
+def test_fsdp2_ep2():
     """Test FSDP=2, EP=2: combined data and expert parallelism."""
-    _run_torchrun("fsdp2_ep2", unused_tcp_port, nproc=4)
+    _run_torchrun("fsdp2_ep2", nproc=4)
 
 
 # ---------------------------------------------------------------------------

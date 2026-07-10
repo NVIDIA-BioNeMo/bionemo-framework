@@ -48,13 +48,12 @@ requires_multi_gpu = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
-def _run_torchrun(test_fn_name: str, port: int, tmp_dir: str):
+def _run_torchrun(test_fn_name: str, tmp_dir: str):
     """Run a named worker function via torchrun with 2 GPUs."""
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
         test_fn_name,
         tmp_dir,
@@ -75,15 +74,15 @@ def _run_torchrun(test_fn_name: str, port: int, tmp_dir: str):
 
 
 @requires_multi_gpu
-def test_ep_dcp_roundtrip(unused_tcp_port, tmp_path):
+def test_ep_dcp_roundtrip(tmp_path):
     """Test DCP save/load round-trip with EP=2."""
-    _run_torchrun("dcp_roundtrip", unused_tcp_port, str(tmp_path))
+    _run_torchrun("dcp_roundtrip", str(tmp_path))
 
 
 @requires_multi_gpu
-def test_ep_save_final_model(unused_tcp_port, tmp_path):
+def test_ep_save_final_model(tmp_path):
     """Test gathering EP-sharded weights into a single safetensors file."""
-    _run_torchrun("save_final_model", unused_tcp_port, str(tmp_path))
+    _run_torchrun("save_final_model", str(tmp_path))
 
 
 # ---------------------------------------------------------------------------

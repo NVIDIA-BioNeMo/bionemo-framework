@@ -175,7 +175,7 @@ class DistributedConfig:
 @skip_in_ci
 @requires_multi_gpu
 @requires_datacenter_hardware
-def test_context_parallel_equivalence_2process(recipe_path: Path, unused_tcp_port):
+def test_context_parallel_equivalence_2process(recipe_path: Path):
     """Test context parallel equivalence between 2 processes.
 
     In one instance, we run the model in non-distributed mode and in the other
@@ -186,9 +186,8 @@ def test_context_parallel_equivalence_2process(recipe_path: Path, unused_tcp_por
     """
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{unused_tcp_port}",
         os.path.relpath(__file__),
     ]
     result = subprocess.run(

@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from ..utils import find_free_network_port, is_a6000_gpu
+from ..utils import is_a6000_gpu
 
 
 _REPO_BASE_DIR = Path(__file__).resolve().parents[4]
@@ -54,8 +54,7 @@ def test_eden_fine_tuning(
     gbs = mbs
     run_dir = tmp_path / "eden_run"
     run_dir.mkdir(parents=True, exist_ok=True)
-    master_port = find_free_network_port()
-    cmd1 = f"""torchrun --nproc-per-node {world_size} --no-python --master_port {master_port} \
+    cmd1 = f"""torchrun --standalone --nproc-per-node {world_size} --no-python \
     train_eden \
         --hf-tokenizer-model-path {DEFAULT_HF_TOKENIZER_MODEL_PATH} \
         --model-size eden_7b --num-layers 2 \

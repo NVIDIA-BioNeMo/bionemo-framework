@@ -19,7 +19,6 @@ import copy
 import gc
 import os
 import shlex
-import socket
 import subprocess
 from pathlib import Path
 
@@ -109,19 +108,12 @@ def mbridge_eden_checkpoint(tmp_path_factory) -> Path:
         Path to the MBridge checkpoint directory (parent of iter_0000002).
     """
 
-    def _find_free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("localhost", 0))
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            return s.getsockname()[1]
-
     tmp_dir = tmp_path_factory.mktemp("eden_ckpt_session")
     run_dir = tmp_dir / "eden_train"
     run_dir.mkdir(parents=True, exist_ok=True)
-    port = _find_free_port()
 
     cmd = (
-        f"torchrun --nproc-per-node 1 --no-python --master_port {port} "
+        "torchrun --standalone --nproc-per-node 1 --no-python "
         f"train_eden "
         f"--hf-tokenizer-model-path {DEFAULT_HF_TOKENIZER_MODEL_PATH} "
         "--model-size eden_7b --num-layers 2 "
