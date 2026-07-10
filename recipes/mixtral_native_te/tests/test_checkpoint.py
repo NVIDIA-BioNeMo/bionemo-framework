@@ -35,12 +35,11 @@ requires_sm100 = pytest.mark.skipif(
 )
 
 
-def _run_torchrun(port: int, tmp_dir: str) -> None:
+def _run_torchrun(tmp_dir: str) -> None:
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
         tmp_dir,
     ]
@@ -61,9 +60,9 @@ def _run_torchrun(port: int, tmp_dir: str) -> None:
 
 @requires_multi_gpu
 @requires_sm100
-def test_checkpoint_save_load_roundtrip(unused_tcp_port, tmp_path):
+def test_checkpoint_save_load_roundtrip(tmp_path):
     """Save/load checkpoint preserves non-expert, expert, and optimizer master state."""
-    _run_torchrun(unused_tcp_port, str(tmp_path))
+    _run_torchrun(str(tmp_path))
 
 
 def _is_expert_key(name: str) -> bool:

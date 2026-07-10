@@ -252,13 +252,12 @@ class DiscreteFusedMoE(nn.Module):
         return self.lm_head(x)
 
 
-def _run_torchrun(test_fn_name: str, port: int, tmp_dir: str, nproc: int, *extra_args: str):
+def _run_torchrun(test_fn_name: str, tmp_dir: str, nproc: int, *extra_args: str):
     """Run a named worker function via torchrun."""
     cmd = [
         "torchrun",
+        "--standalone",
         f"--nproc_per_node={nproc}",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
         test_fn_name,
         tmp_dir,
@@ -280,27 +279,25 @@ def _run_torchrun(test_fn_name: str, port: int, tmp_dir: str, nproc: int, *extra
 
 
 @requires_four_gpu
-def test_grouped_dcp_ep4_roundtrip(unused_tcp_port, tmp_path):
+def test_grouped_dcp_ep4_roundtrip(tmp_path):
     """EP=4 consolidated DCP save/load stop-and-go parity."""
-    _run_torchrun("ep4_roundtrip", unused_tcp_port, str(tmp_path), nproc=4)
+    _run_torchrun("ep4_roundtrip", str(tmp_path), nproc=4)
 
 
 @requires_four_gpu
-def test_grouped_dcp_ep4_to_ep2_reshard(unused_tcp_port, tmp_path):
+def test_grouped_dcp_ep4_to_ep2_reshard(tmp_path):
     """EP=4 save then EP=2 load reshard via consolidated DCP."""
-    _run_torchrun("ep4_save", unused_tcp_port, str(tmp_path), nproc=4)
-    port2 = unused_tcp_port + 1
-    _run_torchrun("ep2_load_verify", port2, str(tmp_path), nproc=2)
+    _run_torchrun("ep4_save", str(tmp_path), nproc=4)
+    _run_torchrun("ep2_load_verify", str(tmp_path), nproc=2)
 
 
 @pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "mxfp8"])
 @requires_four_gpu
-def test_grouped_dcp_discrete_ep4_roundtrip(unused_tcp_port, tmp_path, quantized):
+def test_grouped_dcp_discrete_ep4_roundtrip(tmp_path, quantized):
     """EP=4 consolidated DCP save/load for discrete fused experts + FusedAdam state."""
     _maybe_skip_discrete(quantized)
     _run_torchrun(
         "discrete_ep4_roundtrip",
-        unused_tcp_port,
         str(tmp_path),
         4,
         "1" if quantized else "0",
@@ -309,20 +306,17 @@ def test_grouped_dcp_discrete_ep4_roundtrip(unused_tcp_port, tmp_path, quantized
 
 @pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "mxfp8"])
 @requires_four_gpu
-def test_grouped_dcp_discrete_ep4_to_ep2_reshard(unused_tcp_port, tmp_path, quantized):
+def test_grouped_dcp_discrete_ep4_to_ep2_reshard(tmp_path, quantized):
     """EP=4 save then EP=2 load reshard for discrete fused experts + optimizer state."""
     _maybe_skip_discrete(quantized)
     _run_torchrun(
         "discrete_ep4_save",
-        unused_tcp_port,
         str(tmp_path),
         4,
         "1" if quantized else "0",
     )
-    port2 = unused_tcp_port + 1
     _run_torchrun(
         "discrete_ep2_load_verify",
-        port2,
         str(tmp_path),
         2,
         "1" if quantized else "0",

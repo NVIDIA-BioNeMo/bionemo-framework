@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import socket
 import sys
 from pathlib import Path
 
@@ -36,12 +35,3 @@ if str(RECIPE_ROOT) not in pythonpath_entries:
 def recipe_path() -> Path:
     """Return the root directory of the recipe."""
     return RECIPE_ROOT
-
-
-@pytest.fixture
-def unused_tcp_port() -> int:
-    """Get an unused TCP port for distributed testing."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("", 0))
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return sock.getsockname()[1]

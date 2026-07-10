@@ -41,12 +41,11 @@ requires_sm100 = pytest.mark.skipif(
 )
 
 
-def _run_torchrun(port: int, tmp_dir: str) -> subprocess.CompletedProcess[str]:
+def _run_torchrun(tmp_dir: str) -> subprocess.CompletedProcess[str]:
     cmd = [
         "torchrun",
+        "--standalone",
         f"--nproc_per_node={DP_SIZE * EP_SIZE}",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
         tmp_dir,
     ]
@@ -69,9 +68,9 @@ def _run_torchrun(port: int, tmp_dir: str) -> subprocess.CompletedProcess[str]:
 
 @requires_four_gpu
 @requires_sm100
-def test_ep2_fsdp2_dp2_2d_mesh(unused_tcp_port, tmp_path):
+def test_ep2_fsdp2_dp2_2d_mesh(tmp_path):
     """EP=2 x FSDP2 dp=2: genuine dp sharding, train step, checkpoint roundtrip."""
-    result = _run_torchrun(unused_tcp_port, str(tmp_path))
+    result = _run_torchrun(str(tmp_path))
     if result.returncode != 0:
         print(result.stdout)
         pytest.fail(f"2D mesh worker failed with exit code {result.returncode}")

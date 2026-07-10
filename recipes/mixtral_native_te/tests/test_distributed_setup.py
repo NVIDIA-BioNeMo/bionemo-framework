@@ -36,12 +36,11 @@ requires_sm100 = pytest.mark.skipif(
 )
 
 
-def _run_torchrun(port: int) -> None:
+def _run_torchrun() -> None:
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
     ]
     result = subprocess.run(
@@ -61,9 +60,9 @@ def _run_torchrun(port: int) -> None:
 
 @requires_multi_gpu
 @requires_sm100
-def test_build_mesh_and_wrap_ep_fsdp2(unused_tcp_port):
+def test_build_mesh_and_wrap_ep_fsdp2():
     """EP-only (dp=1, ep=2): nothing FSDP-wrapped, all params plain, forward runs."""
-    _run_torchrun(unused_tcp_port)
+    _run_torchrun()
 
 
 def _get_dummy_batch(vocab_size: int, device: torch.device):

@@ -273,7 +273,7 @@ def _loss(model: nn.Module, batch: dict, mxfp8: bool) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("cell", MATRIX)
-def test_compat_matrix_cell(cell: MatrixCell, unused_tcp_port, tmp_path):
+def test_compat_matrix_cell(cell: MatrixCell, tmp_path):
     """Run one matrix cell (subprocess for EP>1)."""
     results_path = tmp_path / "compat_matrix_results.json"
     if cell.ep_size == 1:
@@ -283,9 +283,8 @@ def test_compat_matrix_cell(cell: MatrixCell, unused_tcp_port, tmp_path):
 
     cmd = [
         "torchrun",
+        "--standalone",
         f"--nproc_per_node={cell.ep_size}",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{unused_tcp_port}",
         str(Path(__file__).resolve()),
         "worker",
         json.dumps(cell.__dict__),
@@ -448,7 +447,7 @@ def test_fp8_parameters_persist_for_grouped_experts(compute):
     ),
     strict=False,
 )
-def test_te_fused_adam_supports_grouped_mlp(unused_tcp_port, tmp_path):
+def test_te_fused_adam_supports_grouped_mlp(tmp_path):
     """A FusedAdam(master_weights=True) step over grouped experts should succeed; today it aborts."""
     if not _is_supported_blackwell() or not _fused_mxfp8_kernel_supported():
         pytest.skip("fused CuteDSL MXFP8 kernel unavailable")
