@@ -129,12 +129,6 @@ jobs:
           # Currently, AMPLIFY is the only folder that needs a custom base image, since we have to support both TE and
           # xformers-based models for golden value testing. The rest of the models use the default pytorch image.
 
-          # This uses a squashed version of the pytorch:26.04-py3 image, generated with `docker-squash
-          # nvcr.io/nvidia/pytorch:26.04-py3 -t svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed --output
-          # type=registry,compression=zstd,force-compression=true,oci-mediatypes=true,compression-level=15` and pushed
-          # to the dockerhub registry. Our github actions are able to cache image pulls from dockerhub but not nvcr, so
-          # hopefully this cuts down slightly on CI time at the expense of having a slightly in-directed image location.
-
           DIRS_WITH_IMAGES=$(echo "$DIRS" | jq -c '
             map({
               dir: .,
@@ -143,8 +137,7 @@ jobs:
                 if . == "models/amplify" then
                   "svcbionemo023/bionemo-framework:amplify-model-devcontainer-082025"
                 else
-                  # "nvcr.io/nvidia/pytorch:26.04-py3"
-                  "svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed"
+                  "nvcr.io/nvidia/pytorch:26.06-py3"
                 end
               )
             })
@@ -212,6 +205,11 @@ jobs:
             ${{ runner.os }}-huggingface-${{ matrix.recipe.name }}-
             ${{ runner.os }}-huggingface-
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          enable-cache: true
+
       - name: Install dependencies
         working-directory: ${{ matrix.recipe.dir }}
         run: |
@@ -255,7 +253,7 @@ jobs:
         )
     name: "notebook-tests (evo2_megatron)"
     container:
-      image: svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed
+      image: nvcr.io/nvidia/pytorch:26.06-py3
       options: --shm-size=16G
       env:
         CI: true
@@ -285,6 +283,11 @@ jobs:
             ${{ runner.os }}-huggingface-evo2_megatron-notebooks-
             ${{ runner.os }}-huggingface-evo2_megatron-
             ${{ runner.os }}-huggingface-
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          enable-cache: true
 
       - name: Install dependencies
         working-directory: recipes/evo2_megatron

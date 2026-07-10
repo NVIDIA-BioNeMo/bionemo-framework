@@ -188,6 +188,87 @@ def dist_process_group():
     torch.distributed.destroy_process_group()
 
 
+def test_expert_ffn_mode_config_default_and_validation():
+    from modeling_mixtral_te import NVMixtralConfig
+
+    cfg = NVMixtralConfig(num_local_experts=8, num_experts_per_tok=2)
+    assert cfg.expert_ffn_mode == "grouped_linear"  # safe default (D4)
+    cfg2 = NVMixtralConfig(num_local_experts=8, expert_ffn_mode="fused_grouped_mlp")
+    assert cfg2.expert_ffn_mode == "fused_grouped_mlp"
+    import pytest
+
+    with pytest.raises(ValueError):
+        NVMixtralConfig(num_local_experts=8, expert_ffn_mode="bogus")
+
+
+def _fused_mxfp8_available():
+    if not (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10):
+        return False
+    os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
+    from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as f
+
+    f.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported.cache_clear()
+    return bool(f.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported())
+
+
+@pytest.mark.skipif(
+    not _fused_mxfp8_available(),
+    reason="fused CuteDSL MXFP8 kernel unavailable (needs sm_100 + cutlass-dsl 4.4.1 pin)",
+)
+def test_fused_grouped_mlp_runs_and_fires():
+    import transformer_engine.common.recipe as te_recipe
+    import transformer_engine.pytorch as te
+    from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd
+
+    os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "0"
+    os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
+
+    torch.manual_seed(0)
+    model = (
+        NVMixtralForCausalLM(
+            NVMixtralConfig(
+                hidden_size=256,
+                intermediate_size=512,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                num_local_experts=8,
+                num_experts_per_tok=2,
+                vocab_size=256,
+                max_position_embeddings=512,
+                attn_input_format="bshd",
+                self_attn_mask_type="causal",
+                router_jitter_noise=0.0,
+                expert_ffn_mode="fused_grouped_mlp",
+            )
+        )
+        .cuda()
+        .to(torch.bfloat16)
+    )
+
+    cls = _fwd.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8
+    fired = {"n": 0}
+    orig = cls.fuser_forward
+
+    def spy(self, *a, **k):
+        fired["n"] += 1
+        return orig(self, *a, **k)
+
+    cls.fuser_forward = spy
+    try:
+        ids = torch.randint(0, 256, (2, 256), device="cuda")
+        recipe = te_recipe.MXFP8BlockScaling(fp8_format=te_recipe.Format.E4M3)
+        with te.autocast(enabled=True, recipe=recipe):
+            out = model(input_ids=ids, labels=ids)
+        out.loss.backward()
+    finally:
+        cls.fuser_forward = orig
+
+    assert torch.isfinite(out.logits).all()
+    assert out.logits.shape == (2, 256, 256)
+    assert fired["n"] > 0, "fused CuteDSL op did not fire (silent unfused fallback)"
+
+
 def _small_config():
     """Create a small Mixtral config for single-GPU EP tests."""
     return NVMixtralConfig(

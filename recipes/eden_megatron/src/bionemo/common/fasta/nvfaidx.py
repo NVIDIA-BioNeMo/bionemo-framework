@@ -19,9 +19,6 @@
 #     python ci/scripts/check_copied_files.py --fix
 # --- END COPIED FILE NOTICE ---
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 # ruff: noqa: D102,D105,D107
 
 from __future__ import annotations

@@ -1,0 +1,91 @@
+# Training config
+config_name_or_path: ./model_configs/mixtral_tiny
+config_kwargs: {}
+
+expert_ffn_mode: fused_grouped_mlp
+
+# Optional path to a converted TE checkpoint (torch.save of a deduplicated state dict, e.g. from
+# models/mixtral convert of a pretrained HF Mixtral). Loaded into the (quantized) model with
+# strict=False before FSDP wrapping, so pretrained bf16 weights re-quantize into the MXFP8 params.
+# Enables fine-tuning / representative benchmarking (trained router => balanced routing).
+init_from_pretrained: null
+
+parallelism:
+  dp_size: 1
+  ep_size: 1
+
+num_train_steps: ???
+grad_acc_steps: 1
+
+use_meta_device: true
+use_torch_compile: false
+use_sequence_packing: false
+
+dataset:
+  tokenizer_name_or_path: ???
+  micro_batch_size: 8
+  num_workers: 8
+  max_seq_length: 8192
+  stride: 200
+  buffer_size: 500_000
+  use_stateful_dataloader: false
+  pad_sequences_to_be_divisible_by: null
+  load_dataset_kwargs:
+    path: ???
+    split: "train"
+    streaming: True
+
+wandb:
+  name: ???
+  project: null
+  id: null
+  resume: allow
+
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.MXFP8BlockScaling
+  fp8_format: E4M3
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: false
+
+adamw_kwargs:
+  lr: 3e-3
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-5
+  weight_decay: 0.1
+
+# TE FusedAdam optimizer master weights. This recipe always keeps an fp32-precision master (a
+# separate choice from quantized_model_init): it is required for persistent-MXFP8 params and for the
+# consolidated expert-optimizer checkpoint, and is harmless (bf16-master-equivalent) otherwise.
+# optimizer_store_param_remainders keeps the master as (bf16 param + 16-bit remainder) instead of a
+# full fp32 copy — same precision at half the master footprint (bf16 params only).
+optimizer_master_weights: true
+optimizer_store_param_remainders: false
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 498_000
+  min_lr_ratio: 0.000001
+
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 50
+  max_checkpoints: 5
+  async_save: true
+
+logger:
+  frequency: 100
+
+quant_stats_config:
+  enabled: false
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: ./log_quant_stats
+
+profiler:
+  enabled: false
+  start_step: 10
+  end_step: 15
