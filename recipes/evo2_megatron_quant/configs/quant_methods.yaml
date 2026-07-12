@@ -1,0 +1,222 @@
+# BioNeMo Quantization Methods Configuration
+#
+# All 22 NVIDIA ModelOpt quantization configurations, organized by family.
+# Each entry maps to a constant in modelopt.torch.quantization (e.g., mtq.FP8_DEFAULT_CFG).
+#
+# Fields:
+#   name:        ModelOpt constant name (pass to --quant CLI argument)
+#   family:      Quantization family (FP8, INT8, INT4, NVFP4, MX, Mixed)
+#   weight_bits: Weight precision in bits
+#   act_bits:    Activation precision in bits (null = not quantized)
+#   description: Brief description of the method
+#   calibration: Whether method requires calibration data
+#   notes:       Additional notes or warnings
+
+methods:
+
+  # ================================
+  # FP8 Family (E4M3 / E5M2)
+  # ================================
+  # Highest precision among quantized formats. Minimal quality loss.
+  # Uses 4-bit exponent + 3-bit mantissa (E4M3) format.
+
+  - name: FP8_DEFAULT_CFG
+    family: FP8
+    weight_bits: 8
+    act_bits: 8
+    description: "FP8 E4M3, per-tensor quantization"
+    calibration: false
+    notes: "Best starting point. Works well with all 3 models."
+
+  - name: FP8_PER_CHANNEL_PER_TOKEN_CFG
+    family: FP8
+    weight_bits: 8
+    act_bits: 8
+    description: "FP8 per-channel weights, per-token activations"
+    calibration: false
+    notes: "Finer-grained scaling for better accuracy."
+
+  - name: FP8_KV_CFG
+    family: FP8
+    weight_bits: 8
+    act_bits: 8
+    description: "FP8 with KV cache quantization"
+    calibration: false
+    notes: "Also quantizes KV cache for attention layers. No effect on Hyena layers."
+
+  - name: FP8_AFFINE_KV_CFG
+    family: FP8
+    weight_bits: 8
+    act_bits: 8
+    description: "FP8 with affine KV cache quantization"
+    calibration: false
+    notes: "Affine (zero-point + scale) KV quantization for better range coverage."
+
+  - name: FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG
+    family: FP8
+    weight_bits: 8
+    act_bits: null
+    description: "FP8 2D blockwise, weight-only quantization"
+    calibration: false
+    notes: "Only quantizes weights. Can improve inference latency with no activation overhead."
+
+  # ================================
+  # INT8 Family
+  # ================================
+  # Good balance of compression and quality.
+
+  - name: INT8_DEFAULT_CFG
+    family: INT8
+    weight_bits: 8
+    act_bits: 8
+    description: "INT8 symmetric, per-tensor quantization"
+    calibration: false
+    notes: "Straightforward integer quantization."
+
+  - name: INT8_SMOOTHQUANT_CFG
+    family: INT8
+    weight_bits: 8
+    act_bits: 8
+    description: "INT8 SmoothQuant — migrates quantization difficulty from activations to weights"
+    calibration: true
+    notes: "Requires calibration data. Better handles activation outliers."
+
+  # ================================
+  # INT4 Family
+  # ================================
+  # Higher compression. May show quality degradation on sensitive layers.
+
+  - name: INT4_AWQ_CFG
+    family: INT4
+    weight_bits: 4
+    act_bits: 16
+    description: "INT4 Activation-aware Weight Quantization"
+    calibration: true
+    notes: "Identifies salient weights via activation patterns. Keeps activations in FP16."
+
+  - name: INT4_BLOCKWISE_WEIGHT_ONLY_CFG
+    family: INT4
+    weight_bits: 4
+    act_bits: null
+    description: "INT4 blockwise weight-only quantization"
+    calibration: false
+    notes: "Block-level scaling for weight-only INT4."
+
+  # ================================
+  # NVFP4 Family (NVIDIA FP4)
+  # ================================
+  # NVIDIA's custom 4-bit floating point format.
+  # Designed for Hopper/Blackwell GPU architectures.
+
+  - name: NVFP4_DEFAULT_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 default configuration"
+    calibration: false
+    notes: "NVIDIA's FP4 format. Requires Hopper+ GPU."
+
+  - name: NVFP4_AWQ_LITE_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 with AWQ lite calibration"
+    calibration: true
+    notes: "Lightweight AWQ calibration for NVFP4."
+
+  - name: NVFP4_AWQ_CLIP_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 with AWQ clip calibration"
+    calibration: true
+    notes: "Clips outlier weights before quantization."
+
+  - name: NVFP4_AWQ_FULL_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 with full AWQ calibration"
+    calibration: true
+    notes: "Most thorough AWQ calibration, but slower."
+
+  - name: NVFP4_KV_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 with KV cache quantization"
+    calibration: false
+    notes: "Also quantizes attention KV cache."
+
+  - name: NVFP4_KV_ROTATE_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 with rotated KV cache quantization"
+    calibration: false
+    notes: "Applies rotation to KV before quantization for better quality."
+
+  - name: NVFP4_AFFINE_KV_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 with affine KV cache quantization"
+    calibration: false
+    notes: "Affine (zero-point + scale) KV for NVFP4."
+
+  - name: NVFP4_SVDQUANT_DEFAULT_CFG
+    family: NVFP4
+    weight_bits: 4
+    act_bits: 8
+    description: "NVFP4 with SVD quantization"
+    calibration: true
+    notes: "Uses SVD decomposition before quantization."
+
+  # ================================
+  # MX (Microscaling) Family
+  # ================================
+  # Block-scaled formats using the OCP Microscaling specification.
+
+  - name: MXFP4_DEFAULT_CFG
+    family: MX
+    weight_bits: 4
+    act_bits: 4
+    description: "Microscaling FP4 — 4-bit weights and activations"
+    calibration: false
+    notes: "Maximum compression among MX formats. May cause quality loss."
+
+  - name: MXFP6_DEFAULT_CFG
+    family: MX
+    weight_bits: 6
+    act_bits: 6
+    description: "Microscaling FP6 — 6-bit weights and activations"
+    calibration: false
+    notes: "Good balance between compression and quality."
+
+  - name: MXFP8_DEFAULT_CFG
+    family: MX
+    weight_bits: 8
+    act_bits: 8
+    description: "Microscaling FP8 — 8-bit with block scaling"
+    calibration: false
+    notes: "Similar to FP8 but uses OCP block scaling."
+
+  - name: MXINT8_DEFAULT_CFG
+    family: MX
+    weight_bits: 8
+    act_bits: 8
+    description: "Microscaling INT8 — 8-bit integer with block scaling"
+    calibration: false
+    notes: "INT8 variant of MX format."
+
+  # ================================
+  # Mixed Precision
+  # ================================
+
+  - name: W4A8_AWQ_BETA_CFG
+    family: Mixed
+    weight_bits: 4
+    act_bits: 8
+    description: "4-bit weights + 8-bit activations (AWQ beta)"
+    calibration: true
+    notes: "Aggressive weight compression with higher-precision activations."
