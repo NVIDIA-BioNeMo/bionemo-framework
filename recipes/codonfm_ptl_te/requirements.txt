@@ -262,7 +262,7 @@ torchx==0.7.0
 tornado==6.5.1
 tqdm==4.67.1
 traitlets==5.14.3
-transformers==4.56.2
+transformers==5.5.0
 typer==0.19.2
 types-dataclasses==0.6.6
 types-python-dateutil==2.9.0.20250708
