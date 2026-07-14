@@ -18,11 +18,14 @@
 
 def register() -> None:
     """Register Evo2 with vLLM without importing the model implementation."""
+    from transformers import AutoConfig
     from vllm import ModelRegistry
 
+    from bionemo.evo2.vllm.config import Evo2Config
+
+    AutoConfig.register(Evo2Config.model_type, Evo2Config, exist_ok=True)
     if "Evo2ForCausalLM" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model(
             "Evo2ForCausalLM",
             "bionemo.evo2.vllm.model:Evo2ForCausalLM",
         )
-

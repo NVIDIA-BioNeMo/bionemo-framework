@@ -16,6 +16,7 @@
 import sys
 
 import vllm
+from transformers import AutoConfig
 
 
 def test_register_is_lazy_and_idempotent(monkeypatch):
@@ -35,4 +36,17 @@ def test_register_is_lazy_and_idempotent(monkeypatch):
     register()
 
     assert calls == [("Evo2ForCausalLM", "bionemo.evo2.vllm.model:Evo2ForCausalLM")]
+    assert "bionemo.evo2.vllm.model" not in sys.modules
+
+
+def test_register_adds_transformers_config(monkeypatch):
+    monkeypatch.setattr(vllm.ModelRegistry, "get_supported_archs", lambda: {"Evo2ForCausalLM"})
+
+    from bionemo.evo2.vllm.config import Evo2Config
+    from bionemo.evo2.vllm.plugin import register
+
+    register()
+
+    config = AutoConfig.for_model("evo2", num_hidden_layers=1, hybrid_override_pattern="*")
+    assert isinstance(config, Evo2Config)
     assert "bionemo.evo2.vllm.model" not in sys.modules
