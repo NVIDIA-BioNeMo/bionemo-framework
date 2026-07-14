@@ -22,6 +22,7 @@ on:
           - esm2_native_te_3b
           - esm2_native_te_15b
           - codonfm_ptl_te
+          - evo2_sae_smoke
       branch:
         description: "Branch to use (ignored if commit SHA is provided)"
         required: true
