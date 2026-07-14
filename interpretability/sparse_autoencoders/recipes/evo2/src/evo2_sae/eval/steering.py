@@ -16,11 +16,18 @@
 """SAE feature-steering analysis: the engine-driven harness + the pure metrics it scores with.
 
 ``run_steering`` clamps a feature via the production ``Evo2SAE.generate`` path (the same
-decode-only ``evo2_sae.steering`` hook the server/CLI use) and quantifies the causal effect:
+decode-only ``evo2_sae.steering`` hook the server/CLI use) and measures its effect on generation:
 
   - divergence:    how far a steered continuation departs from the baseline
   - dose_response: how that effect scales with clamp strength
-  - selectivity:   target vs control features at one strength (is the effect feature-specific?)
+  - selectivity:   target vs control features at one strength (bigger than the controls?)
+
+**Scope — a steering smoke test.** These metrics quantify the *magnitude* of a clamp's effect
+(dose_response) and whether it exceeds a few *hand-picked* control features (selectivity). They do
+not check the effect's *direction* — that the output moved toward the target feature's labeled
+concept — and ``selectivity`` is only as trustworthy as the chosen controls. Verifying steering is
+concept-correct (does clamping a "stop-codon" feature yield more stop codons?) against an
+activation-matched null is future work: concept-density scoring via ``evo2_sae.eval.probing.labelers``.
 
 **Why edit distance, not positional Hamming.** Steering decodes greedily (``temperature=0``),
 so generation is deterministic and autoregressive: the first token a clamp flips shifts every

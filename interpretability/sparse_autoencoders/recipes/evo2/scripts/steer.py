@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-r"""Evo2 SAE steering harness CLI — clamp a feature and measure the causal effect on generation.
+r"""Evo2 SAE steering harness CLI — clamp a feature and measure its effect on generation (a smoke test).
 
 Thin wrapper: builds an ``Evo2SAE`` and calls ``evo2_sae.eval.steering.run_steering`` (the
 engine-driven harness + pure metrics live there, CPU-tested). Writes a structured
@@ -22,7 +22,7 @@ how ``extract.py`` persists its outputs.
 
 GPU harness — run on an H100 with the inference engine available; this is not a CPU unit test.
 
-    python steer.py --evo2-ckpt-dir <mbridge> --sae-checkpoint <sae.pt> --layer 26 \
+    python steer.py --evo2-ckpt-dir <mbridge> --sae-checkpoint <sae.pt> --layer <L> \
         --sequence ATGGCC... --feature 29244 --controls 12345,54321 --strengths 0,50,100,200 \
         --out steering_results.json
 """
