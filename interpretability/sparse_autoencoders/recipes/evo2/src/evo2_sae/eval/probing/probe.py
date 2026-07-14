@@ -16,36 +16,35 @@
 r"""Unified Evo2 SAE probing CLI. All scoring is evo2_sae.eval.probing (model-agnostic);
 this driver only knows how to build/load Evo2 buffers and pick label sets.
 
-  probe.py extract       --out BUF [...]        build an ActivationBuffer (needs the model)
+  probe.py extract       --out BUF [...]        build a point ActivationBuffer (needs the model)
   probe.py auroc         --acts BUF --labels .. per-feature AUROC table (prints)
-  probe.py annotate      --acts BUF --out P     assign each feature its best concept -> annotation parquet
+  probe.py annotate      --acts BUF.. --out P   each feature's best concept -> annotation parquet (point +/or region)
   probe.py linear        --acts BUF --labels .. SAE-vs-dense single + multi (disentanglement/distributed)
-  probe.py euk-f1        --fasta .. --gff ..    RefSeq gene-structure domain-F1 (needs the model)
-  probe.py domain-eval   --fasta .. --track ..  user annotated dataset -> per-feature domain-F1 + AUROC vs
-                                                any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
+  probe.py euk-f1        --fasta .. --gff ..    RefSeq gene-structure domain-F1 [--out BUF] (needs the model)
+  probe.py domain-eval   --fasta .. --track ..  per-feature domain-F1 + AUROC vs any BED/GFF track
+                                                (RefSeq/Rfam/JASPAR/ENCODE) [--out BUF] (needs the model)
   (SAE fidelity / loss-recovered lives in the separate probe_loss_recovered.py script — see step 5 below)
 
-Example end-to-end flow (7B / layer 26; $CKPT = MBridge dir, $SAE = trained SAE .pt):
+Example end-to-end flow ($CKPT = Evo2 MBridge dir, $SAE = trained SAE .pt, $L = the SAE's layer):
 
-  # 1. Build the probing buffer once: SAE codes + dense twin + per-token labels (needs the model)
-  python probe.py extract --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer 26 \
-      --fasta probe_set.fa --out buf.npz
+  # 1. Build the point buffer once: SAE codes + dense twin + per-token labels (needs the model)
+  python probe.py extract --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer $L \
+      --fasta probe_set.fa --out point.npz
 
-  # 2. Score the buffer (no model): per-feature AUROC, then SAE-vs-dense linear probes
-  python probe.py auroc  --acts buf.npz --labels motif_ATG,motif_stop,cds_coding,is_prok
-  python probe.py linear --acts buf.npz --labels cds_coding,is_prok
+  # 2. Score the point buffer (no model): per-feature AUROC, then SAE-vs-dense linear probes
+  python probe.py auroc  --acts point.npz --labels motif_ATG,motif_stop,cds_coding,is_prok
+  python probe.py linear --acts point.npz --labels cds_coding,is_prok
 
-  # 3. Persist annotations (no model): each feature's best concept (incl. base_A/C/G/T) ->
-  #    the feature-annotation parquet the engine/dashboard load via --feature-annotations
-  python probe.py annotate --acts buf.npz --out feature_annotations.parquet --min-auroc 0.85
+  # 3. Build a region buffer from any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
+  python probe.py domain-eval --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer $L \
+      --fasta GRCh38_chr20.fa --track exon=refseq.gff3:exon --track cCRE=encode_ccre.bed --out region.npz
 
-  # 4. User annotated dataset -> per-feature domain-F1 (prec/nt, recall/annotation) + AUROC,
-  #    vs any BED/GFF tracks (RefSeq/Rfam/JASPAR/ENCODE) (needs the model)
-  python probe.py domain-eval --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer 26 \
-      --fasta GRCh38_chr20.fa --track exon=refseq.gff3:exon --track cCRE=encode_ccre.bed
+  # 4. Persist annotations (no model): AUROC for point buffers, domain-F1 for region buffers,
+  #    merged into the one feature-annotation parquet the engine/dashboard load via --feature-annotations
+  python probe.py annotate --acts point.npz region.npz --out feature_annotations.parquet
 
   # 5. SAE fidelity (loss recovered) — separate script, needs the model
-  python probe_loss_recovered.py --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer 26 --fasta probe_set.fa
+  python probe_loss_recovered.py --evo2-ckpt-dir $CKPT --sae-checkpoint $SAE --layer $L --fasta probe_set.fa
 """  # noqa: D205
 
 from __future__ import annotations
@@ -141,32 +140,64 @@ def cmd_linear(a):  # noqa: D103
 
 
 def cmd_annotate(a):
-    """Buffer -> feature-annotation parquet: each feature's best concept by AUROC + activation stats.
+    """Buffer(s) -> feature-annotation parquet: each feature's best concept + activation stats.
 
-    The persist step (uses evo2_sae.eval.probing.annotate_features). Writes a feature_metadata-style
-    parquet — {feature_id, label, auroc, activation_freq, max_activation} — the engine/dashboard
-    load via --feature-annotations. Concepts default to all labels in the buffer (incl. base_*).
+    The persist step. Auto-detects per buffer: point buffers (labels only) are scored by AUROC
+    (uses annotate_features); region buffers (with instance ids) by domain-adjusted F1 (uses
+    annotate_features_domain). Multiple ``--acts`` are merged into one parquet, deduped per feature
+    with AUROC winning over F1 (F1 fills features AUROC left unlabeled). Writes a feature_metadata-
+    style parquet — {feature_id, label, method, score, auroc, activation_freq, max_activation} — the
+    engine/dashboard load feature_id/label/max_activation via --feature-annotations.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from evo2_sae.eval.probing import annotate_features
+    from evo2_sae.eval.probing import annotate_features, annotate_features_domain
 
-    buf, names = _load(a)
     dev = a.device
-    X = torch.from_numpy(buf.codes).to(dev).float()
-    Y = torch.stack([torch.from_numpy(buf.labels[:, buf.name_idx[n]]).to(dev) for n in names], 1)
-    ann = annotate_features(X, Y, names, min_auroc=a.min_auroc)
-    cols = {"feature_id": [], "label": [], "auroc": [], "activation_freq": [], "max_activation": []}
-    for r in ann:
-        col = X[:, r["feature_id"]]
-        cols["feature_id"].append(r["feature_id"])
-        cols["label"].append(r["label"])
-        cols["auroc"].append(r["auroc"])
-        cols["activation_freq"].append(round(float((col > 0).float().mean()), 6))
-        cols["max_activation"].append(round(float(col.max()), 4))
-    pq.write_table(pa.table(cols), a.out, compression="snappy")
-    print(f"[annotate] {len(ann)} features labeled (AUROC >= {a.min_auroc}) over {len(names)} concepts -> {a.out}")
+    by_feat = {}  # feature_id -> row; rank (AUROC beats F1, then higher score) decides ties across buffers
+    for path in a.acts:
+        buf = ActivationBuffer.load(path)
+        names = list(buf.label_names)
+        if getattr(a, "labels", None):
+            want = set(a.labels.split(","))
+            names = [n for n in names if n in want]
+        X = torch.from_numpy(buf.codes).to(dev).float()
+        Y = torch.stack([torch.from_numpy(buf.labels[:, buf.name_idx[n]]).to(dev) for n in names], 1)
+        # region buffers carry per-concept instance ids and no dense twin -> domain-F1; else AUROC
+        if buf.instances is not None and buf.dense is None:
+            method = "domain_f1"
+            ann = annotate_features_domain(X, Y, buf.instances, names, min_f1=a.min_f1)
+        else:
+            method = "auroc"
+            ann = annotate_features(X, Y, names, min_auroc=a.min_auroc)
+        for r in ann:
+            fid = r["feature_id"]
+            score = float(r["auroc"] if method == "auroc" else r["score"])
+            rank = (1 if method == "auroc" else 0, score)  # AUROC wins over F1; else higher score
+            prev = by_feat.get(fid)
+            if prev is not None and rank <= prev["_rank"]:
+                continue
+            col = X[:, fid]
+            by_feat[fid] = {
+                "feature_id": fid,
+                "label": r["label"],
+                "method": method,
+                "score": round(score, 4),
+                "auroc": round(score, 4) if method == "auroc" else None,
+                "activation_freq": round(float((col > 0).float().mean()), 6),
+                "max_activation": round(float(col.max()), 4),
+                "_rank": rank,
+            }
+        del X, Y
+    rows = [by_feat[k] for k in sorted(by_feat)]
+    fields = ("feature_id", "label", "method", "score", "auroc", "activation_freq", "max_activation")
+    pq.write_table(pa.table({k: [r[k] for r in rows] for k in fields}), a.out, compression="snappy")
+    n_au = sum(r["method"] == "auroc" for r in rows)
+    print(
+        f"[annotate] {len(rows)} features labeled ({n_au} AUROC, {len(rows) - n_au} domain-F1) "
+        f"across {len(a.acts)} buffer(s) -> {a.out}"
+    )
 
 
 # ───────────────────────────────────────── model subcommands (need Evo2)
@@ -205,12 +236,26 @@ def _encode_windows(eng, windows, tag_ids, lab_keys, inst_keys, tot, a):
     return code_buf, lab, inst, fmax
 
 
+def _region_buffer(code_buf, lab, inst, label_keys, inst_keys):
+    """Region encode outputs -> ActivationBuffer (stacked masks + per-concept instance ids, no dense).
+
+    ``label_keys`` name the concept columns; ``inst_keys`` are the matching instance-id sources
+    (euk-f1 pairs the ``cds`` mask with ``gene`` instances). Instances are re-keyed to the label
+    concept so ``annotate`` can pair each mask with its instances by name.
+    """
+    labels = torch.stack([lab[k] for k in label_keys], 1).cpu().numpy()
+    instances = {k: inst[ik].cpu().numpy().astype(np.int32) for k, ik in zip(label_keys, inst_keys)}
+    return ActivationBuffer(
+        codes=code_buf.cpu().numpy(), labels=labels, label_names=list(label_keys), instances=instances
+    )
+
+
 def cmd_euk(a):
     """Eukaryotic exon/intron/CDS domain-adjusted F1 vs shuffle null (chr21 FASTA+GFF)."""
-    from euk_windows import build_windows
-
     from evo2_sae.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
     from evo2_sae.eval.probing import domain_f1
+
+    from .euk_windows import build_windows
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
     windows, stats, tot, _ = build_windows(a.fasta, a.gff, a.seq_len, a.max_tokens, seed=a.seed)
@@ -230,6 +275,9 @@ def cmd_euk(a):
         f1n, _ = domain_f1(code_buf, fmax, lab[c][order], inst[ic][order])
         bf, nl = float(f1.max()), float(f1n.max())
         print(f"{c:8s} {bf:6.3f} {nl:6.3f} {bf / max(nl, 1e-9):6.2f} {float(lab[c].float().mean()):6.1%}")
+    if a.out:
+        _region_buffer(code_buf, lab, inst, ("exon", "intron", "cds"), ("exon", "intron", "gene")).save(a.out)
+        print(f"[euk-f1] saved region buffer ({filled} positions) -> {a.out}")
 
 
 def _parse_track_spec(spec):
@@ -251,10 +299,10 @@ def cmd_domain_eval(a):
     annotates the windows, then per concept we report the best feature by instance-level
     domain-F1 (precision-per-nt, recall-per-annotation) and — threshold-free — by AUROC.
     """
-    from annot_tracks import label_windows, load_track, read_fasta_dict
-
     from evo2_sae.core import DEFAULT_ORGANISM_TAGS, Evo2SAE
     from evo2_sae.eval.probing import auroc_all, domain_f1
+
+    from .annot_tracks import label_windows, load_track, read_fasta_dict
 
     tracks = {}
     for spec in a.track:
@@ -280,12 +328,15 @@ def cmd_domain_eval(a):
             f"{c:14s} {float(lab[c].float().mean()):6.1%} {stats['n_inst'][c]:6d} | "
             f"{float(f1[bi]):6.3f} {float(thr[bi]):5.2f} {bi:7d} | {float(au[ai, i]):6.3f} {ai:7d}"
         )
+    if a.out:
+        _region_buffer(code_buf, lab, inst, concepts, concepts).save(a.out)
+        print(f"[domain-eval] saved region buffer ({code_buf.shape[0]} positions) -> {a.out}")
 
 
 def cmd_extract(a):  # noqa: D103
-    from evo2_buffer import build_buffer, sample_sequences
-
     from evo2_sae.core import Evo2SAE
+
+    from .evo2_buffer import build_buffer, sample_sequences
 
     eng = Evo2SAE(a.evo2_ckpt_dir, a.sae_checkpoint, a.layer, device=a.device).load()
     label_names = list(L.LABELERS.keys())
@@ -336,12 +387,13 @@ def main():  # noqa: D103
             p.add_argument("--labels", required=True)
         p.set_defaults(func=fn)
     pan = sub.add_parser("annotate", parents=[common])
-    pan.add_argument("--acts", required=True)
+    pan.add_argument("--acts", nargs="+", required=True, help="one or more buffers (point and/or region), merged")
     pan.add_argument("--out", required=True)
     pan.add_argument(
         "--labels", default=None, help="comma-separated concept subset; default = all labels in the buffer"
     )
     pan.add_argument("--min-auroc", type=float, default=0.8)
+    pan.add_argument("--min-f1", type=float, default=0.5, help="min domain-F1 to keep a region annotation")
     pan.set_defaults(func=cmd_annotate)
     pe = sub.add_parser("extract", parents=[common])
     _add_model_args(pe, required=("--out",), max_tokens=200_000)
@@ -352,6 +404,7 @@ def main():  # noqa: D103
     pk = sub.add_parser("euk-f1", parents=[common])
     _add_model_args(pk, required=("--gff",))
     pk.add_argument("--organism", default="Human")
+    pk.add_argument("--out", default=None, help="optional: save the region ActivationBuffer (npz) for `annotate`")
     pk.set_defaults(func=cmd_euk)
     pd = sub.add_parser("domain-eval", parents=[common])
     _add_model_args(pd)
@@ -364,6 +417,7 @@ def main():  # noqa: D103
         "(e.g. --track exon=refseq.gff3:exon --track tfbs=jaspar.bed --track cCRE=encode.bed).",
     )
     pd.add_argument("--organism", default="Human")
+    pd.add_argument("--out", default=None, help="optional: save the region ActivationBuffer (npz) for `annotate`")
     pd.set_defaults(func=cmd_domain_eval)
     args = ap.parse_args()
     if getattr(args, "auroc_device", None) is None:  # default the AUROC matrix to the model device

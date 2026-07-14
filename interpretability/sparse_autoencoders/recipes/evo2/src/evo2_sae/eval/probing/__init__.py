@@ -205,6 +205,55 @@ def annotate_features(codes, labels, label_names, min_auroc: float = 0.8, chunk:
     return out
 
 
+@torch.no_grad()
+def annotate_features_domain(codes, labels, instances, label_names, min_f1: float = 0.5):
+    """Assign each feature the region concept it best marks (by domain-F1) -> the feature->label table.
+
+    The interval sibling of ``annotate_features``: for each feature takes the concept with the highest
+    domain-adjusted F1 (precision-per-position, recall-per-instance) and keeps it only if that F1 >=
+    ``min_f1``. Uses ``domain_f1`` per concept, pairing mask column ``i`` with the instance ids
+    ``instances[label_names[i]]`` (-1 outside the concept).
+
+    Args:
+        codes: [N, F] feature activations (>= 0).
+        labels: [N, L] bool concept masks (columns aligned to ``label_names``).
+        instances: ``{concept_name: [N] int}`` per-position instance ids (-1 outside). Label columns
+            without an entry here are skipped (domain-F1 needs instances to compute recall).
+        label_names: length-L concept names (aligned to ``labels`` columns).
+        min_f1: keep a feature's annotation only if its best domain-F1 clears this.
+
+    Returns:
+        ``[{"feature_id": int, "label": str, "score": float, "threshold": float}]`` sorted by feature_id.
+    """
+    cols = [(i, c) for i, c in enumerate(label_names) if c in instances]  # only concepts with instances
+    if not cols:
+        return []
+    fmax = codes.max(0).values.float()
+    f1s, ths, kept = [], [], []
+    for i, c in cols:
+        inst = torch.as_tensor(instances[c], device=codes.device).long()
+        f1, th = domain_f1(codes, fmax, labels[:, i].bool(), inst)
+        f1s.append(f1)
+        ths.append(th)
+        kept.append(c)
+    scores, thresh = torch.stack(f1s, 1), torch.stack(ths, 1)  # [F, len(kept)]
+    best = scores.max(dim=1)
+    out = []
+    for f in range(scores.shape[0]):
+        score = float(best.values[f])
+        if score >= min_f1:
+            j = int(best.indices[f])
+            out.append(
+                {
+                    "feature_id": int(f),
+                    "label": str(kept[j]),
+                    "score": round(score, 4),
+                    "threshold": round(float(thresh[f, j]), 4),
+                }
+            )
+    return out
+
+
 # ───────────────────────────────────────────────────────────── linear probes
 def fit_logreg(Xtr, ytr, steps=400, lr=0.05, wd=1e-2):
     """Fit a logistic-regression probe (Adam + BCE-with-logits); returns (w, b)."""

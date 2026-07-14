@@ -46,11 +46,12 @@ from sae.architectures import TopKSAE
 _PLANTED_FEATURE = 3
 
 
-def _planted_buffer(path, n=400, n_features=6, hidden=8, seed=0):
+def _planted_buffer(path, n=400, n_features=6, hidden=8, seed=0, with_dense=True):
     """Write a synthetic buffer where ``_PLANTED_FEATURE`` cleanly separates the "planted" label.
 
-    Includes a dense twin + per-concept instance ids so the save/load round trip and the
-    SAE-vs-dense ``linear`` path are both exercised. Returns the in-memory buffer too.
+    ``with_dense=True`` is a point buffer (dense twin, scored by AUROC); ``with_dense=False`` drops
+    the dense twin so ``annotate`` routes it through domain-F1 (region buffer). Either way it carries
+    per-concept instance ids so the save/load round trip is exercised. Returns the in-memory buffer.
     """
     rng = np.random.default_rng(seed)
     label_names = ["planted", "noise"]
@@ -62,7 +63,7 @@ def _planted_buffer(path, n=400, n_features=6, hidden=8, seed=0):
     pos = labels[:, 0]
     codes[pos, _PLANTED_FEATURE] = (rng.random(int(pos.sum())) * 5 + 5).astype(np.float16)  # strong, positives only
 
-    dense = (rng.random((n, hidden))).astype(np.float16)
+    dense = (rng.random((n, hidden))).astype(np.float16) if with_dense else None
     # one instance per run of 5 positive tokens; -1 outside the concept
     inst = np.full(n, -1, np.int32)
     inst[pos] = (np.cumsum(pos)[pos] - 1) // 5
@@ -106,11 +107,79 @@ def test_annotate_cli_labels_planted_feature(tmp_path, monkeypatch, capsys):
         "cpu",
     )
     tbl = pq.read_table(out).to_pydict()
-    assert set(tbl) == {"feature_id", "label", "auroc", "activation_freq", "max_activation"}
-    rows = {fid: (lab, au) for fid, lab, au in zip(tbl["feature_id"], tbl["label"], tbl["auroc"])}
+    assert set(tbl) == {"feature_id", "label", "method", "score", "auroc", "activation_freq", "max_activation"}
+    rows = {fid: (lab, m, au) for fid, lab, m, au in zip(tbl["feature_id"], tbl["label"], tbl["method"], tbl["auroc"])}
     assert _PLANTED_FEATURE in rows, "planted feature not annotated"
-    label, auroc = rows[_PLANTED_FEATURE]
-    assert label == "planted" and auroc >= 0.85
+    label, method, auroc = rows[_PLANTED_FEATURE]
+    assert label == "planted" and method == "auroc" and auroc >= 0.85
+
+
+def test_annotate_cli_domain_f1_labels_region_feature(tmp_path, monkeypatch):
+    """A region buffer (instance ids, no dense twin) routes ``annotate`` through domain-F1."""
+    _planted_buffer(tmp_path / "region.npz", with_dense=False)
+    out = tmp_path / "region_annotations.parquet"
+    _run_cli(
+        monkeypatch,
+        "annotate",
+        "--acts",
+        str(tmp_path / "region.npz"),
+        "--out",
+        str(out),
+        "--min-f1",
+        "0.5",
+        "--device",
+        "cpu",
+    )
+    tbl = pq.read_table(out).to_pydict()
+    rows = {fid: (lab, m, sc) for fid, lab, m, sc in zip(tbl["feature_id"], tbl["label"], tbl["method"], tbl["score"])}
+    assert _PLANTED_FEATURE in rows, "planted feature not annotated by domain-F1"
+    label, method, score = rows[_PLANTED_FEATURE]
+    assert label == "planted" and method == "domain_f1" and score >= 0.5
+
+
+def test_annotate_cli_merges_point_and_region(tmp_path, monkeypatch):
+    """Multiple --acts merge into one parquet; AUROC wins over F1 for a feature scored by both."""
+    _planted_buffer(tmp_path / "point.npz", with_dense=True)  # -> AUROC
+    _planted_buffer(tmp_path / "region.npz", with_dense=False)  # -> domain-F1
+    out = tmp_path / "merged.parquet"
+    _run_cli(
+        monkeypatch,
+        "annotate",
+        "--acts",
+        str(tmp_path / "point.npz"),
+        str(tmp_path / "region.npz"),
+        "--out",
+        str(out),
+        "--min-auroc",
+        "0.85",
+        "--min-f1",
+        "0.5",
+        "--device",
+        "cpu",
+    )
+    tbl = pq.read_table(out).to_pydict()
+    method = dict(zip(tbl["feature_id"], tbl["method"]))
+    assert method[_PLANTED_FEATURE] == "auroc", "AUROC should win the tie over domain-F1"
+
+
+def test_region_buffer_helper_stacks_masks_and_rekeys_instances(tmp_path):
+    """_region_buffer -> dense-free region buffer; euk-f1 pairs the cds mask with gene instances."""
+    p, f = 12, 5
+    code_buf = torch.rand(p, f, dtype=torch.float16)
+    lab = {k: torch.zeros(p, dtype=torch.bool) for k in ("exon", "intron", "cds")}
+    lab["exon"][2:6] = True
+    lab["cds"][3:6] = True
+    lab["intron"][7:9] = True
+    inst = {k: torch.full((p,), -1, dtype=torch.long) for k in ("exon", "intron", "gene")}
+    inst["exon"][2:6], inst["gene"][2:9], inst["intron"][7:9] = 0, 0, 0
+    buf = probe._region_buffer(code_buf, lab, inst, ("exon", "intron", "cds"), ("exon", "intron", "gene"))
+    assert buf.dense is None and list(buf.label_names) == ["exon", "intron", "cds"]
+    assert set(buf.instances) == {"exon", "intron", "cds"}
+    assert np.array_equal(buf.instances["cds"], inst["gene"].numpy().astype(np.int32))  # cds mask <- gene instances
+    buf.save(str(tmp_path / "r.npz"))  # round trips as a real region buffer
+    lo = ActivationBuffer.load(str(tmp_path / "r.npz"))
+    assert lo.dense is None and lo.labels.shape == (p, 3)
+    assert np.array_equal(lo.instances["cds"], inst["gene"].numpy().astype(np.int32))
 
 
 def test_auroc_cli_recovers_planted_feature(tmp_path, monkeypatch, capsys):
