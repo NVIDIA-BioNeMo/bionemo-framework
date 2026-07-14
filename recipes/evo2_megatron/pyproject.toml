@@ -45,6 +45,12 @@ dependencies = [
 test = [
     "pytest>=8.0",
 ]
+vllm = [
+    "vllm==0.20.0",
+]
+
+[project.entry-points."vllm.general_plugins"]
+evo2 = "bionemo.evo2.vllm.plugin:register"
 
 [project.scripts]
 torchrun = "torch.distributed.run:main"
