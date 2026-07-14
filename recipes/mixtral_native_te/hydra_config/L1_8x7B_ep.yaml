@@ -1,0 +1,56 @@
+defaults:
+  - defaults
+  - _self_
+
+config_name_or_path: ./model_configs/mistralai/Mixtral-8x7B-v0.1
+
+parallelism:
+  dp_size: 1
+  ep_size: 8
+
+num_train_steps: 60_000
+
+fp8_config:
+  enabled: true
+  fp8_recipe: transformer_engine.common.recipe.MXFP8BlockScaling
+  fp8_format: E4M3
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: true
+    preserve_high_precision_init_val: true
+
+dataset:
+  tokenizer_name_or_path: mistralai/Mixtral-8x7B-v0.1
+  micro_batch_size: 1
+  max_seq_length: 4096
+  text_column: "text"
+  load_dataset_kwargs:
+    path: "Salesforce/wikitext"
+    name: "wikitext-2-raw-v1"
+    split: "train"
+    streaming: True
+
+wandb:
+  name: "mixtral-8x7b-ep8-mxfp8"
+  project: mixtral-native-te
+
+adamw_kwargs:
+  lr: 1e-4
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.1
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 58_000
+  min_lr_ratio: 0.000001
+
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  save_every_n_steps: 5_000
+  async_save: false
+
+logger:
+  frequency: 10

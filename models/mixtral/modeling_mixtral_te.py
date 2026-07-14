@@ -62,10 +62,16 @@ class NVMixtralConfig(MixtralConfig):
     layer_precision: list[str | None] | None = None
     use_quantized_model_init: bool = False
     expert_parallel_size: int = 1
+    expert_ffn_mode: str = "grouped_linear"
     moe_aux_loss_coeff: float = 0.0
 
     def __init__(self, **kwargs):
         """Initialize the NVMixtralConfig with additional TE-related config options."""
+        self.expert_ffn_mode = kwargs.pop("expert_ffn_mode", "grouped_linear")
+        if self.expert_ffn_mode not in ("grouped_linear", "fused_grouped_mlp"):
+            raise ValueError(
+                f'expert_ffn_mode must be "grouped_linear" or "fused_grouped_mlp", got {self.expert_ffn_mode!r}'
+            )
         super().__init__(**kwargs)
 
         if self.layer_precision is not None:
@@ -87,12 +93,16 @@ class DispatchOutput:
     """Output of TokenDispatcher.dispatch().
 
     Attributes:
-        expert_input: Tokens sorted by local expert, shape ``[total_recv_tokens, H]``.
-        tokens_per_expert: Token count per local expert.
+        expert_input: Tokens sorted by local expert, shape ``[total_recv_tokens, H]``. Already padded
+            per expert to the fused-kernel alignment (256), so no further padding is needed.
+        expert_probs: Per-token routing probability for each row of ``expert_input`` (shape
+            ``[total_recv_tokens]``), consumed by the expert FFN (``ScaledSwiGLU`` in fused mode).
+        tokens_per_expert: Padded token count per local expert.
         handle: Opaque state needed by ``combine()`` to reverse the dispatch.
     """
 
     expert_input: torch.Tensor
+    expert_probs: torch.Tensor
     tokens_per_expert: list[int]
     handle: Any
 
@@ -184,13 +194,65 @@ class NVMixtralPreTrainedModel(PreTrainedModel):
         super()._init_weights(module)
 
     def state_dict(self, *args, **kwargs):
-        """Override state_dict to filter out TransformerEngine's _extra_state keys."""
+        """Override state_dict to drop TE ``_extra_state`` and duplicate fused-op keys.
+
+        In ``fused_grouped_mlp`` mode the expert weights are owned by ``experts_gate_up`` /
+        ``experts_down`` but are *also* reachable through the ``_experts_ffn_op`` fused
+        ``Sequential`` (the very same ``nn.Parameter`` objects appear under both attribute
+        paths). Emitting both makes ``save_pretrained``'s safetensors writer reject the
+        checkpoint as containing shared tensors. Drop the ``_experts_ffn_op.*`` aliases so the
+        serialized state dict holds exactly one copy of each expert weight; the aliases are
+        repopulated automatically on load because they share storage with the canonical params.
+        """
         state_dict = super().state_dict(*args, **kwargs)
-        return {k: v for k, v in state_dict.items() if not k.endswith("_extra_state")}
+        return {k: v for k, v in state_dict.items() if not k.endswith("_extra_state") and "._experts_ffn_op." not in k}
+
+
+_FUSED_GROUPED_MLP_REGISTERED = False
+
+
+def _ensure_fused_grouped_mlp_registered() -> bool:
+    """Enable the CuteDSL fused GroupedMLP forward fusion once per process. Returns is_supported()."""
+    global _FUSED_GROUPED_MLP_REGISTERED  # noqa: PLW0603  (process-wide one-time TE fusion registration)
+    from transformer_engine.pytorch.ops.fused.forward_grouped_mlp import (
+        ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+        fuse_forward_ops,
+    )
+    from transformer_engine.pytorch.ops.fuser import OperationFuser, register_forward_fusion
+
+    ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported.cache_clear()
+    supported = ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported()
+    if supported and not _FUSED_GROUPED_MLP_REGISTERED:
+        if fuse_forward_ops not in OperationFuser.forward_fusion_functions:
+            register_forward_fusion(fuse_forward_ops, prepend=True)
+        _FUSED_GROUPED_MLP_REGISTERED = True
+    return supported
+
+
+# Per-expert token-count alignment required by the fused MXFP8 grouped-MLP CuteDSL kernel
+# (ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8): each group's GEMM M dimension must be a multiple of 256.
+# The dispatcher's moe_permute_and_pad_with_probs pads to this and returns pad_offsets so the padding
+# is dropped at moe_unpermute.
+_MXFP8_GROUP_ALIGN = 256
 
 
 class NVMixtralSparseMoeBlock(nn.Module):
-    """Mixture of Experts block using TransformerEngine GroupedLinear."""
+    """Mixture-of-Experts block with a replicated router and expert-parallel (EP) experts.
+
+    This is the heart of the "EP from scratch" recipe. The router (``gate``) is replicated on every
+    rank and scores all ``num_experts`` global experts; each rank physically owns only
+    ``num_local_experts = num_experts // ep_size`` of them. Per step:
+
+    1. the router picks each token's top-k experts (globally-numbered);
+    2. the ``dispatcher`` all-to-alls tokens to the rank that owns their selected expert;
+    3. the local TE grouped-linear / fused-GroupedMLP kernels run the SwiGLU FFN on this rank's
+       experts only;
+    4. the dispatcher all-to-alls the outputs back to the originating ranks.
+
+    This reproduces Megatron-style expert parallelism using only PyTorch collectives + TE kernels
+    (no Megatron-LM). See ``AllToAllTokenDispatcher`` for the token routing and the ``experts_*``
+    weight handling below for why the expert weights need manual surgery.
+    """
 
     def __init__(self, config: MixtralConfig, dispatcher: TokenDispatcher | None = None):
         """Initialize the sparse MoE block."""
@@ -200,6 +262,8 @@ class NVMixtralSparseMoeBlock(nn.Module):
         self.num_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
         self.jitter_noise = config.router_jitter_noise
+        self.config = config
+        self.expert_ffn_mode = config.expert_ffn_mode
 
         # Expert parallelism
         self.ep_size = getattr(config, "expert_parallel_size", 1)
@@ -207,6 +271,12 @@ class NVMixtralSparseMoeBlock(nn.Module):
         self.moe_aux_loss_coeff = getattr(config, "moe_aux_loss_coeff", 0.0)
         self._aux_loss: torch.Tensor = torch.tensor(0.0)
         self.initializer_range = config.initializer_range
+        self._ep_mesh: DeviceMesh | None = None
+        # Optional process group over which the load-balancing statistics are reduced so the aux
+        # loss reflects the global token distribution rather than this rank's local shard. ``None``
+        # keeps the per-rank behavior (used in single-process runs / tests). Set via
+        # ``set_load_balance_group``; typically the full data-parallel extent (see the setter).
+        self._lb_group: dist.ProcessGroup | None = None
 
         self.dispatcher: TokenDispatcher = dispatcher or AllToAllTokenDispatcher(
             self.num_experts,
@@ -232,41 +302,78 @@ class NVMixtralSparseMoeBlock(nn.Module):
             )
 
         # Expert FFNs — only num_local_experts per rank when EP > 1
-        self.experts_gate_up = transformer_engine.pytorch.GroupedLinear(
-            num_gemms=self.num_local_experts,
-            in_features=self.hidden_size,
-            out_features=2 * self.intermediate_size,
-            bias=False,
-            params_dtype=config.dtype,
-            device=device,
-            init_method=_init_method,
-        )
-        self.experts_down = transformer_engine.pytorch.GroupedLinear(
-            num_gemms=self.num_local_experts,
-            in_features=self.intermediate_size,
-            out_features=self.hidden_size,
-            bias=False,
-            params_dtype=config.dtype,
-            device=device,
-            init_method=_init_method,
-        )
+        if config.expert_ffn_mode == "fused_grouped_mlp":
+            os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "0"
+            os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
+            _ensure_fused_grouped_mlp_registered()
 
-        # Stack per-expert weights into single parameters (authoritative weight store).
-        # GroupedLinear's _parameters dict is emptied; weight attributes are set as views
-        # so that reset_parameters() / _get_weight_tensors() can still find them.
-        self.experts_gate_up_weight = nn.Parameter(
-            torch.stack(
-                [self.experts_gate_up._parameters.pop(f"weight{i}").data for i in range(self.num_local_experts)]
+            from transformer_engine.pytorch.ops import GroupedLinear as OpsGL
+            from transformer_engine.pytorch.ops import ScaledSwiGLU, Sequential
+
+            self.experts_gate_up = OpsGL(
+                num_groups=self.num_local_experts,
+                in_features=self.hidden_size,
+                out_features=2 * self.intermediate_size,
+                bias=False,
+                dtype=config.dtype,
+                device=device,
             )
-        )  # [num_local_experts, 2*intermediate_size, hidden_size]
+            self.experts_down = OpsGL(
+                num_groups=self.num_local_experts,
+                in_features=self.intermediate_size,
+                out_features=self.hidden_size,
+                bias=False,
+                dtype=config.dtype,
+                device=device,
+            )
+            self._experts_ffn_op = Sequential(
+                self.experts_gate_up, ScaledSwiGLU(glu_interleave_size=32), self.experts_down
+            )
+        else:
+            self.experts_gate_up = transformer_engine.pytorch.GroupedLinear(
+                num_gemms=self.num_local_experts,
+                in_features=self.hidden_size,
+                out_features=2 * self.intermediate_size,
+                bias=False,
+                params_dtype=config.dtype,
+                device=device,
+                init_method=_init_method,
+            )
+            self.experts_down = transformer_engine.pytorch.GroupedLinear(
+                num_gemms=self.num_local_experts,
+                in_features=self.intermediate_size,
+                out_features=self.hidden_size,
+                bias=False,
+                params_dtype=config.dtype,
+                device=device,
+                init_method=_init_method,
+            )
 
-        self.experts_down_weight = nn.Parameter(
-            torch.stack([self.experts_down._parameters.pop(f"weight{i}").data for i in range(self.num_local_experts)])
-        )  # [num_local_experts, hidden_size, intermediate_size]
+            # Weight surgery: stack the per-expert weights into a single [num_local_experts, ...]
+            # parameter (the authoritative store). WHY this isn't handled for us: TE's GroupedLinear
+            # registers one independent nn.Parameter per expert (``weight0``, ``weight1``, ...), but
+            # expert parallelism needs a single leading "expert" dimension so the experts can be
+            # sharded as one DTensor(Shard(0)) over the ep mesh and checkpointed as a global
+            # ``[num_experts, ...]`` tensor (see grouped_dcp.py). PyTorch can't register slices of one
+            # Parameter as separate Parameters without duplicating ownership, so we invert it: the
+            # stacked tensor is the real Parameter, and GroupedLinear's ``weight{i}`` become plain
+            # (non-registered) views of it — set via ``_sync_expert_views`` — so TE's internal
+            # ``getattr(self, "weight{i}")`` calls (reset_parameters / _get_weight_tensors) still work.
+            self.experts_gate_up_weight = nn.Parameter(
+                torch.stack(
+                    [self.experts_gate_up._parameters.pop(f"weight{i}").data for i in range(self.num_local_experts)]
+                )
+            )  # [num_local_experts, 2*intermediate_size, hidden_size]
 
-        # Set views back on GroupedLinear so getattr(self, "weight{i}") still works
-        # (needed by GroupedLinear.reset_parameters and _get_weight_tensors).
-        self._sync_expert_views()
+            self.experts_down_weight = nn.Parameter(
+                torch.stack(
+                    [self.experts_down._parameters.pop(f"weight{i}").data for i in range(self.num_local_experts)]
+                )
+            )  # [num_local_experts, hidden_size, intermediate_size]
+
+            # Set views back on GroupedLinear so getattr(self, "weight{i}") still works
+            # (needed by GroupedLinear.reset_parameters and _get_weight_tensors).
+            self._sync_expert_views()
 
     def _restack_from_views(self) -> None:
         """Re-create stacked parameters on CUDA after meta init.
@@ -276,6 +383,9 @@ class NVMixtralSparseMoeBlock(nn.Module):
         its ``reset_parameters()`` cannot move them from meta to CUDA. This method explicitly
         creates the stacked parameters on CUDA and reinitializes them.
         """
+        if self.expert_ffn_mode == "fused_grouped_mlp":
+            return
+
         device = torch.cuda.current_device()
         for attr_name in ("experts_gate_up_weight", "experts_down_weight"):
             old_param = getattr(self, attr_name)
@@ -295,6 +405,9 @@ class NVMixtralSparseMoeBlock(nn.Module):
         Uses ``object.__setattr__`` to bypass ``nn.Module.__setattr__`` and avoid
         re-registering them as parameters.
         """
+        if self.expert_ffn_mode == "fused_grouped_mlp":
+            return
+
         gate_up_w = self.experts_gate_up_weight
         if isinstance(gate_up_w, DTensor):
             gate_up_w = gate_up_w.to_local()
@@ -308,16 +421,26 @@ class NVMixtralSparseMoeBlock(nn.Module):
             object.__setattr__(self.experts_down, f"weight{i}", down_w[i])
 
     def set_ep_group(self, ep_group: dist.ProcessGroup, ep_mesh: DeviceMesh) -> None:
-        """Set the expert-parallel process group and convert stacked weights to DTensors.
+        """Set the expert-parallel process group; wire experts into the ep mesh.
 
-        Must be called before the first forward pass when ``ep_size > 1``.
+        Must be called before the first forward pass (and before FSDP2 wrapping) when ``ep_size > 1``.
+        Behavior differs by expert representation:
+
+        - ``fused_grouped_mlp`` (the benchmarked path): the *live* experts stay as TE discrete
+          ``weight{i}`` tensors (the fused CuteDSL kernel reads them directly), so we only stash
+          ``ep_mesh`` here — ``grouped_dcp`` uses it at checkpoint time to build the global
+          ``[num_experts, ...]`` DTensor representation.
+        - ``grouped_linear``: wrap the stacked expert parameters as ``DTensor(Shard(0))`` over the
+          expert dimension now, so FSDP2/DCP can save, load, and reshard them automatically.
 
         Args:
             ep_group: A ``torch.distributed.ProcessGroup`` whose world size equals ``self.ep_size``.
-            ep_mesh: A 1-D ``DeviceMesh`` for expert parallelism. Used to wrap stacked weights
-                as ``DTensor(Shard(0))`` so that DCP can save/load/reshard them automatically.
+            ep_mesh: A 1-D ``DeviceMesh`` for expert parallelism (the ``Shard(0)`` device mesh).
         """
         self.dispatcher.set_ep_group(ep_group)
+        if self.expert_ffn_mode == "fused_grouped_mlp":
+            self._ep_mesh = ep_mesh
+            return
         # Convert stacked parameters to DTensors with Shard(0) on the expert dimension.
         # Global shape is [num_experts, ...]; each rank stores [num_local_experts, ...].
         # Guard: only wrap plain tensors; skip if already DTensors (e.g. repeated calls).
@@ -330,20 +453,63 @@ class NVMixtralSparseMoeBlock(nn.Module):
                 DTensor.from_local(self.experts_down_weight.data, device_mesh=ep_mesh, placements=[Shard(0)])
             )
 
-    def _expert_ffn(self, tokens: torch.Tensor, m_splits: list[int]) -> torch.Tensor:
-        """Run the expert SwiGLU FFN (gate_up -> silu -> down).
+    def set_load_balance_group(self, group: dist.ProcessGroup | None) -> None:
+        """Set the process group over which load-balancing statistics are reduced.
+
+        The aux loss's per-expert dispatch fraction and mean router probability are reduced over
+        this group so the objective reflects the global token distribution. Pass the full
+        data-parallel extent that sees distinct data (with global data sharding, the whole world).
+        """
+        self._lb_group = group
+
+    def _expert_ffn_fused(self, tokens: torch.Tensor, m_splits: list[int], probs: torch.Tensor) -> torch.Tensor:
+        """Run the fused CuteDSL grouped MLP on already-padded expert groups.
+
+        Tokens arrive pre-padded to the 256-row MXFP8 alignment (from the dispatcher's
+        ``moe_permute_and_pad_with_probs``), so there is no padding to do here. ``probs`` are the
+        per-token routing probabilities that the fused ``ScaledSwiGLU`` applies (padding rows carry
+        prob 0). The routing weights are thus applied inside the FFN, not at ``moe_unpermute``.
+        """
+        if tokens.shape[0] == 0:
+            # All of this rank's local experts received 0 tokens (empty experts are left unpadded at
+            # 0 rows). The fused CuteDSL kernel builds a TMA descriptor over the token dimension and
+            # fails on a 0-row input; skipping the op would also desync the EP autograd graph (the
+            # combine all-to-all backward would hang waiting on this rank). Run one masked dummy group
+            # to keep the kernel valid and the collectives symmetric, then drop it.
+            align = _MXFP8_GROUP_ALIGN
+            dummy = tokens.new_zeros((align, tokens.shape[-1]))
+            split_sizes = torch.tensor([align] + [0] * (len(m_splits) - 1), dtype=torch.int32, device=tokens.device)
+            dummy_probs = torch.ones(align, device=tokens.device, dtype=torch.float32)
+            out = self._experts_ffn_op(dummy, split_sizes, dummy_probs, split_sizes)
+            return out[:0]
+        split_sizes = torch.tensor(m_splits, dtype=torch.int32, device=tokens.device)
+        return self._experts_ffn_op(tokens, split_sizes, probs.to(torch.float32), split_sizes)
+
+    def _expert_ffn(self, tokens: torch.Tensor, m_splits: list[int], probs: torch.Tensor) -> torch.Tensor:
+        """Run the expert SwiGLU FFN (gate_up -> silu -> down), applying per-token routing probs here.
+
+        In ``fused_grouped_mlp`` mode the probs are applied inside the fused ``ScaledSwiGLU``; in
+        ``grouped_linear`` mode we scale the down-projection output by the per-token probs. Either way
+        the routing weights are applied in the FFN (so ``combine``/``moe_unpermute`` does not re-apply
+        them). ``tokens`` is padded per expert to the 256 alignment; padding rows carry prob 0 and are
+        dropped at unpermute.
 
         Args:
-            tokens: Input tensor of shape [total_tokens, H], sorted by expert.
-            m_splits: Number of tokens per local expert.
+            tokens: Input tensor of shape [total_padded_tokens, H], sorted/padded by local expert.
+            m_splits: Padded token count per local expert.
+            probs: Per-token routing probability, shape [total_padded_tokens].
 
         Returns:
-            Output tensor of shape [total_tokens, H].
+            Output tensor of shape [total_padded_tokens, H].
         """
+        if self.expert_ffn_mode == "fused_grouped_mlp":
+            return self._expert_ffn_fused(tokens, m_splits, probs)
+
         gate_up_output = self.experts_gate_up(tokens, m_splits=m_splits)
         gate_output, up_output = gate_up_output.chunk(2, dim=-1)
         intermediate = torch.nn.functional.silu(gate_output) * up_output
-        return self.experts_down(intermediate, m_splits=m_splits)
+        out = self.experts_down(intermediate, m_splits=m_splits)
+        return out * probs.to(out.dtype).unsqueeze(-1)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass for the MoE block.
@@ -379,22 +545,44 @@ class NVMixtralSparseMoeBlock(nn.Module):
         # Auxiliary load-balancing loss (switch transformer style)
         if self.moe_aux_loss_coeff > 0:
             num_tokens = hidden_states.shape[0]
-            m_splits_tensor = torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts).int()
-            # f_i: fraction of tokens dispatched to each expert
-            f = m_splits_tensor.float() / (num_tokens * self.top_k)
-            # P_i: mean router probability per expert (over all tokens)
+            # Local per-expert dispatch counts and summed router probabilities.
+            expert_counts = torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts).float()
             router_probs = torch.nn.functional.softmax(router_logits, dim=-1, dtype=torch.float32)
-            p = router_probs.mean(dim=0)
+            prob_sum = router_probs.sum(dim=0)  # [num_experts], differentiable
+            total_dispatch = torch.tensor(float(num_tokens), device=hidden_states.device)
+
+            # Reduce the statistics over the data-parallel extent so f_i / P_i describe the GLOBAL
+            # token distribution. The switch loss E·Σ f_i·P_i is nonlinear, so we must reduce the
+            # statistics *before* forming the product (averaging per-rank losses is not equivalent).
+            # counts / token-total are reduced non-differentiably; the global prob-sum is made to
+            # carry gradient only through this rank's local contribution (value = global sum via a
+            # detached all-reduce). This keeps backward collective-free — no new cross-group NCCL
+            # ordering hazard — and, under DP gradient averaging, scales the aux term like the CE
+            # loss (mean over the global batch).
+            if self._lb_group is not None and dist.get_world_size(self._lb_group) > 1:
+                counts_global = expert_counts.detach().clone()
+                dist.all_reduce(counts_global, op=dist.ReduceOp.SUM, group=self._lb_group)
+                dist.all_reduce(total_dispatch, op=dist.ReduceOp.SUM, group=self._lb_group)
+                prob_sum_global = prob_sum.detach().clone()
+                dist.all_reduce(prob_sum_global, op=dist.ReduceOp.SUM, group=self._lb_group)
+                expert_counts = counts_global
+                prob_sum = prob_sum_global + (prob_sum - prob_sum.detach())  # value global, grad local
+
+            f = expert_counts / (total_dispatch * self.top_k)  # fraction dispatched per expert
+            p = prob_sum / total_dispatch  # mean router probability per expert
             self._aux_loss = self.moe_aux_loss_coeff * self.num_experts * (f * p).sum()
         else:
             self._aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
         # Populate GroupedLinear weight attributes from stacked parameters.
         # For EP, the stacked parameter is a DTensor; .to_local() gives the local shard.
-        self._sync_expert_views()
+        if self.expert_ffn_mode != "fused_grouped_mlp":
+            self._sync_expert_views()
 
         dispatch_output = self.dispatcher.dispatch(hidden_states, selected_experts, routing_weights)
-        expert_output = self._expert_ffn(dispatch_output.expert_input, dispatch_output.tokens_per_expert)
+        expert_output = self._expert_ffn(
+            dispatch_output.expert_input, dispatch_output.tokens_per_expert, dispatch_output.expert_probs
+        )
         output = self.dispatcher.combine(expert_output, dispatch_output.handle)
 
         return output.reshape(original_shape)
@@ -542,6 +730,17 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
         """
         for layer in self.layers:
             layer.mlp.set_ep_group(ep_group, ep_mesh)
+
+    def set_load_balance_group(self, group: dist.ProcessGroup | None) -> None:
+        """Propagate the load-balancing reduction group to every MoE block.
+
+        Args:
+            group: Process group over which each block reduces its aux-loss statistics (dispatch
+                fraction and mean router probability) so the objective reflects the global token
+                distribution. With global data sharding this is the full world.
+        """
+        for layer in self.layers:
+            layer.mlp.set_load_balance_group(group)
 
     def forward(
         self,
@@ -948,18 +1147,22 @@ class _AllToAllHandle:
     """Opaque handle for AllToAllTokenDispatcher, storing state between dispatch and combine."""
 
     row_id_map: torch.Tensor
-    routing_weights: torch.Tensor
+    restore_shape: torch.Size
+    pad_offsets: torch.Tensor | None = None
     unsort_indices: torch.Tensor | None = None
     input_split_sizes: list[int] | None = None
     output_split_sizes: list[int] | None = None
 
 
 class _DifferentiableAllToAll(torch.autograd.Function):
-    """Differentiable wrapper around dist.all_to_all_single.
+    """Autograd-aware wrapper around ``dist.all_to_all_single`` for token routing.
 
-    The forward pass performs the standard all-to-all communication.
-    The backward pass reverses the communication direction (swapping
-    input/output split sizes) so that gradients flow correctly.
+    WHY this is hand-written: ``dist.all_to_all_single`` is a plain collective with no autograd
+    support, and TE only ships *local* MoE permute/unpermute helpers — neither provides a
+    differentiable cross-rank token exchange. We define the backward as the inverse all-to-all with
+    the input/output split sizes swapped, so gradients for each token flow back to the rank that
+    originally held it. This is the minimal primitive that makes expert-parallel routing trainable
+    with vanilla PyTorch distributed.
     """
 
     @staticmethod
@@ -974,9 +1177,10 @@ class _DifferentiableAllToAll(torch.autograd.Function):
         ctx.input_split_sizes = input_split_sizes
         ctx.output_split_sizes = output_split_sizes
         ctx.group = group
+        # Works for 2-D token tensors [N, H] and 1-D per-token prob tensors [N].
         output = torch.empty(
             sum(output_split_sizes),
-            input.shape[1],
+            *input.shape[1:],
             device=input.device,
             dtype=input.dtype,
         )
@@ -988,7 +1192,7 @@ class _DifferentiableAllToAll(torch.autograd.Function):
         """Reverse all-to-all: swap input and output split sizes."""
         grad_input = torch.empty(
             sum(ctx.input_split_sizes),
-            grad_output.shape[1],
+            *grad_output.shape[1:],
             device=grad_output.device,
             dtype=grad_output.dtype,
         )
@@ -1035,80 +1239,107 @@ class AllToAllTokenDispatcher:
     ) -> DispatchOutput:
         """Dispatch tokens to their assigned experts via permute and optional all-to-all.
 
+        WHY the routing is manual: TE's permute helpers reorder a rank's *local* tokens by expert id,
+        but no PyTorch/TE call moves tokens across the expert-parallel mesh — the "send each token to
+        the rank that owns its expert" step. So we do it by hand: fused permute+pad+probs locally,
+        exchange per-(source, local-expert) padded counts with a small all-to-all, run the token
+        all-to-all (``_DifferentiableAllToAll``, for tokens and their probs), then re-sort the received
+        tokens from source-major into expert-major order because TE ``GroupedLinear`` expects contiguous
+        rows per local expert. At ``ep_size == 1`` the all-to-all degenerates to a no-op.
+
+        ``moe_permute_and_pad_with_probs`` does three things in one kernel that base PyTorch/TE
+        otherwise leaves to us: (1) group tokens by expert, (2) pad each group to the fused MXFP8
+        kernel's 256-row alignment (returning ``pad_offsets`` so the padding is dropped at unpermute),
+        and (3) carry the per-token routing probability so the destination-side ``ScaledSwiGLU`` applies
+        it locally — the layout the fused ``ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8`` kernel wants.
+
         Args:
             hidden_states: Flattened input tensor of shape ``[N, H]``.
             selected_experts: Expert assignments, shape ``[N, top_k]``, int.
             routing_weights: Normalized routing probabilities, shape ``[N, top_k]``, float32.
 
         Returns:
-            DispatchOutput with expert-sorted tokens, per-expert counts, and an opaque handle.
+            DispatchOutput with padded expert-sorted tokens, their per-token probs, per-expert counts,
+            and an opaque handle.
         """
-        # Permute tokens by expert using TE moe_permute
-        permuted_hidden, row_id_map = transformer_engine.pytorch.moe_permute(
-            hidden_states, selected_experts.to(torch.int32), map_type="index"
+        num_tokens = hidden_states.shape[0]
+        # Dense [N, num_experts] routing map/probs required by moe_permute_and_pad_with_probs.
+        idx = selected_experts.to(torch.int64)
+        routing_map = torch.zeros(
+            num_tokens, self.num_experts, dtype=torch.int32, device=hidden_states.device
+        ).scatter_(1, idx, 1)
+        routing_probs = torch.zeros(
+            num_tokens, self.num_experts, dtype=routing_weights.dtype, device=hidden_states.device
+        ).scatter_(1, idx, routing_weights)
+        tokens_per_expert = routing_map.sum(dim=0).to(torch.int32)
+
+        permuted_hidden, permuted_probs, row_id_map, pad_offsets, padded_tpe = (
+            transformer_engine.pytorch.moe_permute_and_pad_with_probs(
+                hidden_states, routing_probs, routing_map, tokens_per_expert, _MXFP8_GROUP_ALIGN
+            )
         )
+        padded_tpe = padded_tpe.int()
 
-        # Compute m_splits: number of tokens per expert
-        m_splits_tensor = torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts).int()
-
-        if self._ep_group is not None:
-            ep_group = self._ep_group
-
-            # Token counts per expert, reshaped to [ep_size, num_local_experts]
-            send_counts = m_splits_tensor.reshape(self.ep_size, self.num_local_experts)
-
-            # Exchange per-expert token counts between EP ranks
-            recv_counts = torch.empty_like(send_counts)
-            dist.all_to_all_single(recv_counts.flatten(), send_counts.flatten(), group=ep_group)
-
-            # Derive split sizes for the token all-to-all
-            input_split_sizes = send_counts.sum(dim=1).tolist()
-            output_split_sizes = recv_counts.sum(dim=1).tolist()
-            local_m_splits = recv_counts.sum(dim=0).int().tolist()
-
-            # Dispatch tokens to expert-owning ranks (differentiable)
-            recv_tokens = _DifferentiableAllToAll.apply(
-                permuted_hidden, output_split_sizes, input_split_sizes, ep_group
-            )
-
-            # Sort received tokens by local expert index.
-            # After all_to_all layout is [src0_exp0..src0_expL, src1_exp0..src1_expL, ...].
-            # GroupedLinear needs [all_exp0, all_exp1, ...].
-            sort_indices, unsort_indices = _build_expert_sort_indices(recv_counts)
-
-            handle = _AllToAllHandle(
-                row_id_map=row_id_map,
-                routing_weights=routing_weights,
-                unsort_indices=unsort_indices,
-                input_split_sizes=input_split_sizes,
-                output_split_sizes=output_split_sizes,
-            )
+        if self._ep_group is None:
+            handle = _AllToAllHandle(row_id_map=row_id_map, restore_shape=hidden_states.shape, pad_offsets=pad_offsets)
             return DispatchOutput(
-                expert_input=recv_tokens[sort_indices],
-                tokens_per_expert=local_m_splits,
+                expert_input=permuted_hidden,
+                expert_probs=permuted_probs,
+                tokens_per_expert=padded_tpe.tolist(),
                 handle=handle,
             )
 
-        handle = _AllToAllHandle(row_id_map=row_id_map, routing_weights=routing_weights)
+        ep_group = self._ep_group
+        # Padded per-expert counts reshaped to [ep_size, num_local_experts] (expert e owned by rank e // L).
+        send_counts = padded_tpe.reshape(self.ep_size, self.num_local_experts)
+        recv_counts = torch.empty_like(send_counts)
+        dist.all_to_all_single(recv_counts.flatten(), send_counts.flatten(), group=ep_group)
+
+        input_split_sizes = send_counts.sum(dim=1).tolist()
+        output_split_sizes = recv_counts.sum(dim=1).tolist()
+        local_m_splits = recv_counts.sum(dim=0).int().tolist()
+
+        # Ship padded tokens and their per-token probs to the expert-owning ranks (both differentiable).
+        recv_tokens = _DifferentiableAllToAll.apply(permuted_hidden, output_split_sizes, input_split_sizes, ep_group)
+        recv_probs = _DifferentiableAllToAll.apply(permuted_probs, output_split_sizes, input_split_sizes, ep_group)
+
+        # Re-sort received tokens from source-major ([src0_exp0..src0_expL, src1_exp0..]) into
+        # expert-major ([all_exp0, all_exp1, ...]) order, which TE GroupedLinear requires.
+        sort_indices, unsort_indices = _build_expert_sort_indices(recv_counts)
+
+        handle = _AllToAllHandle(
+            row_id_map=row_id_map,
+            restore_shape=hidden_states.shape,
+            pad_offsets=pad_offsets,
+            unsort_indices=unsort_indices,
+            input_split_sizes=input_split_sizes,
+            output_split_sizes=output_split_sizes,
+        )
         return DispatchOutput(
-            expert_input=permuted_hidden,
-            tokens_per_expert=m_splits_tensor.tolist(),
+            expert_input=recv_tokens[sort_indices],
+            expert_probs=recv_probs[sort_indices],
+            tokens_per_expert=local_m_splits,
             handle=handle,
         )
 
     def combine(self, expert_output: torch.Tensor, handle: _AllToAllHandle) -> torch.Tensor:
         """Combine expert outputs back to the original token order.
 
+        Routing probabilities were already applied inside the expert FFN (``ScaledSwiGLU`` in fused
+        mode), so ``moe_unpermute`` is called with ``merging_probs=None``: it scatters each token's
+        top-k expert outputs back to the original position and sums them, using ``pad_offsets`` to skip
+        the padded rows.
+
         Args:
             expert_output: Expert output tensor of shape ``[total_recv_tokens, H]``.
             handle: Handle from ``dispatch()`` containing state for the reverse operation.
 
         Returns:
-            Combined output tensor of shape ``[N, H]`` with routing weights applied.
+            Combined output tensor of shape ``[N, H]``.
         """
         if self._ep_group is not None:
             assert handle.unsort_indices is not None
-            # Unsort back to source-rank-grouped order and reverse all_to_all (differentiable)
+            # Unsort back to source-rank-grouped order and reverse the token all-to-all (differentiable).
             combined = _DifferentiableAllToAll.apply(
                 expert_output[handle.unsort_indices],
                 handle.input_split_sizes,
@@ -1118,10 +1349,11 @@ class AllToAllTokenDispatcher:
         else:
             combined = expert_output
 
-        # Unpermute and combine with routing weights (keep probs in float32 for numerical stability)
         return transformer_engine.pytorch.moe_unpermute(
             combined,
             handle.row_id_map,
-            merging_probs=handle.routing_weights,
-            map_type="index",
+            merging_probs=None,
+            restore_shape=handle.restore_shape,
+            map_type="mask",
+            pad_offsets=handle.pad_offsets,
         )

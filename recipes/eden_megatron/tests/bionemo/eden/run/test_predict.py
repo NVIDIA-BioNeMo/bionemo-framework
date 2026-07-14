@@ -29,7 +29,7 @@ import torch
 from bionemo.eden.data.test_utils.create_fasta_file import ALU_SEQUENCE, create_fasta_file
 from bionemo.eden.run.predict import batch_collator
 
-from ..utils import find_free_network_port, is_a6000_gpu
+from ..utils import is_a6000_gpu
 
 
 # Do this at collection time before we run any tests.
@@ -72,9 +72,8 @@ def test_predict_eden_runs(
         env["NCCL_P2P_DISABLE"] = "1"
 
     output_dir = tmp_path / "eden_test_output"
-    open_port = find_free_network_port()
     command = (
-        f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {open_port} "
+        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
         f"-m bionemo.eden.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_eden_checkpoint_path} "
         f"--output-dir {output_dir} "
         f"--micro-batch-size 3 --write-interval epoch "
@@ -143,9 +142,8 @@ def test_predict_eden_log_probs(
         env["NCCL_P2P_DISABLE"] = "1"
 
     output_dir = tmp_path / "eden_logprobs_output"
-    open_port = find_free_network_port()
     command = (
-        f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {open_port} "
+        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
         f"-m bionemo.eden.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_eden_checkpoint_path} "
         f"--output-dir {output_dir} "
         f"--micro-batch-size 3 --write-interval epoch "

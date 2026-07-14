@@ -1,0 +1,22 @@
+datasets
+hydra-core
+safetensors
+torch
+torchao!=0.14.0
+torchdata
+torchmetrics
+tqdm
+transformer_engine[pytorch]
+transformers
+wandb
+nvdlfw_inspect @ git+https://github.com/NVIDIA/nvidia-dlfw-inspect
+pytest
+# Pinned trio required by the fused MXFP8 GroupedMLP kernel (ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8)
+# used for the experts on Blackwell (sm_100+). Stock PyTorch 26.06 ships nvidia-cutlass-dsl 4.5.x,
+# which changes nvvm.AtomicRMWOp to require a `res` arg; cudnn-frontend 1.23 calls the old API and
+# raises `TypeError: atomicrmw() missing 'res'`. The Dockerfile overrides the base-image versions with
+# this known-good pair (+ apache-tvm-ffi, required by cutlass-dsl 4.4.1). Without it the kernel is
+# unavailable and training asserts loudly rather than silently using the unfused path.
+nvidia-cudnn-frontend>=1.23.0,<1.24
+nvidia-cutlass-dsl[cu13]==4.4.1
+apache-tvm-ffi

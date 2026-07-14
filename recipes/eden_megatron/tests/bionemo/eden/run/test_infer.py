@@ -23,8 +23,6 @@ from pathlib import Path
 
 import pytest
 
-from ..utils import find_free_network_port
-
 
 # Capture environment at import time (consistent with test_predict.py)
 PRETEST_ENV = copy.deepcopy(os.environ)
@@ -57,16 +55,13 @@ def test_infer_eden_runs(mbridge_eden_checkpoint_path, tmp_path):
     """Test that infer.py runs without errors on an Eden (Llama) mbridge checkpoint."""
     output_file = tmp_path / "eden_output.jsonl"
     prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
-    open_port = find_free_network_port()
-
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         "1",
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         "-m",
         "bionemo.eden.run.infer",
         "--ckpt-dir",
@@ -112,15 +107,13 @@ def test_infer_eden_deterministic(mbridge_eden_checkpoint_path, tmp_path):
     prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
 
     for output_file in (output_1, output_2):
-        open_port = find_free_network_port()
         cmd = [
             "torchrun",
+            "--standalone",
             "--nproc_per_node",
             "1",
             "--nnodes",
             "1",
-            "--master_port",
-            str(open_port),
             "-m",
             "bionemo.eden.run.infer",
             "--ckpt-dir",

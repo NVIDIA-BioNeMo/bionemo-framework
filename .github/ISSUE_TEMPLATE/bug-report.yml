@@ -90,7 +90,7 @@ body:
     attributes:
       label: Docker Image
       description: If the issue occurred in a container, provide the docker image name. Visit the [PyTorch NGC Container Registry](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for available images.
-      placeholder: e.g., nvcr.io/nvidia/pytorch:26.05-py3
+      placeholder: e.g., nvcr.io/nvidia/pytorch:26.06-py3
     validations:
       required: false
 

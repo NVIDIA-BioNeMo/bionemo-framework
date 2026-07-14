@@ -95,15 +95,14 @@ def _shard_expert_weights(full_state_dict: dict, ep_rank: int, ep_size: int, num
 # ---------------------------------------------------------------------------
 
 
-def _run_torchrun(test_name: str, port: int):
+def _run_torchrun(test_name: str):
     """Run the equivalence test worker via torchrun with 2 GPUs."""
     model_dir = str(Path(__file__).resolve().parent.parent)
     script = str(Path(__file__).resolve())
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         script,
         test_name,
     ]
@@ -125,17 +124,17 @@ def _run_torchrun(test_name: str, port: int):
 @requires_multi_gpu
 @requires_deep_ep
 @requires_peer_access
-def test_fused_router_matches_alltoall(unused_tcp_port):
+def test_fused_router_matches_alltoall():
     """Test that FusedTokenRouter dispatcher matches AllToAll dispatcher at EP=2."""
-    _run_torchrun("forward", unused_tcp_port)
+    _run_torchrun("forward")
 
 
 @requires_multi_gpu
 @requires_deep_ep
 @requires_peer_access
-def test_fused_router_backward(unused_tcp_port):
+def test_fused_router_backward():
     """Test that backward pass with FusedTokenRouter dispatcher matches AllToAll at EP=2."""
-    _run_torchrun("backward", unused_tcp_port)
+    _run_torchrun("backward")
 
 
 # ---------------------------------------------------------------------------

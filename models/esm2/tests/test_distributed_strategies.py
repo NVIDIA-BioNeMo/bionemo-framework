@@ -43,12 +43,11 @@ requires_multi_gpu = pytest.mark.skipif(
     ],
 )
 @pytest.mark.parametrize("backend", ["te", "eager"])
-def test_ddp_vs_fsdp_single_gpu(strategy, backend, unused_tcp_port):
+def test_ddp_vs_fsdp_single_gpu(strategy, backend):
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=1",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{unused_tcp_port}",
         os.path.relpath(__file__),
         "--strategy",
         strategy,
@@ -73,12 +72,11 @@ def test_ddp_vs_fsdp_single_gpu(strategy, backend, unused_tcp_port):
 @requires_multi_gpu
 @pytest.mark.parametrize("strategy", ["fsdp2", pytest.param("mfsdp", marks=pytest.mark.xfail(reason="BIONEMO-2726"))])
 @pytest.mark.parametrize("backend", ["te", "eager"])
-def test_ddp_vs_fsdp_multi_gpu(strategy, backend, unused_tcp_port):
+def test_ddp_vs_fsdp_multi_gpu(strategy, backend):
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{unused_tcp_port}",
         os.path.relpath(__file__),
         "--strategy",
         strategy,

@@ -50,7 +50,7 @@ from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge
 
-from ..utils import check_fp8_support, find_free_network_port
+from ..utils import check_fp8_support
 
 
 # Capture environment at import time (consistent with test_predict.py)
@@ -82,16 +82,13 @@ def test_infer_runs(mbridge_checkpoint_path, tmp_path):
     # Use a longer DNA prompt to meet FP8 dimension requirements (divisible by 8)
     # 64 characters should be safe
     prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
-    open_port = find_free_network_port()
-
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         "1",
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         "-m",
         "bionemo.evo2.run.infer",
         "--ckpt-dir",
@@ -140,16 +137,13 @@ def test_infer_temperature(mbridge_checkpoint_path, tmp_path, temperature):
     output_file = tmp_path / f"output_temp_{temperature}.jsonl"
     # Use a longer prompt for FP8 compatibility
     prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
-    open_port = find_free_network_port()
-
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         "1",
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         "-m",
         "bionemo.evo2.run.infer",
         "--ckpt-dir",
@@ -183,16 +177,13 @@ def test_infer_top_k(mbridge_checkpoint_path, tmp_path):
     output_file = tmp_path / "output_topk.jsonl"
     # Use a longer prompt for FP8 compatibility
     prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
-    open_port = find_free_network_port()
-
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         "1",
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         "-m",
         "bionemo.evo2.run.infer",
         "--ckpt-dir",
@@ -239,16 +230,13 @@ def test_infer_phylogenetic_prompt(mbridge_checkpoint_path, tmp_path):
         "g__Escherichia;"
         "s__Escherichia|"
     )
-    open_port = find_free_network_port()
-
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         "1",
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         "-m",
         "bionemo.evo2.run.infer",
         "--ckpt-dir",
@@ -329,16 +317,13 @@ def run_infer_subprocess(
     Returns:
         The single JSONL result record (dict) for the prompt.
     """
-    open_port = find_free_network_port()
-
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         "1",
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         "-m",
         "bionemo.evo2.run.infer",
         "--ckpt-dir",
@@ -446,15 +431,13 @@ def _run_infer_prompt_file(
     max_batch_size: int,
     use_subquadratic_ops: bool,
 ) -> dict[str, dict]:
-    open_port = find_free_network_port()
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         "1",
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         "-m",
         "bionemo.evo2.run.infer",
         "--ckpt-dir",
@@ -589,16 +572,13 @@ def run_infer_subprocess_parallel(
         List of parsed JSONL result dicts.
     """
     nproc_per_node = tensor_parallel_size * pipeline_model_parallel_size * context_parallel_size
-    open_port = find_free_network_port()
-
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         str(nproc_per_node),
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         str(_infer_script_path()),
         "--ckpt-dir",
         str(mbridge_checkpoint_path),
@@ -1061,15 +1041,13 @@ def test_different_results_with_without_peft(tmp_path, mbridge_checkpoint_path, 
     prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
 
     def _run_infer(ckpt: Path, output_file: Path) -> dict:
-        port = find_free_network_port()
         cmd = [
             "torchrun",
+            "--standalone",
             "--nproc_per_node",
             "1",
             "--nnodes",
             "1",
-            "--master_port",
-            str(port),
             "-m",
             "bionemo.evo2.run.infer",
             "--ckpt-dir",
@@ -1525,16 +1503,14 @@ def test_native_dynamic_tp2_batch1(mbridge_checkpoint_7b_1m_path, tmp_path):
     tp = 2
     if torch.cuda.device_count() < tp:
         pytest.skip(f"TP={tp} requires {tp} GPUs, have {torch.cuda.device_count()}")
-    open_port = find_free_network_port()
     output_file = tmp_path / "native_tp2.jsonl"
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node",
         str(tp),
         "--nnodes",
         "1",
-        "--master_port",
-        str(open_port),
         str(_infer_script_path()),
         "--ckpt-dir",
         str(mbridge_checkpoint_7b_1m_path),

@@ -1,4 +1,4 @@
-accelerate @ git+https://github.com/huggingface/accelerate.git  # Until huggingface/accelerate#3852 is released.
+accelerate==1.13.0
 datasets
 deepspeed
 hydra-core
