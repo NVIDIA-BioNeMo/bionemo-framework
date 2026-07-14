@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from bionemo.evo2.models.megatron.hyena.engine import step_fir
-from bionemo.evo2.vllm.packed_fir import packed_fir_reference
+from bionemo.evo2.vllm.packed_fir import packed_causal_fir, packed_fir_reference, select_fir_path
 
 
 PROMPT_LENGTHS = list(range(4, 13)) * 10 + [4, 5, 6, 7, 8, 9]
@@ -33,6 +33,11 @@ def _expanded(values, channels, group_size):
     if values.shape[0] == channels:
         return values
     return values.repeat_interleave(group_size, dim=0)
+
+
+def test_bucketed_fir_requires_a_five_percent_measured_speedup():
+    assert select_fir_path(direct_ms=1.0, bucketed_ms=0.96) == "direct"
+    assert select_fir_path(direct_ms=1.0, bucketed_ms=0.94) == "bucketed"
 
 
 def _scalar_oracle(
@@ -243,3 +248,246 @@ def test_invalid_state_indices_are_rejected(state_indices, message):
             gated_bias=False,
             flip_filter=False,
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")
+@pytest.mark.parametrize(
+    ("channels", "taps", "group_size", "gated_bias", "flip_filter", "state_width"),
+    [
+        (12288, 3, 16, False, False, 2),
+        (4096, 7, 16, False, False, 127),
+        (4096, 128, 16, True, True, 127),
+    ],
+)
+def test_packed_causal_fir_matches_reference_and_reuses_slots(
+    channels,
+    taps,
+    group_size,
+    gated_bias,
+    flip_filter,
+    state_width,
+):
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(4000 + taps)
+    real_request_count = len(PROMPT_LENGTHS)
+    padded_request_count = 128
+    lengths = [*PROMPT_LENGTHS, *([0] * (padded_request_count - real_request_count))]
+    query_start_loc = _query_start_loc(lengths).to(device=device, dtype=torch.int32)
+    total_tokens = int(query_start_loc[-1])
+    num_filters = channels // group_size
+    x = torch.randn((total_tokens, channels), device=device, dtype=torch.bfloat16, generator=generator)
+    weight = torch.randn((num_filters, taps), device=device, dtype=torch.bfloat16, generator=generator) * 0.025
+    bias = torch.randn((num_filters,), device=device, dtype=torch.bfloat16, generator=generator) * 0.025
+
+    real_slots = torch.arange(real_request_count, 0, -1, device=device, dtype=torch.int32)
+    real_slots[::17] = 0
+    state_indices = torch.cat(
+        (real_slots, torch.zeros(padded_request_count - real_request_count, device=device, dtype=torch.int32))
+    )
+    has_initial_state = state_indices.ne(0) & (torch.arange(padded_request_count, device=device) % 2 == 0)
+    initial_cache = torch.randn(
+        (real_request_count + 8, channels, state_width),
+        device=device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+    initial_cache[0].fill_(7.0)
+    initial_cache[-1].fill_(-11.0)
+    expected_cache = initial_cache.clone()
+    actual_cache = initial_cache.clone()
+    expected_output = packed_fir_reference(
+        x,
+        weight,
+        bias,
+        expected_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        group_size=group_size,
+        gated_bias=gated_bias,
+        flip_filter=flip_filter,
+    )
+    actual_output = packed_causal_fir(
+        x,
+        weight,
+        bias,
+        actual_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        group_size=group_size,
+        gated_bias=gated_bias,
+        flip_filter=flip_filter,
+        max_query_len=12,
+    )
+
+    torch.testing.assert_close(actual_output, expected_output, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual_cache, expected_cache, rtol=2e-5, atol=2e-5)
+
+    next_x = torch.randn(x.shape, device=device, dtype=torch.bfloat16, generator=generator)
+    next_has_initial_state = state_indices.ne(0)
+    expected_next = packed_fir_reference(
+        next_x,
+        weight,
+        bias,
+        expected_cache,
+        query_start_loc,
+        state_indices,
+        next_has_initial_state,
+        group_size=group_size,
+        gated_bias=gated_bias,
+        flip_filter=flip_filter,
+    )
+    actual_next = packed_causal_fir(
+        next_x,
+        weight,
+        bias,
+        actual_cache,
+        query_start_loc,
+        state_indices,
+        next_has_initial_state,
+        group_size=group_size,
+        gated_bias=gated_bias,
+        flip_filter=flip_filter,
+        max_query_len=12,
+    )
+
+    torch.testing.assert_close(actual_next, expected_next, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual_cache, expected_cache, rtol=2e-5, atol=2e-5)
+    torch.testing.assert_close(actual_cache[0], initial_cache[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual_cache[-1], initial_cache[-1], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")
+@pytest.mark.parametrize("taps", [7, 128])
+@pytest.mark.parametrize("target_position", [0, 1])
+def test_packed_causal_fir_request_matches_alone_or_inside_batch(taps, target_position):
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(8100 + taps)
+    channels = 32
+    target = torch.randn((8, channels), device=device, dtype=torch.bfloat16, generator=generator)
+    other = torch.randn((5, channels), device=device, dtype=torch.bfloat16, generator=generator) * 1000
+    weight = torch.randn((channels // 2, taps), device=device, dtype=torch.bfloat16, generator=generator) * 0.01
+    bias = torch.randn((channels // 2,), device=device, dtype=torch.bfloat16, generator=generator) * 0.01
+    initial_cache = torch.randn((3, channels, 127), device=device, dtype=torch.float32, generator=generator)
+
+    single_query_start_loc = torch.tensor([0, len(target)], device=device, dtype=torch.int32)
+    single_state_indices = torch.tensor([1], device=device, dtype=torch.int32)
+    single_cache = initial_cache.clone()
+    single_output = packed_causal_fir(
+        target,
+        weight,
+        bias,
+        single_cache,
+        single_query_start_loc,
+        single_state_indices,
+        torch.tensor([True], device=device),
+        group_size=2,
+        gated_bias=False,
+        flip_filter=False,
+        max_query_len=len(target),
+    )
+
+    requests = [target, other]
+    if target_position == 1:
+        requests.reverse()
+    lengths = [len(request) for request in requests]
+    query_start_loc = _query_start_loc(lengths).to(device=device, dtype=torch.int32)
+    state_indices = torch.tensor(
+        [1 if request_index == target_position else 2 for request_index in range(2)],
+        device=device,
+        dtype=torch.int32,
+    )
+    has_initial_state = torch.tensor(
+        [request_index == target_position for request_index in range(2)],
+        device=device,
+    )
+    batched_cache = initial_cache.clone()
+    batched_output = packed_causal_fir(
+        torch.cat(requests),
+        weight,
+        bias,
+        batched_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        group_size=2,
+        gated_bias=False,
+        flip_filter=False,
+        max_query_len=len(target),
+    )
+    target_start = sum(lengths[:target_position])
+
+    torch.testing.assert_close(
+        batched_output[target_start : target_start + len(target)],
+        single_output,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(batched_cache[1], single_cache[1], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for graph capture")
+def test_packed_causal_fir_cuda_graph_replay_uses_static_buffers():
+    device = torch.device("cuda")
+    batch_size = 128
+    channels = 4096
+    taps = 7
+    generator = torch.Generator(device=device).manual_seed(6060)
+    x = torch.randn((batch_size, channels), device=device, dtype=torch.bfloat16, generator=generator)
+    weight = torch.randn((channels // 16, taps), device=device, dtype=torch.bfloat16, generator=generator)
+    bias = torch.randn((channels // 16,), device=device, dtype=torch.bfloat16, generator=generator)
+    state_cache = torch.randn((batch_size + 1, channels, 127), device=device, generator=generator)
+    state_cache[0].fill_(5.0)
+    query_start_loc = torch.arange(batch_size + 1, device=device, dtype=torch.int32)
+    state_indices = torch.cat(
+        (
+            torch.arange(1, 97, device=device, dtype=torch.int32),
+            torch.zeros(32, device=device, dtype=torch.int32),
+        )
+    )
+    has_initial_state = state_indices.ne(0)
+
+    packed_causal_fir(
+        x,
+        weight,
+        bias,
+        state_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        group_size=16,
+        gated_bias=False,
+        flip_filter=False,
+        max_query_len=1,
+    )
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = packed_causal_fir(
+            x,
+            weight,
+            bias,
+            state_cache,
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            group_size=16,
+            gated_bias=False,
+            flip_filter=False,
+            max_query_len=1,
+        )
+
+    output_pointer = output.data_ptr()
+    first_output = output.clone()
+    first_state = state_cache[1].clone()
+    null_state = state_cache[0].clone()
+    x.copy_(torch.randn(x.shape, device=device, dtype=torch.bfloat16, generator=generator) + 3)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert output.data_ptr() == output_pointer
+    assert not torch.equal(output, first_output)
+    assert not torch.equal(state_cache[1], first_state)
+    torch.testing.assert_close(state_cache[0], null_state, rtol=0, atol=0)
