@@ -128,7 +128,9 @@ def main():
     pa.add_argument("--fasta", help="MANY sequences -> parquet (needs --out)")
     pa.add_argument("--out", help="output parquet path (required with --fasta)")
     pa.add_argument("--organism", default="None (raw DNA)")
-    pa.add_argument("--top-k", type=int, default=16, help="annotate the top-k features by peak (ignored if --feature-ids)")
+    pa.add_argument(
+        "--top-k", type=int, default=16, help="annotate the top-k features by peak (ignored if --feature-ids)"
+    )
     pa.add_argument("--feature-ids", help="comma-separated feature ids to annotate instead of top-k")
     pa.add_argument(
         "--long",
@@ -275,7 +277,13 @@ def main():
                     if args.long:
                         for pos, val in enumerate(track):
                             rows.append(
-                                {"sequence_id": sid, "position": pos, "feature_id": fid, "label": f.get("label"), "activation": val}
+                                {
+                                    "sequence_id": sid,
+                                    "position": pos,
+                                    "feature_id": fid,
+                                    "label": f.get("label"),
+                                    "activation": val,
+                                }
                             )
                     else:
                         rows.append(
