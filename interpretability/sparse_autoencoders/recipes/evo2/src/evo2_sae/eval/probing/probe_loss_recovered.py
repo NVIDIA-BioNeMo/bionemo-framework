@@ -55,7 +55,7 @@ class SAEWrap(nn.Module):
         return self.sae(x)
 
 
-class L26Hook:  # noqa: D101
+class LayerHook:  # noqa: D101  — forward hook to capture / replace a decoder layer's residual output
     def __init__(self):  # noqa: D107
         self.mode = "off"  # off | capture | replace
         self.override = None
@@ -93,7 +93,7 @@ def main():  # noqa: D103
     # directly below for teacher-forced CE, and hook its layer-`args.layer` output.
     gen = engine._ensure_engine().model
     layer = unwrap_model(gen).decoder.layers[args.layer]
-    hook = L26Hook()
+    hook = LayerHook()
     layer.register_forward_hook(hook)
 
     pairs = sample_sequences(
@@ -132,7 +132,7 @@ def main():  # noqa: D103
 
     with engine._lock:
         res = evaluate_loss_recovered(SAEWrap(engine.sae), batches, get_hiddens, compute_ce, device=dev)
-    print("\n==== Evo2 7B layer-%d SAE — loss recovered ====" % args.layer)
+    print("\n==== Evo2 layer-%d SAE — loss recovered ====" % args.layer)
     print(res)
     print(
         f"loss_recovered = {res.loss_recovered:.3f}  "

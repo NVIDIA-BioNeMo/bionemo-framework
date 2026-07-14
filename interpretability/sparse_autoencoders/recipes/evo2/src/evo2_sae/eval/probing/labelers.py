@@ -56,7 +56,7 @@ LABELERS: dict[str, callable] = {}
 COMPLEX_LABELERS: set[str] = set()
 
 # Sink-token norm threshold (residual L2). Set by the driver from the data
-# (Evo2 7B layer-26 sinks sit ~1638 vs a ~21 median, so this cleanly isolates them).
+# (sinks sit ~1638 vs a ~21 median residual norm — orders of magnitude apart — so a fixed threshold isolates them).
 SINK_NORM_THRESHOLD: float = 100.0
 
 
