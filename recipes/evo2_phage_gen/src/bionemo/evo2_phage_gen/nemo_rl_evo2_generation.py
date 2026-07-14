@@ -34,6 +34,24 @@ def _evo2_batched_decode_size(cfg: dict[str, Any]) -> int:
     )
 
 
+def _evo2_native_batched_decode_size(worker: Any) -> int:
+    """Return native request capacity rounded up for MCore tensor parallelism."""
+    configured_size = max(1, _evo2_batched_decode_size(worker.cfg))
+    megatron_cfg = worker.cfg.get("megatron_cfg", {}) or {}
+    tensor_parallel_size = int(megatron_cfg.get("tensor_model_parallel_size") or 1)
+    if tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_model_parallel_size must be positive for Evo2 native generation, got {tensor_parallel_size}"
+        )
+    return ((configured_size + tensor_parallel_size - 1) // tensor_parallel_size) * tensor_parallel_size
+
+
+def _reseed_evo2_native_dynamic(native_dynamic: Any, seed: int) -> None:
+    """Apply an adapter-call seed even when native inference components are cached."""
+    native_dynamic.evo2_seed = int(seed)
+    native_dynamic.sampling_rng = None
+
+
 def _unwrap_evo2_model(model: Any) -> Any:
     """Unwrap Megatron/DDP/fp16 wrappers until the Evo2 model is visible."""
     current = model
@@ -154,7 +172,7 @@ def generate_evo2_native_batched(
         return []
 
     mcore_generation_config = worker.cfg["generation"]["mcore_generation_config"]
-    batched_decode_size = _evo2_batched_decode_size(worker.cfg)
+    batched_decode_size = _evo2_native_batched_decode_size(worker)
     initial_seed = int(
         evo2_seed if evo2_seed is not None else mcore_generation_config.get("seed", torch.initial_seed() % (2**31))
     )
@@ -175,7 +193,7 @@ def generate_evo2_native_batched(
             cuda_graphs_enabled=mcore_generation_config.get("cuda_graph_impl") != "none",
         )
         worker._evo2_native_dynamic_components = native_dynamic
-    native_dynamic.evo2_seed = initial_seed
+    _reseed_evo2_native_dynamic(native_dynamic, initial_seed)
 
     components = Evo2InferenceComponents(
         tokenizer=tokenizer,
@@ -228,20 +246,44 @@ def generate_evo2_native_batched(
 
 
 class Evo2MegatronGenerationAdapter:
-    """Recipe-owned adapter for TP-coordinated Evo2 batched generation in NeMo-RL."""
+    """Recipe-owned adapter for DP-sharded, model-parallel Evo2 generation."""
 
     requires_all_workers = True
 
     def __init__(self, config: dict[str, Any] | None = None):
         """Create an adapter from NeMo-RL generation adapter config."""
         self.config = dict(config or {})
-        self.return_rank = int(self.config.get("return_rank", 0))
         self.seed_stride = int(self.config.get("seed_stride", 1_000_003))
 
     def _distributed_rank(self, worker: Any) -> int:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             return int(torch.distributed.get_rank())
         return int(getattr(worker, "rank", 0))
+
+    def _data_parallel_coordinates(self, worker: Any) -> tuple[int, int]:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            from megatron.core import parallel_state
+
+            return (
+                int(parallel_state.get_data_parallel_rank()),
+                int(parallel_state.get_data_parallel_world_size()),
+            )
+        return (
+            int(getattr(worker, "data_parallel_rank", 0)),
+            int(getattr(worker, "dp_size", 1)),
+        )
+
+    def _is_model_parallel_leader(self) -> bool:
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return True
+
+        from megatron.core import parallel_state
+
+        return (
+            int(parallel_state.get_tensor_model_parallel_rank()) == 0
+            and int(parallel_state.get_pipeline_model_parallel_rank()) == 0
+            and int(parallel_state.get_context_parallel_rank()) == 0
+        )
 
     def _next_seed(self, worker: Any) -> int:
         mcore_generation_config = worker.cfg["generation"].get("mcore_generation_config", {}) or {}
@@ -255,13 +297,23 @@ class Evo2MegatronGenerationAdapter:
         # TODO: Persist or derive this counter from trainer state. It currently resets
         # when the worker process restarts, so resumed runs can replay the same seed sequence.
         setattr(worker, "_evo2_generation_call_index", call_index + 1)
-        seed = int((base_seed + call_index * self.seed_stride) % (2**31))
+        data_parallel_rank, data_parallel_size = self._data_parallel_coordinates(worker)
+        if data_parallel_size < 1 or not 0 <= data_parallel_rank < data_parallel_size:
+            raise ValueError(
+                "Invalid Evo2 generation data-parallel coordinates: "
+                f"rank={data_parallel_rank}, size={data_parallel_size}"
+            )
+        seed_index = call_index * data_parallel_size + data_parallel_rank
+        seed = int((base_seed + seed_index * self.seed_stride) % (2**31))
 
         trace = getattr(worker, "_evo2_generation_rng_trace", [])
         trace.append(
             {
                 "rank": self._distributed_rank(worker),
+                "data_parallel_rank": data_parallel_rank,
+                "data_parallel_size": data_parallel_size,
                 "call_index": call_index,
+                "seed_index": seed_index,
                 "seed": seed,
                 "base_seed": base_seed,
                 "seed_stride": self.seed_stride,
@@ -277,7 +329,7 @@ class Evo2MegatronGenerationAdapter:
         data: Any,
         greedy: bool = False,
     ) -> Any | None:
-        """Generate on every model-parallel worker and return output from one rank."""
+        """Generate a replicated DP shard on every model-parallel worker."""
         adapter_begin_unix_s = time.time()
         adapter_start = time.perf_counter()
         prompt_tokens_tensor, prompt_lengths_tensor, sampling_params = worker._prepare_data_for_generation(
@@ -291,6 +343,7 @@ class Evo2MegatronGenerationAdapter:
             )
 
         seed = self._next_seed(worker)
+        data_parallel_rank, data_parallel_size = self._data_parallel_coordinates(worker)
         native_begin_unix_s = time.time()
         native_start = time.perf_counter()
         try:
@@ -301,6 +354,13 @@ class Evo2MegatronGenerationAdapter:
                 sampling_params,
                 evo2_seed=seed,
             )
+            expected_results = int(prompt_tokens_tensor.size(0))
+            if len(result) != expected_results:
+                raise RuntimeError(
+                    "Evo2 native batched generation returned "
+                    f"{len(result)} results for {expected_results} prompts on "
+                    f"data-parallel rank {data_parallel_rank}"
+                )
         finally:
             native_end_unix_s = time.time()
             timing = {
@@ -311,15 +371,15 @@ class Evo2MegatronGenerationAdapter:
                 "timing/train/generation/evo2_adapter_end_unix_s": time.time(),
                 "timing/train/generation/evo2_adapter_elapsed_s": time.perf_counter() - adapter_start,
                 "timing/train/generation/evo2_native_batch_size": float(prompt_tokens_tensor.size(0)),
+                "timing/train/generation/evo2_data_parallel_rank": float(data_parallel_rank),
+                "timing/train/generation/evo2_data_parallel_size": float(data_parallel_size),
             }
             setattr(worker, "_evo2_generation_timing", timing)
-            if self._distributed_rank(worker) == self.return_rank:
+            if self._is_model_parallel_leader():
                 print(
                     " ".join(f"{key}={value:.6f}" for key, value in timing.items()),
                     flush=True,
                 )
-        if self._distributed_rank(worker) != self.return_rank:
-            return None
         return worker._parse_result_to_batched_data_dict(data, result)
 
     def finish_worker(self, worker: Any) -> None:

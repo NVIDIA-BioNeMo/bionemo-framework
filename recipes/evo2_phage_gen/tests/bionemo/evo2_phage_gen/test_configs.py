@@ -255,7 +255,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
 
     assert config["defaults"] == "grpo_phage_megatron.yaml"
     assert env_config["reward_output_mode"] == "gdpo"
-    assert config["loss_fn"]["reference_policy_kl_penalty"] == 0.05
+    assert config["loss_fn"]["reference_policy_kl_penalty"] == 0.001
     assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
     assert config["policy"]["generation"]["mcore_generation_config"]["generation_adapter_config"]["seed"] == 42
     assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6
@@ -263,14 +263,23 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["policy"]["megatron_cfg"]["scheduler"]["lr_warmup_init"] == 1.0e-7
     assert config["checkpointing"]["metric_name"] == "val:phage_qc/binary_core_pass_cluster_deduplicated_rate"
     assert [objective["name"] for objective in objectives] == [
-        "feasibility",
-        "function",
-        "architecture",
-        "novelty",
+        "valid_nt_chars",
+        "genome_length",
+        "gc_content",
+        "nt_homopolymer",
+        "dustmask_end",
+        "nucleotide_pass",
+        "protein_hit_count",
+        "tropism",
+        "required_genes",
+        "synteny",
+        "average_protein_identity",
+        "mmseqs_cluster_diversity",
     ]
+    assert all(len(objective["columns"]) == 1 for objective in objectives)
     assert all("reward" not in objective["columns"] for objective in objectives)
     assert "reward_mmseqs_cluster_diversity" in objectives[-1]["columns"]
-    assert "reward_dustmask_end" in objectives[0]["columns"]
+    assert "reward_dustmask_end" in objectives[4]["columns"]
     assert env_config["weight_mmseqs_cluster_diversity"] == 1.0
     assert env_config["dustmask_filter"] is True
     assert env_config["weight_dustmask_end"] == 1.0
@@ -281,7 +290,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert mmseqs_config == {
         "enabled": True,
         "mmseqs_bin": "mmseqs",
-        "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched48_decodefix_clusterfix_mmseqs_cluster_diversity",
+        "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity",
         "keep_artifacts": False,
         "min_seq_id": 0.99,
         "coverage": 0.0,
@@ -292,10 +301,71 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "verbosity": 0,
     }
     assert config["grpo"]["num_generations_per_prompt"] == 96
-    assert config["grpo"]["val_at_start"] is True
-    assert config["policy"]["generation_batch_size"] == 48
-    assert "lr1e-6-kl0.05" in config["logger"]["wandb"]["name"]
+    assert config["grpo"]["val_at_start"] is False
+    assert config["grpo"]["val_at_end"] is True
+    assert config["policy"]["train_global_batch_size"] == 96
+    assert config["policy"]["train_micro_batch_size"] == 1
+    assert config["policy"]["generation_batch_size"] == 96
+    assert config["policy"]["logprob_batch_size"] == 1
+    mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
+    assert mcore_generation_config["prompt_batch_size"] == 96
+    assert mcore_generation_config["max_requests"] == 96
+    assert "lr1e-6-kl0.001" in config["logger"]["wandb"]["name"]
+    assert "batched96" in config["logger"]["wandb"]["name"]
     assert config["logger"]["wandb"]["name"].startswith("gdpo-phage")
+
+
+def test_gdpo_tp1dp2_smoke_uses_local_decode_48_but_training_microbatch_1():
+    """The DP smoke should split decode 48/48 without repeating the MBS48 OOM."""
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron_gdpo12_tp1dp2_mbs1_smoke.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    policy = config["policy"]
+    mcore_generation_config = policy["generation"]["mcore_generation_config"]
+
+    assert config["defaults"] == "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
+    assert policy["train_global_batch_size"] == 96
+    assert policy["generation_batch_size"] == 96
+    assert policy["train_micro_batch_size"] == 1
+    assert policy["logprob_batch_size"] == 1
+    assert policy["megatron_cfg"]["tensor_model_parallel_size"] == 1
+    assert mcore_generation_config["max_requests"] == 48
+    assert mcore_generation_config["prompt_batch_size"] == 48
+    output_paths = [
+        config["checkpointing"]["checkpoint_dir"],
+        config["env"]["phage_qc"]["external_qc"]["work_dir"],
+        config["env"]["phage_qc"]["mmseqs_cluster_diversity"]["work_dir"],
+        config["logger"]["log_dir"],
+    ]
+    assert all("tp1dp2_finalpatch_mbs1_gdpo12_smoke" in path for path in output_paths)
+    assert config["checkpointing"]["pretrained_checkpoint"]["path"] == (
+        "data/checkpoints/evo2_7b_microviridae_mbridge"
+    )
+
+
+def test_gdpo_tp2dp1_smoke_uses_full_96_request_collective_and_isolated_output_paths():
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron_gdpo12_tp2dp1_dpgenfix_smoke.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    policy = config["policy"]
+    mcore_generation_config = policy["generation"]["mcore_generation_config"]
+
+    assert config["defaults"] == "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
+    assert policy["train_global_batch_size"] == 96
+    assert policy["generation_batch_size"] == 96
+    assert policy["train_micro_batch_size"] == 1
+    assert policy["logprob_batch_size"] == 1
+    assert policy["megatron_cfg"]["tensor_model_parallel_size"] == 2
+    assert mcore_generation_config["max_requests"] == 96
+    assert mcore_generation_config["prompt_batch_size"] == 96
+    output_paths = [
+        config["checkpointing"]["checkpoint_dir"],
+        config["env"]["phage_qc"]["external_qc"]["work_dir"],
+        config["env"]["phage_qc"]["mmseqs_cluster_diversity"]["work_dir"],
+        config["logger"]["log_dir"],
+    ]
+    assert all("tp2dp1_dpgenfix_gdpo12_smoke" in path for path in output_paths)
+    assert config["checkpointing"]["pretrained_checkpoint"]["path"] == (
+        "data/checkpoints/evo2_7b_microviridae_mbridge"
+    )
 
 
 def test_grpo_diagnostic_config_keeps_full_length_scoring_but_smaller_rollouts():
