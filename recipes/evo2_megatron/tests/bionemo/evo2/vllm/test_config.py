@@ -54,6 +54,10 @@ def test_default_config_matches_evo2_7b():
     assert config.num_groups_hyena == 4096
     assert config.num_groups_hyena_medium == 256
     assert config.num_groups_hyena_short == 256
+    assert config.hidden_act == "gelu"
+    assert config.gelu_approximate == "none"
+    assert config.gated_linear_unit is True
+    assert config.remove_activation_post_first_layer is True
 
 
 def test_tp2_state_shapes_are_uniform():
@@ -114,3 +118,7 @@ def test_config_round_trip(tmp_path):
     assert loaded.tie_word_embeddings is True
     assert loaded.eos_token_id == 0
     assert loaded.pad_token_id == 1
+    assert loaded.hidden_act == "gelu"
+    assert loaded.gelu_approximate == "none"
+    assert loaded.gated_linear_unit is True
+    assert loaded.remove_activation_post_first_layer is True

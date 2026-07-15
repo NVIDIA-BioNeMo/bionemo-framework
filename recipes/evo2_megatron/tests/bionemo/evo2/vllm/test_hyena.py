@@ -138,7 +138,9 @@ def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor
 def _mlp_reference(layer: Evo2HyenaDecoderLayer, hidden_states: torch.Tensor) -> torch.Tensor:
     gate_up = functional.linear(hidden_states, layer.mlp.linear_fc1.weight)
     gate, up = gate_up.chunk(2, dim=-1)
-    return functional.linear(functional.silu(gate) * up, layer.mlp.linear_fc2.weight)
+    layer_index = int(layer.mixer.prefix.split(".layers.", maxsplit=1)[1].split(".", maxsplit=1)[0])
+    activated_gate = functional.gelu(gate, approximate="none") if layer_index == 0 else gate
+    return functional.linear(activated_gate * up, layer.mlp.linear_fc2.weight)
 
 
 def _fir_reference(

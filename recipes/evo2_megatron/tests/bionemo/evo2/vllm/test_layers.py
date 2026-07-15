@@ -118,10 +118,11 @@ def _attention_reference(
     return functional.linear(mixed, attention.linear_proj.weight, attention.linear_proj.bias)
 
 
-def _mlp_reference(mlp: Evo2MLP, hidden_states: torch.Tensor) -> torch.Tensor:
+def _mlp_reference(mlp: Evo2MLP, hidden_states: torch.Tensor, *, layer_index: int = 0) -> torch.Tensor:
     gate_up = functional.linear(hidden_states, mlp.linear_fc1.weight)
     gate, up = gate_up.chunk(2, dim=-1)
-    return functional.linear(functional.silu(gate) * up, mlp.linear_fc2.weight)
+    activated_gate = functional.gelu(gate, approximate="none") if layer_index == 0 else gate
+    return functional.linear(activated_gate * up, mlp.linear_fc2.weight)
 
 
 def test_apply_pre_norm_residual_matches_two_stage_reference() -> None:
@@ -153,6 +154,31 @@ def test_mlp_matches_dense_bf16_reference() -> None:
     assert actual.dtype == DTYPE
     assert not actual.requires_grad
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@CUDA_REQUIRED
+def test_mlp_uses_exact_gelu_on_global_layer_zero_and_identity_afterward() -> None:
+    with _vllm_module_context():
+        layer_zero = Evo2MLP(_config(), prefix="decoder.layers.0.mlp", disable_tp=True).to(DEVICE).eval()
+        layer_one = Evo2MLP(_config(), prefix="decoder.layers.1.mlp", disable_tp=True).to(DEVICE).eval()
+        _randomize(layer_zero)
+        layer_one.load_state_dict(layer_zero.state_dict())
+        hidden_states = torch.randn((7, 64), device=DEVICE, dtype=DTYPE)
+        fc1 = functional.linear(hidden_states, layer_zero.linear_fc1.weight)
+        gate, up = fc1.chunk(2, dim=-1)
+        expected_zero = functional.linear(
+            functional.gelu(gate, approximate="none") * up,
+            layer_zero.linear_fc2.weight,
+        )
+        expected_one = functional.linear(gate * up, layer_one.linear_fc2.weight)
+
+        with torch.inference_mode():
+            actual_zero = layer_zero(hidden_states)
+            actual_one = layer_one(hidden_states)
+
+    torch.testing.assert_close(actual_zero, expected_zero, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual_one, expected_one, rtol=2e-2, atol=2e-2)
+    assert not torch.allclose(actual_zero, actual_one, rtol=2e-2, atol=2e-2)
 
 
 @CUDA_REQUIRED

@@ -48,6 +48,10 @@ class Evo2Config(PreTrainedConfig):
         rms_norm_eps: float = 1e-6,
         rotary_base: float | None = None,
         use_short_conv_bias: bool = False,
+        hidden_act: str = "gelu",
+        gelu_approximate: str = "none",
+        gated_linear_unit: bool = True,
+        remove_activation_post_first_layer: bool = True,
         **kwargs,
     ) -> None:
         """Initialize an Evo2 checkpoint configuration."""
@@ -79,6 +83,10 @@ class Evo2Config(PreTrainedConfig):
         self.rotary_base = float(rotary_base)
         self.rope_theta = float(rotary_base)
         self.use_short_conv_bias = use_short_conv_bias
+        self.hidden_act = hidden_act
+        self.gelu_approximate = gelu_approximate
+        self.gated_linear_unit = gated_linear_unit
+        self.remove_activation_post_first_layer = remove_activation_post_first_layer
 
         self._validate()
         self.head_dim = self.hidden_size // self.num_attention_heads
@@ -97,6 +105,14 @@ class Evo2Config(PreTrainedConfig):
             raise ValueError("hidden size must be divisible by attention heads")
         if self.num_key_value_heads <= 0 or self.num_attention_heads % self.num_key_value_heads:
             raise ValueError("attention heads must be divisible by key/value heads")
+        if self.hidden_act not in ("gelu", "silu", "identity"):
+            raise ValueError(f"unsupported Evo2 MLP activation: {self.hidden_act}")
+        if self.gelu_approximate not in ("none", "tanh"):
+            raise ValueError(f"unsupported GELU approximation: {self.gelu_approximate}")
+        if self.gated_linear_unit is not True:
+            raise ValueError("Evo2 vLLM requires gated_linear_unit=true")
+        if not isinstance(self.remove_activation_post_first_layer, bool):
+            raise ValueError("remove_activation_post_first_layer must be boolean")
         if min(self.short_conv_length, self.hcs_filter_length, self.hcm_filter_length, self.hcl_state_size) < 2:
             raise ValueError("Evo2 recurrent filter and state lengths must be at least two")
 

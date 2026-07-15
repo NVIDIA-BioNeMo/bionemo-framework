@@ -3,12 +3,16 @@
 
 """vLLM attention, MLP, normalization, and residual layers for Evo2."""
 
+import re
 from typing import cast
 
 import torch
 from torch import nn
 
 from bionemo.evo2.vllm.config import Evo2Config
+
+
+_LAYER_INDEX_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 
 def apply_pre_norm_residual(
@@ -47,8 +51,26 @@ def _add_norm_weight(module: nn.Module, hidden_size: int, params_dtype: torch.dt
     module.register_parameter("layer_norm_weight", nn.Parameter(torch.ones(hidden_size, dtype=dtype)))
 
 
+class IdentityAndMul(nn.Module):
+    """Apply Evo2's post-layer-zero identity GLU: ``first_half * second_half``."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Multiply equally sized fused FC1 halves without a nonlinear activation."""
+        if hidden_states.shape[-1] % 2:
+            raise ValueError("a gated MLP projection must have an even final dimension")
+        gate, up = hidden_states.chunk(2, dim=-1)
+        return gate * up
+
+
+def _global_layer_index(prefix: str) -> int:
+    match = _LAYER_INDEX_PATTERN.search(prefix)
+    if match is None:
+        raise ValueError(f"Evo2 MLP prefix does not contain a global layer index: {prefix!r}")
+    return int(match.group(1))
+
+
 class Evo2MLP(nn.Module):
-    """Tensor-parallel SwiGLU MLP with native Evo2 checkpoint names."""
+    """Tensor-parallel gated MLP with Evo2's global-layer activation policy."""
 
     def __init__(
         self,
@@ -61,7 +83,7 @@ class Evo2MLP(nn.Module):
     ) -> None:
         """Construct the fused column-parallel and row-parallel projections."""
         super().__init__()
-        from vllm.model_executor.layers.activation import SiluAndMul
+        from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
         from vllm.model_executor.layers.linear import MergedColumnParallelLinear, RowParallelLinear
 
         self.linear_fc1 = MergedColumnParallelLinear(
@@ -75,7 +97,17 @@ class Evo2MLP(nn.Module):
             disable_tp=disable_tp,
         )
         _add_norm_weight(self.linear_fc1, config.hidden_size, params_dtype)
-        self.activation = SiluAndMul()
+        self.global_layer_index = _global_layer_index(prefix)
+        if config.remove_activation_post_first_layer and self.global_layer_index > 0:
+            self.activation = IdentityAndMul()
+        elif config.hidden_act == "gelu":
+            self.activation = GeluAndMul(approximate=config.gelu_approximate)
+        elif config.hidden_act == "silu":
+            self.activation = SiluAndMul()
+        elif config.hidden_act == "identity":
+            self.activation = IdentityAndMul()
+        else:
+            raise ValueError(f"unsupported Evo2 MLP activation: {config.hidden_act}")
         self.linear_fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,

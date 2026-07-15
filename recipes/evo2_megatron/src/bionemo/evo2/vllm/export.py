@@ -33,6 +33,13 @@ from torch.distributed.checkpoint.metadata import BytesStorageMetadata
 from bionemo.evo2.vllm.config import Evo2Config
 
 
+_ACTIVATION_TARGETS = {
+    "torch._C._nn.gelu": "gelu",
+    "torch.nn.functional.gelu": "gelu",
+    "torch.nn.functional.silu": "silu",
+}
+
+
 def resolve_iteration_dir(checkpoint_path: Path | str) -> Path:
     """Resolve a checkpoint root or explicit ``iter_XXXXXXX`` directory."""
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
@@ -67,10 +74,21 @@ def infer_evo2_config(checkpoint_path: Path | str) -> tuple[Evo2Config, str]:
         "vocab_size",
         "seq_length",
         "hybrid_override_pattern",
+        "activation_func",
+        "gated_linear_unit",
+        "remove_activation_post_first_layer",
     )
     missing = [name for name in required if model.get(name) is None]
     if missing:
         raise ValueError(f"checkpoint run config is missing Evo2 model fields: {missing}")
+
+    activation_config = model["activation_func"]
+    activation_target = (
+        str(activation_config.get("_target_", "")) if isinstance(activation_config, dict) else str(activation_config)
+    )
+    hidden_act = _ACTIVATION_TARGETS.get(activation_target)
+    if hidden_act is None:
+        raise ValueError(f"unsupported Evo2 activation_func target: {activation_target}")
 
     config = Evo2Config(
         hidden_size=int(model["hidden_size"]),
@@ -86,6 +104,10 @@ def infer_evo2_config(checkpoint_path: Path | str) -> tuple[Evo2Config, str]:
         num_groups_hyena_medium=int(model.get("num_groups_hyena_medium") or 256),
         rms_norm_eps=float(model.get("layernorm_epsilon") or 1e-6),
         rotary_base=float(model.get("rotary_base") or 10000.0),
+        hidden_act=hidden_act,
+        gelu_approximate="none",
+        gated_linear_unit=bool(model["gated_linear_unit"]),
+        remove_activation_post_first_layer=bool(model["remove_activation_post_first_layer"]),
         torch_dtype="bfloat16",
     )
     return config, provider

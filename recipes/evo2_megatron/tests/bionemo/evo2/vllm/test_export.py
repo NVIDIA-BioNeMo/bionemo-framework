@@ -49,6 +49,11 @@ def _write_synthetic_checkpoint(tmp_path):
   num_groups_hyena_medium: 4
   rotary_base: 10000
   layernorm_epsilon: 1.0e-6
+  activation_func:
+    _call_: false
+    _target_: torch._C._nn.gelu
+  gated_linear_unit: true
+  remove_activation_post_first_layer: true
 """
     )
     tokenizer_dir = iteration_dir / "tokenizer"
@@ -73,6 +78,10 @@ def test_infer_evo2_config_from_checkpoint_run_config(tmp_path):
     assert config.hybrid_override_pattern == "SDH*"
     assert config.num_groups_hyena_short == 4
     assert config.num_groups_hyena_medium == 4
+    assert config.hidden_act == "gelu"
+    assert config.gelu_approximate == "none"
+    assert config.gated_linear_unit is True
+    assert config.remove_activation_post_first_layer is True
     assert provider.endswith("HyenaTestModelProvider")
 
 
