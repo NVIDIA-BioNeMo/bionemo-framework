@@ -28,7 +28,10 @@ import gc
 import torch
 import torch.nn as nn
 
-from compressed_linear import METHOD_TO_PRECISION, compress_linear
+try:
+    from .compressed_linear import METHOD_TO_PRECISION, compress_linear
+except ImportError:  # allow running with src/ placed directly on sys.path
+    from compressed_linear import METHOD_TO_PRECISION, compress_linear
 
 
 def get_memory_mb():

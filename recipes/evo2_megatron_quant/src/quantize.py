@@ -178,12 +178,19 @@ def build_calibration_loop(
 
     def forward_loop(model):
         """Drive model through calibration data for quantizer statistics."""
+        failures = 0
         for kwargs in calib_batches:
             with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
                 try:
                     model(**kwargs)
-                except Exception:
-                    pass  # Some configs may fail on certain layers; continue
+                except Exception as e:
+                    failures += 1
+                    print(f"    [calib] forward pass failed: {type(e).__name__}: {e}")
+        if failures == len(calib_batches):
+            print(
+                f"    [calib] WARNING: all {failures} calibration passes failed; "
+                "quantization scales are uncalibrated."
+            )
 
     return forward_loop
 
@@ -211,7 +218,7 @@ def quantize_model(
         calib_seq_length: Sequence length for calibration.
 
     Returns:
-        Dict with 'quant_time_s' and 'num_quantizers'.
+        Dict with 'quant_time_s'.
     """
     cfg = get_quant_config(method_name, enable_all_mlp=enable_all_mlp)
 
@@ -225,10 +232,9 @@ def quantize_model(
     )
 
     t0 = time.time()
-    num_q = mtq.quantize(model, cfg, forward_loop=forward_loop)
+    mtq.quantize(model, cfg, forward_loop=forward_loop)
     quant_time = time.time() - t0
 
     return {
         "quant_time_s": quant_time,
-        "num_quantizers": num_q if isinstance(num_q, int) else 0,
     }

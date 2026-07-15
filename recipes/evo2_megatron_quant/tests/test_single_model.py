@@ -22,15 +22,15 @@ to ensure clean state.
 
 Usage:
     # Single method
-    python tests/test_single_model.py --model esm2 --quant FP8_DEFAULT_CFG
+    python tests/test_single_model.py --model esm2 --quant INT8_DEFAULT_CFG
 
     # Multiple methods
     python tests/test_single_model.py --model esm2 \
-        --quant FP8_DEFAULT_CFG,INT8_DEFAULT_CFG
+        --quant INT8_DEFAULT_CFG,INT8_SMOOTHQUANT_CFG
 
     # Evo2 with all-MLP quantization
     python tests/test_single_model.py --model evo2 \
-        --quant FP8_DEFAULT_CFG --all-mlp
+        --quant INT8_DEFAULT_CFG --all-mlp
 """
 
 import argparse
@@ -50,7 +50,7 @@ from src.quantize import quantize_model
 from src.metrics import compute_metrics, print_summary, save_csv
 
 
-def test_single_method(
+def run_single_method(
     adapter, model_name, ckpt_path, tokenizer, input_type,
     input_ids, attention_mask, bf16_logits, quant_name,
     enable_all_mlp=False,
@@ -140,8 +140,8 @@ def main():
         help="Model to test",
     )
     parser.add_argument(
-        "--quant", type=str, default="FP8_DEFAULT_CFG",
-        help="Comma-separated list of quant methods (default: FP8_DEFAULT_CFG)",
+        "--quant", type=str, default="INT8_DEFAULT_CFG",
+        help="Comma-separated list of quant methods (default: INT8_DEFAULT_CFG)",
     )
     parser.add_argument(
         "--all-mlp", action="store_true",
@@ -194,7 +194,7 @@ def main():
     results = []
     for i, qname in enumerate(methods):
         print(f"\n  [{i+1}/{len(methods)}] {qname}...", end=" ", flush=True)
-        result = test_single_method(
+        result = run_single_method(
             adapter, args.model, ckpt_path, tokenizer, input_type,
             input_ids, attention_mask, bf16_logits, qname,
             enable_all_mlp=args.all_mlp,
@@ -216,6 +216,10 @@ def main():
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     save_csv(results, output_path)
 
+    # 8. Reflect outcome in the exit code so CI/automation can detect failures.
+    n_not_pass = sum(1 for r in results if r["status"] != "PASS")
+    return 1 if n_not_pass else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

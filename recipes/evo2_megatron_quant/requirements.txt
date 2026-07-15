@@ -2,13 +2,9 @@
 #
 # Provided by the BioNeMo / nvcr.io PyTorch base image — do NOT re-pin these here,
 # re-pinning risks clashing with the container build:
-#   torch, transformer-engine, megatron-core, nemo-toolkit, bionemo-*
+#   torch, transformer-engine, megatron-core, nemo-toolkit, bionemo-*,
+#   and nvidia-modelopt (vendored via NeMo; imported by src/quantize.py).
 #
-# Recipe-specific dependencies (pin to the versions shipped in the BioNeMo
-# container you target before opening the PR):
-nvidia-modelopt[torch]   # ModelOpt PTQ bridge used by src/quantize.py
-pyyaml                   # reads configs/quant_methods.yaml
-
-# Test-only (the L0 sanity test tests/test_compressed_linear_roundtrip.py is
-# CPU-only and needs just torch + pytest):
-pytest
+# Recipe-specific dependencies, pinned for reproducibility:
+pyyaml==6.0.2   # reads configs/quant_methods.yaml
+pytest==8.3.4   # CPU-only L0 sanity test (tests/test_compressed_linear_roundtrip.py)

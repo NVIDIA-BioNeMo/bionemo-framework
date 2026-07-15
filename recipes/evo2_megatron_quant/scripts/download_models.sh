@@ -49,13 +49,17 @@ else
     MODELS=("esm2" "geneformer" "evo2")
 fi
 
-# Download each model
+# Validate requested names up front so a typo fails fast instead of silently
+# skipping while the script still exits 0.
 for model in "${MODELS[@]}"; do
     if [[ ! -v "MODEL_TAGS[$model]" ]]; then
-        echo "  ⚠️  Unknown model: $model (available: esm2, geneformer, evo2)"
-        continue
+        echo "  ❌ Unknown model: $model (available: esm2, geneformer, evo2)" >&2
+        exit 1
     fi
+done
 
+# Download each model
+for model in "${MODELS[@]}"; do
     tag="${MODEL_TAGS[$model]}"
     desc="${MODEL_DESC[$model]}"
 

@@ -41,7 +41,7 @@ pass does not touch, so the saving reflects compressing the Linear layers only.
 
 ## Layout
 
-```
+```text
 evo2_megatron_quant/
 ├── src/
 │   ├── adapters.py            # per-model load / tokenize / forward adapters

@@ -115,9 +115,10 @@ try:
     # BF16 baseline
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         # Warmup
-        _ = model(input_ids=input_ids[:, :256], position_ids=position_ids[:, :256],
-                  attention_mask=attention_mask[:, :256])
+        warmup_out = model(input_ids=input_ids[:, :256], position_ids=position_ids[:, :256],
+                           attention_mask=attention_mask[:, :256])
         torch.cuda.synchronize()
+        del warmup_out
 
         t0 = time.perf_counter()
         bf16_out = model(input_ids=input_ids, position_ids=position_ids,
@@ -164,14 +165,16 @@ try:
     gc.collect()
     torch.cuda.empty_cache()
 
-    # Max sequence length binary search
+    # Max sequence length: linear sweep over candidate lengths; report the largest that fits.
     if max_seqlen_search:
-        print("  Searching max sequence length...")
+        print("  Sweeping candidate sequence lengths...")
         test_lens = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288]
         best_len = 0
         best_peak = 0.0
 
         for slen in test_lens:
+            ids = pos = mask = probe_out = None
+            oom = False
             try:
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -182,22 +185,25 @@ try:
                 mask = torch.ones_like(ids)
 
                 with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                    _ = model(input_ids=ids, position_ids=pos, attention_mask=mask)
+                    probe_out = model(input_ids=ids, position_ids=pos, attention_mask=mask)
                     torch.cuda.synchronize()
 
                 peak = torch.cuda.max_memory_allocated() / 1e9
                 print(f"    seq_len={slen:>8d}: OK (peak={peak:.1f} GB)")
                 best_len = slen
                 best_peak = peak
-                del ids, pos, mask
             except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
                 if "out of memory" in str(e).lower():
                     print(f"    seq_len={slen:>8d}: OOM")
-                    del ids, pos, mask
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    break
-                raise
+                    oom = True
+                else:
+                    raise
+            finally:
+                del ids, pos, mask, probe_out
+                gc.collect()
+                torch.cuda.empty_cache()
+            if oom:
+                break
 
         result["max_seqlen"] = best_len
         result["max_seqlen_peak_gb"] = best_peak
@@ -222,6 +228,10 @@ def run_test(precision, method_name, eval_seq_len, max_seqlen_search, port, outp
     with open(worker_file, "w") as f:
         f.write(WORKER_SCRIPT)
 
+    # Remove any stale result so a crashed worker cannot be mistaken for a fresh run.
+    if os.path.exists(output_file):
+        os.remove(output_file)
+
     env = os.environ.copy()
     env["WORKER_PORT"] = str(port)
     env["CUDA_VISIBLE_DEVICES"] = "0"
@@ -238,7 +248,14 @@ def run_test(precision, method_name, eval_seq_len, max_seqlen_search, port, outp
     print(f"{'─' * 70}")
 
     t0 = time.time()
-    proc = subprocess.run(cmd, env=env, capture_output=False, timeout=1200)
+    try:
+        subprocess.run(cmd, env=env, capture_output=False, timeout=1200)
+    except subprocess.TimeoutExpired:
+        return {
+            "method": method_name, "precision": precision,
+            "status": "TIMEOUT", "error": "Worker exceeded the 1200s timeout",
+            "wall_time_s": time.time() - t0,
+        }
     elapsed = time.time() - t0
 
     if os.path.exists(output_file):
@@ -246,12 +263,11 @@ def run_test(precision, method_name, eval_seq_len, max_seqlen_search, port, outp
             result = json.load(f)
         result["wall_time_s"] = elapsed
         return result
-    else:
-        return {
-            "method": method_name, "precision": precision,
-            "status": "CRASH", "error": "No output file produced",
-            "wall_time_s": elapsed,
-        }
+    return {
+        "method": method_name, "precision": precision,
+        "status": "CRASH", "error": "No output file produced",
+        "wall_time_s": elapsed,
+    }
 
 
 def main():
@@ -260,8 +276,9 @@ def main():
                         help="Precision families to test")
     parser.add_argument("--eval-seq-len", type=int, default=2048,
                         help="Sequence length for quality evaluation")
-    parser.add_argument("--max-seqlen", action="store_true", default=True,
-                        help="Binary-search for max sequence length")
+    parser.add_argument("--max-seqlen", action=argparse.BooleanOptionalAction, default=True,
+                        help="Sweep candidate sequence lengths and report the largest that fits "
+                             "(use --no-max-seqlen to skip)")
     parser.add_argument("--output-dir", default="/workspace/quantization/results")
     args = parser.parse_args()
 
