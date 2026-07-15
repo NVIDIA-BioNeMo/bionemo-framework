@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass
 from enum import Enum, IntEnum
+from pathlib import Path
 from typing import Any, Literal
 
 
@@ -114,7 +118,6 @@ class Evo2VllmProfile:
             "pipeline_parallel_size": 1,
             "gpu_memory_utilization": self.gpu_memory_utilization,
             "max_model_len": self.max_model_len,
-            "hf_overrides": {"max_position_embeddings": self.max_model_len},
             "max_num_seqs": self.per_engine_batch_size,
             "max_num_batched_tokens": self.max_num_batched_tokens,
             "enable_chunked_prefill": True,
@@ -328,34 +331,118 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
 
 def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]) -> None:
     """Reject any resolved setting that weakens the optimized proof profile."""
-    assert resolved["runtime"]["optimization_level"] == profile.optimization_level, "optimization_level drifted"
-    assert resolved["runtime"]["performance_mode"] == profile.performance_mode, "performance_mode drifted"
-    assert resolved["model"]["enforce_eager"] is False, "enforce_eager must remain false"
-    assert resolved["model"]["max_model_len"] == profile.max_model_len, "max_model_len drifted"
-    assert resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size, "tensor_parallel_size drifted"
-    assert resolved["scheduler"]["max_num_seqs"] == profile.per_engine_batch_size, "max_num_seqs drifted"
-    assert resolved["scheduler"]["max_num_batched_tokens"] == profile.max_num_batched_tokens, (
-        "max_num_batched_tokens drifted"
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            raise AssertionError(message)
+
+    require(
+        resolved["runtime"]["optimization_level"] == profile.optimization_level,
+        "optimization_level drifted",
     )
-    assert resolved["scheduler"]["enable_chunked_prefill"] is True, "chunked prefill must remain enabled"
-    assert resolved["scheduler"]["async_scheduling"] is profile.async_scheduling, "async scheduling drifted"
-    assert resolved["cache"]["enable_prefix_caching"] is False, "prefix caching must remain disabled"
-    assert resolved["cache"]["mamba_cache_mode"] == "none", "mamba_cache_mode must remain none"
-    assert resolved["cache"]["mamba_block_size"] == profile.max_model_len, (
-        "resolved mamba_block_size must equal max_model_len when prefix caching is disabled"
+    require(resolved["runtime"]["performance_mode"] == profile.performance_mode, "performance_mode drifted")
+    require(resolved["model"]["enforce_eager"] is False, "enforce_eager must remain false")
+    require(resolved["model"]["max_model_len"] == profile.max_model_len, "max_model_len drifted")
+    require(
+        resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size,
+        "tensor_parallel_size drifted",
     )
-    assert resolved["compilation"]["mode"] == 3, "VLLM_COMPILE mode 3 is required"
-    assert resolved["compilation"]["backend"] == "inductor", "Inductor backend is required"
-    assert resolved["compilation"]["cudagraph_mode"] == "FULL_AND_PIECEWISE", (
-        "FULL_AND_PIECEWISE is required for FULL steady decode"
+    require(resolved["scheduler"]["max_num_seqs"] == profile.per_engine_batch_size, "max_num_seqs drifted")
+    require(
+        resolved["scheduler"]["max_num_batched_tokens"] == profile.max_num_batched_tokens,
+        "max_num_batched_tokens drifted",
+    )
+    require(resolved["scheduler"]["enable_chunked_prefill"] is True, "chunked prefill must remain enabled")
+    require(
+        resolved["scheduler"]["async_scheduling"] is profile.async_scheduling,
+        "async scheduling drifted",
+    )
+    require(resolved["cache"]["enable_prefix_caching"] is False, "prefix caching must remain disabled")
+    require(resolved["cache"]["mamba_cache_mode"] == "none", "mamba_cache_mode must remain none")
+    require(
+        resolved["cache"]["mamba_block_size"] == profile.max_model_len,
+        "resolved mamba_block_size must equal max_model_len when prefix caching is disabled",
+    )
+    require(resolved["compilation"]["mode"] == 3, "VLLM_COMPILE mode 3 is required")
+    require(resolved["compilation"]["backend"] == "inductor", "Inductor backend is required")
+    require(
+        resolved["compilation"]["cudagraph_mode"] == "FULL_AND_PIECEWISE",
+        "FULL_AND_PIECEWISE is required for FULL steady decode",
     )
     capture_sizes = resolved["compilation"]["cudagraph_capture_sizes"]
-    assert profile.per_engine_batch_size in capture_sizes, "real topology batch must be CUDA-graph captured"
-    assert resolved["compilation"]["compile_sizes"] == [profile.per_engine_batch_size], (
-        "real topology batch must be statically compiled"
+    require(profile.per_engine_batch_size in capture_sizes, "real topology batch must be CUDA-graph captured")
+    require(
+        resolved["compilation"]["compile_sizes"] == [profile.per_engine_batch_size],
+        "real topology batch must be statically compiled",
     )
     if profile.proof:
-        assert resolved["observability"]["cudagraph_metrics"] is True, "proof run requires cudagraph_metrics"
+        require(resolved["observability"]["cudagraph_metrics"] is True, "proof run requires cudagraph_metrics")
+
+
+def context_length_preflight(
+    profile: Evo2VllmProfile,
+    *,
+    model: str | Path,
+    load_format: str = "safetensors",
+) -> dict[str, Any]:
+    """Resolve the pinned vLLM length contract without loading model weights or GPUs."""
+    checkpoint = Path(model).resolve()
+    config_path = checkpoint / "config.json"
+    config_payload = config_path.read_bytes()
+    config_data = json.loads(config_payload)
+    declared = config_data.get("max_position_embeddings")
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared <= 0:
+        raise ValueError("checkpoint config must declare a positive integer max_position_embeddings")
+
+    environment_variable = "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
+    raw_override = os.environ.get(environment_variable)
+    override_enabled = raw_override is not None and raw_override.strip().lower() in ("1", "true")
+    override_required = profile.max_model_len > declared
+    if override_required and not override_enabled:
+        raise RuntimeError(
+            f"requested max_model_len={profile.max_model_len} exceeds checkpoint provenance {declared}; "
+            f"set {environment_variable}=1 explicitly"
+        )
+
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.usage.usage_lib import UsageContext
+
+    from bionemo.evo2.vllm.model import evo2_context_length_contract
+    from bionemo.evo2.vllm.plugin import register
+
+    register()
+    engine_config = EngineArgs(
+        **profile.engine_kwargs(model=str(checkpoint), load_format=load_format)
+    ).create_engine_config(usage_context=UsageContext.LLM_CLASS)
+    resolved = resolved_config_snapshot(engine_config)
+    validate_resolved_profile(profile, resolved)
+    resolved_hf_max = int(engine_config.model_config.hf_config.max_position_embeddings)
+    if resolved_hf_max != declared:
+        raise AssertionError("vLLM resolution rewrote checkpoint max_position_embeddings provenance")
+    length_contract = evo2_context_length_contract(engine_config)
+    if length_contract["rotary_max_position_embeddings"] != profile.max_model_len:
+        raise AssertionError("Evo2 rotary length did not follow resolved max_model_len")
+    if length_contract["hyena_state_length_dependent"] is not False:
+        raise AssertionError("Evo2 recurrent state unexpectedly depends on max_model_len")
+
+    return {
+        "schema_version": 1,
+        "checkpoint_config_path": str(config_path),
+        "checkpoint_config_sha256": hashlib.sha256(config_payload).hexdigest(),
+        "checkpoint_declared_max_position_embeddings": declared,
+        "requested_max_model_len": profile.max_model_len,
+        "resolved_max_model_len": int(engine_config.model_config.max_model_len),
+        "resolved_hf_max_position_embeddings": resolved_hf_max,
+        "long_length_override": {
+            "environment_variable": environment_variable,
+            "raw_value": raw_override,
+            "enabled": override_enabled,
+            "required": override_required,
+        },
+        "provenance_rewritten": False,
+        "length_clipped": int(engine_config.model_config.max_model_len) != profile.max_model_len,
+        "evo2_length_contract": length_contract,
+        "resolved_config": resolved,
+    }
 
 
 def compilation_counter_snapshot(counter: Any | None = None) -> dict[str, int]:
@@ -372,6 +459,7 @@ __all__ = [
     "PerformanceMode",
     "Topology",
     "compilation_counter_snapshot",
+    "context_length_preflight",
     "optimized_profile_sweep",
     "resolved_config_snapshot",
     "validate_resolved_profile",

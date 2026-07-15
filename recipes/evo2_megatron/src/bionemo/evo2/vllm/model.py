@@ -40,6 +40,30 @@ def _copy_whole_evo2_state_block(
     return MambaCopySpec(start_addr=source.data_ptr(), num_elements=source.numel())
 
 
+def evo2_context_length_contract(vllm_config: VllmConfig) -> dict[str, object]:
+    """Describe the resolved position and length-independent recurrent-state contract."""
+    config = vllm_config.model_config.hf_config
+    if not isinstance(config, Evo2Config):
+        raise TypeError("Evo2 context length contract requires Evo2Config")
+    resolved_max_model_len = int(vllm_config.model_config.max_model_len)
+    if resolved_max_model_len <= 0:
+        raise ValueError("resolved max_model_len must be positive")
+    state_shapes = config.local_state_shapes(vllm_config.parallel_config.tensor_parallel_size)
+    return {
+        "checkpoint_declared_max_position_embeddings": int(config.max_position_embeddings),
+        "resolved_max_model_len": resolved_max_model_len,
+        "rotary_max_position_embeddings": resolved_max_model_len,
+        "attention_kv_position_limit": resolved_max_model_len,
+        "position_source": "vllm_config.model_config.max_model_len",
+        "position_clipping": False,
+        "hyena_state_shapes": [list(shape) for shape in state_shapes],
+        "hyena_state_dtypes": ["float32", "float32"],
+        "hyena_state_length_dependent": False,
+        "hyena_decode_scratch_request_capacity": int(vllm_config.scheduler_config.max_num_seqs),
+        "hyena_prefill_allocation_basis": "num_actual_tokens",
+    }
+
+
 class Evo2Embedding(nn.Module):
     """Vocab-parallel embedding with the native MBridge module path."""
 
@@ -78,7 +102,8 @@ class Evo2Decoder(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         params_dtype = vllm_config.model_config.dtype
-        max_position_embeddings = vllm_config.model_config.max_model_len
+        self.context_length_contract = evo2_context_length_contract(vllm_config)
+        max_position_embeddings = int(self.context_length_contract["rotary_max_position_embeddings"])
         self.config = config
 
         def make_layer(prefix: str) -> nn.Module:

@@ -437,11 +437,25 @@ def test_phase_output_artifact_paths_are_phase_and_replica_specific(tmp_path) ->
     root = tmp_path / "benchmark.json"
 
     assert runner.phase_output_artifact_path(root, phase="steady-0") == (
-        tmp_path / "benchmark.steady-0.outputs.jsonl.gz"
+        tmp_path / "benchmark.json.steady-0.outputs.jsonl.gz"
     )
     assert runner.phase_output_artifact_path(root, phase="steady-0", dp_rank=1) == (
-        tmp_path / "benchmark.steady-0.dp1.outputs.jsonl.gz"
+        tmp_path / "benchmark.json.steady-0.dp1.outputs.jsonl.gz"
     )
+
+
+def test_same_stem_different_suffix_namespaces_cannot_alias_or_run_simultaneously(tmp_path) -> None:
+    json_output = tmp_path / "proof.json"
+    yaml_output = tmp_path / "proof.yaml"
+
+    marker = runner.reserve_output_namespace(json_output)
+    with pytest.raises(FileExistsError, match="proof.inprogress"):
+        runner.reserve_output_namespace(yaml_output)
+
+    assert runner.phase_output_artifact_path(json_output, phase="steady-0") != (
+        runner.phase_output_artifact_path(yaml_output, phase="steady-0")
+    )
+    runner.complete_output_namespace(marker, output_path=json_output, require_final_artifact=False)
 
 
 def test_output_namespace_reservation_refuses_stale_final_sidecar_or_active_run(tmp_path) -> None:
@@ -476,6 +490,54 @@ def test_json_artifact_writer_refuses_to_overwrite_prior_success(tmp_path) -> No
         runner.write_json_artifact(output, {"run": 2})
 
     assert json.loads(output.read_text()) == {"run": 1}
+
+
+def test_context_preflight_only_cli_writes_proof_without_launching_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from bionemo.evo2.vllm.config import Evo2Config
+
+    checkpoint = tmp_path / "checkpoint"
+    Evo2Config(max_position_embeddings=10_240).save_pretrained(checkpoint)
+    output = tmp_path / "preflight.json"
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    monkeypatch.setattr(
+        runner,
+        "run_tp2_benchmark",
+        lambda *args, **kwargs: pytest.fail("preflight-only mode launched generation"),
+    )
+
+    exit_status = runner.main(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(checkpoint),
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "tp2",
+            "--max-model-len",
+            "50000",
+            "--max-num-batched-tokens",
+            "32768",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--context-preflight-only",
+            "--output",
+            str(output),
+        ]
+    )
+
+    artifact = json.loads(output.read_text())
+    assert exit_status == 0
+    assert artifact["task"] == "evo2-vllm-context-length-preflight"
+    assert artifact["profile"]["max_model_len"] == 50_000
+    assert artifact["context_length_preflight"]["checkpoint_declared_max_position_embeddings"] == 10_240
+    assert artifact["context_length_preflight"]["requested_max_model_len"] == 50_000
+    assert artifact["context_length_preflight"]["resolved_max_model_len"] == 50_000
+    assert not output.with_name("preflight.inprogress").exists()
 
 
 def test_checkpoint_provenance_hashes_actual_indexed_weight_shards(tmp_path) -> None:

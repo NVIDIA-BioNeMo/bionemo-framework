@@ -688,17 +688,23 @@ def validate_compilation_proof(
         if missing:
             raise AssertionError(f"{label} compilation snapshot is missing {sorted(missing)}")
 
-    assert initialized["num_models_seen"] >= 1, "the Evo2 model was not seen by the compiler"
-    assert initialized["num_backend_compilations"] > 0, "no vLLM backend compilation was recorded"
-    assert initialized["num_inductor_compiles"] > 0, "no Inductor compilation was recorded"
-    assert initialized["num_eager_compiles"] == 0, "eager compilation is forbidden"
-    assert initialized["num_gpu_runner_capture_triggers"] > 0, "CUDA graph capture was not triggered"
-    assert initialized["num_cudagraph_captured"] > 0, "no CUDA graphs were captured"
-    assert after_warm_replay["num_eager_compiles"] == 0, "warm replay entered eager compilation"
+    if initialized["num_models_seen"] < 1:
+        raise AssertionError("the Evo2 model was not seen by the compiler")
+    if initialized["num_backend_compilations"] <= 0:
+        raise AssertionError("no vLLM backend compilation was recorded")
+    if initialized["num_inductor_compiles"] <= 0:
+        raise AssertionError("no Inductor compilation was recorded")
+    if initialized["num_eager_compiles"] != 0:
+        raise AssertionError("eager compilation is forbidden")
+    if initialized["num_gpu_runner_capture_triggers"] <= 0:
+        raise AssertionError("CUDA graph capture was not triggered")
+    if initialized["num_cudagraph_captured"] <= 0:
+        raise AssertionError("no CUDA graphs were captured")
+    if after_warm_replay["num_eager_compiles"] != 0:
+        raise AssertionError("warm replay entered eager compilation")
     for field in required:
-        assert after_warm_replay[field] == initialized[field], (
-            f"warm replay caused an unexpected recompile or graph recapture: {field}"
-        )
+        if after_warm_replay[field] != initialized[field]:
+            raise AssertionError(f"warm replay caused an unexpected recompile or graph recapture: {field}")
 
 
 def validate_generation_records(
@@ -757,6 +763,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--proof", action="store_true")
+    parser.add_argument("--context-preflight-only", action="store_true")
     parser.add_argument("--async-scheduling", action="store_true")
     parser.add_argument("--max-concurrent-partial-prefills", type=int, default=1)
     parser.add_argument("--long-prefill-chunk-tokens", type=int, default=0)

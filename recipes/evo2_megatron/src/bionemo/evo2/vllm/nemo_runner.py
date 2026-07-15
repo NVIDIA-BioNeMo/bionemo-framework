@@ -22,7 +22,7 @@ from bionemo.evo2.vllm.benchmark import (
     build_request_waves,
     validate_compilation_proof,
 )
-from bionemo.evo2.vllm.profile import Evo2VllmProfile, validate_resolved_profile
+from bionemo.evo2.vllm.profile import Evo2VllmProfile, context_length_preflight, validate_resolved_profile
 from bionemo.evo2.vllm.runner import (
     PeakMemoryMonitor,
     RequestExecutionRecord,
@@ -659,6 +659,30 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     if args.generation_round != 0:
         raise ValueError("production NeMo-RL generation rounds advance from zero; use --generation-round=0")
 
+    clock = __import__("time").perf_counter
+    output_path = Path(args.output).resolve()
+    require_output_namespace_reservation(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    profile = Evo2VllmProfile(
+        topology="dp2",
+        max_model_len=args.max_model_len or manifest.max_total_tokens,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        async_scheduling=args.async_scheduling,
+        proof=args.proof,
+        max_concurrent_partial_prefills=args.max_concurrent_partial_prefills,
+        long_prefill_chunk_tokens=args.long_prefill_chunk_tokens,
+        optimization_level=args.optimization_level,
+        performance_mode=args.performance_mode,
+    )
+    preflight_begin = clock()
+    preflight = context_length_preflight(
+        profile,
+        model=args.checkpoint,
+        load_format=args.load_format,
+    )
+    preflight_s = clock() - preflight_begin
+
     import_begin = __import__("time").perf_counter()
     import nemo_rl
     import ray
@@ -666,11 +690,6 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     from nemo_rl.models.generation.vllm.vllm_generation import VllmGeneration
 
     import_s = __import__("time").perf_counter() - import_begin
-    clock = __import__("time").perf_counter
-    output_path = Path(args.output).resolve()
-    require_output_namespace_reservation(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
     provenance_begin = clock()
     checkpoint_identity = checkpoint_provenance(args.checkpoint)
     bionemo_source_identity = source_provenance()
@@ -686,18 +705,6 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     )
     provenance_s = clock() - provenance_begin
 
-    profile = Evo2VllmProfile(
-        topology="dp2",
-        max_model_len=args.max_model_len or manifest.max_total_tokens,
-        max_num_batched_tokens=args.max_num_batched_tokens,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        async_scheduling=args.async_scheduling,
-        proof=args.proof,
-        max_concurrent_partial_prefills=args.max_concurrent_partial_prefills,
-        long_prefill_chunk_tokens=args.long_prefill_chunk_tokens,
-        optimization_level=args.optimization_level,
-        performance_mode=args.performance_mode,
-    )
     config = build_nemo_generation_config(
         profile,
         manifest,
@@ -815,6 +822,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             "manifest": manifest.to_dict(),
             "manifest_sha256": manifest.sha256,
             "profile": asdict(profile),
+            "context_length_preflight": preflight,
             "nemo_generation_config": config,
             "resolved_configs": [proof["resolved_config"] for proof in initialized_proofs],
             "execution_contract": {
@@ -828,6 +836,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                 "shared_prefix_state_reuse": False,
             },
             "timing": {
+                "context_length_preflight_s": preflight_s,
                 "imports_s": import_s,
                 "provenance_hashing_s": provenance_s,
                 "ray_init_s": ray_init_s,

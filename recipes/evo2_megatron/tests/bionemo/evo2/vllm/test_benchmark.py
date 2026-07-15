@@ -1,8 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import ast
 import hashlib
+import inspect
 import math
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -351,6 +357,7 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
     assert args.prompt_jsonl_sha256 is None
     assert args.prompt_tokenizer_json is None
     assert args.expected_prompt_tokens is None
+    assert args.context_preflight_only is False
 
 
 def _fake_vllm_outputs(manifest: WorkloadManifest):
@@ -488,3 +495,40 @@ def test_compilation_proof_requires_inductor_graph_capture_and_stable_warm_repla
         validate_compilation_proof({**initialized, "num_eager_compiles": 1}, initialized)
     with pytest.raises(AssertionError, match="recompile"):
         validate_compilation_proof(initialized, {**initialized, "num_inductor_compiles": 13})
+
+
+def test_compilation_proof_has_no_optimization_sensitive_asserts() -> None:
+    source = textwrap.dedent(inspect.getsource(validate_compilation_proof))
+
+    assert not any(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(source)))
+
+
+def test_compilation_proof_rejects_counter_drift_under_optimized_python() -> None:
+    source_root = Path(inspect.getfile(validate_compilation_proof)).resolve().parents[3]
+    script = """
+from bionemo.evo2.vllm.benchmark import validate_compilation_proof
+
+initialized = {
+    "num_models_seen": 1,
+    "num_backend_compilations": 12,
+    "num_inductor_compiles": 12,
+    "num_eager_compiles": 0,
+    "num_gpu_runner_capture_triggers": 1,
+    "num_cudagraph_captured": 63,
+    "stock_torch_compile_count": 0,
+}
+after = {**initialized, "num_inductor_compiles": 999, "num_eager_compiles": 7}
+validate_compilation_proof(initialized, after)
+"""
+    pythonpath = os.pathsep.join(filter(None, (str(source_root), os.environ.get("PYTHONPATH"))))
+
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script],
+        env={**os.environ, "PYTHONPATH": pythonpath},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "warm replay entered eager compilation" in result.stderr

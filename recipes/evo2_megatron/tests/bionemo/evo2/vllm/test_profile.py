@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import ast
+import inspect
 import json
+import textwrap
 from dataclasses import replace
 
 import pytest
@@ -10,6 +13,7 @@ from nemo_rl.distributed.ray_actor_environment_registry import (
     VLLM_EXECUTABLE,
 )
 
+import bionemo.evo2.vllm.profile as profile_module
 from bionemo.evo2.vllm.profile import (
     Evo2VllmProfile,
     compilation_counter_snapshot,
@@ -52,7 +56,7 @@ def test_tp2_profile_pins_optimized_vllm_020_settings() -> None:
     assert "mamba_block_size" not in kwargs
     assert kwargs["async_scheduling"] is False
     assert kwargs["cudagraph_metrics"] is True
-    assert kwargs["hf_overrides"]["max_position_embeddings"] == 50_000
+    assert "hf_overrides" not in kwargs
 
     compilation = kwargs["compilation_config"]
     assert compilation["mode"] == 3
@@ -301,3 +305,49 @@ def test_pinned_vllm_resolver_preserves_profile_and_resolves_omitted_mamba_block
     assert "mamba_block_size" not in profile.engine_kwargs(model=str(tmp_path))
     assert resolved["cache"]["mamba_block_size"] == 257
     validate_resolved_profile(profile, resolved)
+
+
+def test_long_context_preflight_requires_explicit_override_and_preserves_provenance(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from bionemo.evo2.vllm.config import Evo2Config
+
+    Evo2Config(max_position_embeddings=10_240).save_pretrained(tmp_path)
+    profile_50k = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=50_000,
+        max_num_batched_tokens=32_768,
+        gpu_memory_utilization=0.92,
+    )
+    monkeypatch.delenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", raising=False)
+
+    with pytest.raises(RuntimeError, match="VLLM_ALLOW_LONG_MAX_MODEL_LEN=1"):
+        profile_module.context_length_preflight(profile_50k, model=tmp_path)
+
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    for requested in (50_000, 300_012):
+        profile = replace(profile_50k, max_model_len=requested)
+        proof = profile_module.context_length_preflight(profile, model=tmp_path)
+
+        assert proof["checkpoint_declared_max_position_embeddings"] == 10_240
+        assert proof["requested_max_model_len"] == requested
+        assert proof["resolved_max_model_len"] == requested
+        assert proof["resolved_hf_max_position_embeddings"] == 10_240
+        assert proof["long_length_override"] == {
+            "environment_variable": "VLLM_ALLOW_LONG_MAX_MODEL_LEN",
+            "raw_value": "1",
+            "enabled": True,
+            "required": True,
+        }
+        assert proof["provenance_rewritten"] is False
+        assert proof["length_clipped"] is False
+        assert proof["evo2_length_contract"]["rotary_max_position_embeddings"] == requested
+        assert proof["evo2_length_contract"]["hyena_state_length_dependent"] is False
+        assert proof["evo2_length_contract"]["position_clipping"] is False
+
+
+def test_resolved_profile_validator_has_no_optimization_sensitive_asserts() -> None:
+    source = textwrap.dedent(inspect.getsource(profile_module.validate_resolved_profile))
+
+    assert not any(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(source)))

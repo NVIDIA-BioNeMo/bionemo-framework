@@ -429,7 +429,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
         build_nemo_generation_config,
         run_nemo_generation_phase,
     )
-    from bionemo.evo2.vllm.profile import Evo2VllmProfile, validate_resolved_profile
+    from bionemo.evo2.vllm.profile import Evo2VllmProfile, context_length_preflight, validate_resolved_profile
     from bionemo.evo2.vllm.refit import indexed_safetensors_layout, plan_ipc_chunks
     from bionemo.evo2.vllm.runner import (
         PeakMemoryMonitor,
@@ -467,6 +467,13 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
         optimization_level=args.optimization_level,
         performance_mode=args.performance_mode,
     )
+    preflight_begin = clock()
+    preflight = context_length_preflight(
+        profile,
+        model=args.checkpoint,
+        load_format=args.load_format,
+    )
+    preflight_s = clock() - preflight_begin
     config = build_nemo_generation_config(
         profile,
         parity_manifest,
@@ -756,6 +763,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
             "manifest": parity_manifest.to_dict(),
             "manifest_sha256": parity_manifest.sha256,
             "profile": asdict(profile),
+            "context_length_preflight": preflight,
             "nemo_generation_config": config,
             "resolved_config": initialized_proofs[0]["resolved_config"],
             "execution_contract": {
@@ -773,6 +781,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                 "prefix_caching": False,
             },
             "timing": {
+                "context_length_preflight_s": preflight_s,
                 "layout_and_refit_plan_s": layout_s,
                 "provenance_hashing_s": provenance_s,
                 "ray_init_s": ray_init_s,

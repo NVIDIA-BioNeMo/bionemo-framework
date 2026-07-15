@@ -37,6 +37,7 @@ from bionemo.evo2.vllm.benchmark import (
 )
 from bionemo.evo2.vllm.profile import (
     Evo2VllmProfile,
+    context_length_preflight,
     resolved_config_snapshot,
     validate_resolved_profile,
 )
@@ -579,14 +580,14 @@ def phase_output_artifact_path(
     if dp_rank is not None and dp_rank < 0:
         raise ValueError("dp_rank must be nonnegative")
     root = Path(root_artifact_path)
-    base_name = root.name.removesuffix(root.suffix)
     replica_suffix = "" if dp_rank is None else f".dp{dp_rank}"
-    return root.with_name(f"{base_name}.{phase}{replica_suffix}.outputs.jsonl.gz")
+    return root.with_name(f"{root.name}.{phase}{replica_suffix}.outputs.jsonl.gz")
 
 
 def _output_namespace_marker_path(path: str | Path) -> Path:
     output = Path(path).resolve()
-    return output.with_name(f"{output.name}.inprogress")
+    base_name = output.name.removesuffix(output.suffix)
+    return output.with_name(f"{base_name}.inprogress")
 
 
 def reserve_output_namespace(path: str | Path) -> Path:
@@ -594,9 +595,10 @@ def reserve_output_namespace(path: str | Path) -> Path:
     output = Path(path).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     marker = _output_namespace_marker_path(output)
+    legacy_marker = output.with_name(f"{output.name}.inprogress")
     temporary = output.with_suffix(f"{output.suffix}.tmp")
     sidecar_prefix = f"{output.name.removesuffix(output.suffix)}."
-    collisions = [candidate for candidate in (output, temporary, marker) if candidate.exists()]
+    collisions = [candidate for candidate in {output, temporary, marker, legacy_marker} if candidate.exists()]
     collisions.extend(
         candidate
         for candidate in output.parent.iterdir()
@@ -916,23 +918,9 @@ def _phase_specs(warmups: int, repetitions: int) -> tuple[tuple[str, int], ...]:
     )
 
 
-def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
-    """Run one TP2 Ray engine through cold, warm, and measured exact phases."""
-    if args.topology != "tp2":
-        raise ValueError("run_tp2_benchmark requires topology=tp2")
-    require_output_namespace_reservation(args.output)
-    vllm_import_begin = time.perf_counter()
-    from vllm import LLM, SamplingParams
-
-    vllm_import_s = time.perf_counter() - vllm_import_begin
-
-    provenance_begin = time.perf_counter()
-    checkpoint_identity = checkpoint_provenance(args.checkpoint)
-    source_identity = source_provenance()
-    provenance_s = time.perf_counter() - provenance_begin
-
-    profile = Evo2VllmProfile(
-        topology="tp2",
+def _profile_from_args(args: Any, manifest: WorkloadManifest) -> Evo2VllmProfile:
+    return Evo2VllmProfile(
+        topology=args.topology,
         max_model_len=args.max_model_len or manifest.max_total_tokens,
         max_num_batched_tokens=args.max_num_batched_tokens,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -943,6 +931,75 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         optimization_level=args.optimization_level,
         performance_mode=args.performance_mode,
     )
+
+
+def run_context_length_preflight(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
+    """Persist the resolved long-context contract without constructing a GPU engine."""
+    require_output_namespace_reservation(args.output)
+    profile = _profile_from_args(args, manifest)
+
+    preflight_begin = time.perf_counter()
+    preflight = context_length_preflight(
+        profile,
+        model=args.checkpoint,
+        load_format=args.load_format,
+    )
+    preflight_s = time.perf_counter() - preflight_begin
+
+    provenance_begin = time.perf_counter()
+    source_identity = source_provenance()
+    provenance_s = time.perf_counter() - provenance_begin
+    return {
+        "schema_version": 1,
+        "task": "evo2-vllm-context-length-preflight",
+        "backend": "vllm",
+        "topology": args.topology,
+        "versions": runtime_versions(),
+        "checkpoint": str(Path(args.checkpoint).resolve()),
+        "source_provenance": source_identity,
+        "invocation": {
+            "argv": [sys.executable, *sys.argv],
+            "parsed_args": {
+                name: str(value) if isinstance(value, Path) else value for name, value in vars(args).items()
+            },
+            "output_artifact_path": str(Path(args.output).resolve()),
+            "exit_status": 0,
+        },
+        "manifest": manifest.to_dict(),
+        "manifest_sha256": manifest.sha256,
+        "profile": asdict(profile),
+        "context_length_preflight": preflight,
+        "timing": {
+            "context_length_preflight_s": preflight_s,
+            "source_provenance_s": provenance_s,
+        },
+    }
+
+
+def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
+    """Run one TP2 Ray engine through cold, warm, and measured exact phases."""
+    if args.topology != "tp2":
+        raise ValueError("run_tp2_benchmark requires topology=tp2")
+    require_output_namespace_reservation(args.output)
+    profile = _profile_from_args(args, manifest)
+    preflight_begin = time.perf_counter()
+    preflight = context_length_preflight(
+        profile,
+        model=args.checkpoint,
+        load_format=args.load_format,
+    )
+    preflight_s = time.perf_counter() - preflight_begin
+
+    vllm_import_begin = time.perf_counter()
+    from vllm import LLM, SamplingParams
+
+    vllm_import_s = time.perf_counter() - vllm_import_begin
+
+    provenance_begin = time.perf_counter()
+    checkpoint_identity = checkpoint_provenance(args.checkpoint)
+    source_identity = source_provenance()
+    provenance_s = time.perf_counter() - provenance_begin
+
     engine_kwargs = profile.engine_kwargs(
         model=str(args.checkpoint),
         seed=manifest.seed,
@@ -1027,6 +1084,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         "manifest": manifest.to_dict(),
         "manifest_sha256": manifest.sha256,
         "profile": asdict(profile),
+        "context_length_preflight": preflight,
         "engine_kwargs": engine_kwargs,
         "resolved_config": resolved,
         "execution_contract": {
@@ -1048,6 +1106,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             for wave in waves
         ],
         "timing": {
+            "context_length_preflight_s": preflight_s,
             "vllm_import_s": vllm_import_s,
             "provenance_hashing_s": provenance_s,
             "engine_init_s": engine_init_s,
@@ -1086,7 +1145,9 @@ def main(argv: list[str] | None = None) -> int:
         request_id_prefix=args.request_id_prefix,
         max_new_tokens=args.max_new_tokens,
     )
-    if args.topology == "tp2":
+    if args.context_preflight_only:
+        artifact = run_context_length_preflight(args, manifest)
+    elif args.topology == "tp2":
         artifact = run_tp2_benchmark(args, manifest)
     else:
         from bionemo.evo2.vllm.nemo_runner import run_nemo_dp2_benchmark
@@ -1114,6 +1175,7 @@ __all__ = [
     "require_output_namespace_reservation",
     "reserve_output_namespace",
     "reset_vllm_worker_proof_state",
+    "run_context_length_preflight",
     "run_generation_phase",
     "runtime_versions",
     "snapshot_vllm_worker_proof_state",

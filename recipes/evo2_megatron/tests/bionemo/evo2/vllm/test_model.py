@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import pytest
 import torch
 
+import bionemo.evo2.vllm.model as evo2_model
 from bionemo.evo2.vllm.config import Evo2Config
 from bionemo.evo2.vllm.hyena import Evo2HyenaDecoderLayer
 from bionemo.evo2.vllm.layers import Evo2AttentionDecoderLayer
@@ -154,15 +155,23 @@ def _randomize(model: torch.nn.Module, seed: int = 67) -> None:
     refresh_derived_filters(model)
 
 
-def test_model_state_contract_has_no_length_ceiling_and_copies_whole_ds_blocks() -> None:
-    config = _config(max_position_embeddings=1_000_000)
+def test_model_state_contract_has_no_length_ceiling_and_copies_whole_ds_blocks(monkeypatch) -> None:
+    config = _config(max_position_embeddings=10_240)
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     with TemporaryDirectory() as temporary_directory:
         vllm_config = _vllm_config(config, temporary_directory, max_model_len=1_000_000)
+        length_contract = evo2_model.evo2_context_length_contract(vllm_config)
         assert Evo2ForCausalLM.get_mamba_state_shape_from_config(vllm_config) == ((48, 2), (16, 6))
         assert Evo2ForCausalLM.get_mamba_state_dtype_from_config(vllm_config) == (
             torch.float32,
             torch.float32,
         )
+        assert length_contract["checkpoint_declared_max_position_embeddings"] == 10_240
+        assert length_contract["resolved_max_model_len"] == 1_000_000
+        assert length_contract["rotary_max_position_embeddings"] == 1_000_000
+        assert length_contract["hyena_state_shapes"] == [[48, 2], [16, 6]]
+        assert length_contract["hyena_state_length_dependent"] is False
+        assert length_contract["position_clipping"] is False
     projection_copy, operator_copy = Evo2ForCausalLM.get_mamba_state_copy_func()
     projection_state = torch.arange(3 * 48 * 2, dtype=torch.float32).view(3, 48, 2)
     operator_state = torch.arange(3 * 16 * 6, dtype=torch.float32).view(3, 16, 6)
