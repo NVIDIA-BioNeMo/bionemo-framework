@@ -238,8 +238,8 @@ def test_all_hyena_model_forward_round_trips_native_weight_stream() -> None:
         with torch.no_grad():
             for parameter in model.parameters():
                 parameter.zero_()
-        consumed = model.load_weights(iter(source_weights))
-        assert consumed == {name for name, _ in source_weights}
+        loaded = model.load_weights(iter(source_weights))
+        assert loaded == set(dict(model.named_parameters()))
         metadata = _bind_hyena_cache_and_metadata(model, starts, slots)
         with set_forward_context(metadata, vllm_config, num_tokens=input_ids.numel()):
             actual = model(input_ids, positions)

@@ -358,9 +358,9 @@ def test_native_vortex_names_load_equivalent_parameters_and_filters():
     vortex = _make_vortex_weights(source)
     model = _make_synthetic_model()
 
-    consumed = load_evo2_weights(model, reversed(list(vortex.items())))
+    loaded = load_evo2_weights(model, reversed(list(vortex.items())))
 
-    assert consumed == set(vortex)
+    assert loaded == set(dict(model.named_parameters()))
     parameters = dict(model.named_parameters())
     hcm_prefix = "decoder.layers.1.mixer.mixer.filter"
     effective_hcm = source[f"{hcm_prefix}.h"] * source[f"{hcm_prefix}.decay"]

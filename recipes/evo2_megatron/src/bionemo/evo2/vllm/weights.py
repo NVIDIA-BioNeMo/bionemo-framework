@@ -231,16 +231,18 @@ def load_evo2_weights(
     The model intentionally preserves MBridge parameter paths. A leading vLLM ``model.`` wrapper
     and a DDP ``module.`` wrapper are accepted without materializing a renamed state dictionary.
     Tensor-parallel and quantized parameters can provide vLLM's conventional ``weight_loader``
-    callback; ordinary replicated parameters are copied directly.
+    callback; ordinary replicated parameters are copied directly. The returned names are canonical
+    entries from ``model.named_parameters()`` because vLLM uses them for strict initialization
+    accounting even when checkpoint source names differ.
     """
     parameters = dict(model.named_parameters(remove_duplicate=False))
+    canonical_names = {id(parameter): name for name, parameter in model.named_parameters()}
     required = _required_parameter_ids(model)
     loaded_parameter_ids: set[int] = set()
-    consumed_source_names: set[str] = set()
+    loaded_parameter_names: set[str] = set()
     pending_fc1: dict[int, dict[str, torch.Tensor]] = {}
 
     for source_name, loaded_weight in weights:
-        consumed_source_names.add(source_name)
         for mapped_name, mapped_weight in _map_vortex_weight(model, source_name, loaded_weight, pending_fc1):
             target_name = next(
                 (candidate for candidate in _target_candidates(mapped_name) if candidate in parameters), None
@@ -253,6 +255,7 @@ def load_evo2_weights(
             weight_loader = getattr(parameter, "weight_loader", _copy_weight)
             weight_loader(parameter, mapped_weight)
             loaded_parameter_ids.add(id(parameter))
+            loaded_parameter_names.add(canonical_names[id(parameter)])
 
             if target_name.endswith(_DERIVED_SOURCE_SUFFIXES):
                 refresh_derived_filters(model, {target_name.rsplit(".", maxsplit=1)[0]})
@@ -261,4 +264,4 @@ def load_evo2_weights(
         missing = sorted(name for parameter_id, name in required.items() if parameter_id not in loaded_parameter_ids)
         if missing:
             raise ValueError(f"Evo2 checkpoint is missing mandatory weights: {missing}")
-    return consumed_source_names
+    return loaded_parameter_names
