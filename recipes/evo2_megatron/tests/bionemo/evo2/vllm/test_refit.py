@@ -125,6 +125,20 @@ def test_refit_proof_requires_exact_chunks_on_every_tp_rank(tmp_path) -> None:
     assert summary["tp_worker_count"] == 2
     assert summary["chunk_count_per_worker"] == [2, 2]
 
+    unconsumed = {
+        **worker,
+        "loader": {**worker["loader"], "consumed": False},
+    }
+    with pytest.raises(AssertionError, match="consumed"):
+        validate_refit_proof(
+            {**proof, "worker_proof": [worker, unconsumed]},
+            layout=layout,
+            plan=plan,
+            expected_phase="refit-1",
+            expected_completed_transactions=2,
+            expected_tp_size=2,
+        )
+
     proof["worker_proof"][1] = {**worker, "chunks": chunks[:-1], "chunk_count": 1}
     with pytest.raises(AssertionError, match="chunk"):
         validate_refit_proof(

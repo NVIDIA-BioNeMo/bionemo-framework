@@ -31,6 +31,7 @@ from bionemo.evo2.vllm.runner import (
     make_nvml_memory_reader,
     phase_output_artifact_path,
     request_seed,
+    require_output_namespace_reservation,
     runtime_versions,
     source_provenance,
     validate_full_decode_proof,
@@ -667,6 +668,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     import_s = __import__("time").perf_counter() - import_begin
     clock = __import__("time").perf_counter
     output_path = Path(args.output).resolve()
+    require_output_namespace_reservation(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     provenance_begin = clock()

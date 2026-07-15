@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-Apache2
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -101,6 +102,56 @@ def test_logprob_evidence_summary_records_coverage_support_and_chosen_values() -
         "chosen_token_oracle_passed": True,
         "chosen_token_logprobs": [[-1.0, -2.0, -3.0, -4.0]] * 2,
     }
+
+
+def test_final_compilation_gate_rejects_drift_in_last_stochastic_phase() -> None:
+    initialized = {
+        "num_models_seen": 1,
+        "num_backend_compilations": 12,
+        "num_inductor_compiles": 12,
+        "num_eager_compiles": 0,
+        "num_gpu_runner_capture_triggers": 1,
+        "num_cudagraph_captured": 24,
+        "stock_torch_compile_count": 0,
+    }
+    initialized_proof = {
+        "worker_proof": [
+            {"compilation": initialized},
+            {"compilation": initialized},
+        ]
+    }
+    stable_final = {
+        "engines": [
+            {
+                "worker_proof": [
+                    {"compilation": initialized},
+                    {"compilation": initialized},
+                ]
+            }
+        ]
+    }
+    final_phase = SimpleNamespace(phase="stochastic-2", wave_proofs=(stable_final,))
+
+    summary = nemo_parity.validate_final_compilation_stability(initialized_proof, final_phase)
+
+    assert summary == {"passed": True, "final_phase": "stochastic-2", "tp_worker_count": 2}
+
+    drifted = {
+        **stable_final,
+        "engines": [
+            {
+                "worker_proof": [
+                    {"compilation": initialized},
+                    {"compilation": {**initialized, "num_inductor_compiles": 13}},
+                ]
+            }
+        ],
+    }
+    with pytest.raises(AssertionError, match="recompile"):
+        nemo_parity.validate_final_compilation_stability(
+            initialized_proof,
+            SimpleNamespace(phase="stochastic-2", wave_proofs=(drifted,)),
+        )
 
 
 def test_production_refit_runs_both_uuid_streams_against_real_generation_contract() -> None:

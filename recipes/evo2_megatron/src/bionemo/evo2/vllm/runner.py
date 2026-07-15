@@ -584,6 +584,71 @@ def phase_output_artifact_path(
     return root.with_name(f"{base_name}.{phase}{replica_suffix}.outputs.jsonl.gz")
 
 
+def _output_namespace_marker_path(path: str | Path) -> Path:
+    output = Path(path).resolve()
+    return output.with_name(f"{output.name}.inprogress")
+
+
+def reserve_output_namespace(path: str | Path) -> Path:
+    """Atomically reserve a new artifact namespace and refuse any stale outputs."""
+    output = Path(path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    marker = _output_namespace_marker_path(output)
+    temporary = output.with_suffix(f"{output.suffix}.tmp")
+    sidecar_prefix = f"{output.name.removesuffix(output.suffix)}."
+    collisions = [candidate for candidate in (output, temporary, marker) if candidate.exists()]
+    collisions.extend(
+        candidate
+        for candidate in output.parent.iterdir()
+        if candidate.name.startswith(sidecar_prefix)
+        and (
+            candidate.name.endswith(".outputs.jsonl.gz")
+            or candidate.name.endswith(".outputs.jsonl.gz.tmp")
+        )
+    )
+    if collisions:
+        names = ", ".join(sorted({candidate.name for candidate in collisions}))
+        raise FileExistsError(f"output namespace already contains prior artifacts: {names}")
+    with marker.open("x", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "schema_version": 1,
+                "state": "in_progress",
+                "output_artifact_path": str(output),
+                "started_unix_s": time.time(),
+                "argv": [sys.executable, *sys.argv],
+            },
+            handle,
+            sort_keys=True,
+        )
+        handle.write("\n")
+    return marker
+
+
+def require_output_namespace_reservation(path: str | Path) -> Path:
+    """Fail unless the caller reserved this exact output namespace."""
+    marker = _output_namespace_marker_path(path)
+    if not marker.is_file():
+        raise RuntimeError(f"output namespace is not reserved: {marker}")
+    return marker
+
+
+def complete_output_namespace(
+    marker: str | Path,
+    *,
+    output_path: str | Path,
+    require_final_artifact: bool = True,
+) -> None:
+    """Release one successful reservation without touching any other artifacts."""
+    output = Path(output_path).resolve()
+    reservation = Path(marker).resolve()
+    if reservation != _output_namespace_marker_path(output):
+        raise ValueError("output namespace marker does not match the requested artifact")
+    if require_final_artifact and not output.is_file():
+        raise RuntimeError("cannot complete an output namespace before its final artifact exists")
+    reservation.unlink()
+
+
 @dataclass(frozen=True)
 class GenerationPhaseResult:
     """One timed generation phase plus its unreset CUDA graph observations."""
@@ -855,6 +920,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     """Run one TP2 Ray engine through cold, warm, and measured exact phases."""
     if args.topology != "tp2":
         raise ValueError("run_tp2_benchmark requires topology=tp2")
+    require_output_namespace_reservation(args.output)
     vllm_import_begin = time.perf_counter()
     from vllm import LLM, SamplingParams
 
@@ -997,8 +1063,10 @@ def write_json_artifact(path: str | Path, artifact: dict[str, Any]) -> None:
     """Write one durable, deterministic benchmark artifact."""
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        raise FileExistsError(f"refusing to overwrite existing artifact: {output}")
     temporary = output.with_suffix(f"{output.suffix}.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
+    with temporary.open("x", encoding="utf-8") as handle:
         json.dump(artifact, handle, indent=2, sort_keys=True)
         handle.write("\n")
     temporary.replace(output)
@@ -1007,6 +1075,7 @@ def write_json_artifact(path: str | Path, artifact: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the optimized exact-length vLLM benchmark CLI."""
     args = build_parser().parse_args(argv)
+    reservation = reserve_output_namespace(args.output)
     if args.backend != "vllm":
         raise NotImplementedError("the MCore baseline uses its pinned backend adapter")
     source_manifest = load_source_manifest(args)
@@ -1024,6 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
 
         artifact = run_nemo_dp2_benchmark(args, manifest)
     write_json_artifact(args.output, artifact)
+    complete_output_namespace(reservation, output_path=args.output)
     return 0
 
 
@@ -1035,11 +1105,14 @@ __all__ = [
     "build_request_execution_records",
     "build_request_sampling_params",
     "checkpoint_provenance",
+    "complete_output_namespace",
     "full_decode_proof_summary",
     "load_source_manifest",
     "phase_output_artifact_path",
     "prepare_workload",
     "request_seed",
+    "require_output_namespace_reservation",
+    "reserve_output_namespace",
     "reset_vllm_worker_proof_state",
     "run_generation_phase",
     "runtime_versions",

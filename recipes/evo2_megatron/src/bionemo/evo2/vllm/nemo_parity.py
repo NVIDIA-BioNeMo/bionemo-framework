@@ -248,6 +248,30 @@ def _phase_evidence(phase: Any) -> dict[str, Any]:
     return evidence
 
 
+def validate_final_compilation_stability(initialized_proof: dict[str, Any], final_phase: Any) -> dict[str, Any]:
+    """Require compile and graph counters to remain stable through the last generation."""
+    from bionemo.evo2.vllm.runner import validate_compilation_proof
+
+    initial_workers = initialized_proof.get("worker_proof")
+    if not isinstance(initial_workers, list) or len(initial_workers) != 2:
+        raise AssertionError("TP2 compilation proof must cover both initialized workers")
+    if not final_phase.wave_proofs:
+        raise AssertionError("final generation phase is missing worker proof")
+    engines = final_phase.wave_proofs[-1].get("engines")
+    if not isinstance(engines, list) or len(engines) != 1:
+        raise AssertionError("final TP2 phase must contain exactly one engine proof")
+    final_workers = engines[0].get("worker_proof")
+    if not isinstance(final_workers, list) or len(final_workers) != 2:
+        raise AssertionError("TP2 compilation proof must cover both final workers")
+    for initialized_worker, final_worker in zip(initial_workers, final_workers, strict=True):
+        validate_compilation_proof(initialized_worker["compilation"], final_worker["compilation"])
+    return {
+        "passed": True,
+        "final_phase": str(final_phase.phase),
+        "tp_worker_count": len(final_workers),
+    }
+
+
 def _logprob_evidence_summary(evidence: dict[str, Any]) -> dict[str, Any]:
     """Summarize one uniform short-run logprob evidence lane."""
     shape = evidence.get("shape")
@@ -412,13 +436,14 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
         checkpoint_provenance,
         make_nvml_memory_reader,
         phase_output_artifact_path,
+        require_output_namespace_reservation,
         runtime_versions,
         source_provenance,
-        validate_compilation_proof,
     )
 
     clock = time.perf_counter
     output_path = Path(args.output).resolve()
+    require_output_namespace_reservation(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     source_manifest = WorkloadManifest.from_path(args.manifest)
     parity_manifest = source_manifest.request_slice(0, 1).with_max_new_tokens(args.max_new_tokens)
@@ -692,12 +717,10 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
         if set(stochastic1_seeds) & set(stochastic2_seeds):
             raise AssertionError("successive stochastic TP2 calls replayed request seeds")
 
-        final_workers = after_refit2.wave_proofs[-1]["engines"][0]["worker_proof"]
-        initial_workers = initialized_proofs[0]["worker_proof"]
-        if len(initial_workers) != 2 or len(final_workers) != 2:
-            raise AssertionError("TP2 compilation proof must cover both internal workers")
-        for initialized_worker, final_worker in zip(initial_workers, final_workers, strict=True):
-            validate_compilation_proof(initialized_worker["compilation"], final_worker["compilation"])
+        final_compilation_validation = validate_final_compilation_stability(
+            initialized_proofs[0],
+            stochastic2,
+        )
 
         phase_results = [
             baseline,
@@ -828,6 +851,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                 ),
             },
             "compilation_and_cudagraph_gate_passed": True,
+            "final_compilation_validation": final_compilation_validation,
         }
     finally:
         if generation is not None:
@@ -839,11 +863,17 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     """Run and persist the canonical TP2 parity/refit proof."""
-    from bionemo.evo2.vllm.runner import write_json_artifact
+    from bionemo.evo2.vllm.runner import (
+        complete_output_namespace,
+        reserve_output_namespace,
+        write_json_artifact,
+    )
 
     args = build_parser().parse_args(argv)
+    reservation = reserve_output_namespace(args.output)
     artifact = run_tp2_refit_parity(args)
     write_json_artifact(args.output, artifact)
+    complete_output_namespace(reservation, output_path=args.output)
     return 0
 
 
@@ -854,6 +884,7 @@ __all__ = [
     "main",
     "run_production_refit",
     "run_tp2_refit_parity",
+    "validate_final_compilation_stability",
 ]
 
 

@@ -354,6 +354,8 @@ def validate_refit_proof(
             raise AssertionError("refit loader did not receive every mandatory parameter")
         if not loader.get("started") or not loader.get("complete"):
             raise AssertionError("refit loader transaction is incomplete")
+        if not loader.get("consumed"):
+            raise AssertionError("refit loader transaction was not consumed by production inference")
         if loader.get("pending_fc1_layer_count") != 0:
             raise AssertionError("refit loader retained incomplete fused MLP weights")
         chunk_counts.append(len(chunks))

@@ -444,6 +444,40 @@ def test_phase_output_artifact_paths_are_phase_and_replica_specific(tmp_path) ->
     )
 
 
+def test_output_namespace_reservation_refuses_stale_final_sidecar_or_active_run(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    unrelated = tmp_path / "unrelated.steady-0.outputs.jsonl.gz"
+    unrelated.write_bytes(b"unrelated")
+
+    marker = runner.reserve_output_namespace(output)
+
+    assert marker.is_file()
+    with pytest.raises(FileExistsError, match="namespace"):
+        runner.reserve_output_namespace(output)
+
+    runner.complete_output_namespace(marker, output_path=output, require_final_artifact=False)
+    output.write_text("stale success\n", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="benchmark.json"):
+        runner.reserve_output_namespace(output)
+
+    output.unlink()
+    sidecar = runner.phase_output_artifact_path(output, phase="steady-0")
+    sidecar.write_bytes(b"stale sidecar")
+    with pytest.raises(FileExistsError, match="steady-0"):
+        runner.reserve_output_namespace(output)
+    assert unrelated.read_bytes() == b"unrelated"
+
+
+def test_json_artifact_writer_refuses_to_overwrite_prior_success(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    runner.write_json_artifact(output, {"run": 1})
+
+    with pytest.raises(FileExistsError, match="benchmark.json"):
+        runner.write_json_artifact(output, {"run": 2})
+
+    assert json.loads(output.read_text()) == {"run": 1}
+
+
 def test_checkpoint_provenance_hashes_actual_indexed_weight_shards(tmp_path) -> None:
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
