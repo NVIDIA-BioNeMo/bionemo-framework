@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import torch
 
-from bionemo.evo2.vllm.benchmark import WorkloadManifest, WorkloadRequest
+from bionemo.evo2.vllm.benchmark import WorkloadManifest, WorkloadRequest, build_request_waves
 from bionemo.evo2.vllm.refit import (
     IndexedSafetensorsLayout,
     IpcChunkPlan,
@@ -599,6 +599,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
         validate_resolved_profile(profile, initialized_proofs[0]["resolved_config"])
 
         phase_index = 0
+        global_call_index = 0
 
         def generate_phase(
             phase: str,
@@ -607,13 +608,23 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
             greedy: bool,
             expected_finite_support: int,
         ):
-            nonlocal phase_index
+            nonlocal global_call_index, phase_index
+            phase_call_count = len(
+                build_request_waves(
+                    request_count=len(manifest.requests),
+                    global_batch_size=profile.global_wave_size,
+                    replica_count=profile.replica_count,
+                )
+            )
             result = run_nemo_generation_phase(
                 generation=generation,
                 manifest=manifest,
                 profile=profile,
                 phase=phase,
                 sample_index=phase_index,
+                generation_round=phase_index,
+                global_call_index_start=global_call_index,
+                global_request_index_start=0,
                 full_output_path=phase_output_artifact_path(output_path, phase=phase),
                 namespace_output_path=output_path,
                 memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
@@ -624,6 +635,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                 expected_finite_logprob_support=expected_finite_support,
             )
             phase_index += 1
+            global_call_index += phase_call_count
             return result
 
         baseline = generate_phase(
@@ -934,7 +946,11 @@ def main(argv: list[str] | None = None) -> int:
     reservation = reserve_output_namespace(args.output)
     artifact = run_tp2_refit_parity(args)
     require_output_namespace_reservation(args.output)
-    write_json_artifact(args.output, artifact)
+    write_json_artifact(
+        args.output,
+        artifact,
+        ownership_validator=lambda: require_output_namespace_reservation(args.output),
+    )
     complete_output_namespace(reservation, output_path=args.output)
     return 0
 

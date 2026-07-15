@@ -5,19 +5,25 @@ import copy
 import gzip
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import bionemo.evo2.vllm.runner as runner
+import bionemo.evo2.vllm.sampler as sampler_module
 from bionemo.evo2.vllm.accuracy import (
     CANONICAL_7B_CHECKPOINT,
     build_canonical_identity_contract,
     build_canonical_identity_manifest,
+    build_common_prefix_identity_contract,
+    build_common_prefix_identity_manifest,
     build_homogeneous_identity_schedule,
     load_canonical_7b_identity_cases,
+    load_common_prefix_identity_cases,
 )
 from bionemo.evo2.vllm.benchmark import (
     GenerationRecord,
@@ -39,6 +45,128 @@ from bionemo.evo2.vllm.runner import (
 DATA = __import__("pathlib").Path(__file__).with_name("data") / "gdpo_mixed_96.json"
 PROMPTS_CSV = Path(__file__).resolve().parent.parent / "data" / "prompts.csv"
 TOKENIZER_JSON = Path(__file__).resolve().parents[4] / "tokenizers/nucleotide_fast_tokenizer_512/tokenizer.json"
+
+
+def _sampler_installation_provenance() -> dict:
+    source_files = [
+        {
+            "path": f"/runtime/{relative_path}",
+            "relative_path": relative_path,
+            "size_bytes": index + 1,
+            "sha256": sha256,
+        }
+        for index, (relative_path, sha256) in enumerate(sampler_module._EXPECTED_SOURCE_SHA256.items())
+    ]
+    return {
+        "schema_version": 1,
+        "executing_python": {
+            "invoked_path": "/nemo-rl/.venv/bin/python",
+            "resolved_path": "/python3.13",
+            "resolved_sha256": "a" * 64,
+            "invoked_symlink_target": "/python3.13",
+            "nemo_rl_py_executables_system": "1",
+        },
+        "launcher_selection": {
+            "nemo_rl_py_executables_system": "1",
+            "selected_environment": "system-runtime",
+            "executing_python_path": "/nemo-rl/.venv/bin/python",
+            "isolated_worker_environment": {
+                "path": "/nemo-rl/venvs/vllm-worker/bin/python",
+                "exists": True,
+                "status": "installed-but-bypassed",
+                "attested_as_executing": False,
+            },
+        },
+        "distributions": dict(sampler_module._EXPECTED_DISTRIBUTIONS),
+        "distribution_metadata": {
+            name: {"record_path": f"/runtime/{name}.dist-info/RECORD", "record_sha256": str(index) * 64}
+            for index, name in enumerate(sampler_module._EXPECTED_DISTRIBUTIONS, start=1)
+        },
+        "loaded_modules": {},
+        "required_sampler_modules_loaded": False,
+        "source_files": source_files,
+        "source_contract_sha256": hashlib.sha256(
+            "".join(item["sha256"] for item in source_files).encode()
+        ).hexdigest(),
+        "flashinfer_per_row_seed_arrays_supported": False,
+        "flashinfer_impact_on_selected_vllm_route": "none-route-bypassed",
+        "passed": True,
+    }
+
+
+class _RunnerTestNativeTopKSampler:
+    __module__ = "vllm.v1.sample.ops.topk_topp_sampler"
+    logprobs_mode = "processed_logprobs"
+
+    def __init__(self) -> None:
+        self.forward = self.forward_native
+
+    def forward_native(self, logits, generators, k, p):
+        del k, p
+        q = torch.empty_like(logits)
+        for row_index, generator in generators.items():
+            q[row_index].exponential_(generator=generator)
+        logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
+        return logprobs.exp().div_(q).argmax(dim=-1), logprobs
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+class _RunnerTestV1ModelRunner:
+    __module__ = "vllm.v1.worker.gpu_model_runner"
+
+    def __init__(self) -> None:
+        self.device = torch.device("cpu")
+        self.sampler = SimpleNamespace(topk_topp_sampler=_RunnerTestNativeTopKSampler())
+
+
+_SAMPLER_BEHAVIORAL_PREFLIGHT = [None]
+
+
+def _sampler_worker_proof(seed_batches: tuple[tuple[int, ...], ...]) -> dict:
+    environment = sampler_module.sampler_runtime_environment_contract()
+    if _SAMPLER_BEHAVIORAL_PREFLIGHT[0] is None:
+        worker = SimpleNamespace(model_runner=_RunnerTestV1ModelRunner())
+        _SAMPLER_BEHAVIORAL_PREFLIGHT[0] = sampler_module.run_sampler_seed_behavioral_preflight(worker)
+    installation = _sampler_installation_provenance()
+    installation["required_sampler_modules_loaded"] = True
+    installation["loaded_modules"] = {
+        "vllm.v1.worker.gpu_model_runner": {
+            "loaded": True,
+            "path": "/runtime/vllm/v1/worker/gpu_model_runner.py",
+            "sha256": sampler_module._EXPECTED_SOURCE_SHA256["vllm/v1/worker/gpu_model_runner.py"],
+        },
+        "vllm.v1.sample.ops.topk_topp_sampler": {
+            "loaded": True,
+            "path": "/runtime/vllm/v1/sample/ops/topk_topp_sampler.py",
+            "sha256": sampler_module._EXPECTED_SOURCE_SHA256["vllm/v1/sample/ops/topk_topp_sampler.py"],
+        },
+        "flashinfer": {"loaded": False, "path": None, "sha256": None},
+        "flashinfer.sampling": {"loaded": False, "path": None, "sha256": None},
+    }
+    return {
+        "schema_version": 1,
+        "environment_contract": environment,
+        "model_runner_type": "vllm.v1.worker.gpu_model_runner._RunnerTestV1ModelRunner",
+        "sampler_type": "vllm.v1.sample.ops.topk_topp_sampler._RunnerTestNativeTopKSampler",
+        "selected_route": "vllm.v1.sample.ops.topk_topp_sampler.TopKTopPSampler.forward_native",
+        "installation": installation,
+        "behavioral_preflight": copy.deepcopy(_SAMPLER_BEHAVIORAL_PREFLIGHT[0]),
+        "generation_observations": [
+            {
+                "batch_rows": len(seeds),
+                "generator_count": len(seeds),
+                "generator_indices": list(range(len(seeds))),
+                "generator_seeds": list(seeds),
+                "route": "vllm.v1.sample.ops.topk_topp_sampler.TopKTopPSampler.forward_native",
+                "passed": True,
+            }
+            for seeds in seed_batches
+        ],
+        "flashinfer_sampling_calls": 0,
+        "passed": True,
+    }
 
 
 def _canonical_base_manifest() -> WorkloadManifest:
@@ -774,6 +902,7 @@ def test_request_sampling_params_consume_persisted_stream_seeds() -> None:
         global_request_offset=48,
         dp_rank=1,
         dp_size=2,
+        generation_round=7,
         call_index=7,
     )
 
@@ -797,6 +926,7 @@ def test_request_execution_records_persist_round_rank_call_and_global_seed() -> 
         global_request_offset=48,
         dp_rank=1,
         dp_size=2,
+        generation_round=7,
         call_index=7,
     )
 
@@ -829,6 +959,7 @@ def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path)
         global_request_offset=48,
         dp_rank=1,
         dp_size=2,
+        generation_round=9,
         call_index=9,
     )
     output_path = tmp_path / "steady-0.outputs.jsonl.gz"
@@ -883,6 +1014,7 @@ def test_backend_neutral_full_output_artifact_accepts_generation_records(tmp_pat
         global_request_offset=48,
         dp_rank=1,
         dp_size=2,
+        generation_round=9,
         call_index=9,
     )
     records = records_from_vllm_outputs(manifest, _fake_outputs(manifest))
@@ -901,6 +1033,70 @@ def test_backend_neutral_full_output_artifact_accepts_generation_records(tmp_pat
     assert rows[0]["output_token_ids"] == [65, 67, 71]
     assert rows[0]["chosen_token_logprobs"] == pytest.approx([-0.1, -0.1, -0.1])
     assert metadata["generated_token_count"] == 6
+
+
+def test_full_output_writer_never_overwrites_foreign_sidecar_created_before_publish(tmp_path, monkeypatch) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    executions = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+    records = records_from_vllm_outputs(manifest, _fake_outputs(manifest))
+    output = tmp_path / "foreign.outputs.jsonl.gz"
+    foreign = b"foreign-sidecar\n"
+    real_link = runner.os.link
+
+    def create_foreign_then_link(source, destination, **kwargs):
+        Path(destination).write_bytes(foreign)
+        return real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(runner.os, "link", create_foreign_then_link)
+
+    with pytest.raises(FileExistsError):
+        runner.write_full_generation_records_artifact(
+            output,
+            records=records,
+            execution_records=executions,
+        )
+
+    assert output.read_bytes() == foreign
+
+
+def test_full_output_writer_removes_only_its_own_sidecar_after_ownership_loss(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    executions = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+    records = records_from_vllm_outputs(manifest, _fake_outputs(manifest))
+    output = tmp_path / "owned.outputs.jsonl.gz"
+    calls = 0
+
+    def lose_ownership_after_publish() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 5:
+            raise RuntimeError("ownership lost")
+
+    with pytest.raises(RuntimeError, match="ownership lost"):
+        runner.write_full_generation_records_artifact(
+            output,
+            records=records,
+            execution_records=executions,
+            ownership_validator=lose_ownership_after_publish,
+        )
+
+    assert calls == 5
+    assert not output.exists()
+    assert not output.with_suffix(f"{output.suffix}.tmp").exists()
 
 
 def test_phase_output_artifact_paths_are_phase_and_replica_specific(tmp_path) -> None:
@@ -1035,6 +1231,133 @@ def test_main_does_not_publish_evidence_after_namespace_ownership_loss(tmp_path,
     assert output.with_name("ownership-loss.inprogress").read_text(encoding="utf-8") == foreign_payload
 
 
+def _gpu_preflight_failure() -> runner.GpuPreflightError:
+    return runner.GpuPreflightError(
+        "one-byte CUDA usable-total drift",
+        evidence={
+            "schema_version": 2,
+            "passed": False,
+            "cuda_visible_devices": "0,1",
+            "expected_cuda_visible_devices": "0,1",
+            "devices": [
+                {
+                    "logical_device_index": 0,
+                    "memory": {
+                        "nvml": {
+                            "physical_total_bytes": 85_520_809_984,
+                            "system_reserved_bytes": 351_666_176,
+                            "free_bytes": 80_000_000_000,
+                            "used_bytes": 5_169_143_808,
+                        },
+                        "cuda": {
+                            "usable_total_bytes": 85_169_143_809,
+                            "free_bytes": 80_000_000_000,
+                        },
+                        "torch_properties_total_bytes": 85_169_143_809,
+                        "usable_total_relation_delta_bytes": -1,
+                    },
+                }
+            ],
+            "failure": {
+                "stage": "memory-accounting",
+                "message": "one-byte CUDA usable-total drift",
+            },
+        },
+    )
+
+
+def test_tp2_gpu_preflight_failure_occurs_before_vllm_import(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    from bionemo.evo2.vllm.config import Evo2Config
+
+    checkpoint = tmp_path / "checkpoint"
+    Evo2Config(max_position_embeddings=10_240).save_pretrained(checkpoint)
+    output = tmp_path / "gpu-preflight-order.json"
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(checkpoint),
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "tp2",
+            "--max-model-len",
+            "7000",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--proof",
+            "--output",
+            str(output),
+        ]
+    )
+    manifest = WorkloadManifest.from_path(DATA)
+    runner.reserve_output_namespace(output)
+    monkeypatch.setattr(runner, "context_length_preflight", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        runner,
+        "gpu_hardware_provenance",
+        lambda: (_ for _ in ()).throw(_gpu_preflight_failure()),
+    )
+    real_import = builtins.__import__
+    imported_vllm = []
+
+    def track_import(name, *args, **kwargs):
+        if name == "vllm":
+            imported_vllm.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", track_import)
+
+    with pytest.raises(runner.GpuPreflightError):
+        runner.run_tp2_benchmark(args, manifest)
+
+    assert imported_vllm == []
+    assert not output.exists()
+
+
+def test_main_atomically_publishes_raw_gpu_preflight_failure(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "gpu-preflight-failure.json"
+    monkeypatch.setattr(
+        runner,
+        "run_tp2_benchmark",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(_gpu_preflight_failure()),
+    )
+
+    status = runner.main(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "tp2",
+            "--max-model-len",
+            "7000",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--proof",
+            "--output",
+            str(output),
+        ]
+    )
+
+    artifact = json.loads(output.read_text())
+    assert status == 1
+    assert artifact["invocation"]["exit_status"] == 1
+    assert artifact["failure"]["type"] == "GpuPreflightError"
+    assert artifact["gpu_hardware_provenance"]["devices"][0]["memory"]["usable_total_relation_delta_bytes"] == -1
+    assert not output.with_name("gpu-preflight-failure.inprogress").exists()
+
+
 def test_json_artifact_writer_refuses_to_overwrite_prior_success(tmp_path) -> None:
     output = tmp_path / "benchmark.json"
     runner.write_json_artifact(output, {"run": 1})
@@ -1043,6 +1366,49 @@ def test_json_artifact_writer_refuses_to_overwrite_prior_success(tmp_path) -> No
         runner.write_json_artifact(output, {"run": 2})
 
     assert json.loads(output.read_text()) == {"run": 1}
+
+
+def test_json_artifact_writer_never_overwrites_foreign_output_created_before_publish(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "benchmark.json"
+    foreign = b"foreign-output\n"
+    real_link = runner.os.link
+
+    def create_foreign_then_link(source, destination, **kwargs):
+        Path(destination).write_bytes(foreign)
+        return real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(runner.os, "link", create_foreign_then_link)
+
+    with pytest.raises(FileExistsError):
+        runner.write_json_artifact(output, {"run": 1})
+
+    assert output.read_bytes() == foreign
+
+
+def test_json_writer_preserves_foreign_replacement_after_reservation_ownership_loss(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    foreign_path = tmp_path / "foreign.json"
+    foreign = b"foreign-replacement\n"
+    calls = 0
+
+    def replace_published_inode_then_lose_ownership() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            foreign_path.write_bytes(foreign)
+            foreign_path.replace(output)
+            raise RuntimeError("ownership lost")
+
+    with pytest.raises(RuntimeError, match="ownership lost"):
+        runner.write_json_artifact(
+            output,
+            {"run": 1},
+            ownership_validator=replace_published_inode_then_lose_ownership,
+        )
+
+    assert calls == 3
+    assert output.read_bytes() == foreign
+    assert not output.with_suffix(f"{output.suffix}.tmp").exists()
 
 
 def test_context_preflight_only_cli_writes_proof_without_launching_generation(
@@ -1281,65 +1647,34 @@ def test_package_installation_provenance_rejects_missing_binary(tmp_path) -> Non
 
 def test_gpu_hardware_provenance_and_memory_headroom_are_exact(monkeypatch) -> None:
     gib = 1024**3
-
-    class FakeNvml:
-        initialized = False
-
-        @classmethod
-        def nvmlInit(cls):  # noqa: N802
-            cls.initialized = True
-
-        @staticmethod
-        def nvmlSystemGetDriverVersion():  # noqa: N802
-            return b"570.86.15"
-
-        @staticmethod
-        def nvmlDeviceGetCount():  # noqa: N802
-            return 2
-
-        @staticmethod
-        def nvmlDeviceGetHandleByIndex(index):  # noqa: N802
-            return index
-
-        @staticmethod
-        def nvmlDeviceGetUUID(handle):  # noqa: N802
-            return f"GPU-uuid-{handle}".encode()
-
-        @staticmethod
-        def nvmlDeviceGetName(handle):  # noqa: N802
-            return f"NVIDIA H100 {handle}".encode()
-
-        @staticmethod
-        def nvmlDeviceGetPciInfo(handle):  # noqa: N802
-            return SimpleNamespace(busId=f"00000000:0{handle + 1}:00.0".encode())
-
-        @staticmethod
-        def nvmlDeviceGetMemoryInfo(handle):  # noqa: N802
-            total = (80 + handle) * gib
-            return SimpleNamespace(total=total, used=3 * gib, free=total - 3 * gib)
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     hardware = runner.gpu_hardware_provenance(
-        nvml_module=FakeNvml,
-        expected_device_count=2,
+        nvml_module=fake_nvml,
+        torch_module=fake_torch,
+        expected_assignments=expected_assignments,
     )
 
-    assert FakeNvml.initialized is True
     assert hardware["driver_version"] == "570.86.15"
     assert hardware["cuda_visible_devices"] == "0,1"
+    assert hardware["passed"] is True
     assert [device["uuid"] for device in hardware["devices"]] == ["GPU-uuid-0", "GPU-uuid-1"]
     assert [device["pci_bus_id"] for device in hardware["devices"]] == [
         "00000000:01:00.0",
         "00000000:02:00.0",
     ]
-    assert [device["total_memory_bytes"] for device in hardware["devices"]] == [80 * gib, 81 * gib]
+    assert [device["memory"]["nvml"]["physical_total_bytes"] for device in hardware["devices"]] == [
+        80 * gib,
+        81 * gib,
+    ]
 
     headroom = runner.gpu_memory_headroom_evidence(
         hardware,
         peak_device_memory_bytes=(77 * gib, 78 * gib),
     )
     assert headroom["required_headroom_bytes"] == 2 * gib
-    assert [device["headroom_bytes"] for device in headroom["devices"]] == [3 * gib, 3 * gib]
+    assert [device["headroom_bytes"] for device in headroom["devices"]] == [5 * gib // 2, 5 * gib // 2]
     assert headroom["passed"] is True
 
     attestation = runner.runtime_attestation_contract(
@@ -1355,6 +1690,7 @@ def test_gpu_hardware_provenance_and_memory_headroom_are_exact(monkeypatch) -> N
             "distribution_version": "0.20.0",
             "installation_sha256": "installation",
         },
+        sampler_installation=_sampler_installation_provenance(),
         gpu_hardware=hardware,
     )
     assert attestation["gpu"]["cuda_visible_devices"] == "0,1"
@@ -1362,6 +1698,400 @@ def test_gpu_hardware_provenance_and_memory_headroom_are_exact(monkeypatch) -> N
         "00000000:01:00.0",
         "00000000:02:00.0",
     ]
+    assert attestation["sampler"]["executing_python"]["invoked_path"] == "/nemo-rl/.venv/bin/python"
+    assert (
+        attestation["sampler"]["launcher_selection"]["isolated_worker_environment"]["status"]
+        == "installed-but-bypassed"
+    )
+
+
+def _gpu_preflight_fakes(*, cuda_total_delta: int = 0):
+    gib = 1024**3
+    reserved = 512 * 1024**2
+
+    class FakeNvml:
+        __version__ = "13.590.48"
+        nvmlMemory_v2 = 2  # noqa: N815
+
+        @staticmethod
+        def nvmlInit():  # noqa: N802
+            return None
+
+        @staticmethod
+        def nvmlSystemGetDriverVersion():  # noqa: N802
+            return b"570.86.15"
+
+        @staticmethod
+        def nvmlSystemGetCudaDriverVersion_v2():  # noqa: N802
+            return 13_000
+
+        @staticmethod
+        def nvmlDeviceGetCount():  # noqa: N802
+            return 2
+
+        @staticmethod
+        def nvmlDeviceGetHandleByIndex(index):  # noqa: N802
+            return index
+
+        @staticmethod
+        def nvmlDeviceGetHandleByUUID(uuid):  # noqa: N802
+            return int(str(uuid).rsplit("-", 1)[1])
+
+        @staticmethod
+        def nvmlDeviceGetIndex(handle):  # noqa: N802
+            return handle
+
+        @staticmethod
+        def nvmlDeviceGetUUID(handle):  # noqa: N802
+            return f"GPU-uuid-{handle}".encode()
+
+        @staticmethod
+        def nvmlDeviceGetName(handle):  # noqa: N802
+            return f"NVIDIA H100 {handle}".encode()
+
+        @staticmethod
+        def nvmlDeviceGetPciInfo(handle):  # noqa: N802
+            return SimpleNamespace(busId=f"00000000:0{handle + 1}:00.0".encode())
+
+        @classmethod
+        def nvmlDeviceGetMemoryInfo(cls, handle, *, version):  # noqa: N802
+            assert version == cls.nvmlMemory_v2
+            physical_total = (80 + handle) * gib
+            usable_total = physical_total - reserved
+            used = 3 * gib
+            return SimpleNamespace(
+                total=physical_total,
+                reserved=reserved,
+                used=used,
+                free=usable_total - used,
+            )
+
+    class FakeCuda:
+        @staticmethod
+        def _physical_index(logical_device):
+            selector = os.environ["CUDA_VISIBLE_DEVICES"].split(",")[logical_device]
+            return int(selector.rsplit("-", 1)[1]) if selector.startswith("GPU-") else int(selector)
+
+        @staticmethod
+        def device_count():
+            return 2
+
+        @staticmethod
+        def get_device_properties(logical_device):
+            physical_index = FakeCuda._physical_index(logical_device)
+            physical_total = (80 + physical_index) * gib
+            usable_total = physical_total - reserved
+            return SimpleNamespace(
+                name=f"NVIDIA H100 {physical_index}",
+                uuid=f"GPU-uuid-{physical_index}",
+                total_memory=usable_total,
+            )
+
+        @staticmethod
+        def mem_get_info(logical_device):
+            physical_index = FakeCuda._physical_index(logical_device)
+            physical_total = (80 + physical_index) * gib
+            usable_total = physical_total - reserved + cuda_total_delta
+            return usable_total - 3 * gib, usable_total
+
+    fake_torch = SimpleNamespace(
+        __version__="2.10.0",
+        version=SimpleNamespace(cuda="13.0"),
+        cuda=FakeCuda,
+    )
+    expected_assignments = (
+        {
+            "logical_device_index": 0,
+            "visible_device_selector": "0",
+            "physical_index": 0,
+            "uuid": "GPU-uuid-0",
+            "pci_bus_id": "00000000:01:00.0",
+        },
+        {
+            "logical_device_index": 1,
+            "visible_device_selector": "1",
+            "physical_index": 1,
+            "uuid": "GPU-uuid-1",
+            "pci_bus_id": "00000000:02:00.0",
+        },
+    )
+    return FakeNvml, fake_torch, expected_assignments
+
+
+def test_gpu_preflight_binds_assignment_and_exact_nvml_cuda_memory_semantics(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+
+    hardware = runner.gpu_hardware_provenance(
+        nvml_module=fake_nvml,
+        torch_module=fake_torch,
+        expected_assignments=expected_assignments,
+    )
+
+    assert hardware["passed"] is True
+    assert hardware["expected_assignments"] == list(expected_assignments)
+    assert hardware["api_versions"]["nvml_memory_info_api"] == "nvmlDeviceGetMemoryInfo_v2"
+    assert hardware["api_versions"]["cuda_memory_info_api"] == "torch.cuda.mem_get_info"
+    for device in hardware["devices"]:
+        memory = device["memory"]
+        assert (
+            memory["nvml"]["physical_total_bytes"] - memory["nvml"]["system_reserved_bytes"]
+            == (memory["cuda"]["usable_total_bytes"])
+        )
+        assert memory["torch_properties_total_bytes"] == memory["cuda"]["usable_total_bytes"]
+        assert memory["usable_total_relation_delta_bytes"] == 0
+
+
+def test_gpu_preflight_retains_raw_one_byte_usable_total_disagreement(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes(cuda_total_delta=1)
+
+    with pytest.raises(runner.GpuPreflightError) as error:
+        runner.gpu_hardware_provenance(
+            nvml_module=fake_nvml,
+            torch_module=fake_torch,
+            expected_assignments=expected_assignments,
+        )
+
+    retained = error.value.evidence
+    assert retained["passed"] is False
+    assert retained["devices"][0]["memory"]["usable_total_relation_delta_bytes"] == -1
+    assert retained["failure"]["stage"] == "memory-accounting"
+
+
+def test_gpu_preflight_retains_raw_mapping_for_wrong_visible_order(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+
+    with pytest.raises(runner.GpuPreflightError) as error:
+        runner.gpu_hardware_provenance(
+            nvml_module=fake_nvml,
+            torch_module=fake_torch,
+            expected_assignments=expected_assignments,
+        )
+
+    retained = error.value.evidence
+    assert retained["cuda_visible_devices"] == "1,0"
+    assert [device["visible_device_selector"] for device in retained["devices"]] == ["1", "0"]
+    assert [device["physical_index"] for device in retained["devices"]] == [1, 0]
+    assert retained["failure"]["stage"] == "assignment"
+
+
+def test_gpu_preflight_rejects_uuid_selectors_even_when_physical_mapping_matches(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-uuid-0,GPU-uuid-1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+
+    with pytest.raises(runner.GpuPreflightError) as error:
+        runner.gpu_hardware_provenance(
+            nvml_module=fake_nvml,
+            torch_module=fake_torch,
+            expected_assignments=expected_assignments,
+        )
+
+    retained = error.value.evidence
+    assert [device["physical_index"] for device in retained["devices"]] == [0, 1]
+    assert retained["observed_visible_device_selectors"] == ["GPU-uuid-0", "GPU-uuid-1"]
+    assert retained["failure"]["stage"] == "assignment"
+
+
+@pytest.mark.parametrize("tamper", ("physical_index", "uuid", "pci_bus_id"))
+def test_gpu_preflight_retains_raw_physical_identity_mismatch(monkeypatch, tamper) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+    if tamper == "physical_index":
+        monkeypatch.setattr(
+            fake_nvml,
+            "nvmlDeviceGetIndex",
+            staticmethod(lambda handle: 1 - handle),
+        )
+    elif tamper == "uuid":
+        monkeypatch.setattr(
+            fake_nvml,
+            "nvmlDeviceGetUUID",
+            staticmethod(lambda handle: f"GPU-wrong-{handle}".encode()),
+        )
+    else:
+        monkeypatch.setattr(
+            fake_nvml,
+            "nvmlDeviceGetPciInfo",
+            staticmethod(lambda handle: SimpleNamespace(busId=f"00000000:9{handle}:00.0".encode())),
+        )
+
+    with pytest.raises(runner.GpuPreflightError) as error:
+        runner.gpu_hardware_provenance(
+            nvml_module=fake_nvml,
+            torch_module=fake_torch,
+            expected_assignments=expected_assignments,
+        )
+
+    retained = error.value.evidence
+    assert len(retained["devices"]) == 2
+    assert len(retained["assignment_mismatches"]) == 2
+    assert retained["failure"]["stage"] == "assignment"
+
+
+def test_gpu_preflight_retains_raw_one_byte_nvml_sum_drift(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+    original = fake_nvml.nvmlDeviceGetMemoryInfo
+
+    def drifted_memory(handle, *, version):
+        memory = original(handle, version=version)
+        if handle != 0:
+            return memory
+        return SimpleNamespace(
+            total=memory.total,
+            reserved=memory.reserved,
+            used=memory.used,
+            free=memory.free + 1,
+        )
+
+    monkeypatch.setattr(fake_nvml, "nvmlDeviceGetMemoryInfo", staticmethod(drifted_memory))
+
+    with pytest.raises(runner.GpuPreflightError) as error:
+        runner.gpu_hardware_provenance(
+            nvml_module=fake_nvml,
+            torch_module=fake_torch,
+            expected_assignments=expected_assignments,
+        )
+
+    memory = error.value.evidence["devices"][0]["memory"]["nvml"]
+    assert memory["free_bytes"] + memory["used_bytes"] + memory["system_reserved_bytes"] == (
+        memory["physical_total_bytes"] + 1
+    )
+    assert error.value.evidence["failure"]["stage"] == "memory-accounting"
+
+
+def test_gpu_preflight_rejects_one_byte_below_initial_headroom(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+    original = fake_nvml.nvmlDeviceGetMemoryInfo
+    required = 2 * 1024**3
+
+    def low_headroom_memory(handle, *, version):
+        memory = original(handle, version=version)
+        if handle != 0:
+            return memory
+        free = required - 1
+        return SimpleNamespace(
+            total=memory.total,
+            reserved=memory.reserved,
+            used=memory.total - memory.reserved - free,
+            free=free,
+        )
+
+    monkeypatch.setattr(fake_nvml, "nvmlDeviceGetMemoryInfo", staticmethod(low_headroom_memory))
+
+    with pytest.raises(runner.GpuPreflightError) as error:
+        runner.gpu_hardware_provenance(
+            nvml_module=fake_nvml,
+            torch_module=fake_torch,
+            expected_assignments=expected_assignments,
+        )
+
+    assert error.value.evidence["devices"][0]["memory"]["nvml"]["free_bytes"] == required - 1
+    assert error.value.evidence["failure"]["stage"] == "memory-headroom"
+
+
+def test_gpu_preflight_rejects_mutated_frozen_logical_indices_before_collection(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+    mutated = copy.deepcopy(expected_assignments)
+    mutated[0]["logical_device_index"] = 1
+    monkeypatch.setattr(
+        fake_nvml,
+        "nvmlInit",
+        staticmethod(lambda: pytest.fail("NVML collection must not start")),
+    )
+
+    with pytest.raises(ValueError, match="logical indices"):
+        runner.gpu_hardware_provenance(
+            nvml_module=fake_nvml,
+            torch_module=fake_torch,
+            expected_assignments=mutated,
+        )
+
+
+def _worker_gpu_proofs(hardware, *, physical_order=(0, 1)):
+    workers = []
+    for rank, physical_index in enumerate(physical_order):
+        device = hardware["devices"][physical_index]
+        workers.append(
+            {
+                "rank": rank,
+                "logical_device": physical_index,
+                "device_uuid": device["uuid"],
+                "pci_bus_id": device["pci_bus_id"],
+                "device_name": device["name"],
+                "cuda_visible_devices": "0,1",
+                "visible_device_selector": str(physical_index),
+                "engine_seed": 42,
+            }
+        )
+    return workers
+
+
+def test_worker_gpu_bindings_accept_exact_physical_index_schema(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+    hardware = runner.gpu_hardware_provenance(
+        nvml_module=fake_nvml,
+        torch_module=fake_torch,
+        expected_assignments=expected_assignments,
+    )
+
+    runner._validate_worker_gpu_bindings(
+        _worker_gpu_proofs(hardware),
+        hardware=hardware,
+        expected_worker_count=2,
+        expected_engine_seed=42,
+        expected_physical_indices=(0, 1),
+    )
+
+
+def test_worker_gpu_bindings_reject_rank_to_physical_assignment_swap(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+    hardware = runner.gpu_hardware_provenance(
+        nvml_module=fake_nvml,
+        torch_module=fake_torch,
+        expected_assignments=expected_assignments,
+    )
+    workers = _worker_gpu_proofs(hardware, physical_order=(1, 0))
+
+    with pytest.raises(AssertionError, match="frozen physical assignment"):
+        runner._validate_worker_gpu_bindings(
+            workers,
+            hardware=hardware,
+            expected_worker_count=2,
+            expected_engine_seed=42,
+            expected_physical_indices=(0, 1),
+        )
+
+
+def test_worker_sampler_proof_uses_exact_runtime_and_physical_seed_batches(monkeypatch) -> None:
+    calls = []
+
+    def fake_validate(proof, **kwargs):
+        calls.append((proof, kwargs))
+        return {"passed": True}
+
+    monkeypatch.setattr(sampler_module, "validate_sampler_proof_evidence", fake_validate)
+    workers = [{"sampler": {"worker": rank}} for rank in range(2)]
+    installation = sampler_module.sampler_installation_contract(_sampler_installation_provenance())
+    seed_batches = ((11, 13), (17, 19))
+
+    summaries = runner._validate_worker_sampler_evidence(
+        workers,
+        expected_installation=installation,
+        expected_seed_batches=seed_batches,
+        require_generation_observations=True,
+    )
+
+    assert summaries == [{"passed": True}, {"passed": True}]
+    assert [proof for proof, _ in calls] == [{"worker": 0}, {"worker": 1}]
+    assert all(call["expected_seed_batches"] == seed_batches for _, call in calls)
+    assert all(call["require_generation_observations"] is True for _, call in calls)
 
 
 def test_worker_gpu_identity_resolves_logical_device_to_physical_uuid_and_pci(monkeypatch) -> None:
@@ -1418,9 +2148,16 @@ def test_gpu_memory_headroom_rejects_less_than_two_gib() -> None:
     hardware = {
         "devices": [
             {
-                "index": 0,
+                "logical_device_index": 0,
+                "physical_index": 0,
                 "uuid": "GPU-a",
-                "total_memory_bytes": 80 * gib,
+                "memory": {
+                    "nvml": {
+                        "physical_total_bytes": 80 * gib,
+                        "system_reserved_bytes": 0,
+                    },
+                    "cuda": {"usable_total_bytes": 80 * gib},
+                },
             }
         ]
     }
@@ -1532,6 +2269,51 @@ def test_parser_and_loader_build_one_executable_homogeneous_identity_case(tmp_pa
     assert identity["checkpoint"] == CANONICAL_7B_CHECKPOINT
     assert identity["schedule"]["global_request_shapes"] == [96]
     assert identity["schedule"]["engine_request_shapes"] == [[96]]
+
+
+def test_loader_builds_one_executable_common_prefix_identity_case(tmp_path) -> None:
+    manifest_path = tmp_path / "base.json"
+    manifest_path.write_text(json.dumps(_canonical_base_manifest().to_dict()), encoding="utf-8")
+    parsed = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--manifest",
+            str(manifest_path),
+            "--topology",
+            "dp2",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--request-count",
+            "96",
+            "--request-id-prefix",
+            "common-case2",
+            "--prompt-tokenizer-json",
+            str(TOKENIZER_JSON),
+            "--common-prefix-identity-case",
+            "2",
+            "--canonical-prompts-csv",
+            str(PROMPTS_CSV),
+            "--output",
+            str(tmp_path / "proof.json"),
+        ]
+    )
+
+    manifest = runner.load_source_manifest(parsed)
+    profile = runner.profile_from_args(parsed, manifest)
+    contract = runner.build_benchmark_contract(parsed, manifest, profile)
+
+    assert len(manifest.requests) == 96
+    assert {len(request.prompt_token_ids) for request in manifest.requests} == {2048}
+    assert manifest.max_new_tokens == 500
+    assert contract["canonical_identity"] is None
+    assert contract["common_prefix_identity"]["case_index"] == 2
+    assert contract["common_prefix_identity"]["serial_schedule"]["engine_request_shapes"] == [[1]]
+    assert contract["common_prefix_identity"]["candidate_schedule"]["engine_request_shapes"] == [[48, 48]]
 
 
 @pytest.mark.parametrize(
@@ -1691,6 +2473,7 @@ def test_linked_identity_validator_recomputes_raw_outputs_and_physical_shapes(tm
         global_request_offset=0,
         dp_rank=0,
         dp_size=1,
+        generation_round=0,
         call_index=0,
     )
     phase["full_output_artifact"] = runner.write_full_generation_records_artifact(
@@ -1736,6 +2519,106 @@ def test_linked_identity_validator_recomputes_raw_outputs_and_physical_shapes(tm
             manifest=manifest,
             profile=profile,
             expected_contract={"canonical_identity": contract},
+        )
+
+
+def test_common_prefix_identity_production_caller_compares_serial_and_batched_outputs(tmp_path) -> None:
+    case = load_common_prefix_identity_cases(PROMPTS_CSV)[0]
+    serial_manifest = build_common_prefix_identity_manifest(
+        _canonical_base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+        tokenize=lambda text: tuple(text.encode("ascii")),
+        request_count=1,
+        request_id_prefix="common-serial",
+    )
+    candidate_manifest = build_common_prefix_identity_manifest(
+        _canonical_base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+        tokenize=lambda text: tuple(text.encode("ascii")),
+        request_count=2,
+        request_id_prefix="common-candidate",
+    )
+
+    def phase_artifact(manifest, *, phase_name):
+        schedule = build_homogeneous_identity_schedule(
+            topology="tp2",
+            request_count=len(manifest.requests),
+            global_wave_size=2,
+        )
+        phase = _runner_identity_phase(schedule, phase_name=phase_name)
+        executions = runner.build_request_execution_records(
+            manifest,
+            global_request_offset=0,
+            dp_rank=0,
+            dp_size=1,
+            generation_round=0,
+            call_index=0,
+        )
+        phase["full_output_artifact"] = runner.write_full_generation_records_artifact(
+            tmp_path / f"{phase_name}.outputs.jsonl.gz",
+            records=_runner_identity_records(manifest, case.target),
+            execution_records=executions,
+            decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+        )
+        return phase
+
+    serial_phase = phase_artifact(serial_manifest, phase_name="common-serial")
+    candidate_phase = phase_artifact(candidate_manifest, phase_name="steady-0")
+    args = SimpleNamespace(
+        common_prefix_identity_case=0,
+        canonical_prompts_csv=PROMPTS_CSV,
+        prompt_tokenizer_json=TOKENIZER_JSON,
+    )
+    profile = SimpleNamespace(topology="tp2", global_wave_size=2)
+
+    phases, summary = runner.common_prefix_identity_phase_artifacts(
+        args=args,
+        manifest=candidate_manifest,
+        profile=profile,
+        serial_reference_phase=serial_phase,
+        phase_artifacts=[candidate_phase],
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+        collect_physical_proof=True,
+    )
+
+    assert summary["passed"] is True
+    assert summary["serial_reference"]["physical_schedule"]["request_count"] == 1
+    assert summary["phases"][0]["outputs"]["candidate_request_count"] == 2
+    assert phases[0]["common_prefix_identity_evidence"] == summary["phases"][0]
+
+    serial_schedule = build_homogeneous_identity_schedule(topology="tp2", request_count=1, global_wave_size=2)
+    candidate_schedule = build_homogeneous_identity_schedule(topology="tp2", request_count=2, global_wave_size=2)
+    contract = build_common_prefix_identity_contract(
+        case=case,
+        serial_schedule=serial_schedule,
+        candidate_schedule=candidate_schedule,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+    )
+    artifact = {
+        "phases": phases,
+        "common_prefix_identity": summary,
+        "common_prefix_serial_reference": serial_phase,
+    }
+    recomputed = runner.validate_common_prefix_identity_proof_evidence(
+        artifact,
+        manifest=candidate_manifest,
+        profile=profile,
+        expected_contract={"common_prefix_identity": contract},
+    )
+    assert recomputed == summary
+
+    artifact["common_prefix_identity"]["phases"][0]["outputs"]["candidate_request_count"] = 99
+    with pytest.raises(AssertionError, match="common-prefix identity"):
+        runner.validate_common_prefix_identity_proof_evidence(
+            artifact,
+            manifest=candidate_manifest,
+            profile=profile,
+            expected_contract={"common_prefix_identity": contract},
         )
 
 
@@ -1800,6 +2683,79 @@ def _compilation_snapshot() -> dict[str, int]:
     }
 
 
+def _synthetic_gpu_hardware() -> dict:
+    gib = 1024**3
+    reserved = 512 * 1024**2
+    assignments = [
+        {
+            "logical_device_index": 0,
+            "visible_device_selector": "0",
+            "physical_index": 0,
+            "uuid": "GPU-uuid-0",
+            "pci_bus_id": "00000000:01:00.0",
+        },
+        {
+            "logical_device_index": 1,
+            "visible_device_selector": "1",
+            "physical_index": 1,
+            "uuid": "GPU-uuid-1",
+            "pci_bus_id": "00000000:02:00.0",
+        },
+    ]
+    devices = []
+    for assignment in assignments:
+        physical_index = assignment["physical_index"]
+        physical_total = (80 + physical_index) * gib
+        usable_total = physical_total - reserved
+        devices.append(
+            {
+                **assignment,
+                "expected_visible_device_selector": assignment["visible_device_selector"],
+                "name": f"NVIDIA H100 {physical_index}",
+                "torch_uuid": assignment["uuid"],
+                "torch_name": f"NVIDIA H100 {physical_index}",
+                "memory": {
+                    "nvml": {
+                        "physical_total_bytes": physical_total,
+                        "system_reserved_bytes": reserved,
+                        "free_bytes": usable_total - gib,
+                        "used_bytes": gib,
+                    },
+                    "cuda": {
+                        "usable_total_bytes": usable_total,
+                        "free_bytes": usable_total - gib,
+                    },
+                    "torch_properties_total_bytes": usable_total,
+                    "usable_total_relation_delta_bytes": 0,
+                },
+            }
+        )
+    return {
+        "schema_version": 2,
+        "passed": True,
+        "cuda_visible_devices": "0,1",
+        "expected_cuda_visible_devices": "0,1",
+        "observed_visible_device_selectors": ["0", "1"],
+        "expected_assignments": assignments,
+        "required_initial_headroom_bytes": 2 * gib,
+        "api_versions": {
+            "nvml_python_version": "13.590.48",
+            "nvml_module_path": "/runtime/pynvml.py",
+            "nvml_memory_info_api": "nvmlDeviceGetMemoryInfo_v2",
+            "torch_version": "2.10.0",
+            "torch_cuda_version": "13.0",
+            "torch_module_path": "/runtime/torch/__init__.py",
+            "cuda_memory_info_api": "torch.cuda.mem_get_info",
+        },
+        "device_count": 2,
+        "cuda_device_count": 2,
+        "driver_version": "570.86.15",
+        "nvml_cuda_driver_version_integer": 13_000,
+        "nvml_memory_info_version": 2,
+        "devices": devices,
+    }
+
+
 def _write_valid_direct_proof_artifact(
     tmp_path,
     *,
@@ -1849,31 +2805,7 @@ def _write_valid_direct_proof_artifact(
     )
     profile = runner.profile_from_args(args, manifest)
     compilation = _compilation_snapshot()
-    hardware = {
-        "driver_version": "570.86.15",
-        "cuda_visible_devices": "0,1",
-        "device_count": 2,
-        "devices": [
-            {
-                "index": 0,
-                "uuid": "GPU-uuid-0",
-                "pci_bus_id": "00000000:01:00.0",
-                "name": "NVIDIA H100 0",
-                "total_memory_bytes": 80 * 1024**3,
-                "initial_used_memory_bytes": 0,
-                "initial_free_memory_bytes": 80 * 1024**3,
-            },
-            {
-                "index": 1,
-                "uuid": "GPU-uuid-1",
-                "pci_bus_id": "00000000:02:00.0",
-                "name": "NVIDIA H100 1",
-                "total_memory_bytes": 81 * 1024**3,
-                "initial_used_memory_bytes": 0,
-                "initial_free_memory_bytes": 81 * 1024**3,
-            },
-        ],
-    }
+    hardware = _synthetic_gpu_hardware()
     checkpoint_identity = {"checkpoint_sha256": "checkpoint-sha256"}
     source_identity = {
         "git_dirty": False,
@@ -1890,6 +2822,7 @@ def _write_valid_direct_proof_artifact(
             checkpoint=checkpoint_identity,
             sources={"bionemo": source_identity},
             vllm_installation=vllm_identity,
+            sampler_installation=_sampler_installation_provenance(),
             gpu_hardware=hardware,
         ),
     }
@@ -1901,6 +2834,7 @@ def _write_valid_direct_proof_artifact(
         executions = runner.build_wave_execution_records(
             manifest,
             global_wave_size=profile.global_wave_size,
+            generation_round=generation_round,
             call_index_start=call_index,
         )
         records = tuple(
@@ -1974,6 +2908,7 @@ def _write_valid_direct_proof_artifact(
             "start": 0,
             "stop": len(manifest.requests),
             "request_count": len(manifest.requests),
+            "generation_round": generation_round,
             "call_index": call_index,
             "generation_s": 1.0,
             "full_decode_proof": full_decode,
@@ -1991,6 +2926,7 @@ def _write_valid_direct_proof_artifact(
                 "cuda_visible_devices": "0,1",
                 "visible_device_selector": str(rank),
                 "engine_seed": manifest.seed,
+                "sampler": _sampler_worker_proof((tuple(execution.seed for execution in executions),)),
                 "fir_routes": {
                     "direct": {"calls": 27, "requests": 54, "tokens": 108},
                     "fallback_reasons": {"short_request": 27},
@@ -2075,8 +3011,6 @@ def _write_valid_direct_proof_artifact(
                 "prefix_cache_reset": shared_prefix,
             }
         )
-        call_index += 1
-
     phases, exact_progress_evidence = runner.attach_exact_generation_progress_evidence(
         phases,
         manifest=manifest,
@@ -2096,6 +3030,7 @@ def _write_valid_direct_proof_artifact(
             "cuda_visible_devices": "0,1",
             "visible_device_selector": str(rank),
             "engine_seed": manifest.seed,
+            "sampler": _sampler_worker_proof(()),
             "fir_routes": {},
             "compilation": dict(compilation),
         }
@@ -2128,6 +3063,7 @@ def _write_valid_direct_proof_artifact(
         "checkpoint_provenance": checkpoint_identity,
         "source_provenance": source_identity,
         "vllm_installation_provenance": vllm_identity,
+        "sampler_installation_provenance": _sampler_installation_provenance(),
         "gpu_hardware_provenance": hardware,
         "gpu_memory_headroom": runner.gpu_memory_headroom_evidence(
             hardware,
@@ -2145,7 +3081,9 @@ def _write_valid_direct_proof_artifact(
 
 
 def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
-    proof_path, _, base = _write_valid_direct_proof_artifact(tmp_path)
+    _, _, base = _write_valid_direct_proof_artifact(tmp_path / "direct-base")
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    proof_path = tmp_path / "proof.json"
     manifest = WorkloadManifest.from_dict(base["manifest"])
     args = runner.build_parser().parse_args(
         [
@@ -2195,6 +3133,7 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
             checkpoint=base["checkpoint_provenance"],
             sources=source_identities,
             vllm_installation=base["vllm_installation_provenance"],
+            sampler_installation=base["sampler_installation_provenance"],
             gpu_hardware=hardware,
         ),
     }
@@ -2217,6 +3156,7 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
                 global_request_offset=global_index + shard.start,
                 dp_rank=shard.replica_index,
                 dp_size=profile.replica_count,
+                generation_round=0,
                 call_index=call_index,
             )
         )
@@ -2280,6 +3220,9 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
                 "cuda_visible_devices": str(shard.replica_index),
                 "visible_device_selector": str(shard.replica_index),
                 "engine_seed": manifest.seed,
+                "sampler": _sampler_worker_proof(
+                    (tuple(execution.seed for execution in executions if execution.dp_rank == shard.replica_index),)
+                ),
                 "fir_routes": {
                     "direct": {"calls": 27, "requests": 27, "tokens": 54},
                     "fallback_reasons": {"short_request": 27},
@@ -2317,6 +3260,8 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
             "start": 0,
             "stop": len(manifest.requests),
             "request_count": len(manifest.requests),
+            "generation_round": 0,
+            "call_index": call_index,
             "generation_s": 1.0,
             "reset_proof": [{"phase": wave_phase}] * 2,
             "engines": engines,
@@ -2347,9 +3292,6 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
                 "prefix_cache_reset": False,
             }
         )
-        call_index += 1
-        global_index += len(manifest.requests)
-
     initialized = [
         {
             "phase": "engine-initialized",
@@ -2357,6 +3299,7 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
             "worker_proof": [
                 {
                     **phases[0]["waves"][0]["engines"][dp_rank]["worker_proof"][0],
+                    "sampler": _sampler_worker_proof(()),
                     "fir_routes": {},
                 }
             ],
@@ -2403,6 +3346,20 @@ def test_linked_proof_validator_accepts_complete_recomputed_direct_evidence(tmp_
 
     assert evidence["artifact_path"] == str(proof_path.resolve())
     assert evidence["artifact_sha256"] == hashlib.sha256(proof_path.read_bytes()).hexdigest()
+
+
+def test_linked_proof_validator_rejects_sampler_seed_batch_outside_physical_wave(tmp_path) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    observation = artifact["phases"][0]["worker_proof"][0]["sampler"]["generation_observations"][0]
+    observation["generator_seeds"][0] += 1
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="exact request seeds"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
 
 
 def test_linked_proof_validator_rejects_tp2_summary_without_raw_scheduler_evidence(tmp_path) -> None:
@@ -2661,11 +3618,7 @@ def test_linked_proof_validator_recomputes_all_direct_evidence(tmp_path, tamper)
         workers[0].update(second)
         workers[1].update(first)
     elif tamper == "runtime_attestation":
-        artifact["gpu_hardware_provenance"]["devices"][0]["total_memory_bytes"] += 100 * 1024**3
-        artifact["gpu_memory_headroom"] = runner.gpu_memory_headroom_evidence(
-            artifact["gpu_hardware_provenance"],
-            peak_device_memory_bytes=artifact["timing"]["engine_init_peak_device_memory_bytes"],
-        )
+        artifact["gpu_hardware_provenance"]["driver_version"] = "forged-driver"
     elif tamper == "memory":
         artifact["gpu_memory_headroom"]["devices"][0]["headroom_bytes"] += 1
     proof_path.write_text(json.dumps(artifact), encoding="utf-8")
@@ -2679,7 +3632,7 @@ def test_linked_proof_validator_recomputes_all_direct_evidence(tmp_path, tamper)
 
 
 def test_benchmark_contract_pins_generation_round_seed_stream(tmp_path) -> None:
-    manifest = WorkloadManifest.from_path(DATA)
+    manifest = WorkloadManifest.from_path(DATA).with_request_count(1_000, request_id_prefix="audit")
     common = [
         "--backend",
         "vllm",
@@ -2718,12 +3671,15 @@ def test_benchmark_contract_pins_generation_round_seed_stream(tmp_path) -> None:
     )
 
     assert first_contract["seed_stream"] == {
-        "schema_version": 1,
+        "schema_version": 2,
         "base_seed": manifest.seed,
         "generation_round": 7,
+        "physical_calls_per_round": 11,
+        "global_call_index_start": 77,
         "round_stride": 1_000_003,
         "modulus": 2**31,
     }
+    assert second_contract["seed_stream"]["global_call_index_start"] == 88
     assert first_contract != second_contract
 
 
@@ -2735,6 +3691,7 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs(t
         global_request_offset=0,
         dp_rank=0,
         dp_size=1,
+        generation_round=0,
         call_index=0,
     )
 
@@ -2811,6 +3768,7 @@ def test_generation_phase_skips_post_generation_evidence_after_namespace_ownersh
         global_request_offset=0,
         dp_rank=0,
         dp_size=1,
+        generation_round=0,
         call_index=0,
     )
     proof_events = []
@@ -2853,6 +3811,7 @@ def test_speed_generation_avoids_proof_callbacks_and_memory_polling(tmp_path) ->
         global_request_offset=0,
         dp_rank=0,
         dp_size=1,
+        generation_round=0,
         call_index=0,
     )
 
@@ -2907,7 +3866,7 @@ def test_speed_generation_avoids_proof_callbacks_and_memory_polling(tmp_path) ->
     assert result.full_output_artifact["generated_token_count"] == 6
 
 
-def test_generation_phase_executes_explicit_10x96_plus_tail40_calls(tmp_path) -> None:
+def test_generation_phase_round1_executes_global_calls_11_through_21_and_replays_exactly(tmp_path) -> None:
     manifest = (
         WorkloadManifest.from_path(DATA).with_request_count(1_000, request_id_prefix="audit").with_max_new_tokens(3)
     )
@@ -2927,7 +3886,7 @@ def test_generation_phase_executes_explicit_10x96_plus_tail40_calls(tmp_path) ->
             assert [params.seed for params in sampling_params] == [
                 request_seed(
                     42,
-                    call_index=7 + wave_index,
+                    call_index=11 + wave_index,
                     dp_rank=0,
                     dp_size=1,
                     request_index_in_stream=index,
@@ -2949,7 +3908,14 @@ def test_generation_phase_executes_explicit_10x96_plus_tail40_calls(tmp_path) ->
     execution_records = runner.build_wave_execution_records(
         manifest,
         global_wave_size=96,
-        call_index_start=7,
+        generation_round=1,
+        call_index_start=11,
+    )
+    assert execution_records == runner.build_wave_execution_records(
+        manifest,
+        global_wave_size=96,
+        generation_round=1,
+        call_index_start=11,
     )
     clock_values = iter(float(value) for value in range(22))
     result = run_generation_phase(
@@ -2974,11 +3940,11 @@ def test_generation_phase_executes_explicit_10x96_plus_tail40_calls(tmp_path) ->
     assert calls == [96] * 10 + [40]
     assert result.generation_call_s == (1.0,) * 11
     assert [proof["request_count"] for proof in result.wave_proofs] == calls
-    assert [proof["call_index"] for proof in result.wave_proofs] == list(range(7, 18))
-    assert all(record.generation_round == record.call_index for record in result.request_executions)
-    assert [record.seed for record in result.request_executions[:96]] == list(range(7_000_063, 7_000_159))
-    assert [record.seed for record in result.request_executions[96:192]] == list(range(8_000_066, 8_000_162))
-    assert [record.seed for record in result.request_executions[-40:]] == list(range(17_000_093, 17_000_133))
+    assert [proof["call_index"] for proof in result.wave_proofs] == list(range(11, 22))
+    assert {record.generation_round for record in result.request_executions} == {1}
+    assert [record.seed for record in result.request_executions[:96]] == list(range(11_000_075, 11_000_171))
+    assert [record.seed for record in result.request_executions[96:192]] == list(range(12_000_078, 12_000_174))
+    assert [record.seed for record in result.request_executions[-40:]] == list(range(21_000_105, 21_000_145))
     assert all(proof["scheduler_capacity_proof"]["batch_fit_without_preemption"] for proof in result.wave_proofs)
     assert [len(proof["scheduler_observations"]) for proof in result.wave_proofs] == [2] * 11
     assert all(
@@ -3182,6 +4148,7 @@ def test_generation_phase_resets_shared_prefix_cache_once_and_proves_tp2_clones(
     execution_records = runner.build_wave_execution_records(
         manifest,
         global_wave_size=2,
+        generation_round=0,
         call_index_start=0,
     )
     times = iter((10.0, 11.0))
@@ -3354,6 +4321,39 @@ def test_shared_prefix_state_reuse_evidence_proves_exact_96x25k_clone_layout() -
     assert evidence["logical_clone_request_count"] == 95
     assert evidence["physically_reused_prompt_tokens_per_clone"] == 24_992
     assert evidence["recomputed_prompt_tokens_per_clone"] == 8
+    assert evidence["physical_prefill_prompt_tokens_by_request"] == [
+        {
+            "request_id": request.request_id,
+            "replica_rank": 0,
+            "prompt_tokens": 25_000,
+            "cached_complete_block_tokens": 0 if index == 0 else 24_992,
+            "physical_prefill_prompt_tokens": 25_000 if index == 0 else 8,
+            "cache_status": "miss" if index == 0 else "hit",
+        }
+        for index, request in enumerate(manifest.requests)
+    ]
+    assert evidence["physical_prefill_prompt_tokens_by_replica"] == [
+        {
+            "replica_rank": 0,
+            "request_count": 96,
+            "cache_miss_request_count": 1,
+            "cache_hit_request_count": 95,
+            "cache_miss_physical_prefill_prompt_tokens": 25_000,
+            "cache_hit_physical_prefill_prompt_tokens": 95 * 8,
+            "physical_prefill_prompt_tokens_total": 25_000 + 95 * 8,
+        }
+    ]
+    assert evidence["cache_miss_physical_prefill_prompt_tokens"] == 25_000
+    assert evidence["cache_hit_physical_prefill_prompt_tokens"] == 95 * 8
+    assert evidence["physical_prefill_prompt_tokens_total"] == 25_000 + 95 * 8
+    assert evidence["physical_prefix_reuse_scope"] == {
+        "resolved_cache_block_size_tokens": 16,
+        "attention_kv_reused_complete_blocks_per_hit": 1_562,
+        "attention_kv_reused_tokens_per_hit": 24_992,
+        "fp32_hyena_state_clone_position_tokens": 24_992,
+        "partial_block_tail_recomputed_tokens_per_hit": 8,
+        "full_prompt_attention_kv_and_state_cloned": False,
+    }
     assert evidence["attention_kv_physical_reuse_proven"] is True
     assert [worker["clone_count"] for worker in evidence["worker_state_clones"]] == [95, 95]
     assert all(
@@ -3361,6 +4361,61 @@ def test_shared_prefix_state_reuse_evidence_proves_exact_96x25k_clone_layout() -
         for worker in evidence["worker_state_clones"]
         for request in worker["requests"]
     )
+
+
+def test_shared_prefix_state_reuse_evidence_reports_one_seed_prefill_per_dp_replica() -> None:
+    manifest = (
+        WorkloadManifest.from_path(DATA)
+        .request_slice(0, 1)
+        .with_uniform_prompt_length(32, request_count=4, request_id_prefix="dp-prefix")
+    )
+    worker_proof = tuple(
+        {
+            "rank": rank,
+            "device": rank,
+            "mamba_prefix_clones": _prefix_worker_stats(
+                [_prefix_clone_record(f"clone-r{rank}", source_request_id=f"miss-r{rank}")],
+                source_request_id=f"miss-r{rank}",
+            ),
+        }
+        for rank in range(2)
+    )
+
+    evidence = runner.shared_prefix_state_reuse_evidence(
+        manifest,
+        cached_tokens=(0, 16, 0, 16),
+        request_replica_ranks=(0, 0, 1, 1),
+        worker_proof=worker_proof,
+        expected_worker_clone_counts=(1, 1),
+        cache_block_size=16,
+        expected_cache_misses=2,
+    )
+
+    assert [
+        (row["request_id"], row["replica_rank"], row["physical_prefill_prompt_tokens"])
+        for row in evidence["physical_prefill_prompt_tokens_by_request"]
+    ] == [
+        (manifest.requests[0].request_id, 0, 32),
+        (manifest.requests[1].request_id, 0, 16),
+        (manifest.requests[2].request_id, 1, 32),
+        (manifest.requests[3].request_id, 1, 16),
+    ]
+    assert evidence["physical_prefill_prompt_tokens_by_replica"] == [
+        {
+            "replica_rank": rank,
+            "request_count": 2,
+            "cache_miss_request_count": 1,
+            "cache_hit_request_count": 1,
+            "cache_miss_physical_prefill_prompt_tokens": 32,
+            "cache_hit_physical_prefill_prompt_tokens": 16,
+            "physical_prefill_prompt_tokens_total": 48,
+        }
+        for rank in range(2)
+    ]
+    assert evidence["cache_miss_request_count"] == 2
+    assert evidence["cache_miss_physical_prefill_prompt_tokens"] == 64
+    assert evidence["cache_hit_physical_prefill_prompt_tokens"] == 32
+    assert evidence["physical_prefill_prompt_tokens_total"] == 96
 
 
 def test_shared_prefix_state_reuse_evidence_accepts_all_clones_after_phase_first_wave() -> None:

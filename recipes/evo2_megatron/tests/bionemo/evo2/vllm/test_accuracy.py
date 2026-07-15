@@ -144,6 +144,7 @@ def _write_common_outputs(path, manifest, outputs):
             global_request_offset=0,
             dp_rank=0,
             dp_size=1,
+            generation_round=0,
             call_index=0,
         ),
         decode_output_token_ids=lambda token_ids: "".join(chr(token_id) for token_id in token_ids),
@@ -441,6 +442,17 @@ def _physical_phase(schedule, *, phase_name="identity"):
                     "stop": stop,
                     "request_count": global_shape,
                     "engines": engines,
+                    "inactive_engines": [
+                        {
+                            "dp_rank": dp_rank,
+                            "request_count": 0,
+                            "inactive": True,
+                            "phase": wave_phase,
+                            "cudagraph_observations": [],
+                            "scheduler_observations": [],
+                        }
+                        for dp_rank in range(len(engine_shapes), 2)
+                    ],
                 }
             )
         start = stop
@@ -487,6 +499,23 @@ def test_homogeneous_identity_phase_evidence_rejects_subdivided_capture_shape() 
         validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)
 
 
+def test_dp2_serial_identity_phase_requires_unused_replica_to_remain_inactive() -> None:
+    schedule = build_homogeneous_identity_schedule(
+        topology="dp2",
+        request_count=1,
+        global_wave_size=96,
+    )
+    phase = _physical_phase(schedule)
+
+    evidence = validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)
+
+    assert evidence["engine_request_shapes"] == [[1]]
+    inactive = phase["wave_proofs"][0]["inactive_engines"][0]
+    inactive["scheduler_observations"] = [{"phase": "identity.wave-000"}]
+    with pytest.raises(AssertionError, match="inactive"):
+        validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)
+
+
 def _identity_records(manifest, target):
     return tuple(
         GenerationRecord(
@@ -522,6 +551,7 @@ def test_canonical_identity_artifact_retains_raw_bytes_and_checks_every_request(
         global_request_offset=0,
         dp_rank=0,
         dp_size=1,
+        generation_round=0,
         call_index=0,
     )
     artifact = write_full_generation_records_artifact(
@@ -567,6 +597,7 @@ def test_canonical_identity_artifact_rejects_one_low_scoring_request(tmp_path) -
         global_request_offset=0,
         dp_rank=0,
         dp_size=1,
+        generation_round=0,
         call_index=0,
     )
     artifact = write_full_generation_records_artifact(

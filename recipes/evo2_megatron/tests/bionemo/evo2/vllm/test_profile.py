@@ -47,6 +47,7 @@ def test_tp2_profile_pins_optimized_vllm_020_settings() -> None:
     assert kwargs["gpu_memory_utilization"] == 0.95
     assert kwargs["optimization_level"] == 2
     assert kwargs["performance_mode"] == "balanced"
+    assert kwargs["logprobs_mode"] == "processed_logprobs"
     assert kwargs["enforce_eager"] is False
     assert kwargs["enable_chunked_prefill"] is True
     assert kwargs["enable_prefix_caching"] is False
@@ -246,6 +247,7 @@ def test_o3_throughput_profile_is_explicit_and_resolved_without_batch_drift() ->
 
     assert kwargs["optimization_level"] == 3
     assert kwargs["performance_mode"] == "throughput"
+    assert kwargs["logprobs_mode"] == "processed_logprobs"
     assert resolved["runtime"] == {
         "optimization_level": 3,
         "performance_mode": "throughput",

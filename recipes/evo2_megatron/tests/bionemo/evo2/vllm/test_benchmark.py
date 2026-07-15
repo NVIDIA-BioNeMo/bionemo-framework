@@ -339,6 +339,8 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
             "20",
             "--max-num-seqs",
             "20",
+            "--common-prefix-identity-case",
+            "2",
             "--linked-proof-artifact",
             str(tmp_path / "proof.json"),
             "--output",
@@ -353,6 +355,7 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
     assert args.warmups == 2
     assert args.repetitions == 5
     assert args.proof is False
+    assert args.common_prefix_identity_case == 2
     assert args.optimization_level == 2
     assert args.performance_mode == "balanced"
     assert args.load_format == "safetensors"

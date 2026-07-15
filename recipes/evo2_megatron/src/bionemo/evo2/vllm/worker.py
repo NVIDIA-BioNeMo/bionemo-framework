@@ -9,7 +9,7 @@ from typing import Any
 class Evo2VllmWorkerExtension:
     """Expose trusted string-RPC proof controls without pickle serialization."""
 
-    def reset_evo2_proof_state(self, reset_prefix_sources: bool = True) -> dict[str, int | bool]:
+    def reset_evo2_proof_state(self, reset_prefix_sources: bool = True) -> dict[str, Any]:
         """Reset phase-local FIR and CUDA-memory telemetry."""
         from bionemo.evo2.vllm.runner import reset_vllm_worker_proof_state
 

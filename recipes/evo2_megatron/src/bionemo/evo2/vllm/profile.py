@@ -139,6 +139,9 @@ class Evo2VllmProfile:
         load_format: str = "safetensors",
     ) -> dict[str, Any]:
         """Return kwargs accepted directly by ``vllm.LLM``."""
+        from bionemo.evo2.vllm.sampler import sampler_runtime_environment_contract
+
+        sampler_runtime_environment_contract()
         kwargs = {
             "model": model,
             "load_format": load_format,
@@ -149,6 +152,7 @@ class Evo2VllmProfile:
             "worker_extension_cls": "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension",
             "optimization_level": self.optimization_level,
             "performance_mode": self.performance_mode,
+            "logprobs_mode": "processed_logprobs",
             "tensor_parallel_size": self.tensor_parallel_size,
             "pipeline_parallel_size": 1,
             "gpu_memory_utilization": self.gpu_memory_utilization,
@@ -216,6 +220,7 @@ class Evo2VllmProfile:
             "kv_cache_dtype",
             "worker_extension_cls",
             "disable_log_stats",
+            "logprobs_mode",
         ):
             engine_kwargs.pop(key)
 
@@ -255,6 +260,7 @@ class Evo2VllmProfile:
             "model": {
                 "max_model_len": self.max_model_len,
                 "enforce_eager": False,
+                "logprobs_mode": "processed_logprobs",
             },
             "parallel": {
                 "tensor_parallel_size": self.tensor_parallel_size,
@@ -336,6 +342,7 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
         "model": {
             "max_model_len": model.max_model_len,
             "enforce_eager": model.enforce_eager,
+            "logprobs_mode": model.logprobs_mode,
         },
         "parallel": {
             "tensor_parallel_size": parallel.tensor_parallel_size,
@@ -382,6 +389,10 @@ def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]
     require(resolved["runtime"]["performance_mode"] == profile.performance_mode, "performance_mode drifted")
     require(resolved["model"]["enforce_eager"] is False, "enforce_eager must remain false")
     require(resolved["model"]["max_model_len"] == profile.max_model_len, "max_model_len drifted")
+    require(
+        resolved["model"]["logprobs_mode"] == "processed_logprobs",
+        "logprobs_mode must remain processed_logprobs",
+    )
     require(
         resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size,
         "tensor_parallel_size drifted",

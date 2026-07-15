@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, distribution, version
 from importlib.util import find_spec
@@ -28,10 +28,14 @@ from typing import Any
 
 from bionemo.evo2.vllm.accuracy import (
     build_canonical_identity_contract,
+    build_common_prefix_identity_contract,
     build_homogeneous_identity_schedule,
     load_canonical_7b_identity_cases,
+    load_common_prefix_identity_cases,
     validate_canonical_identity_manifest,
     validate_canonical_identity_output_artifact,
+    validate_common_prefix_identity_manifest,
+    validate_common_prefix_identity_output_artifacts,
     validate_homogeneous_identity_phase_evidence,
 )
 from bionemo.evo2.vllm.benchmark import (
@@ -59,8 +63,32 @@ from bionemo.evo2.vllm.profile import (
 _SEED_ROUND_STRIDE = 1_000_003
 _SEED_MODULUS = 2**31
 _REQUIRED_GPU_HEADROOM_BYTES = 2 * 1024**3
+_FROZEN_GPU_ASSIGNMENTS: tuple[dict[str, Any], ...] = (
+    {
+        "logical_device_index": 0,
+        "visible_device_selector": "0",
+        "physical_index": 0,
+        "uuid": "GPU-f080a92d-e5d2-6bad-68b2-1d458c0f8337",
+        "pci_bus_id": "00000000:0a:00.0",
+    },
+    {
+        "logical_device_index": 1,
+        "visible_device_selector": "1",
+        "physical_index": 1,
+        "uuid": "GPU-a3040cd2-4d5e-bfe0-3c75-4f8149d5d8b8",
+        "pci_bus_id": "00000000:18:00.0",
+    },
+)
 _OUTPUT_NAMESPACE_OWNERSHIP: dict[Path, tuple[int, int]] = {}
 _OUTPUT_NAMESPACE_OWNERSHIP_LOCK = threading.Lock()
+
+
+class GpuPreflightError(RuntimeError):
+    """Fail-closed hardware-preflight error with raw publishable evidence."""
+
+    def __init__(self, message: str, *, evidence: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.evidence = evidence
 
 
 def _package_version(package: str) -> str:
@@ -140,11 +168,25 @@ def build_benchmark_contract(
     generation_round = int(args.generation_round)
     if generation_round < 0:
         raise ValueError("generation_round must be nonnegative")
+    if (
+        getattr(args, "canonical_identity_case", None) is not None
+        and getattr(args, "common_prefix_identity_case", None) is not None
+    ):
+        raise ValueError("canonical and common-prefix identity modes are mutually exclusive")
+    physical_calls_per_round = len(
+        build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )
+    )
+    global_call_index_start = generation_round * physical_calls_per_round
     profile_contract = asdict(profile)
     profile_contract.pop("proof")
     identity_context = canonical_identity_context(args, manifest, profile)
+    common_identity_context = common_prefix_identity_context(args, manifest, profile)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "backend": args.backend,
         "topology": args.topology,
         "checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
@@ -152,9 +194,11 @@ def build_benchmark_contract(
         "manifest_sha256": manifest.sha256,
         "profile": profile_contract,
         "seed_stream": {
-            "schema_version": 1,
+            "schema_version": 2,
             "base_seed": manifest.seed,
             "generation_round": generation_round,
+            "physical_calls_per_round": physical_calls_per_round,
+            "global_call_index_start": global_call_index_start,
             "round_stride": _SEED_ROUND_STRIDE,
             "modulus": _SEED_MODULUS,
         },
@@ -163,6 +207,7 @@ def build_benchmark_contract(
             "repetitions": int(args.repetitions),
         },
         "canonical_identity": None if identity_context is None else identity_context[2],
+        "common_prefix_identity": None if common_identity_context is None else common_identity_context[3],
         "exact_generation_progress": (
             exact_generation_progress_contract(manifest) if bool(getattr(args, "exact_progress_gate", False)) else None
         ),
@@ -204,6 +249,49 @@ def canonical_identity_context(
     ):
         raise AssertionError("canonical identity manifest provenance does not match its linked contract")
     return case, schedule, contract
+
+
+def common_prefix_identity_context(
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+) -> tuple[Any, Any, Any, dict[str, Any]] | None:
+    """Resolve the immutable serial-vs-batched common-prefix identity contract."""
+    case_index = getattr(args, "common_prefix_identity_case", None)
+    if case_index is None:
+        return None
+    prompts_csv = getattr(args, "canonical_prompts_csv", None)
+    tokenizer_path = getattr(args, "prompt_tokenizer_json", None)
+    if prompts_csv is None or tokenizer_path is None:
+        raise ValueError("common-prefix identity contract requires its source and tokenizer paths")
+    cases = load_common_prefix_identity_cases(prompts_csv)
+    case = cases[case_index]
+    validate_common_prefix_identity_manifest(manifest, case=case, request_count=len(manifest.requests))
+    serial_schedule = build_homogeneous_identity_schedule(
+        topology=profile.topology,
+        request_count=1,
+        global_wave_size=profile.global_wave_size,
+    )
+    candidate_schedule = build_homogeneous_identity_schedule(
+        topology=profile.topology,
+        request_count=len(manifest.requests),
+        global_wave_size=profile.global_wave_size,
+    )
+    contract = build_common_prefix_identity_contract(
+        case=case,
+        serial_schedule=serial_schedule,
+        candidate_schedule=candidate_schedule,
+        prompts_csv=prompts_csv,
+        tokenizer_path=tokenizer_path,
+    )
+    if (
+        manifest.prompt_source_path != contract["prompts_csv_path"]
+        or manifest.prompt_source_sha256 != contract["prompts_csv_sha256"]
+        or manifest.prompt_tokenizer_path != contract["tokenizer_path"]
+        or manifest.prompt_tokenizer_sha256 != contract["tokenizer_sha256"]
+    ):
+        raise AssertionError("common-prefix identity manifest provenance does not match its linked contract")
+    return case, serial_schedule, candidate_schedule, contract
 
 
 def manifest_output_decoder(manifest: WorkloadManifest) -> Callable[[Sequence[int]], str] | None:
@@ -278,6 +366,78 @@ def canonical_identity_phase_artifacts(
         "minimum_observed_identity_percent": minimum_identity,
         "phases": phase_summaries,
         "passed": True,
+    }
+
+
+def common_prefix_identity_phase_artifacts(
+    *,
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    serial_reference_phase: dict[str, Any] | None,
+    phase_artifacts: list[dict[str, Any]],
+    decode_output_token_ids: Callable[[Sequence[int]], str] | None,
+    collect_physical_proof: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Attach serial-vs-batched common-prefix evidence to production phases."""
+    context = common_prefix_identity_context(args, manifest, profile)
+    if context is None:
+        if serial_reference_phase is not None:
+            raise AssertionError("common-prefix serial reference exists without an enabled contract")
+        return phase_artifacts, None
+    if serial_reference_phase is None or decode_output_token_ids is None:
+        raise AssertionError("common-prefix identity requires a serial phase and decoded raw outputs")
+    case, serial_schedule, candidate_schedule, contract = context
+    serial_output = serial_reference_phase.get("full_output_artifact")
+    if not isinstance(serial_output, dict):
+        raise AssertionError("common-prefix serial phase is missing its full output artifact")
+    serial_physical = (
+        validate_homogeneous_identity_phase_evidence(serial_reference_phase, schedule=serial_schedule)
+        if collect_physical_proof
+        else None
+    )
+    expected_request_ids = tuple(request.request_id for request in manifest.requests)
+    summaries = []
+    for phase in phase_artifacts:
+        candidate_output = phase.get("full_output_artifact")
+        if not isinstance(candidate_output, dict):
+            raise AssertionError("common-prefix candidate phase is missing its full output artifact")
+        outputs = validate_common_prefix_identity_output_artifacts(
+            serial_output,
+            candidate_output,
+            case=case,
+            expected_candidate_request_ids=expected_request_ids,
+            decode_output_token_ids=decode_output_token_ids,
+        )
+        physical = (
+            validate_homogeneous_identity_phase_evidence(phase, schedule=candidate_schedule)
+            if collect_physical_proof
+            else None
+        )
+        evidence = {
+            "schema_version": 1,
+            "phase": phase.get("phase"),
+            "outputs": outputs,
+            "physical_schedule": physical,
+            "physical_schedule_attested_by_linked_proof": not collect_physical_proof,
+            "passed": outputs.get("passed") is True and (physical is None or physical.get("passed") is True),
+        }
+        if evidence["passed"] is not True:
+            raise AssertionError("common-prefix production phase failed its accuracy contract")
+        phase["common_prefix_identity_evidence"] = evidence
+        summaries.append(evidence)
+    return phase_artifacts, {
+        "schema_version": 1,
+        "contract": contract,
+        "serial_reference": {
+            "full_output_artifact": serial_output,
+            "physical_schedule": serial_physical,
+            "physical_schedule_attested_by_linked_proof": not collect_physical_proof,
+        },
+        "phases": summaries,
+        "passed": bool(summaries)
+        and all(summary.get("passed") is True for summary in summaries)
+        and (serial_physical is None or serial_physical.get("passed") is True),
     }
 
 
@@ -369,6 +529,118 @@ def validate_canonical_identity_proof_evidence(
     }
     if artifact.get("canonical_identity") != recomputed:
         raise AssertionError("canonical identity run summary does not match recomputed phase evidence")
+    return recomputed
+
+
+def validate_common_prefix_identity_proof_evidence(
+    artifact: dict[str, Any],
+    *,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    expected_contract: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Recompute linked serial-vs-batched identity evidence from raw proof artifacts."""
+    contract = expected_contract.get("common_prefix_identity")
+    phases = artifact.get("phases")
+    if not isinstance(phases, list):
+        raise AssertionError("common-prefix identity proof phases are missing")
+    if contract is None:
+        if (
+            artifact.get("common_prefix_identity") is not None
+            or artifact.get("common_prefix_serial_reference") is not None
+            or any(
+                isinstance(phase, dict) and phase.get("common_prefix_identity_evidence") is not None
+                for phase in phases
+            )
+        ):
+            raise AssertionError("non-identity proof retained unexpected common-prefix identity evidence")
+        return None
+    if not isinstance(contract, dict):
+        raise AssertionError("common-prefix identity benchmark contract is malformed")
+    case_index = contract.get("case_index")
+    if isinstance(case_index, bool) or not isinstance(case_index, int) or not 0 <= case_index < 4:
+        raise AssertionError("common-prefix identity contract case index is malformed")
+    try:
+        cases = load_common_prefix_identity_cases(contract["prompts_csv_path"])
+        case = cases[case_index]
+        serial_schedule = build_homogeneous_identity_schedule(
+            topology=profile.topology,
+            request_count=1,
+            global_wave_size=profile.global_wave_size,
+        )
+        candidate_schedule = build_homogeneous_identity_schedule(
+            topology=profile.topology,
+            request_count=len(manifest.requests),
+            global_wave_size=profile.global_wave_size,
+        )
+        recomputed_contract = build_common_prefix_identity_contract(
+            case=case,
+            serial_schedule=serial_schedule,
+            candidate_schedule=candidate_schedule,
+            prompts_csv=contract["prompts_csv_path"],
+            tokenizer_path=contract["tokenizer_path"],
+        )
+    except (IndexError, KeyError, OSError, TypeError, ValueError) as error:
+        raise AssertionError("common-prefix identity contract could not be reconstructed") from error
+    if contract != recomputed_contract:
+        raise AssertionError("common-prefix identity benchmark contract failed reconstruction")
+    validate_common_prefix_identity_manifest(manifest, case=case, request_count=len(manifest.requests))
+    decoder = manifest_output_decoder(manifest)
+    if decoder is None:
+        raise AssertionError("common-prefix identity proof lacks its output tokenizer")
+
+    serial_phase = artifact.get("common_prefix_serial_reference")
+    if not isinstance(serial_phase, dict):
+        raise AssertionError("common-prefix identity proof lacks its serial reference phase")
+    serial_output = serial_phase.get("full_output_artifact")
+    if not isinstance(serial_output, dict):
+        raise AssertionError("common-prefix serial reference lacks its raw output artifact")
+    serial_physical = validate_homogeneous_identity_phase_evidence(serial_phase, schedule=serial_schedule)
+
+    expected_request_ids = tuple(request.request_id for request in manifest.requests)
+    phase_summaries = []
+    for phase in phases:
+        if not isinstance(phase, dict):
+            raise AssertionError("common-prefix identity phase evidence is malformed")
+        candidate_output = phase.get("full_output_artifact")
+        if not isinstance(candidate_output, dict):
+            raise AssertionError("common-prefix candidate phase lacks its raw output artifact")
+        physical = validate_homogeneous_identity_phase_evidence(phase, schedule=candidate_schedule)
+        outputs = validate_common_prefix_identity_output_artifacts(
+            serial_output,
+            candidate_output,
+            case=case,
+            expected_candidate_request_ids=expected_request_ids,
+            decode_output_token_ids=decoder,
+        )
+        recomputed_phase = {
+            "schema_version": 1,
+            "phase": phase.get("phase"),
+            "outputs": outputs,
+            "physical_schedule": physical,
+            "physical_schedule_attested_by_linked_proof": False,
+            "passed": outputs.get("passed") is True and physical.get("passed") is True,
+        }
+        if recomputed_phase["passed"] is not True:
+            raise AssertionError("common-prefix identity phase failed recomputed gates")
+        if phase.get("common_prefix_identity_evidence") != recomputed_phase:
+            raise AssertionError("common-prefix identity phase summary does not match recomputed raw evidence")
+        phase_summaries.append(recomputed_phase)
+    recomputed = {
+        "schema_version": 1,
+        "contract": recomputed_contract,
+        "serial_reference": {
+            "full_output_artifact": serial_output,
+            "physical_schedule": serial_physical,
+            "physical_schedule_attested_by_linked_proof": False,
+        },
+        "phases": phase_summaries,
+        "passed": bool(phase_summaries)
+        and all(summary.get("passed") is True for summary in phase_summaries)
+        and serial_physical.get("passed") is True,
+    }
+    if artifact.get("common_prefix_identity") != recomputed:
+        raise AssertionError("common-prefix identity run summary does not match recomputed phase evidence")
     return recomputed
 
 
@@ -619,12 +891,22 @@ def _validate_worker_gpu_bindings(
     hardware: dict[str, Any],
     expected_worker_count: int,
     expected_engine_seed: int,
+    expected_physical_indices: Sequence[int],
 ) -> None:
     devices = _require_list(hardware.get("devices"), label="GPU hardware devices")
     if len(workers) != expected_worker_count:
         raise AssertionError("worker proof count does not match the physical model topology")
     if isinstance(expected_engine_seed, bool) or not isinstance(expected_engine_seed, int) or expected_engine_seed < 0:
         raise AssertionError("expected engine seed must be a nonnegative integer")
+    if len(expected_physical_indices) != expected_worker_count:
+        raise AssertionError("expected physical GPU assignments must match the worker topology")
+    if any(
+        isinstance(physical_index, bool) or not isinstance(physical_index, int) or physical_index < 0
+        for physical_index in expected_physical_indices
+    ):
+        raise AssertionError("expected physical GPU indices must be nonnegative integers")
+    if len(set(expected_physical_indices)) != expected_worker_count:
+        raise AssertionError("expected physical GPU assignments must be unique")
     physical = {}
     physical_by_index = {}
     physical_by_uuid = {}
@@ -634,20 +916,38 @@ def _validate_worker_gpu_bindings(
         identity = (device.get("uuid"), device.get("pci_bus_id"))
         if not all(isinstance(value, str) and value for value in identity) or identity in physical:
             raise AssertionError("GPU UUID/PCI provenance must be complete and unique")
+        physical_index = device.get("physical_index")
+        if (
+            isinstance(physical_index, bool)
+            or not isinstance(physical_index, int)
+            or physical_index < 0
+            or physical_index in physical_by_index
+        ):
+            raise AssertionError("GPU physical-index provenance must be complete and unique")
         physical[identity] = device
-        physical_by_index[str(device.get("index"))] = device
+        physical_by_index[physical_index] = device
         physical_by_uuid[device.get("uuid")] = device
     ranks = []
     observed = set()
     for worker in workers:
         rank = worker.get("rank")
         identity = (worker.get("device_uuid"), worker.get("pci_bus_id"))
-        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0 or rank >= expected_worker_count:
             raise AssertionError("worker rank is malformed")
         if worker.get("engine_seed") != expected_engine_seed:
             raise AssertionError("every tensor-parallel worker must attest the same intended engine seed")
         if identity not in physical or identity in observed:
             raise AssertionError("worker rank is not bound to one unique physical GPU UUID/PCI identity")
+        expected_device = physical_by_index.get(expected_physical_indices[rank])
+        if (
+            expected_device is None
+            or (
+                expected_device.get("uuid"),
+                expected_device.get("pci_bus_id"),
+            )
+            != identity
+        ):
+            raise AssertionError("worker rank does not match its frozen physical assignment")
         if worker.get("device_name") != physical[identity].get("name"):
             raise AssertionError("worker device name does not match physical GPU provenance")
         visible = worker.get("cuda_visible_devices")
@@ -665,7 +965,7 @@ def _validate_worker_gpu_bindings(
         selector = selectors[logical_device]
         if worker.get("visible_device_selector") != selector:
             raise AssertionError("worker retained an inconsistent visible-device selector")
-        selected = physical_by_index.get(selector) if selector.isdecimal() else physical_by_uuid.get(selector)
+        selected = physical_by_index.get(int(selector)) if selector.isdecimal() else physical_by_uuid.get(selector)
         if selected is None or (selected.get("uuid"), selected.get("pci_bus_id")) != identity:
             raise AssertionError("worker CUDA_VISIBLE_DEVICES selector does not match its UUID/PCI binding")
         ranks.append(rank)
@@ -683,6 +983,44 @@ def _validate_worker_rank_continuity(
 
     if bindings(workers) != bindings(initialized_workers):
         raise AssertionError("worker rank moved to a different physical GPU during a proof phase")
+
+
+def _validate_worker_sampler_evidence(
+    workers: Sequence[dict[str, Any]],
+    *,
+    expected_installation: Mapping[str, Any],
+    expected_seed_batches: Sequence[Sequence[int]],
+    require_generation_observations: bool,
+) -> list[dict[str, Any]]:
+    from bionemo.evo2.vllm.sampler import (
+        sampler_runtime_environment_contract,
+        validate_sampler_proof_evidence,
+    )
+
+    expected_environment = sampler_runtime_environment_contract()
+    return [
+        validate_sampler_proof_evidence(
+            _require_dict(worker.get("sampler"), label="worker sampler proof"),
+            expected_environment=expected_environment,
+            expected_installation=expected_installation,
+            expected_seed_batches=expected_seed_batches,
+            require_generation_observations=require_generation_observations,
+        )
+        for worker in workers
+    ]
+
+
+def _execution_seed_batches(
+    executions: Sequence[RequestExecutionRecord],
+) -> tuple[tuple[int, ...], ...]:
+    call_order = []
+    batches: dict[int, list[int]] = {}
+    for execution in executions:
+        if execution.call_index not in batches:
+            call_order.append(execution.call_index)
+            batches[execution.call_index] = []
+        batches[execution.call_index].append(execution.seed)
+    return tuple(tuple(batches[call_index]) for call_index in call_order)
 
 
 def _validate_full_output_sidecar(
@@ -837,6 +1175,7 @@ def _validate_direct_phase_evidence(
     manifest: WorkloadManifest,
     profile: Evo2VllmProfile,
     generation_round: int,
+    expected_sampler_installation: Mapping[str, Any],
 ) -> tuple[tuple[int, ...], list[dict[str, Any]]]:
     measurement = _require_dict(
         artifact["benchmark_contract"].get("measurement"),
@@ -857,12 +1196,24 @@ def _validate_direct_phase_evidence(
     phases = _require_list(artifact.get("phases"), label="proof phases")
     if [phase.get("phase") for phase in phases] != expected_names:
         raise AssertionError("proof phases do not match the benchmark measurement contract")
-    call_index = generation_round
+    call_index = generation_round * len(
+        build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )
+    )
     memory_peaks = []
     final_workers = []
     initialized = _require_list(
         artifact.get("initialized_worker_proof"),
         label="initialized worker proof",
+    )
+    _validate_worker_sampler_evidence(
+        initialized,
+        expected_installation=expected_sampler_installation,
+        expected_seed_batches=(),
+        require_generation_observations=False,
     )
     for sample_index, phase in enumerate(phases):
         if not isinstance(phase, dict) or phase.get("proof_collected") is not True:
@@ -891,6 +1242,7 @@ def _validate_direct_phase_evidence(
                 "start": wave.start,
                 "stop": wave.stop,
                 "request_count": wave.request_count,
+                "generation_round": generation_round,
                 "call_index": call_index + wave.wave_index,
             }
             if any(retained.get(key) != value for key, value in expected_fields.items()):
@@ -960,6 +1312,7 @@ def _validate_direct_phase_evidence(
         executions = build_wave_execution_records(
             manifest,
             global_wave_size=profile.global_wave_size,
+            generation_round=generation_round,
             call_index_start=call_index,
         )
         if phase.get("request_executions") != [record.to_dict() for record in executions]:
@@ -1001,8 +1354,15 @@ def _validate_direct_phase_evidence(
             hardware=hardware,
             expected_worker_count=profile.tensor_parallel_size,
             expected_engine_seed=manifest.seed,
+            expected_physical_indices=tuple(range(profile.tensor_parallel_size)),
         )
         _validate_worker_rank_continuity(workers, initialized)
+        _validate_worker_sampler_evidence(
+            workers,
+            expected_installation=expected_sampler_installation,
+            expected_seed_batches=_execution_seed_batches(executions),
+            require_generation_observations=True,
+        )
         _validate_fir_route_evidence(workers, manifest=manifest)
         if profile.shared_prefix_state_reuse:
             retained_prefix = _require_dict(
@@ -1030,8 +1390,6 @@ def _validate_direct_phase_evidence(
         elif phase.get("shared_prefix_state_reuse") is not None or phase.get("prefix_cache_reset") is not False:
             raise AssertionError("non-prefix proof retained unexpected prefix-clone evidence")
         final_workers = workers
-        call_index += len(waves)
-
     hardware = _require_dict(
         artifact.get("gpu_hardware_provenance"),
         label="GPU hardware provenance",
@@ -1041,6 +1399,7 @@ def _validate_direct_phase_evidence(
         hardware=hardware,
         expected_worker_count=profile.tensor_parallel_size,
         expected_engine_seed=manifest.seed,
+        expected_physical_indices=tuple(range(profile.tensor_parallel_size)),
     )
     initialized_by_rank = {worker["rank"]: worker for worker in initialized}
     final_by_rank = {worker["rank"]: worker for worker in final_workers}
@@ -1068,6 +1427,7 @@ def _expected_dp2_executions(
     manifest: WorkloadManifest,
     *,
     profile: Evo2VllmProfile,
+    generation_round: int,
     call_index_start: int,
     global_index_start: int,
 ) -> tuple[RequestExecutionRecord, ...]:
@@ -1084,6 +1444,7 @@ def _expected_dp2_executions(
                     global_request_offset=global_index_start + shard.start,
                     dp_rank=shard.replica_index,
                     dp_size=profile.replica_count,
+                    generation_round=generation_round,
                     call_index=call_index_start + wave.wave_index,
                 )
             )
@@ -1097,6 +1458,7 @@ def _validate_dp2_phase_evidence(
     manifest: WorkloadManifest,
     profile: Evo2VllmProfile,
     generation_round: int,
+    expected_sampler_installation: Mapping[str, Any],
 ) -> tuple[tuple[int, ...], list[dict[str, Any]]]:
     measurement = _require_dict(
         artifact["benchmark_contract"].get("measurement"),
@@ -1118,7 +1480,13 @@ def _validate_dp2_phase_evidence(
     if [phase.get("phase") for phase in phases] != expected_names:
         raise AssertionError("DP2 proof phases do not match the measurement contract")
 
-    call_index = generation_round
+    call_index = generation_round * len(
+        build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )
+    )
     global_index = 0
     memory_peaks = []
     final_engines = []
@@ -1132,6 +1500,16 @@ def _validate_dp2_phase_evidence(
     )
     if len(initialized_engines) != profile.replica_count:
         raise AssertionError("initialized DP2 engine count does not match the topology")
+    for initialized_engine in initialized_engines:
+        _validate_worker_sampler_evidence(
+            _require_list(
+                initialized_engine.get("worker_proof"),
+                label="initialized DP2 sampler worker proof",
+            ),
+            expected_installation=expected_sampler_installation,
+            expected_seed_batches=(),
+            require_generation_observations=False,
+        )
     for sample_index, phase in enumerate(phases):
         if not isinstance(phase, dict) or phase.get("proof_collected") is not True:
             raise AssertionError("DP2 proof phase lacks production proof collection")
@@ -1154,6 +1532,8 @@ def _validate_dp2_phase_evidence(
                 "start": wave.start,
                 "stop": wave.stop,
                 "request_count": wave.request_count,
+                "generation_round": generation_round,
+                "call_index": call_index + wave.wave_index,
             }
             if any(retained.get(key) != value for key, value in expected_wave.items()):
                 raise AssertionError("DP2 physical wave boundaries drifted")
@@ -1220,6 +1600,7 @@ def _validate_dp2_phase_evidence(
                     hardware=hardware,
                     expected_worker_count=profile.tensor_parallel_size,
                     expected_engine_seed=manifest.seed,
+                    expected_physical_indices=(shard.replica_index,),
                 )
                 _validate_worker_rank_continuity(
                     workers,
@@ -1227,6 +1608,20 @@ def _validate_dp2_phase_evidence(
                         initialized_engines[shard.replica_index].get("worker_proof"),
                         label="initialized DP2 inner worker proof",
                     ),
+                )
+                shard_executions = build_request_execution_records(
+                    manifest.request_slice(shard.start, shard.stop),
+                    global_request_offset=global_index + shard.start,
+                    dp_rank=shard.replica_index,
+                    dp_size=profile.replica_count,
+                    generation_round=generation_round,
+                    call_index=call_index + wave.wave_index,
+                )
+                _validate_worker_sampler_evidence(
+                    workers,
+                    expected_installation=expected_sampler_installation,
+                    expected_seed_batches=_execution_seed_batches(shard_executions),
+                    require_generation_observations=True,
                 )
                 _validate_fir_route_evidence(workers, manifest=manifest.request_slice(wave.start, wave.stop))
                 phase_workers.extend(workers)
@@ -1252,6 +1647,9 @@ def _validate_dp2_phase_evidence(
                         retained_prefix.get("cached_tokens_by_request"),
                         label="DP2 cached-token evidence",
                     ),
+                    request_replica_ranks=tuple(
+                        shard.replica_index for shard in wave.shards for _ in range(shard.request_count)
+                    ),
                     worker_proof=workers,
                     expected_worker_clone_counts=tuple(
                         shard.request_count - int(wave.wave_index == 0) for shard in wave.shards
@@ -1275,6 +1673,7 @@ def _validate_dp2_phase_evidence(
         executions = _expected_dp2_executions(
             manifest,
             profile=profile,
+            generation_round=generation_round,
             call_index_start=call_index,
             global_index_start=global_index,
         )
@@ -1303,9 +1702,6 @@ def _validate_dp2_phase_evidence(
         memory_peaks.append(_validate_phase_sample(phase, manifest=manifest, sample_index=sample_index))
         if phase.get("prefix_cache_reset") is not profile.shared_prefix_state_reuse:
             raise AssertionError("DP2 phase prefix-cache reset contract drifted")
-        call_index += len(waves)
-        global_index += len(manifest.requests)
-
     resolved_configs = _require_list(artifact.get("resolved_configs"), label="DP2 resolved configs")
     if len(resolved_configs) != profile.replica_count:
         raise AssertionError("DP2 resolved-config count does not match the topology")
@@ -1332,6 +1728,7 @@ def _validate_dp2_phase_evidence(
             hardware=hardware,
             expected_worker_count=profile.tensor_parallel_size,
             expected_engine_seed=manifest.seed,
+            expected_physical_indices=(dp_rank,),
         )
         initial_identity = (
             initialized_workers[0].get("device_uuid"),
@@ -1390,9 +1787,24 @@ def _validate_linked_proof_evidence(
         raise AssertionError("proof profile does not match the linked benchmark contract")
     seed_stream = _require_dict(expected_contract.get("seed_stream"), label="seed-stream contract")
     expected_seed_stream = {
-        "schema_version": 1,
+        "schema_version": 2,
         "base_seed": manifest.seed,
         "generation_round": seed_stream.get("generation_round"),
+        "physical_calls_per_round": len(
+            build_request_waves(
+                request_count=len(manifest.requests),
+                global_batch_size=profile.global_wave_size,
+                replica_count=profile.replica_count,
+            )
+        ),
+        "global_call_index_start": seed_stream.get("generation_round")
+        * len(
+            build_request_waves(
+                request_count=len(manifest.requests),
+                global_batch_size=profile.global_wave_size,
+                replica_count=profile.replica_count,
+            )
+        ),
         "round_stride": _SEED_ROUND_STRIDE,
         "modulus": _SEED_MODULUS,
     }
@@ -1410,6 +1822,14 @@ def _validate_linked_proof_evidence(
         raise AssertionError("proof parsed generation round does not match the seed-stream contract")
     if artifact.get("topology") != profile.topology or artifact.get("topology") != expected_contract.get("topology"):
         raise AssertionError("proof topology does not match its profile and benchmark contract")
+    expected_runtime = _require_dict(
+        expected_contract.get("runtime_attestation"),
+        label="benchmark runtime attestation",
+    )
+    expected_sampler_installation = _require_dict(
+        expected_runtime.get("sampler"),
+        label="benchmark sampler installation identity",
+    )
     backend = artifact.get("backend")
     if backend == "vllm" and profile.topology == "tp2":
         try:
@@ -1425,6 +1845,7 @@ def _validate_linked_proof_evidence(
             manifest=manifest,
             profile=profile,
             generation_round=generation_round,
+            expected_sampler_installation=expected_sampler_installation,
         )
     elif backend == "nemo-rl-vllm" and profile.topology == "dp2":
         phase_peak, final_workers = _validate_dp2_phase_evidence(
@@ -1433,6 +1854,7 @@ def _validate_linked_proof_evidence(
             manifest=manifest,
             profile=profile,
             generation_round=generation_round,
+            expected_sampler_installation=expected_sampler_installation,
         )
     else:
         raise AssertionError("linked proof backend/topology schema is unsupported")
@@ -1453,10 +1875,6 @@ def _validate_linked_proof_evidence(
     hardware = _require_dict(
         artifact.get("gpu_hardware_provenance"),
         label="GPU hardware provenance",
-    )
-    expected_runtime = _require_dict(
-        expected_contract.get("runtime_attestation"),
-        label="benchmark runtime attestation",
     )
     retained_sources = _require_dict(
         artifact.get("source_provenance"),
@@ -1482,6 +1900,10 @@ def _validate_linked_proof_evidence(
             vllm_installation=_require_dict(
                 artifact.get("vllm_installation_provenance"),
                 label="proof vLLM installation provenance",
+            ),
+            sampler_installation=_require_dict(
+                artifact.get("sampler_installation_provenance"),
+                label="proof sampler installation provenance",
             ),
             gpu_hardware=hardware,
         )
@@ -1521,6 +1943,12 @@ def _validate_linked_proof_evidence(
         profile=profile,
         expected_contract=expected_contract,
     )
+    common_prefix_identity = validate_common_prefix_identity_proof_evidence(
+        artifact,
+        manifest=manifest,
+        profile=profile,
+        expected_contract=expected_contract,
+    )
     return {
         "manifest_sha256": manifest.sha256,
         "phase_count": len(artifact["phases"]),
@@ -1528,6 +1956,7 @@ def _validate_linked_proof_evidence(
         "runtime_attestation": recomputed_runtime,
         "gpu_memory_headroom": recomputed_memory,
         "canonical_identity": canonical_identity,
+        "common_prefix_identity": common_prefix_identity,
         "passed": True,
     }
 
@@ -1658,9 +2087,12 @@ def runtime_attestation_contract(
     checkpoint: dict[str, Any],
     sources: dict[str, dict[str, Any]],
     vllm_installation: dict[str, Any],
+    sampler_installation: dict[str, Any],
     gpu_hardware: dict[str, Any],
 ) -> dict[str, Any]:
     """Reduce full provenance to the immutable identities linked across benchmark lanes."""
+    from bionemo.evo2.vllm.sampler import sampler_installation_contract
+
     source_contract = {}
     for name, source in sorted(sources.items()):
         if source.get("git_dirty") is not False:
@@ -1670,8 +2102,10 @@ def runtime_attestation_contract(
             "source_tree_sha256": source["source_tree_sha256"],
         }
     devices = gpu_hardware.get("devices")
-    if not isinstance(devices, list) or not devices:
+    if gpu_hardware.get("passed") is not True or not isinstance(devices, list) or not devices:
         raise ValueError("runtime attestation requires exact GPU hardware provenance")
+    if gpu_hardware.get("cuda_visible_devices") != gpu_hardware.get("expected_cuda_visible_devices"):
+        raise ValueError("runtime attestation GPU visibility does not match its frozen assignment")
     return {
         "checkpoint_sha256": checkpoint["checkpoint_sha256"],
         "sources": source_contract,
@@ -1679,16 +2113,29 @@ def runtime_attestation_contract(
             "distribution_version": vllm_installation["distribution_version"],
             "installation_sha256": vllm_installation["installation_sha256"],
         },
+        "sampler": sampler_installation_contract(sampler_installation),
         "gpu": {
+            "schema_version": gpu_hardware["schema_version"],
             "driver_version": gpu_hardware["driver_version"],
+            "nvml_cuda_driver_version_integer": gpu_hardware["nvml_cuda_driver_version_integer"],
             "cuda_visible_devices": gpu_hardware.get("cuda_visible_devices"),
+            "expected_cuda_visible_devices": gpu_hardware["expected_cuda_visible_devices"],
+            "api_versions": gpu_hardware["api_versions"],
+            "expected_assignments": gpu_hardware["expected_assignments"],
             "devices": [
                 {
-                    "index": device["index"],
+                    "logical_device_index": device["logical_device_index"],
+                    "visible_device_selector": device["visible_device_selector"],
+                    "physical_index": device["physical_index"],
                     "uuid": device["uuid"],
                     "pci_bus_id": device["pci_bus_id"],
                     "name": device["name"],
-                    "total_memory_bytes": device["total_memory_bytes"],
+                    "torch_uuid": device["torch_uuid"],
+                    "torch_name": device["torch_name"],
+                    "physical_total_memory_bytes": device["memory"]["nvml"]["physical_total_bytes"],
+                    "system_reserved_memory_bytes": device["memory"]["nvml"]["system_reserved_bytes"],
+                    "cuda_usable_total_memory_bytes": device["memory"]["cuda"]["usable_total_bytes"],
+                    "torch_properties_total_memory_bytes": device["memory"]["torch_properties_total_bytes"],
                 }
                 for device in devices
             ],
@@ -1840,7 +2287,47 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
     prompt_tokenizer_json = getattr(args, "prompt_tokenizer_json", None)
     expected_prompt_tokens = getattr(args, "expected_prompt_tokens", None)
     canonical_case_index = getattr(args, "canonical_identity_case", None)
+    common_case_index = getattr(args, "common_prefix_identity_case", None)
     canonical_prompts_csv = getattr(args, "canonical_prompts_csv", None)
+    if canonical_case_index is not None and common_case_index is not None:
+        raise ValueError("canonical and common-prefix identity modes are mutually exclusive")
+    if common_case_index is not None:
+        incompatible = {
+            "prompt_jsonl": prompt_jsonl,
+            "prompt_jsonl_sha256": prompt_jsonl_sha256,
+            "expected_prompt_tokens": expected_prompt_tokens,
+            "uniform_prompt_length": getattr(args, "uniform_prompt_length", None),
+        }
+        enabled = sorted(name for name, value in incompatible.items() if value is not None)
+        if enabled:
+            raise ValueError(f"common-prefix identity is incompatible with workload rewrites: {enabled}")
+        if canonical_prompts_csv is None or prompt_tokenizer_json is None:
+            raise ValueError("common-prefix identity requires --canonical-prompts-csv and --prompt-tokenizer-json")
+        request_count = getattr(args, "request_count", None)
+        if request_count is None or request_count <= 0:
+            raise ValueError("common-prefix identity requires a positive --request-count")
+        max_new_tokens = getattr(args, "max_new_tokens", None)
+        if max_new_tokens not in (None, 500):
+            raise ValueError("common-prefix identity requires exactly 500 new tokens")
+
+        from tokenizers import Tokenizer
+
+        from bionemo.evo2.vllm.accuracy import (
+            build_common_prefix_identity_manifest,
+            load_common_prefix_identity_cases,
+        )
+
+        tokenizer = Tokenizer.from_file(str(prompt_tokenizer_json))
+        cases = load_common_prefix_identity_cases(canonical_prompts_csv)
+        return build_common_prefix_identity_manifest(
+            manifest,
+            case=cases[common_case_index],
+            prompts_csv=canonical_prompts_csv,
+            tokenizer_path=prompt_tokenizer_json,
+            tokenize=lambda prompt: tokenizer.encode(prompt, add_special_tokens=False).ids,
+            request_count=request_count,
+            request_id_prefix=args.request_id_prefix,
+        )
     if canonical_case_index is not None:
         incompatible = {
             "prompt_jsonl": prompt_jsonl,
@@ -1879,7 +2366,7 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
             request_id_prefix=args.request_id_prefix,
         )
     if canonical_prompts_csv is not None:
-        raise ValueError("--canonical-prompts-csv requires --canonical-identity-case")
+        raise ValueError("--canonical-prompts-csv requires --canonical-identity-case or --common-prefix-identity-case")
     if prompt_jsonl is None:
         if any(value is not None for value in (prompt_jsonl_sha256, prompt_tokenizer_json, expected_prompt_tokens)):
             raise ValueError("prompt JSONL provenance options require --prompt-jsonl")
@@ -2419,10 +2906,11 @@ def build_request_execution_records(
     global_request_offset: int,
     dp_rank: int,
     dp_size: int,
+    generation_round: int,
     call_index: int,
 ) -> tuple[RequestExecutionRecord, ...]:
     """Build one ownership/seed record for each exact manifest request."""
-    if min(global_request_offset, dp_rank, call_index) < 0 or dp_size <= 0:
+    if min(global_request_offset, dp_rank, generation_round, call_index) < 0 or dp_size <= 0:
         raise ValueError("execution coordinates must be nonnegative")
     if dp_rank >= dp_size:
         raise ValueError("dp_rank must be smaller than dp_size")
@@ -2430,7 +2918,7 @@ def build_request_execution_records(
         RequestExecutionRecord(
             request_id=request.request_id,
             global_request_index=global_request_offset + local_index,
-            generation_round=call_index,
+            generation_round=generation_round,
             dp_rank=dp_rank,
             call_index=call_index,
             seed=request_seed(
@@ -2449,11 +2937,12 @@ def build_wave_execution_records(
     manifest: WorkloadManifest,
     *,
     global_wave_size: int,
+    generation_round: int,
     call_index_start: int,
 ) -> tuple[RequestExecutionRecord, ...]:
     """Build exact request records whose call indices match physical generation calls."""
-    if call_index_start < 0:
-        raise ValueError("call_index_start must be nonnegative")
+    if min(generation_round, call_index_start) < 0:
+        raise ValueError("generation round and call index start must be nonnegative")
     records = []
     for wave in build_request_waves(
         request_count=len(manifest.requests),
@@ -2466,6 +2955,7 @@ def build_wave_execution_records(
                 global_request_offset=wave.start,
                 dp_rank=0,
                 dp_size=1,
+                generation_round=generation_round,
                 call_index=call_index_start + wave.wave_index,
             )
         )
@@ -2479,6 +2969,7 @@ def write_full_output_artifact(
     outputs: Any,
     execution_records: tuple[RequestExecutionRecord, ...],
     decode_output_token_ids: Callable[[Sequence[int]], str] | None = None,
+    ownership_validator: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Stream every output token and chosen-token logprob to deterministic gzip JSONL."""
     records = records_from_vllm_outputs(manifest, outputs)
@@ -2487,6 +2978,7 @@ def write_full_output_artifact(
         records=records,
         execution_records=execution_records,
         decode_output_token_ids=decode_output_token_ids,
+        ownership_validator=ownership_validator,
     )
 
 
@@ -2496,6 +2988,7 @@ def write_full_generation_records_artifact(
     records: Sequence[GenerationRecord],
     execution_records: Sequence[RequestExecutionRecord],
     decode_output_token_ids: Callable[[Sequence[int]], str] | None = None,
+    ownership_validator: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Persist backend-neutral exact generation records as deterministic gzip JSONL."""
     if len(execution_records) != len(records):
@@ -2505,47 +2998,68 @@ def write_full_generation_records_artifact(
     temporary = output.with_suffix(f"{output.suffix}.tmp")
     generated_token_count = 0
     decoded_output_byte_count = 0
-    with temporary.open("wb") as raw_handle:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as compressed:
-            with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as handle:
-                for generation, execution in zip(
-                    records,
-                    execution_records,
-                    strict=True,
-                ):
-                    if execution.request_id != generation.request_id:
-                        raise AssertionError("execution and generation request IDs must align")
-                    row = {
-                        **execution.to_dict(),
-                        "prompt_token_ids": list(generation.prompt_token_ids),
-                        "output_token_ids": list(generation.output_token_ids),
-                        "chosen_token_logprobs": list(generation.output_logprobs),
-                        **exact_length_evidence(
-                            prompt_tokens=len(generation.prompt_token_ids),
-                            generated_tokens=len(generation.output_token_ids),
-                            requested_new_tokens=generation.requested_max_tokens,
-                        ),
-                        "finish_reason": generation.finish_reason,
-                        "stop_reason": generation.stop_reason,
-                        "stopped_on_eos": generation.stopped_on_eos,
-                    }
-                    if decode_output_token_ids is not None:
-                        decoded = decode_output_token_ids(generation.output_token_ids)
-                        if not isinstance(decoded, str):
-                            raise TypeError("output token decoder must return text")
-                        decoded_bytes = decoded.encode("utf-8")
-                        row.update(
-                            {
-                                "output_text_utf8_base64": base64.b64encode(decoded_bytes).decode("ascii"),
-                                "output_text_sha256": hashlib.sha256(decoded_bytes).hexdigest(),
-                                "output_text_utf8_bytes": len(decoded_bytes),
-                            }
-                        )
-                        decoded_output_byte_count += len(decoded_bytes)
-                    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
-                    handle.write("\n")
-                    generated_token_count += len(generation.output_token_ids)
-    temporary.replace(output)
+    temporary_identity = None
+    published = False
+    try:
+        with temporary.open("xb") as raw_handle:
+            temporary_stat = os.fstat(raw_handle.fileno())
+            temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+            if ownership_validator is not None:
+                ownership_validator()
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as compressed:
+                with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as handle:
+                    for generation, execution in zip(
+                        records,
+                        execution_records,
+                        strict=True,
+                    ):
+                        if ownership_validator is not None:
+                            ownership_validator()
+                        if execution.request_id != generation.request_id:
+                            raise AssertionError("execution and generation request IDs must align")
+                        row = {
+                            **execution.to_dict(),
+                            "prompt_token_ids": list(generation.prompt_token_ids),
+                            "output_token_ids": list(generation.output_token_ids),
+                            "chosen_token_logprobs": list(generation.output_logprobs),
+                            **exact_length_evidence(
+                                prompt_tokens=len(generation.prompt_token_ids),
+                                generated_tokens=len(generation.output_token_ids),
+                                requested_new_tokens=generation.requested_max_tokens,
+                            ),
+                            "finish_reason": generation.finish_reason,
+                            "stop_reason": generation.stop_reason,
+                            "stopped_on_eos": generation.stopped_on_eos,
+                        }
+                        if decode_output_token_ids is not None:
+                            decoded = decode_output_token_ids(generation.output_token_ids)
+                            if not isinstance(decoded, str):
+                                raise TypeError("output token decoder must return text")
+                            decoded_bytes = decoded.encode("utf-8")
+                            row.update(
+                                {
+                                    "output_text_utf8_base64": base64.b64encode(decoded_bytes).decode("ascii"),
+                                    "output_text_sha256": hashlib.sha256(decoded_bytes).hexdigest(),
+                                    "output_text_utf8_bytes": len(decoded_bytes),
+                                }
+                            )
+                            decoded_output_byte_count += len(decoded_bytes)
+                        handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
+                        handle.write("\n")
+                        generated_token_count += len(generation.output_token_ids)
+        if ownership_validator is not None:
+            ownership_validator()
+        os.link(temporary, output, follow_symlinks=False)
+        published = True
+        if ownership_validator is not None:
+            ownership_validator()
+    except BaseException:
+        if published and temporary_identity is not None:
+            _unlink_path_if_identity(output, temporary_identity)
+        raise
+    finally:
+        if temporary_identity is not None:
+            _unlink_path_if_identity(temporary, temporary_identity)
     digest = hashlib.sha256()
     with output.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -2592,6 +3106,18 @@ def _output_namespace_marker_path(path: str | Path) -> Path:
     output = Path(path).resolve()
     base_name = output.name.removesuffix(output.suffix)
     return output.with_name(f"{base_name}.inprogress")
+
+
+def _unlink_path_if_identity(path: Path, expected_identity: tuple[int, int]) -> bool:
+    """Unlink only a regular file that is still the inode created by this process."""
+    try:
+        observed = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(observed.st_mode) or (observed.st_dev, observed.st_ino) != expected_identity:
+        return False
+    path.unlink()
+    return True
 
 
 def reserve_output_namespace(path: str | Path) -> Path:
@@ -3049,6 +3575,7 @@ def shared_prefix_state_reuse_evidence(
     worker_proof: Sequence[dict[str, Any]],
     expected_worker_clone_counts: Sequence[int],
     cache_block_size: int,
+    request_replica_ranks: Sequence[int] | None = None,
     expected_cache_misses: int = 1,
 ) -> dict[str, Any]:
     """Prove exact scheduler hits and request-scoped FP32 recurrent-state clones."""
@@ -3056,6 +3583,19 @@ def shared_prefix_state_reuse_evidence(
     request_count = len(manifest.requests)
     if len(cached_tokens) != request_count:
         raise AssertionError("cached-token telemetry must cover every request")
+    if request_replica_ranks is None:
+        normalized_replica_ranks = [0] * request_count
+    else:
+        if len(request_replica_ranks) != request_count:
+            raise AssertionError("replica-rank telemetry must cover every request")
+        normalized_replica_ranks = []
+        for value in request_replica_ranks:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AssertionError("replica-rank telemetry must contain nonnegative integers")
+            normalized_replica_ranks.append(value)
+    replica_ranks = sorted(set(normalized_replica_ranks))
+    if replica_ranks != list(range(len(replica_ranks))):
+        raise AssertionError("active scheduler replica ranks must be contiguous from zero")
     if isinstance(cache_block_size, bool) or not isinstance(cache_block_size, int) or cache_block_size <= 0:
         raise AssertionError("prefix cache block size must be a positive integer")
     if expected_cache_misses < 0 or expected_cache_misses >= request_count:
@@ -3080,6 +3620,18 @@ def shared_prefix_state_reuse_evidence(
     if miss_count != expected_cache_misses:
         qualifier = "one" if expected_cache_misses == 1 else str(expected_cache_misses)
         raise AssertionError(f"shared-prefix execution must have exactly {qualifier} cache miss")
+    expected_misses_per_replica = int(expected_cache_misses > 0)
+    if expected_cache_misses != expected_misses_per_replica * len(replica_ranks):
+        raise AssertionError("shared-prefix cache misses must be exactly one per active scheduler replica")
+    for replica_rank in replica_ranks:
+        replica_counts = [
+            cached
+            for cached, rank in zip(normalized_counts, normalized_replica_ranks, strict=True)
+            if rank == replica_rank
+        ]
+        replica_miss_count = sum(value == 0 for value in replica_counts)
+        if replica_miss_count != expected_misses_per_replica:
+            raise AssertionError("shared-prefix cache misses must be independently exact on every scheduler replica")
     hit_counts = [value for value in normalized_counts if value > 0]
     if len(hit_counts) != request_count - expected_cache_misses:
         raise AssertionError("shared-prefix execution did not clone every request after each replica's miss")
@@ -3187,7 +3739,53 @@ def shared_prefix_state_reuse_evidence(
     if len(expected_elements_per_request) != 1 or len(expected_bytes_per_request) != 1:
         raise AssertionError("all physical prefix clones must retain one exact Evo2 state-copy layout")
 
+    per_request_physical_work = []
+    for request, cached, replica_rank in zip(
+        manifest.requests,
+        normalized_counts,
+        normalized_replica_ranks,
+        strict=True,
+    ):
+        per_request_physical_work.append(
+            {
+                "request_id": request.request_id,
+                "replica_rank": replica_rank,
+                "prompt_tokens": prompt_tokens,
+                "cached_complete_block_tokens": cached,
+                "physical_prefill_prompt_tokens": prompt_tokens - cached,
+                "cache_status": "miss" if cached == 0 else "hit",
+            }
+        )
+
+    per_replica_physical_work = []
+    for replica_rank in replica_ranks:
+        rows = [row for row in per_request_physical_work if row["replica_rank"] == replica_rank]
+        miss_rows = [row for row in rows if row["cache_status"] == "miss"]
+        hit_rows = [row for row in rows if row["cache_status"] == "hit"]
+        per_replica_physical_work.append(
+            {
+                "replica_rank": replica_rank,
+                "request_count": len(rows),
+                "cache_miss_request_count": len(miss_rows),
+                "cache_hit_request_count": len(hit_rows),
+                "cache_miss_physical_prefill_prompt_tokens": sum(
+                    row["physical_prefill_prompt_tokens"] for row in miss_rows
+                ),
+                "cache_hit_physical_prefill_prompt_tokens": sum(
+                    row["physical_prefill_prompt_tokens"] for row in hit_rows
+                ),
+                "physical_prefill_prompt_tokens_total": sum(row["physical_prefill_prompt_tokens"] for row in rows),
+            }
+        )
+
     total_prompt_tokens = prompt_tokens * request_count
+    cache_miss_physical_tokens = sum(
+        row["physical_prefill_prompt_tokens"] for row in per_request_physical_work if row["cache_status"] == "miss"
+    )
+    cache_hit_physical_tokens = sum(
+        row["physical_prefill_prompt_tokens"] for row in per_request_physical_work if row["cache_status"] == "hit"
+    )
+    physical_prefill_tokens_total = cache_miss_physical_tokens + cache_hit_physical_tokens
     return {
         **identity,
         "cache_block_size": cache_block_size,
@@ -3199,6 +3797,19 @@ def shared_prefix_state_reuse_evidence(
         "recomputed_prompt_tokens_per_clone": prompt_tokens - physically_reused_tokens,
         "total_cached_prompt_tokens": sum(normalized_counts),
         "scheduled_uncached_prompt_tokens": total_prompt_tokens - sum(normalized_counts),
+        "physical_prefill_prompt_tokens_by_request": per_request_physical_work,
+        "physical_prefill_prompt_tokens_by_replica": per_replica_physical_work,
+        "cache_miss_physical_prefill_prompt_tokens": cache_miss_physical_tokens,
+        "cache_hit_physical_prefill_prompt_tokens": cache_hit_physical_tokens,
+        "physical_prefill_prompt_tokens_total": physical_prefill_tokens_total,
+        "physical_prefix_reuse_scope": {
+            "resolved_cache_block_size_tokens": cache_block_size,
+            "attention_kv_reused_complete_blocks_per_hit": physically_reused_tokens // cache_block_size,
+            "attention_kv_reused_tokens_per_hit": physically_reused_tokens,
+            "fp32_hyena_state_clone_position_tokens": physically_reused_tokens,
+            "partial_block_tail_recomputed_tokens_per_hit": prompt_tokens - physically_reused_tokens,
+            "full_prompt_attention_kv_and_state_cloned": physically_reused_tokens == prompt_tokens,
+        },
         "worker_state_clones": worker_clones,
         "rank_local_physical_clone_count": sum(worker["clone_count"] for worker in worker_clones),
         "expected_fp32_state_copy_elements_per_request": next(iter(expected_elements_per_request)),
@@ -3490,6 +4101,7 @@ def run_generation_phase(
         outputs=outputs,
         execution_records=execution_records,
         decode_output_token_ids=decode_output_token_ids,
+        ownership_validator=require_namespace_ownership,
     )
     full_decode_proof = None
     if collect_proof:
@@ -3526,9 +4138,8 @@ def run_generation_phase(
 def reset_vllm_worker_proof_state(
     worker: Any,
     reset_prefix_sources: bool = True,
-) -> dict[str, int | bool]:
+) -> dict[str, Any]:
     """Reset phase-local FIR telemetry and CUDA allocator peaks on one vLLM worker."""
-    del worker
     import torch
 
     from bionemo.evo2.vllm.model import (
@@ -3537,7 +4148,9 @@ def reset_vllm_worker_proof_state(
         reset_mamba_state_copy_stats,
     )
     from bionemo.evo2.vllm.packed_fir import reset_fir_route_stats
+    from bionemo.evo2.vllm.sampler import install_sampler_route_proof_hook
 
+    sampler = install_sampler_route_proof_hook(worker)
     reset_fir_route_stats()
     reset_mamba_state_copy_stats()
     torch.cuda.reset_peak_memory_stats()
@@ -3548,6 +4161,7 @@ def reset_vllm_worker_proof_state(
         "rank": int(rank),
         "device": int(torch.cuda.current_device()),
         "reset_prefix_sources": reset_prefix_sources,
+        "sampler_route": sampler["selected_route"],
     }
 
 
@@ -3561,6 +4175,7 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
     )
     from bionemo.evo2.vllm.packed_fir import get_fir_route_stats
     from bionemo.evo2.vllm.profile import compilation_counter_snapshot
+    from bionemo.evo2.vllm.sampler import snapshot_sampler_route_proof
 
     device = torch.cuda.current_device()
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -3573,6 +4188,10 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
         "device": int(device),
         "engine_seed": engine_seed,
         **gpu_identity,
+        "sampler": snapshot_sampler_route_proof(
+            worker,
+            require_generation_observations=hasattr(worker, "_evo2_sampler_route_observations"),
+        ),
         "fir_routes": get_fir_route_stats(),
         "mamba_state_copies": get_mamba_state_copy_stats(),
         "mamba_prefix_clones": get_mamba_prefix_clone_stats(),
@@ -3712,39 +4331,241 @@ def worker_gpu_identity(
 def gpu_hardware_provenance(
     *,
     nvml_module: Any | None = None,
+    torch_module: Any | None = None,
     expected_device_count: int = 2,
+    expected_assignments: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Record exact driver, UUID, name, and physical memory for every GPU."""
+    """Fail closed on the frozen logical-to-physical GPU and memory contract."""
     if expected_device_count <= 0:
         raise ValueError("expected_device_count must be positive")
     if nvml_module is None:
         import pynvml as nvml_module
+    if torch_module is None:
+        import torch as torch_module
 
-    nvml_module.nvmlInit()
-    device_count = int(nvml_module.nvmlDeviceGetCount())
-    if device_count != expected_device_count:
-        raise RuntimeError(f"benchmark requires exactly {expected_device_count} NVML devices, found {device_count}")
-    devices = []
-    for index in range(device_count):
-        handle = nvml_module.nvmlDeviceGetHandleByIndex(index)
-        memory = nvml_module.nvmlDeviceGetMemoryInfo(handle)
-        devices.append(
-            {
-                "index": index,
-                "uuid": _nvml_text(nvml_module.nvmlDeviceGetUUID(handle)),
-                "pci_bus_id": _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId),
-                "name": _nvml_text(nvml_module.nvmlDeviceGetName(handle)),
-                "total_memory_bytes": int(memory.total),
-                "initial_used_memory_bytes": int(memory.used),
-                "initial_free_memory_bytes": int(memory.free),
-            }
-        )
-    return {
-        "driver_version": _nvml_text(nvml_module.nvmlSystemGetDriverVersion()),
-        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "device_count": device_count,
-        "devices": devices,
+    assignments = [
+        dict(item) for item in (_FROZEN_GPU_ASSIGNMENTS if expected_assignments is None else expected_assignments)
+    ]
+    if len(assignments) != expected_device_count:
+        raise ValueError("expected GPU assignments must match expected_device_count")
+    required_assignment_keys = {
+        "logical_device_index",
+        "visible_device_selector",
+        "physical_index",
+        "uuid",
+        "pci_bus_id",
     }
+    for logical_index, assignment in enumerate(assignments):
+        if set(assignment) != required_assignment_keys:
+            raise ValueError("each expected GPU assignment must use the exact frozen schema")
+        if assignment["logical_device_index"] != logical_index:
+            raise ValueError("expected GPU logical indices must be exact and contiguous")
+        if (
+            isinstance(assignment["physical_index"], bool)
+            or not isinstance(assignment["physical_index"], int)
+            or assignment["physical_index"] < 0
+        ):
+            raise ValueError("expected GPU physical indices must be nonnegative integers")
+        if not all(
+            isinstance(assignment[field], str) and assignment[field]
+            for field in ("visible_device_selector", "uuid", "pci_bus_id")
+        ):
+            raise ValueError("expected GPU selector, UUID, and PCI identity must be nonempty")
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    expected_visible = ",".join(item["visible_device_selector"] for item in assignments)
+    observed_selectors = tuple(item.strip() for item in visible.split(",")) if isinstance(visible, str) else ()
+    assignment_mismatches: list[dict[str, Any]] = []
+    evidence: dict[str, Any] = {
+        "schema_version": 2,
+        "passed": False,
+        "cuda_visible_devices": visible,
+        "expected_cuda_visible_devices": expected_visible,
+        "observed_visible_device_selectors": list(observed_selectors),
+        "expected_assignments": assignments,
+        "required_initial_headroom_bytes": _REQUIRED_GPU_HEADROOM_BYTES,
+        "api_versions": {
+            "nvml_python_version": str(getattr(nvml_module, "__version__", _package_version("nvidia-ml-py"))),
+            "nvml_module_path": (
+                str(Path(nvml_module.__file__).resolve())
+                if isinstance(getattr(nvml_module, "__file__", None), str)
+                else None
+            ),
+            "nvml_memory_info_api": "nvmlDeviceGetMemoryInfo_v2",
+            "torch_version": str(getattr(torch_module, "__version__", "unknown")),
+            "torch_cuda_version": str(getattr(getattr(torch_module, "version", None), "cuda", "unknown")),
+            "torch_module_path": (
+                str(Path(torch_module.__file__).resolve())
+                if isinstance(getattr(torch_module, "__file__", None), str)
+                else None
+            ),
+            "cuda_memory_info_api": "torch.cuda.mem_get_info",
+        },
+        "devices": [],
+    }
+
+    def fail(stage: str, message: str) -> None:
+        evidence["passed"] = False
+        evidence["failure"] = {"stage": stage, "message": message}
+        raise GpuPreflightError(message, evidence=evidence)
+
+    memory_version = getattr(nvml_module, "nvmlMemory_v2", None)
+    if memory_version is None:
+        fail("api-capability", "pynvml does not expose nvmlMemory_v2")
+    cuda_driver_query = getattr(nvml_module, "nvmlSystemGetCudaDriverVersion_v2", None)
+    if not callable(cuda_driver_query):
+        fail("api-capability", "pynvml does not expose nvmlSystemGetCudaDriverVersion_v2")
+
+    initialized = False
+    try:
+        nvml_module.nvmlInit()
+        initialized = True
+        device_count = int(nvml_module.nvmlDeviceGetCount())
+        cuda_device_count = int(torch_module.cuda.device_count())
+        evidence["device_count"] = device_count
+        evidence["cuda_device_count"] = cuda_device_count
+        evidence["driver_version"] = _nvml_text(nvml_module.nvmlSystemGetDriverVersion())
+        evidence["nvml_cuda_driver_version_integer"] = int(cuda_driver_query())
+        evidence["nvml_memory_info_version"] = int(memory_version)
+        if device_count != expected_device_count or cuda_device_count != expected_device_count:
+            fail(
+                "assignment",
+                "NVML and CUDA device counts must both match the frozen benchmark topology",
+            )
+        if len(observed_selectors) != expected_device_count or any(not selector for selector in observed_selectors):
+            fail(
+                "assignment",
+                "CUDA_VISIBLE_DEVICES must expose one nonempty selector per frozen logical device",
+            )
+
+        for assignment in assignments:
+            logical_index = int(assignment["logical_device_index"])
+            expected_selector = str(assignment["visible_device_selector"])
+            selector = observed_selectors[logical_index]
+            if selector.isdecimal():
+                handle = nvml_module.nvmlDeviceGetHandleByIndex(int(selector))
+            elif selector.startswith("GPU-"):
+                handle = nvml_module.nvmlDeviceGetHandleByUUID(selector)
+            else:
+                fail("assignment", f"unsupported CUDA_VISIBLE_DEVICES selector {selector!r}")
+
+            physical_index = int(nvml_module.nvmlDeviceGetIndex(handle))
+            uuid = _nvml_text(nvml_module.nvmlDeviceGetUUID(handle))
+            pci_bus_id = _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId)
+            name = _nvml_text(nvml_module.nvmlDeviceGetName(handle))
+            memory = nvml_module.nvmlDeviceGetMemoryInfo(handle, version=memory_version)
+            properties = torch_module.cuda.get_device_properties(logical_index)
+            torch_uuid = _nvml_text(properties.uuid)
+            if not torch_uuid.startswith("GPU-"):
+                torch_uuid = f"GPU-{torch_uuid}"
+            cuda_free, cuda_total = torch_module.cuda.mem_get_info(logical_index)
+            physical_total = int(memory.total)
+            system_reserved = int(memory.reserved)
+            nvml_free = int(memory.free)
+            nvml_used = int(memory.used)
+            cuda_free = int(cuda_free)
+            cuda_total = int(cuda_total)
+            properties_total = int(properties.total_memory)
+            relation_delta = physical_total - system_reserved - cuda_total
+            device = {
+                "logical_device_index": logical_index,
+                "visible_device_selector": selector,
+                "expected_visible_device_selector": expected_selector,
+                "physical_index": physical_index,
+                "uuid": uuid,
+                "pci_bus_id": pci_bus_id,
+                "name": name,
+                "torch_uuid": torch_uuid,
+                "torch_name": str(properties.name),
+                "memory": {
+                    "nvml": {
+                        "physical_total_bytes": physical_total,
+                        "system_reserved_bytes": system_reserved,
+                        "free_bytes": nvml_free,
+                        "used_bytes": nvml_used,
+                    },
+                    "cuda": {
+                        "usable_total_bytes": cuda_total,
+                        "free_bytes": cuda_free,
+                    },
+                    "torch_properties_total_bytes": properties_total,
+                    "usable_total_relation_delta_bytes": relation_delta,
+                },
+            }
+            evidence["devices"].append(device)
+
+            if (
+                selector != expected_selector
+                or physical_index != assignment["physical_index"]
+                or uuid != assignment["uuid"]
+                or pci_bus_id != assignment["pci_bus_id"]
+                or torch_uuid != uuid
+                or str(properties.name) != name
+            ):
+                assignment_mismatches.append(
+                    {
+                        "logical_device_index": logical_index,
+                        "expected": dict(assignment),
+                        "observed": {
+                            "visible_device_selector": selector,
+                            "physical_index": physical_index,
+                            "uuid": uuid,
+                            "pci_bus_id": pci_bus_id,
+                            "torch_uuid": torch_uuid,
+                            "torch_name": str(properties.name),
+                            "nvml_name": name,
+                        },
+                    }
+                )
+            if (
+                min(physical_total, cuda_total, properties_total) <= 0
+                or min(system_reserved, nvml_free, nvml_used, cuda_free) < 0
+            ):
+                fail("memory-accounting", f"GPU {logical_index} returned malformed memory counters")
+            if nvml_free + nvml_used + system_reserved != physical_total:
+                fail(
+                    "memory-accounting",
+                    f"GPU {logical_index} NVML free+used+reserved does not equal physical total",
+                )
+            if relation_delta != 0 or properties_total != cuda_total:
+                fail(
+                    "memory-accounting",
+                    f"GPU {logical_index} physical-reserved memory does not exactly equal CUDA/Torch usable total",
+                )
+            if nvml_free > cuda_total or cuda_free > cuda_total:
+                fail("memory-accounting", f"GPU {logical_index} free memory exceeds usable total")
+            if nvml_free < _REQUIRED_GPU_HEADROOM_BYTES or cuda_free < _REQUIRED_GPU_HEADROOM_BYTES:
+                fail(
+                    "memory-headroom",
+                    f"GPU {logical_index} has less than 2 GiB free before engine creation",
+                )
+        if visible != expected_visible:
+            assignment_mismatches.insert(
+                0,
+                {
+                    "expected_cuda_visible_devices": expected_visible,
+                    "observed_cuda_visible_devices": visible,
+                },
+            )
+        if assignment_mismatches:
+            evidence["assignment_mismatches"] = assignment_mismatches
+            fail(
+                "assignment",
+                "observed logical GPUs do not match the frozen CUDA-visible physical assignments",
+            )
+    except GpuPreflightError:
+        raise
+    except BaseException as error:
+        fail("collection", f"GPU provenance collection failed: {type(error).__name__}: {error}")
+    finally:
+        if initialized:
+            shutdown = getattr(nvml_module, "nvmlShutdown", None)
+            if callable(shutdown):
+                shutdown()
+
+    evidence["passed"] = True
+    evidence.pop("failure", None)
+    return evidence
 
 
 def gpu_memory_headroom_evidence(
@@ -3764,24 +4585,39 @@ def gpu_memory_headroom_evidence(
 
     retained = []
     for device, peak in zip(devices, peak_device_memory_bytes, strict=True):
-        total = device.get("total_memory_bytes")
-        if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
-            raise ValueError("GPU total memory must be a positive integer")
+        memory = device.get("memory")
+        nvml_memory = memory.get("nvml") if isinstance(memory, dict) else None
+        cuda_memory = memory.get("cuda") if isinstance(memory, dict) else None
+        if not isinstance(nvml_memory, dict) or not isinstance(cuda_memory, dict):
+            raise ValueError("GPU memory provenance must retain NVML and CUDA counters")
+        physical_total = nvml_memory.get("physical_total_bytes")
+        system_reserved = nvml_memory.get("system_reserved_bytes")
+        usable_total = cuda_memory.get("usable_total_bytes")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (physical_total, system_reserved, usable_total)
+        ):
+            raise ValueError("GPU physical, reserved, and usable memory must be nonnegative integers")
+        if physical_total - system_reserved != usable_total or usable_total <= 0:
+            raise ValueError("GPU physical-reserved memory must equal its positive CUDA usable total")
         if isinstance(peak, bool) or not isinstance(peak, int) or peak < 0:
             raise ValueError("GPU peak memory must be a nonnegative integer")
-        headroom = total - peak
+        headroom = usable_total - peak
         retained.append(
             {
-                "index": int(device.get("index", len(retained))),
+                "logical_device_index": int(device.get("logical_device_index", len(retained))),
+                "physical_index": int(device.get("physical_index", len(retained))),
                 "uuid": str(device.get("uuid", "")),
-                "total_memory_bytes": total,
+                "physical_total_memory_bytes": physical_total,
+                "system_reserved_memory_bytes": system_reserved,
+                "cuda_usable_total_memory_bytes": usable_total,
                 "peak_used_memory_bytes": peak,
                 "headroom_bytes": headroom,
             }
         )
         if headroom < required_headroom_bytes:
             raise RuntimeError(
-                f"GPU {device.get('uuid', device.get('index'))} has {headroom} bytes headroom; "
+                f"GPU {device.get('uuid', device.get('physical_index'))} has {headroom} bytes headroom; "
                 "at least 2 GiB is required"
             )
     return {
@@ -3900,6 +4736,10 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     )
     preflight_s = time.perf_counter() - preflight_begin
 
+    gpu_preflight_begin = time.perf_counter()
+    gpu_identity = gpu_hardware_provenance()
+    gpu_preflight_s = time.perf_counter() - gpu_preflight_begin
+
     vllm_import_begin = time.perf_counter()
     from vllm import LLM, SamplingParams
 
@@ -3909,11 +4749,14 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     checkpoint_identity = checkpoint_provenance(args.checkpoint)
     source_identity = source_provenance(require_clean=True)
     vllm_identity = vllm_installation_provenance()
-    gpu_identity = gpu_hardware_provenance()
+    from bionemo.evo2.vllm.sampler import sampler_installation_provenance
+
+    sampler_identity = sampler_installation_provenance(require_loaded_modules=False)
     runtime_attestation = runtime_attestation_contract(
         checkpoint=checkpoint_identity,
         sources={"bionemo": source_identity},
         vllm_installation=vllm_identity,
+        sampler_installation=sampler_identity,
         gpu_hardware=gpu_identity,
     )
     benchmark_contract = {
@@ -3952,12 +4795,60 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     validate_resolved_profile(profile, resolved)
     initialized_worker_proof = _snapshot_worker_proof(llm) if profile.proof else ()
 
+    common_identity = common_prefix_identity_context(args, manifest, profile)
+    serial_reference_result = None
+    calls_per_generation_round = len(
+        build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )
+    )
+    call_index_start = args.generation_round * calls_per_generation_round
+    if common_identity is not None:
+        serial_manifest = manifest.request_slice(0, 1)
+        serial_executions = build_request_execution_records(
+            serial_manifest,
+            global_request_offset=0,
+            dp_rank=0,
+            dp_size=1,
+            generation_round=args.generation_round,
+            call_index=call_index_start,
+        )
+        serial_reference_result = run_generation_phase(
+            llm=llm,
+            manifest=serial_manifest,
+            sampling_params=build_request_sampling_params(
+                serial_manifest,
+                sampling_params_factory=SamplingParams,
+                execution_records=serial_executions,
+            ),
+            phase="common-prefix-serial-reference",
+            sample_index=-1,
+            recorder=recorder,
+            memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
+            execution_records=serial_executions,
+            full_output_path=phase_output_artifact_path(
+                args.output,
+                phase="common-prefix-serial-reference",
+            ),
+            namespace_output_path=args.output,
+            collect_proof=profile.proof,
+            reset_worker_proof=(lambda: _reset_worker_proof(llm)) if profile.proof else None,
+            snapshot_worker_proof=(lambda: _snapshot_worker_proof(llm)) if profile.proof else None,
+            require_shared_prefix_state_reuse=profile.shared_prefix_state_reuse,
+            prefix_cache_block_size=int(resolved["cache"]["block_size"]),
+            global_wave_size=1,
+            scheduler_max_num_seqs=profile.resolved_max_num_seqs,
+            decode_output_token_ids=output_decoder,
+        )
+
     phase_results = []
-    call_index_start = args.generation_round
     for sample_index, (phase, _) in enumerate(_phase_specs(args.warmups, args.repetitions)):
         execution_records = build_wave_execution_records(
             manifest,
             global_wave_size=profile.global_wave_size,
+            generation_round=args.generation_round,
             call_index_start=call_index_start,
         )
         sampling_params = build_request_sampling_params(
@@ -3994,16 +4885,20 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
                     max_new_tokens=manifest.max_new_tokens,
                 )
         phase_results.append(result)
-        call_index_start += len(result.generation_call_s)
 
     if profile.proof:
         final_worker_proof = phase_results[-1].worker_proof
         for initialized, final in zip(initialized_worker_proof, final_worker_proof, strict=True):
             validate_compilation_proof(initialized["compilation"], final["compilation"])
-        memory_samples = [
-            init_memory.peak_device_memory_bytes,
-            *(result.sample.peak_device_memory_bytes for result in phase_results),
-        ]
+            memory_samples = [
+                init_memory.peak_device_memory_bytes,
+                *(
+                    [serial_reference_result.sample.peak_device_memory_bytes]
+                    if serial_reference_result is not None
+                    else []
+                ),
+                *(result.sample.peak_device_memory_bytes for result in phase_results),
+            ]
         peak_device_memory = tuple(max(values) for values in zip(*memory_samples, strict=True))
         memory_headroom = gpu_memory_headroom_evidence(
             gpu_identity,
@@ -4027,6 +4922,15 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         args=args,
         manifest=manifest,
         profile=profile,
+        phase_artifacts=phase_artifacts,
+        decode_output_token_ids=output_decoder,
+        collect_physical_proof=profile.proof,
+    )
+    phase_artifacts, common_prefix_identity = common_prefix_identity_phase_artifacts(
+        args=args,
+        manifest=manifest,
+        profile=profile,
+        serial_reference_phase=(None if serial_reference_result is None else serial_reference_result.to_dict()),
         phase_artifacts=phase_artifacts,
         decode_output_token_ids=output_decoder,
         collect_physical_proof=profile.proof,
@@ -4063,9 +4967,14 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         "checkpoint_provenance": checkpoint_identity,
         "source_provenance": source_identity,
         "vllm_installation_provenance": vllm_identity,
+        "sampler_installation_provenance": sampler_identity,
         "gpu_hardware_provenance": gpu_identity,
         "gpu_memory_headroom": memory_headroom,
         "canonical_identity": canonical_identity,
+        "common_prefix_identity": common_prefix_identity,
+        "common_prefix_serial_reference": (
+            None if serial_reference_result is None else serial_reference_result.to_dict()
+        ),
         "exact_generation_progress": exact_progress,
         "invocation": {
             "argv": [sys.executable, *sys.argv],
@@ -4108,6 +5017,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         ],
         "timing": {
             "context_length_preflight_s": preflight_s,
+            "gpu_hardware_preflight_s": gpu_preflight_s,
             "vllm_import_s": vllm_import_s,
             "provenance_hashing_s": provenance_s,
             "output_decoder_setup_s": output_decoder_setup_s,
@@ -4120,17 +5030,73 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     }
 
 
-def write_json_artifact(path: str | Path, artifact: dict[str, Any]) -> None:
+def write_json_artifact(
+    path: str | Path,
+    artifact: dict[str, Any],
+    *,
+    ownership_validator: Callable[[], None] | None = None,
+) -> None:
     """Write one durable, deterministic benchmark artifact."""
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         raise FileExistsError(f"refusing to overwrite existing artifact: {output}")
     temporary = output.with_suffix(f"{output.suffix}.tmp")
-    with temporary.open("x", encoding="utf-8") as handle:
-        json.dump(artifact, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    temporary.replace(output)
+    temporary_identity = None
+    published = False
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            temporary_stat = os.fstat(handle.fileno())
+            temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+            if ownership_validator is not None:
+                ownership_validator()
+            json.dump(artifact, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        if ownership_validator is not None:
+            ownership_validator()
+        os.link(temporary, output, follow_symlinks=False)
+        published = True
+        if ownership_validator is not None:
+            ownership_validator()
+    except BaseException:
+        if published and temporary_identity is not None:
+            _unlink_path_if_identity(output, temporary_identity)
+        raise
+    finally:
+        if temporary_identity is not None:
+            _unlink_path_if_identity(temporary, temporary_identity)
+
+
+def _gpu_preflight_failure_artifact(
+    args: Any,
+    manifest: WorkloadManifest,
+    error: GpuPreflightError,
+) -> dict[str, Any]:
+    """Build a durable failure artifact without querying the failed GPU path again."""
+    return {
+        "schema_version": 1,
+        "task": "evo2-vllm-gpu-preflight",
+        "benchmark_mode": benchmark_mode_from_args(args),
+        "backend": "vllm",
+        "topology": args.topology,
+        "versions": runtime_versions(),
+        "checkpoint": str(Path(args.checkpoint).resolve()),
+        "invocation": {
+            "argv": [sys.executable, *sys.argv],
+            "parsed_args": {
+                name: str(value) if isinstance(value, Path) else value for name, value in vars(args).items()
+            },
+            "output_artifact_path": str(Path(args.output).resolve()),
+            "exit_status": 1,
+        },
+        "manifest": manifest.to_dict(),
+        "manifest_sha256": manifest.sha256,
+        "failure": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+        "gpu_hardware_provenance": error.evidence,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4141,24 +5107,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.backend != "vllm":
         raise NotImplementedError("the MCore baseline uses its pinned backend adapter")
     source_manifest = load_source_manifest(args)
-    canonical_identity = args.canonical_identity_case is not None
+    identity_mode = args.canonical_identity_case is not None or args.common_prefix_identity_case is not None
     manifest = prepare_workload(
         source_manifest,
-        request_count=None if canonical_identity else args.request_count,
-        uniform_prompt_length=None if canonical_identity else args.uniform_prompt_length,
+        request_count=None if identity_mode else args.request_count,
+        uniform_prompt_length=None if identity_mode else args.uniform_prompt_length,
         request_id_prefix=args.request_id_prefix,
-        max_new_tokens=None if canonical_identity else args.max_new_tokens,
+        max_new_tokens=None if identity_mode else args.max_new_tokens,
     )
-    if args.context_preflight_only:
-        artifact = run_context_length_preflight(args, manifest)
-    elif args.topology == "tp2":
-        artifact = run_tp2_benchmark(args, manifest)
-    else:
-        from bionemo.evo2.vllm.nemo_runner import run_nemo_dp2_benchmark
+    try:
+        if args.context_preflight_only:
+            artifact = run_context_length_preflight(args, manifest)
+        elif args.topology == "tp2":
+            artifact = run_tp2_benchmark(args, manifest)
+        else:
+            from bionemo.evo2.vllm.nemo_runner import run_nemo_dp2_benchmark
 
-        artifact = run_nemo_dp2_benchmark(args, manifest)
+            artifact = run_nemo_dp2_benchmark(args, manifest)
+    except GpuPreflightError as error:
+        artifact = _gpu_preflight_failure_artifact(args, manifest, error)
+        require_output_namespace_reservation(args.output)
+        write_json_artifact(
+            args.output,
+            artifact,
+            ownership_validator=lambda: require_output_namespace_reservation(args.output),
+        )
+        complete_output_namespace(reservation, output_path=args.output)
+        return 1
     require_output_namespace_reservation(args.output)
-    write_json_artifact(args.output, artifact)
+    write_json_artifact(
+        args.output,
+        artifact,
+        ownership_validator=lambda: require_output_namespace_reservation(args.output),
+    )
     complete_output_namespace(reservation, output_path=args.output)
     return 0
 

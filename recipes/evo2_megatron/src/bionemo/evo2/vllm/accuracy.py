@@ -265,6 +265,21 @@ def validate_homogeneous_identity_phase_evidence(
                     global_shape=global_shape,
                     engine_shape=engine_shape,
                 )
+            inactive_engines = wave.get("inactive_engines")
+            expected_inactive_ranks = tuple(range(len(engine_shapes), 2))
+            if not isinstance(inactive_engines, list) or len(inactive_engines) != len(expected_inactive_ranks):
+                raise AssertionError("identity DP2 inactive replica count drifted")
+            for dp_rank, engine in zip(expected_inactive_ranks, inactive_engines, strict=True):
+                if (
+                    not isinstance(engine, dict)
+                    or engine.get("dp_rank") != dp_rank
+                    or engine.get("request_count") != 0
+                    or engine.get("inactive") is not True
+                    or engine.get("phase") != wave_phase
+                    or engine.get("cudagraph_observations") != []
+                    or engine.get("scheduler_observations") != []
+                ):
+                    raise AssertionError("identity DP2 inactive replica executed work or lost ownership evidence")
         start = stop
 
     return {
@@ -418,10 +433,17 @@ def _validate_common_prefix_output_artifact(
     retained = []
     for row in rows:
         request_id = str(row.get("request_id", ""))
+        prompt_token_ids = row.get("prompt_token_ids")
         token_ids = row.get("output_token_ids")
         logprobs = row.get("chosen_token_logprobs")
         if (
             not request_id
+            or not isinstance(prompt_token_ids, list)
+            or not prompt_token_ids
+            or any(
+                not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0
+                for token_id in prompt_token_ids
+            )
             or not isinstance(token_ids, list)
             or len(token_ids) != 500
             or any(
@@ -466,6 +488,7 @@ def _validate_common_prefix_output_artifact(
         retained.append(
             {
                 "request_id": request_id,
+                "prompt_token_ids": tuple(prompt_token_ids),
                 "output_text": output_text,
                 "output_text_sha256": _sha256_bytes(raw_bytes),
                 "output_text_utf8_bytes": len(raw_bytes),
@@ -501,6 +524,12 @@ def validate_common_prefix_identity_output_artifacts(
     )
     if not candidate_rows:
         raise AssertionError("common-prefix candidate artifact cannot be empty")
+    reference_prompt = reference_rows[0].pop("prompt_token_ids")
+    if len(reference_prompt) != case.prompt_length:
+        raise AssertionError("common-prefix serial reference did not use the exact 2048-token prompt")
+    for row in candidate_rows:
+        if row.pop("prompt_token_ids") != reference_prompt:
+            raise AssertionError("common-prefix candidate prompt differs from the serial reference")
 
     def target_identity(output_text: str) -> float:
         matches = sum(observed == expected for observed, expected in zip(output_text, case.target, strict=True))
@@ -810,6 +839,63 @@ def build_homogeneous_identity_schedule(
     )
 
 
+def build_common_prefix_identity_contract(
+    *,
+    case: CommonPrefixIdentityCase,
+    serial_schedule: HomogeneousIdentitySchedule,
+    candidate_schedule: HomogeneousIdentitySchedule,
+    prompts_csv: str | Path,
+    tokenizer_path: str | Path,
+) -> dict[str, Any]:
+    """Return the immutable serial-vs-batched common-prefix accuracy contract."""
+    source = Path(prompts_csv).expanduser().resolve()
+    if _sha256_bytes(source.read_bytes()) != CANONICAL_7B_PROMPTS_SHA256:
+        raise ValueError("common-prefix identity source SHA256 drifted")
+    tokenizer = Path(tokenizer_path).expanduser().resolve()
+
+    def schedule_payload(schedule: HomogeneousIdentitySchedule) -> dict[str, Any]:
+        return {
+            "topology": schedule.topology,
+            "request_count": schedule.request_count,
+            "global_wave_size": schedule.global_wave_size,
+            "global_request_shapes": list(schedule.global_request_shapes),
+            "engine_request_shapes": [list(shapes) for shapes in schedule.engine_request_shapes],
+            "semantic_padding": schedule.semantic_padding,
+            "mixed_case_batching": schedule.mixed_case_batching,
+        }
+
+    if serial_schedule.request_count != 1:
+        raise ValueError("common-prefix serial reference schedule must contain exactly one request")
+    if serial_schedule.topology != candidate_schedule.topology:
+        raise ValueError("common-prefix serial and candidate schedules must use the same topology")
+    return {
+        "schema_version": 1,
+        "protocol": "common-2048-serial-vs-batched",
+        "checkpoint": CANONICAL_7B_CHECKPOINT,
+        "prompts_csv_path": str(source),
+        "prompts_csv_sha256": CANONICAL_7B_PROMPTS_SHA256,
+        "tokenizer_path": str(tokenizer),
+        "tokenizer_sha256": _sha256_bytes(tokenizer.read_bytes()),
+        "case_index": case.case_index,
+        "prompt_length": case.prompt_length,
+        "prompt_sha256": case.prompt_sha256,
+        "target_length": case.target_length,
+        "target_sha256": case.target_sha256,
+        "allowed_identity_drop_points": 5.0,
+        "sampling": {
+            "max_new_tokens": case.max_new_tokens,
+            "temperature": case.temperature,
+            "top_p": 1.0,
+            "top_k": case.top_k,
+            "seed": case.seed,
+            "ignore_eos": True,
+            "stop_token_ids": [],
+        },
+        "serial_schedule": schedule_payload(serial_schedule),
+        "candidate_schedule": schedule_payload(candidate_schedule),
+    }
+
+
 def build_canonical_identity_contract(
     *,
     case: CanonicalIdentityCase,
@@ -869,6 +955,7 @@ __all__ = [
     "HomogeneousIdentitySchedule",
     "build_canonical_identity_contract",
     "build_canonical_identity_manifest",
+    "build_common_prefix_identity_contract",
     "build_common_prefix_identity_manifest",
     "build_homogeneous_identity_schedule",
     "load_canonical_7b_identity_cases",

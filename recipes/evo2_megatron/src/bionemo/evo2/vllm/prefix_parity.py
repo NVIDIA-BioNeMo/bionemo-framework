@@ -47,6 +47,8 @@ class PrefixParityAcceptance:
             character not in "0123456789abcdef" for character in self.prompt_source_sha256
         ):
             raise ValueError("prompt_source_sha256 must be a lowercase SHA256 digest")
+        if not math.isfinite(self.logprob_rtol) or not math.isfinite(self.logprob_atol):
+            raise ValueError("logprob tolerances must be finite")
         if self.logprob_rtol < 0 or self.logprob_atol < 0:
             raise ValueError("logprob tolerances must be nonnegative")
 
@@ -463,14 +465,14 @@ def _validate_physical_prefix_reuse(
     }
 
 
-def compare_prefix_artifacts(
+def _compare_prefix_artifacts(
     independent_artifact: str | Path,
     cached_artifact: str | Path,
     *,
     acceptance: PrefixParityAcceptance = EXACT_25K_PREFIX_ACCEPTANCE,
     proof_validator: Callable[..., dict[str, Any]] = validate_linked_proof_artifact,
 ) -> dict[str, Any]:
-    """Compare two timed artifacts and revalidate their physical execution proofs."""
+    """Internal comparator with injectable fixture contracts for focused CPU tests."""
     independent_path, independent, independent_manifest, independent_link = _load_speed_artifact(
         independent_artifact,
         proof_validator=proof_validator,
@@ -540,6 +542,19 @@ def compare_prefix_artifacts(
     }
 
 
+def compare_prefix_artifacts(
+    independent_artifact: str | Path,
+    cached_artifact: str | Path,
+) -> dict[str, Any]:
+    """Compare exact-25k artifacts under the immutable production acceptance contract."""
+    return _compare_prefix_artifacts(
+        independent_artifact,
+        cached_artifact,
+        acceptance=EXACT_25K_PREFIX_ACCEPTANCE,
+        proof_validator=validate_linked_proof_artifact,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the fixed exact-25k prefix differential CLI."""
     parser = argparse.ArgumentParser(description="Compare exact 25k independent and prefix-reuse Evo2 artifacts")
@@ -551,19 +566,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Write one immutable CPU-only exact-25k prefix parity artifact."""
+    from bionemo.evo2.vllm.runner import (
+        complete_output_namespace,
+        require_output_namespace_reservation,
+        reserve_output_namespace,
+        write_json_artifact,
+    )
+
     args = build_parser().parse_args(argv)
     output = args.output.expanduser().resolve()
-    if output.exists():
-        raise FileExistsError(f"refusing to overwrite prefix parity artifact: {output}")
+    reservation = reserve_output_namespace(output)
     artifact = compare_prefix_artifacts(args.independent_artifact, args.cached_artifact)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(f"{output.suffix}.tmp")
-    if temporary.exists():
-        raise FileExistsError(f"refusing stale prefix parity temporary artifact: {temporary}")
-    with temporary.open("x", encoding="utf-8") as handle:
-        json.dump(artifact, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    temporary.replace(output)
+    require_output_namespace_reservation(output)
+    write_json_artifact(
+        output,
+        artifact,
+        ownership_validator=lambda: require_output_namespace_reservation(output),
+    )
+    complete_output_namespace(reservation, output_path=output)
     return 0
 
 

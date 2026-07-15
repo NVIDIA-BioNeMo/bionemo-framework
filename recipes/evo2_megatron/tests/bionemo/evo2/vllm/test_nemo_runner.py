@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import builtins
 import hashlib
 import json
 import re
@@ -10,6 +11,8 @@ import pytest
 import torch
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
+import bionemo.evo2.vllm.nemo_runner as nemo_runner
+import bionemo.evo2.vllm.runner as runner
 from bionemo.evo2.vllm.benchmark import GenerationRecord, WorkloadManifest
 from bionemo.evo2.vllm.nemo_runner import (
     build_nemo_generation_config,
@@ -24,6 +27,63 @@ from bionemo.evo2.vllm.runner import PeakMemoryMonitor, request_seed
 
 
 DATA = Path(__file__).with_name("data") / "gdpo_mixed_96.json"
+
+
+def test_nemo_dp2_gpu_preflight_failure_precedes_ray_actor_setup(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "dp2-gpu-preflight.json"
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "dp2",
+            "--max-model-len",
+            "7000",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--proof",
+            "--output",
+            str(output),
+        ]
+    )
+    manifest = WorkloadManifest.from_path(DATA)
+    runner.reserve_output_namespace(output)
+    failure = runner.GpuPreflightError(
+        "wrong assigned GPU",
+        evidence={
+            "schema_version": 2,
+            "passed": False,
+            "devices": [],
+            "failure": {"stage": "assignment", "message": "wrong assigned GPU"},
+        },
+    )
+    monkeypatch.setattr(nemo_runner, "context_length_preflight", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        nemo_runner,
+        "gpu_hardware_provenance",
+        lambda: (_ for _ in ()).throw(failure),
+    )
+    real_import = builtins.__import__
+    actor_imports = []
+
+    def track_import(name, *args, **kwargs):
+        if name == "ray" or name.startswith("nemo_rl.distributed.virtual_cluster"):
+            actor_imports.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", track_import)
+
+    with pytest.raises(runner.GpuPreflightError, match="wrong assigned GPU"):
+        nemo_runner.run_nemo_dp2_benchmark(args, manifest)
+
+    assert actor_imports == []
+    assert not output.exists()
 
 
 def test_nemo_dp2_config_owns_two_exact_48_request_engines() -> None:
@@ -525,17 +585,28 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
     class FakeGeneration:
         def __init__(self) -> None:
             self.worker_group = FakeWorkerGroup()
-            self.call_index = 7
-            self.global_index = 48
+            self.calls = []
             self.cache_invalidations = 0
 
         def invalidate_kv_cache(self):
             self.cache_invalidations += 1
             return True
 
-        def generate(self, data, greedy=False):
+        def generate(
+            self,
+            data,
+            greedy=False,
+            *,
+            generation_round,
+            call_index,
+            global_request_offset,
+        ):
             assert greedy is True
+            assert generation_round == 3
+            assert call_index == 6 + len(self.calls)
+            assert global_request_offset == 48 + 4 * len(self.calls)
             request_count = len(data["input_ids"])
+            self.calls.append((generation_round, call_index, global_request_offset, request_count))
             first_shard = (request_count + 1) // 2
             self.worker_group.shard_sizes = (first_shard, request_count - first_shard)
             output_ids = torch.zeros((request_count, data["input_ids"].shape[1] + 3), dtype=torch.long)
@@ -547,12 +618,12 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
             dense = torch.full((request_count, 3, 512), -20.0)
             for row_index in range(request_count):
                 dense[row_index, torch.arange(3), torch.tensor([65, 67, 71])] = torch.tensor([-0.1, -0.2, -0.3])
-            global_indices = torch.arange(self.global_index, self.global_index + request_count)
+            global_indices = torch.arange(global_request_offset, global_request_offset + request_count)
             seeds = torch.tensor(
                 [
                     request_seed(
                         42,
-                        call_index=self.call_index,
+                        call_index=call_index,
                         dp_rank=dp_rank,
                         dp_size=2,
                         request_index_in_stream=local_index,
@@ -570,20 +641,18 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                     "truncated": torch.ones(request_count, dtype=torch.bool),
                     "generation_request_seeds": seeds,
                     "generation_global_request_indices": global_indices,
-                    "generation_rounds": torch.full((request_count,), self.call_index),
-                    "generation_call_indices": torch.full((request_count,), self.call_index),
+                    "generation_rounds": torch.full((request_count,), generation_round),
+                    "generation_call_indices": torch.full((request_count,), call_index),
                     "generation_dp_ranks": torch.tensor([0] * first_shard + [1] * (request_count - first_shard)),
                     "generation_first_token_latency_s": torch.full((request_count,), 0.4),
                     "generation_decode_s": torch.full((request_count,), 0.2),
                     "generation_num_cached_tokens": torch.tensor(
-                        [0, 16, 0, 16] if self.call_index == 7 else [16, 16, 16, 16]
+                        [0, 16, 0, 16] if call_index == 6 else [16, 16, 16, 16]
                     ),
                     "generation_vocab_logprobs": dense,
                     "generation_logprob_counts": torch.full((request_count, 3), 512),
                 }
             )
-            self.call_index += 1
-            self.global_index += request_count
             return outputs
 
     times = iter((10.0, 11.0, 20.0, 21.0))
@@ -594,6 +663,9 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
         profile=profile,
         phase="steady-0",
         sample_index=0,
+        generation_round=3,
+        global_call_index_start=6,
+        global_request_index_start=48,
         full_output_path=tmp_path / "nemo.outputs.jsonl.gz",
         memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
         ray_get=lambda futures: futures,
@@ -606,18 +678,19 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
     assert result.sample.generated_tokens == 24
     assert [record.global_request_index for record in result.request_executions] == list(range(48, 56))
     assert [record.dp_rank for record in result.request_executions] == [0, 0, 1, 1] * 2
-    assert [record.generation_round for record in result.request_executions] == [7] * 4 + [8] * 4
-    assert [record.call_index for record in result.request_executions] == [7] * 4 + [8] * 4
+    assert [record.generation_round for record in result.request_executions] == [3] * 8
+    assert [record.call_index for record in result.request_executions] == [6] * 4 + [7] * 4
     assert [record.seed for record in result.request_executions] == [
+        12_000_078,
+        12_000_079,
+        13_000_081,
+        13_000_082,
         14_000_084,
         14_000_085,
         15_000_087,
         15_000_088,
-        16_000_090,
-        16_000_091,
-        17_000_093,
-        17_000_094,
     ]
+    assert generation.calls == [(3, 6, 48, 4), (3, 7, 52, 4)]
     assert len(result.wave_proofs) == 2
     assert generation.cache_invalidations == 1
     assert [engine["full_decode_proof"]["passed"] for engine in result.wave_proofs[0]["engines"]] == [
@@ -661,8 +734,17 @@ def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
     class FakeGeneration:
         worker_group = ForbiddenWorkerGroup()
 
-        def generate(self, data, greedy=False):
+        def generate(
+            self,
+            data,
+            greedy=False,
+            *,
+            generation_round,
+            call_index,
+            global_request_offset,
+        ):
             assert greedy is False
+            assert (generation_round, call_index, global_request_offset) == (0, 0, 0)
             request_count = len(data["input_ids"])
             prompt_width = data["input_ids"].shape[1]
             output_ids = torch.zeros((request_count, prompt_width + 1), dtype=torch.long)
@@ -695,6 +777,9 @@ def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
         profile=profile,
         phase="steady-0",
         sample_index=0,
+        generation_round=0,
+        global_call_index_start=0,
+        global_request_index_start=0,
         full_output_path=tmp_path / "nemo-speed.outputs.jsonl.gz",
         memory_monitor_factory=lambda: pytest.fail("speed lane started peak-memory polling"),
         ray_get=lambda futures: pytest.fail(f"speed lane resolved proof futures: {futures!r}"),

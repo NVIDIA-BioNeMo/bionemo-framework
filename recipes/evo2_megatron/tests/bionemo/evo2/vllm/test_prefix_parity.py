@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
+import bionemo.evo2.vllm.prefix_parity as prefix_parity_module
 from bionemo.evo2.vllm.benchmark import WorkloadManifest, WorkloadRequest
-from bionemo.evo2.vllm.prefix_parity import PrefixParityAcceptance, compare_prefix_artifacts
+from bionemo.evo2.vllm.prefix_parity import PrefixParityAcceptance
 
 
 _SOURCE_SHA = "a" * 64
@@ -219,7 +220,7 @@ def _acceptance() -> PrefixParityAcceptance:
 def test_prefix_parity_compares_every_request_and_requires_physical_reuse(tmp_path) -> None:
     independent, cached, retained = _write_pair(tmp_path)
 
-    evidence = compare_prefix_artifacts(
+    evidence = prefix_parity_module._compare_prefix_artifacts(
         independent,
         cached,
         acceptance=_acceptance(),
@@ -259,9 +260,89 @@ def test_prefix_parity_fails_closed_on_output_contract_or_reuse_drift(tmp_path, 
     cached.write_text(json.dumps(candidate), encoding="utf-8")
 
     with pytest.raises(AssertionError):
-        compare_prefix_artifacts(
+        prefix_parity_module._compare_prefix_artifacts(
             independent,
             cached,
             acceptance=_acceptance(),
             proof_validator=lambda path, **_: retained[str(Path(path).resolve())],
         )
+
+
+@pytest.mark.parametrize("tolerance", (float("nan"), float("inf")))
+def test_prefix_acceptance_rejects_nonfinite_tolerances(tolerance) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        PrefixParityAcceptance(
+            request_count=2,
+            prompt_tokens=4,
+            max_new_tokens=3,
+            comparison_tokens=2,
+            prompt_source_sha256=_SOURCE_SHA,
+            logprob_rtol=tolerance,
+        )
+
+
+def test_prefix_parity_cli_never_overwrites_foreign_output_created_during_compare(tmp_path, monkeypatch) -> None:
+    independent = tmp_path / "independent.json"
+    cached = tmp_path / "cached.json"
+    output = tmp_path / "parity.json"
+    foreign = b"foreign-output\n"
+
+    def create_foreign_output(*args, **kwargs):
+        del args, kwargs
+        output.write_bytes(foreign)
+        return {"passed": True}
+
+    monkeypatch.setattr(prefix_parity_module, "compare_prefix_artifacts", create_foreign_output)
+
+    with pytest.raises(FileExistsError):
+        prefix_parity_module.main(
+            [
+                "--independent-artifact",
+                str(independent),
+                "--cached-artifact",
+                str(cached),
+                "--output",
+                str(output),
+            ]
+        )
+
+    assert output.read_bytes() == foreign
+
+
+def test_prefix_parity_public_api_rejects_caller_loosened_acceptance() -> None:
+    with pytest.raises(TypeError):
+        prefix_parity_module.compare_prefix_artifacts(
+            "/independent.json",
+            "/cached.json",
+            acceptance=_acceptance(),
+        )
+
+
+def test_prefix_parity_cli_stops_after_reservation_inode_is_replaced(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "parity.json"
+    marker = tmp_path / "parity.inprogress"
+    foreign_marker = tmp_path / "foreign-marker"
+    foreign_payload = b"foreign-marker\n"
+
+    def replace_reservation(*args, **kwargs):
+        del args, kwargs
+        foreign_marker.write_bytes(foreign_payload)
+        foreign_marker.replace(marker)
+        return {"must_not_be_published": True}
+
+    monkeypatch.setattr(prefix_parity_module, "compare_prefix_artifacts", replace_reservation)
+
+    with pytest.raises(RuntimeError, match="ownership"):
+        prefix_parity_module.main(
+            [
+                "--independent-artifact",
+                str(tmp_path / "independent.json"),
+                "--cached-artifact",
+                str(tmp_path / "cached.json"),
+                "--output",
+                str(output),
+            ]
+        )
+
+    assert not output.exists()
+    assert marker.read_bytes() == foreign_payload

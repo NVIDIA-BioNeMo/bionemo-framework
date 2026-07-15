@@ -36,6 +36,8 @@ from bionemo.evo2.vllm.runner import (
     build_benchmark_contract,
     canonical_identity_phase_artifacts,
     checkpoint_provenance,
+    common_prefix_identity_context,
+    common_prefix_identity_phase_artifacts,
     full_decode_proof_summary,
     gpu_hardware_provenance,
     gpu_memory_headroom_evidence,
@@ -487,9 +489,10 @@ def _validate_wave_execution(
     *,
     expected_dp_ranks: tuple[int, ...],
     dp_size: int,
+    expected_generation_round: int,
     expected_global_start: int,
-    expected_call_index: int | None,
-) -> int:
+    expected_call_index: int,
+) -> None:
     if len(executions) != len(manifest.requests):
         raise AssertionError("execution metadata must cover every wave request")
     actual_ids = tuple(record.request_id for record in executions)
@@ -505,11 +508,10 @@ def _validate_wave_execution(
 
     call_indices = {record.call_index for record in executions}
     generation_rounds = {record.generation_round for record in executions}
-    if len(call_indices) != 1 or generation_rounds != call_indices:
-        raise AssertionError("each production generation call must own one persisted generation round")
-    call_index = next(iter(call_indices))
-    if expected_call_index is not None and call_index != expected_call_index:
-        raise AssertionError("successive production generation calls did not advance exactly once")
+    if generation_rounds != {expected_generation_round}:
+        raise AssertionError("physical generation calls drifted from the requested semantic generation round")
+    if call_indices != {expected_call_index}:
+        raise AssertionError("physical generation call index does not match its exact wave coordinate")
     request_index_by_rank = {rank: 0 for rank in range(dp_size)}
     for record in executions:
         request_index_in_stream = request_index_by_rank[record.dp_rank]
@@ -523,7 +525,6 @@ def _validate_wave_execution(
         if record.seed != expected_seed:
             raise AssertionError("persisted NeMo-RL request seed does not match its RNG coordinates")
         request_index_by_rank[record.dp_rank] += 1
-    return call_index
 
 
 def run_nemo_generation_phase(
@@ -533,6 +534,9 @@ def run_nemo_generation_phase(
     profile: Evo2VllmProfile,
     phase: str,
     sample_index: int,
+    generation_round: int,
+    global_call_index_start: int,
+    global_request_index_start: int,
     full_output_path: str | Path,
     namespace_output_path: str | Path | None = None,
     memory_monitor_factory: Any,
@@ -552,6 +556,8 @@ def run_nemo_generation_phase(
     require_namespace_ownership()
     if not phase:
         raise ValueError("phase cannot be empty")
+    if min(generation_round, global_call_index_start, global_request_index_start) < 0:
+        raise ValueError("generation and request coordinates must be nonnegative")
     if ray_get is None:
         import ray
 
@@ -572,8 +578,6 @@ def run_nemo_generation_phase(
     all_decode: list[float] = []
     generation_call_s = []
     wave_proofs = []
-    phase_global_start: int | None = None
-    previous_call_index: int | None = None
     prefix_cache_reset = False
     if profile.shared_prefix_state_reuse:
         if generation.invalidate_kv_cache() is not True:
@@ -599,6 +603,9 @@ def run_nemo_generation_phase(
             outputs = generation.generate(
                 build_nemo_generation_input(wave_manifest),
                 greedy=greedy,
+                generation_round=generation_round,
+                call_index=global_call_index_start + wave.wave_index,
+                global_request_offset=global_request_index_start + wave.start,
             )
             generation_call_s.append(clock() - begin)
             require_namespace_ownership()
@@ -623,26 +630,26 @@ def run_nemo_generation_phase(
             )
 
             expected_dp_ranks = tuple(shard.replica_index for shard in wave.shards for _ in range(shard.request_count))
-            if phase_global_start is None:
-                phase_global_start = executions[0].global_request_index - wave.start
-            call_index = _validate_wave_execution(
+            _validate_wave_execution(
                 wave_manifest,
                 executions,
                 expected_dp_ranks=expected_dp_ranks,
                 dp_size=profile.replica_count,
-                expected_global_start=phase_global_start + wave.start,
-                expected_call_index=None if previous_call_index is None else previous_call_index + 1,
+                expected_generation_round=generation_round,
+                expected_global_start=global_request_index_start + wave.start,
+                expected_call_index=global_call_index_start + wave.wave_index,
             )
-            previous_call_index = call_index
 
-            if profile.proof and len(engine_proofs) != len(wave.shards):
+            if profile.proof and len(engine_proofs) != profile.replica_count:
                 raise AssertionError(
                     f"wave {wave.wave_index} returned {len(engine_proofs)} engine proofs for "
-                    f"{len(wave.shards)} active DP replicas"
+                    f"{profile.replica_count} physical DP replicas"
                 )
             validated_engine_proofs = []
+            inactive_engine_proofs = []
             if profile.proof:
-                for shard, engine_proof in zip(wave.shards, engine_proofs, strict=True):
+                active_engine_proofs = engine_proofs[: len(wave.shards)]
+                for shard, engine_proof in zip(wave.shards, active_engine_proofs, strict=True):
                     if engine_proof.get("phase") != wave_phase:
                         raise AssertionError("engine proof phase does not match its request wave")
                     observations = list(engine_proof.get("cudagraph_observations", ()))
@@ -675,6 +682,22 @@ def run_nemo_generation_phase(
                             **engine_proof,
                         }
                     )
+                for dp_rank, engine_proof in enumerate(
+                    engine_proofs[len(wave.shards) :],
+                    start=len(wave.shards),
+                ):
+                    if engine_proof.get("phase") != wave_phase:
+                        raise AssertionError("inactive engine proof phase does not match its request wave")
+                    if engine_proof.get("cudagraph_observations") or engine_proof.get("scheduler_observations"):
+                        raise AssertionError("inactive DP replica executed scheduler or CUDA-graph work")
+                    inactive_engine_proofs.append(
+                        {
+                            "dp_rank": dp_rank,
+                            "request_count": 0,
+                            "inactive": True,
+                            **engine_proof,
+                        }
+                    )
             shared_prefix_reuse = None
             if profile.proof and profile.shared_prefix_state_reuse:
                 shared_prefix_reuse = shared_prefix_state_reuse_evidence(
@@ -683,6 +706,7 @@ def run_nemo_generation_phase(
                         outputs,
                         request_count=wave.request_count,
                     ),
+                    request_replica_ranks=expected_dp_ranks,
                     worker_proof=tuple(
                         worker for engine in validated_engine_proofs for worker in _inner_worker_proofs(engine)
                     ),
@@ -704,9 +728,12 @@ def run_nemo_generation_phase(
                     "start": wave.start,
                     "stop": wave.stop,
                     "request_count": wave.request_count,
+                    "generation_round": generation_round,
+                    "call_index": global_call_index_start + wave.wave_index,
                     "generation_s": generation_call_s[-1],
                     "reset_proof": reset_proof,
                     "engines": validated_engine_proofs,
+                    "inactive_engines": inactive_engine_proofs,
                     "full_vocab_logprobs": full_vocab_logprobs,
                     "shared_prefix_state_reuse": shared_prefix_reuse,
                 }
@@ -750,6 +777,7 @@ def run_nemo_generation_phase(
         records=all_records,
         execution_records=all_executions,
         decode_output_token_ids=decode_output_token_ids,
+        ownership_validator=require_namespace_ownership,
     )
     return NemoGenerationPhaseResult(
         phase=phase,
@@ -775,9 +803,6 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     """Launch the actual NeMo-RL TP1/DP2 path and retain exact production evidence."""
     if args.topology != "dp2":
         raise ValueError("run_nemo_dp2_benchmark requires topology=dp2")
-    if args.generation_round != 0:
-        raise ValueError("production NeMo-RL generation rounds advance from zero; use --generation-round=0")
-
     clock = __import__("time").perf_counter
     output_path = Path(args.output).resolve()
     require_output_namespace_reservation(output_path)
@@ -793,6 +818,10 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
         load_format=args.load_format,
     )
     preflight_s = clock() - preflight_begin
+
+    gpu_preflight_begin = clock()
+    gpu_identity = gpu_hardware_provenance()
+    gpu_preflight_s = clock() - gpu_preflight_begin
 
     import_begin = __import__("time").perf_counter()
     import nemo_rl
@@ -816,7 +845,9 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
         require_clean=True,
     )
     vllm_identity = vllm_installation_provenance()
-    gpu_identity = gpu_hardware_provenance()
+    from bionemo.evo2.vllm.sampler import sampler_installation_provenance
+
+    sampler_identity = sampler_installation_provenance(require_loaded_modules=False)
     runtime_attestation = runtime_attestation_contract(
         checkpoint=checkpoint_identity,
         sources={
@@ -824,6 +855,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             "nemo_rl": nemo_source_identity,
         },
         vllm_installation=vllm_identity,
+        sampler_installation=sampler_identity,
         gpu_hardware=gpu_identity,
     )
     benchmark_contract = {
@@ -912,6 +944,35 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             *((f"steady-{index}", args.warmups + index + 1) for index in range(args.repetitions)),
         )
         phase_results = []
+        calls_per_generation_round = len(
+            build_request_waves(
+                request_count=len(manifest.requests),
+                global_batch_size=profile.global_wave_size,
+                replica_count=profile.replica_count,
+            )
+        )
+        global_call_index_start = args.generation_round * calls_per_generation_round
+        serial_reference_result = None
+        if common_prefix_identity_context(args, manifest, profile) is not None:
+            serial_reference_result = run_nemo_generation_phase(
+                generation=generation,
+                manifest=manifest.request_slice(0, 1),
+                profile=profile,
+                phase="common-prefix-serial-reference",
+                sample_index=-1,
+                generation_round=args.generation_round,
+                global_call_index_start=global_call_index_start,
+                global_request_index_start=0,
+                full_output_path=phase_output_artifact_path(
+                    output_path,
+                    phase="common-prefix-serial-reference",
+                ),
+                namespace_output_path=output_path,
+                memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
+                ray_get=ray.get,
+                clock=clock,
+                decode_output_token_ids=output_decoder,
+            )
         for sample_index, (phase, _) in enumerate(phase_specs):
             phase_results.append(
                 run_nemo_generation_phase(
@@ -920,6 +981,9 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                     profile=profile,
                     phase=phase,
                     sample_index=sample_index,
+                    generation_round=args.generation_round,
+                    global_call_index_start=global_call_index_start,
+                    global_request_index_start=0,
                     full_output_path=phase_output_artifact_path(output_path, phase=phase),
                     namespace_output_path=output_path,
                     memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
@@ -951,6 +1015,11 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                     )
             memory_samples = [
                 init_memory.peak_device_memory_bytes,
+                *(
+                    [serial_reference_result.sample.peak_device_memory_bytes]
+                    if serial_reference_result is not None
+                    else []
+                ),
                 *(result.sample.peak_device_memory_bytes for result in phase_results),
             ]
             peak_device_memory = tuple(max(values) for values in zip(*memory_samples, strict=True))
@@ -976,6 +1045,15 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             args=args,
             manifest=manifest,
             profile=profile,
+            phase_artifacts=phase_artifacts,
+            decode_output_token_ids=output_decoder,
+            collect_physical_proof=profile.proof,
+        )
+        phase_artifacts, common_prefix_identity = common_prefix_identity_phase_artifacts(
+            args=args,
+            manifest=manifest,
+            profile=profile,
+            serial_reference_phase=(None if serial_reference_result is None else serial_reference_result.to_dict()),
             phase_artifacts=phase_artifacts,
             decode_output_token_ids=output_decoder,
             collect_physical_proof=profile.proof,
@@ -1010,9 +1088,14 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                 "nemo_rl": nemo_source_identity,
             },
             "vllm_installation_provenance": vllm_identity,
+            "sampler_installation_provenance": sampler_identity,
             "gpu_hardware_provenance": gpu_identity,
             "gpu_memory_headroom": memory_headroom,
             "canonical_identity": canonical_identity,
+            "common_prefix_identity": common_prefix_identity,
+            "common_prefix_serial_reference": (
+                None if serial_reference_result is None else serial_reference_result.to_dict()
+            ),
             "exact_generation_progress": exact_progress,
             "invocation": {
                 "argv": [__import__("sys").executable, *__import__("sys").argv],
@@ -1048,6 +1131,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             },
             "timing": {
                 "context_length_preflight_s": preflight_s,
+                "gpu_hardware_preflight_s": gpu_preflight_s,
                 "imports_s": import_s,
                 "provenance_hashing_s": provenance_s,
                 "ray_init_s": ray_init_s,
