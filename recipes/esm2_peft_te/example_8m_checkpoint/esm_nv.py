@@ -261,6 +261,12 @@ class NVEsmEncoder(nn.Module):
                 if kwargs.get("output_hidden_states", False):
                     all_hidden_states = (*all_hidden_states, hidden_states)
 
+                # PEFT replaces Transformer Engine's QKV module with a LoRA wrapper. TE 2.16 reads the module name
+                # while configuring quantizer roles, but the wrapper does not currently forward that attribute.
+                qkv_linear = layer_module.self_attention.layernorm_qkv
+                if not hasattr(qkv_linear, "name") and hasattr(qkv_linear, "get_base_layer"):
+                    qkv_linear.name = qkv_linear.get_base_layer().name
+
                 with self.get_autocast_context(layer_idx):
                     hidden_states = layer_module(
                         hidden_states,

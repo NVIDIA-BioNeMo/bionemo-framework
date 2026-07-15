@@ -78,7 +78,7 @@ def _engine(args):
 
 def main():
     """Parse args and dispatch to the serve / encode / batch subcommand."""
-    ap = argparse.ArgumentParser(description="Evo2 SAE inference (serve | encode | batch | generate)")
+    ap = argparse.ArgumentParser(description="Evo2 SAE inference (serve | encode | annotate | batch | generate)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     ps = sub.add_parser("serve", help="start the FastAPI inference server")
@@ -117,6 +117,27 @@ def main():
     pg.add_argument("--temperature", type=float, default=1.0)
     pg.add_argument("--top-k", type=int, default=0)
     pg.add_argument("--compare-baseline", action="store_true", help="also generate unsteered, for comparison")
+
+    pa = sub.add_parser(
+        "annotate",
+        help="per-base annotation (each feature's activation at every base): ONE --sequence -> JSON "
+        "(like /api/annotate), or a --fasta -> parquet",
+    )
+    _add_common(pa)
+    pa.add_argument("--sequence", help="ONE sequence -> JSON on stdout")
+    pa.add_argument("--fasta", help="MANY sequences -> parquet (needs --out)")
+    pa.add_argument("--out", help="output parquet path (required with --fasta)")
+    pa.add_argument("--organism", default="None (raw DNA)")
+    pa.add_argument(
+        "--top-k", type=int, default=16, help="annotate the top-k features by peak (ignored if --feature-ids)"
+    )
+    pa.add_argument("--feature-ids", help="comma-separated feature ids to annotate instead of top-k")
+    pa.add_argument(
+        "--long",
+        action="store_true",
+        help="batch parquet: one row per (sequence, feature, base) instead of a per-feature activations list column",
+    )
+    pa.add_argument("--batch-size", type=int, default=8)
 
     args = ap.parse_args()
 
@@ -186,6 +207,99 @@ def main():
         if out.get("baseline"):
             result["baseline_sequence"] = out["baseline"]["sequence"]
         print(json.dumps(result, indent=2))
+
+    elif args.cmd == "annotate":
+        if bool(args.sequence) == bool(args.fasta):
+            raise SystemExit("annotate: pass exactly one of --sequence or --fasta")
+
+        def _pick(codes, tag_len):
+            """Features to annotate: explicit --feature-ids, else top-k by peak."""
+            if args.feature_ids:
+                chosen = [int(i) for i in args.feature_ids.split(",") if i.strip()]
+                bad = sorted({i for i in chosen if not (0 <= i < eng.n_features)})
+                if bad:
+                    raise SystemExit(f"feature_id(s) {bad} out of range [0, {eng.n_features})")
+                return [{"feature_id": fid, "label": eng.label_for(fid)} for fid in chosen]
+            return eng.top_features(codes, tag_len=tag_len, k=args.top_k)
+
+        def _track(codes, tag_len, fid):
+            """Per-base activation of feature `fid` over the DNA region (tag stripped)."""
+            region = codes[tag_len:] if codes.shape[0] > tag_len else codes
+            return [round(float(v), 4) for v in region[:, fid].tolist()]
+
+        if args.sequence:  # ONE sequence -> JSON with per-base tracks (mirrors /api/annotate)
+            try:
+                dna, _tag, codes, tag_len = core.annotate(eng, args.sequence, args.organism)
+            except ValueError as e:
+                raise SystemExit(str(e))
+            feats = []
+            for f in _pick(codes, tag_len):
+                track = _track(codes, tag_len, f["feature_id"])
+                feats.append(
+                    {
+                        "feature_id": f["feature_id"],
+                        "label": f.get("label"),
+                        "max_activation": round(max(track), 4) if track else 0.0,
+                        "activations": track,
+                    }
+                )
+            print(
+                json.dumps(
+                    {
+                        "sequence": dna,
+                        "organism": args.organism,
+                        "tag_len": tag_len,
+                        "bases": len(dna),
+                        "layer": eng.layer,
+                        "features": feats,
+                    },
+                    indent=2,
+                )
+            )
+        else:  # FASTA -> parquet (per-base tracks; raw/untagged, like `batch`)
+            if not args.out:
+                raise SystemExit("annotate --fasta requires --out")
+            import pandas as pd
+
+            from .fasta import read_fasta
+
+            ids, seqs = [], []
+            for sid, seq in read_fasta(args.fasta):
+                ids.append(sid)
+                seqs.append(seq)
+            print(f"[annotate] {len(seqs)} sequences from {args.fasta}; encoding (batch_size={args.batch_size})…")
+            codes_list = eng.encode_batch(seqs, batch_size=args.batch_size)  # raw: no organism tag
+            rows = []
+            for sid, codes in zip(ids, codes_list):
+                for f in _pick(codes, 0):
+                    fid = f["feature_id"]
+                    track = _track(codes, 0, fid)
+                    if args.long:
+                        for pos, val in enumerate(track):
+                            rows.append(
+                                {
+                                    "sequence_id": sid,
+                                    "position": pos,
+                                    "feature_id": fid,
+                                    "label": f.get("label"),
+                                    "activation": val,
+                                }
+                            )
+                    else:
+                        rows.append(
+                            {
+                                "sequence_id": sid,
+                                "bp": int(codes.shape[0]),
+                                "feature_id": fid,
+                                "label": f.get("label"),
+                                "max_activation": round(max(track), 4) if track else 0.0,
+                                "activations": track,
+                            }
+                        )
+            df = pd.DataFrame(rows)
+            df.to_parquet(args.out, index=False)
+            shape = "long" if args.long else "per-feature"
+            print(f"[annotate] wrote {len(df)} rows for {len(seqs)} sequences -> {args.out} ({shape})")
 
 
 if __name__ == "__main__":

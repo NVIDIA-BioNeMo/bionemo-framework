@@ -176,6 +176,7 @@ SOURCE_TO_DESTINATION_MAP: dict[str, list[str]] = {
         "models/qwen/collator.py",
         "recipes/esm2_native_te/collator.py",
         "recipes/llama3_native_te/collator.py",
+        "recipes/mixtral_native_te/collator.py",
         "recipes/opengenome2_llama_native_te/collator.py",
         "recipes/esm2_peft_te/collator.py",
     ],
@@ -189,6 +190,12 @@ SOURCE_TO_DESTINATION_MAP: dict[str, list[str]] = {
     "models/llama3/modeling_llama_te.py": [
         "recipes/llama3_native_te/modeling_llama_te.py",
         "recipes/opengenome2_llama_native_te/modeling_llama_te.py",
+    ],
+    "models/mixtral/modeling_mixtral_te.py": [
+        "recipes/mixtral_native_te/modeling_mixtral_te.py",
+    ],
+    "models/mixtral/grouped_dcp.py": [
+        "recipes/mixtral_native_te/grouped_dcp.py",
     ],
     "models/llama3/nucleotide_fast_tokenizer": [
         "recipes/llama3_native_te/tokenizers/nucleotide_fast_tokenizer",

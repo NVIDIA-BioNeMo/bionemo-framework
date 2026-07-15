@@ -484,8 +484,12 @@ class Evo2SAE:
         return [hidden[i, : lens[i]].float() for i in range(b)]
 
     def feature_tracks(self, dna: str, fids: list[int]) -> dict:
-        """Per-base activation of several features on `dna`. {fid: [..]} (encoded once)."""
-        if not dna:
+        """Per-base activation of several features on `dna`. {fid: [..]} (encoded once).
+
+        No fids -> nothing to track, so skip the encode entirely: an unsteered generate() would
+        otherwise pay a full forward pass over the output just to return {}.
+        """
+        if not dna or not fids:
             return {int(f): [] for f in fids}
         codes = self.encode(dna)
         return {int(f): [round(float(v), 4) for v in codes[:, int(f)].tolist()] for f in fids}

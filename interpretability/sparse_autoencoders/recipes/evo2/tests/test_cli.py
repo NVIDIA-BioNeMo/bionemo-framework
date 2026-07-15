@@ -98,6 +98,43 @@ def test_batch_writes_parquet(fake, monkeypatch, capsys, tmp_path):
     assert {"sequence_id", "bp", "rank", "feature_id"} <= set(df.columns)
 
 
+# ------------------------------------------------------------------------------ annotate
+def test_annotate_single_per_base_tracks(fake, monkeypatch, capsys):
+    run(monkeypatch, "annotate", "--sequence", "ACGTACGT")
+    out = json.loads(capsys.readouterr().out)
+    assert out["bases"] == 8
+    f = out["features"][0]
+    assert {"feature_id", "label", "max_activation", "activations"} <= set(f)
+    assert len(f["activations"]) == out["bases"]  # one value per base = the heatmap track
+
+
+def test_annotate_batch_list_column(fake, monkeypatch, tmp_path):
+    fasta = tmp_path / "in.fa"
+    fasta.write_text(">a\nACGTACGT\n>b\nTTTT\n")
+    out = tmp_path / "annot.parquet"
+    run(monkeypatch, "annotate", "--fasta", str(fasta), "--out", str(out))
+    df = pd.read_parquet(out)
+    assert set(df["sequence_id"]) == {"a", "b"}
+    assert {"sequence_id", "bp", "feature_id", "label", "max_activation", "activations"} <= set(df.columns)
+    row = df[df["sequence_id"] == "a"].iloc[0]  # per-feature list column: track length == that seq's bp
+    assert len(row["activations"]) == row["bp"] == 8
+
+
+def test_annotate_batch_long_format(fake, monkeypatch, tmp_path):
+    fasta = tmp_path / "in.fa"
+    fasta.write_text(">a\nACGTACGT\n>b\nTTTT\n")
+    out = tmp_path / "annot_long.parquet"
+    run(monkeypatch, "annotate", "--fasta", str(fasta), "--out", str(out), "--long")
+    df = pd.read_parquet(out)
+    assert {"sequence_id", "position", "feature_id", "activation"} <= set(df.columns)
+    assert (df[df["sequence_id"] == "a"]["position"].max() + 1) == 8  # one row per (seq, feature, base)
+
+
+def test_annotate_requires_exactly_one_input(fake, monkeypatch):
+    with pytest.raises(SystemExit):
+        run(monkeypatch, "annotate")  # neither --sequence nor --fasta
+
+
 # ------------------------------------------------------- shared core helpers (CLI + API)
 def test_parse_clamp_spec_string_and_dict():
     assert core.parse_clamp_spec("29244:300") == {"feature_id": 29244, "strength": 300.0}

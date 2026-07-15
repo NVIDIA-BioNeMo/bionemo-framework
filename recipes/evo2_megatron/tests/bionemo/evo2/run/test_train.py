@@ -36,7 +36,7 @@ from bionemo.common.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH, DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 
-from ..utils import find_free_network_port, is_a6000_gpu, is_fp4_supported, is_fp8_supported, is_mxfp8_supported
+from ..utils import is_a6000_gpu, is_fp4_supported, is_fp8_supported, is_mxfp8_supported
 
 
 TensorLike = Union[torch.Tensor, Iterable[torch.Tensor]]
@@ -298,7 +298,6 @@ PRETEST_ENV = copy.deepcopy(os.environ)
 
 def _run_train_command(cmd: str, run_dir: Path) -> str:
     env = copy.deepcopy(PRETEST_ENV)
-    env["MASTER_PORT"] = str(find_free_network_port())
     result = subprocess.run(
         shlex.split(cmd),
         check=False,
@@ -330,7 +329,7 @@ def _distributed_training_cmd(
 ) -> str:
     micro_batch_size = 1 if dp == 2 else 2
     return (
-        f"torchrun --nproc-per-node {num_devices} --no-python train_evo2 "
+        f"torchrun --standalone --nproc-per-node {num_devices} --no-python train_evo2 "
         f"--mock-data --result-dir {path} "
         f"--hf-tokenizer-model-path {DEFAULT_HF_TOKENIZER_MODEL_PATH} "
         "--model-size evo2_7b --num-layers 4 --hybrid-override-pattern SDH* "
@@ -389,9 +388,8 @@ def test_fine_tuning(
         pytest.xfail(reason="FP8 subchannel scaling is not currently working with Evo2 on some GPUs.")
     run_dir = tmp_path / f"run_tp{tp_size}_pp{pp_size}_cp{cp_size}_dp{dp_size}_rc{dp_rank_check}_pr{precision_recipe}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    master_port = find_free_network_port()
     dp_rank_check_str = "--debug-ddp-parity-freq 5" if dp_rank_check else ""
-    cmd1 = f"""torchrun --nproc-per-node {world_size} --no-python --master_port {master_port} \
+    cmd1 = f"""torchrun --standalone --nproc-per-node {world_size} --no-python \
     train_evo2 \
         --hf-tokenizer-model-path {DEFAULT_HF_TOKENIZER_MODEL_PATH} \
         --model-size striped_hyena_1b_nv_parallel --num-layers 4 --hybrid-override-pattern SDH* \
