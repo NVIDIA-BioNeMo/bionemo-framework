@@ -41,6 +41,7 @@ class Evo2NemoRlGenerationWorkerImpl(VllmGenerationWorkerImpl):
         self._evo2_cudagraph_recorder = CUDAGraphProofRecorder()
         self._evo2_proof_phase = "unlabeled"
         self._evo2_observation_start = 0
+        self._evo2_scheduler_observation_start = 0
         manager.stat_loggers.append(self._evo2_cudagraph_recorder)
 
     def reset_evo2_proof_phase(self, phase: str) -> dict[str, Any]:
@@ -51,6 +52,7 @@ class Evo2NemoRlGenerationWorkerImpl(VllmGenerationWorkerImpl):
         self._evo2_proof_phase = phase
         self._evo2_cudagraph_recorder.start_phase(phase)
         self._evo2_observation_start = len(self._evo2_cudagraph_recorder.observations)
+        self._evo2_scheduler_observation_start = len(self._evo2_cudagraph_recorder.scheduler_observations)
         worker_reset = self.llm.collective_rpc("reset_evo2_proof_state", args=())
         return {"phase": phase, "worker_reset": worker_reset}
 
@@ -59,12 +61,16 @@ class Evo2NemoRlGenerationWorkerImpl(VllmGenerationWorkerImpl):
         if phase != self._evo2_proof_phase:
             raise ValueError(f"requested proof phase {phase!r} does not match active {self._evo2_proof_phase!r}")
         observations = tuple(self._evo2_cudagraph_recorder.observations[self._evo2_observation_start :])
+        scheduler_observations = tuple(
+            self._evo2_cudagraph_recorder.scheduler_observations[self._evo2_scheduler_observation_start :]
+        )
         worker_proof = self.llm.collective_rpc("snapshot_evo2_proof_state", args=())
         return {
             "phase": phase,
             "resolved_config": resolved_config_snapshot(self.llm.llm_engine.vllm_config),
             "cudagraph_observations": list(observations),
             "cudagraph_summary": summarize_cudagraph_observations(observations),
+            "scheduler_observations": list(scheduler_observations),
             "worker_proof": worker_proof,
         }
 

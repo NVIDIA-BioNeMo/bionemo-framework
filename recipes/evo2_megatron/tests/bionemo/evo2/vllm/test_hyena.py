@@ -10,6 +10,7 @@ import torch
 from torch.nn import functional
 from torch.profiler import ProfilerActivity, profile
 
+import bionemo.evo2.vllm.hyena as evo2_hyena
 from bionemo.evo2.vllm.config import Evo2Config
 from bionemo.evo2.vllm.hyena import Evo2HyenaDecoderLayer, Evo2HyenaMixer
 from bionemo.evo2.vllm.weights import refresh_derived_filters
@@ -18,6 +19,58 @@ from bionemo.evo2.vllm.weights import refresh_derived_filters
 DEVICE = "cuda"
 DTYPE = torch.float32
 CUDA_REQUIRED = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+
+@pytest.mark.parametrize(
+    ("enable_prefix_caching", "mamba_cache_mode", "mamba_block_size"),
+    [(False, "none", 128), (True, "align", 16)],
+)
+def test_hyena_cache_contract_accepts_uncached_or_native_align_mode(
+    enable_prefix_caching: bool,
+    mamba_cache_mode: str,
+    mamba_block_size: int,
+) -> None:
+    cache_config = type(
+        "CacheConfigStub",
+        (),
+        {
+            "enable_prefix_caching": enable_prefix_caching,
+            "mamba_cache_mode": mamba_cache_mode,
+            "block_size": 16,
+            "mamba_block_size": mamba_block_size,
+        },
+    )()
+
+    evo2_hyena._validate_evo2_cache_config(cache_config)
+
+
+@pytest.mark.parametrize(
+    ("enable_prefix_caching", "mamba_cache_mode", "mamba_block_size", "message"),
+    [
+        (True, "all", 16, "align"),
+        (True, "align", 32, "block size"),
+        (False, "align", 16, "disabled"),
+    ],
+)
+def test_hyena_cache_contract_rejects_unsupported_prefix_modes(
+    enable_prefix_caching: bool,
+    mamba_cache_mode: str,
+    mamba_block_size: int,
+    message: str,
+) -> None:
+    cache_config = type(
+        "CacheConfigStub",
+        (),
+        {
+            "enable_prefix_caching": enable_prefix_caching,
+            "mamba_cache_mode": mamba_cache_mode,
+            "block_size": 16,
+            "mamba_block_size": mamba_block_size,
+        },
+    )()
+
+    with pytest.raises(ValueError, match=message):
+        evo2_hyena._validate_evo2_cache_config(cache_config)
 
 
 def _config(symbol: str) -> Evo2Config:

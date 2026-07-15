@@ -141,6 +141,39 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert nemo_owned_llm_kwargs.isdisjoint(nemo_rl["vllm_kwargs"])
 
 
+def test_capacity_profile_exposes_global_wave_and_scheduler_ceiling() -> None:
+    profile = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=50_000,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.92,
+        global_wave_size=20,
+        max_num_seqs=20,
+    )
+
+    kwargs = profile.engine_kwargs(model="/checkpoint")
+    resolved = profile.expected_resolved_config()
+
+    assert profile.global_batch_size == 20
+    assert profile.gdpo_target_batch_size == 96
+    assert profile.per_engine_batch_size == 20
+    assert profile.resolved_max_num_seqs == 20
+    assert profile.gdpo_waves_to_96 == 5
+    assert kwargs["max_num_seqs"] == 20
+    assert kwargs["compilation_config"]["compile_sizes"] == [20]
+    assert kwargs["compilation_config"]["cudagraph_capture_sizes"][-1] == 20
+    assert all(size <= 20 for size in kwargs["compilation_config"]["cudagraph_capture_sizes"])
+    assert resolved["scheduler"]["max_num_seqs"] == 20
+    validate_resolved_profile(profile, resolved)
+
+    dp2 = replace(profile, topology="dp2", max_num_seqs=10)
+    assert dp2.global_wave_size == 20
+    assert dp2.gdpo_target_batch_size == 96
+    assert dp2.per_engine_batch_size == 10
+    assert dp2.resolved_max_num_seqs == 10
+    assert dp2.engine_kwargs(model="/checkpoint")["max_num_seqs"] == 10
+
+
 def test_long_prefill_profile_admits_multiple_packed_partial_requests() -> None:
     profile = Evo2VllmProfile(
         topology="tp2",
@@ -157,6 +190,37 @@ def test_long_prefill_profile_admits_multiple_packed_partial_requests() -> None:
     assert kwargs["max_long_partial_prefills"] == 8
     assert kwargs["long_prefill_token_threshold"] == 4_096
     assert kwargs["enable_chunked_prefill"] is True
+
+
+def test_shared_prefix_profile_pins_native_align_state_reuse() -> None:
+    profile = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=50_000,
+        max_num_batched_tokens=32_768,
+        gpu_memory_utilization=0.92,
+        shared_prefix_state_reuse=True,
+    )
+
+    kwargs = profile.engine_kwargs(model="/checkpoint")
+    nemo_rl = profile.nemo_rl_generation_config(load_format="dummy")
+    resolved = profile.expected_resolved_config()
+
+    assert kwargs["enable_prefix_caching"] is True
+    assert kwargs["mamba_cache_mode"] == "align"
+    assert kwargs["block_size"] == 16
+    assert kwargs["mamba_block_size"] == 16
+    assert nemo_rl["vllm_cfg"]["enable_prefix_caching"] is True
+    assert nemo_rl["vllm_kwargs"]["mamba_cache_mode"] == "align"
+    assert nemo_rl["vllm_kwargs"]["block_size"] == 16
+    assert nemo_rl["vllm_kwargs"]["mamba_block_size"] == 16
+    assert resolved["cache"] == {
+        "gpu_memory_utilization": 0.92,
+        "enable_prefix_caching": True,
+        "block_size": 16,
+        "mamba_cache_mode": "align",
+        "mamba_block_size": 16,
+    }
+    validate_resolved_profile(profile, resolved)
 
 
 def test_o3_throughput_profile_is_explicit_and_resolved_without_batch_drift() -> None:
@@ -226,6 +290,12 @@ def test_profile_rejects_unsupported_or_misleading_settings() -> None:
         replace(base, optimization_level=4)
     with pytest.raises(ValueError, match="performance_mode"):
         replace(base, performance_mode="latency")
+    with pytest.raises(ValueError, match="global_wave_size"):
+        replace(base, global_wave_size=0)
+    with pytest.raises(ValueError, match="divisible"):
+        replace(base, topology="dp2", global_wave_size=95)
+    with pytest.raises(ValueError, match="max_num_seqs"):
+        replace(base, max_num_seqs=95, global_wave_size=96)
 
 
 def test_resolved_profile_validation_requires_full_decode_graphs_and_no_fallback() -> None:
@@ -254,6 +324,33 @@ def test_resolved_profile_validation_requires_full_decode_graphs_and_no_fallback
         invalid[path[0]][path[1]] = value
         with pytest.raises(AssertionError, match=message):
             validate_resolved_profile(profile, invalid)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (("cache", "enable_prefix_caching"), False, "prefix caching"),
+        (("cache", "mamba_cache_mode"), "all", "align"),
+        (("cache", "mamba_block_size"), 32, "block size"),
+    ],
+)
+def test_shared_prefix_profile_rejects_resolved_cache_fallback(
+    path: tuple[str, str],
+    value,
+    message: str,
+) -> None:
+    profile = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=50_000,
+        max_num_batched_tokens=32_768,
+        gpu_memory_utilization=0.92,
+        shared_prefix_state_reuse=True,
+    )
+    invalid = json.loads(json.dumps(profile.expected_resolved_config()))
+    invalid[path[0]][path[1]] = value
+
+    with pytest.raises(AssertionError, match=message):
+        validate_resolved_profile(profile, invalid)
 
 
 def test_compilation_counter_snapshot_is_json_serializable() -> None:

@@ -18,6 +18,7 @@ Topology = Literal["tp2", "dp2"]
 PerformanceMode = Literal["balanced", "throughput"]
 
 _GLOBAL_BATCH_SIZE = 96
+_PREFIX_CACHE_BLOCK_SIZE = 16
 _TP2_CAPTURE_SIZES = (1, 2, 4, 8, 16, 24, 32, 40, 48, 64, 80, 96)
 _DP2_CAPTURE_SIZES = (1, 2, 4, 8, 16, 20, 24, 32, 40, 48)
 _COUNTER_FIELDS = (
@@ -45,14 +46,29 @@ class Evo2VllmProfile:
     long_prefill_chunk_tokens: int = 0
     optimization_level: int = 2
     performance_mode: PerformanceMode = "balanced"
+    shared_prefix_state_reuse: bool = False
+    global_wave_size: int = _GLOBAL_BATCH_SIZE
+    max_num_seqs: int | None = None
 
     def __post_init__(self) -> None:
         """Validate settings before an engine can consume them."""
         if self.topology not in ("tp2", "dp2"):
             raise ValueError(f"unsupported topology: {self.topology}")
+        if (
+            isinstance(self.global_wave_size, bool)
+            or not isinstance(self.global_wave_size, int)
+            or self.global_wave_size <= 0
+        ):
+            raise ValueError("global_wave_size must be a positive integer")
+        if self.global_wave_size % self.replica_count:
+            raise ValueError("global_wave_size must be divisible by the topology replica count")
+        if self.resolved_max_num_seqs < self.per_engine_batch_size:
+            raise ValueError("max_num_seqs must cover every request in one per-engine wave")
+        if self.resolved_max_num_seqs <= 0:
+            raise ValueError("max_num_seqs must be positive")
         if self.max_model_len <= 0:
             raise ValueError("max_model_len must be positive")
-        if self.max_num_batched_tokens < self.per_engine_batch_size:
+        if self.max_num_batched_tokens < self.resolved_max_num_seqs:
             raise ValueError("max_num_batched_tokens must cover one decode token per active request")
         if not 0 < self.gpu_memory_utilization < 1:
             raise ValueError("gpu_memory_utilization must be between zero and one")
@@ -73,7 +89,12 @@ class Evo2VllmProfile:
 
     @property
     def global_batch_size(self) -> int:
-        """Return the GDPO-wide request count."""
+        """Return the physical global request count submitted in one call."""
+        return self.global_wave_size
+
+    @property
+    def gdpo_target_batch_size(self) -> int:
+        """Return the fixed request target used for one GDPO optimization batch."""
         return _GLOBAL_BATCH_SIZE
 
     @property
@@ -89,12 +110,26 @@ class Evo2VllmProfile:
     @property
     def per_engine_batch_size(self) -> int:
         """Return the real request count handled by each engine."""
-        return self.global_batch_size // self.replica_count
+        return self.global_wave_size // self.replica_count
+
+    @property
+    def resolved_max_num_seqs(self) -> int:
+        """Return the explicit per-engine scheduler request ceiling."""
+        return self.per_engine_batch_size if self.max_num_seqs is None else self.max_num_seqs
+
+    @property
+    def gdpo_waves_to_96(self) -> int:
+        """Return the number of explicit global calls needed for one 96-request GDPO batch."""
+        return (self.gdpo_target_batch_size + self.global_wave_size - 1) // self.global_wave_size
 
     @property
     def cudagraph_capture_sizes(self) -> tuple[int, ...]:
         """Return explicit decode graph sizes through the real batch size."""
-        return _TP2_CAPTURE_SIZES if self.topology == "tp2" else _DP2_CAPTURE_SIZES
+        defaults = _TP2_CAPTURE_SIZES if self.topology == "tp2" else _DP2_CAPTURE_SIZES
+        sizes = {size for size in defaults if size <= self.resolved_max_num_seqs}
+        sizes.add(self.per_engine_batch_size)
+        sizes.add(self.resolved_max_num_seqs)
+        return tuple(sorted(sizes))
 
     def engine_kwargs(
         self,
@@ -118,14 +153,14 @@ class Evo2VllmProfile:
             "pipeline_parallel_size": 1,
             "gpu_memory_utilization": self.gpu_memory_utilization,
             "max_model_len": self.max_model_len,
-            "max_num_seqs": self.per_engine_batch_size,
+            "max_num_seqs": self.resolved_max_num_seqs,
             "max_num_batched_tokens": self.max_num_batched_tokens,
             "enable_chunked_prefill": True,
             "max_num_partial_prefills": self.max_concurrent_partial_prefills,
             "max_long_partial_prefills": self.max_concurrent_partial_prefills,
             "long_prefill_token_threshold": self.long_prefill_chunk_tokens,
-            "enable_prefix_caching": False,
-            "mamba_cache_mode": "none",
+            "enable_prefix_caching": self.shared_prefix_state_reuse,
+            "mamba_cache_mode": "align" if self.shared_prefix_state_reuse else "none",
             "mamba_cache_dtype": "float32",
             "mamba_ssm_cache_dtype": "float32",
             "kv_cache_dtype": "auto",
@@ -139,9 +174,12 @@ class Evo2VllmProfile:
                 "cudagraph_mode": "FULL_AND_PIECEWISE",
                 "cudagraph_num_of_warmups": 1,
                 "cudagraph_capture_sizes": list(self.cudagraph_capture_sizes),
-                "compile_sizes": [self.per_engine_batch_size],
+                "compile_sizes": sorted({self.per_engine_batch_size, self.resolved_max_num_seqs}),
             },
         }
+        if self.shared_prefix_state_reuse:
+            kwargs["block_size"] = _PREFIX_CACHE_BLOCK_SIZE
+            kwargs["mamba_block_size"] = _PREFIX_CACHE_BLOCK_SIZE
         if self.topology == "tp2":
             kwargs["distributed_executor_backend"] = "ray"
         return kwargs
@@ -198,7 +236,7 @@ class Evo2VllmProfile:
                 "precision": "bfloat16",
                 "kv_cache_dtype": "auto",
                 "enforce_eager": False,
-                "enable_prefix_caching": False,
+                "enable_prefix_caching": self.shared_prefix_state_reuse,
             },
             "vllm_kwargs": {
                 **engine_kwargs,
@@ -222,7 +260,7 @@ class Evo2VllmProfile:
                 "pipeline_parallel_size": 1,
             },
             "scheduler": {
-                "max_num_seqs": self.per_engine_batch_size,
+                "max_num_seqs": self.resolved_max_num_seqs,
                 "max_num_batched_tokens": self.max_num_batched_tokens,
                 "enable_chunked_prefill": True,
                 "max_num_partial_prefills": self.max_concurrent_partial_prefills,
@@ -232,18 +270,17 @@ class Evo2VllmProfile:
             },
             "cache": {
                 "gpu_memory_utilization": self.gpu_memory_utilization,
-                "enable_prefix_caching": False,
-                "mamba_cache_mode": "none",
-                # vLLM 0.20 rejects an explicit value when prefix caching is off,
-                # then resolves the omitted accounting block to max_model_len.
-                "mamba_block_size": self.max_model_len,
+                "enable_prefix_caching": self.shared_prefix_state_reuse,
+                "block_size": _PREFIX_CACHE_BLOCK_SIZE,
+                "mamba_cache_mode": "align" if self.shared_prefix_state_reuse else "none",
+                "mamba_block_size": _PREFIX_CACHE_BLOCK_SIZE if self.shared_prefix_state_reuse else self.max_model_len,
             },
             "compilation": {
                 "mode": 3,
                 "backend": "inductor",
                 "cudagraph_mode": "FULL_AND_PIECEWISE",
                 "cudagraph_capture_sizes": list(self.cudagraph_capture_sizes),
-                "compile_sizes": [self.per_engine_batch_size],
+                "compile_sizes": sorted({self.per_engine_batch_size, self.resolved_max_num_seqs}),
             },
             "observability": {"cudagraph_metrics": self.proof},
         }
@@ -315,6 +352,7 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
         "cache": {
             "gpu_memory_utilization": cache.gpu_memory_utilization,
             "enable_prefix_caching": cache.enable_prefix_caching,
+            "block_size": cache.block_size,
             "mamba_cache_mode": cache.mamba_cache_mode,
             "mamba_block_size": cache.mamba_block_size,
         },
@@ -331,6 +369,7 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
 
 def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]) -> None:
     """Reject any resolved setting that weakens the optimized proof profile."""
+
     def require(condition: bool, message: str) -> None:
         if not condition:
             raise AssertionError(message)
@@ -346,7 +385,7 @@ def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]
         resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size,
         "tensor_parallel_size drifted",
     )
-    require(resolved["scheduler"]["max_num_seqs"] == profile.per_engine_batch_size, "max_num_seqs drifted")
+    require(resolved["scheduler"]["max_num_seqs"] == profile.resolved_max_num_seqs, "max_num_seqs drifted")
     require(
         resolved["scheduler"]["max_num_batched_tokens"] == profile.max_num_batched_tokens,
         "max_num_batched_tokens drifted",
@@ -356,12 +395,26 @@ def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]
         resolved["scheduler"]["async_scheduling"] is profile.async_scheduling,
         "async scheduling drifted",
     )
-    require(resolved["cache"]["enable_prefix_caching"] is False, "prefix caching must remain disabled")
-    require(resolved["cache"]["mamba_cache_mode"] == "none", "mamba_cache_mode must remain none")
     require(
-        resolved["cache"]["mamba_block_size"] == profile.max_model_len,
-        "resolved mamba_block_size must equal max_model_len when prefix caching is disabled",
+        resolved["cache"]["enable_prefix_caching"] is profile.shared_prefix_state_reuse,
+        "prefix caching drifted",
     )
+    if profile.shared_prefix_state_reuse:
+        require(resolved["cache"]["mamba_cache_mode"] == "align", "prefix reuse requires align mode")
+        require(
+            resolved["cache"]["block_size"] == _PREFIX_CACHE_BLOCK_SIZE,
+            "prefix-cache block size drifted",
+        )
+        require(
+            resolved["cache"]["mamba_block_size"] == resolved["cache"]["block_size"],
+            "Mamba and attention block sizes must match for align mode",
+        )
+    else:
+        require(resolved["cache"]["mamba_cache_mode"] == "none", "mamba_cache_mode must remain none")
+        require(
+            resolved["cache"]["mamba_block_size"] == profile.max_model_len,
+            "resolved mamba_block_size must equal max_model_len when prefix caching is disabled",
+        )
     require(resolved["compilation"]["mode"] == 3, "VLLM_COMPILE mode 3 is required")
     require(resolved["compilation"]["backend"] == "inductor", "Inductor backend is required")
     require(
@@ -369,9 +422,11 @@ def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]
         "FULL_AND_PIECEWISE is required for FULL steady decode",
     )
     capture_sizes = resolved["compilation"]["cudagraph_capture_sizes"]
+    require(profile.resolved_max_num_seqs in capture_sizes, "scheduler ceiling must be CUDA-graph captured")
     require(profile.per_engine_batch_size in capture_sizes, "real topology batch must be CUDA-graph captured")
     require(
-        resolved["compilation"]["compile_sizes"] == [profile.per_engine_batch_size],
+        resolved["compilation"]["compile_sizes"]
+        == sorted({profile.per_engine_batch_size, profile.resolved_max_num_seqs}),
         "real topology batch must be statically compiled",
     )
     if profile.proof:

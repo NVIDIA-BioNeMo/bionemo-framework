@@ -30,11 +30,16 @@ from bionemo.evo2.vllm.runner import (
     full_decode_proof_summary,
     make_nvml_memory_reader,
     phase_output_artifact_path,
+    profile_from_args,
     request_seed,
     require_output_namespace_reservation,
     runtime_versions,
+    scheduler_capacity_proof_summary,
+    shared_prefix_state_reuse_evidence,
     source_provenance,
     validate_full_decode_proof,
+    validate_scheduler_capacity_proof,
+    wave_execution_summary,
     write_full_generation_records_artifact,
 )
 
@@ -46,6 +51,25 @@ _OUTPUT_METADATA_KEYS = (
     "generation_call_indices",
     "generation_dp_ranks",
 )
+
+
+def cached_tokens_from_nemo_generation_output(
+    outputs: BatchedDataDict,
+    *,
+    request_count: int,
+) -> tuple[int, ...]:
+    """Read exact scheduler cache hits from the recombined production output."""
+    values = outputs.get("generation_num_cached_tokens")
+    if not isinstance(values, torch.Tensor):
+        raise AssertionError("production NeMo-RL output is missing cached-token telemetry")
+    if values.ndim != 1 or values.shape[0] != request_count:
+        raise AssertionError("production cached-token telemetry must align with every request")
+    if values.dtype == torch.bool or torch.is_floating_point(values) or torch.is_complex(values):
+        raise AssertionError("production cached-token telemetry must use an integer tensor")
+    result = tuple(int(value) for value in values.tolist())
+    if any(value < 0 for value in result):
+        raise AssertionError("production cached-token telemetry cannot be negative")
+    return result
 
 
 def build_nemo_generation_config(
@@ -403,6 +427,7 @@ class NemoGenerationPhaseResult:
             "phase": self.phase,
             "sample": self.sample.to_dict(),
             "generation_call_s": list(self.generation_call_s),
+            "wave_execution": wave_execution_summary(self.wave_proofs),
             "outputs": list(self.output_summaries),
             "request_executions": [record.to_dict() for record in self.request_executions],
             "full_output_artifact": self.full_output_artifact,
@@ -504,6 +529,11 @@ def run_nemo_generation_phase(
     wave_proofs = []
     phase_global_start: int | None = None
     previous_call_index: int | None = None
+    prefix_cache_reset = False
+    if profile.shared_prefix_state_reuse:
+        if generation.invalidate_kv_cache() is not True:
+            raise AssertionError("shared-prefix NeMo-RL phase requires a successful cache invalidation")
+        prefix_cache_reset = True
 
     with memory_monitor_factory() as monitor:
         for wave in waves:
@@ -567,6 +597,14 @@ def run_nemo_generation_phase(
                     batch_size=shard.request_count,
                     max_new_tokens=manifest.max_new_tokens,
                 )
+                scheduler_proof = scheduler_capacity_proof_summary(
+                    list(engine_proof.get("scheduler_observations", ())),
+                    phase=wave_phase,
+                    global_wave_size=wave.request_count,
+                    engine_request_count=shard.request_count,
+                    max_num_seqs=profile.resolved_max_num_seqs,
+                )
+                validate_scheduler_capacity_proof(scheduler_proof)
                 if profile.proof:
                     validate_full_decode_proof(
                         observations,
@@ -579,9 +617,31 @@ def run_nemo_generation_phase(
                         "dp_rank": shard.replica_index,
                         "request_count": shard.request_count,
                         "full_decode_proof": proof_summary,
+                        "scheduler_capacity_proof": scheduler_proof,
                         **engine_proof,
                     }
                 )
+            shared_prefix_reuse = None
+            if profile.shared_prefix_state_reuse:
+                shared_prefix_reuse = shared_prefix_state_reuse_evidence(
+                    wave_manifest,
+                    cached_tokens=cached_tokens_from_nemo_generation_output(
+                        outputs,
+                        request_count=wave.request_count,
+                    ),
+                    worker_proof=tuple(
+                        worker for engine in validated_engine_proofs for worker in _inner_worker_proofs(engine)
+                    ),
+                    expected_worker_clone_counts=tuple(
+                        shard.request_count - int(wave.wave_index == 0) for shard in wave.shards
+                    ),
+                    cache_block_size=int(validated_engine_proofs[0]["resolved_config"]["cache"]["block_size"]),
+                    expected_cache_misses=len(wave.shards) if wave.wave_index == 0 else 0,
+                )
+                shared_prefix_reuse = {
+                    **shared_prefix_reuse,
+                    "phase_prefix_cache_reset_before_first_wave": prefix_cache_reset,
+                }
 
             wave_proofs.append(
                 {
@@ -590,10 +650,11 @@ def run_nemo_generation_phase(
                     "start": wave.start,
                     "stop": wave.stop,
                     "request_count": wave.request_count,
-                    "generation_call_s": generation_call_s[-1],
+                    "generation_s": generation_call_s[-1],
                     "reset_proof": reset_proof,
                     "engines": validated_engine_proofs,
                     "full_vocab_logprobs": full_vocab_logprobs,
+                    "shared_prefix_state_reuse": shared_prefix_reuse,
                 }
             )
             all_records.extend(records)
@@ -663,18 +724,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     output_path = Path(args.output).resolve()
     require_output_namespace_reservation(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    profile = Evo2VllmProfile(
-        topology="dp2",
-        max_model_len=args.max_model_len or manifest.max_total_tokens,
-        max_num_batched_tokens=args.max_num_batched_tokens,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        async_scheduling=args.async_scheduling,
-        proof=args.proof,
-        max_concurrent_partial_prefills=args.max_concurrent_partial_prefills,
-        long_prefill_chunk_tokens=args.long_prefill_chunk_tokens,
-        optimization_level=args.optimization_level,
-        performance_mode=args.performance_mode,
-    )
+    profile = profile_from_args(args, manifest)
     preflight_begin = clock()
     preflight = context_length_preflight(
         profile,
@@ -831,10 +881,15 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                 "replicas": 2,
                 "tensor_parallel_size_per_replica": 1,
                 "global_batch_size": profile.global_batch_size,
+                "global_wave_size": profile.global_wave_size,
                 "per_engine_batch_size": profile.per_engine_batch_size,
+                "per_engine_max_num_seqs": profile.resolved_max_num_seqs,
+                "gdpo_target_request_count": profile.gdpo_target_batch_size,
+                "planned_waves_to_96": profile.gdpo_waves_to_96,
                 "semantic_padding": False,
-                "prefix_caching": False,
-                "shared_prefix_state_reuse": False,
+                "prefix_caching": profile.shared_prefix_state_reuse,
+                "mamba_cache_mode": "align" if profile.shared_prefix_state_reuse else "none",
+                "shared_prefix_state_reuse": profile.shared_prefix_state_reuse,
             },
             "timing": {
                 "context_length_preflight_s": preflight_s,

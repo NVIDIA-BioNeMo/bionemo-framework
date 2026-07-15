@@ -3,7 +3,9 @@
 
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -172,6 +174,7 @@ def test_model_state_contract_has_no_length_ceiling_and_copies_whole_ds_blocks(m
         assert length_contract["hyena_state_shapes"] == [[48, 2], [16, 6]]
         assert length_contract["hyena_state_length_dependent"] is False
         assert length_contract["position_clipping"] is False
+    evo2_model.reset_mamba_state_copy_stats()
     projection_copy, operator_copy = Evo2ForCausalLM.get_mamba_state_copy_func()
     projection_state = torch.arange(3 * 48 * 2, dtype=torch.float32).view(3, 48, 2)
     operator_state = torch.arange(3 * 16 * 6, dtype=torch.float32).view(3, 16, 6)
@@ -182,8 +185,150 @@ def test_model_state_contract_has_no_length_ceiling_and_copies_whole_ds_blocks(m
     assert projection_spec.num_elements == projection_state[2].numel()
     assert operator_spec.start_addr == operator_state[1].data_ptr()
     assert operator_spec.num_elements == operator_state[1].numel()
+    assert evo2_model.get_mamba_state_copy_stats() == {
+        "copy_calls": 2,
+        "copied_elements": projection_state[2].numel() + operator_state[1].numel(),
+        "copied_bytes": (
+            projection_state[2].numel() * projection_state.element_size()
+            + operator_state[1].numel() * operator_state.element_size()
+        ),
+    }
     with pytest.raises(ValueError, match="speculative"):
         projection_copy(projection_state, [1, 2], 0, 2)
+    evo2_model.reset_mamba_state_copy_stats()
+    assert evo2_model.get_mamba_state_copy_stats() == {
+        "copy_calls": 0,
+        "copied_elements": 0,
+        "copied_bytes": 0,
+    }
+
+
+def test_mamba_prefix_clone_hook_records_exact_request_scoped_fp32_copy_bytes() -> None:
+    module = SimpleNamespace()
+
+    def collect(
+        copy_bufs,
+        kv_cache_config,
+        mamba_state_copy_funcs,
+        mamba_group_ids,
+        src_block_idx,
+        dest_block_idx,
+        accept_token_bias,
+        req_state,
+        forward_context,
+    ):
+        del (
+            kv_cache_config,
+            mamba_state_copy_funcs,
+            mamba_group_ids,
+            src_block_idx,
+            dest_block_idx,
+            accept_token_bias,
+            req_state,
+        )
+        for state in forward_context["layer"].kv_cache:
+            copy_bufs.sizes.np[copy_bufs.offset] = state[0].numel() * state.element_size()
+            copy_bufs.offset += 1
+
+    def preprocess(
+        scheduler_output,
+        kv_cache_config,
+        cache_config,
+        mamba_state_idx,
+        input_batch,
+        requests,
+        forward_context,
+        mamba_state_copy_funcs,
+        copy_bufs,
+    ):
+        del cache_config, mamba_state_idx
+        for req_id in input_batch.req_ids:
+            req_state = requests[req_id]
+            if req_state.num_computed_tokens:
+                module.collect_mamba_copy_meta(
+                    copy_bufs,
+                    kv_cache_config,
+                    mamba_state_copy_funcs,
+                    copy_bufs.mamba_group_ids,
+                    0,
+                    1,
+                    0,
+                    req_state,
+                    forward_context,
+                )
+
+    module.collect_mamba_copy_meta = collect
+    module.preprocess_mamba = preprocess
+    evo2_model.install_mamba_prefix_clone_proof_hook(module)
+    installed = module.preprocess_mamba
+    evo2_model.install_mamba_prefix_clone_proof_hook(module)
+    assert module.preprocess_mamba is installed
+
+    states = (
+        torch.zeros((3, 2, 3), dtype=torch.float32),
+        torch.zeros((3, 5), dtype=torch.float32),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(layer_names=["layer"])]
+    )
+    copy_bufs = SimpleNamespace(
+        offset=0,
+        sizes=SimpleNamespace(np=np.zeros(8, dtype=np.int32)),
+        mamba_group_ids=[0],
+        mamba_spec=SimpleNamespace(block_size=16),
+    )
+    requests = {
+        "miss": SimpleNamespace(
+            req_id="miss",
+            num_computed_tokens=0,
+            num_prompt_tokens=32,
+            output_token_ids=[],
+        ),
+        "clone": SimpleNamespace(
+            req_id="clone",
+            num_computed_tokens=16,
+            num_prompt_tokens=32,
+            output_token_ids=[],
+        ),
+    }
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id="miss"),
+            SimpleNamespace(req_id="clone"),
+        ]
+    )
+
+    evo2_model.reset_mamba_prefix_clone_stats()
+    module.preprocess_mamba(
+        scheduler_output,
+        kv_cache_config,
+        SimpleNamespace(),
+        {},
+        SimpleNamespace(req_ids=["miss", "clone"]),
+        requests,
+        {"layer": SimpleNamespace(kv_cache=states)},
+        (object(), object()),
+        copy_bufs,
+    )
+
+    assert evo2_model.get_mamba_prefix_clone_stats() == {
+        "clone_count": 1,
+        "requests": [
+            {
+                "request_id": "clone",
+                "num_computed_tokens": 16,
+                "prompt_tokens": 32,
+                "block_size": 16,
+                "copy_entries": 2,
+                "copied_elements": 11,
+                "copied_bytes": 44,
+                "expected_copy_entries": 2,
+                "expected_copied_elements": 11,
+                "expected_copied_bytes": 44,
+                "all_state_dtypes_fp32": True,
+            }
+        ],
+    }
 
 
 @CUDA_REQUIRED

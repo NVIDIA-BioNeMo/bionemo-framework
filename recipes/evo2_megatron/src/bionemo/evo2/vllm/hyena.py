@@ -133,6 +133,18 @@ class _HCLOperator(nn.Module):
         self.filter = _HCLFilter(groups, state_size, device=device)
 
 
+def _validate_evo2_cache_config(cache_config: CacheConfig) -> None:
+    """Accept only uncached execution or vLLM's physical align-mode state reuse."""
+    if not cache_config.enable_prefix_caching:
+        if cache_config.mamba_cache_mode != "none":
+            raise ValueError("mamba cache mode must be 'none' when prefix caching is disabled")
+        return
+    if cache_config.mamba_cache_mode != "align":
+        raise ValueError("Evo2 prefix caching supports only mamba_cache_mode='align'")
+    if cache_config.mamba_block_size != cache_config.block_size:
+        raise ValueError("Evo2 align mode requires matching Mamba and attention block sizes")
+
+
 def _one_dimensional_state_indices(state_indices: torch.Tensor, *, kind: str) -> torch.Tensor:
     if state_indices.ndim == 1:
         return state_indices
@@ -178,8 +190,7 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
 
         if operator_type not in ("S", "D", "H"):
             raise ValueError(f"unsupported Evo2 Hyena operator type: {operator_type}")
-        if cache_config.mamba_cache_mode != "none" or cache_config.enable_prefix_caching:
-            raise ValueError("Evo2 vLLM inference requires prefix caching disabled and mamba_cache_mode='none'")
+        _validate_evo2_cache_config(cache_config)
 
         tp_size = 1 if disable_tp else get_tensor_model_parallel_world_size()
         if config.hidden_size % tp_size:

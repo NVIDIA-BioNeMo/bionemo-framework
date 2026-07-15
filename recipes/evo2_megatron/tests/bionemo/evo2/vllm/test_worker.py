@@ -111,9 +111,20 @@ def test_nemo_generation_worker_records_outer_graph_and_inner_route_proof(monkey
                 num_padded_tokens=48,
                 num_paddings=0,
                 runtime_mode="CUDAGraphMode.FULL",
-            )
+            ),
+            prefix_cache_stats=SimpleNamespace(
+                preempted_requests=0,
+                preempted_queries=0,
+                preempted_hits=0,
+            ),
+            num_running_reqs=48,
+            num_waiting_reqs=0,
+            num_skipped_waiting_reqs=0,
         ),
-        None,
+        SimpleNamespace(
+            num_preempted_reqs=0,
+            prompt_token_stats=SimpleNamespace(computed=384, cached_tokens=0, total=384),
+        ),
     )
 
     proof = worker.snapshot_evo2_proof_phase("steady-0")
@@ -122,6 +133,8 @@ def test_nemo_generation_worker_records_outer_graph_and_inner_route_proof(monkey
     assert proof["phase"] == "steady-0"
     assert proof["cudagraph_observations"][0]["num_unpadded_tokens"] == 48
     assert proof["cudagraph_summary"][0]["count"] == 1
+    assert proof["scheduler_observations"][0]["preemption_events"] == 0
+    assert proof["scheduler_observations"][0]["prompt_tokens_computed"] == 384
     assert proof["resolved_config"] == {"resolved": "engine-config"}
     assert proof["worker_proof"][0]["fir_routes"]["equal_length_conv"]["calls"] == 9
     assert rpc_calls == [

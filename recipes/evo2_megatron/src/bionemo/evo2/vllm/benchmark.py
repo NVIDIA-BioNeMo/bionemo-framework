@@ -750,6 +750,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-model-len", type=int)
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--request-count", type=int)
+    parser.add_argument("--global-wave-size", type=int, default=96)
+    parser.add_argument("--max-num-seqs", type=int)
     parser.add_argument("--uniform-prompt-length", type=int)
     parser.add_argument("--request-id-prefix", default="benchmark")
     parser.add_argument("--prompt-jsonl", type=Path)
@@ -767,6 +769,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--async-scheduling", action="store_true")
     parser.add_argument("--max-concurrent-partial-prefills", type=int, default=1)
     parser.add_argument("--long-prefill-chunk-tokens", type=int, default=0)
+    parser.add_argument("--shared-prefix-state-reuse", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     return parser
 

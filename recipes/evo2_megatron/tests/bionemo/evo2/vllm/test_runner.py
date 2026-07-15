@@ -37,7 +37,28 @@ def _scheduler_stats(
             num_padded_tokens=padded,
             num_paddings=padded - unpadded,
             runtime_mode=mode,
-        )
+        ),
+        prefix_cache_stats=SimpleNamespace(
+            preempted_requests=0,
+            preempted_queries=0,
+            preempted_hits=0,
+        ),
+        num_running_reqs=unpadded,
+        num_waiting_reqs=0,
+        num_skipped_waiting_reqs=0,
+    )
+
+
+def _iteration_stats(
+    *,
+    preempted: int = 0,
+    computed: int = 0,
+    cached_tokens: int = 0,
+    total: int = 0,
+):
+    return SimpleNamespace(
+        num_preempted_reqs=preempted,
+        prompt_token_stats=SimpleNamespace(computed=computed, cached_tokens=cached_tokens, total=total),
     )
 
 
@@ -74,6 +95,93 @@ def test_cudagraph_recorder_persists_phase_and_runtime_mode_without_log_resets()
             "runtime_mode": "CUDAGraphMode.FULL",
         },
     ]
+
+
+def test_scheduler_capacity_proof_retains_and_rejects_preemption_recompute() -> None:
+    recorder = CUDAGraphProofRecorder()
+    recorder.start_phase("capacity.wave-000")
+    recorder.record(
+        SimpleNamespace(
+            cudagraph_stats=None,
+            prefix_cache_stats=SimpleNamespace(
+                preempted_requests=1,
+                preempted_queries=100,
+                preempted_hits=20,
+            ),
+            num_running_reqs=20,
+            num_waiting_reqs=76,
+            num_skipped_waiting_reqs=0,
+        ),
+        SimpleNamespace(
+            num_preempted_reqs=1,
+            prompt_token_stats=SimpleNamespace(
+                computed=80,
+                cached_tokens=20,
+                total=100,
+            ),
+        ),
+        engine_idx=0,
+    )
+
+    proof = runner.scheduler_capacity_proof_summary(
+        recorder.scheduler_observations,
+        phase="capacity.wave-000",
+        global_wave_size=20,
+        max_num_seqs=20,
+    )
+
+    assert proof["preemption_events"] == 1
+    assert proof["recompute_events"] == 1
+    assert proof["preempted_prompt_recomputed_tokens"] == 80
+    assert proof["prompt_tokens_computed"] == 80
+    assert proof["batch_fit_without_preemption"] is False
+    with pytest.raises(AssertionError, match="preempt"):
+        runner.validate_scheduler_capacity_proof(proof)
+
+
+def test_scheduler_capacity_proof_rejects_missing_iteration_telemetry() -> None:
+    proof = runner.scheduler_capacity_proof_summary(
+        [],
+        phase="capacity.wave-000",
+        global_wave_size=20,
+        max_num_seqs=20,
+    )
+
+    with pytest.raises(AssertionError, match="scheduler telemetry"):
+        runner.validate_scheduler_capacity_proof(proof)
+
+
+def test_profile_from_cli_preserves_physical_wave_and_per_engine_ceiling(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA)
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            "/checkpoint",
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "tp2",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--global-wave-size",
+            "20",
+            "--max-num-seqs",
+            "20",
+            "--output",
+            str(tmp_path / "proof.json"),
+        ]
+    )
+
+    profile = runner.profile_from_args(args, manifest)
+
+    assert profile.global_wave_size == 20
+    assert profile.per_engine_batch_size == 20
+    assert profile.resolved_max_num_seqs == 20
+    assert profile.gdpo_waves_to_96 == 5
 
 
 def test_full_decode_proof_requires_full_unpadded_replay_and_rejects_fallback() -> None:
@@ -833,3 +941,392 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs(t
     assert artifact["full_output_artifact"]["generated_token_count"] == 6
     assert artifact["full_decode_proof"]["passed"] is True
     assert artifact["full_decode_proof"]["full_decode_tokens"] == 4
+
+
+def test_generation_phase_executes_explicit_10x96_plus_tail40_calls(tmp_path) -> None:
+    manifest = (
+        WorkloadManifest.from_path(DATA)
+        .with_request_count(1_000, request_id_prefix="audit")
+        .with_max_new_tokens(3)
+    )
+    recorder = CUDAGraphProofRecorder()
+    calls = []
+
+    class FakeLLM:
+        def generate(self, prompts, sampling_params, *, use_tqdm):
+            start = sum(calls)
+            request_count = len(prompts)
+            calls.append(request_count)
+            wave_manifest = manifest.request_slice(start, start + request_count)
+            assert prompts == [
+                {"prompt_token_ids": list(request.prompt_token_ids)}
+                for request in wave_manifest.requests
+            ]
+            assert [params.seed for params in sampling_params] == [
+                42 + index for index in range(start, start + request_count)
+            ]
+            assert use_tqdm is False
+            for _ in range(2):
+                recorder.record(
+                    _scheduler_stats(
+                        unpadded=request_count,
+                        padded=request_count,
+                        mode="CUDAGraphMode.FULL",
+                    ),
+                    _iteration_stats(),
+                )
+            return _fake_outputs(wave_manifest)
+
+    execution_records = runner.build_wave_execution_records(
+        manifest,
+        generation_round=0,
+        global_wave_size=96,
+        call_index_start=7,
+    )
+    clock_values = iter(float(value) for value in range(22))
+    result = run_generation_phase(
+        llm=FakeLLM(),
+        manifest=manifest,
+        sampling_params=build_request_sampling_params(
+            manifest,
+            sampling_params_factory=SimpleNamespace,
+            generation_round=0,
+            global_request_offset=0,
+        ),
+        phase="steady-0",
+        sample_index=0,
+        recorder=recorder,
+        memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+        execution_records=execution_records,
+        full_output_path=tmp_path / "steady-0.outputs.jsonl.gz",
+        global_wave_size=96,
+        clock=lambda: next(clock_values),
+        scheduler_max_num_seqs=96,
+    )
+
+    assert calls == [96] * 10 + [40]
+    assert result.generation_call_s == (1.0,) * 11
+    assert [proof["request_count"] for proof in result.wave_proofs] == calls
+    assert [proof["call_index"] for proof in result.wave_proofs] == list(range(7, 18))
+    assert all(proof["scheduler_capacity_proof"]["batch_fit_without_preemption"] for proof in result.wave_proofs)
+    assert result.full_decode_proof["wave_count"] == 11
+    assert result.full_decode_proof["expected_decode_tokens"] == 2_000
+    assert result.full_decode_proof["full_decode_tokens"] == 2_000
+    assert result.full_decode_proof["passed"] is True
+    assert result.sample.request_count == 1_000
+    assert result.full_output_artifact["request_count"] == 1_000
+    assert result.to_dict()["wave_execution"]["actual_call_count"] == 11
+    assert result.to_dict()["wave_execution"]["measured_waves_to_target"] == 1
+    assert result.to_dict()["wave_execution"]["measured_time_to_target_s"] == 1.0
+
+
+def test_wave_execution_summary_measures_five_physical_calls_to_96() -> None:
+    summary = runner.wave_execution_summary(
+        tuple(
+            {
+                "wave_index": index,
+                "request_count": request_count,
+                "generation_s": 1.0,
+            }
+            for index, request_count in enumerate((20, 20, 20, 20, 16))
+        )
+    )
+
+    assert summary["target_request_count"] == 96
+    assert summary["actual_call_count"] == 5
+    assert summary["actual_request_count"] == 96
+    assert summary["measured_waves_to_target"] == 5
+    assert summary["measured_time_to_target_s"] == 5.0
+    assert summary["requests_completed_at_target_boundary"] == 96
+
+
+def _shared_prefix_manifest() -> WorkloadManifest:
+    return (
+        WorkloadManifest.from_path(DATA)
+        .request_slice(0, 1)
+        .with_uniform_prompt_length(
+            32,
+            request_count=2,
+            request_id_prefix="shared",
+        )
+    )
+
+
+def test_generation_phase_resets_shared_prefix_cache_once_and_proves_tp2_clones(tmp_path) -> None:
+    manifest = _shared_prefix_manifest().with_max_new_tokens(3)
+    recorder = CUDAGraphProofRecorder()
+    clone = {
+        "request_id": "clone",
+        "num_computed_tokens": 16,
+        "prompt_tokens": 32,
+        "block_size": 16,
+        "copy_entries": 8,
+        "copied_elements": 1_024,
+        "copied_bytes": 4_096,
+        "expected_copy_entries": 8,
+        "expected_copied_elements": 1_024,
+        "expected_copied_bytes": 4_096,
+        "all_state_dtypes_fp32": True,
+    }
+
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.cache_resets = 0
+
+        def reset_prefix_cache(self):
+            self.cache_resets += 1
+            return True
+
+        def generate(self, prompts, sampling_params, *, use_tqdm):
+            assert len(prompts) == len(sampling_params) == 2
+            assert use_tqdm is False
+            for _ in range(2):
+                recorder.record(
+                    _scheduler_stats(unpadded=2, padded=2, mode="CUDAGraphMode.FULL"),
+                    _iteration_stats(),
+                )
+            outputs = _fake_outputs(manifest)
+            outputs[0].num_cached_tokens = 0
+            outputs[1].num_cached_tokens = 16
+            return outputs
+
+    llm = FakeLLM()
+    execution_records = runner.build_wave_execution_records(
+        manifest,
+        generation_round=0,
+        global_wave_size=2,
+        call_index_start=0,
+    )
+    times = iter((10.0, 11.0))
+    result = run_generation_phase(
+        llm=llm,
+        manifest=manifest,
+        sampling_params=build_request_sampling_params(
+            manifest,
+            sampling_params_factory=SimpleNamespace,
+            generation_round=0,
+            global_request_offset=0,
+        ),
+        phase="steady-0",
+        sample_index=0,
+        recorder=recorder,
+        memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+        execution_records=execution_records,
+        full_output_path=tmp_path / "shared.outputs.jsonl.gz",
+        snapshot_worker_proof=lambda: (
+            {"rank": 0, "device": 0, "mamba_prefix_clones": {"clone_count": 1, "requests": [clone]}},
+            {"rank": 1, "device": 1, "mamba_prefix_clones": {"clone_count": 1, "requests": [clone]}},
+        ),
+        prefix_cache_block_size=16,
+        require_shared_prefix_state_reuse=True,
+        global_wave_size=2,
+        scheduler_max_num_seqs=2,
+        clock=lambda: next(times),
+    )
+
+    assert llm.cache_resets == 1
+    assert result.shared_prefix_state_reuse["phase_prefix_cache_reset"] is True
+    assert result.shared_prefix_state_reuse["cache_miss_request_count"] == 1
+    assert result.shared_prefix_state_reuse["cache_hit_request_count"] == 1
+    assert [worker["clone_count"] for worker in result.shared_prefix_state_reuse["worker_state_clones"]] == [1, 1]
+
+
+def test_shared_prefix_state_reuse_evidence_requires_cache_hits_and_physical_copies() -> None:
+    manifest = _shared_prefix_manifest()
+    clone = {
+        "request_id": "1",
+        "num_computed_tokens": 16,
+        "prompt_tokens": 32,
+        "block_size": 16,
+        "copy_entries": 8,
+        "copied_elements": 1_024,
+        "copied_bytes": 4_096,
+        "expected_copy_entries": 8,
+        "expected_copied_elements": 1_024,
+        "expected_copied_bytes": 4_096,
+        "all_state_dtypes_fp32": True,
+    }
+    evidence = runner.shared_prefix_state_reuse_evidence(
+        manifest,
+        cached_tokens=(0, 16),
+        worker_proof=(
+            {
+                "rank": 0,
+                "device": 0,
+                "mamba_prefix_clones": {"clone_count": 1, "requests": [clone]},
+            },
+            {
+                "rank": 1,
+                "device": 1,
+                "mamba_prefix_clones": {"clone_count": 1, "requests": [clone]},
+            },
+        ),
+        expected_worker_clone_counts=(1, 1),
+        cache_block_size=16,
+    )
+
+    assert evidence["identical_prompt_count"] == 2
+    assert evidence["cached_tokens_by_request"] == [0, 16]
+    assert evidence["cache_hit_request_count"] == 1
+    assert evidence["cache_miss_request_count"] == 1
+    assert evidence["logical_clone_request_count"] == 1
+    assert evidence["physically_reused_prompt_tokens_per_clone"] == 16
+    assert evidence["recomputed_prompt_tokens_per_clone"] == 16
+    assert evidence["total_cached_prompt_tokens"] == 16
+    assert evidence["scheduled_uncached_prompt_tokens"] == 48
+    assert evidence["physical_state_copy_proven"] is True
+    assert [worker["clone_count"] for worker in evidence["worker_state_clones"]] == [1, 1]
+    assert evidence["worker_state_clones"][0]["requests"][0]["copied_bytes"] == 4_096
+
+
+def test_shared_prefix_state_reuse_evidence_proves_exact_96x25k_clone_layout() -> None:
+    manifest = (
+        WorkloadManifest.from_path(DATA)
+        .request_slice(0, 1)
+        .with_uniform_prompt_length(25_000, request_count=96, request_id_prefix="prefix25k")
+    )
+    clones = [
+        {
+            "request_id": f"clone-{index}",
+            "num_computed_tokens": 24_992,
+            "prompt_tokens": 25_000,
+            "block_size": 16,
+            "copy_entries": 18,
+            "copied_elements": 131_072,
+            "copied_bytes": 524_288,
+            "expected_copy_entries": 18,
+            "expected_copied_elements": 131_072,
+            "expected_copied_bytes": 524_288,
+            "all_state_dtypes_fp32": True,
+        }
+        for index in range(95)
+    ]
+
+    evidence = runner.shared_prefix_state_reuse_evidence(
+        manifest,
+        cached_tokens=(0, *((24_992,) * 95)),
+        worker_proof=(
+            {"rank": 0, "device": 0, "mamba_prefix_clones": {"clone_count": 95, "requests": clones}},
+            {"rank": 1, "device": 1, "mamba_prefix_clones": {"clone_count": 95, "requests": clones}},
+        ),
+        expected_worker_clone_counts=(95, 95),
+        cache_block_size=16,
+    )
+
+    assert evidence["cache_miss_request_count"] == 1
+    assert evidence["cache_hit_request_count"] == 95
+    assert evidence["logical_clone_request_count"] == 95
+    assert evidence["physically_reused_prompt_tokens_per_clone"] == 24_992
+    assert evidence["recomputed_prompt_tokens_per_clone"] == 8
+    assert [worker["clone_count"] for worker in evidence["worker_state_clones"]] == [95, 95]
+    assert all(
+        request["copied_bytes"] == request["expected_copied_bytes"] == 524_288
+        for worker in evidence["worker_state_clones"]
+        for request in worker["requests"]
+    )
+
+
+def test_shared_prefix_state_reuse_evidence_accepts_all_clones_after_phase_first_wave() -> None:
+    manifest = _shared_prefix_manifest()
+    clones = [
+        {
+            "request_id": f"clone-{index}",
+            "num_computed_tokens": 16,
+            "prompt_tokens": 32,
+            "block_size": 16,
+            "copy_entries": 1,
+            "copied_elements": 8,
+            "copied_bytes": 32,
+            "expected_copy_entries": 1,
+            "expected_copied_elements": 8,
+            "expected_copied_bytes": 32,
+            "all_state_dtypes_fp32": True,
+        }
+        for index in range(2)
+    ]
+
+    evidence = runner.shared_prefix_state_reuse_evidence(
+        manifest,
+        cached_tokens=(16, 16),
+        worker_proof=(
+            {"rank": 0, "device": 0, "mamba_prefix_clones": {"clone_count": 2, "requests": clones}},
+        ),
+        expected_worker_clone_counts=(2,),
+        cache_block_size=16,
+        expected_cache_misses=0,
+    )
+
+    assert evidence["cache_miss_request_count"] == 0
+    assert evidence["cache_hit_request_count"] == 2
+
+
+def test_shared_prefix_state_reuse_evidence_fails_closed() -> None:
+    manifest = _shared_prefix_manifest()
+    clone = {
+        "request_id": "1",
+        "num_computed_tokens": 16,
+        "prompt_tokens": 32,
+        "block_size": 16,
+        "copy_entries": 1,
+        "copied_elements": 1,
+        "copied_bytes": 4,
+        "expected_copy_entries": 1,
+        "expected_copied_elements": 1,
+        "expected_copied_bytes": 4,
+        "all_state_dtypes_fp32": True,
+    }
+    worker_proof = (
+        {
+            "rank": 0,
+            "device": 0,
+            "mamba_prefix_clones": {"clone_count": 1, "requests": [clone]},
+        },
+    )
+
+    with pytest.raises(AssertionError, match="cached-token telemetry"):
+        runner.shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=(None, 16),
+            worker_proof=worker_proof,
+            expected_worker_clone_counts=(1,),
+            cache_block_size=16,
+        )
+    with pytest.raises(AssertionError, match="exactly one cache miss"):
+        runner.shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=(0, 0),
+            worker_proof=worker_proof,
+            expected_worker_clone_counts=(1,),
+            cache_block_size=16,
+        )
+    with pytest.raises(AssertionError, match="block-aligned prefix"):
+        runner.shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=(0, 15),
+            worker_proof=worker_proof,
+            expected_worker_clone_counts=(1,),
+            cache_block_size=16,
+        )
+    with pytest.raises(AssertionError, match="clone count"):
+        runner.shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=(0, 16),
+            worker_proof=worker_proof,
+            expected_worker_clone_counts=(2,),
+            cache_block_size=16,
+        )
+    bad_clone = {**clone, "copied_bytes": 8}
+    with pytest.raises(AssertionError, match="copy bytes"):
+        runner.shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=(0, 16),
+            worker_proof=(
+                {
+                    "rank": 0,
+                    "device": 0,
+                    "mamba_prefix_clones": {"clone_count": 1, "requests": [bad_clone]},
+                },
+            ),
+            expected_worker_clone_counts=(1,),
+            cache_block_size=16,
+        )

@@ -310,13 +310,25 @@ def test_full_vocab_evidence_rejects_nonfinite_chosen_processed_logprob() -> Non
 
 
 def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outputs(tmp_path) -> None:
-    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 4).with_max_new_tokens(3)
+    manifest = (
+        WorkloadManifest.from_path(DATA)
+        .request_slice(0, 1)
+        .with_uniform_prompt_length(
+            32,
+            request_count=8,
+            request_id_prefix="shared",
+        )
+        .with_max_new_tokens(3)
+    )
     profile = Evo2VllmProfile(
         topology="dp2",
-        max_model_len=15,
+        max_model_len=35,
         max_num_batched_tokens=16_384,
         gpu_memory_utilization=0.92,
         proof=True,
+        shared_prefix_state_reuse=True,
+        global_wave_size=4,
+        max_num_seqs=2,
     )
 
     class FakeWorkerGroup:
@@ -333,6 +345,7 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
             return [
                 {
                     "phase": phase,
+                    "resolved_config": {"cache": {"block_size": 16}},
                     "cudagraph_observations": [
                         {
                             "phase": phase,
@@ -345,10 +358,55 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                         for _ in range(2)
                     ],
                     "cudagraph_summary": [],
+                    "scheduler_observations": [
+                        {
+                            "phase": phase,
+                            "engine_index": 0,
+                            "preemption_events": 0,
+                            "recompute_events": 0,
+                            "prefix_preempted_requests": 0,
+                            "prefix_preempted_queries": 0,
+                            "prefix_preempted_hits": 0,
+                            "preempted_prompt_recomputed_tokens": 0,
+                            "prompt_tokens_computed": 32,
+                            "prompt_tokens_cached": 16
+                            * (shard_size - int(phase.endswith("wave-000"))),
+                            "prompt_tokens_total": 32 * shard_size,
+                            "num_running_requests": shard_size,
+                            "num_waiting_requests": 0,
+                            "num_skipped_waiting_requests": 0,
+                        }
+                    ],
                     "worker_proof": [
                         {
                             "rank": 0,
                             "fir_routes": {"direct": {"calls": 9, "requests": shard_size, "tokens": 18}},
+                            "mamba_state_copies": {
+                                "copy_calls": 8,
+                                "copied_elements": 1_024,
+                                "copied_bytes": 4_096,
+                            },
+                            "mamba_prefix_clones": {
+                                "clone_count": shard_size - int(phase.endswith("wave-000")),
+                                "requests": [
+                                    {
+                                        "request_id": f"{phase}-clone-{index}",
+                                        "num_computed_tokens": 16,
+                                        "prompt_tokens": 32,
+                                        "block_size": 16,
+                                        "copy_entries": 8,
+                                        "copied_elements": 1_024,
+                                        "copied_bytes": 4_096,
+                                        "expected_copy_entries": 8,
+                                        "expected_copied_elements": 1_024,
+                                        "expected_copied_bytes": 4_096,
+                                        "all_state_dtypes_fp32": True,
+                                    }
+                                    for index in range(
+                                        shard_size - int(phase.endswith("wave-000"))
+                                    )
+                                ],
+                            },
                         }
                     ],
                 }
@@ -360,6 +418,11 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
             self.worker_group = FakeWorkerGroup()
             self.call_index = 7
             self.global_index = 48
+            self.cache_invalidations = 0
+
+        def invalidate_kv_cache(self):
+            self.cache_invalidations += 1
+            return True
 
         def generate(self, data, greedy=False):
             assert greedy is True
@@ -398,6 +461,9 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                     "generation_dp_ranks": torch.tensor([0] * first_shard + [1] * (request_count - first_shard)),
                     "generation_first_token_latency_s": torch.full((request_count,), 0.4),
                     "generation_decode_s": torch.full((request_count,), 0.2),
+                        "generation_num_cached_tokens": torch.tensor(
+                            [0, 16, 0, 16] if self.call_index == 7 else [16, 16, 16, 16]
+                        ),
                     "generation_vocab_logprobs": dense,
                     "generation_logprob_counts": torch.full((request_count, 3), 512),
                 }
@@ -406,9 +472,10 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
             self.global_index += request_count
             return outputs
 
-    times = iter((10.0, 12.5))
+    times = iter((10.0, 11.0, 20.0, 21.0))
+    generation = FakeGeneration()
     result = run_nemo_generation_phase(
-        generation=FakeGeneration(),
+        generation=generation,
         manifest=manifest,
         profile=profile,
         phase="steady-0",
@@ -421,15 +488,29 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
         require_full_vocab_logprobs=True,
     )
 
-    assert result.sample.generation_s == 2.5
-    assert result.sample.generated_tokens == 12
-    assert [record.global_request_index for record in result.request_executions] == [48, 49, 50, 51]
-    assert [record.dp_rank for record in result.request_executions] == [0, 0, 1, 1]
-    assert len(result.wave_proofs) == 1
+    assert result.sample.generation_s == 2.0
+    assert result.sample.generated_tokens == 24
+    assert [record.global_request_index for record in result.request_executions] == list(range(48, 56))
+    assert [record.dp_rank for record in result.request_executions] == [0, 0, 1, 1] * 2
+    assert len(result.wave_proofs) == 2
+    assert generation.cache_invalidations == 1
     assert [engine["full_decode_proof"]["passed"] for engine in result.wave_proofs[0]["engines"]] == [
         True,
         True,
     ]
-    assert result.full_output_artifact["generated_token_count"] == 12
+    assert result.full_output_artifact["generated_token_count"] == 24
     assert result.wave_proofs[0]["full_vocab_logprobs"]["shape"] == [4, 3, 512]
     assert result.wave_proofs[0]["full_vocab_logprobs"]["chosen_token_oracle_passed"] is True
+    assert all(
+        engine["scheduler_capacity_proof"]["batch_fit_without_preemption"]
+        for engine in result.wave_proofs[0]["engines"]
+    )
+    reuse = result.wave_proofs[0]["shared_prefix_state_reuse"]
+    assert reuse["cached_tokens_by_request"] == [0, 16, 0, 16]
+    assert reuse["cache_hit_request_count"] == 2
+    assert reuse["physical_state_copy_proven"] is True
+    assert reuse["phase_prefix_cache_reset_before_first_wave"] is True
+    later_reuse = result.wave_proofs[1]["shared_prefix_state_reuse"]
+    assert later_reuse["cache_miss_request_count"] == 0
+    assert later_reuse["cache_hit_request_count"] == 4
+    assert [worker["clone_count"] for worker in later_reuse["worker_state_clones"]] == [2, 2]

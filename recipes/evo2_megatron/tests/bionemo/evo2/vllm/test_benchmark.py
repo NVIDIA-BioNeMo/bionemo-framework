@@ -335,6 +335,11 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
             "2",
             "--repetitions",
             "5",
+            "--shared-prefix-state-reuse",
+            "--global-wave-size",
+            "20",
+            "--max-num-seqs",
+            "20",
             "--output",
             str(tmp_path / "result.json"),
         ]
@@ -358,6 +363,9 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
     assert args.prompt_tokenizer_json is None
     assert args.expected_prompt_tokens is None
     assert args.context_preflight_only is False
+    assert args.shared_prefix_state_reuse is True
+    assert args.global_wave_size == 20
+    assert args.max_num_seqs == 20
 
 
 def _fake_vllm_outputs(manifest: WorkloadManifest):

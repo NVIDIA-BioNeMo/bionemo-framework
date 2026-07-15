@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import platform
 import subprocess
 import sys
@@ -269,6 +270,7 @@ class CUDAGraphProofRecorder:
         """Create an empty phase-aware observation stream."""
         self._phase = "unlabeled"
         self.observations: list[dict[str, Any]] = []
+        self.scheduler_observations: list[dict[str, Any]] = []
 
     def start_phase(self, phase: str) -> None:
         """Label subsequent scheduler observations."""
@@ -284,14 +286,42 @@ class CUDAGraphProofRecorder:
         engine_idx: int | None = None,
     ) -> None:
         """Record one scheduler dispatch when CUDA graph metrics are present."""
-        del iteration_stats, mm_cache_stats
-        if scheduler_stats is None or scheduler_stats.cudagraph_stats is None:
+        del mm_cache_stats
+        engine_index = 0 if engine_idx is None else int(engine_idx)
+        if scheduler_stats is not None and iteration_stats is not None:
+            prefix_stats = getattr(scheduler_stats, "prefix_cache_stats", None)
+            prompt_stats = getattr(iteration_stats, "prompt_token_stats", None)
+            if prefix_stats is not None and prompt_stats is not None:
+                preempted_queries = int(prefix_stats.preempted_queries)
+                preempted_hits = int(prefix_stats.preempted_hits)
+                preemption_events = int(iteration_stats.num_preempted_reqs)
+                self.scheduler_observations.append(
+                    {
+                        "phase": self._phase,
+                        "engine_index": engine_index,
+                        "preemption_events": preemption_events,
+                        "recompute_events": preemption_events,
+                        "prefix_preempted_requests": int(prefix_stats.preempted_requests),
+                        "prefix_preempted_queries": preempted_queries,
+                        "prefix_preempted_hits": preempted_hits,
+                        "preempted_prompt_recomputed_tokens": preempted_queries - preempted_hits,
+                        "prompt_tokens_computed": int(prompt_stats.computed),
+                        "prompt_tokens_cached": int(prompt_stats.cached_tokens),
+                        "prompt_tokens_total": int(prompt_stats.total),
+                        "num_running_requests": int(scheduler_stats.num_running_reqs),
+                        "num_waiting_requests": int(scheduler_stats.num_waiting_reqs),
+                        "num_skipped_waiting_requests": int(scheduler_stats.num_skipped_waiting_reqs),
+                    }
+                )
+
+        graph_stats = None if scheduler_stats is None else scheduler_stats.cudagraph_stats
+        if graph_stats is None:
             return
-        stats = scheduler_stats.cudagraph_stats
+        stats = graph_stats
         self.observations.append(
             {
                 "phase": self._phase,
-                "engine_index": 0 if engine_idx is None else engine_idx,
+                "engine_index": engine_index,
                 "num_unpadded_tokens": int(stats.num_unpadded_tokens),
                 "num_padded_tokens": int(stats.num_padded_tokens),
                 "num_paddings": int(stats.num_paddings),
@@ -308,6 +338,94 @@ class CUDAGraphProofRecorder:
     def record_sleep_state(self, sleep: int = 0, level: int = 0) -> None:
         """Satisfy the vLLM stat logger protocol."""
         del sleep, level
+
+
+def scheduler_capacity_proof_summary(
+    observations: Sequence[dict[str, Any]],
+    *,
+    phase: str,
+    global_wave_size: int,
+    max_num_seqs: int,
+    engine_request_count: int | None = None,
+) -> dict[str, Any]:
+    """Summarize phase-local scheduler fit without inferring absent telemetry."""
+    if not phase:
+        raise ValueError("scheduler proof phase cannot be empty")
+    submitted_engine_requests = global_wave_size if engine_request_count is None else engine_request_count
+    if global_wave_size <= 0 or max_num_seqs <= 0 or submitted_engine_requests <= 0:
+        raise ValueError("global wave, engine request, and max_num_seqs counts must be positive")
+    phase_observations = [item for item in observations if item.get("phase") == phase]
+
+    def total(field: str) -> int:
+        return sum(int(item[field]) for item in phase_observations)
+
+    preemption_events = total("preemption_events")
+    recompute_events = total("recompute_events")
+    prefix_preempted_requests = total("prefix_preempted_requests")
+    preempted_queries = total("prefix_preempted_queries")
+    preempted_hits = total("prefix_preempted_hits")
+    preempted_recomputed = total("preempted_prompt_recomputed_tokens")
+    maximum_running = max((int(item["num_running_requests"]) for item in phase_observations), default=0)
+    request_count_within_scheduler_ceiling = submitted_engine_requests <= max_num_seqs
+    running_count_within_scheduler_ceiling = maximum_running <= max_num_seqs
+    batch_fit_without_preemption = (
+        bool(phase_observations)
+        and request_count_within_scheduler_ceiling
+        and running_count_within_scheduler_ceiling
+        and preemption_events == 0
+        and recompute_events == 0
+        and prefix_preempted_requests == 0
+        and preempted_queries == 0
+        and preempted_hits == 0
+        and preempted_recomputed == 0
+    )
+    return {
+        "phase": phase,
+        "global_wave_size": global_wave_size,
+        "engine_request_count": submitted_engine_requests,
+        "max_num_seqs": max_num_seqs,
+        "scheduler_observation_count": len(phase_observations),
+        "preemption_events": preemption_events,
+        "recompute_events": recompute_events,
+        "prefix_preempted_requests": prefix_preempted_requests,
+        "prefix_preempted_queries": preempted_queries,
+        "prefix_preempted_hits": preempted_hits,
+        "preempted_prompt_recomputed_tokens": preempted_recomputed,
+        "prompt_tokens_computed": total("prompt_tokens_computed"),
+        "prompt_tokens_cached": total("prompt_tokens_cached"),
+        "prompt_tokens_total": total("prompt_tokens_total"),
+        "maximum_running_requests": maximum_running,
+        "maximum_waiting_requests": max(
+            (int(item["num_waiting_requests"]) for item in phase_observations), default=0
+        ),
+        "maximum_skipped_waiting_requests": max(
+            (int(item["num_skipped_waiting_requests"]) for item in phase_observations), default=0
+        ),
+        "request_count_within_scheduler_ceiling": request_count_within_scheduler_ceiling,
+        "running_count_within_scheduler_ceiling": running_count_within_scheduler_ceiling,
+        "batch_fit_without_preemption": batch_fit_without_preemption,
+    }
+
+
+def validate_scheduler_capacity_proof(proof: dict[str, Any]) -> None:
+    """Fail closed unless one submitted wave fits without preemption or recompute."""
+    if int(proof.get("scheduler_observation_count", 0)) <= 0:
+        raise AssertionError("no scheduler telemetry was retained for the generation wave")
+    if not proof.get("request_count_within_scheduler_ceiling") or not proof.get(
+        "running_count_within_scheduler_ceiling"
+    ):
+        raise AssertionError("generation wave exceeded the per-engine max_num_seqs scheduler ceiling")
+    if any(
+        int(proof.get(field, 0)) != 0
+        for field in ("preemption_events", "recompute_events", "prefix_preempted_requests")
+    ):
+        raise AssertionError("scheduler preemption/recompute occurred during the generation wave")
+    if int(proof.get("prefix_preempted_hits", 0)) > int(proof.get("prefix_preempted_queries", 0)):
+        raise AssertionError("scheduler preempted prefix-cache hit telemetry is inconsistent")
+    if int(proof.get("preempted_prompt_recomputed_tokens", 0)) != 0:
+        raise AssertionError("scheduler recomputed prompt tokens after preemption")
+    if proof.get("batch_fit_without_preemption") is not True:
+        raise AssertionError("generation wave did not prove scheduler fit without preemption")
 
 
 def validate_full_decode_proof(
@@ -495,6 +613,34 @@ def build_request_execution_records(
     )
 
 
+def build_wave_execution_records(
+    manifest: WorkloadManifest,
+    *,
+    generation_round: int,
+    global_wave_size: int,
+    call_index_start: int,
+) -> tuple[RequestExecutionRecord, ...]:
+    """Build exact request records whose call indices match physical generation calls."""
+    if call_index_start < 0:
+        raise ValueError("call_index_start must be nonnegative")
+    records = []
+    for wave in build_request_waves(
+        request_count=len(manifest.requests),
+        global_batch_size=global_wave_size,
+        replica_count=1,
+    ):
+        records.extend(
+            build_request_execution_records(
+                manifest.request_slice(wave.start, wave.stop),
+                generation_round=generation_round,
+                global_request_offset=wave.start,
+                dp_rank=0,
+                call_index=call_index_start + wave.wave_index,
+            )
+        )
+    return tuple(records)
+
+
 def write_full_output_artifact(
     path: str | Path,
     *,
@@ -651,18 +797,204 @@ def complete_output_namespace(
     reservation.unlink()
 
 
+def shared_prefix_manifest_evidence(manifest: WorkloadManifest) -> dict[str, Any]:
+    """Validate one physically reusable prompt and return its stable identity."""
+    if len(manifest.requests) < 2:
+        raise AssertionError("shared-prefix reuse requires at least two requests")
+    prompt = manifest.requests[0].prompt_token_ids
+    if not prompt:
+        raise AssertionError("shared-prefix reuse requires a nonempty prompt")
+    if any(request.prompt_token_ids != prompt for request in manifest.requests[1:]):
+        raise AssertionError("shared-prefix reuse requires identical prompt token IDs")
+    payload = json.dumps(list(prompt), separators=(",", ":")).encode()
+    return {
+        "identical_prompt_count": len(manifest.requests),
+        "prompt_tokens_per_request": len(prompt),
+        "prompt_token_ids_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def shared_prefix_state_reuse_evidence(
+    manifest: WorkloadManifest,
+    *,
+    cached_tokens: Sequence[int | None],
+    worker_proof: Sequence[dict[str, Any]],
+    expected_worker_clone_counts: Sequence[int],
+    cache_block_size: int,
+    expected_cache_misses: int = 1,
+) -> dict[str, Any]:
+    """Prove exact scheduler hits and request-scoped FP32 recurrent-state clones."""
+    identity = shared_prefix_manifest_evidence(manifest)
+    request_count = len(manifest.requests)
+    if len(cached_tokens) != request_count:
+        raise AssertionError("cached-token telemetry must cover every request")
+    if isinstance(cache_block_size, bool) or not isinstance(cache_block_size, int) or cache_block_size <= 0:
+        raise AssertionError("prefix cache block size must be a positive integer")
+    if expected_cache_misses < 0 or expected_cache_misses >= request_count:
+        raise AssertionError("expected cache misses must leave at least one physical prefix clone")
+    if len(expected_worker_clone_counts) != len(worker_proof) or not worker_proof:
+        raise AssertionError("expected worker clone counts must cover every physical worker")
+
+    prompt_tokens = identity["prompt_tokens_per_request"]
+    physically_reused_tokens = (prompt_tokens - 1) // cache_block_size * cache_block_size
+    if physically_reused_tokens <= 0:
+        raise AssertionError("the prompt is too short for one block-aligned prefix clone")
+
+    normalized_counts = []
+    for value in cached_tokens:
+        if value is None or isinstance(value, bool) or not isinstance(value, int):
+            raise AssertionError("cached-token telemetry must contain concrete integer counts")
+        if not 0 <= value <= prompt_tokens:
+            raise AssertionError("cached-token telemetry exceeds the exact prompt length")
+        normalized_counts.append(value)
+
+    miss_count = sum(value == 0 for value in normalized_counts)
+    if miss_count != expected_cache_misses:
+        qualifier = "one" if expected_cache_misses == 1 else str(expected_cache_misses)
+        raise AssertionError(f"shared-prefix execution must have exactly {qualifier} cache miss")
+    hit_counts = [value for value in normalized_counts if value > 0]
+    if len(hit_counts) != request_count - expected_cache_misses:
+        raise AssertionError("shared-prefix execution did not clone every request after each replica's miss")
+    if any(value != physically_reused_tokens for value in hit_counts):
+        raise AssertionError("every cache hit must reuse the exact block-aligned prefix")
+
+    worker_clones = []
+    for proof, expected_clone_count in zip(worker_proof, expected_worker_clone_counts, strict=True):
+        if isinstance(expected_clone_count, bool) or not isinstance(expected_clone_count, int):
+            raise AssertionError("expected worker clone counts must be integers")
+        stats = proof.get("mamba_prefix_clones")
+        if not isinstance(stats, dict):
+            raise AssertionError("shared-prefix proof is missing request-scoped physical state clones")
+        clone_count = stats.get("clone_count")
+        requests = stats.get("requests")
+        if clone_count != expected_clone_count or not isinstance(requests, list) or len(requests) != clone_count:
+            raise AssertionError("physical worker prefix clone count does not match the exact request layout")
+
+        retained_requests = []
+        request_ids = set()
+        for record in requests:
+            if not isinstance(record, dict):
+                raise AssertionError("request-scoped physical clone telemetry is malformed")
+            request_id = record.get("request_id")
+            if not isinstance(request_id, str) or not request_id or request_id in request_ids:
+                raise AssertionError("physical prefix clone request IDs must be unique nonempty strings")
+            request_ids.add(request_id)
+            for key in (
+                "num_computed_tokens",
+                "prompt_tokens",
+                "block_size",
+                "copy_entries",
+                "copied_elements",
+                "copied_bytes",
+                "expected_copy_entries",
+                "expected_copied_elements",
+                "expected_copied_bytes",
+            ):
+                value = record.get(key)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise AssertionError(f"physical prefix clone {key} telemetry is malformed")
+            if record["num_computed_tokens"] != physically_reused_tokens:
+                raise AssertionError("physical clone source position does not match the scheduler cache hit")
+            if record["prompt_tokens"] != prompt_tokens or record["block_size"] != cache_block_size:
+                raise AssertionError("physical clone prompt or block-size provenance drifted")
+            if record.get("all_state_dtypes_fp32") is not True:
+                raise AssertionError("every cloned Evo2 recurrent state must be FP32")
+            if record["copy_entries"] != record["expected_copy_entries"]:
+                raise AssertionError("physical prefix clone copy entry count does not match the Evo2 state layout")
+            if record["copied_elements"] != record["expected_copied_elements"]:
+                raise AssertionError("physical prefix clone copy elements do not match the Evo2 state layout")
+            if record["copied_bytes"] != record["expected_copied_bytes"]:
+                raise AssertionError("physical prefix clone copy bytes do not match the Evo2 FP32 state layout")
+            retained_requests.append(dict(record))
+
+        worker_clones.append(
+            {
+                "rank": int(proof.get("rank", 0)),
+                "device": int(proof.get("device", 0)),
+                "clone_count": clone_count,
+                "requests": retained_requests,
+            }
+        )
+
+    total_prompt_tokens = prompt_tokens * request_count
+    return {
+        **identity,
+        "cache_block_size": cache_block_size,
+        "cached_tokens_by_request": normalized_counts,
+        "cache_hit_request_count": len(hit_counts),
+        "cache_miss_request_count": miss_count,
+        "logical_clone_request_count": len(hit_counts),
+        "physically_reused_prompt_tokens_per_clone": physically_reused_tokens,
+        "recomputed_prompt_tokens_per_clone": prompt_tokens - physically_reused_tokens,
+        "total_cached_prompt_tokens": sum(normalized_counts),
+        "scheduled_uncached_prompt_tokens": total_prompt_tokens - sum(normalized_counts),
+        "worker_state_clones": worker_clones,
+        "rank_local_physical_clone_count": sum(worker["clone_count"] for worker in worker_clones),
+        "physical_state_copy_proven": True,
+    }
+
+
+def wave_execution_summary(
+    wave_proofs: Sequence[dict[str, Any]],
+    *,
+    target_request_count: int = 96,
+) -> dict[str, Any]:
+    """Retain actual physical calls and measured wall time needed to cover a target batch."""
+    if target_request_count <= 0:
+        raise ValueError("target_request_count must be positive")
+    if not wave_proofs:
+        raise AssertionError("wave execution summary requires at least one physical generation call")
+
+    request_counts = []
+    generation_s = []
+    covered_requests = 0
+    measured_waves_to_target = None
+    measured_time_to_target_s = None
+    requests_completed_at_target_boundary = None
+    for expected_index, proof in enumerate(wave_proofs):
+        if proof.get("wave_index") != expected_index:
+            raise AssertionError("physical generation wave indices must be exact and contiguous")
+        request_count = proof.get("request_count")
+        elapsed = proof.get("generation_s")
+        if isinstance(request_count, bool) or not isinstance(request_count, int) or request_count <= 0:
+            raise AssertionError("physical generation wave request counts must be positive integers")
+        if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed <= 0:
+            raise AssertionError("physical generation wave timings must be finite and positive")
+        request_counts.append(request_count)
+        generation_s.append(float(elapsed))
+        covered_requests += request_count
+        if measured_waves_to_target is None and covered_requests >= target_request_count:
+            measured_waves_to_target = expected_index + 1
+            measured_time_to_target_s = sum(generation_s)
+            requests_completed_at_target_boundary = covered_requests
+
+    return {
+        "target_request_count": target_request_count,
+        "actual_call_count": len(wave_proofs),
+        "actual_request_count": sum(request_counts),
+        "call_request_counts": request_counts,
+        "call_generation_s": generation_s,
+        "measured_waves_to_target": measured_waves_to_target,
+        "measured_time_to_target_s": measured_time_to_target_s,
+        "requests_completed_at_target_boundary": requests_completed_at_target_boundary,
+    }
+
+
 @dataclass(frozen=True)
 class GenerationPhaseResult:
     """One timed generation phase plus its unreset CUDA graph observations."""
 
     phase: str
     sample: BenchmarkSample
+    generation_call_s: tuple[float, ...]
+    wave_proofs: tuple[dict[str, Any], ...]
     observations: tuple[dict[str, Any], ...]
     output_summaries: tuple[dict[str, Any], ...]
     request_executions: tuple[RequestExecutionRecord, ...]
     full_output_artifact: dict[str, Any]
     full_decode_proof: dict[str, Any]
     worker_proof: tuple[dict[str, Any], ...]
+    shared_prefix_state_reuse: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe phase record."""
@@ -674,6 +1006,9 @@ class GenerationPhaseResult:
         return {
             "phase": self.phase,
             "sample": self.sample.to_dict(),
+            "generation_call_s": list(self.generation_call_s),
+            "wave_proofs": list(self.wave_proofs),
+            "wave_execution": wave_execution_summary(self.wave_proofs),
             "cudagraph_observation_count": len(self.observations),
             "cudagraph_observations_retained": retained_observations,
             "cudagraph_summary": summarize_cudagraph_observations(self.observations),
@@ -682,6 +1017,7 @@ class GenerationPhaseResult:
             "full_output_artifact": self.full_output_artifact,
             "full_decode_proof": self.full_decode_proof,
             "worker_proof": list(self.worker_proof),
+            "shared_prefix_state_reuse": self.shared_prefix_state_reuse,
         }
 
 
@@ -723,10 +1059,14 @@ def run_generation_phase(
     full_output_path: str | Path,
     reset_worker_proof: Callable[[], Any] | None = None,
     snapshot_worker_proof: Callable[[], tuple[dict[str, Any], ...]] | None = None,
+    prefix_cache_block_size: int | None = None,
+    require_shared_prefix_state_reuse: bool = False,
+    global_wave_size: int | None = None,
+    scheduler_max_num_seqs: int | None = None,
     clock: Callable[[], float] = time.perf_counter,
     barrier: Any | None = None,
 ) -> GenerationPhaseResult:
-    """Time one complete offline vLLM batch with optional DP synchronization."""
+    """Time explicit offline vLLM calls while preserving one ordered phase artifact."""
     if len(sampling_params) != len(manifest.requests):
         raise ValueError("sampling params must align with every request")
     if len(execution_records) != len(manifest.requests):
@@ -736,27 +1076,114 @@ def run_generation_phase(
             raise ValueError("execution record request IDs must preserve manifest order")
         if params.seed != execution.seed:
             raise ValueError("sampling parameter seeds must match persisted execution records")
-    prompts = [{"prompt_token_ids": list(request.prompt_token_ids)} for request in manifest.requests]
-    recorder.start_phase(phase)
+    wave_size = len(manifest.requests) if global_wave_size is None else global_wave_size
+    waves = build_request_waves(
+        request_count=len(manifest.requests),
+        global_batch_size=wave_size,
+        replica_count=1,
+    )
+    if scheduler_max_num_seqs is not None and scheduler_max_num_seqs <= 0:
+        raise ValueError("scheduler_max_num_seqs must be positive")
+    call_index_start = execution_records[0].call_index
+    for wave in waves:
+        call_indexes = {record.call_index for record in execution_records[wave.start : wave.stop]}
+        expected_call_index = call_index_start + wave.wave_index
+        if call_indexes != {expected_call_index}:
+            raise ValueError("execution call indices must match explicit generation waves")
+
     observation_start = len(recorder.observations)
     if reset_worker_proof is not None:
         reset_worker_proof()
+    prefix_cache_reset = False
+    if require_shared_prefix_state_reuse:
+        shared_prefix_manifest_evidence(manifest)
+        reset_prefix_cache = getattr(llm, "reset_prefix_cache", None)
+        if reset_prefix_cache is None or reset_prefix_cache() is not True:
+            raise AssertionError("shared-prefix execution requires a successful phase-local prefix-cache reset")
+        prefix_cache_reset = True
+
+    outputs = []
+    generation_call_s = []
+    wave_proofs = []
     with memory_monitor_factory() as monitor:
-        if barrier is not None:
-            barrier.wait()
-        begin = clock()
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-        if barrier is not None:
-            barrier.wait()
-        generation_s = clock() - begin
+        for wave in waves:
+            wave_phase = f"{phase}.wave-{wave.wave_index:03d}"
+            wave_manifest = manifest.request_slice(wave.start, wave.stop)
+            wave_prompts = [
+                {"prompt_token_ids": list(request.prompt_token_ids)} for request in wave_manifest.requests
+            ]
+            recorder.start_phase(wave_phase)
+            wave_observation_start = len(recorder.observations)
+            wave_scheduler_start = len(recorder.scheduler_observations)
+            if barrier is not None:
+                barrier.wait()
+            begin = clock()
+            wave_outputs = list(
+                llm.generate(
+                    wave_prompts,
+                    sampling_params[wave.start : wave.stop],
+                    use_tqdm=False,
+                )
+            )
+            if barrier is not None:
+                barrier.wait()
+            elapsed = clock() - begin
+            if len(wave_outputs) != wave.request_count:
+                raise AssertionError("vLLM output count must match the explicit generation wave")
+            generation_call_s.append(elapsed)
+            outputs.extend(wave_outputs)
+
+            full_decode = full_decode_proof_summary(
+                recorder.observations[wave_observation_start:],
+                phase=wave_phase,
+                batch_size=wave.request_count,
+                max_new_tokens=manifest.max_new_tokens,
+            )
+            scheduler_proof = scheduler_capacity_proof_summary(
+                recorder.scheduler_observations[wave_scheduler_start:],
+                phase=wave_phase,
+                global_wave_size=wave.request_count,
+                max_num_seqs=(
+                    wave.request_count if scheduler_max_num_seqs is None else scheduler_max_num_seqs
+                ),
+            )
+            if scheduler_max_num_seqs is not None:
+                validate_scheduler_capacity_proof(scheduler_proof)
+            wave_proofs.append(
+                {
+                    "wave_index": wave.wave_index,
+                    "start": wave.start,
+                    "stop": wave.stop,
+                    "request_count": wave.request_count,
+                    "call_index": call_index_start + wave.wave_index,
+                    "generation_s": elapsed,
+                    "full_decode_proof": full_decode,
+                    "scheduler_capacity_proof": scheduler_proof,
+                }
+            )
     worker_proof = () if snapshot_worker_proof is None else snapshot_worker_proof()
+    shared_prefix_reuse = None
+    if require_shared_prefix_state_reuse:
+        if prefix_cache_block_size is None:
+            raise AssertionError("shared-prefix proof requires the resolved cache block size")
+        shared_prefix_reuse = shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=tuple(getattr(output, "num_cached_tokens", None) for output in outputs),
+            worker_proof=worker_proof,
+            expected_worker_clone_counts=tuple(len(manifest.requests) - 1 for _ in worker_proof),
+            cache_block_size=prefix_cache_block_size,
+        )
+        shared_prefix_reuse = {
+            **shared_prefix_reuse,
+            "phase_prefix_cache_reset": prefix_cache_reset,
+        }
 
     output_summaries = summarize_vllm_outputs(manifest, outputs)
     sample = benchmark_sample_from_vllm_outputs(
         manifest,
         outputs,
         sample_index=sample_index,
-        generation_s=generation_s,
+        generation_s=sum(generation_call_s),
         peak_device_memory_bytes=monitor.peak_device_memory_bytes,
         validated_summaries=output_summaries,
     )
@@ -766,21 +1193,31 @@ def run_generation_phase(
         outputs=outputs,
         execution_records=execution_records,
     )
-    full_decode_proof = full_decode_proof_summary(
-        recorder.observations[observation_start:],
-        phase=phase,
-        batch_size=len(manifest.requests),
-        max_new_tokens=manifest.max_new_tokens,
+    expected_decode_tokens = sum(
+        int(proof["full_decode_proof"]["expected_decode_tokens"]) for proof in wave_proofs
     )
+    full_decode_tokens = sum(int(proof["full_decode_proof"]["full_decode_tokens"]) for proof in wave_proofs)
+    full_decode_proof = {
+        "phase": phase,
+        "wave_count": len(wave_proofs),
+        "expected_decode_tokens": expected_decode_tokens,
+        "full_decode_tokens": full_decode_tokens,
+        "coverage_fraction": full_decode_tokens / expected_decode_tokens if expected_decode_tokens else 1.0,
+        "passed": all(proof["full_decode_proof"]["passed"] for proof in wave_proofs),
+        "waves": [proof["full_decode_proof"] for proof in wave_proofs],
+    }
     return GenerationPhaseResult(
         phase=phase,
         sample=sample,
+        generation_call_s=tuple(generation_call_s),
+        wave_proofs=tuple(wave_proofs),
         observations=tuple(recorder.observations[observation_start:]),
         output_summaries=output_summaries,
         request_executions=execution_records,
         full_output_artifact=full_output_artifact,
         full_decode_proof=full_decode_proof,
         worker_proof=worker_proof,
+        shared_prefix_state_reuse=shared_prefix_reuse,
     )
 
 
@@ -789,11 +1226,19 @@ def reset_vllm_worker_proof_state(worker: Any) -> dict[str, int]:
     del worker
     import torch
 
+    from bionemo.evo2.vllm.model import (
+        install_mamba_prefix_clone_proof_hook,
+        reset_mamba_prefix_clone_stats,
+        reset_mamba_state_copy_stats,
+    )
     from bionemo.evo2.vllm.packed_fir import reset_fir_route_stats
 
     reset_fir_route_stats()
+    reset_mamba_state_copy_stats()
     torch.cuda.reset_peak_memory_stats()
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    install_mamba_prefix_clone_proof_hook()
+    reset_mamba_prefix_clone_stats()
     return {"rank": int(rank), "device": int(torch.cuda.current_device())}
 
 
@@ -802,6 +1247,10 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
     del worker
     import torch
 
+    from bionemo.evo2.vllm.model import (
+        get_mamba_prefix_clone_stats,
+        get_mamba_state_copy_stats,
+    )
     from bionemo.evo2.vllm.packed_fir import get_fir_route_stats
     from bionemo.evo2.vllm.profile import compilation_counter_snapshot
 
@@ -812,6 +1261,8 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
         "device": int(device),
         "device_name": torch.cuda.get_device_name(device),
         "fir_routes": get_fir_route_stats(),
+        "mamba_state_copies": get_mamba_state_copy_stats(),
+        "mamba_prefix_clones": get_mamba_prefix_clone_stats(),
         "compilation": compilation_counter_snapshot(),
         "cuda_memory": {
             "allocated_bytes": int(torch.cuda.memory_allocated(device)),
@@ -918,8 +1369,9 @@ def _phase_specs(warmups: int, repetitions: int) -> tuple[tuple[str, int], ...]:
     )
 
 
-def _profile_from_args(args: Any, manifest: WorkloadManifest) -> Evo2VllmProfile:
-    return Evo2VllmProfile(
+def profile_from_args(args: Any, manifest: WorkloadManifest) -> Evo2VllmProfile:
+    """Map benchmark CLI settings to one topology-local physical engine profile."""
+    profile = Evo2VllmProfile(
         topology=args.topology,
         max_model_len=args.max_model_len or manifest.max_total_tokens,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -930,13 +1382,19 @@ def _profile_from_args(args: Any, manifest: WorkloadManifest) -> Evo2VllmProfile
         long_prefill_chunk_tokens=args.long_prefill_chunk_tokens,
         optimization_level=args.optimization_level,
         performance_mode=args.performance_mode,
+        shared_prefix_state_reuse=getattr(args, "shared_prefix_state_reuse", False),
+        global_wave_size=getattr(args, "global_wave_size", 96),
+        max_num_seqs=getattr(args, "max_num_seqs", None),
     )
+    if profile.shared_prefix_state_reuse:
+        shared_prefix_manifest_evidence(manifest)
+    return profile
 
 
 def run_context_length_preflight(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     """Persist the resolved long-context contract without constructing a GPU engine."""
     require_output_namespace_reservation(args.output)
-    profile = _profile_from_args(args, manifest)
+    profile = profile_from_args(args, manifest)
 
     preflight_begin = time.perf_counter()
     preflight = context_length_preflight(
@@ -982,7 +1440,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     if args.topology != "tp2":
         raise ValueError("run_tp2_benchmark requires topology=tp2")
     require_output_namespace_reservation(args.output)
-    profile = _profile_from_args(args, manifest)
+    profile = profile_from_args(args, manifest)
     preflight_begin = time.perf_counter()
     preflight = context_length_preflight(
         profile,
@@ -1020,6 +1478,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     initialized_worker_proof = _snapshot_worker_proof(llm)
 
     phase_results = []
+    call_index_start = 0
     for sample_index, (phase, round_offset) in enumerate(_phase_specs(args.warmups, args.repetitions)):
         generation_round = args.generation_round + round_offset
         sampling_params = build_request_sampling_params(
@@ -1028,12 +1487,11 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             generation_round=generation_round,
             global_request_offset=0,
         )
-        execution_records = build_request_execution_records(
+        execution_records = build_wave_execution_records(
             manifest,
             generation_round=generation_round,
-            global_request_offset=0,
-            dp_rank=0,
-            call_index=sample_index,
+            global_wave_size=profile.global_wave_size,
+            call_index_start=call_index_start,
         )
         result = run_generation_phase(
             llm=llm,
@@ -1047,15 +1505,21 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             full_output_path=phase_output_artifact_path(args.output, phase=phase),
             reset_worker_proof=lambda: _reset_worker_proof(llm),
             snapshot_worker_proof=lambda: _snapshot_worker_proof(llm),
+            require_shared_prefix_state_reuse=profile.shared_prefix_state_reuse,
+            prefix_cache_block_size=int(resolved["cache"]["block_size"]),
+            global_wave_size=profile.global_wave_size,
+            scheduler_max_num_seqs=profile.resolved_max_num_seqs,
         )
         if args.proof:
-            validate_full_decode_proof(
-                list(result.observations),
-                phase=phase,
-                batch_size=min(profile.per_engine_batch_size, len(manifest.requests)),
-                max_new_tokens=manifest.max_new_tokens,
-            )
+            for wave_proof in result.wave_proofs:
+                validate_full_decode_proof(
+                    list(result.observations),
+                    phase=wave_proof["full_decode_proof"]["phase"],
+                    batch_size=wave_proof["request_count"],
+                    max_new_tokens=manifest.max_new_tokens,
+                )
         phase_results.append(result)
+        call_index_start += len(result.generation_call_s)
 
     final_worker_proof = phase_results[-1].worker_proof
     for initialized, final in zip(initialized_worker_proof, final_worker_proof, strict=True):
@@ -1093,8 +1557,13 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             "outer_model": "torch.compile Inductor",
             "prefill": "optimized eager no_compile custom op; packed route proven per worker",
             "decode": "FULL CUDA graph replay required",
-            "prefix_caching": False,
-            "shared_prefix_state_reuse": False,
+            "prefix_caching": profile.shared_prefix_state_reuse,
+            "mamba_cache_mode": "align" if profile.shared_prefix_state_reuse else "none",
+            "shared_prefix_state_reuse": profile.shared_prefix_state_reuse,
+            "global_wave_size": profile.global_wave_size,
+            "per_engine_max_num_seqs": profile.resolved_max_num_seqs,
+            "gdpo_target_request_count": profile.gdpo_target_batch_size,
+            "planned_waves_to_96": profile.gdpo_waves_to_96,
             "semantic_padding": False,
         },
         "request_waves": [

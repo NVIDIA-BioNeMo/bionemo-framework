@@ -5,6 +5,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -25,6 +26,195 @@ from bionemo.evo2.vllm.layers import Evo2AttentionDecoderLayer
 from bionemo.evo2.vllm.weights import IncrementalEvo2WeightLoader
 
 
+_MAMBA_STATE_COPY_STATS = {
+    "copy_calls": 0,
+    "copied_elements": 0,
+    "copied_bytes": 0,
+}
+
+_MAMBA_PREFIX_CLONE_RECORDS: list[dict[str, Any]] = []
+_MAMBA_PREFIX_CLONE_STATE: dict[str, dict[str, dict[str, Any]] | None] = {"active": None}
+
+
+def reset_mamba_state_copy_stats() -> None:
+    """Reset phase-local physical state-copy telemetry."""
+    for key in _MAMBA_STATE_COPY_STATS:
+        _MAMBA_STATE_COPY_STATS[key] = 0
+
+
+def get_mamba_state_copy_stats() -> dict[str, int]:
+    """Return physical whole-state copies queued through vLLM's align manager."""
+    return dict(_MAMBA_STATE_COPY_STATS)
+
+
+def reset_mamba_prefix_clone_stats() -> None:
+    """Reset phase-local request-scoped prefix clone telemetry."""
+    if _MAMBA_PREFIX_CLONE_STATE["active"] is not None:
+        raise RuntimeError("cannot reset prefix clone telemetry during Mamba preprocessing")
+    _MAMBA_PREFIX_CLONE_RECORDS.clear()
+
+
+def get_mamba_prefix_clone_stats() -> dict[str, Any]:
+    """Return exact per-request recurrent-state clones caused by prefix hits."""
+    return {
+        "clone_count": len(_MAMBA_PREFIX_CLONE_RECORDS),
+        "requests": [dict(record) for record in _MAMBA_PREFIX_CLONE_RECORDS],
+    }
+
+
+def _expected_mamba_prefix_clone_layout(
+    kv_cache_config: Any,
+    mamba_group_ids: list[int],
+    forward_context: dict[str, Any],
+    mamba_state_copy_funcs: tuple[Any, ...],
+) -> dict[str, int | bool]:
+    expected_entries = 0
+    expected_elements = 0
+    expected_bytes = 0
+    all_state_dtypes_fp32 = True
+    for group_id in mamba_group_ids:
+        group = kv_cache_config.kv_cache_groups[group_id]
+        for layer_name in group.layer_names:
+            states = forward_context[layer_name].kv_cache
+            if len(states) != len(mamba_state_copy_funcs):
+                raise AssertionError("Mamba state tensors and copy functions do not align")
+            for state in states:
+                if not isinstance(state, torch.Tensor) or state.ndim < 1 or state.shape[0] < 1:
+                    raise AssertionError("Mamba prefix clone state must be a nonempty tensor")
+                block = state[0]
+                expected_entries += 1
+                expected_elements += block.numel()
+                expected_bytes += block.numel() * block.element_size()
+                all_state_dtypes_fp32 &= state.dtype == torch.float32
+    if expected_entries == 0:
+        raise AssertionError("Mamba prefix clone layout contains no recurrent state")
+    if not all_state_dtypes_fp32:
+        raise AssertionError("Evo2 prefix clone state must remain FP32")
+    return {
+        "expected_copy_entries": expected_entries,
+        "expected_copied_elements": expected_elements,
+        "expected_copied_bytes": expected_bytes,
+        "all_state_dtypes_fp32": all_state_dtypes_fp32,
+    }
+
+
+def install_mamba_prefix_clone_proof_hook(mamba_utils_module: Any | None = None) -> None:
+    """Install request-scoped telemetry around vLLM's physical align-mode copies."""
+    if mamba_utils_module is None:
+        from vllm.v1.worker import mamba_utils as mamba_utils_module
+
+    original_preprocess = mamba_utils_module.preprocess_mamba
+    if getattr(original_preprocess, "_evo2_prefix_clone_proof_hook", False):
+        return
+    original_collect = mamba_utils_module.collect_mamba_copy_meta
+
+    def tracked_collect(
+        copy_bufs,
+        kv_cache_config,
+        mamba_state_copy_funcs,
+        mamba_group_ids,
+        src_block_idx,
+        dest_block_idx,
+        accept_token_bias,
+        req_state,
+        forward_context,
+    ):
+        before = int(copy_bufs.offset)
+        result = original_collect(
+            copy_bufs,
+            kv_cache_config,
+            mamba_state_copy_funcs,
+            mamba_group_ids,
+            src_block_idx,
+            dest_block_idx,
+            accept_token_bias,
+            req_state,
+            forward_context,
+        )
+        active = _MAMBA_PREFIX_CLONE_STATE["active"]
+        if active is not None and req_state.req_id in active:
+            after = int(copy_bufs.offset)
+            sizes = [int(value) for value in copy_bufs.sizes.np[before:after]]
+            if any(size <= 0 or size % 4 for size in sizes):
+                raise AssertionError("FP32 Mamba prefix clone copy sizes must be positive multiples of four")
+            record = active[req_state.req_id]
+            record["copy_entries"] += after - before
+            record["copied_bytes"] += sum(sizes)
+            record["copied_elements"] += sum(sizes) // 4
+        return result
+
+    def tracked_preprocess(
+        scheduler_output,
+        kv_cache_config,
+        cache_config,
+        mamba_state_idx,
+        input_batch,
+        requests,
+        forward_context,
+        mamba_state_copy_funcs,
+        copy_bufs,
+    ):
+        if _MAMBA_PREFIX_CLONE_STATE["active"] is not None:
+            raise RuntimeError("Mamba prefix clone telemetry does not support reentrant preprocessing")
+
+        new_request_ids = {request.req_id for request in scheduler_output.scheduled_new_reqs}
+        candidate_ids = [
+            req_id
+            for req_id in input_batch.req_ids
+            if req_id in new_request_ids and requests[req_id].num_computed_tokens > 0
+        ]
+        active: dict[str, dict[str, Any]] = {}
+        if candidate_ids:
+            block_size = int(copy_bufs.mamba_spec.block_size)
+            layout = _expected_mamba_prefix_clone_layout(
+                kv_cache_config,
+                copy_bufs.mamba_group_ids,
+                forward_context,
+                mamba_state_copy_funcs,
+            )
+            for req_id in candidate_ids:
+                req_state = requests[req_id]
+                if req_state.output_token_ids:
+                    raise AssertionError("a newly cloned prefix request cannot already have output tokens")
+                if req_state.num_computed_tokens >= req_state.num_prompt_tokens:
+                    raise AssertionError("vLLM must recompute at least the final prompt token")
+                active[req_id] = {
+                    "request_id": str(req_id),
+                    "num_computed_tokens": int(req_state.num_computed_tokens),
+                    "prompt_tokens": int(req_state.num_prompt_tokens),
+                    "block_size": block_size,
+                    "copy_entries": 0,
+                    "copied_elements": 0,
+                    "copied_bytes": 0,
+                    **layout,
+                }
+
+        _MAMBA_PREFIX_CLONE_STATE["active"] = active
+        succeeded = False
+        try:
+            result = original_preprocess(
+                scheduler_output,
+                kv_cache_config,
+                cache_config,
+                mamba_state_idx,
+                input_batch,
+                requests,
+                forward_context,
+                mamba_state_copy_funcs,
+                copy_bufs,
+            )
+            succeeded = True
+            return result
+        finally:
+            _MAMBA_PREFIX_CLONE_STATE["active"] = None
+            if succeeded:
+                _MAMBA_PREFIX_CLONE_RECORDS.extend(active[req_id] for req_id in candidate_ids)
+
+    tracked_preprocess._evo2_prefix_clone_proof_hook = True
+    mamba_utils_module.collect_mamba_copy_meta = tracked_collect
+    mamba_utils_module.preprocess_mamba = tracked_preprocess
+
+
 def _copy_whole_evo2_state_block(
     state: torch.Tensor,
     block_ids: list[int],
@@ -37,6 +227,10 @@ def _copy_whole_evo2_state_block(
     if not 0 <= cur_block_idx < len(block_ids):
         raise IndexError("Evo2 state copy block index is out of range")
     source = state[block_ids[cur_block_idx]]
+    elements = source.numel()
+    _MAMBA_STATE_COPY_STATS["copy_calls"] += 1
+    _MAMBA_STATE_COPY_STATS["copied_elements"] += elements
+    _MAMBA_STATE_COPY_STATS["copied_bytes"] += elements * source.element_size()
     return MambaCopySpec(start_addr=source.data_ptr(), num_elements=source.numel())
 
 
