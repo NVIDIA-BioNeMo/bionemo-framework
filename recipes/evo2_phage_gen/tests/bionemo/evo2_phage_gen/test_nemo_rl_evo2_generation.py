@@ -199,6 +199,17 @@ def test_evo2_adapter_broadcasts_implicit_base_seed_from_model_parallel_leader(m
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(parallel_state, "get_model_parallel_group", lambda: model_parallel_group)
     monkeypatch.setattr(parallel_state, "get_model_parallel_src_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        parallel_state,
+        "get_context_parallel_group",
+        lambda: pytest.fail("CP=1 must not request a context-parallel collective group"),
+    )
+    monkeypatch.setattr(
+        parallel_state,
+        "get_context_parallel_global_ranks",
+        lambda: pytest.fail("CP=1 must not request context-parallel source ranks"),
+    )
 
     def _broadcast(seed_tensor, *, src, group):
         assert src == 0
@@ -218,6 +229,84 @@ def test_evo2_adapter_broadcasts_implicit_base_seed_from_model_parallel_leader(m
     assert leader_result == peer_result == 111
     assert workers[0]._evo2_generation_rng_trace[0]["base_seed"] == 111
     assert workers[1]._evo2_generation_rng_trace[0]["base_seed"] == 111
+
+
+def test_evo2_adapter_broadcasts_implicit_base_seed_across_model_and_context_parallel_groups(monkeypatch):
+    from megatron.core import parallel_state
+
+    adapter = Evo2MegatronGenerationAdapter({"seed_stride": 101})
+    current = {"dp": 0, "cp": 0, "mp": 0}
+    model_group_values = {}
+    context_group_values = {}
+    broadcast_groups = []
+    initial_seeds = iter([100, 999, 300, 777, 500, 888, 700, 666])
+    workers = [SimpleNamespace(rank=rank, cfg={"generation": {"mcore_generation_config": {}}}) for rank in range(8)]
+
+    def _global_rank(dp_rank, cp_rank, mp_rank):
+        return dp_rank * 4 + cp_rank * 2 + mp_rank
+
+    def _model_group():
+        return ("model", current["dp"], current["cp"])
+
+    def _context_group():
+        return ("context", current["dp"], current["mp"])
+
+    monkeypatch.setattr(torch, "initial_seed", lambda: next(initial_seeds))
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        torch.distributed,
+        "get_rank",
+        lambda: _global_rank(current["dp"], current["cp"], current["mp"]),
+    )
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda _group: "gloo")
+    monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda: current["dp"])
+    monkeypatch.setattr(parallel_state, "get_data_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: current["mp"])
+    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_model_parallel_group", _model_group)
+    monkeypatch.setattr(
+        parallel_state,
+        "get_model_parallel_src_rank",
+        lambda: _global_rank(current["dp"], current["cp"], 0),
+    )
+    monkeypatch.setattr(parallel_state, "get_context_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_context_parallel_group", _context_group)
+    monkeypatch.setattr(
+        parallel_state,
+        "get_context_parallel_global_ranks",
+        lambda: [
+            _global_rank(current["dp"], 0, current["mp"]),
+            _global_rank(current["dp"], 1, current["mp"]),
+        ],
+    )
+
+    def _broadcast(seed_tensor, *, src, group):
+        broadcast_groups.append(group)
+        current_rank = _global_rank(current["dp"], current["cp"], current["mp"])
+        values = model_group_values if group[0] == "model" else context_group_values
+        if current_rank == src:
+            values[group] = int(seed_tensor.item())
+        else:
+            seed_tensor.fill_(values[group])
+
+    monkeypatch.setattr(torch.distributed, "broadcast", _broadcast)
+
+    seeds = {}
+    worker_idx = 0
+    for dp_rank in range(2):
+        for cp_rank in range(2):
+            for mp_rank in range(2):
+                current.update(dp=dp_rank, cp=cp_rank, mp=mp_rank)
+                seeds[(dp_rank, cp_rank, mp_rank)] = adapter._next_seed(workers[worker_idx])
+                worker_idx += 1
+
+    assert {seed for (dp_rank, _cp, _mp), seed in seeds.items() if dp_rank == 0} == {100}
+    assert {seed for (dp_rank, _cp, _mp), seed in seeds.items() if dp_rank == 1} == {601}
+    assert {worker._evo2_generation_rng_trace[0]["base_seed"] for worker in workers[:4]} == {100}
+    assert {worker._evo2_generation_rng_trace[0]["base_seed"] for worker in workers[4:]} == {500}
+    assert sum(group[0] == "model" for group in broadcast_groups) == 8
+    assert sum(group[0] == "context" for group in broadcast_groups) == 8
 
 
 def test_evo2_native_generation_reseeds_cached_sampling_rng_for_each_adapter_call():
@@ -358,12 +447,45 @@ def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id
         "generation_elapsed_s": 13.0,
         "total_elapsed_s": 13.0,
     }
+    group_zero_memory = {
+        "engine_setup_peak_allocated_bytes": 100,
+        "engine_setup_peak_reserved_bytes": 110,
+        "context_setup_peak_allocated_bytes": 200,
+        "context_setup_peak_reserved_bytes": 210,
+        "cuda_graph_capture_peak_allocated_bytes": 300,
+        "cuda_graph_capture_peak_reserved_bytes": 310,
+        "prefill_peak_allocated_bytes": 400,
+        "prefill_peak_reserved_bytes": 410,
+        "decode_peak_allocated_bytes": 500,
+        "decode_peak_reserved_bytes": 510,
+        "generation_peak_allocated_bytes": 500,
+        "generation_peak_reserved_bytes": 510,
+        "total_peak_allocated_bytes": 500,
+        "total_peak_reserved_bytes": 510,
+    }
+    group_one_memory = {
+        "engine_setup_peak_allocated_bytes": 0,
+        "engine_setup_peak_reserved_bytes": 0,
+        "context_setup_peak_allocated_bytes": 0,
+        "context_setup_peak_reserved_bytes": 0,
+        "cuda_graph_capture_peak_allocated_bytes": 0,
+        "cuda_graph_capture_peak_reserved_bytes": 0,
+        "prefill_peak_allocated_bytes": 600,
+        "prefill_peak_reserved_bytes": 610,
+        "decode_peak_allocated_bytes": 550,
+        "decode_peak_reserved_bytes": 560,
+        "generation_peak_allocated_bytes": 600,
+        "generation_peak_reserved_bytes": 610,
+        "total_peak_allocated_bytes": 600,
+        "total_peak_reserved_bytes": 610,
+    }
     generated = [
         Evo2GenerationResult(
             prompt_tokens=prompt_tokens[idx],
             generated_tokens=[65, 67],
             generated_log_probs=[-0.1, -0.2],
             timings=dict(group_zero if idx < 2 else group_one),
+            memory=dict(group_zero_memory if idx < 2 else group_one_memory),
         )
         for idx in range(4)
     ]
@@ -399,6 +521,24 @@ def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id
     assert timing["timing/train/generation/evo2_decode_elapsed_s"] == 12.0
     assert timing["timing/train/generation/evo2_generation_elapsed_s"] == 22.0
     assert timing["timing/train/generation/evo2_total_elapsed_s"] == 28.0
+    expected_memory_metrics = {
+        "engine_setup_peak_allocated_bytes": 100,
+        "engine_setup_peak_reserved_bytes": 110,
+        "context_setup_peak_allocated_bytes": 200,
+        "context_setup_peak_reserved_bytes": 210,
+        "cuda_graph_capture_peak_allocated_bytes": 300,
+        "cuda_graph_capture_peak_reserved_bytes": 310,
+        "prefill_peak_allocated_bytes": 600,
+        "prefill_peak_reserved_bytes": 610,
+        "decode_peak_allocated_bytes": 550,
+        "decode_peak_reserved_bytes": 560,
+        "generation_peak_allocated_bytes": 600,
+        "generation_peak_reserved_bytes": 610,
+        "total_peak_allocated_bytes": 600,
+        "total_peak_reserved_bytes": 610,
+    }
+    for metric_name, expected_value in expected_memory_metrics.items():
+        assert timing[f"memory/train/generation/evo2_{metric_name}"] == expected_value
 
 
 def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):
@@ -438,6 +578,10 @@ def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):
                 prompt_tokens=prompt_tokens[idx].tolist(),
                 generated_tokens=[65, 67],
                 generated_log_probs=[-0.1, -0.2],
+                memory={
+                    "generation_peak_allocated_bytes": 123,
+                    "generation_peak_reserved_bytes": 456,
+                },
             )
             for idx in range(2)
         ]
@@ -449,6 +593,10 @@ def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):
     assert len(results) == 2
     assert forwarded["ignore_eos"] is True
     assert forwarded["strict_generation"] is True
+    assert results[0].memory == {
+        "generation_peak_allocated_bytes": 123,
+        "generation_peak_reserved_bytes": 456,
+    }
 
 
 def test_megatron_generation_shards_adapter_input_across_dp_and_gathers_in_order():

@@ -162,6 +162,8 @@ def test_result_to_jsonl_record_serializes_complete_benchmark_evidence():
         memory={
             "prefill_peak_allocated_bytes": 1024,
             "prefill_peak_reserved_bytes": 2048,
+            "generation_peak_allocated_bytes": 4096,
+            "generation_peak_reserved_bytes": 8192,
         },
     )
 
@@ -180,6 +182,8 @@ def test_result_to_jsonl_record_serializes_complete_benchmark_evidence():
     assert record["timings"]["decode_elapsed_s"] == 0.75
     assert record["memory"]["prefill_peak_allocated_bytes"] == 1024
     assert record["memory"]["prefill_peak_reserved_bytes"] == 2048
+    assert record["memory"]["generation_peak_allocated_bytes"] == 4096
+    assert record["memory"]["generation_peak_reserved_bytes"] == 8192
 
 
 def test_infer_logs_synchronized_setup_elapsed_and_peak_memory(monkeypatch, caplog):
@@ -226,7 +230,7 @@ def test_infer_logs_synchronized_setup_elapsed_and_peak_memory(monkeypatch, capl
     assert records[0]["completion_token_ids"] == [65]
 
 
-def test_strict_streaming_late_failure_leaves_only_named_partial_artifact(monkeypatch, tmp_path):
+def test_strict_streaming_nonfinite_late_failure_leaves_only_named_partial_artifact(monkeypatch, tmp_path):
     output_file = tmp_path / "audit.jsonl"
     partial_file = tmp_path / "audit.jsonl.partial"
     components = SimpleNamespace(
@@ -243,7 +247,12 @@ def test_strict_streaming_late_failure_leaves_only_named_partial_artifact(monkey
 
     def _fail_after_first_result(_components, *, result_callback, **_kwargs):
         result_callback(0, first_result)
-        raise RuntimeError("late strict failure")
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[[1]],
+            max_new_tokens=1,
+        )
+        pytest.fail("strict native generation accepted a non-finite chosen-token log-prob")
 
     monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
@@ -253,8 +262,13 @@ def test_strict_streaming_late_failure_leaves_only_named_partial_artifact(monkey
     monkeypatch.setattr(infer_module, "setup_inference_engine", lambda **kwargs: components)
     monkeypatch.setattr(infer_module, "generate", _fail_after_first_result)
     monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
+    monkeypatch.setattr(
+        infer_module,
+        "_selected_log_probs_for_sampled_tokens",
+        lambda _log_probs, sampled_tokens: [float("nan")] * sampled_tokens.numel(),
+    )
 
-    with pytest.raises(RuntimeError, match="late strict failure"):
+    with pytest.raises(RuntimeError, match="non-finite chosen-token log-prob"):
         infer_module.infer(
             prompts=[{"id": "first", "prompt": "A"}, {"id": "second", "prompt": "C"}],
             ckpt_dir=Path("/tmp/ckpt"),
@@ -455,6 +469,8 @@ def _run_mock_native_generation(
     forward_error: Exception | None = None,
     events: list[str] | None = None,
     perf_counter_values: list[float] | None = None,
+    peak_allocated_values: list[int] | None = None,
+    peak_reserved_values: list[int] | None = None,
 ):
     from megatron.core.inference.utils import InferenceMode
 
@@ -505,8 +521,18 @@ def _run_mock_native_generation(
     monkeypatch.setattr(infer_module, "_sample_from_log_probs", _sample_step)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("sync") if events is not None else None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
-    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 0)
+    allocated_iter = iter(peak_allocated_values or [])
+    reserved_iter = iter(peak_reserved_values or [])
+    monkeypatch.setattr(
+        torch.cuda,
+        "max_memory_allocated",
+        lambda: next(allocated_iter) if peak_allocated_values is not None else 0,
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "max_memory_reserved",
+        lambda: next(reserved_iter) if peak_reserved_values is not None else 0,
+    )
     if perf_counter_values is not None:
         perf_counter_iter = iter(perf_counter_values)
         monkeypatch.setattr(infer_module.time, "perf_counter", lambda: next(perf_counter_iter))
@@ -626,6 +652,25 @@ def test_native_strict_loop_rejects_requested_but_missing_logprobs(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "nonfinite_logprob",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "positive_infinity", "negative_infinity"],
+)
+def test_native_strict_loop_rejects_nonfinite_chosen_logprobs(monkeypatch, nonfinite_logprob):
+    monkeypatch.setattr(
+        infer_module,
+        "_selected_log_probs_for_sampled_tokens",
+        lambda _log_probs, sampled_tokens: [nonfinite_logprob] * sampled_tokens.numel(),
+    )
+
+    with pytest.raises(RuntimeError, match=r"non-finite chosen-token log-prob.*prompt 0"):
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[[1], [2], [3]],
+        )
+
+
+@pytest.mark.parametrize(
     ("prompts", "batched_decode_size", "sampled_steps"),
     [
         (["P"], 1, [[1], [2], [3]]),
@@ -647,6 +692,8 @@ def test_native_loop_synchronizes_only_at_phase_boundaries(
         evo2_batched_decode_size=batched_decode_size,
         events=events,
         perf_counter_values=[10.0, 12.0, 17.0],
+        peak_allocated_values=[101, 303],
+        peak_reserved_values=[202, 404],
     )
 
     assert events == [
@@ -665,6 +712,15 @@ def test_native_loop_synchronizes_only_at_phase_boundaries(
     assert results[0].timings["total_elapsed_s"] == 7.0
     assert results[0].timings["context_setup_elapsed_s"] == 0.0
     assert results[0].timings["cuda_graph_capture_elapsed_s"] == 0.0
+    for result in results:
+        assert result.memory["prefill_peak_allocated_bytes"] == 101
+        assert result.memory["prefill_peak_reserved_bytes"] == 202
+        assert result.memory["decode_peak_allocated_bytes"] == 303
+        assert result.memory["decode_peak_reserved_bytes"] == 404
+        assert result.memory["generation_peak_allocated_bytes"] == 303
+        assert result.memory["generation_peak_reserved_bytes"] == 404
+        assert result.memory["total_peak_allocated_bytes"] == 303
+        assert result.memory["total_peak_reserved_bytes"] == 404
 
 
 def test_shared_dynamic_context_reports_cold_context_and_capture_then_zero_on_warm_reuse(monkeypatch):

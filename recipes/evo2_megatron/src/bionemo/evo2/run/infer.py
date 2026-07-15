@@ -63,6 +63,7 @@ import contextlib
 import gc
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -1749,6 +1750,14 @@ def _generate_native_dynamic(
         }
         for phase_name, stats in setup_phase_stats.items():
             _record_phase_stats(group_timings, group_memory, phase_name, stats)
+        group_memory["generation_peak_allocated_bytes"] = max(
+            int(group_memory.get("prefill_peak_allocated_bytes", 0)),
+            int(group_memory.get("decode_peak_allocated_bytes", 0)),
+        )
+        group_memory["generation_peak_reserved_bytes"] = max(
+            int(group_memory.get("prefill_peak_reserved_bytes", 0)),
+            int(group_memory.get("decode_peak_reserved_bytes", 0)),
+        )
         group_timings.update(
             {
                 "timing_scope": "native_generation_group",
@@ -1803,6 +1812,16 @@ def _generate_native_dynamic(
                         f"prompt {prompt_idx}: {generated_token_count} tokens != "
                         f"{len(result.generated_log_probs)} log-probs"
                     )
+                for logprob_idx, logprob in enumerate(result.generated_log_probs or []):
+                    try:
+                        is_finite = math.isfinite(float(logprob))
+                    except (TypeError, ValueError):
+                        is_finite = False
+                    if not is_finite:
+                        raise RuntimeError(
+                            "Strict Evo2 generation returned a non-finite chosen-token log-prob "
+                            f"for prompt {prompt_idx} at generated token {logprob_idx}: {logprob!r}"
+                        )
             results.append(result)
             if result_callback is not None:
                 result_callback(prompt_idx, result)

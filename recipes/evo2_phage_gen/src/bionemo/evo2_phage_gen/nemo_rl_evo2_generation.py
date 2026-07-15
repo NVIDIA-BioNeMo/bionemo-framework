@@ -93,6 +93,7 @@ class Evo2GenerationResult:
     stopped_on_eos: bool = False
     truncated: bool = False
     timings: dict[str, Any] | None = None
+    memory: dict[str, int] | None = None
 
 
 class _PromptTokenProxy:
@@ -247,6 +248,7 @@ def generate_evo2_native_batched(
                 stopped_on_eos=bool(getattr(result, "stopped_on_eos", False)),
                 truncated=bool(getattr(result, "truncated", False)),
                 timings=getattr(result, "timings", None),
+                memory=getattr(result, "memory", None),
             )
         )
     return results
@@ -305,15 +307,10 @@ class Evo2MegatronGenerationAdapter:
             and int(parallel_state.get_context_parallel_rank()) == 0
         )
 
-    def _shared_implicit_base_seed(self, candidate_seed: int) -> int:
-        """Broadcast an unconfigured base seed from this DP replica's model-parallel leader."""
-        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
-            return int(candidate_seed)
-
-        from megatron.core import parallel_state
-
-        model_parallel_group = parallel_state.get_model_parallel_group()
-        backend = str(torch.distributed.get_backend(model_parallel_group)).lower()
+    @staticmethod
+    def _broadcast_seed_in_group(candidate_seed: int, *, group: Any, src: int) -> int:
+        """Broadcast one seed using a tensor compatible with the group's backend."""
+        backend = str(torch.distributed.get_backend(group)).lower()
         if backend.endswith("nccl"):
             seed_device = torch.device("cuda", torch.cuda.current_device())
         else:
@@ -321,10 +318,30 @@ class Evo2MegatronGenerationAdapter:
         seed_tensor = torch.tensor([int(candidate_seed)], dtype=torch.int64, device=seed_device)
         torch.distributed.broadcast(
             seed_tensor,
-            src=int(parallel_state.get_model_parallel_src_rank()),
-            group=model_parallel_group,
+            src=int(src),
+            group=group,
         )
         return int(seed_tensor.item())
+
+    def _shared_implicit_base_seed(self, candidate_seed: int) -> int:
+        """Broadcast an unconfigured base seed across this DP replica's MP and CP dimensions."""
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return int(candidate_seed)
+
+        from megatron.core import parallel_state
+
+        shared_seed = self._broadcast_seed_in_group(
+            candidate_seed,
+            group=parallel_state.get_model_parallel_group(),
+            src=int(parallel_state.get_model_parallel_src_rank()),
+        )
+        if int(parallel_state.get_context_parallel_world_size()) > 1:
+            shared_seed = self._broadcast_seed_in_group(
+                shared_seed,
+                group=parallel_state.get_context_parallel_group(),
+                src=int(parallel_state.get_context_parallel_global_ranks()[0]),
+            )
+        return shared_seed
 
     def _next_seed(self, worker: Any) -> int:
         mcore_generation_config = worker.cfg["generation"].get("mcore_generation_config", {}) or {}
@@ -437,24 +454,47 @@ class Evo2MegatronGenerationAdapter:
                     "generation_elapsed_s": 0.0,
                     "total_elapsed_s": 0.0,
                 }
-                seen_timing_groups: set[tuple[str, str]] = set()
+                memory_peak_maxima = {
+                    f"{phase_name}_peak_{memory_kind}_bytes": 0
+                    for phase_name in (
+                        "engine_setup",
+                        "context_setup",
+                        "cuda_graph_capture",
+                        "prefill",
+                        "decode",
+                        "generation",
+                        "total",
+                    )
+                    for memory_kind in ("allocated", "reserved")
+                }
+                seen_evidence_groups: set[tuple[str, str]] = set()
                 for generation_result in result:
                     result_timings = generation_result.timings
-                    if result_timings is None:
+                    result_memory = generation_result.memory
+                    if result_timings is None and result_memory is None:
                         continue
-                    timing_group_id = result_timings.get("timing_group_id")
-                    if timing_group_id is None:
-                        timing_group_key = ("legacy_object", str(id(result_timings)))
-                    else:
-                        timing_group_key = (
+                    timing_group_id = result_timings.get("timing_group_id") if result_timings is not None else None
+                    if timing_group_id is not None:
+                        evidence_group_key = (
                             str(result_timings.get("timing_scope", "native_generation_group")),
                             str(timing_group_id),
                         )
-                    if timing_group_key in seen_timing_groups:
+                    elif result_timings is not None:
+                        evidence_group_key = ("legacy_timing_object", str(id(result_timings)))
+                    else:
+                        evidence_group_key = ("legacy_memory_object", str(id(result_memory)))
+                    if evidence_group_key in seen_evidence_groups:
                         continue
-                    seen_timing_groups.add(timing_group_key)
-                    for phase_name in phase_totals:
-                        phase_totals[phase_name] += float(result_timings.get(phase_name, 0.0))
+                    seen_evidence_groups.add(evidence_group_key)
+                    if result_timings is not None:
+                        for phase_name in phase_totals:
+                            phase_totals[phase_name] += float(result_timings.get(phase_name, 0.0))
+                    if result_memory is not None:
+                        for memory_name in memory_peak_maxima:
+                            memory_peak_maxima[memory_name] = max(
+                                memory_peak_maxima[memory_name],
+                                int(result_memory.get(memory_name, 0)),
+                            )
                 timing.update(
                     {
                         "timing/train/generation/evo2_engine_setup_elapsed_s": phase_totals["engine_setup_elapsed_s"],
@@ -468,6 +508,12 @@ class Evo2MegatronGenerationAdapter:
                         "timing/train/generation/evo2_decode_elapsed_s": phase_totals["decode_elapsed_s"],
                         "timing/train/generation/evo2_generation_elapsed_s": phase_totals["generation_elapsed_s"],
                         "timing/train/generation/evo2_total_elapsed_s": phase_totals["total_elapsed_s"],
+                    }
+                )
+                timing.update(
+                    {
+                        f"memory/train/generation/evo2_{memory_name}": value
+                        for memory_name, value in memory_peak_maxima.items()
                     }
                 )
             setattr(worker, "_evo2_generation_timing", timing)
