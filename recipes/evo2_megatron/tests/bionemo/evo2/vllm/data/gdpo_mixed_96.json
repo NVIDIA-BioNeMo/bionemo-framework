@@ -1,0 +1,1257 @@
+{
+  "schema_version": 1,
+  "name": "evo2-phage-gdpo-mixed-96",
+  "source_checkpoint": "/data/jstjohn/bionemo-recipes/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge/iter_0000001",
+  "checkpoint_manifest_sha256": "6f85cf5681e194c6499b0ea967acdc70d6706abc41f5c579bdc785b787fc2207",
+  "checkpoint_index_sha256": "f9a37408f07c774c13b55648c40f9a4f7fe2847114f988541e5b501bf59f127f",
+  "tokenizer_sha256": "d8b5392d4795e3011b648b7e79a1e2f563cfa508200196d30d6dcbb0292d0803",
+  "requests": [
+    {
+      "request_id": "gdpo-000",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-001",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-002",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-003",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-004",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-005",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-006",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-007",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-008",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-009",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-010",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-011",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-012",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-013",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-014",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-015",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-016",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-017",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-018",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-019",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-020",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-021",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-022",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-023",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-024",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-025",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-026",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-027",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-028",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-029",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-030",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-031",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-032",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-033",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-034",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-035",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-036",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-037",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-038",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-039",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-040",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-041",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-042",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-043",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-044",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-045",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-046",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-047",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-048",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-049",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-050",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-051",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-052",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-053",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-054",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-055",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-056",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-057",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-058",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-059",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-060",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-061",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-062",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-063",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-064",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-065",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-066",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-067",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-068",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-069",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-070",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-071",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-072",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-073",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-074",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-075",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-076",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-077",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-078",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-079",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-080",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-081",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-082",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-083",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-084",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-085",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-086",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-087",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-088",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-089",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84,
+        65,
+        84,
+        67
+      ]
+    },
+    {
+      "request_id": "gdpo-090",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65
+      ]
+    },
+    {
+      "request_id": "gdpo-091",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71
+      ]
+    },
+    {
+      "request_id": "gdpo-092",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-093",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-094",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84
+      ]
+    },
+    {
+      "request_id": "gdpo-095",
+      "prompt_token_ids": [
+        43,
+        126,
+        71,
+        65,
+        71,
+        84,
+        84,
+        84,
+        84
+      ]
+    }
+  ],
+  "max_new_tokens": 5989,
+  "temperature": 1,
+  "top_p": 1,
+  "top_k": 4,
+  "seed": 42,
+  "dtype": "bfloat16",
+  "ignore_eos": true,
+  "stop_token_ids": []
+}

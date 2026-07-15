@@ -1,0 +1,449 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+
+"""Reproducible benchmark schema and runner for Evo2 inference backends."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import statistics
+from dataclasses import asdict, dataclass, fields, replace
+from pathlib import Path
+from typing import Any, Sequence
+
+
+@dataclass(frozen=True)
+class WorkloadRequest:
+    """One stable pretokenized generation request."""
+
+    request_id: str
+    prompt_token_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """Validate request identity and token IDs."""
+        if not self.request_id:
+            raise ValueError("request_id cannot be empty")
+        if not self.prompt_token_ids:
+            raise ValueError(f"request {self.request_id} has an empty prompt")
+        if any(token_id < 0 for token_id in self.prompt_token_ids):
+            raise ValueError(f"request {self.request_id} has a negative token ID")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe request record."""
+        return {"request_id": self.request_id, "prompt_token_ids": list(self.prompt_token_ids)}
+
+
+@dataclass(frozen=True)
+class WorkloadManifest:
+    """Backend-neutral immutable generation workload."""
+
+    schema_version: int
+    name: str
+    source_checkpoint: str
+    checkpoint_manifest_sha256: str
+    checkpoint_index_sha256: str
+    tokenizer_sha256: str
+    requests: tuple[WorkloadRequest, ...]
+    max_new_tokens: int
+    temperature: float
+    top_p: float
+    top_k: int
+    seed: int
+    dtype: str
+    ignore_eos: bool
+    stop_token_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """Validate workload and sampling invariants."""
+        if self.schema_version != 1:
+            raise ValueError(f"unsupported workload schema_version: {self.schema_version}")
+        if not self.name:
+            raise ValueError("workload name cannot be empty")
+        request_ids = [request.request_id for request in self.requests]
+        if len(request_ids) != len(set(request_ids)):
+            raise ValueError("request IDs must be unique")
+        if not self.requests:
+            raise ValueError("workload must contain at least one request")
+        if self.max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
+        if self.temperature < 0:
+            raise ValueError("temperature cannot be negative")
+        if not 0 < self.top_p <= 1:
+            raise ValueError("top_p must be in (0, 1]")
+        if self.top_k == 0 or self.top_k < -1:
+            raise ValueError("top_k must be -1 or positive")
+        if self.dtype not in ("bfloat16", "float16", "float32"):
+            raise ValueError(f"unsupported dtype: {self.dtype}")
+        for label, digest in (
+            ("checkpoint_manifest_sha256", self.checkpoint_manifest_sha256),
+            ("checkpoint_index_sha256", self.checkpoint_index_sha256),
+            ("tokenizer_sha256", self.tokenizer_sha256),
+        ):
+            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+                raise ValueError(f"{label} must be a lowercase SHA256 digest")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WorkloadManifest:
+        """Build a manifest from its JSON representation."""
+        values = dict(data)
+        values["requests"] = tuple(
+            WorkloadRequest(
+                request_id=request["request_id"],
+                prompt_token_ids=tuple(request["prompt_token_ids"]),
+            )
+            for request in values["requests"]
+        )
+        values["stop_token_ids"] = tuple(values.get("stop_token_ids", ()))
+        return cls(**values)
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> WorkloadManifest:
+        """Load and validate one JSON manifest."""
+        with Path(path).open(encoding="utf-8") as handle:
+            return cls.from_dict(json.load(handle))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the canonical JSON-safe representation."""
+        return {
+            "schema_version": self.schema_version,
+            "name": self.name,
+            "source_checkpoint": self.source_checkpoint,
+            "checkpoint_manifest_sha256": self.checkpoint_manifest_sha256,
+            "checkpoint_index_sha256": self.checkpoint_index_sha256,
+            "tokenizer_sha256": self.tokenizer_sha256,
+            "requests": [request.to_dict() for request in self.requests],
+            "max_new_tokens": self.max_new_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "seed": self.seed,
+            "dtype": self.dtype,
+            "ignore_eos": self.ignore_eos,
+            "stop_token_ids": list(self.stop_token_ids),
+        }
+
+    def constructor_kwargs(self) -> dict[str, Any]:
+        """Return dataclass constructor values without JSON conversion."""
+        return {field.name: getattr(self, field.name) for field in fields(self)}
+
+    @property
+    def sha256(self) -> str:
+        """Return a stable digest over canonical compact JSON."""
+        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    @property
+    def max_total_tokens(self) -> int:
+        """Return the longest prompt plus required generated length."""
+        return max(len(request.prompt_token_ids) for request in self.requests) + self.max_new_tokens
+
+    def with_max_new_tokens(self, max_new_tokens: int) -> WorkloadManifest:
+        """Return an otherwise identical exact-length workload."""
+        return replace(self, max_new_tokens=max_new_tokens)
+
+    def request_slice(self, start: int, stop: int) -> WorkloadManifest:
+        """Return a deterministic request shard while preserving sampling settings."""
+        return replace(self, requests=self.requests[start:stop], name=f"{self.name}[{start}:{stop}]")
+
+
+@dataclass(frozen=True)
+class GenerationRecord:
+    """Tokens and chosen-token logprobs for one completed request."""
+
+    request_id: str
+    prompt_token_ids: tuple[int, ...]
+    output_token_ids: tuple[int, ...]
+    output_logprobs: tuple[float, ...]
+
+    @property
+    def output_sha256(self) -> str:
+        """Return a compact stable output-token digest."""
+        payload = json.dumps(self.output_token_ids, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    def summary_dict(self) -> dict[str, Any]:
+        """Return exact lengths and digest without duplicating long token arrays."""
+        return {
+            "request_id": self.request_id,
+            "prompt_length": len(self.prompt_token_ids),
+            "output_length": len(self.output_token_ids),
+            "output_sha256": self.output_sha256,
+            "first_output_tokens": list(self.output_token_ids[:8]),
+            "last_output_tokens": list(self.output_token_ids[-8:]),
+            "all_logprobs_finite": all(math.isfinite(value) for value in self.output_logprobs),
+        }
+
+
+@dataclass(frozen=True)
+class BenchmarkSample:
+    """One complete synchronized generation measurement."""
+
+    sample_index: int
+    generation_s: float
+    request_count: int
+    prompt_tokens: int
+    generated_tokens: int
+    ttft_s: tuple[float, ...]
+    inter_token_latency_s: tuple[float, ...]
+    output_lengths: tuple[int, ...]
+    peak_device_memory_bytes: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """Reject malformed timing samples."""
+        if self.generation_s <= 0:
+            raise ValueError("generation_s must be positive")
+        if self.request_count <= 0:
+            raise ValueError("request_count must be positive")
+        if self.prompt_tokens <= 0 or self.generated_tokens <= 0:
+            raise ValueError("sample token counts must be positive")
+        if len(self.output_lengths) != self.request_count:
+            raise ValueError("output_lengths must align with requests")
+
+    @property
+    def generated_tokens_per_s(self) -> float:
+        """Return aggregate generated-token throughput."""
+        return self.generated_tokens / self.generation_s
+
+    @property
+    def requests_per_s(self) -> float:
+        """Return completed-request throughput."""
+        return self.request_count / self.generation_s
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe sample including derived throughput."""
+        result = asdict(self)
+        result["generated_tokens_per_s"] = self.generated_tokens_per_s
+        result["requests_per_s"] = self.requests_per_s
+        return result
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError("cannot calculate a percentile of an empty sequence")
+    position = (len(ordered) - 1) * percentile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return float(ordered[lower])
+    fraction = position - lower
+    return float(ordered[lower] + fraction * (ordered[upper] - ordered[lower]))
+
+
+def _distribution(values: Sequence[float]) -> dict[str, float]:
+    if not values:
+        raise ValueError("cannot summarize an empty sequence")
+    median = float(statistics.median(values))
+    deviations = [abs(value - median) for value in values]
+    return {
+        "median": median,
+        "p95": _percentile(values, 0.95),
+        "mad": float(statistics.median(deviations)),
+        "min": float(min(values)),
+        "max": float(max(values)),
+    }
+
+
+def aggregate_samples(samples: Sequence[BenchmarkSample]) -> dict[str, Any]:
+    """Aggregate independent raw samples without discarding outliers."""
+    if not samples:
+        raise ValueError("at least one benchmark sample is required")
+    ttft = [value for sample in samples for value in sample.ttft_s]
+    inter_token_latency = [value for sample in samples for value in sample.inter_token_latency_s]
+    peak_memory = [float(value) for sample in samples for value in sample.peak_device_memory_bytes]
+    return {
+        "sample_count": len(samples),
+        "generation_s": _distribution([sample.generation_s for sample in samples]),
+        "generated_tokens_per_s": _distribution([sample.generated_tokens_per_s for sample in samples]),
+        "requests_per_s": _distribution([sample.requests_per_s for sample in samples]),
+        "ttft_s": _distribution(ttft),
+        "inter_token_latency_s": _distribution(inter_token_latency),
+        "peak_device_memory_bytes": _distribution(peak_memory),
+    }
+
+
+def sampling_params_kwargs(manifest: WorkloadManifest) -> dict[str, Any]:
+    """Return exact-length vLLM sampling settings matching the GDPO policy."""
+    return {
+        "temperature": manifest.temperature,
+        "top_p": manifest.top_p,
+        "top_k": manifest.top_k,
+        "max_tokens": manifest.max_new_tokens,
+        "min_tokens": manifest.max_new_tokens,
+        "logprobs": 0,
+        "stop_token_ids": list(manifest.stop_token_ids) or None,
+        "ignore_eos": manifest.ignore_eos,
+        "detokenize": False,
+    }
+
+
+def records_from_vllm_outputs(
+    manifest: WorkloadManifest,
+    outputs: Sequence[Any],
+) -> tuple[GenerationRecord, ...]:
+    """Adapt ordered offline vLLM outputs to the backend-neutral record schema."""
+    if len(outputs) != len(manifest.requests):
+        raise AssertionError("vLLM must return exactly one output per request")
+
+    records = []
+    for request, output in zip(manifest.requests, outputs, strict=True):
+        if not output.finished or len(output.outputs) != 1:
+            raise AssertionError(f"request {request.request_id} did not produce one finished completion")
+        prompt_token_ids = tuple(output.prompt_token_ids or ())
+        if prompt_token_ids != request.prompt_token_ids:
+            raise AssertionError(f"request {request.request_id} prompt tokens changed or were reordered")
+
+        completion = output.outputs[0]
+        output_token_ids = tuple(int(token_id) for token_id in completion.token_ids)
+        if completion.logprobs is None or len(completion.logprobs) != len(output_token_ids):
+            raise AssertionError(f"request {request.request_id} is missing chosen-token logprobs")
+        output_logprobs = []
+        for token_id, position in zip(output_token_ids, completion.logprobs, strict=True):
+            if position is None or token_id not in position:
+                raise AssertionError(f"request {request.request_id} is missing a chosen-token logprob")
+            output_logprobs.append(float(position[token_id].logprob))
+
+        records.append(
+            GenerationRecord(
+                request_id=request.request_id,
+                prompt_token_ids=prompt_token_ids,
+                output_token_ids=output_token_ids,
+                output_logprobs=tuple(output_logprobs),
+            )
+        )
+
+    result = tuple(records)
+    validate_generation_records(manifest, result)
+    return result
+
+
+def benchmark_sample_from_vllm_outputs(
+    manifest: WorkloadManifest,
+    outputs: Sequence[Any],
+    *,
+    sample_index: int,
+    generation_s: float,
+    peak_device_memory_bytes: tuple[int, ...],
+) -> BenchmarkSample:
+    """Build one synchronized sample from validated vLLM outputs and request metrics."""
+    records = records_from_vllm_outputs(manifest, outputs)
+    ttft = []
+    inter_token_latency = []
+    for request, output, record in zip(manifest.requests, outputs, records, strict=True):
+        metrics = output.metrics
+        if metrics is None:
+            raise AssertionError(f"request {request.request_id} is missing vLLM timing metrics")
+        if metrics.num_generation_tokens != len(record.output_token_ids):
+            raise AssertionError(f"request {request.request_id} timing token count is inconsistent")
+        ttft.append(float(metrics.first_token_latency))
+        if len(record.output_token_ids) > 1:
+            decode_s = float(metrics.last_token_ts - metrics.first_token_ts)
+            inter_token_latency.append(decode_s / (len(record.output_token_ids) - 1))
+
+    return BenchmarkSample(
+        sample_index=sample_index,
+        generation_s=generation_s,
+        request_count=len(records),
+        prompt_tokens=sum(len(record.prompt_token_ids) for record in records),
+        generated_tokens=sum(len(record.output_token_ids) for record in records),
+        ttft_s=tuple(ttft),
+        inter_token_latency_s=tuple(inter_token_latency),
+        output_lengths=tuple(len(record.output_token_ids) for record in records),
+        peak_device_memory_bytes=peak_device_memory_bytes,
+    )
+
+
+def validate_compilation_proof(
+    initialized: dict[str, int],
+    after_warm_replay: dict[str, int],
+) -> None:
+    """Require Inductor CUDA graphs and reject eager or warm-run recompilation."""
+    required = {
+        "num_models_seen",
+        "num_backend_compilations",
+        "num_inductor_compiles",
+        "num_eager_compiles",
+        "num_gpu_runner_capture_triggers",
+        "num_cudagraph_captured",
+        "stock_torch_compile_count",
+    }
+    for label, snapshot in (("initialized", initialized), ("after_warm_replay", after_warm_replay)):
+        missing = required - snapshot.keys()
+        if missing:
+            raise AssertionError(f"{label} compilation snapshot is missing {sorted(missing)}")
+
+    assert initialized["num_models_seen"] >= 1, "the Evo2 model was not seen by the compiler"
+    assert initialized["num_backend_compilations"] > 0, "no vLLM backend compilation was recorded"
+    assert initialized["num_inductor_compiles"] > 0, "no Inductor compilation was recorded"
+    assert initialized["num_eager_compiles"] == 0, "eager compilation is forbidden"
+    assert initialized["num_gpu_runner_capture_triggers"] > 0, "CUDA graph capture was not triggered"
+    assert initialized["num_cudagraph_captured"] > 0, "no CUDA graphs were captured"
+    assert after_warm_replay["num_eager_compiles"] == 0, "warm replay entered eager compilation"
+    for field in required:
+        assert after_warm_replay[field] == initialized[field], (
+            f"warm replay caused an unexpected recompile or graph recapture: {field}"
+        )
+
+
+def validate_generation_records(
+    manifest: WorkloadManifest,
+    records: Sequence[GenerationRecord],
+) -> None:
+    """Require exact request, prompt, output-length, and logprob parity."""
+    expected_ids = tuple(request.request_id for request in manifest.requests)
+    actual_ids = tuple(record.request_id for record in records)
+    if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected_ids):
+        raise AssertionError("every request ID must appear exactly once")
+    if actual_ids != expected_ids:
+        raise AssertionError("generation records must preserve input request order")
+
+    for request, record in zip(manifest.requests, records, strict=True):
+        if record.prompt_token_ids != request.prompt_token_ids:
+            raise AssertionError(f"request {request.request_id} prompt tokens changed")
+        if len(record.output_token_ids) != manifest.max_new_tokens:
+            raise AssertionError(
+                f"request {request.request_id} must generate exactly {manifest.max_new_tokens} tokens"
+            )
+        if len(record.output_logprobs) != len(record.output_token_ids):
+            raise AssertionError(f"request {request.request_id} token/logprob lengths differ")
+        if not all(math.isfinite(value) for value in record.output_logprobs):
+            raise AssertionError(f"request {request.request_id} has a non-finite logprob")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the backend-neutral benchmark CLI parser."""
+    parser = argparse.ArgumentParser(description="Benchmark Evo2 MCore or vLLM generation")
+    parser.add_argument("--backend", choices=("mcore", "vllm"), required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--topology", choices=("tp2", "dp2"), required=True)
+    parser.add_argument("--max-num-batched-tokens", type=int, choices=(16_384, 32_768), required=True)
+    parser.add_argument("--gpu-memory-utilization", type=float, choices=(0.92, 0.95, 0.97), required=True)
+    parser.add_argument("--max-model-len", type=int)
+    parser.add_argument("--max-new-tokens", type=int)
+    parser.add_argument("--warmups", type=int, default=2)
+    parser.add_argument("--repetitions", type=int, default=5)
+    parser.add_argument("--proof", action="store_true")
+    parser.add_argument("--async-scheduling", action="store_true")
+    parser.add_argument("--max-concurrent-partial-prefills", type=int, default=1)
+    parser.add_argument("--long-prefill-chunk-tokens", type=int, default=0)
+    parser.add_argument("--output", type=Path, required=True)
+    return parser
+
+
+__all__ = [
+    "BenchmarkSample",
+    "GenerationRecord",
+    "WorkloadManifest",
+    "WorkloadRequest",
+    "aggregate_samples",
+    "benchmark_sample_from_vllm_outputs",
+    "build_parser",
+    "records_from_vllm_outputs",
+    "sampling_params_kwargs",
+    "validate_compilation_proof",
+    "validate_generation_records",
+]
