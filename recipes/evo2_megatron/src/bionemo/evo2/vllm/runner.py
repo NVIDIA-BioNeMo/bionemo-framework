@@ -29,6 +29,7 @@ from bionemo.evo2.vllm.benchmark import (
     benchmark_sample_from_vllm_outputs,
     build_parser,
     build_request_waves,
+    exact_length_evidence,
     records_from_vllm_outputs,
     sampling_params_kwargs,
     summarize_vllm_outputs,
@@ -218,6 +219,8 @@ def prepare_workload(
     max_new_tokens: int | None,
 ) -> WorkloadManifest:
     """Return an immutable exact-shape workload derived from a pinned manifest."""
+    if manifest.prompt_source_path is not None and (request_count is not None or uniform_prompt_length is not None):
+        raise ValueError("a frozen prompt source cannot be rewritten with synthetic request IDs or prompt lengths")
     result = manifest
     if uniform_prompt_length is not None:
         result = result.with_uniform_prompt_length(
@@ -230,6 +233,32 @@ def prepare_workload(
     if max_new_tokens is not None:
         result = result.with_max_new_tokens(max_new_tokens)
     return result
+
+
+def load_source_manifest(args: Any) -> WorkloadManifest:
+    """Load a base manifest and optionally overlay one hash-pinned prompt JSONL source."""
+    manifest = WorkloadManifest.from_path(args.manifest)
+    prompt_jsonl = getattr(args, "prompt_jsonl", None)
+    prompt_jsonl_sha256 = getattr(args, "prompt_jsonl_sha256", None)
+    prompt_tokenizer_json = getattr(args, "prompt_tokenizer_json", None)
+    expected_prompt_tokens = getattr(args, "expected_prompt_tokens", None)
+    if prompt_jsonl is None:
+        if any(value is not None for value in (prompt_jsonl_sha256, prompt_tokenizer_json, expected_prompt_tokens)):
+            raise ValueError("prompt JSONL provenance options require --prompt-jsonl")
+        return manifest
+    if prompt_jsonl_sha256 is None or prompt_tokenizer_json is None:
+        raise ValueError("--prompt-jsonl requires --prompt-jsonl-sha256 and --prompt-tokenizer-json")
+
+    from tokenizers import Tokenizer
+
+    tokenizer = Tokenizer.from_file(str(prompt_tokenizer_json))
+    return manifest.with_prompt_jsonl(
+        prompt_jsonl,
+        tokenize=lambda prompt: tokenizer.encode(prompt, add_special_tokens=False).ids,
+        tokenizer_path=prompt_tokenizer_json,
+        expected_sha256=prompt_jsonl_sha256,
+        expected_prompt_tokens=expected_prompt_tokens,
+    )
 
 
 class CUDAGraphProofRecorder:
@@ -509,7 +538,11 @@ def write_full_generation_records_artifact(
                         "prompt_token_ids": list(generation.prompt_token_ids),
                         "output_token_ids": list(generation.output_token_ids),
                         "chosen_token_logprobs": list(generation.output_logprobs),
-                        "requested_max_tokens": generation.requested_max_tokens,
+                        **exact_length_evidence(
+                            prompt_tokens=len(generation.prompt_token_ids),
+                            generated_tokens=len(generation.output_token_ids),
+                            requested_new_tokens=generation.requested_max_tokens,
+                        ),
                         "finish_reason": generation.finish_reason,
                         "stop_reason": generation.stop_reason,
                         "stopped_on_eos": generation.stopped_on_eos,
@@ -976,7 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.backend != "vllm":
         raise NotImplementedError("the MCore baseline uses its pinned backend adapter")
-    source_manifest = WorkloadManifest.from_path(args.manifest)
+    source_manifest = load_source_manifest(args)
     manifest = prepare_workload(
         source_manifest,
         request_count=args.request_count,
@@ -1003,6 +1036,7 @@ __all__ = [
     "build_request_sampling_params",
     "checkpoint_provenance",
     "full_decode_proof_summary",
+    "load_source_manifest",
     "phase_output_artifact_path",
     "prepare_workload",
     "request_seed",

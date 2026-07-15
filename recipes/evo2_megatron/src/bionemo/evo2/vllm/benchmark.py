@@ -10,9 +10,10 @@ import hashlib
 import json
 import math
 import statistics
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 
 def _token_ids_sha256(token_ids: Sequence[int]) -> str:
@@ -123,6 +124,10 @@ class WorkloadManifest:
     dtype: str
     ignore_eos: bool
     stop_token_ids: tuple[int, ...]
+    prompt_source_path: str | None = None
+    prompt_source_sha256: str | None = None
+    prompt_tokenizer_path: str | None = None
+    prompt_tokenizer_sha256: str | None = None
 
     def __post_init__(self) -> None:
         """Validate workload and sampling invariants."""
@@ -145,11 +150,25 @@ class WorkloadManifest:
             raise ValueError("top_k must be -1 or positive")
         if self.dtype not in ("bfloat16", "float16", "float32"):
             raise ValueError(f"unsupported dtype: {self.dtype}")
+        prompt_provenance = (
+            self.prompt_source_path,
+            self.prompt_source_sha256,
+            self.prompt_tokenizer_path,
+            self.prompt_tokenizer_sha256,
+        )
+        if any(value is not None for value in prompt_provenance) and not all(
+            value is not None for value in prompt_provenance
+        ):
+            raise ValueError("prompt source and tokenizer provenance must be complete")
         for label, digest in (
             ("checkpoint_manifest_sha256", self.checkpoint_manifest_sha256),
             ("checkpoint_index_sha256", self.checkpoint_index_sha256),
             ("tokenizer_sha256", self.tokenizer_sha256),
+            ("prompt_source_sha256", self.prompt_source_sha256),
+            ("prompt_tokenizer_sha256", self.prompt_tokenizer_sha256),
         ):
+            if digest is None:
+                continue
             if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
                 raise ValueError(f"{label} must be a lowercase SHA256 digest")
 
@@ -175,7 +194,7 @@ class WorkloadManifest:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the canonical JSON-safe representation."""
-        return {
+        result = {
             "schema_version": self.schema_version,
             "name": self.name,
             "source_checkpoint": self.source_checkpoint,
@@ -192,6 +211,16 @@ class WorkloadManifest:
             "ignore_eos": self.ignore_eos,
             "stop_token_ids": list(self.stop_token_ids),
         }
+        if self.prompt_source_path is not None:
+            result.update(
+                {
+                    "prompt_source_path": self.prompt_source_path,
+                    "prompt_source_sha256": self.prompt_source_sha256,
+                    "prompt_tokenizer_path": self.prompt_tokenizer_path,
+                    "prompt_tokenizer_sha256": self.prompt_tokenizer_sha256,
+                }
+            )
+        return result
 
     def constructor_kwargs(self) -> dict[str, Any]:
         """Return dataclass constructor values without JSON conversion."""
@@ -211,6 +240,62 @@ class WorkloadManifest:
     def with_max_new_tokens(self, max_new_tokens: int) -> WorkloadManifest:
         """Return an otherwise identical exact-length workload."""
         return replace(self, max_new_tokens=max_new_tokens)
+
+    def with_prompt_jsonl(
+        self,
+        path: str | Path,
+        *,
+        tokenize: Callable[[str], Sequence[int]],
+        tokenizer_path: str | Path,
+        expected_sha256: str,
+        expected_prompt_tokens: int | None = None,
+        name: str | None = None,
+    ) -> WorkloadManifest:
+        """Replace requests with one hash-pinned, ID-preserving prompt JSONL source."""
+        if expected_prompt_tokens is not None and expected_prompt_tokens <= 0:
+            raise ValueError("expected_prompt_tokens must be positive")
+        source = Path(path).resolve()
+        payload = source.read_bytes()
+        source_sha256 = hashlib.sha256(payload).hexdigest()
+        if source_sha256 != expected_sha256:
+            raise ValueError(
+                f"prompt source SHA256 mismatch: expected {expected_sha256}, observed {source_sha256}"
+            )
+        tokenizer = Path(tokenizer_path).resolve()
+        tokenizer_sha256 = hashlib.sha256(tokenizer.read_bytes()).hexdigest()
+        token_cache: dict[str, tuple[int, ...]] = {}
+        requests = []
+        for line_number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
+            if not line:
+                raise ValueError(f"prompt source line {line_number} is blank")
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"prompt source line {line_number} is not valid JSON") from error
+            if not isinstance(row, dict) or set(row) != {"id", "prompt"}:
+                raise ValueError(f"prompt source line {line_number} must contain exactly id and prompt")
+            request_id = row["id"]
+            prompt = row["prompt"]
+            if not isinstance(request_id, str) or not isinstance(prompt, str):
+                raise ValueError(f"prompt source line {line_number} id and prompt must be strings")
+            if prompt not in token_cache:
+                token_cache[prompt] = tuple(int(token_id) for token_id in tokenize(prompt))
+            prompt_token_ids = token_cache[prompt]
+            if expected_prompt_tokens is not None and len(prompt_token_ids) != expected_prompt_tokens:
+                raise ValueError(
+                    f"request {request_id} expected {expected_prompt_tokens} prompt tokens, "
+                    f"observed {len(prompt_token_ids)}"
+                )
+            requests.append(WorkloadRequest(request_id=request_id, prompt_token_ids=prompt_token_ids))
+        return replace(
+            self,
+            name=name or f"{self.name}-{source.stem}",
+            requests=tuple(requests),
+            prompt_source_path=str(source),
+            prompt_source_sha256=source_sha256,
+            prompt_tokenizer_path=str(tokenizer),
+            prompt_tokenizer_sha256=tokenizer_sha256,
+        )
 
     def with_request_count(
         self,
@@ -282,9 +367,11 @@ class GenerationRecord:
         """Return exact lengths and digest without duplicating long token arrays."""
         return {
             "request_id": self.request_id,
-            "prompt_length": len(self.prompt_token_ids),
-            "output_length": len(self.output_token_ids),
-            "requested_max_tokens": self.requested_max_tokens,
+            **exact_length_evidence(
+                prompt_tokens=len(self.prompt_token_ids),
+                generated_tokens=len(self.output_token_ids),
+                requested_new_tokens=self.requested_max_tokens,
+            ),
             "finish_reason": self.finish_reason,
             "stop_reason": self.stop_reason,
             "stopped_on_eos": self.stopped_on_eos,
@@ -293,6 +380,26 @@ class GenerationRecord:
             "last_output_tokens": list(self.output_token_ids[-8:]),
             "all_logprobs_finite": all(math.isfinite(value) for value in self.output_logprobs),
         }
+
+
+def exact_length_evidence(
+    *,
+    prompt_tokens: int,
+    generated_tokens: int,
+    requested_new_tokens: int,
+) -> dict[str, int]:
+    """Return explicit requested and observed prompt, generation, and total lengths."""
+    return {
+        "prompt_length": prompt_tokens,
+        "output_length": generated_tokens,
+        "requested_max_tokens": requested_new_tokens,
+        "requested_prompt_tokens": prompt_tokens,
+        "requested_new_tokens": requested_new_tokens,
+        "requested_total_tokens": prompt_tokens + requested_new_tokens,
+        "observed_prompt_tokens": prompt_tokens,
+        "observed_new_tokens": generated_tokens,
+        "observed_total_tokens": prompt_tokens + generated_tokens,
+    }
 
 
 @dataclass(frozen=True)
@@ -504,9 +611,11 @@ def summarize_vllm_outputs(
         summaries.append(
             {
                 "request_id": request.request_id,
-                "prompt_length": len(request.prompt_token_ids),
-                "output_length": len(output_token_ids),
-                "requested_max_tokens": manifest.max_new_tokens,
+                **exact_length_evidence(
+                    prompt_tokens=len(request.prompt_token_ids),
+                    generated_tokens=len(output_token_ids),
+                    requested_new_tokens=manifest.max_new_tokens,
+                ),
                 "finish_reason": finish_reason,
                 "stop_reason": stop_reason,
                 "stopped_on_eos": False,
@@ -637,6 +746,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-count", type=int)
     parser.add_argument("--uniform-prompt-length", type=int)
     parser.add_argument("--request-id-prefix", default="benchmark")
+    parser.add_argument("--prompt-jsonl", type=Path)
+    parser.add_argument("--prompt-jsonl-sha256")
+    parser.add_argument("--prompt-tokenizer-json", type=Path)
+    parser.add_argument("--expected-prompt-tokens", type=int)
     parser.add_argument("--load-format", choices=("safetensors", "dummy"), default="safetensors")
     parser.add_argument("--optimization-level", type=int, choices=(2, 3), default=2)
     parser.add_argument("--performance-mode", choices=("balanced", "throughput"), default="balanced")
@@ -662,6 +775,7 @@ __all__ = [
     "benchmark_sample_from_vllm_outputs",
     "build_parser",
     "build_request_waves",
+    "exact_length_evidence",
     "records_from_vllm_outputs",
     "sampling_params_kwargs",
     "summarize_vllm_outputs",

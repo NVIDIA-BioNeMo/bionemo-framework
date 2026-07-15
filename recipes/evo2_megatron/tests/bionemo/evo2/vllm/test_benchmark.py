@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import hashlib
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,6 +119,76 @@ def test_manifest_builds_exact_long_prompts_from_real_tokens_without_padding() -
     assert [len(request.prompt_token_ids) for request in manifest.requests] == [25_000] * 3
     assert all(0 <= token_id < 512 for request in manifest.requests for token_id in request.prompt_token_ids)
     assert manifest.max_total_tokens == 50_000
+
+
+def test_prompt_jsonl_loader_preserves_ids_hash_and_exact_length_lanes(tmp_path) -> None:
+    prompt_source = tmp_path / "frozen-prompts.jsonl"
+    prompt_payload = (
+        '{"id":"audit_prompt10_0000","prompt":"+~GAGTTTTATC"}\n'
+        '{"id":"audit_prompt10_0001","prompt":"+~GAGTTTTATC"}\n'
+    )
+    prompt_source.write_text(prompt_payload, encoding="utf-8")
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text('{"type":"test-tokenizer"}\n', encoding="utf-8")
+    tokenize_calls = []
+
+    def tokenize(prompt: str) -> tuple[int, ...]:
+        tokenize_calls.append(prompt)
+        return tuple(ord(character) for character in prompt)
+
+    source_sha256 = hashlib.sha256(prompt_payload.encode()).hexdigest()
+    manifest = WorkloadManifest.from_path(DATA).with_prompt_jsonl(
+        prompt_source,
+        tokenize=tokenize,
+        tokenizer_path=tokenizer_path,
+        expected_sha256=source_sha256,
+        expected_prompt_tokens=12,
+        name="matched-audit-96",
+    )
+
+    assert [request.request_id for request in manifest.requests] == [
+        "audit_prompt10_0000",
+        "audit_prompt10_0001",
+    ]
+    assert [len(request.prompt_token_ids) for request in manifest.requests] == [12, 12]
+    assert tokenize_calls == ["+~GAGTTTTATC"]
+    assert manifest.prompt_source_path == str(prompt_source.resolve())
+    assert manifest.prompt_source_sha256 == source_sha256
+    assert manifest.prompt_tokenizer_path == str(tokenizer_path.resolve())
+    assert manifest.prompt_tokenizer_sha256 == hashlib.sha256(tokenizer_path.read_bytes()).hexdigest()
+    assert WorkloadManifest.from_dict(manifest.to_dict()) == manifest
+
+    exact_6k_total = manifest.with_max_new_tokens(5_988)
+    exact_6k_new = manifest.with_max_new_tokens(6_000)
+    assert exact_6k_total.max_total_tokens == 6_000
+    assert exact_6k_new.max_total_tokens == 6_012
+
+
+def test_prompt_jsonl_loader_rejects_source_or_token_length_drift(tmp_path) -> None:
+    prompt_source = tmp_path / "frozen-prompts.jsonl"
+    prompt_source.write_text('{"id":"audit-0","prompt":"ACGT"}\n', encoding="utf-8")
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text("{}\n", encoding="utf-8")
+    base = WorkloadManifest.from_path(DATA)
+
+    with pytest.raises(ValueError, match="prompt source SHA256"):
+        base.with_prompt_jsonl(
+            prompt_source,
+            tokenize=lambda prompt: tuple(map(ord, prompt)),
+            tokenizer_path=tokenizer_path,
+            expected_sha256="0" * 64,
+            expected_prompt_tokens=4,
+        )
+
+    source_sha256 = hashlib.sha256(prompt_source.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="expected 5 prompt tokens"):
+        base.with_prompt_jsonl(
+            prompt_source,
+            tokenize=lambda prompt: tuple(map(ord, prompt)),
+            tokenizer_path=tokenizer_path,
+            expected_sha256=source_sha256,
+            expected_prompt_tokens=5,
+        )
 
 
 def test_sample_aggregation_reports_median_p95_and_mad_without_hiding_outlier() -> None:
@@ -276,6 +347,10 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
     assert args.request_count is None
     assert args.uniform_prompt_length is None
     assert args.generation_round == 0
+    assert args.prompt_jsonl is None
+    assert args.prompt_jsonl_sha256 is None
+    assert args.prompt_tokenizer_json is None
+    assert args.expected_prompt_tokens is None
 
 
 def _fake_vllm_outputs(manifest: WorkloadManifest):
@@ -330,6 +405,12 @@ def test_vllm_output_summary_streams_exact_lengths_and_matches_record_digest() -
     assert summaries[0] == records[0].summary_dict()
     assert summaries[1]["request_id"] == "gdpo-001"
     assert summaries[1]["output_length"] == 3
+    assert summaries[1]["requested_prompt_tokens"] == len(manifest.requests[1].prompt_token_ids)
+    assert summaries[1]["requested_new_tokens"] == 3
+    assert summaries[1]["requested_total_tokens"] == len(manifest.requests[1].prompt_token_ids) + 3
+    assert summaries[1]["observed_prompt_tokens"] == len(manifest.requests[1].prompt_token_ids)
+    assert summaries[1]["observed_new_tokens"] == 3
+    assert summaries[1]["observed_total_tokens"] == len(manifest.requests[1].prompt_token_ids) + 3
 
 
 def test_vllm_output_adapter_rejects_reordered_or_missing_logprob_outputs() -> None:

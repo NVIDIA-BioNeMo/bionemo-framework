@@ -382,6 +382,12 @@ def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path)
     assert rows[0]["seed"] == execution_records[0].seed
     assert rows[0]["execution_uid"] == "round=3/call=9/global=48/dp=1/request=gdpo-000"
     assert rows[0]["requested_max_tokens"] == 3
+    assert rows[0]["requested_prompt_tokens"] == len(manifest.requests[0].prompt_token_ids)
+    assert rows[0]["requested_new_tokens"] == 3
+    assert rows[0]["requested_total_tokens"] == len(manifest.requests[0].prompt_token_ids) + 3
+    assert rows[0]["observed_prompt_tokens"] == len(manifest.requests[0].prompt_token_ids)
+    assert rows[0]["observed_new_tokens"] == 3
+    assert rows[0]["observed_total_tokens"] == len(manifest.requests[0].prompt_token_ids) + 3
     assert rows[0]["finish_reason"] == "length"
     assert rows[0]["stop_reason"] is None
     assert rows[0]["stopped_on_eos"] is False
@@ -542,6 +548,61 @@ def test_prepare_workload_builds_exact_pressure_shape_without_mutating_manifest(
         "pressure-0001",
         "pressure-0002",
     ]
+
+
+def test_load_source_manifest_tokenizes_hash_pinned_jsonl_and_preserves_ids(tmp_path) -> None:
+    prompt_source = tmp_path / "matched.jsonl"
+    prompt_source.write_text(
+        '{"id":"audit_prompt10_0000","prompt":"+~GAGTTTTATC"}\n'
+        '{"id":"audit_prompt10_0001","prompt":"+~GAGTTTTATC"}\n',
+        encoding="utf-8",
+    )
+    tokenizer_json = (
+        __import__("pathlib").Path(__file__).parents[4]
+        / "tokenizers"
+        / "nucleotide_fast_tokenizer_512"
+        / "tokenizer.json"
+    )
+    args = SimpleNamespace(
+        manifest=DATA,
+        prompt_jsonl=prompt_source,
+        prompt_jsonl_sha256=hashlib.sha256(prompt_source.read_bytes()).hexdigest(),
+        prompt_tokenizer_json=tokenizer_json,
+        expected_prompt_tokens=12,
+    )
+
+    manifest = runner.load_source_manifest(args)
+
+    assert [request.request_id for request in manifest.requests] == [
+        "audit_prompt10_0000",
+        "audit_prompt10_0001",
+    ]
+    assert [len(request.prompt_token_ids) for request in manifest.requests] == [12, 12]
+    assert manifest.prompt_source_sha256 == args.prompt_jsonl_sha256
+    assert manifest.prompt_tokenizer_sha256 == hashlib.sha256(tokenizer_json.read_bytes()).hexdigest()
+
+
+def test_prepare_workload_rejects_synthetic_prompt_or_id_rewrites_for_frozen_source(tmp_path) -> None:
+    prompt_source = tmp_path / "matched.jsonl"
+    prompt_source.write_text('{"id":"audit-0","prompt":"ACGT"}\n', encoding="utf-8")
+    tokenizer_json = tmp_path / "tokenizer.json"
+    tokenizer_json.write_text("{}\n", encoding="utf-8")
+    manifest = WorkloadManifest.from_path(DATA).with_prompt_jsonl(
+        prompt_source,
+        tokenize=lambda prompt: tuple(map(ord, prompt)),
+        tokenizer_path=tokenizer_json,
+        expected_sha256=hashlib.sha256(prompt_source.read_bytes()).hexdigest(),
+        expected_prompt_tokens=4,
+    )
+
+    with pytest.raises(ValueError, match="frozen prompt source"):
+        prepare_workload(
+            manifest,
+            request_count=2,
+            uniform_prompt_length=None,
+            request_id_prefix="rewritten",
+            max_new_tokens=5_988,
+        )
 
 
 def _fake_outputs(manifest: WorkloadManifest):
