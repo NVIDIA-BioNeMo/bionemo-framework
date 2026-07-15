@@ -19,7 +19,7 @@ import pytest
 import torch
 from torch import nn
 
-from bionemo.evo2.vllm.weights import load_evo2_weights, load_tensor_parallel_weight
+from bionemo.evo2.vllm.weights import IncrementalEvo2WeightLoader, load_evo2_weights, load_tensor_parallel_weight
 
 
 PATTERN = "SDH*"
@@ -428,3 +428,47 @@ def test_unknown_and_missing_mandatory_weights_are_rejected():
     incomplete = [(name, tensor) for name, tensor in source.items() if name != missing_name]
     with pytest.raises(ValueError, match=missing_name):
         load_evo2_weights(_make_synthetic_model(), incomplete)
+
+
+def test_incremental_loader_requires_complete_initial_load_and_each_refit():
+    source = _make_source_weights()
+    model = _make_synthetic_model()
+    loader = IncrementalEvo2WeightLoader(model)
+    chunks = [list(source.items())[index : index + 7] for index in range(0, len(source), 7)]
+
+    loader.load(chunks[0])
+    with pytest.raises(RuntimeError, match="initial weight load is incomplete"):
+        loader.assert_ready_for_inference()
+
+    for chunk in chunks[1:]:
+        loader.load(chunk)
+    loader.assert_ready_for_inference()
+    assert loader.completed_transactions == 1
+    for name, parameter in model.named_parameters():
+        torch.testing.assert_close(parameter, source[name])
+
+    refit_source = {name: tensor + 0.25 for name, tensor in source.items()}
+    refit_items = list(refit_source.items())
+    loader.load(refit_items[:-1])
+    with pytest.raises(RuntimeError, match="refit weight load is incomplete"):
+        loader.assert_ready_for_inference()
+
+    loader.load(refit_items[-1:])
+    loader.assert_ready_for_inference()
+    assert loader.completed_transactions == 2
+    for name, parameter in model.named_parameters():
+        torch.testing.assert_close(parameter, refit_source[name])
+
+
+def test_incremental_loader_preserves_vortex_fc1_fusion_across_chunks():
+    source = _make_source_weights()
+    model = _make_synthetic_model()
+    loader = IncrementalEvo2WeightLoader(model)
+    loaded = set()
+
+    for item in _make_vortex_weights(source).items():
+        loaded.update(loader.load([item]))
+
+    loader.assert_ready_for_inference()
+    assert loaded == set(dict(model.named_parameters()))
+    assert loader.completed_transactions == 1

@@ -33,6 +33,20 @@ def select_fir_path(*, direct_ms: float, bucketed_ms: float) -> str:
     return "bucketed" if bucketed_ms <= direct_ms * 0.95 else "direct"
 
 
+def select_production_fir_path(
+    *,
+    num_requests: int,
+    total_tokens: int,
+    max_query_len: int,
+    taps: int,
+) -> str:
+    """Select the measured fast path only for equal long 128-tap segments."""
+    if num_requests < 1 or total_tokens < 1 or max_query_len < 1 or taps < 2:
+        raise ValueError("FIR production path dimensions must be positive")
+    equal_length = total_tokens == num_requests * max_query_len
+    return "equal_length_conv" if taps == 128 and max_query_len >= 1_024 and equal_length else "direct"
+
+
 def _expand_channels(values: torch.Tensor, *, channels: int, group_size: int, name: str) -> torch.Tensor:
     if values.shape[0] == channels:
         return values
@@ -476,6 +490,78 @@ def _packed_fir_update_state_kernel(
         )
 
 
+def _packed_equal_length_causal_fir(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    state_cache: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    *,
+    num_requests: int,
+    query_len: int,
+    group_size: int,
+    gated_bias: bool,
+    flip_filter: bool,
+) -> torch.Tensor:
+    """Run the measured grouped-convolution path with recurrent history."""
+    channels = x.shape[1]
+    taps = weight.shape[1]
+    slots = state_indices.to(torch.int64)
+    gathered_state = state_cache.index_select(0, slots)[:, :, : taps - 1]
+    valid_history = has_initial_state[:, None, None] & slots.ne(0)[:, None, None]
+    history = torch.where(valid_history, gathered_state, torch.zeros_like(gathered_state))
+    sequence = x.reshape(num_requests, query_len, channels).transpose(1, 2).float()
+    padded_sequence = torch.cat((history, sequence), dim=-1)
+
+    expanded_weight = _expand_channels(
+        weight,
+        channels=channels,
+        group_size=group_size,
+        name="weight",
+    ).float()
+    if flip_filter:
+        expanded_weight = expanded_weight.flip(-1)
+    convolution = torch.conv1d(
+        padded_sequence,
+        expanded_weight.contiguous().unsqueeze(1),
+        groups=channels,
+    )
+    if bias is not None:
+        expanded_bias = _expand_channels(
+            bias,
+            channels=channels,
+            group_size=group_size,
+            name="bias",
+        ).float()[None, :, None]
+        convolution = convolution + (expanded_bias * sequence if gated_bias else expanded_bias)
+    output = convolution.transpose(1, 2).reshape(-1, channels).to(x.dtype)
+
+    block_channels = 16
+    state_grid = (num_requests, triton.cdiv(channels, block_channels))
+    _packed_fir_update_state_kernel[state_grid](
+        x,
+        state_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        channels,
+        x.stride(0),
+        x.stride(1),
+        state_cache.stride(0),
+        state_cache.stride(1),
+        state_cache.stride(2),
+        query_start_loc.stride(0),
+        state_indices.stride(0),
+        has_initial_state.stride(0),
+        kernel_size=taps,
+        block_c=block_channels,
+        num_warps=4,
+    )
+    return output
+
+
 def packed_causal_fir(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -517,8 +603,30 @@ def packed_causal_fir(
             flip_filter=flip_filter,
         )
 
-    output = torch.empty_like(x)
     taps = weight.shape[1]
+    production_path = select_production_fir_path(
+        num_requests=num_requests,
+        total_tokens=x.shape[0],
+        max_query_len=max_query_len,
+        taps=taps,
+    )
+    if production_path == "equal_length_conv":
+        return _packed_equal_length_causal_fir(
+            x,
+            weight,
+            bias,
+            state_cache,
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            num_requests=num_requests,
+            query_len=max_query_len,
+            group_size=group_size,
+            gated_bias=gated_bias,
+            flip_filter=flip_filter,
+        )
+
+    output = torch.empty_like(x)
     bias_tensor = x if bias is None else bias
     if max_query_len <= 32:
         block_channels = 32 if taps >= 128 else 128
@@ -785,6 +893,16 @@ def _benchmark_fir(args: argparse.Namespace) -> dict[str, object]:
         results.append(
             {
                 "taps": taps,
+                "production_path": select_production_fir_path(
+                    num_requests=args.batch_size,
+                    total_tokens=starts[-1],
+                    max_query_len=max(lengths),
+                    taps=taps,
+                ),
+                "production_trials_ms": direct_trials,
+                "production_median_ms": direct_ms,
+                "benchmark_candidate_trials_ms": bucketed_trials,
+                "benchmark_candidate_median_ms": bucketed_ms,
                 "direct_trials_ms": direct_trials,
                 "bucketed_trials_ms": bucketed_trials,
                 "direct_median_ms": direct_ms,
@@ -794,7 +912,8 @@ def _benchmark_fir(args: argparse.Namespace) -> dict[str, object]:
         )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "dispatch_under_test": "packed_causal_fir production dispatch",
         "device": torch.cuda.get_device_name(device),
         "batch_size": args.batch_size,
         "request_prompt_lengths": lengths,

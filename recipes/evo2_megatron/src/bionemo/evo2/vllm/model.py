@@ -22,7 +22,7 @@ from vllm.sequence import IntermediateTensors
 from bionemo.evo2.vllm.config import Evo2Config
 from bionemo.evo2.vllm.hyena import Evo2HyenaDecoderLayer
 from bionemo.evo2.vllm.layers import Evo2AttentionDecoderLayer
-from bionemo.evo2.vllm.weights import load_evo2_weights
+from bionemo.evo2.vllm.weights import IncrementalEvo2WeightLoader
 
 
 def _copy_whole_evo2_state_block(
@@ -209,6 +209,7 @@ class Evo2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.lm_head = self.model.embedding.word_embeddings
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self._weight_loader = IncrementalEvo2WeightLoader(self)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Embed input ids through the tied Evo2 table."""
@@ -224,6 +225,7 @@ class Evo2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     ) -> torch.Tensor | IntermediateTensors:
         """Return hidden states for vLLM's logits and sampling pipeline."""
         del kwargs
+        self._weight_loader.assert_ready_for_inference()
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     @classmethod
@@ -264,4 +266,4 @@ class Evo2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Stream native MBridge or Vortex names into the vLLM parameter tree."""
-        return load_evo2_weights(self, weights, strict=True)
+        return self._weight_loader.load(weights)

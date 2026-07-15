@@ -225,6 +225,7 @@ def load_evo2_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
     strict: bool = True,
+    pending_fc1: dict[int, dict[str, torch.Tensor]] | None = None,
 ) -> set[str]:
     """Stream native or MBridge-named tensors into an Evo2 vLLM model.
 
@@ -240,7 +241,8 @@ def load_evo2_weights(
     required = _required_parameter_ids(model)
     loaded_parameter_ids: set[int] = set()
     loaded_parameter_names: set[str] = set()
-    pending_fc1: dict[int, dict[str, torch.Tensor]] = {}
+    if pending_fc1 is None:
+        pending_fc1 = {}
 
     for source_name, loaded_weight in weights:
         for mapped_name, mapped_weight in _map_vortex_weight(model, source_name, loaded_weight, pending_fc1):
@@ -265,3 +267,64 @@ def load_evo2_weights(
         if missing:
             raise ValueError(f"Evo2 checkpoint is missing mandatory weights: {missing}")
     return loaded_parameter_names
+
+
+def _pending_fc1_signature(pending_fc1: dict[int, dict[str, torch.Tensor]]) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    return tuple((layer_index, tuple(sorted(parts))) for layer_index, parts in sorted(pending_fc1.items()))
+
+
+class IncrementalEvo2WeightLoader:
+    """Track complete Evo2 initialization and refit transactions across chunks."""
+
+    def __init__(self, model: nn.Module) -> None:
+        """Record the model's mandatory canonical parameter names."""
+        self.model = model
+        self.required_parameter_names = frozenset(_required_parameter_ids(model).values())
+        self.completed_transactions = 0
+        self._loaded_parameter_names: set[str] = set()
+        self._pending_fc1: dict[int, dict[str, torch.Tensor]] = {}
+        self._started = False
+        self._complete = False
+        self._consumed = False
+
+    def _reset_for_next_transaction(self) -> None:
+        self._loaded_parameter_names.clear()
+        self._pending_fc1.clear()
+        self._started = False
+        self._complete = False
+        self._consumed = False
+
+    def load(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load one IPC/checkpoint chunk and complete only after every mandatory parameter arrives."""
+        if self._complete and self._consumed:
+            self._reset_for_next_transaction()
+
+        pending_before = _pending_fc1_signature(self._pending_fc1)
+        loaded = load_evo2_weights(
+            self.model,
+            weights,
+            strict=False,
+            pending_fc1=self._pending_fc1,
+        )
+        has_activity = bool(loaded) or _pending_fc1_signature(self._pending_fc1) != pending_before
+        if not has_activity and not self._started:
+            return loaded
+
+        self._started = True
+        self._loaded_parameter_names.update(loaded)
+        if not self._complete and not self._pending_fc1 and self.required_parameter_names <= self._loaded_parameter_names:
+            self._complete = True
+            self.completed_transactions += 1
+        return loaded
+
+    def assert_ready_for_inference(self) -> None:
+        """Reject inference after a partial load while permitting untouched dummy initialization."""
+        if not self._started:
+            return
+        if not self._complete:
+            phase = "initial" if self.completed_transactions == 0 else "refit"
+            missing = sorted(self.required_parameter_names - self._loaded_parameter_names)
+            if self._pending_fc1:
+                missing.append("incomplete Vortex MLP fusion")
+            raise RuntimeError(f"Evo2 {phase} weight load is incomplete; missing mandatory weights: {missing}")
+        self._consumed = True

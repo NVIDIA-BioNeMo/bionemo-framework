@@ -35,6 +35,8 @@ def test_tp2_profile_pins_optimized_vllm_020_settings() -> None:
     assert kwargs["max_model_len"] == 50_000
     assert kwargs["max_num_batched_tokens"] == 32_768
     assert kwargs["gpu_memory_utilization"] == 0.95
+    assert kwargs["optimization_level"] == 2
+    assert kwargs["performance_mode"] == "balanced"
     assert kwargs["enforce_eager"] is False
     assert kwargs["enable_chunked_prefill"] is True
     assert kwargs["enable_prefix_caching"] is False
@@ -76,6 +78,7 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert kwargs["async_scheduling"] is True
     assert kwargs["compilation_config"]["compile_sizes"] == [48]
     assert kwargs["compilation_config"]["cudagraph_capture_sizes"][-1] == 48
+    assert 20 in kwargs["compilation_config"]["cudagraph_capture_sizes"]
     assert 96 not in kwargs["compilation_config"]["cudagraph_capture_sizes"]
 
     assert nemo_rl["backend"] == "vllm"
@@ -118,17 +121,53 @@ def test_long_prefill_profile_admits_multiple_packed_partial_requests() -> None:
     assert kwargs["enable_chunked_prefill"] is True
 
 
-def test_requested_profile_sweep_is_complete_and_stable() -> None:
+def test_o3_throughput_profile_is_explicit_and_resolved_without_batch_drift() -> None:
+    profile = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=50_000,
+        max_num_batched_tokens=32_768,
+        gpu_memory_utilization=0.95,
+        optimization_level=3,
+        performance_mode="throughput",
+        proof=True,
+    )
+
+    kwargs = profile.engine_kwargs(model="/checkpoint")
+    resolved = profile.expected_resolved_config()
+
+    assert kwargs["optimization_level"] == 3
+    assert kwargs["performance_mode"] == "throughput"
+    assert resolved["runtime"] == {
+        "optimization_level": 3,
+        "performance_mode": "throughput",
+    }
+    assert resolved["scheduler"]["max_num_seqs"] == 96
+    assert resolved["scheduler"]["max_num_batched_tokens"] == 32_768
+    validate_resolved_profile(profile, resolved)
+
+
+def test_requested_profile_sweep_includes_performance_and_long_prefill_dimensions() -> None:
     profiles = optimized_profile_sweep(topology="tp2", max_model_len=10_240)
 
-    assert [(profile.max_num_batched_tokens, profile.gpu_memory_utilization) for profile in profiles] == [
-        (16_384, 0.92),
-        (16_384, 0.95),
-        (16_384, 0.97),
-        (32_768, 0.92),
-        (32_768, 0.95),
-        (32_768, 0.97),
-    ]
+    dimensions = {
+        (
+            profile.max_num_batched_tokens,
+            profile.gpu_memory_utilization,
+            profile.optimization_level,
+            profile.performance_mode,
+            profile.max_concurrent_partial_prefills,
+            profile.long_prefill_chunk_tokens,
+        )
+        for profile in profiles
+    }
+    assert len(profiles) == 36
+    assert dimensions == {
+        (tokens, utilization, optimization, performance, concurrency, threshold)
+        for tokens in (16_384, 32_768)
+        for utilization in (0.92, 0.95, 0.97)
+        for optimization, performance in ((2, "balanced"), (3, "throughput"))
+        for concurrency, threshold in ((1, 0), (2, 4_096), (4, 4_096))
+    }
 
 
 def test_profile_rejects_unsupported_or_misleading_settings() -> None:
@@ -145,6 +184,10 @@ def test_profile_rejects_unsupported_or_misleading_settings() -> None:
         replace(base, max_concurrent_partial_prefills=8, long_prefill_chunk_tokens=0)
     with pytest.raises(ValueError, match="max_model_len"):
         replace(base, max_model_len=0)
+    with pytest.raises(ValueError, match="optimization_level"):
+        replace(base, optimization_level=4)
+    with pytest.raises(ValueError, match="performance_mode"):
+        replace(base, performance_mode="latency")
 
 
 def test_resolved_profile_validation_requires_full_decode_graphs_and_no_fallback() -> None:
@@ -166,6 +209,8 @@ def test_resolved_profile_validation_requires_full_decode_graphs_and_no_fallback
         (("cache", "enable_prefix_caching"), True, "prefix caching"),
         (("cache", "mamba_cache_mode"), "all", "mamba_cache_mode"),
         (("scheduler", "max_num_seqs"), 48, "max_num_seqs"),
+        (("runtime", "optimization_level"), 0, "optimization_level"),
+        (("runtime", "performance_mode"), "throughput", "performance_mode"),
     ]:
         invalid = json.loads(json.dumps(resolved))
         invalid[path[0]][path[1]] = value

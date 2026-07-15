@@ -15,6 +15,17 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
+def _token_ids_sha256(token_ids: Sequence[int]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    for index, token_id in enumerate(token_ids):
+        if index:
+            digest.update(b",")
+        digest.update(str(int(token_id)).encode())
+    digest.update(b"]")
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class WorkloadRequest:
     """One stable pretokenized generation request."""
@@ -144,6 +155,49 @@ class WorkloadManifest:
         """Return an otherwise identical exact-length workload."""
         return replace(self, max_new_tokens=max_new_tokens)
 
+    def with_request_count(
+        self,
+        request_count: int,
+        *,
+        request_id_prefix: str,
+    ) -> WorkloadManifest:
+        """Cycle real prompts into a deterministic workload of any positive size."""
+        if request_count <= 0:
+            raise ValueError("request_count must be positive")
+        if not request_id_prefix:
+            raise ValueError("request_id_prefix cannot be empty")
+        width = max(4, len(str(request_count - 1)))
+        requests = tuple(
+            WorkloadRequest(
+                request_id=f"{request_id_prefix}-{index:0{width}d}",
+                prompt_token_ids=self.requests[index % len(self.requests)].prompt_token_ids,
+            )
+            for index in range(request_count)
+        )
+        return replace(self, name=f"{self.name}-n{request_count}", requests=requests)
+
+    def with_uniform_prompt_length(
+        self,
+        prompt_length: int,
+        *,
+        request_count: int,
+        request_id_prefix: str,
+    ) -> WorkloadManifest:
+        """Build exact synthetic pressure prompts by repeating real prompt tokens."""
+        if prompt_length <= 0:
+            raise ValueError("prompt_length must be positive")
+        base = self.with_request_count(request_count, request_id_prefix=request_id_prefix)
+        requests = []
+        for request in base.requests:
+            repetitions = math.ceil(prompt_length / len(request.prompt_token_ids))
+            prompt_token_ids = (request.prompt_token_ids * repetitions)[:prompt_length]
+            requests.append(replace(request, prompt_token_ids=prompt_token_ids))
+        return replace(
+            base,
+            name=f"{self.name}-prompt{prompt_length}-n{request_count}",
+            requests=tuple(requests),
+        )
+
     def request_slice(self, start: int, stop: int) -> WorkloadManifest:
         """Return a deterministic request shard while preserving sampling settings."""
         return replace(self, requests=self.requests[start:stop], name=f"{self.name}[{start}:{stop}]")
@@ -161,8 +215,7 @@ class GenerationRecord:
     @property
     def output_sha256(self) -> str:
         """Return a compact stable output-token digest."""
-        payload = json.dumps(self.output_token_ids, separators=(",", ":")).encode()
-        return hashlib.sha256(payload).hexdigest()
+        return _token_ids_sha256(self.output_token_ids)
 
     def summary_dict(self) -> dict[str, Any]:
         """Return exact lengths and digest without duplicating long token arrays."""
@@ -320,6 +373,51 @@ def records_from_vllm_outputs(
     return result
 
 
+def summarize_vllm_outputs(
+    manifest: WorkloadManifest,
+    outputs: Sequence[Any],
+) -> tuple[dict[str, Any], ...]:
+    """Validate and summarize vLLM outputs without copying complete token arrays."""
+    if len(outputs) != len(manifest.requests):
+        raise AssertionError("vLLM must return exactly one output per request")
+
+    summaries = []
+    for request, output in zip(manifest.requests, outputs, strict=True):
+        if not output.finished or len(output.outputs) != 1:
+            raise AssertionError(f"request {request.request_id} did not produce one finished completion")
+        if tuple(output.prompt_token_ids or ()) != request.prompt_token_ids:
+            raise AssertionError(f"request {request.request_id} prompt tokens changed or were reordered")
+
+        completion = output.outputs[0]
+        output_token_ids = completion.token_ids
+        if len(output_token_ids) != manifest.max_new_tokens:
+            raise AssertionError(
+                f"request {request.request_id} must generate exactly {manifest.max_new_tokens} tokens"
+            )
+        if completion.logprobs is None or len(completion.logprobs) != len(output_token_ids):
+            raise AssertionError(f"request {request.request_id} is missing chosen-token logprobs")
+        all_logprobs_finite = True
+        for token_id, position in zip(output_token_ids, completion.logprobs, strict=True):
+            if position is None or token_id not in position:
+                raise AssertionError(f"request {request.request_id} is missing a chosen-token logprob")
+            all_logprobs_finite &= math.isfinite(float(position[token_id].logprob))
+        if not all_logprobs_finite:
+            raise AssertionError(f"request {request.request_id} has a non-finite logprob")
+
+        summaries.append(
+            {
+                "request_id": request.request_id,
+                "prompt_length": len(request.prompt_token_ids),
+                "output_length": len(output_token_ids),
+                "output_sha256": _token_ids_sha256(output_token_ids),
+                "first_output_tokens": list(output_token_ids[:8]),
+                "last_output_tokens": list(output_token_ids[-8:]),
+                "all_logprobs_finite": True,
+            }
+        )
+    return tuple(summaries)
+
+
 def benchmark_sample_from_vllm_outputs(
     manifest: WorkloadManifest,
     outputs: Sequence[Any],
@@ -327,31 +425,38 @@ def benchmark_sample_from_vllm_outputs(
     sample_index: int,
     generation_s: float,
     peak_device_memory_bytes: tuple[int, ...],
+    validated_summaries: Sequence[dict[str, Any]] | None = None,
 ) -> BenchmarkSample:
     """Build one synchronized sample from validated vLLM outputs and request metrics."""
-    records = records_from_vllm_outputs(manifest, outputs)
+    summaries = (
+        summarize_vllm_outputs(manifest, outputs)
+        if validated_summaries is None
+        else tuple(validated_summaries)
+    )
+    if len(summaries) != len(outputs):
+        raise AssertionError("validated summaries must align with vLLM outputs")
     ttft = []
     inter_token_latency = []
-    for request, output, record in zip(manifest.requests, outputs, records, strict=True):
+    for request, output, summary in zip(manifest.requests, outputs, summaries, strict=True):
         metrics = output.metrics
         if metrics is None:
             raise AssertionError(f"request {request.request_id} is missing vLLM timing metrics")
-        if metrics.num_generation_tokens != len(record.output_token_ids):
+        if metrics.num_generation_tokens != summary["output_length"]:
             raise AssertionError(f"request {request.request_id} timing token count is inconsistent")
         ttft.append(float(metrics.first_token_latency))
-        if len(record.output_token_ids) > 1:
+        if summary["output_length"] > 1:
             decode_s = float(metrics.last_token_ts - metrics.first_token_ts)
-            inter_token_latency.append(decode_s / (len(record.output_token_ids) - 1))
+            inter_token_latency.append(decode_s / (summary["output_length"] - 1))
 
     return BenchmarkSample(
         sample_index=sample_index,
         generation_s=generation_s,
-        request_count=len(records),
-        prompt_tokens=sum(len(record.prompt_token_ids) for record in records),
-        generated_tokens=sum(len(record.output_token_ids) for record in records),
+        request_count=len(summaries),
+        prompt_tokens=sum(summary["prompt_length"] for summary in summaries),
+        generated_tokens=sum(summary["output_length"] for summary in summaries),
         ttft_s=tuple(ttft),
         inter_token_latency_s=tuple(inter_token_latency),
-        output_lengths=tuple(len(record.output_token_ids) for record in records),
+        output_lengths=tuple(summary["output_length"] for summary in summaries),
         peak_device_memory_bytes=peak_device_memory_bytes,
     )
 
@@ -444,6 +549,7 @@ __all__ = [
     "build_parser",
     "records_from_vllm_outputs",
     "sampling_params_kwargs",
+    "summarize_vllm_outputs",
     "validate_compilation_proof",
     "validate_generation_records",
 ]

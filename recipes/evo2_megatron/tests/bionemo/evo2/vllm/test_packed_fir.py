@@ -18,7 +18,12 @@ import torch
 import torch.nn.functional as functional
 
 from bionemo.evo2.models.megatron.hyena.engine import step_fir
-from bionemo.evo2.vllm.packed_fir import packed_causal_fir, packed_fir_reference, select_fir_path
+from bionemo.evo2.vllm.packed_fir import (
+    packed_causal_fir,
+    packed_fir_reference,
+    select_fir_path,
+    select_production_fir_path,
+)
 
 
 PROMPT_LENGTHS = list(range(4, 13)) * 10 + [4, 5, 6, 7, 8, 9]
@@ -39,6 +44,45 @@ def _expanded(values, channels, group_size):
 def test_bucketed_fir_requires_a_five_percent_measured_speedup():
     assert select_fir_path(direct_ms=1.0, bucketed_ms=0.96) == "direct"
     assert select_fir_path(direct_ms=1.0, bucketed_ms=0.94) == "bucketed"
+
+
+def test_production_fir_uses_grouped_convolution_only_for_proven_equal_long_128_tap_segments():
+    assert (
+        select_production_fir_path(
+            num_requests=2,
+            total_tokens=50_000,
+            max_query_len=25_000,
+            taps=128,
+        )
+        == "equal_length_conv"
+    )
+    assert (
+        select_production_fir_path(
+            num_requests=2,
+            total_tokens=49_999,
+            max_query_len=25_000,
+            taps=128,
+        )
+        == "direct"
+    )
+    assert (
+        select_production_fir_path(
+            num_requests=1,
+            total_tokens=25_000,
+            max_query_len=25_000,
+            taps=7,
+        )
+        == "direct"
+    )
+    assert (
+        select_production_fir_path(
+            num_requests=1,
+            total_tokens=511,
+            max_query_len=511,
+            taps=128,
+        )
+        == "direct"
+    )
 
 
 def _scalar_oracle(
@@ -508,7 +552,7 @@ def test_packed_causal_fir_long_prefill_matches_independent_convolution_oracle()
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for torch.compile FIR coverage")
 def test_packed_causal_fir_long_path_matches_torch_compile():
     device = torch.device("cuda")
-    lengths = [33, 47, 65]
+    lengths = [1_024, 1_024]
     channels = 16
     taps = 128
     group_size = 4
@@ -539,7 +583,7 @@ def test_packed_causal_fir_long_path_matches_torch_compile():
         * 0.01
     )
     state_indices = torch.arange(1, len(lengths) + 1, device=device, dtype=torch.int32)
-    has_initial_state = torch.tensor([True, False, True], device=device)
+    has_initial_state = torch.tensor([True, False], device=device)
     initial_cache = torch.randn(
         (len(lengths) + 1, channels, taps - 1),
         device=device,
@@ -573,9 +617,9 @@ def test_packed_causal_fir_long_path_matches_torch_compile():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for graph capture")
-def test_packed_causal_fir_long_cuda_graph_replay_uses_static_buffers():
+@pytest.mark.parametrize("lengths", ([65, 47], [1_024, 1_024]))
+def test_packed_causal_fir_long_cuda_graph_replay_uses_static_buffers(lengths):
     device = torch.device("cuda")
-    lengths = [65, 47]
     channels = 32
     taps = 128
     group_size = 4

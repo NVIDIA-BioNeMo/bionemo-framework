@@ -11,10 +11,11 @@ from typing import Any, Literal
 
 
 Topology = Literal["tp2", "dp2"]
+PerformanceMode = Literal["balanced", "throughput"]
 
 _GLOBAL_BATCH_SIZE = 96
 _TP2_CAPTURE_SIZES = (1, 2, 4, 8, 16, 24, 32, 40, 48, 64, 80, 96)
-_DP2_CAPTURE_SIZES = (1, 2, 4, 8, 16, 24, 32, 40, 48)
+_DP2_CAPTURE_SIZES = (1, 2, 4, 8, 16, 20, 24, 32, 40, 48)
 _COUNTER_FIELDS = (
     "num_models_seen",
     "num_backend_compilations",
@@ -38,6 +39,8 @@ class Evo2VllmProfile:
     proof: bool = False
     max_concurrent_partial_prefills: int = 1
     long_prefill_chunk_tokens: int = 0
+    optimization_level: int = 2
+    performance_mode: PerformanceMode = "balanced"
 
     def __post_init__(self) -> None:
         """Validate settings before an engine can consume them."""
@@ -59,6 +62,10 @@ class Evo2VllmProfile:
             raise ValueError("long_prefill_chunk_tokens cannot be negative")
         if self.long_prefill_chunk_tokens > self.max_model_len:
             raise ValueError("long_prefill_chunk_tokens cannot exceed max_model_len")
+        if self.optimization_level not in (2, 3):
+            raise ValueError("optimized Evo2 profiles require optimization_level 2 or 3")
+        if self.performance_mode not in ("balanced", "throughput"):
+            raise ValueError(f"unsupported performance_mode: {self.performance_mode}")
 
     @property
     def global_batch_size(self) -> int:
@@ -100,6 +107,8 @@ class Evo2VllmProfile:
             "model_impl": "vllm",
             "dtype": "bfloat16",
             "seed": seed,
+            "optimization_level": self.optimization_level,
+            "performance_mode": self.performance_mode,
             "tensor_parallel_size": self.tensor_parallel_size,
             "pipeline_parallel_size": 1,
             "gpu_memory_utilization": self.gpu_memory_utilization,
@@ -172,6 +181,10 @@ class Evo2VllmProfile:
     def expected_resolved_config(self) -> dict[str, Any]:
         """Return the pinned subset expected after ``EngineArgs`` resolution."""
         return {
+            "runtime": {
+                "optimization_level": self.optimization_level,
+                "performance_mode": self.performance_mode,
+            },
             "model": {
                 "max_model_len": self.max_model_len,
                 "enforce_eager": False,
@@ -209,16 +222,27 @@ class Evo2VllmProfile:
 
 
 def optimized_profile_sweep(*, topology: Topology, max_model_len: int) -> list[Evo2VllmProfile]:
-    """Build the requested scheduler-budget and graph-headroom sweep."""
+    """Build scheduler, memory, runtime-policy, and long-prefill sweep points."""
+    long_prefill_threshold = min(4_096, max_model_len)
     return [
         Evo2VllmProfile(
             topology=topology,
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             gpu_memory_utilization=gpu_memory_utilization,
+            optimization_level=optimization_level,
+            performance_mode=performance_mode,
+            max_concurrent_partial_prefills=max_concurrent_partial_prefills,
+            long_prefill_chunk_tokens=long_prefill_chunk_tokens,
         )
         for max_num_batched_tokens in (16_384, 32_768)
         for gpu_memory_utilization in (0.92, 0.95, 0.97)
+        for optimization_level, performance_mode in ((2, "balanced"), (3, "throughput"))
+        for max_concurrent_partial_prefills, long_prefill_chunk_tokens in (
+            (1, 0),
+            (2, long_prefill_threshold),
+            (4, long_prefill_threshold),
+        )
     ]
 
 
@@ -239,6 +263,10 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
     compilation = vllm_config.compilation_config
     observability = vllm_config.observability_config
     return {
+        "runtime": {
+            "optimization_level": _enum_name_or_value(vllm_config.optimization_level),
+            "performance_mode": vllm_config.performance_mode,
+        },
         "model": {
             "max_model_len": model.max_model_len,
             "enforce_eager": model.enforce_eager,
@@ -275,6 +303,12 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
 
 def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]) -> None:
     """Reject any resolved setting that weakens the optimized proof profile."""
+    assert resolved["runtime"]["optimization_level"] == profile.optimization_level, (
+        "optimization_level drifted"
+    )
+    assert resolved["runtime"]["performance_mode"] == profile.performance_mode, (
+        "performance_mode drifted"
+    )
     assert resolved["model"]["enforce_eager"] is False, "enforce_eager must remain false"
     assert resolved["model"]["max_model_len"] == profile.max_model_len, "max_model_len drifted"
     assert resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size, (
@@ -316,6 +350,7 @@ def compilation_counter_snapshot(counter: Any | None = None) -> dict[str, int]:
 
 __all__ = [
     "Evo2VllmProfile",
+    "PerformanceMode",
     "Topology",
     "compilation_counter_snapshot",
     "optimized_profile_sweep",

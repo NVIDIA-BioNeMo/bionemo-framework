@@ -16,6 +16,7 @@ from bionemo.evo2.vllm.benchmark import (
     build_parser,
     records_from_vllm_outputs,
     sampling_params_kwargs,
+    summarize_vllm_outputs,
     validate_compilation_proof,
     validate_generation_records,
 )
@@ -62,6 +63,48 @@ def test_manifest_validation_rejects_duplicate_ids_and_invalid_sampling() -> Non
         WorkloadManifest(**{**manifest.constructor_kwargs(), "temperature": -1.0})
     with pytest.raises(ValueError, match="max_new_tokens"):
         WorkloadManifest(**{**manifest.constructor_kwargs(), "max_new_tokens": 0})
+
+
+def test_manifest_expands_deterministically_to_full_1000_by_6000_audit() -> None:
+    manifest = (
+        WorkloadManifest.from_path(DATA)
+        .with_request_count(1_000, request_id_prefix="audit")
+        .with_max_new_tokens(6_000)
+    )
+
+    assert len(manifest.requests) == 1_000
+    assert manifest.requests[0].request_id == "audit-0000"
+    assert manifest.requests[-1].request_id == "audit-0999"
+    assert {len(request.prompt_token_ids) for request in manifest.requests} == set(range(4, 13))
+    assert len({request.request_id for request in manifest.requests}) == 1_000
+    assert manifest.max_new_tokens == 6_000
+    assert manifest.sha256 == (
+        WorkloadManifest.from_path(DATA)
+        .with_request_count(1_000, request_id_prefix="audit")
+        .with_max_new_tokens(6_000)
+        .sha256
+    )
+
+
+def test_manifest_builds_exact_long_prompts_from_real_tokens_without_padding() -> None:
+    manifest = (
+        WorkloadManifest.from_path(DATA)
+        .with_uniform_prompt_length(
+            25_000,
+            request_count=3,
+            request_id_prefix="pressure",
+        )
+        .with_max_new_tokens(25_000)
+    )
+
+    assert [request.request_id for request in manifest.requests] == [
+        "pressure-0000",
+        "pressure-0001",
+        "pressure-0002",
+    ]
+    assert [len(request.prompt_token_ids) for request in manifest.requests] == [25_000] * 3
+    assert all(0 <= token_id < 512 for request in manifest.requests for token_id in request.prompt_token_ids)
+    assert manifest.max_total_tokens == 50_000
 
 
 def test_sample_aggregation_reports_median_p95_and_mad_without_hiding_outlier() -> None:
@@ -220,6 +263,18 @@ def test_vllm_output_adapter_preserves_manifest_identity_and_chosen_logprobs() -
     assert [record.request_id for record in records] == ["gdpo-000", "gdpo-001"]
     assert records[0].output_token_ids == (65, 67, 71)
     assert records[0].output_logprobs == pytest.approx((-0.1, -0.2, -0.3))
+
+
+def test_vllm_output_summary_streams_exact_lengths_and_matches_record_digest() -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    outputs = _fake_vllm_outputs(manifest)
+
+    summaries = summarize_vllm_outputs(manifest, outputs)
+    records = records_from_vllm_outputs(manifest, outputs)
+
+    assert summaries[0] == records[0].summary_dict()
+    assert summaries[1]["request_id"] == "gdpo-001"
+    assert summaries[1]["output_length"] == 3
 
 
 def test_vllm_output_adapter_rejects_reordered_or_missing_logprob_outputs() -> None:
