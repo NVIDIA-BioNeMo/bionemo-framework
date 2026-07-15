@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from nemo_rl.models.generation.vllm.vllm_backend import VllmInternalWorkerExtension
 from nemo_rl.models.generation.vllm.vllm_worker import VllmGenerationWorkerImpl
@@ -17,10 +18,21 @@ from bionemo.evo2.vllm.worker import Evo2VllmWorkerExtension
 
 def test_named_worker_extension_delegates_proof_state_without_callable_rpc(monkeypatch) -> None:
     worker = Evo2VllmWorkerExtension()
-    monkeypatch.setattr(runner, "reset_vllm_worker_proof_state", lambda owner: {"owner": owner})
+    monkeypatch.setattr(
+        runner,
+        "reset_vllm_worker_proof_state",
+        lambda owner, reset_prefix_sources: {
+            "owner": owner,
+            "reset_prefix_sources": reset_prefix_sources,
+        },
+    )
     monkeypatch.setattr(runner, "snapshot_vllm_worker_proof_state", lambda owner: {"snapshot": owner})
 
-    assert worker.reset_evo2_proof_state() == {"owner": worker}
+    assert worker.reset_evo2_proof_state() == {"owner": worker, "reset_prefix_sources": True}
+    assert worker.reset_evo2_proof_state(False) == {
+        "owner": worker,
+        "reset_prefix_sources": False,
+    }
     assert worker.snapshot_evo2_proof_state() == {"snapshot": worker}
 
 
@@ -102,6 +114,7 @@ def test_nemo_generation_worker_records_outer_graph_and_inner_route_proof(monkey
 
     worker = object.__new__(Evo2NemoRlGenerationWorkerImpl)
     worker.llm = FakeLLM()
+    worker._evo2_proof_enabled = True
     worker._attach_evo2_proof_recorder()
     worker.reset_evo2_proof_phase("steady-0")
     worker._evo2_cudagraph_recorder.record(
@@ -137,10 +150,25 @@ def test_nemo_generation_worker_records_outer_graph_and_inner_route_proof(monkey
     assert proof["scheduler_observations"][0]["prompt_tokens_computed"] == 384
     assert proof["resolved_config"] == {"resolved": "engine-config"}
     assert proof["worker_proof"][0]["fir_routes"]["equal_length_conv"]["calls"] == 9
+    worker.reset_evo2_proof_phase("steady-0.wave-001")
     assert rpc_calls == [
-        ("reset_evo2_proof_state", ()),
+        ("reset_evo2_proof_state", (True,)),
         ("snapshot_evo2_proof_state", ()),
+        ("reset_evo2_proof_state", (False,)),
     ]
+
+
+def test_nemo_generation_worker_does_not_attach_proof_recorder_when_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(VllmGenerationWorkerImpl, "post_init", lambda self: "base-post-init")
+    worker = object.__new__(Evo2NemoRlGenerationWorkerImpl)
+    worker.cfg = {"evo2_collect_proof": False}
+    worker.llm = SimpleNamespace(llm_engine=SimpleNamespace(logger_manager=SimpleNamespace(stat_loggers=[])))
+
+    assert worker.post_init() == "base-post-init"
+    assert worker.llm.llm_engine.logger_manager.stat_loggers == []
+    assert not hasattr(worker, "_evo2_cudagraph_recorder")
+    with pytest.raises(RuntimeError, match="disabled"):
+        worker.reset_evo2_proof_phase("steady-0")
 
 
 def test_nemo_generation_worker_exposes_internal_refit_transaction_proof(monkeypatch) -> None:

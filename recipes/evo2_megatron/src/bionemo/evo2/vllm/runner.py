@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import platform
 import subprocess
 import sys
@@ -18,7 +19,8 @@ import time
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +47,8 @@ from bionemo.evo2.vllm.profile import (
 
 
 _SEED_ROUND_STRIDE = 1_000_003
+_SEED_MODULUS = 2**31
+_REQUIRED_GPU_HEADROOM_BYTES = 2 * 1024**3
 
 
 def _package_version(package: str) -> str:
@@ -67,6 +71,101 @@ def runtime_versions() -> dict[str, Any]:
         "triton": _package_version("triton"),
         "transformers": _package_version("transformers"),
         "nemo_rl": _package_version("nemo-rl"),
+    }
+
+
+def benchmark_mode_from_args(args: Any) -> str:
+    """Resolve one fail-closed preflight, proof, or linked speed invocation."""
+    linked_proof = getattr(args, "linked_proof_artifact", None)
+    if args.context_preflight_only:
+        if args.proof or linked_proof is not None:
+            raise ValueError("context preflight cannot enable proof or link a proof artifact")
+        return "preflight"
+    if args.proof:
+        if linked_proof is not None:
+            raise ValueError("a proof run cannot link another proof artifact")
+        return "proof"
+    if linked_proof is None:
+        raise ValueError("a low-overhead speed run requires a linked proof artifact")
+    return "speed"
+
+
+def benchmark_instrumentation_contract(mode: str) -> dict[str, bool]:
+    """Describe instrumentation that is active inside generation measurements."""
+    if mode not in {"proof", "speed"}:
+        raise ValueError(f"generation instrumentation requires proof or speed mode, got {mode!r}")
+    collect_proof = mode == "proof"
+    return {
+        "scheduler_callbacks_during_generation": collect_proof,
+        "worker_proof_rpcs": collect_proof,
+        "prefix_clone_instrumentation": collect_proof,
+        "peak_memory_polling_during_generation": collect_proof,
+        "post_generation_exact_output_validation": True,
+    }
+
+
+def build_benchmark_contract(
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+) -> dict[str, Any]:
+    """Build the optimized engine/workload identity shared by proof and speed lanes."""
+    profile_contract = asdict(profile)
+    profile_contract.pop("proof")
+    return {
+        "schema_version": 1,
+        "backend": args.backend,
+        "topology": args.topology,
+        "checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
+        "load_format": args.load_format,
+        "manifest_sha256": manifest.sha256,
+        "profile": profile_contract,
+    }
+
+
+def benchmark_contract_sha256(contract: dict[str, Any]) -> str:
+    """Return the canonical digest used to link proof and speed artifacts."""
+    payload = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def validate_linked_proof_artifact(
+    path: str | Path,
+    *,
+    expected_contract: dict[str, Any],
+    require_memory_headroom: bool = False,
+) -> dict[str, Any]:
+    """Require one successful proof artifact with the exact speed-run contract."""
+    artifact_path = Path(path).expanduser().resolve()
+    if not artifact_path.is_file():
+        raise FileNotFoundError(f"linked proof artifact is missing: {artifact_path}")
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if artifact.get("benchmark_mode") != "proof":
+        raise AssertionError("linked artifact is not a proof benchmark")
+    if artifact.get("invocation", {}).get("exit_status") != 0:
+        raise AssertionError("linked proof artifact did not complete successfully")
+    if artifact.get("proof_status", {}).get("passed") is not True:
+        raise AssertionError("linked proof artifact did not pass its proof gates")
+    retained_contract = artifact.get("benchmark_contract")
+    if not isinstance(retained_contract, dict):
+        raise AssertionError("linked proof artifact is missing its benchmark contract")
+    retained_sha256 = benchmark_contract_sha256(retained_contract)
+    if artifact.get("benchmark_contract_sha256") != retained_sha256:
+        raise AssertionError("linked proof artifact benchmark contract digest is invalid")
+    expected_sha256 = benchmark_contract_sha256(expected_contract)
+    if retained_sha256 != expected_sha256 or retained_contract != expected_contract:
+        raise AssertionError("linked proof artifact benchmark contract does not match the speed run")
+    memory_headroom = artifact.get("gpu_memory_headroom")
+    if require_memory_headroom and (
+        not isinstance(memory_headroom, dict) or memory_headroom.get("passed") is not True
+    ):
+        raise AssertionError("linked proof artifact is missing passed GPU memory headroom evidence")
+    return {
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": _sha256_file(artifact_path),
+        "benchmark_contract_sha256": retained_sha256,
+        "proof_status": dict(artifact["proof_status"]),
+        "gpu_memory_headroom": memory_headroom,
     }
 
 
@@ -100,6 +199,144 @@ def _file_records(root: Path, paths: Any) -> list[dict[str, Any]]:
 def _records_sha256(records: list[dict[str, Any]]) -> str:
     payload = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def package_installation_provenance(
+    package_root: str | Path,
+    *,
+    distribution_name: str,
+    distribution_version: str,
+    metadata_paths: Sequence[str | Path] = (),
+    require_binary: bool = False,
+) -> dict[str, Any]:
+    """Hash one installed Python package, including compiled extensions and metadata."""
+    root = Path(package_root).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"installed package root is missing: {root}")
+
+    def is_durable(path: Path) -> bool:
+        return "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+
+    package_paths = tuple(path for path in root.rglob("*") if path.is_file() and is_durable(path))
+    source_suffixes = {".py", ".pyi", ".pyx", ".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp"}
+    binary_suffixes = {".so", ".pyd", ".dll", ".dylib", ".cubin", ".fatbin"}
+    source_paths = tuple(path for path in package_paths if path.suffix.lower() in source_suffixes)
+    binary_paths = tuple(path for path in package_paths if path.suffix.lower() in binary_suffixes)
+    if not source_paths:
+        raise RuntimeError(f"installed {distribution_name} package contains no source implementation files")
+    if require_binary and not binary_paths:
+        raise RuntimeError(f"installed {distribution_name} package contains no compiled binary files")
+
+    package_records = _file_records(root, package_paths)
+    source_records = _file_records(root, source_paths)
+    binary_records = _file_records(root, binary_paths)
+    metadata_records = []
+    for metadata_path in sorted({Path(path).expanduser().resolve() for path in metadata_paths}):
+        if not metadata_path.is_file():
+            raise FileNotFoundError(f"installed package metadata is missing: {metadata_path}")
+        metadata_records.append(
+            {
+                "path": str(metadata_path),
+                "size_bytes": metadata_path.stat().st_size,
+                "sha256": _sha256_file(metadata_path),
+            }
+        )
+    installation_identity = {
+        "distribution_name": distribution_name,
+        "distribution_version": distribution_version,
+        "package_root": str(root),
+        "package_files": package_records,
+        "metadata_files": metadata_records,
+    }
+    installation_sha256 = hashlib.sha256(
+        json.dumps(installation_identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        **installation_identity,
+        "installation_sha256": installation_sha256,
+        "package_file_count": len(package_records),
+        "package_bytes": sum(record["size_bytes"] for record in package_records),
+        "source_file_count": len(source_records),
+        "binary_file_count": len(binary_records),
+        "metadata_file_count": len(metadata_records),
+        "source_files": source_records,
+        "binary_files": binary_records,
+    }
+
+
+def vllm_installation_provenance() -> dict[str, Any]:
+    """Discover and hash the exact installed vLLM implementation and binaries."""
+    spec = find_spec("vllm")
+    if spec is None or not spec.submodule_search_locations:
+        raise RuntimeError("installed vLLM package could not be resolved")
+    package_locations = tuple(Path(path).expanduser().resolve() for path in spec.submodule_search_locations)
+    if len(package_locations) != 1:
+        raise RuntimeError(f"vLLM must resolve to one package root, got {package_locations}")
+
+    installed_distribution = distribution("vllm")
+    distribution_files = installed_distribution.files
+    if distribution_files is None:
+        raise RuntimeError("installed vLLM distribution exposes no file manifest")
+    retained_metadata_names = {"INSTALLER", "METADATA", "RECORD", "WHEEL", "direct_url.json"}
+    metadata_paths = []
+    for entry in distribution_files:
+        entry_path = Path(str(entry))
+        if not any(part.endswith(".dist-info") for part in entry_path.parts):
+            continue
+        if entry_path.name in retained_metadata_names:
+            located = Path(installed_distribution.locate_file(entry)).expanduser().resolve()
+            if located.is_file():
+                metadata_paths.append(located)
+    if not metadata_paths:
+        raise RuntimeError("installed vLLM distribution metadata could not be resolved")
+    return package_installation_provenance(
+        package_locations[0],
+        distribution_name="vllm",
+        distribution_version=installed_distribution.version,
+        metadata_paths=tuple(metadata_paths),
+        require_binary=True,
+    )
+
+
+def runtime_attestation_contract(
+    *,
+    checkpoint: dict[str, Any],
+    sources: dict[str, dict[str, Any]],
+    vllm_installation: dict[str, Any],
+    gpu_hardware: dict[str, Any],
+) -> dict[str, Any]:
+    """Reduce full provenance to the immutable identities linked across benchmark lanes."""
+    source_contract = {}
+    for name, source in sorted(sources.items()):
+        if source.get("git_dirty") is not False:
+            raise RuntimeError(f"runtime attestation source {name!r} is dirty")
+        source_contract[name] = {
+            "git_head": source["git_head"],
+            "source_tree_sha256": source["source_tree_sha256"],
+        }
+    devices = gpu_hardware.get("devices")
+    if not isinstance(devices, list) or not devices:
+        raise ValueError("runtime attestation requires exact GPU hardware provenance")
+    return {
+        "checkpoint_sha256": checkpoint["checkpoint_sha256"],
+        "sources": source_contract,
+        "vllm": {
+            "distribution_version": vllm_installation["distribution_version"],
+            "installation_sha256": vllm_installation["installation_sha256"],
+        },
+        "gpu": {
+            "driver_version": gpu_hardware["driver_version"],
+            "devices": [
+                {
+                    "index": device["index"],
+                    "uuid": device["uuid"],
+                    "name": device["name"],
+                    "total_memory_bytes": device["total_memory_bytes"],
+                }
+                for device in devices
+            ],
+        },
+    }
 
 
 def checkpoint_provenance(checkpoint: str | Path) -> dict[str, Any]:
@@ -163,6 +400,7 @@ def source_provenance(
     *,
     repository: str | Path | None = None,
     source_roots: tuple[str | Path, ...] | None = None,
+    require_clean: bool = False,
 ) -> dict[str, Any]:
     """Record git identity plus a content hash of the production vLLM source tree."""
     if repository is None:
@@ -180,15 +418,15 @@ def source_provenance(
             if is_durable_source(resolved):
                 source_paths.append(resolved)
         elif resolved.is_dir():
-            source_paths.extend(
-                path for path in resolved.rglob("*") if path.is_file() and is_durable_source(path)
-            )
+            source_paths.extend(path for path in resolved.rglob("*") if path.is_file() and is_durable_source(path))
         else:
             raise FileNotFoundError(f"source provenance root is missing: {resolved}")
     source_records = _file_records(root, source_paths)
     source_tree_sha256 = _records_sha256(source_records)
     git_head = _git_output(root, "rev-parse", "HEAD").strip()
     status = _git_output(root, "status", "--porcelain=v1", "--untracked-files=all")
+    if require_clean and status:
+        raise RuntimeError(f"dirty source repository is not benchmarkable: {root}; status={status.splitlines()}")
     tracked_diff = _git_output(root, "diff", "--binary", "HEAD", "--")
     dirty_payload = json.dumps(
         {
@@ -395,9 +633,7 @@ def scheduler_capacity_proof_summary(
         "prompt_tokens_cached": total("prompt_tokens_cached"),
         "prompt_tokens_total": total("prompt_tokens_total"),
         "maximum_running_requests": maximum_running,
-        "maximum_waiting_requests": max(
-            (int(item["num_waiting_requests"]) for item in phase_observations), default=0
-        ),
+        "maximum_waiting_requests": max((int(item["num_waiting_requests"]) for item in phase_observations), default=0),
         "maximum_skipped_waiting_requests": max(
             (int(item["num_skipped_waiting_requests"]) for item in phase_observations), default=0
         ),
@@ -527,37 +763,43 @@ def full_decode_proof_summary(
 def request_seed(
     base_seed: int,
     *,
-    generation_round: int,
-    global_request_index: int,
+    call_index: int,
+    dp_rank: int,
+    dp_size: int,
+    request_index_in_stream: int,
 ) -> int:
-    """Return a topology-invariant seed unique to one request and generation round."""
-    if base_seed < 0 or generation_round < 0 or global_request_index < 0:
+    """Return one deterministic request seed from physical call and DP stream coordinates."""
+    if min(base_seed, call_index, dp_rank, request_index_in_stream) < 0 or dp_size <= 0:
         raise ValueError("seed coordinates must be nonnegative")
-    seed = base_seed + generation_round * _SEED_ROUND_STRIDE + global_request_index
-    if seed >= 2**63:
-        raise ValueError("derived request seed exceeds signed int64")
-    return seed
+    if dp_rank >= dp_size:
+        raise ValueError("dp_rank must be smaller than dp_size")
+    if request_index_in_stream >= _SEED_ROUND_STRIDE:
+        raise ValueError("request index exceeds the collision-free stream stride")
+    stream_seed = (base_seed + (call_index * dp_size + dp_rank) * _SEED_ROUND_STRIDE) % _SEED_MODULUS
+    return (stream_seed + request_index_in_stream) % _SEED_MODULUS
 
 
 def build_request_sampling_params(
     manifest: WorkloadManifest,
     *,
     sampling_params_factory: Callable[..., Any],
-    generation_round: int,
-    global_request_offset: int,
+    execution_records: Sequence[RequestExecutionRecord],
 ) -> list[Any]:
-    """Build exact-length per-request sampling params with stable global seeds."""
+    """Build exact-length sampling params from the persisted production seed records."""
+    if len(execution_records) != len(manifest.requests):
+        raise ValueError("execution records must align with every manifest request")
+    if any(
+        request.request_id != record.request_id
+        for request, record in zip(manifest.requests, execution_records, strict=True)
+    ):
+        raise ValueError("execution record request IDs must preserve manifest order")
     common_kwargs = sampling_params_kwargs(manifest)
     return [
         sampling_params_factory(
             **common_kwargs,
-            seed=request_seed(
-                manifest.seed,
-                generation_round=generation_round,
-                global_request_index=global_request_offset + local_index,
-            ),
+            seed=record.seed,
         )
-        for local_index in range(len(manifest.requests))
+        for record in execution_records
     ]
 
 
@@ -588,25 +830,29 @@ class RequestExecutionRecord:
 def build_request_execution_records(
     manifest: WorkloadManifest,
     *,
-    generation_round: int,
     global_request_offset: int,
     dp_rank: int,
+    dp_size: int,
     call_index: int,
 ) -> tuple[RequestExecutionRecord, ...]:
     """Build one ownership/seed record for each exact manifest request."""
-    if min(generation_round, global_request_offset, dp_rank, call_index) < 0:
+    if min(global_request_offset, dp_rank, call_index) < 0 or dp_size <= 0:
         raise ValueError("execution coordinates must be nonnegative")
+    if dp_rank >= dp_size:
+        raise ValueError("dp_rank must be smaller than dp_size")
     return tuple(
         RequestExecutionRecord(
             request_id=request.request_id,
             global_request_index=global_request_offset + local_index,
-            generation_round=generation_round,
+            generation_round=call_index,
             dp_rank=dp_rank,
             call_index=call_index,
             seed=request_seed(
                 manifest.seed,
-                generation_round=generation_round,
-                global_request_index=global_request_offset + local_index,
+                call_index=call_index,
+                dp_rank=dp_rank,
+                dp_size=dp_size,
+                request_index_in_stream=local_index,
             ),
         )
         for local_index, request in enumerate(manifest.requests)
@@ -616,7 +862,6 @@ def build_request_execution_records(
 def build_wave_execution_records(
     manifest: WorkloadManifest,
     *,
-    generation_round: int,
     global_wave_size: int,
     call_index_start: int,
 ) -> tuple[RequestExecutionRecord, ...]:
@@ -632,9 +877,9 @@ def build_wave_execution_records(
         records.extend(
             build_request_execution_records(
                 manifest.request_slice(wave.start, wave.stop),
-                generation_round=generation_round,
                 global_request_offset=wave.start,
                 dp_rank=0,
+                dp_size=1,
                 call_index=call_index_start + wave.wave_index,
             )
         )
@@ -749,10 +994,7 @@ def reserve_output_namespace(path: str | Path) -> Path:
         candidate
         for candidate in output.parent.iterdir()
         if candidate.name.startswith(sidecar_prefix)
-        and (
-            candidate.name.endswith(".outputs.jsonl.gz")
-            or candidate.name.endswith(".outputs.jsonl.gz.tmp")
-        )
+        and (candidate.name.endswith(".outputs.jsonl.gz") or candidate.name.endswith(".outputs.jsonl.gz.tmp"))
     )
     if collisions:
         names = ", ".join(sorted({candidate.name for candidate in collisions}))
@@ -814,6 +1056,208 @@ def shared_prefix_manifest_evidence(manifest: WorkloadManifest) -> dict[str, Any
     }
 
 
+def _validated_attention_kv_groups(
+    groups: Any,
+    *,
+    expected_prefix_tokens: int,
+    expected_block_size: int,
+    kind: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(groups, list) or not groups:
+        raise AssertionError(f"{kind} must retain at least one attention KV cache group")
+    retained = []
+    group_ids = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            raise AssertionError(f"{kind} attention KV cache group telemetry is malformed")
+        group_id = group.get("kv_cache_group_id")
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id < 0:
+            raise AssertionError(f"{kind} attention KV cache group ID is malformed")
+        if group_id in group_ids:
+            raise AssertionError(f"{kind} attention KV cache group IDs must be unique")
+        group_ids.add(group_id)
+        layer_names = group.get("layer_names")
+        if (
+            not isinstance(layer_names, list)
+            or not layer_names
+            or any(not isinstance(name, str) or not name for name in layer_names)
+            or len(set(layer_names)) != len(layer_names)
+        ):
+            raise AssertionError(f"{kind} attention KV layer ownership is malformed")
+        block_size = group.get("block_size_tokens")
+        if block_size != expected_block_size:
+            raise AssertionError(f"{kind} attention KV block size does not match the resolved cache")
+        expected_block_count = expected_prefix_tokens // expected_block_size
+        if group.get("physical_block_count") != expected_block_count:
+            raise AssertionError(f"{kind} attention KV physical block count is not exact")
+        block_ids = group.get("physical_block_ids")
+        if (
+            not isinstance(block_ids, list)
+            or len(block_ids) != expected_block_count
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in block_ids)
+            or len(set(block_ids)) != len(block_ids)
+        ):
+            raise AssertionError(f"{kind} attention KV physical block IDs are malformed")
+        expected_hash = hashlib.sha256(json.dumps(block_ids, separators=(",", ":")).encode()).hexdigest()
+        if group.get("physical_block_ids_sha256") != expected_hash:
+            raise AssertionError(f"{kind} attention KV physical block ID hash does not match retained IDs")
+        retained.append(dict(group))
+    return retained
+
+
+def _validated_prefix_source(
+    stats: dict[str, Any],
+    *,
+    prompt_tokens: int,
+    physically_reused_tokens: int,
+    cache_block_size: int,
+    expected_cache_misses: int,
+) -> dict[str, Any]:
+    expected_worker_misses = int(expected_cache_misses > 0)
+    if stats.get("cache_miss_count") != expected_worker_misses:
+        raise AssertionError("physical worker cache-miss count does not match the exact wave layout")
+    miss_ids = stats.get("cache_miss_request_ids")
+    if not isinstance(miss_ids, list) or len(miss_ids) != expected_worker_misses:
+        raise AssertionError("physical worker cache-miss request IDs are not exact")
+    sources = stats.get("prefix_sources")
+    if not isinstance(sources, list) or len(sources) != 1 or not isinstance(sources[0], dict):
+        raise AssertionError("physical worker must retain exactly one direct cache-miss source")
+    source = sources[0]
+    source_request_id = source.get("request_id")
+    if not isinstance(source_request_id, str) or not source_request_id:
+        raise AssertionError("direct cache-miss source request ID is malformed")
+    if miss_ids and miss_ids != [source_request_id]:
+        raise AssertionError("phase cache-miss request ID does not match the retained direct source")
+    if source.get("prompt_tokens") != prompt_tokens:
+        raise AssertionError("direct cache-miss source prompt length drifted")
+    snapshots = source.get("snapshots")
+    if not isinstance(snapshots, list) or not snapshots:
+        raise AssertionError("direct cache-miss source has no physical attention block snapshots")
+    previous_groups = None
+    previous_prefix_tokens = 0
+    retained_snapshots = []
+    for snapshot_index, snapshot in enumerate(snapshots):
+        if not isinstance(snapshot, dict) or snapshot.get("snapshot_index") != snapshot_index:
+            raise AssertionError("direct cache-miss source snapshot indices must be exact and contiguous")
+        for key in ("num_computed_tokens_before_step", "num_scheduled_tokens"):
+            value = snapshot.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AssertionError(f"direct cache-miss source {key} is malformed")
+        prefix_tokens = snapshot.get("directly_observed_prefix_tokens")
+        if (
+            isinstance(prefix_tokens, bool)
+            or not isinstance(prefix_tokens, int)
+            or prefix_tokens <= previous_prefix_tokens
+            or prefix_tokens > physically_reused_tokens
+            or prefix_tokens % cache_block_size
+        ):
+            raise AssertionError("direct cache-miss source prefix coverage is malformed")
+        if snapshot["num_computed_tokens_before_step"] + snapshot["num_scheduled_tokens"] < prefix_tokens:
+            raise AssertionError("direct cache-miss source snapshot exceeds scheduled prefill work")
+        groups = _validated_attention_kv_groups(
+            snapshot.get("attention_kv_groups"),
+            expected_prefix_tokens=prefix_tokens,
+            expected_block_size=cache_block_size,
+            kind="source",
+        )
+        if previous_groups is not None:
+            if len(previous_groups) != len(groups):
+                raise AssertionError("direct cache-miss source attention group count changed")
+            for previous, current in zip(previous_groups, groups, strict=True):
+                for key in ("kv_cache_group_id", "layer_names", "block_size_tokens"):
+                    if previous[key] != current[key]:
+                        raise AssertionError("direct cache-miss source attention ownership changed")
+                previous_ids = previous["physical_block_ids"]
+                if previous_ids != current["physical_block_ids"][: len(previous_ids)]:
+                    raise AssertionError("direct cache-miss source physical block identity changed")
+        previous_groups = groups
+        previous_prefix_tokens = prefix_tokens
+        retained_snapshots.append({**snapshot, "attention_kv_groups": groups})
+    if previous_prefix_tokens != physically_reused_tokens:
+        raise AssertionError("direct cache-miss source does not cover the exact reusable prompt prefix")
+    return {**source, "snapshots": retained_snapshots}
+
+
+def _validated_fp32_state_copies(record: dict[str, Any]) -> list[dict[str, Any]]:
+    copies = record.get("state_copies")
+    if not isinstance(copies, list) or len(copies) != record["copy_entries"]:
+        raise AssertionError("physical prefix clone must retain every recurrent-state copy entry")
+    retained = []
+    identities = set()
+    copied_elements = 0
+    copied_bytes = 0
+    for entry in copies:
+        if not isinstance(entry, dict):
+            raise AssertionError("recurrent-state copy entry is malformed")
+        group_id = entry.get("kv_cache_group_id")
+        layer_name = entry.get("layer_name")
+        state_index = entry.get("state_index")
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or group_id < 0
+            or not isinstance(layer_name, str)
+            or not layer_name
+            or isinstance(state_index, bool)
+            or not isinstance(state_index, int)
+            or state_index < 0
+        ):
+            raise AssertionError("recurrent-state copy ownership is malformed")
+        identity = (group_id, layer_name, state_index)
+        if identity in identities:
+            raise AssertionError("recurrent-state copy ownership must be unique per request")
+        identities.add(identity)
+        if entry.get("dtype") != "torch.float32":
+            raise AssertionError("every physical Evo2 recurrent-state copy must be FP32")
+        state_shape = entry.get("state_shape")
+        block_shape = entry.get("block_shape")
+        if (
+            not isinstance(state_shape, list)
+            or len(state_shape) < 2
+            or not isinstance(block_shape, list)
+            or not block_shape
+            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in state_shape)
+            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in block_shape)
+            or state_shape[1:] != block_shape
+        ):
+            raise AssertionError("recurrent-state copy tensor shape evidence is malformed")
+        integer_keys = (
+            "source_logical_block_index",
+            "destination_logical_block_index",
+            "source_physical_block_id",
+            "destination_physical_block_id",
+            "source_data_ptr",
+            "destination_data_ptr",
+            "copied_elements",
+            "copied_bytes",
+        )
+        if any(
+            isinstance(entry.get(key), bool) or not isinstance(entry.get(key), int) or entry[key] < 0
+            for key in integer_keys
+        ):
+            raise AssertionError("recurrent-state copy pointer, slot, or size evidence is malformed")
+        if entry["source_logical_block_index"] == entry["destination_logical_block_index"]:
+            raise AssertionError("recurrent-state copy logical source and destination must differ")
+        if entry["source_physical_block_id"] == entry["destination_physical_block_id"]:
+            raise AssertionError("recurrent-state copy physical source and destination must differ")
+        if entry["source_data_ptr"] <= 0 or entry["destination_data_ptr"] <= 0:
+            raise AssertionError("recurrent-state copy pointers must be concrete nonzero addresses")
+        if entry["source_data_ptr"] == entry["destination_data_ptr"]:
+            raise AssertionError("recurrent-state copy source and destination pointers must differ")
+        if state_shape[0] <= max(entry["source_physical_block_id"], entry["destination_physical_block_id"]):
+            raise AssertionError("recurrent-state physical block IDs exceed the retained tensor shape")
+        if entry["copied_elements"] != math.prod(block_shape):
+            raise AssertionError("recurrent-state copied elements do not match the retained block shape")
+        if entry["copied_bytes"] != 4 * entry["copied_elements"]:
+            raise AssertionError("recurrent-state copied bytes do not match exact FP32 storage")
+        copied_elements += entry["copied_elements"]
+        copied_bytes += entry["copied_bytes"]
+        retained.append(dict(entry))
+    if copied_elements != record["copied_elements"] or copied_bytes != record["copied_bytes"]:
+        raise AssertionError("per-state copy entries do not sum to the physical clone totals")
+    return retained
+
+
 def shared_prefix_state_reuse_evidence(
     manifest: WorkloadManifest,
     *,
@@ -859,6 +1303,8 @@ def shared_prefix_state_reuse_evidence(
         raise AssertionError("every cache hit must reuse the exact block-aligned prefix")
 
     worker_clones = []
+    expected_elements_per_request = set()
+    expected_bytes_per_request = set()
     for proof, expected_clone_count in zip(worker_proof, expected_worker_clone_counts, strict=True):
         if isinstance(expected_clone_count, bool) or not isinstance(expected_clone_count, int):
             raise AssertionError("expected worker clone counts must be integers")
@@ -869,6 +1315,15 @@ def shared_prefix_state_reuse_evidence(
         requests = stats.get("requests")
         if clone_count != expected_clone_count or not isinstance(requests, list) or len(requests) != clone_count:
             raise AssertionError("physical worker prefix clone count does not match the exact request layout")
+        source = _validated_prefix_source(
+            stats,
+            prompt_tokens=prompt_tokens,
+            physically_reused_tokens=physically_reused_tokens,
+            cache_block_size=cache_block_size,
+            expected_cache_misses=expected_cache_misses,
+        )
+        source_snapshot = source["snapshots"][-1]
+        source_groups = source_snapshot["attention_kv_groups"]
 
         retained_requests = []
         request_ids = set()
@@ -905,16 +1360,52 @@ def shared_prefix_state_reuse_evidence(
                 raise AssertionError("physical prefix clone copy elements do not match the Evo2 state layout")
             if record["copied_bytes"] != record["expected_copied_bytes"]:
                 raise AssertionError("physical prefix clone copy bytes do not match the Evo2 FP32 state layout")
-            retained_requests.append(dict(record))
+            if record.get("source_miss_request_id") != source["request_id"]:
+                raise AssertionError("physical prefix clone does not name its direct cache-miss source")
+            if record.get("source_snapshot_index") != source_snapshot["snapshot_index"]:
+                raise AssertionError("physical prefix clone does not name the exact direct source snapshot")
+            if record.get("attention_kv_identity_verified") is not True:
+                raise AssertionError("physical prefix clone lacks attention KV identity verification")
+            retained_source_groups = _validated_attention_kv_groups(
+                record.get("source_attention_kv_groups"),
+                expected_prefix_tokens=physically_reused_tokens,
+                expected_block_size=cache_block_size,
+                kind="clone source",
+            )
+            retained_reused_groups = _validated_attention_kv_groups(
+                record.get("reused_attention_kv_groups"),
+                expected_prefix_tokens=physically_reused_tokens,
+                expected_block_size=cache_block_size,
+                kind="clone hit",
+            )
+            if retained_source_groups != source_groups:
+                raise AssertionError("clone source attention KV blocks do not match the direct miss snapshot")
+            if retained_reused_groups != retained_source_groups:
+                raise AssertionError("clone hit attention KV physical block IDs do not exactly match its source")
+            state_copies = _validated_fp32_state_copies(record)
+            expected_elements_per_request.add(record["expected_copied_elements"])
+            expected_bytes_per_request.add(record["expected_copied_bytes"])
+            retained_requests.append(
+                {
+                    **record,
+                    "source_attention_kv_groups": retained_source_groups,
+                    "reused_attention_kv_groups": retained_reused_groups,
+                    "state_copies": state_copies,
+                }
+            )
 
         worker_clones.append(
             {
                 "rank": int(proof.get("rank", 0)),
                 "device": int(proof.get("device", 0)),
                 "clone_count": clone_count,
+                "prefix_source": source,
                 "requests": retained_requests,
             }
         )
+
+    if len(expected_elements_per_request) != 1 or len(expected_bytes_per_request) != 1:
+        raise AssertionError("all physical prefix clones must retain one exact Evo2 state-copy layout")
 
     total_prompt_tokens = prompt_tokens * request_count
     return {
@@ -930,6 +1421,9 @@ def shared_prefix_state_reuse_evidence(
         "scheduled_uncached_prompt_tokens": total_prompt_tokens - sum(normalized_counts),
         "worker_state_clones": worker_clones,
         "rank_local_physical_clone_count": sum(worker["clone_count"] for worker in worker_clones),
+        "expected_fp32_state_copy_elements_per_request": next(iter(expected_elements_per_request)),
+        "expected_fp32_state_copy_bytes_per_request": next(iter(expected_bytes_per_request)),
+        "attention_kv_physical_reuse_proven": True,
         "physical_state_copy_proven": True,
     }
 
@@ -958,7 +1452,12 @@ def wave_execution_summary(
         elapsed = proof.get("generation_s")
         if isinstance(request_count, bool) or not isinstance(request_count, int) or request_count <= 0:
             raise AssertionError("physical generation wave request counts must be positive integers")
-        if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed <= 0:
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not math.isfinite(elapsed)
+            or elapsed <= 0
+        ):
             raise AssertionError("physical generation wave timings must be finite and positive")
         request_counts.append(request_count)
         generation_s.append(float(elapsed))
@@ -992,9 +1491,11 @@ class GenerationPhaseResult:
     output_summaries: tuple[dict[str, Any], ...]
     request_executions: tuple[RequestExecutionRecord, ...]
     full_output_artifact: dict[str, Any]
-    full_decode_proof: dict[str, Any]
+    full_decode_proof: dict[str, Any] | None
     worker_proof: tuple[dict[str, Any], ...]
     shared_prefix_state_reuse: dict[str, Any] | None
+    proof_collected: bool
+    prefix_cache_reset: bool
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe phase record."""
@@ -1018,6 +1519,8 @@ class GenerationPhaseResult:
             "full_decode_proof": self.full_decode_proof,
             "worker_proof": list(self.worker_proof),
             "shared_prefix_state_reuse": self.shared_prefix_state_reuse,
+            "proof_collected": self.proof_collected,
+            "prefix_cache_reset": self.prefix_cache_reset,
         }
 
 
@@ -1057,6 +1560,7 @@ def run_generation_phase(
     memory_monitor_factory: Callable[[], PeakMemoryMonitor],
     execution_records: tuple[RequestExecutionRecord, ...],
     full_output_path: str | Path,
+    collect_proof: bool = True,
     reset_worker_proof: Callable[[], Any] | None = None,
     snapshot_worker_proof: Callable[[], tuple[dict[str, Any], ...]] | None = None,
     prefix_cache_block_size: int | None = None,
@@ -1067,6 +1571,8 @@ def run_generation_phase(
     barrier: Any | None = None,
 ) -> GenerationPhaseResult:
     """Time explicit offline vLLM calls while preserving one ordered phase artifact."""
+    if collect_proof and recorder is None:
+        raise ValueError("proof collection requires a CUDA graph recorder")
     if len(sampling_params) != len(manifest.requests):
         raise ValueError("sampling params must align with every request")
     if len(execution_records) != len(manifest.requests):
@@ -1091,8 +1597,8 @@ def run_generation_phase(
         if call_indexes != {expected_call_index}:
             raise ValueError("execution call indices must match explicit generation waves")
 
-    observation_start = len(recorder.observations)
-    if reset_worker_proof is not None:
+    observation_start = 0 if recorder is None else len(recorder.observations)
+    if collect_proof and reset_worker_proof is not None:
         reset_worker_proof()
     prefix_cache_reset = False
     if require_shared_prefix_state_reuse:
@@ -1105,16 +1611,16 @@ def run_generation_phase(
     outputs = []
     generation_call_s = []
     wave_proofs = []
-    with memory_monitor_factory() as monitor:
+    monitor_context = memory_monitor_factory() if collect_proof else _UnmonitoredMemory()
+    with monitor_context as monitor:
         for wave in waves:
             wave_phase = f"{phase}.wave-{wave.wave_index:03d}"
             wave_manifest = manifest.request_slice(wave.start, wave.stop)
-            wave_prompts = [
-                {"prompt_token_ids": list(request.prompt_token_ids)} for request in wave_manifest.requests
-            ]
-            recorder.start_phase(wave_phase)
-            wave_observation_start = len(recorder.observations)
-            wave_scheduler_start = len(recorder.scheduler_observations)
+            wave_prompts = [{"prompt_token_ids": list(request.prompt_token_ids)} for request in wave_manifest.requests]
+            if collect_proof:
+                recorder.start_phase(wave_phase)
+                wave_observation_start = len(recorder.observations)
+                wave_scheduler_start = len(recorder.scheduler_observations)
             if barrier is not None:
                 barrier.wait()
             begin = clock()
@@ -1133,22 +1639,23 @@ def run_generation_phase(
             generation_call_s.append(elapsed)
             outputs.extend(wave_outputs)
 
-            full_decode = full_decode_proof_summary(
-                recorder.observations[wave_observation_start:],
-                phase=wave_phase,
-                batch_size=wave.request_count,
-                max_new_tokens=manifest.max_new_tokens,
-            )
-            scheduler_proof = scheduler_capacity_proof_summary(
-                recorder.scheduler_observations[wave_scheduler_start:],
-                phase=wave_phase,
-                global_wave_size=wave.request_count,
-                max_num_seqs=(
-                    wave.request_count if scheduler_max_num_seqs is None else scheduler_max_num_seqs
-                ),
-            )
-            if scheduler_max_num_seqs is not None:
-                validate_scheduler_capacity_proof(scheduler_proof)
+            full_decode = None
+            scheduler_proof = None
+            if collect_proof:
+                full_decode = full_decode_proof_summary(
+                    recorder.observations[wave_observation_start:],
+                    phase=wave_phase,
+                    batch_size=wave.request_count,
+                    max_new_tokens=manifest.max_new_tokens,
+                )
+                scheduler_proof = scheduler_capacity_proof_summary(
+                    recorder.scheduler_observations[wave_scheduler_start:],
+                    phase=wave_phase,
+                    global_wave_size=wave.request_count,
+                    max_num_seqs=(wave.request_count if scheduler_max_num_seqs is None else scheduler_max_num_seqs),
+                )
+                if scheduler_max_num_seqs is not None:
+                    validate_scheduler_capacity_proof(scheduler_proof)
             wave_proofs.append(
                 {
                     "wave_index": wave.wave_index,
@@ -1161,9 +1668,9 @@ def run_generation_phase(
                     "scheduler_capacity_proof": scheduler_proof,
                 }
             )
-    worker_proof = () if snapshot_worker_proof is None else snapshot_worker_proof()
+    worker_proof = () if not collect_proof or snapshot_worker_proof is None else snapshot_worker_proof()
     shared_prefix_reuse = None
-    if require_shared_prefix_state_reuse:
+    if collect_proof and require_shared_prefix_state_reuse:
         if prefix_cache_block_size is None:
             raise AssertionError("shared-prefix proof requires the resolved cache block size")
         shared_prefix_reuse = shared_prefix_state_reuse_evidence(
@@ -1193,35 +1700,42 @@ def run_generation_phase(
         outputs=outputs,
         execution_records=execution_records,
     )
-    expected_decode_tokens = sum(
-        int(proof["full_decode_proof"]["expected_decode_tokens"]) for proof in wave_proofs
-    )
-    full_decode_tokens = sum(int(proof["full_decode_proof"]["full_decode_tokens"]) for proof in wave_proofs)
-    full_decode_proof = {
-        "phase": phase,
-        "wave_count": len(wave_proofs),
-        "expected_decode_tokens": expected_decode_tokens,
-        "full_decode_tokens": full_decode_tokens,
-        "coverage_fraction": full_decode_tokens / expected_decode_tokens if expected_decode_tokens else 1.0,
-        "passed": all(proof["full_decode_proof"]["passed"] for proof in wave_proofs),
-        "waves": [proof["full_decode_proof"] for proof in wave_proofs],
-    }
+    full_decode_proof = None
+    if collect_proof:
+        expected_decode_tokens = sum(
+            int(proof["full_decode_proof"]["expected_decode_tokens"]) for proof in wave_proofs
+        )
+        full_decode_tokens = sum(int(proof["full_decode_proof"]["full_decode_tokens"]) for proof in wave_proofs)
+        full_decode_proof = {
+            "phase": phase,
+            "wave_count": len(wave_proofs),
+            "expected_decode_tokens": expected_decode_tokens,
+            "full_decode_tokens": full_decode_tokens,
+            "coverage_fraction": full_decode_tokens / expected_decode_tokens if expected_decode_tokens else 1.0,
+            "passed": all(proof["full_decode_proof"]["passed"] for proof in wave_proofs),
+            "waves": [proof["full_decode_proof"] for proof in wave_proofs],
+        }
     return GenerationPhaseResult(
         phase=phase,
         sample=sample,
         generation_call_s=tuple(generation_call_s),
         wave_proofs=tuple(wave_proofs),
-        observations=tuple(recorder.observations[observation_start:]),
+        observations=(tuple(recorder.observations[observation_start:]) if collect_proof else ()),
         output_summaries=output_summaries,
         request_executions=execution_records,
         full_output_artifact=full_output_artifact,
         full_decode_proof=full_decode_proof,
         worker_proof=worker_proof,
         shared_prefix_state_reuse=shared_prefix_reuse,
+        proof_collected=collect_proof,
+        prefix_cache_reset=prefix_cache_reset,
     )
 
 
-def reset_vllm_worker_proof_state(worker: Any) -> dict[str, int]:
+def reset_vllm_worker_proof_state(
+    worker: Any,
+    reset_prefix_sources: bool = True,
+) -> dict[str, int | bool]:
     """Reset phase-local FIR telemetry and CUDA allocator peaks on one vLLM worker."""
     del worker
     import torch
@@ -1238,8 +1752,12 @@ def reset_vllm_worker_proof_state(worker: Any) -> dict[str, int]:
     torch.cuda.reset_peak_memory_stats()
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     install_mamba_prefix_clone_proof_hook()
-    reset_mamba_prefix_clone_stats()
-    return {"rank": int(rank), "device": int(torch.cuda.current_device())}
+    reset_mamba_prefix_clone_stats(reset_prefix_sources=reset_prefix_sources)
+    return {
+        "rank": int(rank),
+        "device": int(torch.cuda.current_device()),
+        "reset_prefix_sources": reset_prefix_sources,
+    }
 
 
 def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
@@ -1271,6 +1789,18 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
             "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
         },
     }
+
+
+class _UnmonitoredMemory:
+    """Expose the sample interface without polling during speed measurements."""
+
+    peak_device_memory_bytes: tuple[int, ...] = ()
+
+    def __enter__(self) -> _UnmonitoredMemory:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        del exc_type, exc_value, traceback
 
 
 class PeakMemoryMonitor:
@@ -1344,6 +1874,91 @@ def make_nvml_memory_reader() -> Callable[[], tuple[int, ...]]:
     return lambda: tuple(int(pynvml.nvmlDeviceGetMemoryInfo(handle).used) for handle in handles)
 
 
+def _nvml_text(value: Any) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def gpu_hardware_provenance(
+    *,
+    nvml_module: Any | None = None,
+    expected_device_count: int = 2,
+) -> dict[str, Any]:
+    """Record exact driver, UUID, name, and physical memory for every GPU."""
+    if expected_device_count <= 0:
+        raise ValueError("expected_device_count must be positive")
+    if nvml_module is None:
+        import pynvml as nvml_module
+
+    nvml_module.nvmlInit()
+    device_count = int(nvml_module.nvmlDeviceGetCount())
+    if device_count != expected_device_count:
+        raise RuntimeError(f"benchmark requires exactly {expected_device_count} NVML devices, found {device_count}")
+    devices = []
+    for index in range(device_count):
+        handle = nvml_module.nvmlDeviceGetHandleByIndex(index)
+        memory = nvml_module.nvmlDeviceGetMemoryInfo(handle)
+        devices.append(
+            {
+                "index": index,
+                "uuid": _nvml_text(nvml_module.nvmlDeviceGetUUID(handle)),
+                "name": _nvml_text(nvml_module.nvmlDeviceGetName(handle)),
+                "total_memory_bytes": int(memory.total),
+                "initial_used_memory_bytes": int(memory.used),
+                "initial_free_memory_bytes": int(memory.free),
+            }
+        )
+    return {
+        "driver_version": _nvml_text(nvml_module.nvmlSystemGetDriverVersion()),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "device_count": device_count,
+        "devices": devices,
+    }
+
+
+def gpu_memory_headroom_evidence(
+    hardware: dict[str, Any],
+    *,
+    peak_device_memory_bytes: Sequence[int],
+    required_headroom_bytes: int = _REQUIRED_GPU_HEADROOM_BYTES,
+) -> dict[str, Any]:
+    """Require at least 2 GiB beyond the observed peak on every benchmark GPU."""
+    if required_headroom_bytes <= 0:
+        raise ValueError("required_headroom_bytes must be positive")
+    devices = hardware.get("devices")
+    if not isinstance(devices, list) or not devices:
+        raise ValueError("GPU hardware provenance must contain a nonempty device list")
+    if len(devices) != len(peak_device_memory_bytes):
+        raise ValueError("peak-memory samples must align with every provenance GPU")
+
+    retained = []
+    for device, peak in zip(devices, peak_device_memory_bytes, strict=True):
+        total = device.get("total_memory_bytes")
+        if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+            raise ValueError("GPU total memory must be a positive integer")
+        if isinstance(peak, bool) or not isinstance(peak, int) or peak < 0:
+            raise ValueError("GPU peak memory must be a nonnegative integer")
+        headroom = total - peak
+        retained.append(
+            {
+                "index": int(device.get("index", len(retained))),
+                "uuid": str(device.get("uuid", "")),
+                "total_memory_bytes": total,
+                "peak_used_memory_bytes": peak,
+                "headroom_bytes": headroom,
+            }
+        )
+        if headroom < required_headroom_bytes:
+            raise RuntimeError(
+                f"GPU {device.get('uuid', device.get('index'))} has {headroom} bytes headroom; "
+                "at least 2 GiB is required"
+            )
+    return {
+        "required_headroom_bytes": required_headroom_bytes,
+        "devices": retained,
+        "passed": True,
+    }
+
+
 def _attach_cudagraph_recorder(llm: Any, recorder: CUDAGraphProofRecorder) -> None:
     manager = llm.llm_engine.logger_manager
     if manager is None:
@@ -1411,6 +2026,7 @@ def run_context_length_preflight(args: Any, manifest: WorkloadManifest) -> dict[
     return {
         "schema_version": 1,
         "task": "evo2-vllm-context-length-preflight",
+        "benchmark_mode": "preflight",
         "backend": "vllm",
         "topology": args.topology,
         "versions": runtime_versions(),
@@ -1441,6 +2057,8 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         raise ValueError("run_tp2_benchmark requires topology=tp2")
     require_output_namespace_reservation(args.output)
     profile = profile_from_args(args, manifest)
+    benchmark_mode = benchmark_mode_from_args(args)
+    instrumentation = benchmark_instrumentation_contract(benchmark_mode)
     preflight_begin = time.perf_counter()
     preflight = context_length_preflight(
         profile,
@@ -1457,7 +2075,28 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
 
     provenance_begin = time.perf_counter()
     checkpoint_identity = checkpoint_provenance(args.checkpoint)
-    source_identity = source_provenance()
+    source_identity = source_provenance(require_clean=True)
+    vllm_identity = vllm_installation_provenance()
+    gpu_identity = gpu_hardware_provenance()
+    runtime_attestation = runtime_attestation_contract(
+        checkpoint=checkpoint_identity,
+        sources={"bionemo": source_identity},
+        vllm_installation=vllm_identity,
+        gpu_hardware=gpu_identity,
+    )
+    benchmark_contract = {
+        **build_benchmark_contract(args, manifest, profile),
+        "runtime_attestation": runtime_attestation,
+    }
+    linked_proof = (
+        None
+        if benchmark_mode == "proof"
+        else validate_linked_proof_artifact(
+            args.linked_proof_artifact,
+            expected_contract=benchmark_contract,
+            require_memory_headroom=True,
+        )
+    )
     provenance_s = time.perf_counter() - provenance_begin
 
     engine_kwargs = profile.engine_kwargs(
@@ -1466,32 +2105,30 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         load_format=args.load_format,
     )
     memory_reader = make_nvml_memory_reader()
-    recorder = CUDAGraphProofRecorder()
+    recorder = CUDAGraphProofRecorder() if profile.proof else None
 
     init_begin = time.perf_counter()
     with PeakMemoryMonitor(memory_reader) as init_memory:
         llm = LLM(**engine_kwargs)
     engine_init_s = time.perf_counter() - init_begin
-    _attach_cudagraph_recorder(llm, recorder)
+    if profile.proof:
+        _attach_cudagraph_recorder(llm, recorder)
     resolved = resolved_config_snapshot(llm.llm_engine.vllm_config)
     validate_resolved_profile(profile, resolved)
-    initialized_worker_proof = _snapshot_worker_proof(llm)
+    initialized_worker_proof = _snapshot_worker_proof(llm) if profile.proof else ()
 
     phase_results = []
-    call_index_start = 0
-    for sample_index, (phase, round_offset) in enumerate(_phase_specs(args.warmups, args.repetitions)):
-        generation_round = args.generation_round + round_offset
+    call_index_start = args.generation_round
+    for sample_index, (phase, _) in enumerate(_phase_specs(args.warmups, args.repetitions)):
+        execution_records = build_wave_execution_records(
+            manifest,
+            global_wave_size=profile.global_wave_size,
+            call_index_start=call_index_start,
+        )
         sampling_params = build_request_sampling_params(
             manifest,
             sampling_params_factory=SamplingParams,
-            generation_round=generation_round,
-            global_request_offset=0,
-        )
-        execution_records = build_wave_execution_records(
-            manifest,
-            generation_round=generation_round,
-            global_wave_size=profile.global_wave_size,
-            call_index_start=call_index_start,
+            execution_records=execution_records,
         )
         result = run_generation_phase(
             llm=llm,
@@ -1503,8 +2140,9 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
             execution_records=execution_records,
             full_output_path=phase_output_artifact_path(args.output, phase=phase),
-            reset_worker_proof=lambda: _reset_worker_proof(llm),
-            snapshot_worker_proof=lambda: _snapshot_worker_proof(llm),
+            collect_proof=profile.proof,
+            reset_worker_proof=(lambda: _reset_worker_proof(llm)) if profile.proof else None,
+            snapshot_worker_proof=(lambda: _snapshot_worker_proof(llm)) if profile.proof else None,
             require_shared_prefix_state_reuse=profile.shared_prefix_state_reuse,
             prefix_cache_block_size=int(resolved["cache"]["block_size"]),
             global_wave_size=profile.global_wave_size,
@@ -1521,9 +2159,23 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         phase_results.append(result)
         call_index_start += len(result.generation_call_s)
 
-    final_worker_proof = phase_results[-1].worker_proof
-    for initialized, final in zip(initialized_worker_proof, final_worker_proof, strict=True):
-        validate_compilation_proof(initialized["compilation"], final["compilation"])
+    if profile.proof:
+        final_worker_proof = phase_results[-1].worker_proof
+        for initialized, final in zip(initialized_worker_proof, final_worker_proof, strict=True):
+            validate_compilation_proof(initialized["compilation"], final["compilation"])
+        memory_samples = [
+            init_memory.peak_device_memory_bytes,
+            *(result.sample.peak_device_memory_bytes for result in phase_results),
+        ]
+        peak_device_memory = tuple(max(values) for values in zip(*memory_samples, strict=True))
+        memory_headroom = gpu_memory_headroom_evidence(
+            gpu_identity,
+            peak_device_memory_bytes=peak_device_memory,
+        )
+    else:
+        if linked_proof is None or not isinstance(linked_proof.get("gpu_memory_headroom"), dict):
+            raise RuntimeError("speed lane is missing linked proof GPU memory headroom evidence")
+        memory_headroom = linked_proof["gpu_memory_headroom"]
 
     steady_results = [result for result in phase_results if result.phase.startswith("steady-")]
     waves = build_request_waves(
@@ -1535,10 +2187,31 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         "schema_version": 1,
         "backend": "vllm",
         "topology": "tp2",
+        "benchmark_mode": benchmark_mode,
+        "benchmark_contract": benchmark_contract,
+        "benchmark_contract_sha256": benchmark_contract_sha256(benchmark_contract),
+        "instrumentation": instrumentation,
+        "linked_proof_artifact": linked_proof,
+        "proof_status": (
+            {
+                "passed": True,
+                "phase_count": len(phase_results),
+                "full_decode_passed": all(result.full_decode_proof["passed"] for result in phase_results),
+                "compilation_stable": True,
+            }
+            if profile.proof
+            else {
+                "passed": None,
+                "attested_by_linked_proof": linked_proof,
+            }
+        ),
         "versions": runtime_versions(),
         "checkpoint": str(args.checkpoint),
         "checkpoint_provenance": checkpoint_identity,
         "source_provenance": source_identity,
+        "vllm_installation_provenance": vllm_identity,
+        "gpu_hardware_provenance": gpu_identity,
+        "gpu_memory_headroom": memory_headroom,
         "invocation": {
             "argv": [sys.executable, *sys.argv],
             "parsed_args": {
@@ -1565,6 +2238,8 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             "gdpo_target_request_count": profile.gdpo_target_batch_size,
             "planned_waves_to_96": profile.gdpo_waves_to_96,
             "semantic_padding": False,
+            "benchmark_mode": benchmark_mode,
+            "timed_generation_instrumentation": instrumentation,
         },
         "request_waves": [
             {
@@ -1605,6 +2280,7 @@ def write_json_artifact(path: str | Path, artifact: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the optimized exact-length vLLM benchmark CLI."""
     args = build_parser().parse_args(argv)
+    benchmark_mode_from_args(args)
     reservation = reserve_output_namespace(args.output)
     if args.backend != "vllm":
         raise NotImplementedError("the MCore baseline uses its pinned backend adapter")

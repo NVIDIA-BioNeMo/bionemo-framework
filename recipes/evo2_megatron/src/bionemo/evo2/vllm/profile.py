@@ -223,6 +223,7 @@ class Evo2VllmProfile:
             "backend": "vllm",
             "generation_batch_size": self.global_batch_size,
             "request_seed": request_seed,
+            "evo2_collect_proof": self.proof,
             "generation_worker_cls": generation_worker_cls,
             "vllm_cfg": {
                 "tensor_parallel_size": self.tensor_parallel_size,

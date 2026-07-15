@@ -3,7 +3,10 @@
 
 """Out-of-tree vLLM model implementation for Evo2 Vortex checkpoints."""
 
+import hashlib
+import json
 from collections.abc import Iterable
+from copy import deepcopy
 from itertools import islice
 from typing import Any
 
@@ -33,7 +36,9 @@ _MAMBA_STATE_COPY_STATS = {
 }
 
 _MAMBA_PREFIX_CLONE_RECORDS: list[dict[str, Any]] = []
-_MAMBA_PREFIX_CLONE_STATE: dict[str, dict[str, dict[str, Any]] | None] = {"active": None}
+_MAMBA_PREFIX_CACHE_MISS_IDS: list[str] = []
+_MAMBA_PREFIX_SOURCE_RECORDS: dict[str, dict[str, Any]] = {}
+_MAMBA_PREFIX_CLONE_STATE: dict[str, dict[str, Any] | None] = {"active": None}
 
 
 def reset_mamba_state_copy_stats() -> None:
@@ -47,19 +52,213 @@ def get_mamba_state_copy_stats() -> dict[str, int]:
     return dict(_MAMBA_STATE_COPY_STATS)
 
 
-def reset_mamba_prefix_clone_stats() -> None:
+def reset_mamba_prefix_clone_stats(*, reset_prefix_sources: bool = True) -> None:
     """Reset phase-local request-scoped prefix clone telemetry."""
     if _MAMBA_PREFIX_CLONE_STATE["active"] is not None:
         raise RuntimeError("cannot reset prefix clone telemetry during Mamba preprocessing")
     _MAMBA_PREFIX_CLONE_RECORDS.clear()
+    _MAMBA_PREFIX_CACHE_MISS_IDS.clear()
+    if reset_prefix_sources:
+        _MAMBA_PREFIX_SOURCE_RECORDS.clear()
 
 
 def get_mamba_prefix_clone_stats() -> dict[str, Any]:
     """Return exact per-request recurrent-state clones caused by prefix hits."""
     return {
+        "cache_miss_count": len(_MAMBA_PREFIX_CACHE_MISS_IDS),
+        "cache_miss_request_ids": list(_MAMBA_PREFIX_CACHE_MISS_IDS),
+        "prefix_sources": deepcopy(list(_MAMBA_PREFIX_SOURCE_RECORDS.values())),
         "clone_count": len(_MAMBA_PREFIX_CLONE_RECORDS),
-        "requests": [dict(record) for record in _MAMBA_PREFIX_CLONE_RECORDS],
+        "requests": deepcopy(_MAMBA_PREFIX_CLONE_RECORDS),
     }
+
+
+def _physical_block_ids_sha256(block_ids: list[int]) -> str:
+    payload = json.dumps(block_ids, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _attention_prefix_block_groups(
+    kv_cache_config: Any,
+    mamba_group_ids: list[int],
+    req_state: Any,
+    *,
+    prefix_tokens: int,
+    expected_block_size: int,
+) -> list[dict[str, Any]]:
+    if prefix_tokens <= 0 or prefix_tokens % expected_block_size:
+        raise AssertionError("attention KV proof requires a positive block-aligned prefix")
+    if len(req_state.block_ids) != len(kv_cache_config.kv_cache_groups):
+        raise AssertionError("request block tables must align with every KV cache group")
+    mamba_groups = set(mamba_group_ids)
+    retained = []
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        if group_id in mamba_groups:
+            continue
+        block_size = int(group.kv_cache_spec.block_size)
+        if block_size != expected_block_size:
+            raise AssertionError("Evo2 prefix proof requires matching Mamba and attention block sizes")
+        physical_block_count = prefix_tokens // block_size
+        physical_block_ids = [int(value) for value in req_state.block_ids[group_id][:physical_block_count]]
+        if len(physical_block_ids) != physical_block_count:
+            raise AssertionError("attention KV block table does not cover the full cached prefix")
+        if len(set(physical_block_ids)) != len(physical_block_ids):
+            raise AssertionError("attention KV cached-prefix physical block IDs must be unique")
+        layer_names = [str(name) for name in group.layer_names]
+        if not layer_names:
+            raise AssertionError("attention KV cache group must own at least one layer")
+        retained.append(
+            {
+                "kv_cache_group_id": group_id,
+                "layer_names": layer_names,
+                "block_size_tokens": block_size,
+                "physical_block_count": physical_block_count,
+                "physical_block_ids": physical_block_ids,
+                "physical_block_ids_sha256": _physical_block_ids_sha256(physical_block_ids),
+            }
+        )
+    if not retained:
+        raise AssertionError("Evo2 shared-prefix proof found no attention KV cache groups")
+    return retained
+
+
+def _record_prefix_source_snapshot(
+    scheduler_output: Any,
+    kv_cache_config: Any,
+    mamba_group_ids: list[int],
+    req_state: Any,
+    *,
+    block_size: int,
+) -> None:
+    request_id = str(req_state.req_id)
+    source = _MAMBA_PREFIX_SOURCE_RECORDS[request_id]
+    if source["prompt_tokens"] != int(req_state.num_prompt_tokens):
+        raise AssertionError("cache-miss source prompt length changed while retaining prefix evidence")
+    num_scheduled_tokens = int(scheduler_output.num_scheduled_tokens[req_state.req_id])
+    observed_tokens = min(
+        int(req_state.num_computed_tokens) + num_scheduled_tokens,
+        int(req_state.num_prompt_tokens) - 1,
+    )
+    directly_observed_prefix_tokens = observed_tokens // block_size * block_size
+    if directly_observed_prefix_tokens <= 0:
+        return
+    groups = _attention_prefix_block_groups(
+        kv_cache_config,
+        mamba_group_ids,
+        req_state,
+        prefix_tokens=directly_observed_prefix_tokens,
+        expected_block_size=block_size,
+    )
+    snapshots = source["snapshots"]
+    if snapshots:
+        previous_groups = snapshots[-1]["attention_kv_groups"]
+        if len(previous_groups) != len(groups):
+            raise AssertionError("cache-miss source attention KV group count changed")
+        for old, new in zip(previous_groups, groups, strict=True):
+            for key in ("kv_cache_group_id", "layer_names", "block_size_tokens"):
+                if old[key] != new[key]:
+                    raise AssertionError("cache-miss source attention KV group or layer ownership changed")
+            old_ids = old["physical_block_ids"]
+            if old_ids != new["physical_block_ids"][: len(old_ids)]:
+                raise AssertionError("cache-miss source attention KV physical blocks changed during prefill")
+        if groups == previous_groups:
+            return
+    snapshots.append(
+        {
+            "snapshot_index": len(snapshots),
+            "num_computed_tokens_before_step": int(req_state.num_computed_tokens),
+            "num_scheduled_tokens": num_scheduled_tokens,
+            "directly_observed_prefix_tokens": directly_observed_prefix_tokens,
+            "attention_kv_groups": groups,
+        }
+    )
+
+
+def _verified_prefix_source_for_hit(
+    kv_cache_config: Any,
+    mamba_group_ids: list[int],
+    req_state: Any,
+    *,
+    block_size: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    sources = [record for record in _MAMBA_PREFIX_SOURCE_RECORDS.values() if record["snapshots"]]
+    if len(sources) != 1:
+        raise AssertionError("prefix reuse proof requires exactly one directly observed cache-miss source")
+    source = sources[0]
+    if source["prompt_tokens"] != int(req_state.num_prompt_tokens):
+        raise AssertionError("cache hit prompt length does not match its directly observed source")
+    source_snapshot = source["snapshots"][-1]
+    if source_snapshot["directly_observed_prefix_tokens"] != int(req_state.num_computed_tokens):
+        raise AssertionError("cache hit token count does not match the direct cache-miss source snapshot")
+    reused_groups = _attention_prefix_block_groups(
+        kv_cache_config,
+        mamba_group_ids,
+        req_state,
+        prefix_tokens=int(req_state.num_computed_tokens),
+        expected_block_size=block_size,
+    )
+    source_groups = source_snapshot["attention_kv_groups"]
+    if len(source_groups) != len(reused_groups):
+        raise AssertionError("cache hit attention KV group count does not match its source")
+    for source_group, reused_group in zip(source_groups, reused_groups, strict=True):
+        for key in (
+            "kv_cache_group_id",
+            "layer_names",
+            "block_size_tokens",
+            "physical_block_count",
+        ):
+            if source_group[key] != reused_group[key]:
+                raise AssertionError("cache hit attention KV group, layer, or block count does not match")
+        if source_group["physical_block_ids"] != reused_group["physical_block_ids"]:
+            raise AssertionError("cache hit attention KV physical block IDs do not exactly match its source")
+    return source, reused_groups
+
+
+def _mamba_copy_entry_specs(
+    kv_cache_config: Any,
+    mamba_group_ids: list[int],
+    req_state: Any,
+    forward_context: dict[str, Any],
+    *,
+    src_block_idx: int,
+    dest_block_idx: int,
+) -> list[dict[str, Any]]:
+    entries = []
+    for group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[group_id]
+        if not 0 <= src_block_idx < len(block_ids) or not 0 <= dest_block_idx < len(block_ids):
+            raise AssertionError("Mamba clone logical block index is outside the request block table")
+        source_block_id = int(block_ids[src_block_idx])
+        destination_block_id = int(block_ids[dest_block_idx])
+        if source_block_id == destination_block_id:
+            raise AssertionError("Mamba prefix clone source and destination blocks must differ")
+        group = kv_cache_config.kv_cache_groups[group_id]
+        for layer_name in group.layer_names:
+            states = forward_context[layer_name].kv_cache
+            for state_index, state in enumerate(states):
+                if not isinstance(state, torch.Tensor) or state.dtype != torch.float32:
+                    raise AssertionError("every Evo2 cloned recurrent state must be an FP32 tensor")
+                source = state[source_block_id]
+                destination = state[destination_block_id]
+                entries.append(
+                    {
+                        "kv_cache_group_id": int(group_id),
+                        "layer_name": str(layer_name),
+                        "state_index": state_index,
+                        "dtype": str(state.dtype),
+                        "state_shape": list(state.shape),
+                        "block_shape": list(source.shape),
+                        "source_logical_block_index": src_block_idx,
+                        "destination_logical_block_index": dest_block_idx,
+                        "source_physical_block_id": source_block_id,
+                        "destination_physical_block_id": destination_block_id,
+                        "source_data_ptr": int(source.data_ptr()),
+                        "destination_data_ptr": int(destination.data_ptr()),
+                        "copied_elements": int(source.numel()),
+                        "copied_bytes": int(source.numel() * source.element_size()),
+                    }
+                )
+    return entries
 
 
 def _expected_mamba_prefix_clone_layout(
@@ -119,6 +318,19 @@ def install_mamba_prefix_clone_proof_hook(mamba_utils_module: Any | None = None)
         req_state,
         forward_context,
     ):
+        active = _MAMBA_PREFIX_CLONE_STATE["active"]
+        entry_specs = []
+        if active is not None and req_state.req_id in active:
+            if accept_token_bias != 0:
+                raise AssertionError("Evo2 prefix clones must copy one exact recurrent state block")
+            entry_specs = _mamba_copy_entry_specs(
+                kv_cache_config,
+                mamba_group_ids,
+                req_state,
+                forward_context,
+                src_block_idx=src_block_idx,
+                dest_block_idx=dest_block_idx,
+            )
         before = int(copy_bufs.offset)
         result = original_collect(
             copy_bufs,
@@ -131,13 +343,30 @@ def install_mamba_prefix_clone_proof_hook(mamba_utils_module: Any | None = None)
             req_state,
             forward_context,
         )
-        active = _MAMBA_PREFIX_CLONE_STATE["active"]
         if active is not None and req_state.req_id in active:
             after = int(copy_bufs.offset)
+            if after - before != len(entry_specs):
+                raise AssertionError("Mamba prefix clone copy entries do not match the physical state layout")
+            source_ptrs = [int(value) for value in copy_bufs.src_ptrs.np[before:after]]
+            destination_ptrs = [int(value) for value in copy_bufs.dst_ptrs.np[before:after]]
             sizes = [int(value) for value in copy_bufs.sizes.np[before:after]]
             if any(size <= 0 or size % 4 for size in sizes):
                 raise AssertionError("FP32 Mamba prefix clone copy sizes must be positive multiples of four")
             record = active[req_state.req_id]
+            for entry, source_ptr, destination_ptr, size in zip(
+                entry_specs,
+                source_ptrs,
+                destination_ptrs,
+                sizes,
+                strict=True,
+            ):
+                if source_ptr != entry["source_data_ptr"]:
+                    raise AssertionError("Mamba prefix clone source pointer does not match its physical block")
+                if destination_ptr != entry["destination_data_ptr"]:
+                    raise AssertionError("Mamba prefix clone destination pointer does not match its physical block")
+                if size != entry["copied_bytes"]:
+                    raise AssertionError("Mamba prefix clone byte count does not match its tensor shape")
+            record["state_copies"].extend(entry_specs)
             record["copy_entries"] += after - before
             record["copied_bytes"] += sum(sizes)
             record["copied_elements"] += sum(sizes) // 4
@@ -158,6 +387,31 @@ def install_mamba_prefix_clone_proof_hook(mamba_utils_module: Any | None = None)
             raise RuntimeError("Mamba prefix clone telemetry does not support reentrant preprocessing")
 
         new_request_ids = {request.req_id for request in scheduler_output.scheduled_new_reqs}
+        block_size = int(copy_bufs.mamba_spec.block_size)
+        for req_id in input_batch.req_ids:
+            if req_id not in new_request_ids or requests[req_id].num_computed_tokens != 0:
+                continue
+            retained_req_id = str(req_id)
+            if retained_req_id not in _MAMBA_PREFIX_CACHE_MISS_IDS:
+                _MAMBA_PREFIX_CACHE_MISS_IDS.append(retained_req_id)
+            if retained_req_id in _MAMBA_PREFIX_SOURCE_RECORDS:
+                raise AssertionError("cache-miss request IDs must remain unique within a prefix-cache epoch")
+            _MAMBA_PREFIX_SOURCE_RECORDS[retained_req_id] = {
+                "request_id": retained_req_id,
+                "prompt_tokens": int(requests[req_id].num_prompt_tokens),
+                "snapshots": [],
+            }
+        for req_id in input_batch.req_ids:
+            source = _MAMBA_PREFIX_SOURCE_RECORDS.get(str(req_id))
+            if source is None:
+                continue
+            _record_prefix_source_snapshot(
+                scheduler_output,
+                kv_cache_config,
+                copy_bufs.mamba_group_ids,
+                requests[req_id],
+                block_size=block_size,
+            )
         candidate_ids = [
             req_id
             for req_id in input_batch.req_ids
@@ -165,7 +419,6 @@ def install_mamba_prefix_clone_proof_hook(mamba_utils_module: Any | None = None)
         ]
         active: dict[str, dict[str, Any]] = {}
         if candidate_ids:
-            block_size = int(copy_bufs.mamba_spec.block_size)
             layout = _expected_mamba_prefix_clone_layout(
                 kv_cache_config,
                 copy_bufs.mamba_group_ids,
@@ -178,11 +431,24 @@ def install_mamba_prefix_clone_proof_hook(mamba_utils_module: Any | None = None)
                     raise AssertionError("a newly cloned prefix request cannot already have output tokens")
                 if req_state.num_computed_tokens >= req_state.num_prompt_tokens:
                     raise AssertionError("vLLM must recompute at least the final prompt token")
+                source, reused_groups = _verified_prefix_source_for_hit(
+                    kv_cache_config,
+                    copy_bufs.mamba_group_ids,
+                    req_state,
+                    block_size=block_size,
+                )
+                source_snapshot = source["snapshots"][-1]
                 active[req_id] = {
                     "request_id": str(req_id),
+                    "source_miss_request_id": source["request_id"],
+                    "source_snapshot_index": source_snapshot["snapshot_index"],
+                    "attention_kv_identity_verified": True,
                     "num_computed_tokens": int(req_state.num_computed_tokens),
                     "prompt_tokens": int(req_state.num_prompt_tokens),
                     "block_size": block_size,
+                    "source_attention_kv_groups": deepcopy(source_snapshot["attention_kv_groups"]),
+                    "reused_attention_kv_groups": reused_groups,
+                    "state_copies": [],
                     "copy_entries": 0,
                     "copied_elements": 0,
                     "copied_bytes": 0,

@@ -130,8 +130,7 @@ def test_manifest_builds_exact_long_prompts_from_real_tokens_without_padding() -
 def test_prompt_jsonl_loader_preserves_ids_hash_and_exact_length_lanes(tmp_path) -> None:
     prompt_source = tmp_path / "frozen-prompts.jsonl"
     prompt_payload = (
-        '{"id":"audit_prompt10_0000","prompt":"+~GAGTTTTATC"}\n'
-        '{"id":"audit_prompt10_0001","prompt":"+~GAGTTTTATC"}\n'
+        '{"id":"audit_prompt10_0000","prompt":"+~GAGTTTTATC"}\n{"id":"audit_prompt10_0001","prompt":"+~GAGTTTTATC"}\n'
     )
     prompt_source.write_text(prompt_payload, encoding="utf-8")
     tokenizer_path = tmp_path / "tokenizer.json"
@@ -340,6 +339,8 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
             "20",
             "--max-num-seqs",
             "20",
+            "--linked-proof-artifact",
+            str(tmp_path / "proof.json"),
             "--output",
             str(tmp_path / "result.json"),
         ]
@@ -366,6 +367,7 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
     assert args.shared_prefix_state_reuse is True
     assert args.global_wave_size == 20
     assert args.max_num_seqs == 20
+    assert args.linked_proof_artifact == tmp_path / "proof.json"
 
 
 def _fake_vllm_outputs(manifest: WorkloadManifest):

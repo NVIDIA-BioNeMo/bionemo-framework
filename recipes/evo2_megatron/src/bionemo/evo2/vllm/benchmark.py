@@ -258,9 +258,7 @@ class WorkloadManifest:
         payload = source.read_bytes()
         source_sha256 = hashlib.sha256(payload).hexdigest()
         if source_sha256 != expected_sha256:
-            raise ValueError(
-                f"prompt source SHA256 mismatch: expected {expected_sha256}, observed {source_sha256}"
-            )
+            raise ValueError(f"prompt source SHA256 mismatch: expected {expected_sha256}, observed {source_sha256}")
         tokenizer = Path(tokenizer_path).resolve()
         tokenizer_sha256 = hashlib.sha256(tokenizer.read_bytes()).hexdigest()
         token_cache: dict[str, tuple[int, ...]] = {}
@@ -765,6 +763,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--proof", action="store_true")
+    parser.add_argument("--linked-proof-artifact", type=Path)
     parser.add_argument("--context-preflight-only", action="store_true")
     parser.add_argument("--async-scheduling", action="store_true")
     parser.add_argument("--max-concurrent-partial-prefills", type=int, default=1)

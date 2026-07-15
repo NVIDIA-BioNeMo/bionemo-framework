@@ -217,17 +217,14 @@ def test_mamba_prefix_clone_hook_records_exact_request_scoped_fp32_copy_bytes() 
         req_state,
         forward_context,
     ):
-        del (
-            kv_cache_config,
-            mamba_state_copy_funcs,
-            mamba_group_ids,
-            src_block_idx,
-            dest_block_idx,
-            accept_token_bias,
-            req_state,
-        )
+        del kv_cache_config, mamba_state_copy_funcs, accept_token_bias
+        block_ids = req_state.block_ids[mamba_group_ids[0]]
         for state in forward_context["layer"].kv_cache:
-            copy_bufs.sizes.np[copy_bufs.offset] = state[0].numel() * state.element_size()
+            source = state[block_ids[src_block_idx]]
+            destination = state[block_ids[dest_block_idx]]
+            copy_bufs.src_ptrs.np[copy_bufs.offset] = source.data_ptr()
+            copy_bufs.dst_ptrs.np[copy_bufs.offset] = destination.data_ptr()
+            copy_bufs.sizes.np[copy_bufs.offset] = source.numel() * source.element_size()
             copy_bufs.offset += 1
 
     def preprocess(
@@ -269,10 +266,21 @@ def test_mamba_prefix_clone_hook_records_exact_request_scoped_fp32_copy_bytes() 
         torch.zeros((3, 5), dtype=torch.float32),
     )
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(layer_names=["layer"])]
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=["layer"],
+                kv_cache_spec=SimpleNamespace(block_size=16),
+            ),
+            SimpleNamespace(
+                layer_names=["attention.layer"],
+                kv_cache_spec=SimpleNamespace(block_size=16),
+            ),
+        ]
     )
     copy_bufs = SimpleNamespace(
         offset=0,
+        src_ptrs=SimpleNamespace(np=np.zeros(8, dtype=np.int64)),
+        dst_ptrs=SimpleNamespace(np=np.zeros(8, dtype=np.int64)),
         sizes=SimpleNamespace(np=np.zeros(8, dtype=np.int32)),
         mamba_group_ids=[0],
         mamba_spec=SimpleNamespace(block_size=16),
@@ -283,19 +291,22 @@ def test_mamba_prefix_clone_hook_records_exact_request_scoped_fp32_copy_bytes() 
             num_computed_tokens=0,
             num_prompt_tokens=32,
             output_token_ids=[],
+            block_ids=[[2, 1], [101, 102]],
         ),
         "clone": SimpleNamespace(
             req_id="clone",
             num_computed_tokens=16,
             num_prompt_tokens=32,
             output_token_ids=[],
+            block_ids=[[0, 1], [101, 103]],
         ),
     }
     scheduler_output = SimpleNamespace(
         scheduled_new_reqs=[
             SimpleNamespace(req_id="miss"),
             SimpleNamespace(req_id="clone"),
-        ]
+        ],
+        num_scheduled_tokens={"miss": 32, "clone": 16},
     )
 
     evo2_model.reset_mamba_prefix_clone_stats()
@@ -311,24 +322,112 @@ def test_mamba_prefix_clone_hook_records_exact_request_scoped_fp32_copy_bytes() 
         copy_bufs,
     )
 
-    assert evo2_model.get_mamba_prefix_clone_stats() == {
-        "clone_count": 1,
-        "requests": [
-            {
-                "request_id": "clone",
-                "num_computed_tokens": 16,
-                "prompt_tokens": 32,
-                "block_size": 16,
-                "copy_entries": 2,
-                "copied_elements": 11,
-                "copied_bytes": 44,
-                "expected_copy_entries": 2,
-                "expected_copied_elements": 11,
-                "expected_copied_bytes": 44,
-                "all_state_dtypes_fp32": True,
-            }
-        ],
-    }
+    stats = evo2_model.get_mamba_prefix_clone_stats()
+    assert stats["cache_miss_count"] == 1
+    assert stats["cache_miss_request_ids"] == ["miss"]
+    assert len(stats["prefix_sources"]) == 1
+    source = stats["prefix_sources"][0]
+    assert source["request_id"] == "miss"
+    assert source["prompt_tokens"] == 32
+    assert len(source["snapshots"]) == 1
+    source_snapshot = source["snapshots"][0]
+    assert source_snapshot["snapshot_index"] == 0
+    assert source_snapshot["num_computed_tokens_before_step"] == 0
+    assert source_snapshot["num_scheduled_tokens"] == 32
+    assert source_snapshot["directly_observed_prefix_tokens"] == 16
+    assert source_snapshot["attention_kv_groups"] == [
+        {
+            "kv_cache_group_id": 1,
+            "layer_names": ["attention.layer"],
+            "block_size_tokens": 16,
+            "physical_block_count": 1,
+            "physical_block_ids": [101],
+            "physical_block_ids_sha256": source_snapshot["attention_kv_groups"][0]["physical_block_ids_sha256"],
+        }
+    ]
+    assert stats["clone_count"] == 1
+    record = stats["requests"][0]
+    assert record["request_id"] == "clone"
+    assert record["source_miss_request_id"] == "miss"
+    assert record["source_snapshot_index"] == 0
+    assert record["attention_kv_identity_verified"] is True
+    assert record["num_computed_tokens"] == 16
+    assert record["prompt_tokens"] == 32
+    assert record["block_size"] == 16
+    assert record["copy_entries"] == 2
+    assert record["copied_elements"] == 11
+    assert record["copied_bytes"] == 44
+    assert record["expected_copy_entries"] == 2
+    assert record["expected_copied_elements"] == 11
+    assert record["expected_copied_bytes"] == 44
+    assert record["all_state_dtypes_fp32"] is True
+    assert record["source_attention_kv_groups"] == source_snapshot["attention_kv_groups"]
+    assert record["reused_attention_kv_groups"] == [
+        {
+            "kv_cache_group_id": 1,
+            "layer_names": ["attention.layer"],
+            "block_size_tokens": 16,
+            "physical_block_count": 1,
+            "physical_block_ids": [101],
+            "physical_block_ids_sha256": record["reused_attention_kv_groups"][0]["physical_block_ids_sha256"],
+        }
+    ]
+    assert record["state_copies"] == [
+        {
+            "kv_cache_group_id": 0,
+            "layer_name": "layer",
+            "state_index": 0,
+            "dtype": "torch.float32",
+            "state_shape": [3, 2, 3],
+            "block_shape": [2, 3],
+            "source_logical_block_index": 0,
+            "destination_logical_block_index": 1,
+            "source_physical_block_id": 0,
+            "destination_physical_block_id": 1,
+            "source_data_ptr": states[0][0].data_ptr(),
+            "destination_data_ptr": states[0][1].data_ptr(),
+            "copied_elements": 6,
+            "copied_bytes": 24,
+        },
+        {
+            "kv_cache_group_id": 0,
+            "layer_name": "layer",
+            "state_index": 1,
+            "dtype": "torch.float32",
+            "state_shape": [3, 5],
+            "block_shape": [5],
+            "source_logical_block_index": 0,
+            "destination_logical_block_index": 1,
+            "source_physical_block_id": 0,
+            "destination_physical_block_id": 1,
+            "source_data_ptr": states[1][0].data_ptr(),
+            "destination_data_ptr": states[1][1].data_ptr(),
+            "copied_elements": 5,
+            "copied_bytes": 20,
+        },
+    ]
+
+    evo2_model.reset_mamba_prefix_clone_stats(reset_prefix_sources=False)
+    later_wave_stats = evo2_model.get_mamba_prefix_clone_stats()
+    assert later_wave_stats["cache_miss_count"] == 0
+    assert later_wave_stats["clone_count"] == 0
+    assert later_wave_stats["prefix_sources"] == stats["prefix_sources"]
+
+    evo2_model.reset_mamba_prefix_clone_stats()
+    requests["clone"].block_ids[1][0] = 999
+    with pytest.raises(AssertionError, match="physical block IDs do not exactly match"):
+        module.preprocess_mamba(
+            scheduler_output,
+            kv_cache_config,
+            SimpleNamespace(),
+            {},
+            SimpleNamespace(req_ids=["miss", "clone"]),
+            requests,
+            {"layer": SimpleNamespace(kv_cache=states)},
+            (object(), object()),
+            copy_bufs,
+        )
+    evo2_model.reset_mamba_prefix_clone_stats()
 
 
 @CUDA_REQUIRED

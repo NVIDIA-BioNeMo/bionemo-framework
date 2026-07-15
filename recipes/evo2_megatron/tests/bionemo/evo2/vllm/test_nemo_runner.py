@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -331,6 +333,61 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
         max_num_seqs=2,
     )
 
+    def attention_groups():
+        block_ids = [101]
+        return [
+            {
+                "kv_cache_group_id": 1,
+                "layer_names": ["model.layers.3.self_attention"],
+                "block_size_tokens": 16,
+                "physical_block_count": 1,
+                "physical_block_ids": block_ids,
+                "physical_block_ids_sha256": hashlib.sha256(
+                    json.dumps(block_ids, separators=(",", ":")).encode()
+                ).hexdigest(),
+            }
+        ]
+
+    def clone_record(phase, index):
+        state_copies = [
+            {
+                "kv_cache_group_id": 0,
+                "layer_name": f"model.layers.{state_index}.mixer",
+                "state_index": state_index,
+                "dtype": "torch.float32",
+                "state_shape": [17, 128],
+                "block_shape": [128],
+                "source_logical_block_index": 0,
+                "destination_logical_block_index": 1,
+                "source_physical_block_id": 2 * state_index,
+                "destination_physical_block_id": 2 * state_index + 1,
+                "source_data_ptr": 10_000 + 2 * state_index,
+                "destination_data_ptr": 10_001 + 2 * state_index,
+                "copied_elements": 128,
+                "copied_bytes": 512,
+            }
+            for state_index in range(8)
+        ]
+        return {
+            "request_id": f"{phase}-clone-{index}",
+            "source_miss_request_id": "source",
+            "source_snapshot_index": 0,
+            "attention_kv_identity_verified": True,
+            "num_computed_tokens": 16,
+            "prompt_tokens": 32,
+            "block_size": 16,
+            "source_attention_kv_groups": attention_groups(),
+            "reused_attention_kv_groups": attention_groups(),
+            "state_copies": state_copies,
+            "copy_entries": 8,
+            "copied_elements": 1_024,
+            "copied_bytes": 4_096,
+            "expected_copy_entries": 8,
+            "expected_copied_elements": 1_024,
+            "expected_copied_bytes": 4_096,
+            "all_state_dtypes_fp32": True,
+        }
+
     class FakeWorkerGroup:
         def __init__(self) -> None:
             self.phase = ""
@@ -369,8 +426,7 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                             "prefix_preempted_hits": 0,
                             "preempted_prompt_recomputed_tokens": 0,
                             "prompt_tokens_computed": 32,
-                            "prompt_tokens_cached": 16
-                            * (shard_size - int(phase.endswith("wave-000"))),
+                            "prompt_tokens_cached": 16 * (shard_size - int(phase.endswith("wave-000"))),
                             "prompt_tokens_total": 32 * shard_size,
                             "num_running_requests": shard_size,
                             "num_waiting_requests": 0,
@@ -387,24 +443,27 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                                 "copied_bytes": 4_096,
                             },
                             "mamba_prefix_clones": {
+                                "cache_miss_count": int(phase.endswith("wave-000")),
+                                "cache_miss_request_ids": (["source"] if phase.endswith("wave-000") else []),
+                                "prefix_sources": [
+                                    {
+                                        "request_id": "source",
+                                        "prompt_tokens": 32,
+                                        "snapshots": [
+                                            {
+                                                "snapshot_index": 0,
+                                                "num_computed_tokens_before_step": 0,
+                                                "num_scheduled_tokens": 32,
+                                                "directly_observed_prefix_tokens": 16,
+                                                "attention_kv_groups": attention_groups(),
+                                            }
+                                        ],
+                                    }
+                                ],
                                 "clone_count": shard_size - int(phase.endswith("wave-000")),
                                 "requests": [
-                                    {
-                                        "request_id": f"{phase}-clone-{index}",
-                                        "num_computed_tokens": 16,
-                                        "prompt_tokens": 32,
-                                        "block_size": 16,
-                                        "copy_entries": 8,
-                                        "copied_elements": 1_024,
-                                        "copied_bytes": 4_096,
-                                        "expected_copy_entries": 8,
-                                        "expected_copied_elements": 1_024,
-                                        "expected_copied_bytes": 4_096,
-                                        "all_state_dtypes_fp32": True,
-                                    }
-                                    for index in range(
-                                        shard_size - int(phase.endswith("wave-000"))
-                                    )
+                                    clone_record(phase, index)
+                                    for index in range(shard_size - int(phase.endswith("wave-000")))
                                 ],
                             },
                         }
@@ -437,14 +496,19 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                 logprobs[row_index, prompt_length : prompt_length + 3] = torch.tensor([-0.1, -0.2, -0.3])
             dense = torch.full((request_count, 3, 512), -20.0)
             for row_index in range(request_count):
-                dense[row_index, torch.arange(3), torch.tensor([65, 67, 71])] = torch.tensor(
-                    [-0.1, -0.2, -0.3]
-                )
+                dense[row_index, torch.arange(3), torch.tensor([65, 67, 71])] = torch.tensor([-0.1, -0.2, -0.3])
             global_indices = torch.arange(self.global_index, self.global_index + request_count)
             seeds = torch.tensor(
                 [
-                    request_seed(42, generation_round=self.call_index, global_request_index=int(index))
-                    for index in global_indices
+                    request_seed(
+                        42,
+                        call_index=self.call_index,
+                        dp_rank=dp_rank,
+                        dp_size=2,
+                        request_index_in_stream=local_index,
+                    )
+                    for dp_rank, shard_size in enumerate(self.worker_group.shard_sizes)
+                    for local_index in range(shard_size)
                 ]
             )
             outputs = BatchedDataDict(
@@ -461,9 +525,9 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                     "generation_dp_ranks": torch.tensor([0] * first_shard + [1] * (request_count - first_shard)),
                     "generation_first_token_latency_s": torch.full((request_count,), 0.4),
                     "generation_decode_s": torch.full((request_count,), 0.2),
-                        "generation_num_cached_tokens": torch.tensor(
-                            [0, 16, 0, 16] if self.call_index == 7 else [16, 16, 16, 16]
-                        ),
+                    "generation_num_cached_tokens": torch.tensor(
+                        [0, 16, 0, 16] if self.call_index == 7 else [16, 16, 16, 16]
+                    ),
                     "generation_vocab_logprobs": dense,
                     "generation_logprob_counts": torch.full((request_count, 3), 512),
                 }
@@ -492,6 +556,18 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
     assert result.sample.generated_tokens == 24
     assert [record.global_request_index for record in result.request_executions] == list(range(48, 56))
     assert [record.dp_rank for record in result.request_executions] == [0, 0, 1, 1] * 2
+    assert [record.generation_round for record in result.request_executions] == [7] * 4 + [8] * 4
+    assert [record.call_index for record in result.request_executions] == [7] * 4 + [8] * 4
+    assert [record.seed for record in result.request_executions] == [
+        14_000_084,
+        14_000_085,
+        15_000_087,
+        15_000_088,
+        16_000_090,
+        16_000_091,
+        17_000_093,
+        17_000_094,
+    ]
     assert len(result.wave_proofs) == 2
     assert generation.cache_invalidations == 1
     assert [engine["full_decode_proof"]["passed"] for engine in result.wave_proofs[0]["engines"]] == [
@@ -514,3 +590,70 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
     assert later_reuse["cache_miss_request_count"] == 0
     assert later_reuse["cache_hit_request_count"] == 4
     assert [worker["clone_count"] for worker in later_reuse["worker_state_clones"]] == [2, 2]
+
+
+def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 4).with_max_new_tokens(1)
+    profile = Evo2VllmProfile(
+        topology="dp2",
+        max_model_len=13,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.92,
+        proof=False,
+        global_wave_size=4,
+        max_num_seqs=2,
+    )
+
+    class ForbiddenWorkerGroup:
+        def run_all_workers_single_data(self, *args, **kwargs):
+            pytest.fail(f"speed lane issued a proof RPC: {args!r} {kwargs!r}")
+
+    class FakeGeneration:
+        worker_group = ForbiddenWorkerGroup()
+
+        def generate(self, data, greedy=False):
+            assert greedy is False
+            request_count = len(data["input_ids"])
+            prompt_width = data["input_ids"].shape[1]
+            output_ids = torch.zeros((request_count, prompt_width + 1), dtype=torch.long)
+            logprobs = torch.zeros_like(output_ids, dtype=torch.float32)
+            for row_index, prompt_length in enumerate(data["input_lengths"].tolist()):
+                output_ids[row_index, :prompt_length] = data["input_ids"][row_index, :prompt_length]
+                output_ids[row_index, prompt_length] = 65
+                logprobs[row_index, prompt_length] = -0.1
+            return BatchedDataDict(
+                {
+                    "output_ids": output_ids,
+                    "logprobs": logprobs,
+                    "generation_lengths": torch.ones(request_count, dtype=torch.long),
+                    "unpadded_sequence_lengths": data["input_lengths"] + 1,
+                    "truncated": torch.ones(request_count, dtype=torch.bool),
+                    "generation_request_seeds": torch.tensor([42, 43, 1_000_045, 1_000_046]),
+                    "generation_global_request_indices": torch.arange(request_count),
+                    "generation_rounds": torch.zeros(request_count, dtype=torch.long),
+                    "generation_call_indices": torch.zeros(request_count, dtype=torch.long),
+                    "generation_dp_ranks": torch.tensor([0, 0, 1, 1]),
+                    "generation_first_token_latency_s": torch.full((request_count,), 0.4),
+                    "generation_decode_s": torch.zeros(request_count),
+                }
+            )
+
+    times = iter((10.0, 11.0))
+    result = run_nemo_generation_phase(
+        generation=FakeGeneration(),
+        manifest=manifest,
+        profile=profile,
+        phase="steady-0",
+        sample_index=0,
+        full_output_path=tmp_path / "nemo-speed.outputs.jsonl.gz",
+        memory_monitor_factory=lambda: pytest.fail("speed lane started peak-memory polling"),
+        ray_get=lambda futures: pytest.fail(f"speed lane resolved proof futures: {futures!r}"),
+        clock=lambda: next(times),
+    )
+
+    assert result.sample.generation_s == 1.0
+    assert result.sample.peak_device_memory_bytes == ()
+    assert result.proof_collected is False
+    assert result.wave_proofs[0]["reset_proof"] is None
+    assert result.wave_proofs[0]["engines"] == []
+    assert result.full_output_artifact["generated_token_count"] == 4

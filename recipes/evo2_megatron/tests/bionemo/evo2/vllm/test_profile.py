@@ -96,6 +96,7 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert nemo_rl["backend"] == "vllm"
     assert nemo_rl["generation_batch_size"] == 96
     assert nemo_rl["request_seed"] == 29
+    assert nemo_rl["evo2_collect_proof"] is False
     assert nemo_rl["generation_worker_cls"] == ("bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker")
     assert ACTOR_ENVIRONMENT_REGISTRY[nemo_rl["generation_worker_cls"]] == VLLM_EXECUTABLE
     assert nemo_rl["vllm_cfg"] == {
@@ -139,6 +140,12 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
         "logprobs_mode",
     }
     assert nemo_owned_llm_kwargs.isdisjoint(nemo_rl["vllm_kwargs"])
+
+    proof_config = replace(profile, proof=True).nemo_rl_generation_config(
+        load_format="dummy",
+        request_seed=29,
+    )
+    assert proof_config["evo2_collect_proof"] is True
 
 
 def test_capacity_profile_exposes_global_wave_and_scheduler_ceiling() -> None:
