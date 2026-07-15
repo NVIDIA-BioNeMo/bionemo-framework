@@ -66,7 +66,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -112,6 +112,55 @@ from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_c
 
 logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+@dataclass(frozen=True)
+class _CudaPhaseStats:
+    """Synchronized elapsed time and allocator peaks for one CUDA phase."""
+
+    elapsed_s: float = 0.0
+    peak_allocated_bytes: int = 0
+    peak_reserved_bytes: int = 0
+    performed: bool = False
+    _ended_at_s: float = field(default=0.0, repr=False, compare=False)
+
+
+def _begin_cuda_phase(
+    *,
+    already_synchronized: bool = False,
+    boundary_time_s: Optional[float] = None,
+) -> float:
+    """Start a CUDA phase, optionally reusing the preceding phase's synchronized boundary."""
+    if not already_synchronized:
+        torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    return time.perf_counter() if boundary_time_s is None else float(boundary_time_s)
+
+
+def _finish_cuda_phase(started_at_s: float) -> _CudaPhaseStats:
+    """Finish a CUDA phase at one synchronized boundary and capture allocator peaks."""
+    torch.cuda.synchronize()
+    ended_at_s = time.perf_counter()
+    return _CudaPhaseStats(
+        elapsed_s=ended_at_s - started_at_s,
+        peak_allocated_bytes=int(torch.cuda.max_memory_allocated()),
+        peak_reserved_bytes=int(torch.cuda.max_memory_reserved()),
+        performed=True,
+        _ended_at_s=ended_at_s,
+    )
+
+
+def _record_phase_stats(
+    timings: Dict[str, Any],
+    memory: Dict[str, int],
+    phase_name: str,
+    stats: _CudaPhaseStats,
+) -> None:
+    """Attach one named phase's timing, performed flag, and memory peaks."""
+    timings[f"{phase_name}_elapsed_s"] = float(stats.elapsed_s)
+    timings[f"{phase_name}_performed"] = bool(stats.performed)
+    memory[f"{phase_name}_peak_allocated_bytes"] = int(stats.peak_allocated_bytes)
+    memory[f"{phase_name}_peak_reserved_bytes"] = int(stats.peak_reserved_bytes)
 
 
 def _register_bionemo_target_prefix() -> None:
@@ -311,6 +360,11 @@ class Evo2NativeDynamicComponents:
     # that needs more than the frozen budget is a hard error (the context cannot grow); in manual mode
     # the request just stops early on overflow, as before.
     max_seq_length_is_auto: bool = False
+    # Engine setup is measured by infer(), then emitted exactly once on the first generated group.
+    engine_setup_stats: _CudaPhaseStats = field(default_factory=_CudaPhaseStats)
+    engine_setup_stats_pending: bool = False
+    # Stable generation-call counter used by serialized timing group identifiers.
+    generation_call_index: int = 0
 
 
 # =============================================================================
@@ -776,7 +830,8 @@ class _NativeDynamicResult:
     finish_reason: str = "length"
     stopped_on_eos: bool = False
     truncated: bool = False
-    timings: Optional[Dict[str, float]] = None
+    timings: Optional[Dict[str, Any]] = None
+    memory: Optional[Dict[str, int]] = None
 
 
 def _sampling_log_probs_from_logits(
@@ -1116,7 +1171,7 @@ def _get_or_build_shared_dynamic_context(
     enable_chunked_prefill: bool,
     max_active_requests: int,
     device: torch.device,
-) -> Any:
+) -> tuple[Any, _CudaPhaseStats, _CudaPhaseStats]:
     """Return the engine's persistent dynamic context, building (and graph-warming) it on first use.
 
     A single context is reused for the whole engine lifetime so the per-layer CUDA graphs captured
@@ -1147,10 +1202,11 @@ def _get_or_build_shared_dynamic_context(
         # Reuse the persistent context (it is big enough); reset() returns it to a clean state without
         # freeing the CUDA-graph-referenced buffers (it is explicitly designed for reuse-after-capture).
         cached.reset()
-        return cached
+        return cached, _CudaPhaseStats(), _CudaPhaseStats()
 
     # First build, config change, or grow. Drop any graphs captured against the previous context
     # object so a stale graph can never be replayed against the new (larger) one.
+    context_setup_started_at_s = _begin_cuda_phase()
     if cached is not None and nd.cuda_graphs_enabled:
         _reset_layer_cuda_graphs(nd)
 
@@ -1187,11 +1243,18 @@ def _get_or_build_shared_dynamic_context(
     dyn_ctx.materialize_only_last_token_logits = True
     dyn_ctx.evo2_max_batched_decode_requests = int(max_active_requests)
     dyn_ctx.initialize_all_tensors()
+    context_setup_stats = _finish_cuda_phase(context_setup_started_at_s)
+    cuda_graph_capture_stats = _CudaPhaseStats()
     if nd.cuda_graphs_enabled:
+        capture_started_at_s = _begin_cuda_phase(
+            already_synchronized=True,
+            boundary_time_s=context_setup_stats._ended_at_s,
+        )
         _warmup_native_dynamic_cuda_graphs(nd, dyn_ctx, device)
+        cuda_graph_capture_stats = _finish_cuda_phase(capture_started_at_s)
     nd.shared_dyn_ctx = dyn_ctx
     nd.shared_dyn_ctx_key = ctx_key
-    return dyn_ctx
+    return dyn_ctx, context_setup_stats, cuda_graph_capture_stats
 
 
 def _generate_native_dynamic(
@@ -1309,7 +1372,7 @@ def _generate_native_dynamic(
     # same object and shape must be presented on every later decode step regardless of prompt or batch.
     # reset() (called between prompts in the loop below, and on reuse) returns the context to a clean
     # state without freeing the graph-referenced buffers.
-    dyn_ctx = _get_or_build_shared_dynamic_context(
+    dyn_ctx, context_setup_stats, cuda_graph_capture_stats = _get_or_build_shared_dynamic_context(
         nd,
         block_size_tokens=block_size_tokens,
         max_tokens=max_tokens,
@@ -1317,6 +1380,12 @@ def _generate_native_dynamic(
         max_active_requests=max(1, int(evo2_batched_decode_size)),
         device=device,
     )
+    engine_setup_stats = _CudaPhaseStats()
+    if bool(getattr(nd, "engine_setup_stats_pending", False)):
+        engine_setup_stats = getattr(nd, "engine_setup_stats", _CudaPhaseStats())
+        nd.engine_setup_stats_pending = False
+    generation_call_index = int(getattr(nd, "generation_call_index", 0))
+    nd.generation_call_index = generation_call_index + 1
     if max_n_prompt > dyn_ctx.max_tokens and not enable_chunked_prefill:
         raise ValueError(
             f"Longest prompt has {max_n_prompt} tokens but the dynamic context max token budget is "
@@ -1336,6 +1405,13 @@ def _generate_native_dynamic(
             "decode_elapsed_s": 0.0,
             "generation_elapsed_s": 0.0,
         }
+        memory: Dict[str, int] = {}
+        phase_stats = {
+            "prefill": _CudaPhaseStats(),
+            "decode": _CudaPhaseStats(),
+        }
+        _record_phase_stats(timings, memory, "prefill", phase_stats["prefill"])
+        _record_phase_stats(timings, memory, "decode", phase_stats["decode"])
         prefill_start: Optional[float] = None
         decode_start: Optional[float] = None
         timing_complete = False
@@ -1344,13 +1420,13 @@ def _generate_native_dynamic(
             nonlocal timing_complete
             if prefill_start is None or timing_complete:
                 return
-            torch.cuda.synchronize()
-            generation_end = time.perf_counter()
             if decode_start is None:
-                timings["prefill_elapsed_s"] = generation_end - prefill_start
+                phase_stats["prefill"] = _finish_cuda_phase(prefill_start)
+                _record_phase_stats(timings, memory, "prefill", phase_stats["prefill"])
             else:
-                timings["decode_elapsed_s"] = generation_end - decode_start
-            timings["generation_elapsed_s"] = generation_end - prefill_start
+                phase_stats["decode"] = _finish_cuda_phase(decode_start)
+                _record_phase_stats(timings, memory, "decode", phase_stats["decode"])
+            timings["generation_elapsed_s"] = phase_stats["prefill"].elapsed_s + phase_stats["decode"].elapsed_s
             timing_complete = True
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
@@ -1448,13 +1524,15 @@ def _generate_native_dynamic(
                                 req.remaining_prompt_length - chunk_len,
                             )
                         if prefill_start is None:
-                            torch.cuda.synchronize()
-                            prefill_start = time.perf_counter()
+                            prefill_start = _begin_cuda_phase()
                         _forward_sample_update(count_generated=not is_partial_chunk)
                         if not is_partial_chunk:
-                            torch.cuda.synchronize()
-                            decode_start = time.perf_counter()
-                            timings["prefill_elapsed_s"] = decode_start - prefill_start
+                            phase_stats["prefill"] = _finish_cuda_phase(prefill_start)
+                            _record_phase_stats(timings, memory, "prefill", phase_stats["prefill"])
+                            decode_start = _begin_cuda_phase(
+                                already_synchronized=True,
+                                boundary_time_s=phase_stats["prefill"]._ended_at_s,
+                            )
                             req.remaining_prompt_tokens = req.remaining_prompt_tokens.new_empty(0)
                             break
                         req.remaining_prompt_tokens = req.remaining_prompt_tokens[chunk_len:]
@@ -1488,6 +1566,7 @@ def _generate_native_dynamic(
             stopped_on_eos=stopped_on_eos,
             truncated=not stopped_on_eos and len(generated_ids) >= max_new_tokens,
             timings=timings,
+            memory=memory,
         )
 
     def _run_batched_prompts(prompt_token_id_batch: list[list[int]]) -> list[_NativeDynamicResult]:
@@ -1497,6 +1576,9 @@ def _generate_native_dynamic(
             "decode_elapsed_s": 0.0,
             "generation_elapsed_s": 0.0,
         }
+        memory: Dict[str, int] = {}
+        _record_phase_stats(timings, memory, "prefill", _CudaPhaseStats())
+        _record_phase_stats(timings, memory, "decode", _CudaPhaseStats())
         if batch_request_count <= 1:
             return [_run_single_prompt(prompt_token_id_batch[0])]
         if max_new_tokens <= 0:
@@ -1511,6 +1593,7 @@ def _generate_native_dynamic(
                     stopped_on_eos=False,
                     truncated=False,
                     timings=timings,
+                    memory=memory,
                 )
                 for prompt_token_ids in prompt_token_id_batch
             ]
@@ -1615,20 +1698,21 @@ def _generate_native_dynamic(
                         n_prompt,
                     )
 
-                torch.cuda.synchronize()
-                generation_start = time.perf_counter()
+                prefill_started_at_s = _begin_cuda_phase()
                 _forward_sample_update(count_generated=True)
-                torch.cuda.synchronize()
-                decode_start = time.perf_counter()
-                timings["prefill_elapsed_s"] = decode_start - generation_start
+                prefill_stats = _finish_cuda_phase(prefill_started_at_s)
+                _record_phase_stats(timings, memory, "prefill", prefill_stats)
+                decode_started_at_s = _begin_cuda_phase(
+                    already_synchronized=True,
+                    boundary_time_s=prefill_stats._ended_at_s,
+                )
                 while any(len(request_generated_ids) < max_new_tokens for request_generated_ids in generated_ids):
                     if not dyn_ctx.has_unfinished_requests():
                         break
                     _forward_sample_update(count_generated=True)
-                torch.cuda.synchronize()
-                generation_end = time.perf_counter()
-                timings["decode_elapsed_s"] = generation_end - decode_start
-                timings["generation_elapsed_s"] = generation_end - generation_start
+                decode_stats = _finish_cuda_phase(decode_started_at_s)
+                _record_phase_stats(timings, memory, "decode", decode_stats)
+                timings["generation_elapsed_s"] = prefill_stats.elapsed_s + decode_stats.elapsed_s
         finally:
             dyn_ctx.evo2_batched_decode_enabled = False
             dyn_ctx.reset()
@@ -1644,6 +1728,7 @@ def _generate_native_dynamic(
                 stopped_on_eos=stopped_on_eos[request_idx],
                 truncated=not stopped_on_eos[request_idx] and len(request_generated_ids) >= max_new_tokens,
                 timings=timings,
+                memory=memory,
             )
             for request_idx, (prompt_token_ids, request_generated_ids) in enumerate(
                 zip(prompt_token_id_batch, generated_ids)
@@ -1655,14 +1740,62 @@ def _generate_native_dynamic(
         logger.info("[evo2-native] opt-in batched decode active: size=%d", batched_decode_size)
 
     def _append_results(group_results: list[_NativeDynamicResult], *, prompt_offset: int) -> None:
+        group_timings = dict(group_results[0].timings or {})
+        group_memory = dict(group_results[0].memory or {})
+        setup_phase_stats = {
+            "engine_setup": engine_setup_stats if prompt_offset == 0 else _CudaPhaseStats(),
+            "context_setup": context_setup_stats if prompt_offset == 0 else _CudaPhaseStats(),
+            "cuda_graph_capture": cuda_graph_capture_stats if prompt_offset == 0 else _CudaPhaseStats(),
+        }
+        for phase_name, stats in setup_phase_stats.items():
+            _record_phase_stats(group_timings, group_memory, phase_name, stats)
+        group_timings.update(
+            {
+                "timing_scope": "native_generation_group",
+                "timing_group_id": (f"native-call-{generation_call_index:08d}-group-{prompt_offset:08d}"),
+                "timing_request_count": len(group_results),
+            }
+        )
+        group_timings["total_elapsed_s"] = sum(
+            float(group_timings.get(f"{phase_name}_elapsed_s", 0.0))
+            for phase_name in (
+                "engine_setup",
+                "context_setup",
+                "cuda_graph_capture",
+                "prefill",
+                "decode",
+            )
+        )
+        group_memory["total_peak_allocated_bytes"] = max(
+            (
+                value
+                for key, value in group_memory.items()
+                if key.endswith("_peak_allocated_bytes") and key != "total_peak_allocated_bytes"
+            ),
+            default=0,
+        )
+        group_memory["total_peak_reserved_bytes"] = max(
+            (
+                value
+                for key, value in group_memory.items()
+                if key.endswith("_peak_reserved_bytes") and key != "total_peak_reserved_bytes"
+            ),
+            default=0,
+        )
         for local_idx, result in enumerate(group_results):
             prompt_idx = prompt_offset + local_idx
+            result.timings = group_timings
+            result.memory = group_memory
             if strict_generation:
                 generated_token_count = len(result.generated_tokens or [])
                 if generated_token_count != max_new_tokens:
                     raise RuntimeError(
                         "Strict Evo2 generation expected exactly "
                         f"{max_new_tokens} generated tokens for prompt {prompt_idx}, got {generated_token_count}"
+                    )
+                if return_log_probs and result.generated_log_probs is None:
+                    raise RuntimeError(
+                        f"Strict Evo2 generation is missing requested chosen-token log-probs for prompt {prompt_idx}"
                     )
                 if result.generated_log_probs is not None and len(result.generated_log_probs) != generated_token_count:
                     raise RuntimeError(
@@ -1789,6 +1922,7 @@ def _result_to_jsonl_record(
         "completion_token_ids": completion_token_ids,
         "finish_reason": finish_reason,
         "timings": dict(getattr(result, "timings", None) or {}),
+        "memory": dict(getattr(result, "memory", None) or {}),
         "usage": {
             "prompt_tokens": prompt_tokens_count,
             "completion_tokens": generated_length,
@@ -1894,7 +2028,10 @@ def parse_args() -> argparse.Namespace:
         "--stream-output",
         action="store_true",
         default=False,
-        help="When --output-file is set, write and flush each JSONL result as soon as it is generated.",
+        help=(
+            "When --output-file is set, write and flush each JSONL result as soon as it is generated. "
+            "Strict generation writes <output-file>.partial and atomically promotes it after success."
+        ),
     )
 
     # Precision arguments
@@ -2076,7 +2213,8 @@ def infer(
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
         output_file: Optional path to save results as JSONL.
-        stream_output: Write and flush each result to ``output_file`` as soon as it is generated.
+        stream_output: Write and flush each result as soon as it is generated. Strict generation
+            writes to ``<output_file>.partial`` and atomically promotes it after success.
         mixed_precision_recipe: Override mixed precision recipe.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
@@ -2102,9 +2240,8 @@ def infer(
     """
     random_seed = seed or 1234
 
-    t_setup_start = time.perf_counter()
     _prune_caches()
-    torch.cuda.reset_peak_memory_stats()
+    engine_setup_started_at_s = _begin_cuda_phase()
 
     components = setup_inference_engine(
         ckpt_dir=ckpt_dir,
@@ -2119,13 +2256,15 @@ def infer(
         use_subquadratic_ops=use_subquadratic_ops,
         cuda_graph_impl=cuda_graph_impl,
     )
-    torch.cuda.synchronize()
-    t_setup_elapsed = time.perf_counter() - t_setup_start
-    mem_after_setup_gb = torch.cuda.max_memory_allocated() / (1024**3)
-    mem_reserved_after_setup_gb = torch.cuda.max_memory_reserved() / (1024**3)
+    engine_setup_stats = _finish_cuda_phase(engine_setup_started_at_s)
+    components.native_dynamic.engine_setup_stats = engine_setup_stats
+    components.native_dynamic.engine_setup_stats_pending = True
+    mem_after_setup_gb = engine_setup_stats.peak_allocated_bytes / (1024**3)
+    mem_reserved_after_setup_gb = engine_setup_stats.peak_reserved_bytes / (1024**3)
     logger.info(
         f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB, "
-        f"reserved={mem_reserved_after_setup_gb:.3f} GB, setup_elapsed_s={t_setup_elapsed:.6f}"
+        f"reserved={mem_reserved_after_setup_gb:.3f} GB, "
+        f"engine_setup_elapsed_s={engine_setup_stats.elapsed_s:.6f}"
     )
 
     # Auto-size the engine's sequence-length budget from the prompts unless a manual value was given.
@@ -2148,11 +2287,16 @@ def infer(
     is_rank_zero = int(os.environ.get("RANK", "0")) == 0
     stream_file = None
     streamed_record_count = 0
+    strict_stream_partial_path: Optional[Path] = None
 
     if is_rank_zero and output_file is not None and stream_output:
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        stream_file = open(output_file, "w")
-        logger.info("Streaming JSONL results to: %s", output_file)
+        stream_path = output_file
+        if strict_generation:
+            strict_stream_partial_path = Path(f"{output_file}.partial")
+            stream_path = strict_stream_partial_path
+        stream_file = open(stream_path, "w")
+        logger.info("Streaming JSONL results to: %s", stream_path)
 
     try:
         for batch_start in range(0, len(prompts), max_batch_size):
@@ -2220,11 +2364,24 @@ def infer(
         if stream_file is not None:
             stream_file.close()
 
+    if strict_stream_partial_path is not None:
+        os.replace(strict_stream_partial_path, output_file)
+
     t_generate_elapsed = time.perf_counter() - t_generate_start
     total_tok_per_sec = total_completion_tokens / t_generate_elapsed if t_generate_elapsed > 0 else 0
 
-    mem_after_generate_gb = torch.cuda.max_memory_allocated() / (1024**3)
-    mem_reserved_after_generate_gb = torch.cuda.max_memory_reserved() / (1024**3)
+    mem_after_generate_bytes = max(
+        engine_setup_stats.peak_allocated_bytes,
+        int(torch.cuda.max_memory_allocated()),
+        *(int(record.get("memory", {}).get("total_peak_allocated_bytes", 0)) for record in all_records),
+    )
+    mem_reserved_after_generate_bytes = max(
+        engine_setup_stats.peak_reserved_bytes,
+        int(torch.cuda.max_memory_reserved()),
+        *(int(record.get("memory", {}).get("total_peak_reserved_bytes", 0)) for record in all_records),
+    )
+    mem_after_generate_gb = mem_after_generate_bytes / (1024**3)
+    mem_reserved_after_generate_gb = mem_reserved_after_generate_bytes / (1024**3)
     logger.info(
         f"[MEMORY] After generation: peak={mem_after_generate_gb:.3f} GB, "
         f"reserved={mem_reserved_after_generate_gb:.3f} GB "

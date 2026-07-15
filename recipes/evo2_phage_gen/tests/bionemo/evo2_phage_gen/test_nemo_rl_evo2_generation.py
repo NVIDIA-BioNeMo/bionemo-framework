@@ -178,6 +178,48 @@ def test_evo2_adapter_shares_tp_seed_and_separates_dp_and_successive_calls():
     assert [entry["seed_index"] for entry in dp1_tp0._evo2_generation_rng_trace] == [1, 3]
 
 
+def test_evo2_adapter_broadcasts_implicit_base_seed_from_model_parallel_leader(monkeypatch):
+    from megatron.core import parallel_state
+
+    adapter = Evo2MegatronGenerationAdapter()
+    current_tp_rank = {"value": 0}
+    leader_seed = {"value": None}
+    initial_seeds = iter([111, 999])
+    model_parallel_group = object()
+    workers = [SimpleNamespace(rank=rank, cfg={"generation": {"mcore_generation_config": {}}}) for rank in range(2)]
+
+    monkeypatch.setattr(torch, "initial_seed", lambda: next(initial_seeds))
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: current_tp_rank["value"])
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda _group: "gloo")
+    monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "get_data_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: current_tp_rank["value"])
+    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_model_parallel_group", lambda: model_parallel_group)
+    monkeypatch.setattr(parallel_state, "get_model_parallel_src_rank", lambda: 0)
+
+    def _broadcast(seed_tensor, *, src, group):
+        assert src == 0
+        assert group is model_parallel_group
+        if current_tp_rank["value"] == 0:
+            leader_seed["value"] = int(seed_tensor.item())
+        else:
+            seed_tensor.fill_(leader_seed["value"])
+
+    monkeypatch.setattr(torch.distributed, "broadcast", _broadcast)
+
+    current_tp_rank["value"] = 0
+    leader_result = adapter._next_seed(workers[0])
+    current_tp_rank["value"] = 1
+    peer_result = adapter._next_seed(workers[1])
+
+    assert leader_result == peer_result == 111
+    assert workers[0]._evo2_generation_rng_trace[0]["base_seed"] == 111
+    assert workers[1]._evo2_generation_rng_trace[0]["base_seed"] == 111
+
+
 def test_evo2_native_generation_reseeds_cached_sampling_rng_for_each_adapter_call():
     cached_rng = object()
     native_dynamic = SimpleNamespace(evo2_seed=17, sampling_rng=cached_rng)
@@ -285,6 +327,78 @@ def test_evo2_adapter_emits_replicated_batched_data_from_every_model_parallel_ra
     )
     with pytest.raises(RuntimeError, match="returned 1 results for 2 prompts"):
         adapter.generate_worker(worker, data=data, greedy=False)
+
+
+def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id(monkeypatch):
+    adapter = Evo2MegatronGenerationAdapter({"seed": 17})
+    prompt_tokens = torch.tensor([[11, 12], [21, 22], [31, 32], [41, 42]])
+    prompt_lengths = torch.tensor([2, 2, 2, 2])
+    sampling_params = [SimpleNamespace(num_tokens_to_generate=2)]
+    group_zero = {
+        "timing_scope": "native_generation_group",
+        "timing_group_id": "native-call-00000000-group-00000000",
+        "timing_request_count": 2,
+        "engine_setup_elapsed_s": 1.0,
+        "context_setup_elapsed_s": 2.0,
+        "cuda_graph_capture_elapsed_s": 3.0,
+        "prefill_elapsed_s": 4.0,
+        "decode_elapsed_s": 5.0,
+        "generation_elapsed_s": 9.0,
+        "total_elapsed_s": 15.0,
+    }
+    group_one = {
+        "timing_scope": "native_generation_group",
+        "timing_group_id": "native-call-00000000-group-00000002",
+        "timing_request_count": 2,
+        "engine_setup_elapsed_s": 0.0,
+        "context_setup_elapsed_s": 0.0,
+        "cuda_graph_capture_elapsed_s": 0.0,
+        "prefill_elapsed_s": 6.0,
+        "decode_elapsed_s": 7.0,
+        "generation_elapsed_s": 13.0,
+        "total_elapsed_s": 13.0,
+    }
+    generated = [
+        Evo2GenerationResult(
+            prompt_tokens=prompt_tokens[idx],
+            generated_tokens=[65, 67],
+            generated_log_probs=[-0.1, -0.2],
+            timings=dict(group_zero if idx < 2 else group_one),
+        )
+        for idx in range(4)
+    ]
+    worker = SimpleNamespace(
+        rank=0,
+        cfg={
+            "generation": {
+                "mcore_generation_config": {
+                    "prompt_batch_size": 2,
+                    "generation_adapter": (
+                        "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
+                    ),
+                }
+            }
+        },
+        model=SimpleNamespace(decoder=SimpleNamespace(hyena_state_shapes_per_request=lambda: None)),
+        _prepare_data_for_generation=lambda _data, _greedy: (
+            prompt_tokens,
+            prompt_lengths,
+            sampling_params,
+        ),
+        _parse_result_to_batched_data_dict=lambda _data, result: result,
+    )
+    monkeypatch.setattr(evo2_generation, "generate_evo2_native_batched", lambda *args, **kwargs: generated)
+
+    adapter.generate_worker(worker, data=SimpleNamespace(size=4))
+
+    timing = worker._evo2_generation_timing
+    assert timing["timing/train/generation/evo2_engine_setup_elapsed_s"] == 1.0
+    assert timing["timing/train/generation/evo2_context_setup_elapsed_s"] == 2.0
+    assert timing["timing/train/generation/evo2_cuda_graph_capture_elapsed_s"] == 3.0
+    assert timing["timing/train/generation/evo2_prefill_elapsed_s"] == 10.0
+    assert timing["timing/train/generation/evo2_decode_elapsed_s"] == 12.0
+    assert timing["timing/train/generation/evo2_generation_elapsed_s"] == 22.0
+    assert timing["timing/train/generation/evo2_total_elapsed_s"] == 28.0
 
 
 def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):

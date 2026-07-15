@@ -92,7 +92,7 @@ class Evo2GenerationResult:
     finish_reason: str = "length"
     stopped_on_eos: bool = False
     truncated: bool = False
-    timings: dict[str, float] | None = None
+    timings: dict[str, Any] | None = None
 
 
 class _PromptTokenProxy:
@@ -305,14 +305,36 @@ class Evo2MegatronGenerationAdapter:
             and int(parallel_state.get_context_parallel_rank()) == 0
         )
 
+    def _shared_implicit_base_seed(self, candidate_seed: int) -> int:
+        """Broadcast an unconfigured base seed from this DP replica's model-parallel leader."""
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return int(candidate_seed)
+
+        from megatron.core import parallel_state
+
+        model_parallel_group = parallel_state.get_model_parallel_group()
+        backend = str(torch.distributed.get_backend(model_parallel_group)).lower()
+        if backend.endswith("nccl"):
+            seed_device = torch.device("cuda", torch.cuda.current_device())
+        else:
+            seed_device = torch.device("cpu")
+        seed_tensor = torch.tensor([int(candidate_seed)], dtype=torch.int64, device=seed_device)
+        torch.distributed.broadcast(
+            seed_tensor,
+            src=int(parallel_state.get_model_parallel_src_rank()),
+            group=model_parallel_group,
+        )
+        return int(seed_tensor.item())
+
     def _next_seed(self, worker: Any) -> int:
         mcore_generation_config = worker.cfg["generation"].get("mcore_generation_config", {}) or {}
-        base_seed = int(
-            self.config.get(
-                "seed",
-                mcore_generation_config.get("seed", torch.initial_seed() % (2**31)),
-            )
-        )
+        configured_seed = self.config.get("seed")
+        if configured_seed is None:
+            configured_seed = mcore_generation_config.get("seed")
+        if configured_seed is None:
+            base_seed = self._shared_implicit_base_seed(torch.initial_seed() % (2**31))
+        else:
+            base_seed = int(configured_seed)
         call_index = int(getattr(worker, "_evo2_generation_call_index", 0))
         # TODO: Persist or derive this counter from trainer state. It currently resets
         # when the worker process restarts, so resumed runs can replay the same seed sequence.
@@ -407,23 +429,45 @@ class Evo2MegatronGenerationAdapter:
             }
             if result is not None:
                 phase_totals = {
+                    "engine_setup_elapsed_s": 0.0,
+                    "context_setup_elapsed_s": 0.0,
+                    "cuda_graph_capture_elapsed_s": 0.0,
                     "prefill_elapsed_s": 0.0,
                     "decode_elapsed_s": 0.0,
                     "generation_elapsed_s": 0.0,
+                    "total_elapsed_s": 0.0,
                 }
-                seen_timing_records: set[int] = set()
+                seen_timing_groups: set[tuple[str, str]] = set()
                 for generation_result in result:
                     result_timings = generation_result.timings
-                    if result_timings is None or id(result_timings) in seen_timing_records:
+                    if result_timings is None:
                         continue
-                    seen_timing_records.add(id(result_timings))
+                    timing_group_id = result_timings.get("timing_group_id")
+                    if timing_group_id is None:
+                        timing_group_key = ("legacy_object", str(id(result_timings)))
+                    else:
+                        timing_group_key = (
+                            str(result_timings.get("timing_scope", "native_generation_group")),
+                            str(timing_group_id),
+                        )
+                    if timing_group_key in seen_timing_groups:
+                        continue
+                    seen_timing_groups.add(timing_group_key)
                     for phase_name in phase_totals:
                         phase_totals[phase_name] += float(result_timings.get(phase_name, 0.0))
                 timing.update(
                     {
+                        "timing/train/generation/evo2_engine_setup_elapsed_s": phase_totals["engine_setup_elapsed_s"],
+                        "timing/train/generation/evo2_context_setup_elapsed_s": phase_totals[
+                            "context_setup_elapsed_s"
+                        ],
+                        "timing/train/generation/evo2_cuda_graph_capture_elapsed_s": phase_totals[
+                            "cuda_graph_capture_elapsed_s"
+                        ],
                         "timing/train/generation/evo2_prefill_elapsed_s": phase_totals["prefill_elapsed_s"],
                         "timing/train/generation/evo2_decode_elapsed_s": phase_totals["decode_elapsed_s"],
                         "timing/train/generation/evo2_generation_elapsed_s": phase_totals["generation_elapsed_s"],
+                        "timing/train/generation/evo2_total_elapsed_s": phase_totals["total_elapsed_s"],
                     }
                 )
             setattr(worker, "_evo2_generation_timing", timing)
