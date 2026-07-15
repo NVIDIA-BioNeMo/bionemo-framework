@@ -198,6 +198,10 @@ def test_generation_validation_requires_exact_ids_lengths_prompts_and_finite_log
             prompt_token_ids=request.prompt_token_ids,
             output_token_ids=(65, 67, 71),
             output_logprobs=(-0.1, -0.2, -0.3),
+            requested_max_tokens=3,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
         )
         for request in manifest.requests
     )
@@ -213,6 +217,10 @@ def test_generation_validation_requires_exact_ids_lengths_prompts_and_finite_log
         prompt_token_ids=short[0].prompt_token_ids,
         output_token_ids=(65, 67),
         output_logprobs=(-0.1, -0.2),
+        requested_max_tokens=3,
+        finish_reason="length",
+        stop_reason=None,
+        stopped_on_eos=False,
     )
     with pytest.raises(AssertionError, match="exactly 3"):
         validate_generation_records(manifest, tuple(short))
@@ -222,6 +230,10 @@ def test_generation_validation_requires_exact_ids_lengths_prompts_and_finite_log
         prompt_token_ids=nonfinite[0].prompt_token_ids,
         output_token_ids=nonfinite[0].output_token_ids,
         output_logprobs=(-0.1, math.nan, -0.3),
+        requested_max_tokens=3,
+        finish_reason="length",
+        stop_reason=None,
+        stopped_on_eos=False,
     )
     with pytest.raises(AssertionError, match="finite"):
         validate_generation_records(manifest, tuple(nonfinite))
@@ -273,7 +285,12 @@ def _fake_vllm_outputs(manifest: WorkloadManifest):
         logprobs = [
             {token_id: SimpleNamespace(logprob=-0.1 * (position + 1))} for position, token_id in enumerate(token_ids)
         ]
-        completion = SimpleNamespace(token_ids=token_ids, logprobs=logprobs)
+        completion = SimpleNamespace(
+            token_ids=token_ids,
+            logprobs=logprobs,
+            finish_reason="length",
+            stop_reason=None,
+        )
         metrics = SimpleNamespace(
             first_token_latency=0.4 + index / 100,
             first_token_ts=10.0,

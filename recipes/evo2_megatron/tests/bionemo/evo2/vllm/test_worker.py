@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import torch
 from nemo_rl.models.generation.vllm.vllm_backend import VllmInternalWorkerExtension
 from nemo_rl.models.generation.vllm.vllm_worker import VllmGenerationWorkerImpl
 
@@ -26,6 +27,44 @@ def test_named_worker_extension_delegates_proof_state_without_callable_rpc(monke
 def test_nemo_worker_extension_composes_refit_and_evo2_proof_controls() -> None:
     assert issubclass(Evo2NemoRlVllmWorkerExtension, VllmInternalWorkerExtension)
     assert issubclass(Evo2NemoRlVllmWorkerExtension, Evo2VllmWorkerExtension)
+
+
+def test_nemo_worker_extension_records_actual_incremental_refit_chunks(monkeypatch) -> None:
+    load_calls = []
+
+    def fake_load_weights(self, weights):
+        load_calls.append(tuple(name for name, _ in weights))
+
+    monkeypatch.setattr(VllmInternalWorkerExtension, "_load_weights", fake_load_weights)
+    loader = SimpleNamespace(
+        completed_transactions=1,
+        required_parameter_names=frozenset({"a", "b"}),
+        _loaded_parameter_names={"a"},
+        _pending_fc1={},
+        _started=True,
+        _complete=False,
+        _consumed=True,
+    )
+    worker = object.__new__(Evo2NemoRlVllmWorkerExtension)
+    worker.model_runner = SimpleNamespace(model=SimpleNamespace(_weight_loader=loader))
+
+    assert worker.reset_evo2_refit_proof_state("refit-1") == {"phase": "refit-1"}
+    worker._load_weights([("a", torch.ones(2)), ("b", torch.ones(3))])
+    loader.completed_transactions = 2
+    loader._loaded_parameter_names = {"a", "b"}
+    loader._complete = True
+
+    proof = worker.snapshot_evo2_refit_proof_state("refit-1")
+
+    assert load_calls == [("a", "b")]
+    assert proof["phase"] == "refit-1"
+    assert proof["chunk_count"] == 1
+    assert proof["chunks"][0]["tensor_count"] == 2
+    assert proof["chunks"][0]["tensor_bytes"] == 20
+    assert proof["loader"]["completed_transactions"] == 2
+    assert proof["loader"]["loaded_parameter_count"] == 2
+    assert proof["loader"]["required_parameter_count"] == 2
+    assert proof["loader"]["complete"] is True
 
 
 def test_nemo_generation_actor_registers_evo2_before_nemo_model_preflight(monkeypatch) -> None:
@@ -89,3 +128,40 @@ def test_nemo_generation_worker_records_outer_graph_and_inner_route_proof(monkey
         ("reset_evo2_proof_state", ()),
         ("snapshot_evo2_proof_state", ()),
     ]
+
+
+def test_nemo_generation_worker_exposes_internal_refit_transaction_proof(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nemo_generation_worker_module.ray,
+        "get_runtime_context",
+        lambda: SimpleNamespace(get_actor_id=lambda: "actor-123"),
+    )
+
+    class FakeLLM:
+        llm_engine = SimpleNamespace(
+            model_config=SimpleNamespace(
+                model="/checkpoint",
+                architectures=("Evo2ForCausalLM",),
+                dtype="bfloat16",
+                max_model_len=16,
+            )
+        )
+
+        def collective_rpc(self, method, args=tuple()):
+            if method == "reset_evo2_refit_proof_state":
+                return [{"phase": args[0]}] * 2
+            if method == "snapshot_evo2_refit_proof_state":
+                return [{"phase": args[0], "chunk_count": 53}] * 2
+            assert method == "report_device_id"
+            return ["GPU-a", "GPU-b"]
+
+    worker = object.__new__(Evo2NemoRlGenerationWorkerImpl)
+    worker.llm = FakeLLM()
+
+    assert worker.reset_evo2_refit_phase("refit-1")["phase"] == "refit-1"
+    proof = worker.snapshot_evo2_refit_phase("refit-1")
+
+    assert proof["actor"]["ray_actor_id"] == "actor-123"
+    assert proof["model"]["architectures"] == ["Evo2ForCausalLM"]
+    assert proof["device_uuids"] == ["GPU-a", "GPU-b"]
+    assert [item["chunk_count"] for item in proof["worker_proof"]] == [53, 53]

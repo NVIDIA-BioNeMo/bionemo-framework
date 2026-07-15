@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import re
 from pathlib import Path
 
 import pytest
 import torch
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
-from bionemo.evo2.vllm.benchmark import WorkloadManifest
+from bionemo.evo2.vllm.benchmark import GenerationRecord, WorkloadManifest
 from bionemo.evo2.vllm.nemo_runner import (
     build_nemo_generation_config,
     build_nemo_generation_input,
+    full_vocab_logprob_evidence_from_nemo_output,
     records_from_nemo_generation_output,
     run_nemo_generation_phase,
 )
@@ -69,6 +71,30 @@ def test_nemo_generation_input_right_pads_mixed_prompts_without_semantic_padding
         assert row[length:].tolist() == [0] * (6 - length)
 
 
+def test_nemo_tp2_parity_config_requests_all_512_processed_logprobs() -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1).with_max_new_tokens(4)
+    profile = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=16,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.92,
+        proof=True,
+    )
+
+    config = build_nemo_generation_config(
+        profile,
+        manifest,
+        checkpoint=Path("/checkpoint"),
+        load_format="safetensors",
+        num_logprobs=512,
+    )
+
+    assert config["num_logprobs"] == 512
+    assert config["vllm_cfg"]["tensor_parallel_size"] == 2
+    assert config["vllm_kwargs"]["max_num_seqs"] == 96
+    assert config["vllm_kwargs"]["max_logprobs"] == 512
+
+
 def test_nemo_output_adapter_retains_full_tokens_logprobs_seeds_and_timings() -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
     inputs = build_nemo_generation_input(manifest)
@@ -104,6 +130,7 @@ def test_nemo_output_adapter_retains_full_tokens_logprobs_seeds_and_timings() ->
     assert records[0].output_token_ids == (65, 67, 71)
     assert records[0].output_logprobs == pytest.approx((-0.1, -0.2, -0.3))
     assert executions[0].to_dict() == {
+        "execution_uid": "round=3/call=7/global=48/dp=1/request=gdpo-000",
         "request_id": "gdpo-000",
         "global_request_index": 48,
         "generation_round": 3,
@@ -111,8 +138,175 @@ def test_nemo_output_adapter_retains_full_tokens_logprobs_seeds_and_timings() ->
         "call_index": 7,
         "seed": 101,
     }
+    assert records[0].requested_max_tokens == 3
+    assert records[0].finish_reason == "length"
+    assert records[0].stop_reason is None
+    assert records[0].stopped_on_eos is False
     assert timings["ttft_s"] == pytest.approx((0.4, 0.5))
     assert timings["decode_s"] == pytest.approx((0.2, 0.3))
+
+
+def test_full_vocab_evidence_validates_every_chosen_token_semantically() -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1).with_max_new_tokens(3)
+    inputs = build_nemo_generation_input(manifest)
+    prompt_length = len(manifest.requests[0].prompt_token_ids)
+    output_ids = torch.zeros((1, inputs["input_ids"].shape[1] + 3), dtype=torch.long)
+    output_ids[0, :prompt_length] = torch.tensor(manifest.requests[0].prompt_token_ids)
+    output_ids[0, prompt_length : prompt_length + 3] = torch.tensor([1, 2, 3])
+    logprobs = torch.zeros_like(output_ids, dtype=torch.float32)
+    dense = torch.full((1, 3, 512), -torch.inf)
+    dense[0, 0] = torch.linspace(-8.0, -1.0, 512)
+    dense[0, 1] = torch.linspace(-7.0, -0.5, 512)
+    dense[0, 2] = torch.linspace(-6.0, -0.25, 512)
+    chosen = dense[0, torch.arange(3), torch.tensor([1, 2, 3])]
+    logprobs[0, prompt_length : prompt_length + 3] = chosen
+    outputs = BatchedDataDict(
+        {
+            "output_ids": output_ids,
+            "logprobs": logprobs,
+            "generation_lengths": torch.tensor([3]),
+            "unpadded_sequence_lengths": torch.tensor([prompt_length + 3]),
+            "truncated": torch.tensor([True]),
+            "generation_request_seeds": torch.tensor([101]),
+            "generation_global_request_indices": torch.tensor([48]),
+            "generation_rounds": torch.tensor([3]),
+            "generation_call_indices": torch.tensor([7]),
+            "generation_dp_ranks": torch.tensor([0]),
+            "generation_first_token_latency_s": torch.tensor([0.4]),
+            "generation_decode_s": torch.tensor([0.2]),
+            "generation_vocab_logprobs": dense,
+            "generation_logprob_counts": torch.full((1, 3), 512),
+        }
+    )
+    records, _, _ = records_from_nemo_generation_output(manifest, outputs)
+
+    evidence = full_vocab_logprob_evidence_from_nemo_output(
+        outputs,
+        records=records,
+        require_full=True,
+    )
+
+    assert evidence["shape"] == [1, 3, 512]
+    assert evidence["coverage_counts"] == [[512, 512, 512]]
+    assert evidence["chosen_token_oracle_passed"] is True
+    assert evidence["logprobs"][0][1][2] == pytest.approx(float(dense[0, 1, 2]))
+
+    outputs["logprobs"][0, prompt_length] += 0.5
+    broken_records, _, _ = records_from_nemo_generation_output(manifest, outputs)
+    with pytest.raises(AssertionError, match="chosen-token"):
+        full_vocab_logprob_evidence_from_nemo_output(
+            outputs,
+            records=broken_records,
+            require_full=True,
+        )
+
+
+def test_full_vocab_evidence_reports_exact_processed_topk_finite_mismatch() -> None:
+    dense = torch.full((2, 4, 512), -torch.inf)
+    dense[:, :, :4] = torch.tensor([-4.0, -3.0, -2.0, -1.0])
+    outputs = BatchedDataDict(
+        {
+            "generation_vocab_logprobs": dense,
+            "generation_logprob_counts": torch.full((2, 4), 512),
+        }
+    )
+    records = tuple(
+        GenerationRecord(
+            request_id=f"request-{index}",
+            prompt_token_ids=(43, 126, 71, 65),
+            output_token_ids=(0, 1, 2, 3),
+            output_logprobs=(-4.0, -3.0, -2.0, -1.0),
+            requested_max_tokens=4,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        )
+        for index in range(2)
+    )
+
+    expected = (
+        "shape=[2, 4, 512], mismatched_positions=8/8, "
+        "reported_counts={512: 8}, finite_counts={4: 8}, "
+        "first_mismatch=(request=0, step=0, reported=512, finite=4)"
+    )
+    with pytest.raises(AssertionError, match=re.escape(expected)):
+        full_vocab_logprob_evidence_from_nemo_output(
+            outputs,
+            records=records,
+            require_full=True,
+        )
+
+
+def test_full_vocab_evidence_retains_exact_processed_topk_support() -> None:
+    dense = torch.full((2, 4, 512), -torch.inf)
+    dense[:, :, :4] = torch.tensor([-4.0, -3.0, -2.0, -1.0])
+    outputs = BatchedDataDict(
+        {
+            "generation_vocab_logprobs": dense,
+            "generation_logprob_counts": torch.full((2, 4), 512),
+        }
+    )
+    records = tuple(
+        GenerationRecord(
+            request_id=f"request-{index}",
+            prompt_token_ids=(43, 126, 71, 65),
+            output_token_ids=(0, 1, 2, 3),
+            output_logprobs=(-4.0, -3.0, -2.0, -1.0),
+            requested_max_tokens=4,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        )
+        for index in range(2)
+    )
+
+    evidence = full_vocab_logprob_evidence_from_nemo_output(
+        outputs,
+        records=records,
+        require_full=True,
+        expected_finite_support=4,
+    )
+
+    assert evidence["shape"] == [2, 4, 512]
+    assert evidence["coverage_counts"] == [[512] * 4] * 2
+    assert evidence["finite_support_counts"] == [[4] * 4] * 2
+    assert evidence["negative_infinity_counts"] == [[508] * 4] * 2
+    assert evidence["expected_finite_support"] == 4
+    assert evidence["chosen_token_in_finite_support"] is True
+    assert evidence["chosen_token_logprobs"] == [[-4.0, -3.0, -2.0, -1.0]] * 2
+
+
+def test_full_vocab_evidence_rejects_nonfinite_chosen_processed_logprob() -> None:
+    dense = torch.full((1, 1, 512), -torch.inf)
+    dense[0, 0, :4] = torch.tensor([-4.0, -3.0, -2.0, -1.0])
+    dense[0, 0, 0] = -torch.inf
+    dense[0, 0, 4] = -5.0
+    outputs = BatchedDataDict(
+        {
+            "generation_vocab_logprobs": dense,
+            "generation_logprob_counts": torch.tensor([[512]]),
+        }
+    )
+    records = (
+        GenerationRecord(
+            request_id="request-0",
+            prompt_token_ids=(43, 126, 71, 65),
+            output_token_ids=(0,),
+            output_logprobs=(-torch.inf,),
+            requested_max_tokens=1,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        ),
+    )
+
+    with pytest.raises(AssertionError, match="chosen token is outside finite processed support"):
+        full_vocab_logprob_evidence_from_nemo_output(
+            outputs,
+            records=records,
+            require_full=True,
+            expected_finite_support=4,
+        )
 
 
 def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outputs(tmp_path) -> None:
@@ -167,7 +361,8 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
             self.call_index = 7
             self.global_index = 48
 
-        def generate(self, data):
+        def generate(self, data, greedy=False):
+            assert greedy is True
             request_count = len(data["input_ids"])
             first_shard = (request_count + 1) // 2
             self.worker_group.shard_sizes = (first_shard, request_count - first_shard)
@@ -177,6 +372,11 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                 output_ids[row_index, :prompt_length] = data["input_ids"][row_index, :prompt_length]
                 output_ids[row_index, prompt_length : prompt_length + 3] = torch.tensor([65, 67, 71])
                 logprobs[row_index, prompt_length : prompt_length + 3] = torch.tensor([-0.1, -0.2, -0.3])
+            dense = torch.full((request_count, 3, 512), -20.0)
+            for row_index in range(request_count):
+                dense[row_index, torch.arange(3), torch.tensor([65, 67, 71])] = torch.tensor(
+                    [-0.1, -0.2, -0.3]
+                )
             global_indices = torch.arange(self.global_index, self.global_index + request_count)
             seeds = torch.tensor(
                 [
@@ -198,6 +398,8 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
                     "generation_dp_ranks": torch.tensor([0] * first_shard + [1] * (request_count - first_shard)),
                     "generation_first_token_latency_s": torch.full((request_count,), 0.4),
                     "generation_decode_s": torch.full((request_count,), 0.2),
+                    "generation_vocab_logprobs": dense,
+                    "generation_logprob_counts": torch.full((request_count, 3), 512),
                 }
             )
             self.call_index += 1
@@ -215,6 +417,8 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
         memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
         ray_get=lambda futures: futures,
         clock=lambda: next(times),
+        greedy=True,
+        require_full_vocab_logprobs=True,
     )
 
     assert result.sample.generation_s == 2.5
@@ -227,3 +431,5 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
         True,
     ]
     assert result.full_output_artifact["generated_token_count"] == 12
+    assert result.wave_proofs[0]["full_vocab_logprobs"]["shape"] == [4, 3, 512]
+    assert result.wave_proofs[0]["full_vocab_logprobs"]["chosen_token_oracle_passed"] is True

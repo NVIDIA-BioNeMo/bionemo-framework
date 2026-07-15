@@ -167,12 +167,19 @@ def source_provenance(
     root = Path(repository).expanduser().resolve()
     roots = (Path(__file__).resolve().parent,) if source_roots is None else tuple(Path(path) for path in source_roots)
     source_paths = []
+
+    def is_durable_source(path: Path) -> bool:
+        return "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+
     for source_root in roots:
         resolved = source_root.expanduser().resolve()
         if resolved.is_file():
-            source_paths.append(resolved)
+            if is_durable_source(resolved):
+                source_paths.append(resolved)
         elif resolved.is_dir():
-            source_paths.extend(path for path in resolved.rglob("*") if path.is_file())
+            source_paths.extend(
+                path for path in resolved.rglob("*") if path.is_file() and is_durable_source(path)
+            )
         else:
             raise FileNotFoundError(f"source provenance root is missing: {resolved}")
     source_records = _file_records(root, source_paths)
@@ -417,9 +424,17 @@ class RequestExecutionRecord:
     call_index: int
     seed: int
 
+    @property
+    def execution_uid(self) -> str:
+        """Return a phase-stable composite identity for one execution."""
+        return (
+            f"round={self.generation_round}/call={self.call_index}/"
+            f"global={self.global_request_index}/dp={self.dp_rank}/request={self.request_id}"
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe execution record."""
-        return asdict(self)
+        return {"execution_uid": self.execution_uid, **asdict(self)}
 
 
 def build_request_execution_records(
@@ -494,6 +509,10 @@ def write_full_generation_records_artifact(
                         "prompt_token_ids": list(generation.prompt_token_ids),
                         "output_token_ids": list(generation.output_token_ids),
                         "chosen_token_logprobs": list(generation.output_logprobs),
+                        "requested_max_tokens": generation.requested_max_tokens,
+                        "finish_reason": generation.finish_reason,
+                        "stop_reason": generation.stop_reason,
+                        "stopped_on_eos": generation.stopped_on_eos,
                     }
                     handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
                     handle.write("\n")
@@ -504,7 +523,7 @@ def write_full_generation_records_artifact(
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "format": "jsonl",
         "compression": "gzip",
         "path": str(output),

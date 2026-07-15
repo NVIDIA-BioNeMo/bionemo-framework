@@ -334,6 +334,7 @@ def test_request_execution_records_persist_round_rank_call_and_global_seed() -> 
 
     assert [record.to_dict() for record in records] == [
         {
+            "execution_uid": "round=2/call=7/global=48/dp=1/request=gdpo-000",
             "request_id": "gdpo-000",
             "global_request_index": 48,
             "generation_round": 2,
@@ -342,6 +343,7 @@ def test_request_execution_records_persist_round_rank_call_and_global_seed() -> 
             "seed": request_seed(42, generation_round=2, global_request_index=48),
         },
         {
+            "execution_uid": "round=2/call=7/global=49/dp=1/request=gdpo-001",
             "request_id": "gdpo-001",
             "global_request_index": 49,
             "generation_round": 2,
@@ -378,11 +380,16 @@ def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path)
     assert rows[0]["call_index"] == 9
     assert rows[0]["global_request_index"] == 48
     assert rows[0]["seed"] == execution_records[0].seed
+    assert rows[0]["execution_uid"] == "round=3/call=9/global=48/dp=1/request=gdpo-000"
+    assert rows[0]["requested_max_tokens"] == 3
+    assert rows[0]["finish_reason"] == "length"
+    assert rows[0]["stop_reason"] is None
+    assert rows[0]["stopped_on_eos"] is False
     assert rows[0]["output_token_ids"] == [65, 67, 71]
     assert rows[0]["chosen_token_logprobs"] == pytest.approx([-0.1, -0.1, -0.1])
     assert rows[1]["output_token_ids"] == [66, 68, 72]
     assert metadata == {
-        "schema_version": 1,
+        "schema_version": 2,
         "format": "jsonl",
         "compression": "gzip",
         "path": str(output_path.resolve()),
@@ -481,8 +488,12 @@ def test_source_provenance_records_head_dirty_diff_and_actual_source_tree(tmp_pa
     source = tmp_path / "src" / "model.py"
     source.parent.mkdir()
     source.write_text("VALUE = 1\n")
+    pycache = source.parent / "__pycache__"
+    pycache.mkdir()
+    (pycache / "model.cpython-313.pyc").write_bytes(b"transient-bytecode")
+    (tmp_path / ".gitignore").write_text("__pycache__/\n*.pyc\n")
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", "src/model.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "src/model.py", ".gitignore"], cwd=tmp_path, check=True)
     subprocess.run(
         [
             "git",
@@ -540,6 +551,8 @@ def _fake_outputs(manifest: WorkloadManifest):
         completion = SimpleNamespace(
             token_ids=token_ids,
             logprobs=[{token_id: SimpleNamespace(logprob=-0.1)} for token_id in token_ids],
+            finish_reason="length",
+            stop_reason=None,
         )
         outputs.append(
             SimpleNamespace(

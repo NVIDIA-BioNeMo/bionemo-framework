@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -52,8 +53,11 @@ def build_nemo_generation_config(
     *,
     checkpoint: Path,
     load_format: str,
+    num_logprobs: int = 0,
 ) -> dict[str, Any]:
     """Build a complete NeMo-RL vLLM config for one exact workload."""
+    if num_logprobs < 0:
+        raise ValueError("num_logprobs must be nonnegative")
     if profile.max_model_len < manifest.max_total_tokens:
         raise ValueError(
             f"profile max_model_len={profile.max_model_len} is smaller than "
@@ -82,6 +86,9 @@ def build_nemo_generation_config(
             },
         }
     )
+    if num_logprobs:
+        config["num_logprobs"] = num_logprobs
+        config["vllm_kwargs"]["max_logprobs"] = num_logprobs
     return config
 
 
@@ -215,6 +222,10 @@ def records_from_nemo_generation_output(
                 prompt_token_ids=request.prompt_token_ids,
                 output_token_ids=generated_ids,
                 output_logprobs=generated_logprobs,
+                requested_max_tokens=manifest.max_new_tokens,
+                finish_reason="length",
+                stop_reason=None,
+                stopped_on_eos=False,
             )
         )
         executions.append(
@@ -243,6 +254,134 @@ def records_from_nemo_generation_output(
             "decode_s": tuple(float(value) for value in decode),
         },
     )
+
+
+def full_vocab_logprob_evidence_from_nemo_output(
+    outputs: BatchedDataDict,
+    *,
+    records: tuple[GenerationRecord, ...],
+    require_full: bool,
+    expected_finite_support: int | None = None,
+) -> dict[str, Any]:
+    """Validate and retain per-step processed-logprob distributions."""
+    dense = outputs.get("generation_vocab_logprobs")
+    counts = outputs.get("generation_logprob_counts")
+    if not isinstance(dense, torch.Tensor) or dense.ndim != 3:
+        raise TypeError("NeMo-RL full-vocabulary logprobs must be a rank-3 tensor")
+    if not isinstance(counts, torch.Tensor) or counts.shape != dense.shape[:2]:
+        raise ValueError("NeMo-RL logprob coverage counts must align with every generated position")
+    if dense.shape[0] != len(records):
+        raise ValueError("NeMo-RL full-vocabulary logprobs must align with every output record")
+
+    dense = dense.detach().cpu().to(torch.float32)
+    counts = counts.detach().cpu().to(torch.long)
+    vocab_size = dense.shape[2]
+    if expected_finite_support is None and require_full:
+        expected_finite_support = vocab_size
+    if expected_finite_support is not None and not 1 <= expected_finite_support <= vocab_size:
+        raise ValueError("expected finite logprob support must be within the model vocabulary")
+
+    generation_lengths = [len(record.output_token_ids) for record in records]
+    if any(dense.shape[1] < length for length in generation_lengths):
+        raise ValueError("NeMo-RL full-vocabulary evidence is shorter than its generated output")
+    finite_count_tensor = torch.isfinite(dense).sum(dim=-1)
+    valid_coordinates = [
+        (row_index, step)
+        for row_index, generation_length in enumerate(generation_lengths)
+        for step in range(generation_length)
+    ]
+    reported_values = [int(counts[row_index, step]) for row_index, step in valid_coordinates]
+    finite_values = [int(finite_count_tensor[row_index, step]) for row_index, step in valid_coordinates]
+
+    if expected_finite_support == vocab_size and reported_values != finite_values:
+        mismatch_coordinates = [
+            (row_index, step, reported, finite)
+            for (row_index, step), reported, finite in zip(
+                valid_coordinates,
+                reported_values,
+                finite_values,
+                strict=True,
+            )
+            if reported != finite
+        ]
+        row_index, step, reported, finite = mismatch_coordinates[0]
+        raise AssertionError(
+            f"shape={list(dense.shape)}, "
+            f"mismatched_positions={len(mismatch_coordinates)}/{len(valid_coordinates)}, "
+            f"reported_counts={dict(sorted(Counter(reported_values).items()))}, "
+            f"finite_counts={dict(sorted(Counter(finite_values).items()))}, "
+            "first_mismatch=("
+            f"request={row_index}, step={step}, reported={reported}, finite={finite})"
+        )
+
+    retained: list[list[list[float | None]]] = []
+    retained_counts: list[list[int]] = []
+    retained_finite_counts: list[list[int]] = []
+    retained_negative_infinity_counts: list[list[int]] = []
+    chosen_token_logprobs: list[list[float]] = []
+    for row_index, record in enumerate(records):
+        generation_length = len(record.output_token_ids)
+        row = dense[row_index, :generation_length]
+        row_counts = counts[row_index, :generation_length]
+        finite_counts = torch.isfinite(row).sum(dim=-1)
+        if bool(torch.any(row_counts <= 0)) or bool(torch.any(row_counts > vocab_size)):
+            raise AssertionError("logprob coverage count is outside the model vocabulary")
+        if require_full and not bool(torch.all(row_counts == vocab_size)):
+            raise AssertionError("full-vocabulary evidence omitted one or more token logprobs")
+        if bool(torch.any(torch.isnan(row))) or bool(torch.any(torch.isposinf(row))):
+            raise AssertionError("processed logprob evidence contains NaN or positive infinity")
+        if expected_finite_support is not None and not bool(
+            torch.all(finite_counts == expected_finite_support)
+        ):
+            raise AssertionError(
+                "processed logprob finite support does not match the configured sampling policy: "
+                f"expected={expected_finite_support}, actual={finite_counts.tolist()}"
+            )
+
+        row_chosen_logprobs = []
+        for position, (token_id, chosen_logprob) in enumerate(
+            zip(record.output_token_ids, record.output_logprobs, strict=True)
+        ):
+            if not 0 <= token_id < vocab_size:
+                raise AssertionError(f"generated token {token_id} is outside vocabulary size {vocab_size}")
+            distribution_logprob = float(row[position, token_id])
+            if not math.isfinite(distribution_logprob) or not math.isfinite(chosen_logprob):
+                raise AssertionError("chosen token is outside finite processed support")
+            if not math.isclose(
+                distribution_logprob,
+                chosen_logprob,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                raise AssertionError(
+                    "chosen-token logprob does not match its full-vocabulary distribution entry"
+                )
+            row_chosen_logprobs.append(chosen_logprob)
+
+        retained.append(
+            [
+                [float(value) if math.isfinite(float(value)) else None for value in position]
+                for position in row
+            ]
+        )
+        retained_counts.append([int(value) for value in row_counts])
+        retained_finite_counts.append([int(value) for value in finite_counts])
+        retained_negative_infinity_counts.append(
+            [int(value) for value in torch.isneginf(row).sum(dim=-1)]
+        )
+        chosen_token_logprobs.append(row_chosen_logprobs)
+
+    return {
+        "shape": [len(records), dense.shape[1], vocab_size],
+        "coverage_counts": retained_counts,
+        "finite_support_counts": retained_finite_counts,
+        "negative_infinity_counts": retained_negative_infinity_counts,
+        "expected_finite_support": expected_finite_support,
+        "chosen_token_oracle_passed": True,
+        "chosen_token_in_finite_support": True,
+        "chosen_token_logprobs": chosen_token_logprobs,
+        "logprobs": retained,
+    }
 
 
 @dataclass(frozen=True)
@@ -335,10 +474,11 @@ def run_nemo_generation_phase(
     memory_monitor_factory: Any,
     ray_get: Any | None = None,
     clock: Any | None = None,
+    greedy: bool = False,
+    require_full_vocab_logprobs: bool = False,
+    expected_finite_logprob_support: int | None = None,
 ) -> NemoGenerationPhaseResult:
     """Run exact NeMo-RL waves with per-engine graph, route, seed, and ownership proof."""
-    if profile.topology != "dp2":
-        raise ValueError("production NeMo-RL phase runner currently requires topology=dp2")
     if not phase:
         raise ValueError("phase cannot be empty")
     if ray_get is None:
@@ -375,7 +515,10 @@ def run_nemo_generation_phase(
                 ray_get=ray_get,
             )
             begin = clock()
-            outputs = generation.generate(build_nemo_generation_input(wave_manifest))
+            outputs = generation.generate(
+                build_nemo_generation_input(wave_manifest),
+                greedy=greedy,
+            )
             generation_call_s.append(clock() - begin)
             engine_proofs = _proof_rpc(
                 generation,
@@ -384,6 +527,16 @@ def run_nemo_generation_phase(
                 ray_get=ray_get,
             )
             records, executions, timings = records_from_nemo_generation_output(wave_manifest, outputs)
+            full_vocab_logprobs = (
+                full_vocab_logprob_evidence_from_nemo_output(
+                    outputs,
+                    records=records,
+                    require_full=True,
+                    expected_finite_support=expected_finite_logprob_support,
+                )
+                if require_full_vocab_logprobs
+                else None
+            )
 
             expected_dp_ranks = tuple(shard.replica_index for shard in wave.shards for _ in range(shard.request_count))
             if phase_global_start is None:
@@ -439,6 +592,7 @@ def run_nemo_generation_phase(
                     "generation_call_s": generation_call_s[-1],
                     "reset_proof": reset_proof,
                     "engines": validated_engine_proofs,
+                    "full_vocab_logprobs": full_vocab_logprobs,
                 }
             )
             all_records.extend(records)
@@ -695,6 +849,7 @@ __all__ = [
     "NemoGenerationPhaseResult",
     "build_nemo_generation_config",
     "build_nemo_generation_input",
+    "full_vocab_logprob_evidence_from_nemo_output",
     "records_from_nemo_generation_output",
     "run_nemo_dp2_benchmark",
     "run_nemo_generation_phase",

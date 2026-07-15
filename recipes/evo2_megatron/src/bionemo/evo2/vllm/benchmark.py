@@ -268,6 +268,10 @@ class GenerationRecord:
     prompt_token_ids: tuple[int, ...]
     output_token_ids: tuple[int, ...]
     output_logprobs: tuple[float, ...]
+    requested_max_tokens: int
+    finish_reason: str
+    stop_reason: str | int | None
+    stopped_on_eos: bool
 
     @property
     def output_sha256(self) -> str:
@@ -280,6 +284,10 @@ class GenerationRecord:
             "request_id": self.request_id,
             "prompt_length": len(self.prompt_token_ids),
             "output_length": len(self.output_token_ids),
+            "requested_max_tokens": self.requested_max_tokens,
+            "finish_reason": self.finish_reason,
+            "stop_reason": self.stop_reason,
+            "stopped_on_eos": self.stopped_on_eos,
             "output_sha256": self.output_sha256,
             "first_output_tokens": list(self.output_token_ids[:8]),
             "last_output_tokens": list(self.output_token_ids[-8:]),
@@ -446,6 +454,10 @@ def records_from_vllm_outputs(
                 prompt_token_ids=prompt_token_ids,
                 output_token_ids=output_token_ids,
                 output_logprobs=tuple(output_logprobs),
+                requested_max_tokens=manifest.max_new_tokens,
+                finish_reason=str(completion.finish_reason),
+                stop_reason=completion.stop_reason,
+                stopped_on_eos=False,
             )
         )
 
@@ -484,12 +496,20 @@ def summarize_vllm_outputs(
             all_logprobs_finite &= math.isfinite(float(position[token_id].logprob))
         if not all_logprobs_finite:
             raise AssertionError(f"request {request.request_id} has a non-finite logprob")
+        finish_reason = str(completion.finish_reason)
+        stop_reason = completion.stop_reason
+        if finish_reason != "length" or stop_reason is not None:
+            raise AssertionError(f"request {request.request_id} did not finish at the exact max-token limit")
 
         summaries.append(
             {
                 "request_id": request.request_id,
                 "prompt_length": len(request.prompt_token_ids),
                 "output_length": len(output_token_ids),
+                "requested_max_tokens": manifest.max_new_tokens,
+                "finish_reason": finish_reason,
+                "stop_reason": stop_reason,
+                "stopped_on_eos": False,
                 "output_sha256": _token_ids_sha256(output_token_ids),
                 "first_output_tokens": list(output_token_ids[:8]),
                 "last_output_tokens": list(output_token_ids[-8:]),
@@ -591,6 +611,12 @@ def validate_generation_records(
             raise AssertionError(
                 f"request {request.request_id} must generate exactly {manifest.max_new_tokens} tokens"
             )
+        if record.requested_max_tokens != manifest.max_new_tokens:
+            raise AssertionError(f"request {request.request_id} requested max-token limit drifted")
+        if record.finish_reason != "length" or record.stop_reason is not None:
+            raise AssertionError(f"request {request.request_id} did not finish at the exact max-token limit")
+        if record.stopped_on_eos:
+            raise AssertionError(f"request {request.request_id} stopped on EOS during exact-length generation")
         if len(record.output_logprobs) != len(record.output_token_ids):
             raise AssertionError(f"request {request.request_id} token/logprob lengths differ")
         if not all(math.isfinite(value) for value in record.output_logprobs):

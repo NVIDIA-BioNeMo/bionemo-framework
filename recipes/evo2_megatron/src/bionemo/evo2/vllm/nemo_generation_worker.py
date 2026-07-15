@@ -3,6 +3,8 @@
 
 """NeMo-RL outer generation worker with phase-local Evo2 execution proof."""
 
+import os
+import socket
 from typing import Any
 
 import ray
@@ -63,6 +65,38 @@ class Evo2NemoRlGenerationWorkerImpl(VllmGenerationWorkerImpl):
             "resolved_config": resolved_config_snapshot(self.llm.llm_engine.vllm_config),
             "cudagraph_observations": list(observations),
             "cudagraph_summary": summarize_cudagraph_observations(observations),
+            "worker_proof": worker_proof,
+        }
+
+    def reset_evo2_refit_phase(self, phase: str) -> dict[str, Any]:
+        """Reset refit chunk telemetry on every internal TP worker."""
+        worker_reset = self.llm.collective_rpc(
+            "reset_evo2_refit_proof_state", args=(phase,)
+        )
+        return {"phase": phase, "worker_reset": worker_reset}
+
+    def snapshot_evo2_refit_phase(self, phase: str) -> dict[str, Any]:
+        """Return internal TP refit transactions plus stable actor/model identity."""
+        worker_proof = self.llm.collective_rpc(
+            "snapshot_evo2_refit_proof_state", args=(phase,)
+        )
+        device_uuids = self.llm.collective_rpc("report_device_id", args=())
+        model_config = self.llm.llm_engine.model_config
+        return {
+            "phase": phase,
+            "actor": {
+                "ray_actor_id": ray.get_runtime_context().get_actor_id(),
+                "pid": os.getpid(),
+                "hostname": socket.gethostname(),
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            },
+            "model": {
+                "model": str(model_config.model),
+                "architectures": list(model_config.architectures),
+                "dtype": str(model_config.dtype),
+                "max_model_len": int(model_config.max_model_len),
+            },
+            "device_uuids": device_uuids,
             "worker_proof": worker_proof,
         }
 
