@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -91,6 +92,7 @@ class Evo2GenerationResult:
     finish_reason: str = "length"
     stopped_on_eos: bool = False
     truncated: bool = False
+    timings: dict[str, float] | None = None
 
 
 class _PromptTokenProxy:
@@ -158,6 +160,8 @@ def generate_evo2_native_batched(
     sampling_params: list[Any],
     *,
     evo2_seed: int | None = None,
+    ignore_eos: bool = False,
+    strict_generation: bool = False,
 ) -> list[Evo2GenerationResult]:
     """Generate Evo2 completions with the standalone batched dynamic-decode lifecycle."""
     from megatron.core.utils import unwrap_model
@@ -212,6 +216,8 @@ def generate_evo2_native_batched(
         top_k=top_k,
         top_p=top_p,
         return_log_probs=True,
+        ignore_eos=ignore_eos,
+        strict_generation=strict_generation,
         enable_chunked_prefill=bool(mcore_generation_config.get("enable_chunked_prefill", False))
         and batched_decode_size <= 1,
         inference_dynamic_batching_max_tokens=mcore_generation_config.get("max_tokens"),
@@ -240,6 +246,7 @@ def generate_evo2_native_batched(
                 finish_reason=str(getattr(result, "finish_reason", "length")),
                 stopped_on_eos=bool(getattr(result, "stopped_on_eos", False)),
                 truncated=bool(getattr(result, "truncated", False)),
+                timings=getattr(result, "timings", None),
             )
         )
     return results
@@ -273,6 +280,19 @@ class Evo2MegatronGenerationAdapter:
             int(getattr(worker, "dp_size", 1)),
         )
 
+    def _tensor_parallel_coordinates(self, worker: Any) -> tuple[int, int]:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            from megatron.core import parallel_state
+
+            return (
+                int(parallel_state.get_tensor_model_parallel_rank()),
+                int(parallel_state.get_tensor_model_parallel_world_size()),
+            )
+        return (
+            int(getattr(worker, "tensor_parallel_rank", 0)),
+            int(getattr(worker, "tp_size", 1)),
+        )
+
     def _is_model_parallel_leader(self) -> bool:
         if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
             return True
@@ -303,23 +323,31 @@ class Evo2MegatronGenerationAdapter:
                 "Invalid Evo2 generation data-parallel coordinates: "
                 f"rank={data_parallel_rank}, size={data_parallel_size}"
             )
+        tensor_parallel_rank, tensor_parallel_size = self._tensor_parallel_coordinates(worker)
+        if tensor_parallel_size < 1 or not 0 <= tensor_parallel_rank < tensor_parallel_size:
+            raise ValueError(
+                "Invalid Evo2 generation tensor-parallel coordinates: "
+                f"rank={tensor_parallel_rank}, size={tensor_parallel_size}"
+            )
         seed_index = call_index * data_parallel_size + data_parallel_rank
         seed = int((base_seed + seed_index * self.seed_stride) % (2**31))
 
         trace = getattr(worker, "_evo2_generation_rng_trace", [])
-        trace.append(
-            {
-                "rank": self._distributed_rank(worker),
-                "data_parallel_rank": data_parallel_rank,
-                "data_parallel_size": data_parallel_size,
-                "call_index": call_index,
-                "seed_index": seed_index,
-                "seed": seed,
-                "base_seed": base_seed,
-                "seed_stride": self.seed_stride,
-            }
-        )
+        trace_item = {
+            "rank": self._distributed_rank(worker),
+            "data_parallel_rank": data_parallel_rank,
+            "data_parallel_size": data_parallel_size,
+            "tensor_parallel_rank": tensor_parallel_rank,
+            "tensor_parallel_size": tensor_parallel_size,
+            "call_index": call_index,
+            "seed_index": seed_index,
+            "seed": seed,
+            "base_seed": base_seed,
+            "seed_stride": self.seed_stride,
+        }
+        trace.append(trace_item)
         setattr(worker, "_evo2_generation_rng_trace", trace[-100:])
+        print(f"EVO2_SEED_TRACE {json.dumps(trace_item, sort_keys=True)}", flush=True)
         return seed
 
     def generate_worker(
@@ -346,6 +374,7 @@ class Evo2MegatronGenerationAdapter:
         data_parallel_rank, data_parallel_size = self._data_parallel_coordinates(worker)
         native_begin_unix_s = time.time()
         native_start = time.perf_counter()
+        result: list[Evo2GenerationResult] | None = None
         try:
             result = generate_evo2_native_batched(
                 worker,
@@ -353,6 +382,8 @@ class Evo2MegatronGenerationAdapter:
                 prompt_lengths_tensor,
                 sampling_params,
                 evo2_seed=seed,
+                ignore_eos=bool(self.config.get("ignore_eos", False)),
+                strict_generation=bool(self.config.get("strict_generation", False)),
             )
             expected_results = int(prompt_tokens_tensor.size(0))
             if len(result) != expected_results:
@@ -374,6 +405,27 @@ class Evo2MegatronGenerationAdapter:
                 "timing/train/generation/evo2_data_parallel_rank": float(data_parallel_rank),
                 "timing/train/generation/evo2_data_parallel_size": float(data_parallel_size),
             }
+            if result is not None:
+                phase_totals = {
+                    "prefill_elapsed_s": 0.0,
+                    "decode_elapsed_s": 0.0,
+                    "generation_elapsed_s": 0.0,
+                }
+                seen_timing_records: set[int] = set()
+                for generation_result in result:
+                    result_timings = generation_result.timings
+                    if result_timings is None or id(result_timings) in seen_timing_records:
+                        continue
+                    seen_timing_records.add(id(result_timings))
+                    for phase_name in phase_totals:
+                        phase_totals[phase_name] += float(result_timings.get(phase_name, 0.0))
+                timing.update(
+                    {
+                        "timing/train/generation/evo2_prefill_elapsed_s": phase_totals["prefill_elapsed_s"],
+                        "timing/train/generation/evo2_decode_elapsed_s": phase_totals["decode_elapsed_s"],
+                        "timing/train/generation/evo2_generation_elapsed_s": phase_totals["generation_elapsed_s"],
+                    }
+                )
             setattr(worker, "_evo2_generation_timing", timing)
             if self._is_model_parallel_leader():
                 print(

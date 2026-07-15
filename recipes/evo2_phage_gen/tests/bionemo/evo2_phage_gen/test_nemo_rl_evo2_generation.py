@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -98,7 +99,7 @@ def test_should_use_evo2_native_batched_generation_requires_evo2_batch_and_model
     assert not should_use_evo2_native_batched_generation(cfg, non_evo2_model, batch_size=8)
 
 
-def test_evo2_adapter_rng_seed_advances_and_records_trace():
+def test_evo2_adapter_rng_seed_advances_and_records_trace(capsys):
     adapter = Evo2MegatronGenerationAdapter({"seed": 17, "seed_stride": 101})
     worker = SimpleNamespace(rank=0, cfg={"generation": {"mcore_generation_config": {}}})
 
@@ -109,6 +110,8 @@ def test_evo2_adapter_rng_seed_advances_and_records_trace():
             "rank": 0,
             "data_parallel_rank": 0,
             "data_parallel_size": 1,
+            "tensor_parallel_rank": 0,
+            "tensor_parallel_size": 1,
             "call_index": 0,
             "seed_index": 0,
             "seed": 17,
@@ -119,6 +122,8 @@ def test_evo2_adapter_rng_seed_advances_and_records_trace():
             "rank": 0,
             "data_parallel_rank": 0,
             "data_parallel_size": 1,
+            "tensor_parallel_rank": 0,
+            "tensor_parallel_size": 1,
             "call_index": 1,
             "seed_index": 1,
             "seed": 118,
@@ -126,29 +131,51 @@ def test_evo2_adapter_rng_seed_advances_and_records_trace():
             "seed_stride": 101,
         },
     ]
+    trace_lines = capsys.readouterr().out.strip().splitlines()
+    assert len(trace_lines) == 2
+    for line, expected in zip(trace_lines, worker._evo2_generation_rng_trace, strict=True):
+        assert line.startswith("EVO2_SEED_TRACE ")
+        payload = line.removeprefix("EVO2_SEED_TRACE ")
+        assert json.loads(payload) == expected
+        assert payload == json.dumps(expected, sort_keys=True)
 
 
-def test_evo2_adapter_assigns_distinct_seed_streams_to_data_parallel_replicas():
+def test_evo2_adapter_shares_tp_seed_and_separates_dp_and_successive_calls():
     adapter = Evo2MegatronGenerationAdapter({"seed": 17, "seed_stride": 101})
-    worker0 = SimpleNamespace(
+    dp0_tp0 = SimpleNamespace(
         rank=0,
         data_parallel_rank=0,
         dp_size=2,
+        tensor_parallel_rank=0,
+        tp_size=2,
         cfg={"generation": {"mcore_generation_config": {}}},
     )
-    worker1 = SimpleNamespace(
+    dp0_tp1 = SimpleNamespace(
         rank=1,
+        data_parallel_rank=0,
+        dp_size=2,
+        tensor_parallel_rank=1,
+        tp_size=2,
+        cfg={"generation": {"mcore_generation_config": {}}},
+    )
+    dp1_tp0 = SimpleNamespace(
+        rank=2,
         data_parallel_rank=1,
         dp_size=2,
+        tensor_parallel_rank=0,
+        tp_size=2,
         cfg={"generation": {"mcore_generation_config": {}}},
     )
 
-    assert adapter._next_seed(worker0) == 17
-    assert adapter._next_seed(worker1) == 118
-    assert adapter._next_seed(worker0) == 219
-    assert adapter._next_seed(worker1) == 320
-    assert [entry["seed_index"] for entry in worker0._evo2_generation_rng_trace] == [0, 2]
-    assert [entry["seed_index"] for entry in worker1._evo2_generation_rng_trace] == [1, 3]
+    assert adapter._next_seed(dp0_tp0) == 17
+    assert adapter._next_seed(dp0_tp1) == 17
+    assert adapter._next_seed(dp1_tp0) == 118
+    assert adapter._next_seed(dp0_tp0) == 219
+    assert adapter._next_seed(dp0_tp1) == 219
+    assert adapter._next_seed(dp1_tp0) == 320
+    assert [entry["seed_index"] for entry in dp0_tp0._evo2_generation_rng_trace] == [0, 2]
+    assert [entry["seed_index"] for entry in dp0_tp1._evo2_generation_rng_trace] == [0, 2]
+    assert [entry["seed_index"] for entry in dp1_tp0._evo2_generation_rng_trace] == [1, 3]
 
 
 def test_evo2_native_generation_reseeds_cached_sampling_rng_for_each_adapter_call():
@@ -199,16 +226,23 @@ def test_evo2_adapter_emits_replicated_batched_data_from_every_model_parallel_ra
     prompt_lengths = torch.tensor([2, 2])
     sampling_params = [SimpleNamespace(num_tokens_to_generate=2)]
     parsed = object()
+    group_timings = {
+        "prefill_elapsed_s": 0.25,
+        "decode_elapsed_s": 0.75,
+        "generation_elapsed_s": 1.0,
+    }
     generated = [
         Evo2GenerationResult(
             prompt_tokens=prompt_tokens[0],
             generated_tokens=[65, 67],
             generated_log_probs=[-0.1, -0.2],
+            timings=group_timings,
         ),
         Evo2GenerationResult(
             prompt_tokens=prompt_tokens[1],
             generated_tokens=[67, 65],
             generated_log_probs=[-0.3, -0.4],
+            timings=group_timings,
         ),
     ]
 
@@ -240,6 +274,9 @@ def test_evo2_adapter_emits_replicated_batched_data_from_every_model_parallel_ra
     )
 
     assert adapter.generate_worker(worker, data=data, greedy=False) is parsed
+    assert worker._evo2_generation_timing["timing/train/generation/evo2_prefill_elapsed_s"] == 0.25
+    assert worker._evo2_generation_timing["timing/train/generation/evo2_decode_elapsed_s"] == 0.75
+    assert worker._evo2_generation_timing["timing/train/generation/evo2_generation_elapsed_s"] == 1.0
 
     monkeypatch.setattr(
         evo2_generation,
@@ -248,6 +285,56 @@ def test_evo2_adapter_emits_replicated_batched_data_from_every_model_parallel_ra
     )
     with pytest.raises(RuntimeError, match="returned 1 results for 2 prompts"):
         adapter.generate_worker(worker, data=data, greedy=False)
+
+
+def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):
+    adapter = Evo2MegatronGenerationAdapter({"ignore_eos": True, "strict_generation": True})
+    prompt_tokens = torch.tensor([[11, 12], [21, 22]])
+    prompt_lengths = torch.tensor([2, 2])
+    sampling_params = [SimpleNamespace(num_tokens_to_generate=2)] * 2
+    forwarded = {}
+
+    worker = SimpleNamespace(
+        rank=0,
+        cfg={
+            "generation": {
+                "mcore_generation_config": {
+                    "prompt_batch_size": 2,
+                    "generation_adapter": (
+                        "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
+                    ),
+                }
+            }
+        },
+        model=SimpleNamespace(decoder=SimpleNamespace(hyena_state_shapes_per_request=lambda: None)),
+        megatron_tokenizer=_Tokenizer(),
+        _evo2_native_dynamic_components=SimpleNamespace(forward_model=object(), evo2_seed=0, sampling_rng=None),
+        _prepare_data_for_generation=lambda _data, _greedy: (
+            prompt_tokens,
+            prompt_lengths,
+            sampling_params,
+        ),
+        _parse_result_to_batched_data_dict=lambda _data, result: result,
+    )
+
+    def _fake_generate_native_dynamic(*args, **kwargs):
+        forwarded.update(kwargs)
+        return [
+            SimpleNamespace(
+                prompt_tokens=prompt_tokens[idx].tolist(),
+                generated_tokens=[65, 67],
+                generated_log_probs=[-0.1, -0.2],
+            )
+            for idx in range(2)
+        ]
+
+    monkeypatch.setattr("bionemo.evo2.run.infer._generate_native_dynamic", _fake_generate_native_dynamic)
+
+    results = adapter.generate_worker(worker, data=SimpleNamespace(size=2))
+
+    assert len(results) == 2
+    assert forwarded["ignore_eos"] is True
+    assert forwarded["strict_generation"] is True
 
 
 def test_megatron_generation_shards_adapter_input_across_dp_and_gathers_in_order():
@@ -336,7 +423,7 @@ def test_megatron_generation_shards_adapter_input_across_dp_and_gathers_in_order
             "input_lengths": torch.tensor([2]),
         }
     )
-    with pytest.raises(ValueError, match="batch size 1.*data-parallel size 2"):
+    with pytest.raises(ValueError, match=r"batch size 1.*data-parallel size 2"):
         generation.generate(too_small)
 
     worker_group.outputs = worker_group.outputs[:1]

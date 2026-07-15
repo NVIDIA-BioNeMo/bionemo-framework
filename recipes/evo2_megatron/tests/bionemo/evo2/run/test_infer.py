@@ -39,11 +39,14 @@ import csv
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+import bionemo.evo2.run.infer as infer_module
 from bionemo.common.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
@@ -51,9 +54,11 @@ from bionemo.evo2.run.infer import (
     _native_stop_token_ids,
     _NativeDynamicResult,
     _result_to_jsonl_record,
-    _sampling_log_probs_from_logits,
     _sample_from_log_probs,
+    _sampled_token_action,
+    _sampling_log_probs_from_logits,
     _selected_log_probs_for_sampled_tokens,
+    parse_args,
 )
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge
@@ -98,6 +103,31 @@ def test_native_stop_token_ids_resolves_eos_text_token():
     assert _native_stop_token_ids(_FakeTokenizer()) == {0}
 
 
+def test_sampled_eos_is_retained_when_ignore_eos_is_enabled():
+    assert _sampled_token_action(0, {0}, ignore_eos=True) == (True, False)
+
+
+def test_sampled_eos_stops_and_is_omitted_by_default():
+    assert _sampled_token_action(0, {0}, ignore_eos=False) == (False, True)
+
+
+def test_exact_generation_cli_flags_default_false_and_enable_when_passed(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = parse_args()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["infer", "--ckpt-dir", "/tmp/ckpt", "--ignore-eos", "--strict-generation"],
+    )
+    enabled = parse_args()
+
+    assert defaults.ignore_eos is False
+    assert defaults.strict_generation is False
+    assert enabled.ignore_eos is True
+    assert enabled.strict_generation is True
+
+
 def test_result_to_jsonl_record_honors_explicit_stop_reason():
     """EOS-stopped native results should not be reclassified as length-finished."""
     result = _NativeDynamicResult(
@@ -117,6 +147,67 @@ def test_result_to_jsonl_record_honors_explicit_stop_reason():
     assert record["completion"] == "ACGT"
     assert record["finish_reason"] == "stop"
     assert record["usage"]["completion_tokens"] == 4
+
+
+def test_result_to_jsonl_record_serializes_complete_benchmark_evidence():
+    result = _NativeDynamicResult(
+        generated_text="AC",
+        generated_length=2,
+        prompt_tokens=[43, 126],
+        generated_tokens=[65, 67],
+        generated_log_probs=[-0.1, -0.2],
+        timings={"prefill_elapsed_s": 0.25, "decode_elapsed_s": 0.75},
+    )
+
+    record = _result_to_jsonl_record(
+        request_id="seq",
+        prompt="+~",
+        result=result,
+        max_new_tokens=2,
+        return_log_probs=True,
+    )
+
+    assert record["prompt_token_ids"] == [43, 126]
+    assert record["completion_token_ids"] == [65, 67]
+    assert record["logprobs"]["completion_logprobs"] == [-0.1, -0.2]
+    assert record["timings"]["prefill_elapsed_s"] == 0.25
+    assert record["timings"]["decode_elapsed_s"] == 0.75
+
+
+def test_infer_logs_synchronized_setup_elapsed_and_peak_memory(monkeypatch, caplog):
+    synchronizations = []
+    gib = 1024**3
+    components = SimpleNamespace(
+        tokenizer=SimpleNamespace(tokenize=lambda text: [ord(char) for char in text]),
+        native_dynamic=SimpleNamespace(cuda_graphs_enabled=False),
+    )
+    native_result = _NativeDynamicResult(
+        generated_text="A",
+        generated_length=1,
+        prompt_tokens=[65],
+        generated_tokens=[65],
+    )
+
+    monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: synchronizations.append("setup"))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 2 * gib)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 3 * gib)
+    monkeypatch.setattr(infer_module, "setup_inference_engine", lambda **kwargs: components)
+    monkeypatch.setattr(infer_module, "generate", lambda *args, **kwargs: [native_result])
+    monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
+    caplog.set_level("INFO", logger=infer_module.logger.name)
+
+    records = infer_module.infer(
+        prompts=[{"id": "seq", "prompt": "A"}],
+        ckpt_dir=Path("/tmp/ckpt"),
+        max_new_tokens=1,
+        max_seq_length=16,
+    )
+
+    assert synchronizations == ["setup"]
+    assert "[MEMORY] After model setup: peak=2.000 GB, reserved=3.000 GB, setup_elapsed_s=" in caplog.text
+    assert records[0]["completion_token_ids"] == [65]
 
 
 def test_sampling_log_probs_use_temperature_scaled_top_k_support():

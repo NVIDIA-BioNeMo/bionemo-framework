@@ -701,6 +701,8 @@ def generate(
     top_k: int = 0,
     top_p: float = 0.0,
     return_log_probs: bool = False,
+    ignore_eos: bool = False,
+    strict_generation: bool = False,
     enable_chunked_prefill: bool = False,
     inference_dynamic_batching_max_tokens: Optional[int] = None,
     inference_dynamic_batching_block_size: int = 256,
@@ -720,6 +722,8 @@ def generate(
         top_k: Top-k sampling parameter (0 = disabled, 1 = greedy).
         top_p: Nucleus sampling parameter (0 = disabled).
         return_log_probs: Whether to return log probabilities.
+        ignore_eos: Retain sampled EOS tokens and continue to max_new_tokens.
+        strict_generation: Fail instead of returning short or fallback generation results.
         enable_chunked_prefill: Split prompts across multiple prefill forwards when they exceed
             ``inference_dynamic_batching_max_tokens``. Disabled by default.
         inference_dynamic_batching_max_tokens: Optional dynamic-context per-step token budget.
@@ -746,6 +750,8 @@ def generate(
         top_k=top_k,
         top_p=top_p,
         return_log_probs=return_log_probs,
+        ignore_eos=ignore_eos,
+        strict_generation=strict_generation,
         enable_chunked_prefill=enable_chunked_prefill,
         inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
         inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
@@ -770,6 +776,7 @@ class _NativeDynamicResult:
     finish_reason: str = "length"
     stopped_on_eos: bool = False
     truncated: bool = False
+    timings: Optional[Dict[str, float]] = None
 
 
 def _sampling_log_probs_from_logits(
@@ -962,6 +969,17 @@ def _native_stop_token_ids(tokenizer: Any) -> set[int]:
     for token_text in ("<EOS>", "<EOD>"):
         _add_token_id(token_text)
     return stop_token_ids
+
+
+def _sampled_token_action(
+    token_id: int,
+    stop_token_ids: set[int],
+    *,
+    ignore_eos: bool,
+) -> tuple[bool, bool]:
+    """Return whether to append a sampled token and stop its request."""
+    is_eos = token_id in stop_token_ids
+    return (not is_eos or ignore_eos, is_eos and not ignore_eos)
 
 
 def _trim_native_text_stop_markers(text: str) -> str:
@@ -1185,6 +1203,8 @@ def _generate_native_dynamic(
     top_k: int,
     top_p: float,
     return_log_probs: bool,
+    ignore_eos: bool,
+    strict_generation: bool,
     enable_chunked_prefill: bool,
     inference_dynamic_batching_max_tokens: Optional[int],
     inference_dynamic_batching_block_size: int,
@@ -1311,6 +1331,27 @@ def _generate_native_dynamic(
         generated_logprobs: List[float] = []
         stop_token_ids = _native_stop_token_ids(tokenizer)
         stopped_on_eos = False
+        timings = {
+            "prefill_elapsed_s": 0.0,
+            "decode_elapsed_s": 0.0,
+            "generation_elapsed_s": 0.0,
+        }
+        prefill_start: Optional[float] = None
+        decode_start: Optional[float] = None
+        timing_complete = False
+
+        def _complete_phase_timing() -> None:
+            nonlocal timing_complete
+            if prefill_start is None or timing_complete:
+                return
+            torch.cuda.synchronize()
+            generation_end = time.perf_counter()
+            if decode_start is None:
+                timings["prefill_elapsed_s"] = generation_end - prefill_start
+            else:
+                timings["decode_elapsed_s"] = generation_end - decode_start
+            timings["generation_elapsed_s"] = generation_end - prefill_start
+            timing_complete = True
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
             nonlocal stopped_on_eos
@@ -1353,12 +1394,17 @@ def _generate_native_dynamic(
             sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
             if count_generated:
                 next_tok_id = int(sampled_cpu[0].item())
-                if next_tok_id in stop_token_ids:
-                    stopped_on_eos = True
-                else:
+                append_token, stop_request = _sampled_token_action(
+                    next_tok_id,
+                    stop_token_ids,
+                    ignore_eos=ignore_eos,
+                )
+                if append_token:
                     generated_ids.append(next_tok_id)
-                if return_log_probs and not stopped_on_eos:
-                    generated_logprobs.append(float(selected_log_probs[0]))
+                    if return_log_probs:
+                        generated_logprobs.append(float(selected_log_probs[0]))
+                if stop_request:
+                    stopped_on_eos = True
             active_after_sample = torch.tensor(
                 [not count_generated or (not stopped_on_eos and len(generated_ids) < max_new_tokens)], dtype=torch.bool
             )
@@ -1401,8 +1447,14 @@ def _generate_native_dynamic(
                                 n_prompt,
                                 req.remaining_prompt_length - chunk_len,
                             )
+                        if prefill_start is None:
+                            torch.cuda.synchronize()
+                            prefill_start = time.perf_counter()
                         _forward_sample_update(count_generated=not is_partial_chunk)
                         if not is_partial_chunk:
+                            torch.cuda.synchronize()
+                            decode_start = time.perf_counter()
+                            timings["prefill_elapsed_s"] = decode_start - prefill_start
                             req.remaining_prompt_tokens = req.remaining_prompt_tokens.new_empty(0)
                             break
                         req.remaining_prompt_tokens = req.remaining_prompt_tokens[chunk_len:]
@@ -1410,7 +1462,11 @@ def _generate_native_dynamic(
 
                     while len(generated_ids) < max_new_tokens and dyn_ctx.has_unfinished_requests():
                         _forward_sample_update(count_generated=True)
+                    _complete_phase_timing()
         except (BlockOverflowError, TokenOverflowError, MaxSequenceLengthOverflowError) as exc:
+            _complete_phase_timing()
+            if strict_generation:
+                raise
             if rank == 0:
                 logger.warning(
                     "[evo2-native] generation stopped early at %d tokens (context overflow: %s). "
@@ -1431,10 +1487,16 @@ def _generate_native_dynamic(
             finish_reason="stop" if stopped_on_eos else "length",
             stopped_on_eos=stopped_on_eos,
             truncated=not stopped_on_eos and len(generated_ids) >= max_new_tokens,
+            timings=timings,
         )
 
     def _run_batched_prompts(prompt_token_id_batch: list[list[int]]) -> list[_NativeDynamicResult]:
         batch_request_count = len(prompt_token_id_batch)
+        timings = {
+            "prefill_elapsed_s": 0.0,
+            "decode_elapsed_s": 0.0,
+            "generation_elapsed_s": 0.0,
+        }
         if batch_request_count <= 1:
             return [_run_single_prompt(prompt_token_id_batch[0])]
         if max_new_tokens <= 0:
@@ -1448,6 +1510,7 @@ def _generate_native_dynamic(
                     finish_reason="length",
                     stopped_on_eos=False,
                     truncated=False,
+                    timings=timings,
                 )
                 for prompt_token_ids in prompt_token_id_batch
             ]
@@ -1509,12 +1572,17 @@ def _generate_native_dynamic(
                 for request_idx, next_tok_id in enumerate(sampled_ids):
                     if stopped_on_eos[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens:
                         continue
-                    if next_tok_id in stop_token_ids:
+                    append_token, stop_request = _sampled_token_action(
+                        next_tok_id,
+                        stop_token_ids,
+                        ignore_eos=ignore_eos,
+                    )
+                    if append_token:
+                        generated_ids[request_idx].append(next_tok_id)
+                        if return_log_probs:
+                            generated_logprobs[request_idx].append(float(selected_log_probs[request_idx]))
+                    if stop_request:
                         stopped_on_eos[request_idx] = True
-                        continue
-                    generated_ids[request_idx].append(next_tok_id)
-                    if return_log_probs:
-                        generated_logprobs[request_idx].append(float(selected_log_probs[request_idx]))
 
             keep_group_active = (not count_generated) or any(
                 not stopped_on_eos[request_idx] and len(request_generated_ids) < max_new_tokens
@@ -1547,11 +1615,20 @@ def _generate_native_dynamic(
                         n_prompt,
                     )
 
+                torch.cuda.synchronize()
+                generation_start = time.perf_counter()
                 _forward_sample_update(count_generated=True)
+                torch.cuda.synchronize()
+                decode_start = time.perf_counter()
+                timings["prefill_elapsed_s"] = decode_start - generation_start
                 while any(len(request_generated_ids) < max_new_tokens for request_generated_ids in generated_ids):
                     if not dyn_ctx.has_unfinished_requests():
                         break
                     _forward_sample_update(count_generated=True)
+                torch.cuda.synchronize()
+                generation_end = time.perf_counter()
+                timings["decode_elapsed_s"] = generation_end - decode_start
+                timings["generation_elapsed_s"] = generation_end - generation_start
         finally:
             dyn_ctx.evo2_batched_decode_enabled = False
             dyn_ctx.reset()
@@ -1566,6 +1643,7 @@ def _generate_native_dynamic(
                 finish_reason="stop" if stopped_on_eos[request_idx] else "length",
                 stopped_on_eos=stopped_on_eos[request_idx],
                 truncated=not stopped_on_eos[request_idx] and len(request_generated_ids) >= max_new_tokens,
+                timings=timings,
             )
             for request_idx, (prompt_token_ids, request_generated_ids) in enumerate(
                 zip(prompt_token_id_batch, generated_ids)
@@ -1579,6 +1657,19 @@ def _generate_native_dynamic(
     def _append_results(group_results: list[_NativeDynamicResult], *, prompt_offset: int) -> None:
         for local_idx, result in enumerate(group_results):
             prompt_idx = prompt_offset + local_idx
+            if strict_generation:
+                generated_token_count = len(result.generated_tokens or [])
+                if generated_token_count != max_new_tokens:
+                    raise RuntimeError(
+                        "Strict Evo2 generation expected exactly "
+                        f"{max_new_tokens} generated tokens for prompt {prompt_idx}, got {generated_token_count}"
+                    )
+                if result.generated_log_probs is not None and len(result.generated_log_probs) != generated_token_count:
+                    raise RuntimeError(
+                        "Strict Evo2 generation returned mismatched token/log-prob lengths for "
+                        f"prompt {prompt_idx}: {generated_token_count} tokens != "
+                        f"{len(result.generated_log_probs)} log-probs"
+                    )
             results.append(result)
             if result_callback is not None:
                 result_callback(prompt_idx, result)
@@ -1591,6 +1682,8 @@ def _generate_native_dynamic(
         try:
             _append_results(_run_batched_prompts(group), prompt_offset=group_start)
         except Exception as exc:
+            if strict_generation:
+                raise
             if rank == 0:
                 logger.exception(
                     "[evo2-native] batched decode group failed (%r); falling back to single-request decode",
@@ -1671,6 +1764,18 @@ def _result_to_jsonl_record(
     generated_text = result.generated_text or ""
     generated_length = result.generated_length or 0
     prompt_tokens_count = len(result.prompt_tokens) if result.prompt_tokens is not None else 0
+    prompt_token_ids = result.prompt_tokens if result.prompt_tokens is not None else []
+    if hasattr(prompt_token_ids, "tolist"):
+        prompt_token_ids = prompt_token_ids.tolist()
+    prompt_token_ids = [int(token_id) for token_id in prompt_token_ids]
+    completion_token_ids = getattr(result, "generated_tokens", None)
+    if completion_token_ids is None:
+        completion_token_ids = getattr(result, "generated_token_ids", None)
+    if completion_token_ids is None:
+        completion_token_ids = []
+    if hasattr(completion_token_ids, "tolist"):
+        completion_token_ids = completion_token_ids.tolist()
+    completion_token_ids = [int(token_id) for token_id in completion_token_ids]
 
     finish_reason = getattr(result, "finish_reason", None)
     if finish_reason is None:
@@ -1680,7 +1785,10 @@ def _result_to_jsonl_record(
         "id": request_id,
         "prompt": prompt,
         "completion": generated_text,
+        "prompt_token_ids": prompt_token_ids,
+        "completion_token_ids": completion_token_ids,
         "finish_reason": finish_reason,
+        "timings": dict(getattr(result, "timings", None) or {}),
         "usage": {
             "prompt_tokens": prompt_tokens_count,
             "completion_tokens": generated_length,
@@ -1756,6 +1864,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Include per-token log probabilities in JSONL output",
+    )
+    ap.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        default=False,
+        help="Retain sampled EOS tokens and generate exactly --max-new-tokens tokens",
+    )
+    ap.add_argument(
+        "--strict-generation",
+        action="store_true",
+        default=False,
+        help="Fail on context overflow, batched fallback, or incomplete generation evidence",
     )
 
     # Parallelism arguments
@@ -1916,6 +2036,8 @@ def infer(
     top_p: float = 0.0,
     seed: Optional[int] = None,
     return_log_probs: bool = False,
+    ignore_eos: bool = False,
+    strict_generation: bool = False,
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
@@ -1948,6 +2070,8 @@ def infer(
         top_p: Nucleus sampling parameter (0 = disabled).
         seed: Random seed for reproducibility.
         return_log_probs: Whether to return per-token log probabilities.
+        ignore_eos: Retain sampled EOS tokens and continue to max_new_tokens.
+        strict_generation: Fail instead of returning short or fallback generation results.
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
@@ -1978,6 +2102,7 @@ def infer(
     """
     random_seed = seed or 1234
 
+    t_setup_start = time.perf_counter()
     _prune_caches()
     torch.cuda.reset_peak_memory_stats()
 
@@ -1994,8 +2119,14 @@ def infer(
         use_subquadratic_ops=use_subquadratic_ops,
         cuda_graph_impl=cuda_graph_impl,
     )
+    torch.cuda.synchronize()
+    t_setup_elapsed = time.perf_counter() - t_setup_start
     mem_after_setup_gb = torch.cuda.max_memory_allocated() / (1024**3)
-    logger.info(f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB")
+    mem_reserved_after_setup_gb = torch.cuda.max_memory_reserved() / (1024**3)
+    logger.info(
+        f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB, "
+        f"reserved={mem_reserved_after_setup_gb:.3f} GB, setup_elapsed_s={t_setup_elapsed:.6f}"
+    )
 
     # Auto-size the engine's sequence-length budget from the prompts unless a manual value was given.
     # Manual --max-seq-length supersedes (setup stored it; this only runs in auto mode). We size from
@@ -2056,6 +2187,8 @@ def infer(
                 top_k=top_k,
                 top_p=top_p,
                 return_log_probs=return_log_probs,
+                ignore_eos=ignore_eos,
+                strict_generation=strict_generation,
                 enable_chunked_prefill=enable_chunked_prefill,
                 inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
                 inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
@@ -2091,8 +2224,10 @@ def infer(
     total_tok_per_sec = total_completion_tokens / t_generate_elapsed if t_generate_elapsed > 0 else 0
 
     mem_after_generate_gb = torch.cuda.max_memory_allocated() / (1024**3)
+    mem_reserved_after_generate_gb = torch.cuda.max_memory_reserved() / (1024**3)
     logger.info(
-        f"[MEMORY] After generation: peak={mem_after_generate_gb:.3f} GB "
+        f"[MEMORY] After generation: peak={mem_after_generate_gb:.3f} GB, "
+        f"reserved={mem_reserved_after_generate_gb:.3f} GB "
         f"(setup={mem_after_setup_gb:.3f} GB, generation delta="
         f"{mem_after_generate_gb - mem_after_setup_gb:.3f} GB)"
     )
@@ -2165,6 +2300,8 @@ def main() -> None:
         top_p=args.top_p,
         seed=args.seed,
         return_log_probs=args.return_log_probs,
+        ignore_eos=args.ignore_eos,
+        strict_generation=args.strict_generation,
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,
         context_parallel_size=args.context_parallel_size,
