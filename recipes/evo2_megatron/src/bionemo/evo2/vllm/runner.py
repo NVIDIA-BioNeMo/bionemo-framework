@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import io
@@ -12,6 +13,7 @@ import json
 import math
 import os
 import platform
+import stat
 import subprocess
 import sys
 import threading
@@ -24,6 +26,14 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
+from bionemo.evo2.vllm.accuracy import (
+    build_canonical_identity_contract,
+    build_homogeneous_identity_schedule,
+    load_canonical_7b_identity_cases,
+    validate_canonical_identity_manifest,
+    validate_canonical_identity_output_artifact,
+    validate_homogeneous_identity_phase_evidence,
+)
 from bionemo.evo2.vllm.benchmark import (
     BenchmarkSample,
     GenerationRecord,
@@ -49,6 +59,8 @@ from bionemo.evo2.vllm.profile import (
 _SEED_ROUND_STRIDE = 1_000_003
 _SEED_MODULUS = 2**31
 _REQUIRED_GPU_HEADROOM_BYTES = 2 * 1024**3
+_OUTPUT_NAMESPACE_OWNERSHIP: dict[Path, tuple[int, int]] = {}
+_OUTPUT_NAMESPACE_OWNERSHIP_LOCK = threading.Lock()
 
 
 def _package_version(package: str) -> str:
@@ -104,6 +116,21 @@ def benchmark_instrumentation_contract(mode: str) -> dict[str, bool]:
     }
 
 
+def exact_generation_progress_contract(manifest: WorkloadManifest) -> dict[str, int]:
+    """Describe exact first-sample, decode-update, and retained-output counts."""
+    request_count = len(manifest.requests)
+    retained_tokens = request_count * manifest.max_new_tokens
+    return {
+        "schema_version": 1,
+        "request_count": request_count,
+        "max_new_tokens": manifest.max_new_tokens,
+        "expected_first_sampled_tokens": request_count,
+        "expected_decode_token_updates": request_count * max(0, manifest.max_new_tokens - 1),
+        "expected_retained_output_token_ids": retained_tokens,
+        "expected_retained_chosen_token_logprobs": retained_tokens,
+    }
+
+
 def build_benchmark_contract(
     args: Any,
     manifest: WorkloadManifest,
@@ -115,6 +142,7 @@ def build_benchmark_contract(
         raise ValueError("generation_round must be nonnegative")
     profile_contract = asdict(profile)
     profile_contract.pop("proof")
+    identity_context = canonical_identity_context(args, manifest, profile)
     return {
         "schema_version": 2,
         "backend": args.backend,
@@ -134,7 +162,214 @@ def build_benchmark_contract(
             "warmups": int(args.warmups),
             "repetitions": int(args.repetitions),
         },
+        "canonical_identity": None if identity_context is None else identity_context[2],
+        "exact_generation_progress": (
+            exact_generation_progress_contract(manifest) if bool(getattr(args, "exact_progress_gate", False)) else None
+        ),
     }
+
+
+def canonical_identity_context(
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+) -> tuple[Any, Any, dict[str, Any]] | None:
+    """Resolve and validate one canonical identity case, schedule, and linked contract."""
+    case_index = getattr(args, "canonical_identity_case", None)
+    if case_index is None:
+        return None
+    prompts_csv = getattr(args, "canonical_prompts_csv", None)
+    tokenizer_path = getattr(args, "prompt_tokenizer_json", None)
+    if prompts_csv is None or tokenizer_path is None:
+        raise ValueError("canonical identity contract requires its source and tokenizer paths")
+    cases = load_canonical_7b_identity_cases(prompts_csv)
+    case = cases[case_index]
+    validate_canonical_identity_manifest(manifest, case=case, request_count=len(manifest.requests))
+    schedule = build_homogeneous_identity_schedule(
+        topology=profile.topology,
+        request_count=len(manifest.requests),
+        global_wave_size=profile.global_wave_size,
+    )
+    contract = build_canonical_identity_contract(
+        case=case,
+        schedule=schedule,
+        prompts_csv=prompts_csv,
+        tokenizer_path=tokenizer_path,
+    )
+    if (
+        manifest.prompt_source_path != contract["prompts_csv_path"]
+        or manifest.prompt_source_sha256 != contract["prompts_csv_sha256"]
+        or manifest.prompt_tokenizer_path != contract["tokenizer_path"]
+        or manifest.prompt_tokenizer_sha256 != contract["tokenizer_sha256"]
+    ):
+        raise AssertionError("canonical identity manifest provenance does not match its linked contract")
+    return case, schedule, contract
+
+
+def manifest_output_decoder(manifest: WorkloadManifest) -> Callable[[Sequence[int]], str] | None:
+    """Build a hash-verified tokenizer decoder for retained raw output bytes."""
+    tokenizer_path = manifest.prompt_tokenizer_path
+    tokenizer_sha256 = manifest.prompt_tokenizer_sha256
+    if tokenizer_path is None:
+        if tokenizer_sha256 is not None:
+            raise AssertionError("output tokenizer provenance is incomplete")
+        return None
+    path = Path(tokenizer_path).expanduser().resolve()
+    if tokenizer_sha256 is None or _sha256_file(path) != tokenizer_sha256:
+        raise AssertionError("output tokenizer SHA256 does not match the workload manifest")
+
+    from tokenizers import Tokenizer
+
+    tokenizer = Tokenizer.from_file(str(path))
+    return lambda token_ids: tokenizer.decode(list(token_ids), skip_special_tokens=False)
+
+
+def canonical_identity_phase_artifacts(
+    *,
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    phase_artifacts: list[dict[str, Any]],
+    decode_output_token_ids: Callable[[Sequence[int]], str] | None,
+    collect_physical_proof: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Attach independently recomputed per-request identity evidence after generation timing."""
+    context = canonical_identity_context(args, manifest, profile)
+    if context is None:
+        return phase_artifacts, None
+    if decode_output_token_ids is None:
+        raise AssertionError("canonical identity requires decoded raw output retention")
+    case, schedule, contract = context
+    expected_request_ids = tuple(request.request_id for request in manifest.requests)
+    phase_summaries = []
+    minimum_identity = 100.0
+    for phase in phase_artifacts:
+        outputs = validate_canonical_identity_output_artifact(
+            phase["full_output_artifact"],
+            case=case,
+            expected_request_ids=expected_request_ids,
+            decode_output_token_ids=decode_output_token_ids,
+        )
+        physical = (
+            validate_homogeneous_identity_phase_evidence(phase, schedule=schedule) if collect_physical_proof else None
+        )
+        evidence = {
+            "schema_version": 1,
+            "outputs": outputs,
+            "physical_schedule": physical,
+            "physical_schedule_attested_by_linked_proof": not collect_physical_proof,
+            "passed": True,
+        }
+        phase["canonical_identity_evidence"] = evidence
+        minimum_identity = min(minimum_identity, outputs["minimum_observed_identity_percent"])
+        phase_summaries.append(
+            {
+                "phase": phase["phase"],
+                "request_count": outputs["request_count"],
+                "minimum_observed_identity_percent": outputs["minimum_observed_identity_percent"],
+                "physical_schedule_proven": physical is not None,
+                "passed": True,
+            }
+        )
+    return phase_artifacts, {
+        "schema_version": 1,
+        "contract": contract,
+        "phase_count": len(phase_summaries),
+        "minimum_observed_identity_percent": minimum_identity,
+        "phases": phase_summaries,
+        "passed": True,
+    }
+
+
+def validate_canonical_identity_proof_evidence(
+    artifact: dict[str, Any],
+    *,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    expected_contract: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Recompute linked canonical identity evidence from raw sidecars and physical telemetry."""
+    contract = expected_contract.get("canonical_identity")
+    phases = artifact.get("phases")
+    if not isinstance(phases, list):
+        raise AssertionError("canonical identity proof phases are missing")
+    if contract is None:
+        if artifact.get("canonical_identity") is not None or any(
+            isinstance(phase, dict) and phase.get("canonical_identity_evidence") is not None for phase in phases
+        ):
+            raise AssertionError("non-identity proof retained unexpected canonical identity evidence")
+        return None
+    if not isinstance(contract, dict):
+        raise AssertionError("canonical identity benchmark contract is malformed")
+    case_index = contract.get("case_index")
+    if isinstance(case_index, bool) or not isinstance(case_index, int) or not 0 <= case_index < 4:
+        raise AssertionError("canonical identity contract case index is malformed")
+    try:
+        cases = load_canonical_7b_identity_cases(contract["prompts_csv_path"])
+        case = cases[case_index]
+        schedule = build_homogeneous_identity_schedule(
+            topology=profile.topology,
+            request_count=len(manifest.requests),
+            global_wave_size=profile.global_wave_size,
+        )
+        recomputed_contract = build_canonical_identity_contract(
+            case=case,
+            schedule=schedule,
+            prompts_csv=contract["prompts_csv_path"],
+            tokenizer_path=contract["tokenizer_path"],
+        )
+    except (IndexError, KeyError, OSError, TypeError, ValueError) as error:
+        raise AssertionError("canonical identity contract could not be reconstructed") from error
+    if contract != recomputed_contract:
+        raise AssertionError("canonical identity benchmark contract failed reconstruction")
+    validate_canonical_identity_manifest(manifest, case=case, request_count=len(manifest.requests))
+    decoder = manifest_output_decoder(manifest)
+    if decoder is None:
+        raise AssertionError("canonical identity proof lacks its output tokenizer")
+
+    expected_request_ids = tuple(request.request_id for request in manifest.requests)
+    phase_summaries = []
+    minimum_identity = 100.0
+    for phase in phases:
+        if not isinstance(phase, dict):
+            raise AssertionError("canonical identity phase evidence is malformed")
+        physical = validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)
+        outputs = validate_canonical_identity_output_artifact(
+            phase.get("full_output_artifact", {}),
+            case=case,
+            expected_request_ids=expected_request_ids,
+            decode_output_token_ids=decoder,
+        )
+        recomputed_phase = {
+            "schema_version": 1,
+            "outputs": outputs,
+            "physical_schedule": physical,
+            "physical_schedule_attested_by_linked_proof": False,
+            "passed": True,
+        }
+        if phase.get("canonical_identity_evidence") != recomputed_phase:
+            raise AssertionError("canonical identity phase summary does not match recomputed raw evidence")
+        minimum_identity = min(minimum_identity, outputs["minimum_observed_identity_percent"])
+        phase_summaries.append(
+            {
+                "phase": phase["phase"],
+                "request_count": outputs["request_count"],
+                "minimum_observed_identity_percent": outputs["minimum_observed_identity_percent"],
+                "physical_schedule_proven": True,
+                "passed": True,
+            }
+        )
+    recomputed = {
+        "schema_version": 1,
+        "contract": recomputed_contract,
+        "phase_count": len(phase_summaries),
+        "minimum_observed_identity_percent": minimum_identity,
+        "phases": phase_summaries,
+        "passed": True,
+    }
+    if artifact.get("canonical_identity") != recomputed:
+        raise AssertionError("canonical identity run summary does not match recomputed phase evidence")
+    return recomputed
 
 
 def benchmark_contract_sha256(contract: dict[str, Any]) -> str:
@@ -279,7 +514,7 @@ def _validate_cudagraph_phase_evidence(
     phase: dict[str, Any],
     *,
     maximum_wave_size: int,
-) -> int:
+) -> tuple[int, list[dict[str, Any]]]:
     observation_count = phase.get("cudagraph_observation_count")
     if isinstance(observation_count, bool) or not isinstance(observation_count, int) or observation_count <= 0:
         raise AssertionError("proof phase is missing concrete CUDA graph observations")
@@ -287,9 +522,8 @@ def _validate_cudagraph_phase_evidence(
         phase.get("cudagraph_observations_retained"),
         label="retained CUDA graph observations",
     )
-    expected_retained = min(observation_count, 256)
-    if len(retained) != expected_retained or any(not isinstance(item, dict) for item in retained):
-        raise AssertionError("retained CUDA graph observation count is inconsistent")
+    if len(retained) != observation_count or any(not isinstance(item, dict) for item in retained):
+        raise AssertionError("CUDA graph proof must retain complete lossless observations")
     aggregate = _require_list(phase.get("cudagraph_summary"), label="CUDA graph aggregate")
     if not aggregate or any(not isinstance(item, dict) for item in aggregate):
         raise AssertionError("CUDA graph aggregate is empty or malformed")
@@ -327,23 +561,9 @@ def _validate_cudagraph_phase_evidence(
             raise AssertionError("CUDA graph aggregate contains eager decode dispatch")
     if total_count != observation_count:
         raise AssertionError("CUDA graph aggregate count does not match retained observation count")
-    if observation_count <= 256:
-        if summarize_cudagraph_observations(tuple(retained)) != aggregate:
-            raise AssertionError("CUDA graph aggregate does not match raw retained observations")
-    else:
-        retained_counts = Counter(
-            (
-                item.get("engine_index"),
-                item.get("runtime_mode"),
-                item.get("num_unpadded_tokens"),
-                item.get("num_padded_tokens"),
-                item.get("num_paddings"),
-            )
-            for item in retained
-        )
-        if any(aggregate_counts.get(key, 0) < count for key, count in retained_counts.items()):
-            raise AssertionError("truncated CUDA graph observations do not match their aggregate")
-    return full_tokens
+    if summarize_cudagraph_observations(tuple(retained)) != aggregate:
+        raise AssertionError("CUDA graph aggregate does not match complete raw observations")
+    return full_tokens, retained
 
 
 def _validate_fir_route_evidence(
@@ -398,10 +618,13 @@ def _validate_worker_gpu_bindings(
     *,
     hardware: dict[str, Any],
     expected_worker_count: int,
+    expected_engine_seed: int,
 ) -> None:
     devices = _require_list(hardware.get("devices"), label="GPU hardware devices")
     if len(workers) != expected_worker_count:
         raise AssertionError("worker proof count does not match the physical model topology")
+    if isinstance(expected_engine_seed, bool) or not isinstance(expected_engine_seed, int) or expected_engine_seed < 0:
+        raise AssertionError("expected engine seed must be a nonnegative integer")
     physical = {}
     physical_by_index = {}
     physical_by_uuid = {}
@@ -421,6 +644,8 @@ def _validate_worker_gpu_bindings(
         identity = (worker.get("device_uuid"), worker.get("pci_bus_id"))
         if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
             raise AssertionError("worker rank is malformed")
+        if worker.get("engine_seed") != expected_engine_seed:
+            raise AssertionError("every tensor-parallel worker must attest the same intended engine seed")
         if identity not in physical or identity in observed:
             raise AssertionError("worker rank is not bound to one unique physical GPU UUID/PCI identity")
         if worker.get("device_name") != physical[identity].get("name"):
@@ -447,6 +672,17 @@ def _validate_worker_gpu_bindings(
         observed.add(identity)
     if sorted(ranks) != list(range(expected_worker_count)):
         raise AssertionError("worker ranks are not exact and contiguous")
+
+
+def _validate_worker_rank_continuity(
+    workers: Sequence[dict[str, Any]],
+    initialized_workers: Sequence[dict[str, Any]],
+) -> None:
+    def bindings(items: Sequence[dict[str, Any]]) -> dict[int, tuple[Any, Any]]:
+        return {item.get("rank"): (item.get("device_uuid"), item.get("pci_bus_id")) for item in items}
+
+    if bindings(workers) != bindings(initialized_workers):
+        raise AssertionError("worker rank moved to a different physical GPU during a proof phase")
 
 
 def _validate_full_output_sidecar(
@@ -549,9 +785,14 @@ def _validate_full_output_sidecar(
         raise AssertionError("full-output sidecar request count is inconsistent")
     if metadata.get("generated_token_count") != generated_count:
         raise AssertionError("full-output sidecar generated-token count is inconsistent")
+    if metadata.get("output_token_id_count") != generated_count:
+        raise AssertionError("full-output sidecar token-ID count is inconsistent")
+    if metadata.get("chosen_token_logprob_count") != generated_count:
+        raise AssertionError("full-output sidecar chosen-logprob count is inconsistent")
     return {
         "request_count": request_count,
-        "generated_token_count": generated_count,
+        "output_token_id_count": generated_count,
+        "chosen_token_logprob_count": generated_count,
     }
 
 
@@ -619,15 +860,26 @@ def _validate_direct_phase_evidence(
     call_index = generation_round
     memory_peaks = []
     final_workers = []
+    initialized = _require_list(
+        artifact.get("initialized_worker_proof"),
+        label="initialized worker proof",
+    )
     for sample_index, phase in enumerate(phases):
         if not isinstance(phase, dict) or phase.get("proof_collected") is not True:
             raise AssertionError("proof phase lacks production proof collection")
         phase_name = expected_names[sample_index]
+        graph_full_tokens, graph_observations = _validate_cudagraph_phase_evidence(
+            phase,
+            maximum_wave_size=profile.global_wave_size,
+        )
         waves = build_request_waves(
             request_count=len(manifest.requests),
             global_batch_size=profile.global_wave_size,
             replica_count=1,
         )
+        expected_wave_phases = {f"{phase_name}.wave-{wave.wave_index:03d}" for wave in waves}
+        if any(observation.get("phase") not in expected_wave_phases for observation in graph_observations):
+            raise AssertionError("CUDA graph observations must belong to one exact physical wave")
         retained_waves = _require_list(phase.get("wave_proofs"), label="physical wave proofs")
         if len(retained_waves) != len(waves):
             raise AssertionError("physical proof wave count does not match the exact workload")
@@ -647,6 +899,14 @@ def _validate_direct_phase_evidence(
                 retained.get("full_decode_proof"),
                 label="wave FULL decode proof",
             )
+            recomputed_full_decode = full_decode_proof_summary(
+                graph_observations,
+                phase=expected_phase,
+                batch_size=wave.request_count,
+                max_new_tokens=manifest.max_new_tokens,
+            )
+            if full_decode != recomputed_full_decode:
+                raise AssertionError("wave FULL decode proof does not match complete raw CUDA observations")
             _validate_full_decode_summary_values(
                 full_decode,
                 phase=expected_phase,
@@ -657,14 +917,25 @@ def _validate_direct_phase_evidence(
                 retained.get("scheduler_capacity_proof"),
                 label="wave scheduler proof",
             )
-            if (
-                scheduler.get("phase") != expected_phase
-                or scheduler.get("global_wave_size") != wave.request_count
-                or scheduler.get("engine_request_count") != wave.request_count
-                or scheduler.get("max_num_seqs") != profile.resolved_max_num_seqs
+            scheduler_observations = _require_list(
+                retained.get("scheduler_observations"),
+                label="raw wave scheduler observations",
+            )
+            if not scheduler_observations or any(
+                not isinstance(observation, dict) or observation.get("phase") != expected_phase
+                for observation in scheduler_observations
             ):
-                raise AssertionError("scheduler proof dimensions do not match the physical wave")
-            validate_scheduler_capacity_proof(scheduler)
+                raise AssertionError("raw scheduler observations must belong exclusively to the physical wave")
+            recomputed_scheduler = scheduler_capacity_proof_summary(
+                scheduler_observations,
+                phase=expected_phase,
+                global_wave_size=wave.request_count,
+                engine_request_count=wave.request_count,
+                max_num_seqs=profile.resolved_max_num_seqs,
+            )
+            if scheduler != recomputed_scheduler:
+                raise AssertionError("scheduler proof does not match raw wave observations")
+            validate_scheduler_capacity_proof(recomputed_scheduler)
             full_summaries.append(full_decode)
         if phase.get("wave_execution") != wave_execution_summary(retained_waves):
             raise AssertionError("physical wave execution summary is inconsistent")
@@ -683,10 +954,6 @@ def _validate_direct_phase_evidence(
         coverage = full_tokens / expected_tokens if expected_tokens else 1.0
         if not math.isclose(float(phase_full.get("coverage_fraction", -1.0)), coverage):
             raise AssertionError("phase FULL decode aggregate coverage is inconsistent")
-        graph_full_tokens = _validate_cudagraph_phase_evidence(
-            phase,
-            maximum_wave_size=profile.global_wave_size,
-        )
         if graph_full_tokens != full_tokens:
             raise AssertionError("raw CUDA graph aggregate does not match wave FULL decode totals")
 
@@ -697,7 +964,7 @@ def _validate_direct_phase_evidence(
         )
         if phase.get("request_executions") != [record.to_dict() for record in executions]:
             raise AssertionError("phase request ownership or seed stream drifted")
-        _validate_full_output_sidecar(
+        sidecar_counts = _validate_full_output_sidecar(
             _require_dict(phase.get("full_output_artifact"), label="full-output sidecar metadata"),
             artifact_path=artifact_path,
             phase=phase_name,
@@ -705,6 +972,18 @@ def _validate_direct_phase_evidence(
             expected_executions=executions,
             output_summaries=phase.get("outputs"),
         )
+        progress_contract = artifact["benchmark_contract"].get("exact_generation_progress")
+        if progress_contract is None:
+            if phase.get("exact_generation_progress") is not None:
+                raise AssertionError("proof retained exact-generation evidence without a linked contract")
+        else:
+            recomputed_progress = exact_generation_progress_evidence(
+                manifest,
+                sidecar_counts=sidecar_counts,
+                full_decode_summaries=full_summaries,
+            )
+            if phase.get("exact_generation_progress") != recomputed_progress:
+                raise AssertionError("exact-generation progress evidence failed raw recomputation")
         memory_peaks.append(
             _validate_phase_sample(
                 phase,
@@ -721,7 +1000,9 @@ def _validate_direct_phase_evidence(
             workers,
             hardware=hardware,
             expected_worker_count=profile.tensor_parallel_size,
+            expected_engine_seed=manifest.seed,
         )
+        _validate_worker_rank_continuity(workers, initialized)
         _validate_fir_route_evidence(workers, manifest=manifest)
         if profile.shared_prefix_state_reuse:
             retained_prefix = _require_dict(
@@ -751,10 +1032,6 @@ def _validate_direct_phase_evidence(
         final_workers = workers
         call_index += len(waves)
 
-    initialized = _require_list(
-        artifact.get("initialized_worker_proof"),
-        label="initialized worker proof",
-    )
     hardware = _require_dict(
         artifact.get("gpu_hardware_provenance"),
         label="GPU hardware provenance",
@@ -763,6 +1040,7 @@ def _validate_direct_phase_evidence(
         initialized,
         hardware=hardware,
         expected_worker_count=profile.tensor_parallel_size,
+        expected_engine_seed=manifest.seed,
     )
     initialized_by_rank = {worker["rank"]: worker for worker in initialized}
     final_by_rank = {worker["rank"]: worker for worker in final_workers}
@@ -848,6 +1126,12 @@ def _validate_dp2_phase_evidence(
         artifact.get("gpu_hardware_provenance"),
         label="GPU hardware provenance",
     )
+    initialized_engines = _require_list(
+        artifact.get("initialized_engine_proofs"),
+        label="initialized DP2 engine proofs",
+    )
+    if len(initialized_engines) != profile.replica_count:
+        raise AssertionError("initialized DP2 engine count does not match the topology")
     for sample_index, phase in enumerate(phases):
         if not isinstance(phase, dict) or phase.get("proof_collected") is not True:
             raise AssertionError("DP2 proof phase lacks production proof collection")
@@ -861,6 +1145,7 @@ def _validate_dp2_phase_evidence(
         if len(retained_waves) != len(waves):
             raise AssertionError("DP2 proof wave count does not match the exact workload")
         phase_workers = []
+        phase_full_summaries = []
         for wave, retained in zip(waves, retained_waves, strict=True):
             wave_phase = f"{phase_name}.wave-{wave.wave_index:03d}"
             expected_wave = {
@@ -902,10 +1187,16 @@ def _validate_dp2_phase_evidence(
                     batch_size=shard.request_count,
                     max_new_tokens=manifest.max_new_tokens,
                 )
+                phase_full_summaries.append(recomputed_full)
                 scheduler_observations = _require_list(
                     engine.get("scheduler_observations"),
                     label="DP2 raw scheduler observations",
                 )
+                if not scheduler_observations or any(
+                    not isinstance(observation, dict) or observation.get("phase") != wave_phase
+                    for observation in scheduler_observations
+                ):
+                    raise AssertionError("raw DP2 scheduler observations must belong exclusively to the physical wave")
                 recomputed_scheduler = scheduler_capacity_proof_summary(
                     scheduler_observations,
                     phase=wave_phase,
@@ -928,6 +1219,14 @@ def _validate_dp2_phase_evidence(
                     workers,
                     hardware=hardware,
                     expected_worker_count=profile.tensor_parallel_size,
+                    expected_engine_seed=manifest.seed,
+                )
+                _validate_worker_rank_continuity(
+                    workers,
+                    _require_list(
+                        initialized_engines[shard.replica_index].get("worker_proof"),
+                        label="initialized DP2 inner worker proof",
+                    ),
                 )
                 _validate_fir_route_evidence(workers, manifest=manifest.request_slice(wave.start, wave.stop))
                 phase_workers.extend(workers)
@@ -981,7 +1280,7 @@ def _validate_dp2_phase_evidence(
         )
         if phase.get("request_executions") != [record.to_dict() for record in executions]:
             raise AssertionError("DP2 request ownership or rank-local seed streams drifted")
-        _validate_full_output_sidecar(
+        sidecar_counts = _validate_full_output_sidecar(
             _require_dict(phase.get("full_output_artifact"), label="DP2 full-output sidecar"),
             artifact_path=artifact_path,
             phase=phase_name,
@@ -989,18 +1288,24 @@ def _validate_dp2_phase_evidence(
             expected_executions=executions,
             output_summaries=phase.get("outputs"),
         )
+        progress_contract = artifact["benchmark_contract"].get("exact_generation_progress")
+        if progress_contract is None:
+            if phase.get("exact_generation_progress") is not None:
+                raise AssertionError("DP2 proof retained exact-generation evidence without a linked contract")
+        else:
+            recomputed_progress = exact_generation_progress_evidence(
+                manifest,
+                sidecar_counts=sidecar_counts,
+                full_decode_summaries=phase_full_summaries,
+            )
+            if phase.get("exact_generation_progress") != recomputed_progress:
+                raise AssertionError("DP2 exact-generation progress evidence failed raw recomputation")
         memory_peaks.append(_validate_phase_sample(phase, manifest=manifest, sample_index=sample_index))
         if phase.get("prefix_cache_reset") is not profile.shared_prefix_state_reuse:
             raise AssertionError("DP2 phase prefix-cache reset contract drifted")
         call_index += len(waves)
         global_index += len(manifest.requests)
 
-    initialized_engines = _require_list(
-        artifact.get("initialized_engine_proofs"),
-        label="initialized DP2 engine proofs",
-    )
-    if len(initialized_engines) != profile.replica_count:
-        raise AssertionError("initialized DP2 engine count does not match the topology")
     resolved_configs = _require_list(artifact.get("resolved_configs"), label="DP2 resolved configs")
     if len(resolved_configs) != profile.replica_count:
         raise AssertionError("DP2 resolved-config count does not match the topology")
@@ -1026,6 +1331,7 @@ def _validate_dp2_phase_evidence(
             initialized_workers,
             hardware=hardware,
             expected_worker_count=profile.tensor_parallel_size,
+            expected_engine_seed=manifest.seed,
         )
         initial_identity = (
             initialized_workers[0].get("device_uuid"),
@@ -1068,6 +1374,9 @@ def _validate_linked_proof_evidence(
         or expected_contract.get("manifest_sha256") != manifest.sha256
     ):
         raise AssertionError("proof manifest SHA256 does not match the benchmark contract")
+    progress_contract = expected_contract.get("exact_generation_progress")
+    if progress_contract is not None and progress_contract != exact_generation_progress_contract(manifest):
+        raise AssertionError("exact-generation progress contract does not match the immutable manifest")
     profile_data = _require_dict(artifact.get("profile"), label="proof profile")
     try:
         profile = Evo2VllmProfile(**profile_data)
@@ -1127,6 +1436,20 @@ def _validate_linked_proof_evidence(
         )
     else:
         raise AssertionError("linked proof backend/topology schema is unsupported")
+    if progress_contract is None:
+        if artifact.get("exact_generation_progress") is not None:
+            raise AssertionError("proof retained an exact-generation aggregate without a linked contract")
+    else:
+        _, recomputed_progress = attach_exact_generation_progress_evidence(
+            _require_list(artifact.get("phases"), label="proof phases"),
+            manifest=manifest,
+            enabled=True,
+            proof_collected=True,
+            topology=profile.topology,
+            linked_proof_artifact=None,
+        )
+        if artifact.get("exact_generation_progress") != recomputed_progress:
+            raise AssertionError("exact-generation aggregate failed phase recomputation")
     hardware = _require_dict(
         artifact.get("gpu_hardware_provenance"),
         label="GPU hardware provenance",
@@ -1192,12 +1515,19 @@ def _validate_linked_proof_evidence(
         or proof_status.get("compilation_stable") is not True
     ):
         raise AssertionError("top-level proof status does not match recomputed phase evidence")
+    canonical_identity = validate_canonical_identity_proof_evidence(
+        artifact,
+        manifest=manifest,
+        profile=profile,
+        expected_contract=expected_contract,
+    )
     return {
         "manifest_sha256": manifest.sha256,
         "phase_count": len(artifact["phases"]),
         "final_worker_count": len(final_workers),
         "runtime_attestation": recomputed_runtime,
         "gpu_memory_headroom": recomputed_memory,
+        "canonical_identity": canonical_identity,
         "passed": True,
     }
 
@@ -1509,6 +1839,47 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
     prompt_jsonl_sha256 = getattr(args, "prompt_jsonl_sha256", None)
     prompt_tokenizer_json = getattr(args, "prompt_tokenizer_json", None)
     expected_prompt_tokens = getattr(args, "expected_prompt_tokens", None)
+    canonical_case_index = getattr(args, "canonical_identity_case", None)
+    canonical_prompts_csv = getattr(args, "canonical_prompts_csv", None)
+    if canonical_case_index is not None:
+        incompatible = {
+            "prompt_jsonl": prompt_jsonl,
+            "prompt_jsonl_sha256": prompt_jsonl_sha256,
+            "expected_prompt_tokens": expected_prompt_tokens,
+            "uniform_prompt_length": getattr(args, "uniform_prompt_length", None),
+        }
+        enabled = sorted(name for name, value in incompatible.items() if value is not None)
+        if enabled:
+            raise ValueError(f"canonical identity is incompatible with workload rewrites: {enabled}")
+        if canonical_prompts_csv is None or prompt_tokenizer_json is None:
+            raise ValueError("canonical identity requires --canonical-prompts-csv and --prompt-tokenizer-json")
+        request_count = getattr(args, "request_count", None)
+        if request_count is None or request_count <= 0:
+            raise ValueError("canonical identity requires a positive --request-count")
+        max_new_tokens = getattr(args, "max_new_tokens", None)
+        if max_new_tokens not in (None, 500):
+            raise ValueError("canonical identity requires exactly 500 new tokens")
+
+        from tokenizers import Tokenizer
+
+        from bionemo.evo2.vllm.accuracy import (
+            build_canonical_identity_manifest,
+            load_canonical_7b_identity_cases,
+        )
+
+        tokenizer = Tokenizer.from_file(str(prompt_tokenizer_json))
+        cases = load_canonical_7b_identity_cases(canonical_prompts_csv)
+        return build_canonical_identity_manifest(
+            manifest,
+            case=cases[canonical_case_index],
+            prompts_csv=canonical_prompts_csv,
+            tokenizer_path=prompt_tokenizer_json,
+            tokenize=lambda prompt: tokenizer.encode(prompt, add_special_tokens=False).ids,
+            request_count=request_count,
+            request_id_prefix=args.request_id_prefix,
+        )
+    if canonical_prompts_csv is not None:
+        raise ValueError("--canonical-prompts-csv requires --canonical-identity-case")
     if prompt_jsonl is None:
         if any(value is not None for value in (prompt_jsonl_sha256, prompt_tokenizer_json, expected_prompt_tokens)):
             raise ValueError("prompt JSONL provenance options require --prompt-jsonl")
@@ -1823,6 +2194,158 @@ def full_decode_proof_summary(
     }
 
 
+def exact_generation_progress_evidence(
+    manifest: WorkloadManifest,
+    *,
+    sidecar_counts: dict[str, int],
+    full_decode_summaries: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Prove exact retained outputs and every post-prefill decode update."""
+    request_count = len(manifest.requests)
+    retained_token_count = request_count * manifest.max_new_tokens
+    expected_counts = {
+        "request_count": request_count,
+        "output_token_id_count": retained_token_count,
+        "chosen_token_logprob_count": retained_token_count,
+    }
+    for field, expected in expected_counts.items():
+        observed = sidecar_counts.get(field)
+        if isinstance(observed, bool) or not isinstance(observed, int) or observed != expected:
+            raise AssertionError(f"retained exact-generation field {field!r} was {observed!r}, expected {expected}")
+
+    decode_steps_per_request = max(0, manifest.max_new_tokens - 1)
+    expected_decode_updates = request_count * decode_steps_per_request
+    observed_decode_updates = 0
+    retained_expected_updates = 0
+    for summary in full_decode_summaries:
+        if not isinstance(summary, dict):
+            raise AssertionError("exact decode proof contains a malformed summary")
+        expected = summary.get("expected_decode_tokens")
+        observed = summary.get("full_decode_tokens")
+        if (
+            isinstance(expected, bool)
+            or not isinstance(expected, int)
+            or expected < 0
+            or isinstance(observed, bool)
+            or not isinstance(observed, int)
+            or observed < 0
+        ):
+            raise AssertionError("exact decode proof contains malformed token counters")
+        if (
+            observed != expected
+            or summary.get("eager_decode_dispatch_count") != 0
+            or summary.get("full_decode_unpadded") is not True
+            or summary.get("passed") is not True
+        ):
+            raise AssertionError("exact decode proof omitted updates or used forbidden execution")
+        retained_expected_updates += expected
+        observed_decode_updates += observed
+    if retained_expected_updates != expected_decode_updates or observed_decode_updates != expected_decode_updates:
+        raise AssertionError("exact decode proof does not cover every request's post-prefill token update")
+
+    return {
+        "schema_version": 1,
+        "request_count": request_count,
+        "prefill_request_count": request_count,
+        "first_sampled_token_count": request_count,
+        "decode_steps_per_request": decode_steps_per_request,
+        "expected_decode_token_updates": expected_decode_updates,
+        "observed_full_decode_token_updates": observed_decode_updates,
+        "retained_output_token_id_count": retained_token_count,
+        "retained_chosen_token_logprob_count": retained_token_count,
+        "passed": True,
+    }
+
+
+def attach_exact_generation_progress_evidence(
+    phase_artifacts: Sequence[dict[str, Any]],
+    *,
+    manifest: WorkloadManifest,
+    enabled: bool,
+    proof_collected: bool,
+    topology: str,
+    linked_proof_artifact: str | Path | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Attach exact counters after timed generation for proof and linked speed lanes."""
+    artifacts = [dict(phase) for phase in phase_artifacts]
+    if not enabled:
+        return artifacts, None
+    if topology not in {"tp2", "dp2"}:
+        raise ValueError(f"unsupported exact-progress topology: {topology!r}")
+    if proof_collected:
+        if linked_proof_artifact is not None:
+            raise ValueError("a proof run cannot link external exact-progress evidence")
+        proof_source = "current-proof-run"
+    else:
+        if linked_proof_artifact is None:
+            raise ValueError("an exact-progress speed run requires its linked proof artifact")
+        proof_source = str(Path(linked_proof_artifact).expanduser().resolve())
+
+    retained_tokens = len(manifest.requests) * manifest.max_new_tokens
+    phase_summaries = []
+    for phase in artifacts:
+        sidecar = phase.get("full_output_artifact")
+        if not isinstance(sidecar, dict):
+            raise AssertionError("exact-progress phase is missing full-output sidecar metadata")
+        counts = {
+            "request_count": sidecar.get("request_count"),
+            "output_token_id_count": sidecar.get("output_token_id_count"),
+            "chosen_token_logprob_count": sidecar.get("chosen_token_logprob_count"),
+        }
+        if proof_collected:
+            if topology == "tp2":
+                waves = phase.get("wave_proofs")
+                if not isinstance(waves, list):
+                    raise AssertionError("TP2 exact-progress proof is missing physical waves")
+                decode_summaries = [wave.get("full_decode_proof") for wave in waves if isinstance(wave, dict)]
+            else:
+                waves = phase.get("waves")
+                if not isinstance(waves, list):
+                    raise AssertionError("DP2 exact-progress proof is missing physical waves")
+                decode_summaries = [
+                    engine.get("full_decode_proof")
+                    for wave in waves
+                    if isinstance(wave, dict)
+                    for engine in wave.get("engines", ())
+                    if isinstance(engine, dict)
+                ]
+            evidence = exact_generation_progress_evidence(
+                manifest,
+                sidecar_counts=counts,
+                full_decode_summaries=decode_summaries,
+            )
+        else:
+            expected_counts = {
+                "request_count": len(manifest.requests),
+                "output_token_id_count": retained_tokens,
+                "chosen_token_logprob_count": retained_tokens,
+            }
+            if counts != expected_counts:
+                raise AssertionError("speed phase retained output counts do not match the exact workload")
+            evidence = {
+                "schema_version": 1,
+                "request_count": len(manifest.requests),
+                "prefill_request_count": len(manifest.requests),
+                "first_sampled_token_count": len(manifest.requests),
+                "decode_steps_per_request": max(0, manifest.max_new_tokens - 1),
+                "expected_decode_token_updates": len(manifest.requests) * max(0, manifest.max_new_tokens - 1),
+                "observed_full_decode_token_updates": None,
+                "retained_output_token_id_count": retained_tokens,
+                "retained_chosen_token_logprob_count": retained_tokens,
+                "execution_proof_source": proof_source,
+                "passed": True,
+            }
+        phase["exact_generation_progress"] = evidence
+        phase_summaries.append({"phase": phase.get("phase"), "evidence": evidence})
+    return artifacts, {
+        "schema_version": 1,
+        "phase_count": len(artifacts),
+        "execution_proof_source": proof_source,
+        "phases": phase_summaries,
+        "passed": bool(artifacts) and all(item["evidence"].get("passed") is True for item in phase_summaries),
+    }
+
+
 def request_seed(
     base_seed: int,
     *,
@@ -1955,6 +2478,7 @@ def write_full_output_artifact(
     manifest: WorkloadManifest,
     outputs: Any,
     execution_records: tuple[RequestExecutionRecord, ...],
+    decode_output_token_ids: Callable[[Sequence[int]], str] | None = None,
 ) -> dict[str, Any]:
     """Stream every output token and chosen-token logprob to deterministic gzip JSONL."""
     records = records_from_vllm_outputs(manifest, outputs)
@@ -1962,6 +2486,7 @@ def write_full_output_artifact(
         path,
         records=records,
         execution_records=execution_records,
+        decode_output_token_ids=decode_output_token_ids,
     )
 
 
@@ -1970,6 +2495,7 @@ def write_full_generation_records_artifact(
     *,
     records: Sequence[GenerationRecord],
     execution_records: Sequence[RequestExecutionRecord],
+    decode_output_token_ids: Callable[[Sequence[int]], str] | None = None,
 ) -> dict[str, Any]:
     """Persist backend-neutral exact generation records as deterministic gzip JSONL."""
     if len(execution_records) != len(records):
@@ -1978,6 +2504,7 @@ def write_full_generation_records_artifact(
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(f"{output.suffix}.tmp")
     generated_token_count = 0
+    decoded_output_byte_count = 0
     with temporary.open("wb") as raw_handle:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as compressed:
             with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as handle:
@@ -2002,6 +2529,19 @@ def write_full_generation_records_artifact(
                         "stop_reason": generation.stop_reason,
                         "stopped_on_eos": generation.stopped_on_eos,
                     }
+                    if decode_output_token_ids is not None:
+                        decoded = decode_output_token_ids(generation.output_token_ids)
+                        if not isinstance(decoded, str):
+                            raise TypeError("output token decoder must return text")
+                        decoded_bytes = decoded.encode("utf-8")
+                        row.update(
+                            {
+                                "output_text_utf8_base64": base64.b64encode(decoded_bytes).decode("ascii"),
+                                "output_text_sha256": hashlib.sha256(decoded_bytes).hexdigest(),
+                                "output_text_utf8_bytes": len(decoded_bytes),
+                            }
+                        )
+                        decoded_output_byte_count += len(decoded_bytes)
                     handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
                     handle.write("\n")
                     generated_token_count += len(generation.output_token_ids)
@@ -2010,7 +2550,7 @@ def write_full_generation_records_artifact(
     with output.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return {
+    metadata = {
         "schema_version": 2,
         "format": "jsonl",
         "compression": "gzip",
@@ -2019,7 +2559,17 @@ def write_full_generation_records_artifact(
         "size_bytes": output.stat().st_size,
         "request_count": len(records),
         "generated_token_count": generated_token_count,
+        "output_token_id_count": generated_token_count,
+        "chosen_token_logprob_count": generated_token_count,
     }
+    if decode_output_token_ids is not None:
+        metadata.update(
+            {
+                "decoded_output_bytes_retained": True,
+                "decoded_output_byte_count": decoded_output_byte_count,
+            }
+        )
+    return metadata
 
 
 def phase_output_artifact_path(
@@ -2063,11 +2613,14 @@ def reserve_output_namespace(path: str | Path) -> Path:
         names = ", ".join(sorted({candidate.name for candidate in collisions}))
         raise FileExistsError(f"output namespace already contains prior artifacts: {names}")
     with marker.open("x", encoding="utf-8") as handle:
+        marker_stat = os.fstat(handle.fileno())
         json.dump(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "state": "in_progress",
                 "output_artifact_path": str(output),
+                "marker_device": marker_stat.st_dev,
+                "marker_inode": marker_stat.st_ino,
                 "started_unix_s": time.time(),
                 "argv": [sys.executable, *sys.argv],
             },
@@ -2075,14 +2628,63 @@ def reserve_output_namespace(path: str | Path) -> Path:
             sort_keys=True,
         )
         handle.write("\n")
+    marker_identity = (marker_stat.st_dev, marker_stat.st_ino)
+    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+        if marker in _OUTPUT_NAMESPACE_OWNERSHIP:
+            raise RuntimeError(f"output namespace ownership is already registered: {marker}")
+        _OUTPUT_NAMESPACE_OWNERSHIP[marker] = marker_identity
     return marker
+
+
+def _validate_output_namespace_ownership(marker: Path, *, output: Path) -> None:
+    expected_marker = _output_namespace_marker_path(output)
+    lexical_marker = Path(os.path.abspath(marker.expanduser()))
+    if lexical_marker != expected_marker:
+        raise ValueError("output namespace marker does not match the requested artifact")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lexical_marker, flags)
+    except OSError as error:
+        raise RuntimeError(f"output namespace reservation ownership is unavailable: {lexical_marker}") from error
+    try:
+        marker_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(marker_stat.st_mode):
+            raise RuntimeError("output namespace reservation ownership is not a regular file")
+        with os.fdopen(descriptor, mode="r", encoding="utf-8") as handle:
+            descriptor = -1
+            payload = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as error:
+        raise RuntimeError("output namespace reservation ownership metadata is invalid") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+        expected_identity = _OUTPUT_NAMESPACE_OWNERSHIP.get(lexical_marker)
+    if expected_identity is None:
+        raise RuntimeError("output namespace reservation ownership is not bound to this process")
+    observed_identity = (marker_stat.st_dev, marker_stat.st_ino)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 2
+        or payload.get("state") != "in_progress"
+        or payload.get("output_artifact_path") != str(output)
+        or (payload.get("marker_device"), payload.get("marker_inode")) != expected_identity
+        or observed_identity != expected_identity
+    ):
+        raise RuntimeError("output namespace reservation ownership metadata does not match its inode")
+    try:
+        path_stat = os.lstat(lexical_marker)
+    except OSError as error:
+        raise RuntimeError("output namespace reservation ownership was lost during validation") from error
+    if (path_stat.st_dev, path_stat.st_ino) != expected_identity:
+        raise RuntimeError("output namespace reservation ownership was replaced during validation")
 
 
 def require_output_namespace_reservation(path: str | Path) -> Path:
     """Fail unless the caller reserved this exact output namespace."""
-    marker = _output_namespace_marker_path(path)
-    if not marker.is_file():
-        raise RuntimeError(f"output namespace is not reserved: {marker}")
+    output = Path(path).resolve()
+    marker = _output_namespace_marker_path(output)
+    _validate_output_namespace_ownership(marker, output=output)
     return marker
 
 
@@ -2094,12 +2696,16 @@ def complete_output_namespace(
 ) -> None:
     """Release one successful reservation without touching any other artifacts."""
     output = Path(output_path).resolve()
-    reservation = Path(marker).resolve()
+    reservation = Path(os.path.abspath(Path(marker).expanduser()))
     if reservation != _output_namespace_marker_path(output):
         raise ValueError("output namespace marker does not match the requested artifact")
+    _validate_output_namespace_ownership(reservation, output=output)
     if require_final_artifact and not output.is_file():
         raise RuntimeError("cannot complete an output namespace before its final artifact exists")
+    _validate_output_namespace_ownership(reservation, output=output)
     reservation.unlink()
+    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+        _OUTPUT_NAMESPACE_OWNERSHIP.pop(reservation, None)
 
 
 def shared_prefix_manifest_evidence(manifest: WorkloadManifest) -> dict[str, Any]:
@@ -2241,10 +2847,97 @@ def _validated_prefix_source(
     return {**source, "snapshots": retained_snapshots}
 
 
-def _validated_fp32_state_copies(record: dict[str, Any]) -> list[dict[str, Any]]:
+_RUNTIME_STATE_LAYOUT_FIELDS = (
+    "kv_cache_group_id",
+    "layer_name",
+    "state_index",
+    "dtype",
+    "state_shape",
+    "block_shape",
+    "copied_elements",
+    "copied_bytes",
+)
+
+
+def _validated_runtime_state_layout(record: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    layout = record.get("runtime_state_layout")
+    if not isinstance(layout, list) or not layout:
+        raise AssertionError("physical prefix clone is missing the complete runtime state layout")
+    retained = []
+    identities = set()
+    expected_elements = 0
+    expected_bytes = 0
+    for entry in layout:
+        if not isinstance(entry, dict):
+            raise AssertionError("runtime recurrent-state layout entry is malformed")
+        group_id = entry.get("kv_cache_group_id")
+        layer_name = entry.get("layer_name")
+        state_index = entry.get("state_index")
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or group_id < 0
+            or not isinstance(layer_name, str)
+            or not layer_name
+            or isinstance(state_index, bool)
+            or not isinstance(state_index, int)
+            or state_index < 0
+        ):
+            raise AssertionError("runtime recurrent-state layout ownership is malformed")
+        identity = (group_id, layer_name, state_index)
+        if identity in identities:
+            raise AssertionError("runtime recurrent-state layout ownership must be unique")
+        identities.add(identity)
+        if entry.get("dtype") != "torch.float32":
+            raise AssertionError("complete Evo2 runtime recurrent-state layout must be FP32")
+        state_shape = entry.get("state_shape")
+        block_shape = entry.get("block_shape")
+        if (
+            not isinstance(state_shape, list)
+            or len(state_shape) < 2
+            or not isinstance(block_shape, list)
+            or not block_shape
+            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in state_shape)
+            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in block_shape)
+            or state_shape[1:] != block_shape
+        ):
+            raise AssertionError("runtime recurrent-state layout tensor shape is malformed")
+        copied_elements = entry.get("copied_elements")
+        copied_bytes = entry.get("copied_bytes")
+        if (
+            isinstance(copied_elements, bool)
+            or not isinstance(copied_elements, int)
+            or copied_elements <= 0
+            or isinstance(copied_bytes, bool)
+            or not isinstance(copied_bytes, int)
+            or copied_bytes <= 0
+            or copied_elements != math.prod(block_shape)
+            or copied_bytes != 4 * copied_elements
+        ):
+            raise AssertionError("runtime recurrent-state layout size is inconsistent with exact FP32 storage")
+        expected_elements += copied_elements
+        expected_bytes += copied_bytes
+        retained.append(
+            {
+                **entry,
+                "state_shape": list(state_shape),
+                "block_shape": list(block_shape),
+            }
+        )
+    return retained, {
+        "expected_copy_entries": len(retained),
+        "expected_copied_elements": expected_elements,
+        "expected_copied_bytes": expected_bytes,
+    }
+
+
+def _validated_fp32_state_copies(
+    record: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    runtime_layout, direct_layout = _validated_runtime_state_layout(record)
     copies = record.get("state_copies")
-    if not isinstance(copies, list) or len(copies) != record["copy_entries"]:
-        raise AssertionError("physical prefix clone must retain every recurrent-state copy entry")
+    if not isinstance(copies, list) or not copies:
+        raise AssertionError("physical prefix clone must retain positive recurrent-state copy entries")
     retained = []
     identities = set()
     copied_elements = 0
@@ -2316,9 +3009,37 @@ def _validated_fp32_state_copies(record: dict[str, Any]) -> list[dict[str, Any]]
         copied_elements += entry["copied_elements"]
         copied_bytes += entry["copied_bytes"]
         retained.append(dict(entry))
-    if copied_elements != record["copied_elements"] or copied_bytes != record["copied_bytes"]:
-        raise AssertionError("per-state copy entries do not sum to the physical clone totals")
-    return retained
+    retained_layout = [{key: entry[key] for key in _RUNTIME_STATE_LAYOUT_FIELDS} for entry in retained]
+    runtime_by_identity = {
+        (entry["kv_cache_group_id"], entry["layer_name"], entry["state_index"]): entry for entry in runtime_layout
+    }
+    retained_by_identity = {
+        (entry["kv_cache_group_id"], entry["layer_name"], entry["state_index"]): entry for entry in retained_layout
+    }
+    if retained_by_identity != runtime_by_identity:
+        raise AssertionError("physical state copies do not match the complete runtime recurrent-state layout")
+    if (
+        len(retained) != direct_layout["expected_copy_entries"]
+        or copied_elements != direct_layout["expected_copied_elements"]
+        or copied_bytes != direct_layout["expected_copied_bytes"]
+    ):
+        raise AssertionError("physical state-copy totals do not match the complete runtime layout")
+    actual_fields = {
+        "copy_entries": len(retained),
+        "copied_elements": copied_elements,
+        "copied_bytes": copied_bytes,
+    }
+    field_labels = {
+        "copy_entries": "copy entry count",
+        "copied_elements": "copy elements",
+        "copied_bytes": "copy bytes",
+    }
+    for field, value in actual_fields.items():
+        if record.get(field) != value:
+            raise AssertionError(f"per-state {field_labels[field]} do not sum to the physical clone total")
+    if any(record.get(field) != value for field, value in direct_layout.items()):
+        raise AssertionError("self-reported state-copy expectations do not match direct per-state evidence")
+    return retained, runtime_layout, direct_layout
 
 
 def shared_prefix_state_reuse_evidence(
@@ -2417,12 +3138,6 @@ def shared_prefix_state_reuse_evidence(
                 raise AssertionError("physical clone prompt or block-size provenance drifted")
             if record.get("all_state_dtypes_fp32") is not True:
                 raise AssertionError("every cloned Evo2 recurrent state must be FP32")
-            if record["copy_entries"] != record["expected_copy_entries"]:
-                raise AssertionError("physical prefix clone copy entry count does not match the Evo2 state layout")
-            if record["copied_elements"] != record["expected_copied_elements"]:
-                raise AssertionError("physical prefix clone copy elements do not match the Evo2 state layout")
-            if record["copied_bytes"] != record["expected_copied_bytes"]:
-                raise AssertionError("physical prefix clone copy bytes do not match the Evo2 FP32 state layout")
             if record.get("source_miss_request_id") != source["request_id"]:
                 raise AssertionError("physical prefix clone does not name its direct cache-miss source")
             if record.get("source_snapshot_index") != source_snapshot["snapshot_index"]:
@@ -2445,12 +3160,14 @@ def shared_prefix_state_reuse_evidence(
                 raise AssertionError("clone source attention KV blocks do not match the direct miss snapshot")
             if retained_reused_groups != retained_source_groups:
                 raise AssertionError("clone hit attention KV physical block IDs do not exactly match its source")
-            state_copies = _validated_fp32_state_copies(record)
-            expected_elements_per_request.add(record["expected_copied_elements"])
-            expected_bytes_per_request.add(record["expected_copied_bytes"])
+            state_copies, runtime_state_layout, direct_layout = _validated_fp32_state_copies(record)
+            expected_elements_per_request.add(direct_layout["expected_copied_elements"])
+            expected_bytes_per_request.add(direct_layout["expected_copied_bytes"])
             retained_requests.append(
                 {
                     **record,
+                    **direct_layout,
+                    "runtime_state_layout": runtime_state_layout,
                     "source_attention_kv_groups": retained_source_groups,
                     "reused_attention_kv_groups": retained_reused_groups,
                     "state_copies": state_copies,
@@ -2562,11 +3279,7 @@ class GenerationPhaseResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe phase record."""
-        observation_limit = 256
-        if len(self.observations) <= observation_limit:
-            retained_observations = list(self.observations)
-        else:
-            retained_observations = [*self.observations[:128], *self.observations[-128:]]
+        retained_observations = list(self.observations)
         return {
             "phase": self.phase,
             "sample": self.sample.to_dict(),
@@ -2623,6 +3336,7 @@ def run_generation_phase(
     memory_monitor_factory: Callable[[], PeakMemoryMonitor],
     execution_records: tuple[RequestExecutionRecord, ...],
     full_output_path: str | Path,
+    namespace_output_path: str | Path | None = None,
     collect_proof: bool = True,
     reset_worker_proof: Callable[[], Any] | None = None,
     snapshot_worker_proof: Callable[[], tuple[dict[str, Any], ...]] | None = None,
@@ -2630,10 +3344,17 @@ def run_generation_phase(
     require_shared_prefix_state_reuse: bool = False,
     global_wave_size: int | None = None,
     scheduler_max_num_seqs: int | None = None,
+    decode_output_token_ids: Callable[[Sequence[int]], str] | None = None,
     clock: Callable[[], float] = time.perf_counter,
     barrier: Any | None = None,
 ) -> GenerationPhaseResult:
     """Time explicit offline vLLM calls while preserving one ordered phase artifact."""
+
+    def require_namespace_ownership() -> None:
+        if namespace_output_path is not None:
+            require_output_namespace_reservation(namespace_output_path)
+
+    require_namespace_ownership()
     if collect_proof and recorder is None:
         raise ValueError("proof collection requires a CUDA graph recorder")
     if len(sampling_params) != len(manifest.requests):
@@ -2697,6 +3418,7 @@ def run_generation_phase(
             if barrier is not None:
                 barrier.wait()
             elapsed = clock() - begin
+            require_namespace_ownership()
             if len(wave_outputs) != wave.request_count:
                 raise AssertionError("vLLM output count must match the explicit generation wave")
             generation_call_s.append(elapsed)
@@ -2704,6 +3426,7 @@ def run_generation_phase(
 
             full_decode = None
             scheduler_proof = None
+            scheduler_observations = None
             if collect_proof:
                 full_decode = full_decode_proof_summary(
                     recorder.observations[wave_observation_start:],
@@ -2711,8 +3434,9 @@ def run_generation_phase(
                     batch_size=wave.request_count,
                     max_new_tokens=manifest.max_new_tokens,
                 )
+                scheduler_observations = list(recorder.scheduler_observations[wave_scheduler_start:])
                 scheduler_proof = scheduler_capacity_proof_summary(
-                    recorder.scheduler_observations[wave_scheduler_start:],
+                    scheduler_observations,
                     phase=wave_phase,
                     global_wave_size=wave.request_count,
                     max_num_seqs=(wave.request_count if scheduler_max_num_seqs is None else scheduler_max_num_seqs),
@@ -2728,9 +3452,11 @@ def run_generation_phase(
                     "call_index": call_index_start + wave.wave_index,
                     "generation_s": elapsed,
                     "full_decode_proof": full_decode,
+                    "scheduler_observations": scheduler_observations,
                     "scheduler_capacity_proof": scheduler_proof,
                 }
             )
+    require_namespace_ownership()
     worker_proof = () if not collect_proof or snapshot_worker_proof is None else snapshot_worker_proof()
     shared_prefix_reuse = None
     if collect_proof and require_shared_prefix_state_reuse:
@@ -2757,11 +3483,13 @@ def run_generation_phase(
         peak_device_memory_bytes=monitor.peak_device_memory_bytes,
         validated_summaries=output_summaries,
     )
+    require_namespace_ownership()
     full_output_artifact = write_full_output_artifact(
         full_output_path,
         manifest=manifest,
         outputs=outputs,
         execution_records=execution_records,
+        decode_output_token_ids=decode_output_token_ids,
     )
     full_decode_proof = None
     if collect_proof:
@@ -2825,7 +3553,6 @@ def reset_vllm_worker_proof_state(
 
 def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
     """Collect route, compile, and CUDA-memory evidence from one vLLM worker."""
-    del worker
     import torch
 
     from bionemo.evo2.vllm.model import (
@@ -2838,9 +3565,13 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
     device = torch.cuda.current_device()
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     gpu_identity = worker_gpu_identity(logical_device=int(device))
+    engine_seed = getattr(getattr(worker, "model_config", None), "seed", None)
+    if isinstance(engine_seed, bool) or not isinstance(engine_seed, int) or engine_seed < 0:
+        raise RuntimeError("vLLM worker model_config.seed is unavailable or malformed")
     return {
         "rank": int(rank),
         "device": int(device),
+        "engine_seed": engine_seed,
         **gpu_identity,
         "fir_routes": get_fir_route_stats(),
         "mamba_state_copies": get_mamba_state_copy_stats(),
@@ -3205,6 +3936,9 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         seed=manifest.seed,
         load_format=args.load_format,
     )
+    decoder_begin = time.perf_counter()
+    output_decoder = manifest_output_decoder(manifest)
+    output_decoder_setup_s = time.perf_counter() - decoder_begin
     memory_reader = make_nvml_memory_reader()
     recorder = CUDAGraphProofRecorder() if profile.proof else None
 
@@ -3241,6 +3975,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
             execution_records=execution_records,
             full_output_path=phase_output_artifact_path(args.output, phase=phase),
+            namespace_output_path=args.output,
             collect_proof=profile.proof,
             reset_worker_proof=(lambda: _reset_worker_proof(llm)) if profile.proof else None,
             snapshot_worker_proof=(lambda: _snapshot_worker_proof(llm)) if profile.proof else None,
@@ -3248,6 +3983,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             prefix_cache_block_size=int(resolved["cache"]["block_size"]),
             global_wave_size=profile.global_wave_size,
             scheduler_max_num_seqs=profile.resolved_max_num_seqs,
+            decode_output_token_ids=output_decoder,
         )
         if args.proof:
             for wave_proof in result.wave_proofs:
@@ -3279,6 +4015,22 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         memory_headroom = linked_proof["gpu_memory_headroom"]
 
     steady_results = [result for result in phase_results if result.phase.startswith("steady-")]
+    phase_artifacts, exact_progress = attach_exact_generation_progress_evidence(
+        [result.to_dict() for result in phase_results],
+        manifest=manifest,
+        enabled=bool(args.exact_progress_gate),
+        proof_collected=profile.proof,
+        topology=profile.topology,
+        linked_proof_artifact=args.linked_proof_artifact,
+    )
+    phase_artifacts, canonical_identity = canonical_identity_phase_artifacts(
+        args=args,
+        manifest=manifest,
+        profile=profile,
+        phase_artifacts=phase_artifacts,
+        decode_output_token_ids=output_decoder,
+        collect_physical_proof=profile.proof,
+    )
     waves = build_request_waves(
         request_count=len(manifest.requests),
         global_batch_size=profile.global_batch_size,
@@ -3313,6 +4065,8 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         "vllm_installation_provenance": vllm_identity,
         "gpu_hardware_provenance": gpu_identity,
         "gpu_memory_headroom": memory_headroom,
+        "canonical_identity": canonical_identity,
+        "exact_generation_progress": exact_progress,
         "invocation": {
             "argv": [sys.executable, *sys.argv],
             "parsed_args": {
@@ -3356,11 +4110,12 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             "context_length_preflight_s": preflight_s,
             "vllm_import_s": vllm_import_s,
             "provenance_hashing_s": provenance_s,
+            "output_decoder_setup_s": output_decoder_setup_s,
             "engine_init_s": engine_init_s,
             "engine_init_peak_device_memory_bytes": list(init_memory.peak_device_memory_bytes),
         },
         "initialized_worker_proof": list(initialized_worker_proof),
-        "phases": [result.to_dict() for result in phase_results],
+        "phases": phase_artifacts,
         "steady_aggregate": aggregate_samples([result.sample for result in steady_results]),
     }
 
@@ -3386,12 +4141,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.backend != "vllm":
         raise NotImplementedError("the MCore baseline uses its pinned backend adapter")
     source_manifest = load_source_manifest(args)
+    canonical_identity = args.canonical_identity_case is not None
     manifest = prepare_workload(
         source_manifest,
-        request_count=args.request_count,
-        uniform_prompt_length=args.uniform_prompt_length,
+        request_count=None if canonical_identity else args.request_count,
+        uniform_prompt_length=None if canonical_identity else args.uniform_prompt_length,
         request_id_prefix=args.request_id_prefix,
-        max_new_tokens=args.max_new_tokens,
+        max_new_tokens=None if canonical_identity else args.max_new_tokens,
     )
     if args.context_preflight_only:
         artifact = run_context_length_preflight(args, manifest)
@@ -3401,6 +4157,7 @@ def main(argv: list[str] | None = None) -> int:
         from bionemo.evo2.vllm.nemo_runner import run_nemo_dp2_benchmark
 
         artifact = run_nemo_dp2_benchmark(args, manifest)
+    require_output_namespace_reservation(args.output)
     write_json_artifact(args.output, artifact)
     complete_output_namespace(reservation, output_path=args.output)
     return 0

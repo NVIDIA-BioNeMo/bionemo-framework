@@ -276,7 +276,40 @@ def test_full_vocab_evidence_retains_exact_processed_topk_support() -> None:
     assert evidence["negative_infinity_counts"] == [[508] * 4] * 2
     assert evidence["expected_finite_support"] == 4
     assert evidence["chosen_token_in_finite_support"] is True
+    assert evidence["chosen_token_ids"] == [[0, 1, 2, 3]] * 2
     assert evidence["chosen_token_logprobs"] == [[-4.0, -3.0, -2.0, -1.0]] * 2
+
+
+def test_full_vocab_evidence_rejects_one_ulp_chosen_value_drift() -> None:
+    dense = torch.full((1, 1, 512), -torch.inf)
+    dense[0, 0, :4] = torch.tensor([-4.0, -3.0, -2.0, -1.0])
+    one_ulp_drift = torch.nextafter(dense[0, 0, 0], torch.tensor(-3.0)).item()
+    outputs = BatchedDataDict(
+        {
+            "generation_vocab_logprobs": dense,
+            "generation_logprob_counts": torch.full((1, 1), 512),
+        }
+    )
+    records = (
+        GenerationRecord(
+            request_id="request-0",
+            prompt_token_ids=(43, 126, 71, 65),
+            output_token_ids=(0,),
+            output_logprobs=(one_ulp_drift,),
+            requested_max_tokens=1,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        ),
+    )
+
+    with pytest.raises(AssertionError, match="bitwise"):
+        full_vocab_logprob_evidence_from_nemo_output(
+            outputs,
+            records=records,
+            require_full=True,
+            expected_finite_support=4,
+        )
 
 
 def test_full_vocab_evidence_rejects_nonfinite_chosen_processed_logprob() -> None:
@@ -379,6 +412,22 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
             "block_size": 16,
             "source_attention_kv_groups": attention_groups(),
             "reused_attention_kv_groups": attention_groups(),
+            "runtime_state_layout": [
+                {
+                    key: entry[key]
+                    for key in (
+                        "kv_cache_group_id",
+                        "layer_name",
+                        "state_index",
+                        "dtype",
+                        "state_shape",
+                        "block_shape",
+                        "copied_elements",
+                        "copied_bytes",
+                    )
+                }
+                for entry in state_copies
+            ],
             "state_copies": state_copies,
             "copy_entries": 8,
             "copied_elements": 1_024,

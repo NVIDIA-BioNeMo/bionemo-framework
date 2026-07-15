@@ -12,7 +12,19 @@ from types import SimpleNamespace
 import pytest
 
 import bionemo.evo2.vllm.runner as runner
-from bionemo.evo2.vllm.benchmark import GenerationRecord, WorkloadManifest, records_from_vllm_outputs
+from bionemo.evo2.vllm.accuracy import (
+    CANONICAL_7B_CHECKPOINT,
+    build_canonical_identity_contract,
+    build_canonical_identity_manifest,
+    build_homogeneous_identity_schedule,
+    load_canonical_7b_identity_cases,
+)
+from bionemo.evo2.vllm.benchmark import (
+    GenerationRecord,
+    WorkloadManifest,
+    WorkloadRequest,
+    records_from_vllm_outputs,
+)
 from bionemo.evo2.vllm.runner import (
     CUDAGraphProofRecorder,
     PeakMemoryMonitor,
@@ -25,6 +37,28 @@ from bionemo.evo2.vllm.runner import (
 
 
 DATA = __import__("pathlib").Path(__file__).with_name("data") / "gdpo_mixed_96.json"
+PROMPTS_CSV = Path(__file__).resolve().parent.parent / "data" / "prompts.csv"
+TOKENIZER_JSON = Path(__file__).resolve().parents[4] / "tokenizers/nucleotide_fast_tokenizer_512/tokenizer.json"
+
+
+def _canonical_base_manifest() -> WorkloadManifest:
+    return WorkloadManifest(
+        schema_version=1,
+        name="canonical-identity-base",
+        source_checkpoint=CANONICAL_7B_CHECKPOINT,
+        checkpoint_manifest_sha256="1" * 64,
+        checkpoint_index_sha256="2" * 64,
+        tokenizer_sha256="3" * 64,
+        requests=(WorkloadRequest(request_id="base", prompt_token_ids=(1,)),),
+        max_new_tokens=1,
+        temperature=0.5,
+        top_p=0.5,
+        top_k=4,
+        seed=7,
+        dtype="bfloat16",
+        ignore_eos=False,
+        stop_token_ids=(0,),
+    )
 
 
 def _scheduler_stats(
@@ -493,6 +527,176 @@ def test_full_decode_proof_summary_persists_long_run_coverage_and_occupancy() ->
     assert summary["passed"] is True
 
 
+def test_exact_generation_progress_rejects_one_batch_decode_shortfall() -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    observation = {
+        "phase": "steady-0.wave-000",
+        "engine_index": 0,
+        "num_unpadded_tokens": 2,
+        "num_padded_tokens": 2,
+        "num_paddings": 0,
+        "runtime_mode": "CUDAGraphMode.FULL",
+    }
+    exact = runner.full_decode_proof_summary(
+        [dict(observation), dict(observation)],
+        phase="steady-0.wave-000",
+        batch_size=2,
+        max_new_tokens=3,
+    )
+    evidence = runner.exact_generation_progress_evidence(
+        manifest,
+        sidecar_counts={
+            "request_count": 2,
+            "output_token_id_count": 6,
+            "chosen_token_logprob_count": 6,
+        },
+        full_decode_summaries=[exact],
+    )
+
+    assert evidence == {
+        "schema_version": 1,
+        "request_count": 2,
+        "prefill_request_count": 2,
+        "first_sampled_token_count": 2,
+        "decode_steps_per_request": 2,
+        "expected_decode_token_updates": 4,
+        "observed_full_decode_token_updates": 4,
+        "retained_output_token_id_count": 6,
+        "retained_chosen_token_logprob_count": 6,
+        "passed": True,
+    }
+
+    tolerated_by_general_long_gate = runner.full_decode_proof_summary(
+        [dict(observation)],
+        phase="steady-0.wave-000",
+        batch_size=2,
+        max_new_tokens=3,
+    )
+    assert tolerated_by_general_long_gate["passed"] is True
+    with pytest.raises(AssertionError, match="exact decode"):
+        runner.exact_generation_progress_evidence(
+            manifest,
+            sidecar_counts={
+                "request_count": 2,
+                "output_token_id_count": 6,
+                "chosen_token_logprob_count": 6,
+            },
+            full_decode_summaries=[tolerated_by_general_long_gate],
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("request_count", 1),
+        ("output_token_id_count", 5),
+        ("chosen_token_logprob_count", 5),
+    ),
+)
+def test_exact_generation_progress_rejects_truncated_retained_outputs(field, value) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(1)
+    counts = {
+        "request_count": 2,
+        "output_token_id_count": 2,
+        "chosen_token_logprob_count": 2,
+    }
+    counts[field] = value
+
+    with pytest.raises(AssertionError, match="retained"):
+        runner.exact_generation_progress_evidence(
+            manifest,
+            sidecar_counts=counts,
+            full_decode_summaries=[],
+        )
+
+
+@pytest.mark.parametrize("topology", ("tp2", "dp2"))
+def test_exact_progress_artifacts_cover_proof_topologies_without_timed_callbacks(topology) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+
+    def summary(phase: str, batch_size: int):
+        observation = {
+            "phase": phase,
+            "engine_index": 0,
+            "num_unpadded_tokens": batch_size,
+            "num_padded_tokens": batch_size,
+            "num_paddings": 0,
+            "runtime_mode": "CUDAGraphMode.FULL",
+        }
+        return runner.full_decode_proof_summary(
+            [dict(observation), dict(observation)],
+            phase=phase,
+            batch_size=batch_size,
+            max_new_tokens=3,
+        )
+
+    if topology == "tp2":
+        physical = {"wave_proofs": [{"full_decode_proof": summary("steady-0.wave-000", 2)}]}
+    else:
+        physical = {
+            "waves": [
+                {
+                    "engines": [
+                        {"full_decode_proof": summary("steady-0.wave-000", 1)},
+                        {"full_decode_proof": summary("steady-0.wave-000", 1)},
+                    ]
+                }
+            ]
+        }
+    phases, aggregate = runner.attach_exact_generation_progress_evidence(
+        [
+            {
+                "phase": "steady-0",
+                "full_output_artifact": {
+                    "request_count": 2,
+                    "output_token_id_count": 6,
+                    "chosen_token_logprob_count": 6,
+                },
+                **physical,
+            }
+        ],
+        manifest=manifest,
+        enabled=True,
+        proof_collected=True,
+        topology=topology,
+        linked_proof_artifact=None,
+    )
+
+    assert phases[0]["exact_generation_progress"]["observed_full_decode_token_updates"] == 4
+    assert aggregate["phase_count"] == 1
+    assert aggregate["execution_proof_source"] == "current-proof-run"
+    assert aggregate["passed"] is True
+
+
+def test_exact_progress_speed_artifact_retains_counts_and_links_physical_proof(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    proof_path = tmp_path / "proof.json"
+    phases, aggregate = runner.attach_exact_generation_progress_evidence(
+        [
+            {
+                "phase": "steady-0",
+                "full_output_artifact": {
+                    "request_count": 2,
+                    "output_token_id_count": 6,
+                    "chosen_token_logprob_count": 6,
+                },
+                "wave_proofs": [{"full_decode_proof": None}],
+            }
+        ],
+        manifest=manifest,
+        enabled=True,
+        proof_collected=False,
+        topology="tp2",
+        linked_proof_artifact=proof_path,
+    )
+
+    evidence = phases[0]["exact_generation_progress"]
+    assert evidence["retained_output_token_id_count"] == 6
+    assert evidence["observed_full_decode_token_updates"] is None
+    assert evidence["execution_proof_source"] == str(proof_path.resolve())
+    assert aggregate["execution_proof_source"] == str(proof_path.resolve())
+
+
 def test_peak_memory_monitor_records_each_device_maximum() -> None:
     samples = iter(((100, 200), (150, 180), (125, 240)))
     monitor = PeakMemoryMonitor(lambda: next(samples))
@@ -667,6 +871,8 @@ def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path)
         "size_bytes": output_path.stat().st_size,
         "request_count": 2,
         "generated_token_count": 6,
+        "output_token_id_count": 6,
+        "chosen_token_logprob_count": 6,
     }
 
 
@@ -713,7 +919,7 @@ def test_same_stem_different_suffix_namespaces_cannot_alias_or_run_simultaneousl
     yaml_output = tmp_path / "proof.yaml"
 
     marker = runner.reserve_output_namespace(json_output)
-    with pytest.raises(FileExistsError, match="proof.inprogress"):
+    with pytest.raises(FileExistsError, match=r"proof.inprogress"):
         runner.reserve_output_namespace(yaml_output)
 
     assert runner.phase_output_artifact_path(json_output, phase="steady-0") != (
@@ -735,7 +941,7 @@ def test_output_namespace_reservation_refuses_stale_final_sidecar_or_active_run(
 
     runner.complete_output_namespace(marker, output_path=output, require_final_artifact=False)
     output.write_text("stale success\n", encoding="utf-8")
-    with pytest.raises(FileExistsError, match="benchmark.json"):
+    with pytest.raises(FileExistsError, match=r"benchmark.json"):
         runner.reserve_output_namespace(output)
 
     output.unlink()
@@ -746,11 +952,94 @@ def test_output_namespace_reservation_refuses_stale_final_sidecar_or_active_run(
     assert unrelated.read_bytes() == b"unrelated"
 
 
+def test_output_namespace_rejects_foreign_replacement_inode_without_unlinking_it(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    marker = runner.reserve_output_namespace(output)
+    reserved_identity = (marker.stat().st_dev, marker.stat().st_ino)
+    foreign = tmp_path / "foreign-marker"
+    foreign_payload = "foreign owner\n"
+    foreign.write_text(foreign_payload, encoding="utf-8")
+    foreign_identity = (foreign.stat().st_dev, foreign.stat().st_ino)
+    assert foreign_identity != reserved_identity
+    foreign.replace(marker)
+
+    with pytest.raises(RuntimeError, match="ownership"):
+        runner.require_output_namespace_reservation(output)
+    with pytest.raises(RuntimeError, match="ownership"):
+        runner.complete_output_namespace(marker, output_path=output, require_final_artifact=False)
+
+    assert marker.read_text(encoding="utf-8") == foreign_payload
+
+
+def test_output_namespace_rejects_self_consistent_foreign_inode_metadata(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    marker = runner.reserve_output_namespace(output)
+    foreign = tmp_path / "foreign-marker"
+    foreign.touch()
+    foreign_stat = foreign.stat()
+    foreign.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "state": "in_progress",
+                "output_artifact_path": str(output.resolve()),
+                "marker_device": foreign_stat.st_dev,
+                "marker_inode": foreign_stat.st_ino,
+            }
+        ),
+        encoding="utf-8",
+    )
+    foreign.replace(marker)
+
+    with pytest.raises(RuntimeError, match="ownership"):
+        runner.require_output_namespace_reservation(output)
+
+
+def test_main_does_not_publish_evidence_after_namespace_ownership_loss(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "ownership-loss.json"
+    foreign_payload = "foreign owner\n"
+
+    def replace_reservation(*_args, **_kwargs):
+        marker = output.with_name("ownership-loss.inprogress")
+        foreign = tmp_path / "foreign-marker"
+        foreign.write_text(foreign_payload, encoding="utf-8")
+        foreign.replace(marker)
+        return {"must_not_be_published": True}
+
+    monkeypatch.setattr(runner, "run_context_length_preflight", replace_reservation)
+
+    with pytest.raises(RuntimeError, match="ownership"):
+        runner.main(
+            [
+                "--backend",
+                "vllm",
+                "--checkpoint",
+                str(tmp_path / "checkpoint"),
+                "--manifest",
+                str(DATA),
+                "--topology",
+                "tp2",
+                "--max-model-len",
+                "7000",
+                "--max-num-batched-tokens",
+                "16384",
+                "--gpu-memory-utilization",
+                "0.92",
+                "--context-preflight-only",
+                "--output",
+                str(output),
+            ]
+        )
+
+    assert not output.exists()
+    assert output.with_name("ownership-loss.inprogress").read_text(encoding="utf-8") == foreign_payload
+
+
 def test_json_artifact_writer_refuses_to_overwrite_prior_success(tmp_path) -> None:
     output = tmp_path / "benchmark.json"
     runner.write_json_artifact(output, {"run": 1})
 
-    with pytest.raises(FileExistsError, match="benchmark.json"):
+    with pytest.raises(FileExistsError, match=r"benchmark.json"):
         runner.write_json_artifact(output, {"run": 2})
 
     assert json.loads(output.read_text()) == {"run": 1}
@@ -816,7 +1105,7 @@ def test_context_preflight_only_cli_rejects_model_len_shorter_than_manifest(
     Evo2Config(max_position_embeddings=10_240).save_pretrained(checkpoint)
     output = tmp_path / "undersized.json"
 
-    with pytest.raises(ValueError, match="max_model_len=16.*workload max_total_tokens=6001"):
+    with pytest.raises(ValueError, match=r"max_model_len=16.*workload max_total_tokens=6001"):
         runner.main(
             [
                 "--backend",
@@ -1196,6 +1485,260 @@ def test_load_source_manifest_tokenizes_hash_pinned_jsonl_and_preserves_ids(tmp_
     assert manifest.prompt_tokenizer_sha256 == hashlib.sha256(tokenizer_json.read_bytes()).hexdigest()
 
 
+def test_parser_and_loader_build_one_executable_homogeneous_identity_case(tmp_path) -> None:
+    manifest_path = tmp_path / "base.json"
+    manifest_path.write_text(json.dumps(_canonical_base_manifest().to_dict()), encoding="utf-8")
+    parsed = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--manifest",
+            str(manifest_path),
+            "--topology",
+            "tp2",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--request-count",
+            "96",
+            "--request-id-prefix",
+            "canonical-case3",
+            "--prompt-tokenizer-json",
+            str(TOKENIZER_JSON),
+            "--canonical-identity-case",
+            "3",
+            "--canonical-prompts-csv",
+            str(PROMPTS_CSV),
+            "--output",
+            str(tmp_path / "proof.json"),
+        ]
+    )
+
+    manifest = runner.load_source_manifest(parsed)
+
+    assert parsed.canonical_identity_case == 3
+    assert len(manifest.requests) == 96
+    assert {len(request.prompt_token_ids) for request in manifest.requests} == {3808}
+    assert len({request.prompt_token_ids for request in manifest.requests}) == 1
+    assert manifest.max_new_tokens == 500
+
+    profile = runner.profile_from_args(parsed, manifest)
+    contract = runner.build_benchmark_contract(parsed, manifest, profile)
+    identity = contract["canonical_identity"]
+    assert identity["case_index"] == 3
+    assert identity["checkpoint"] == CANONICAL_7B_CHECKPOINT
+    assert identity["schedule"]["global_request_shapes"] == [96]
+    assert identity["schedule"]["engine_request_shapes"] == [[96]]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"request_count": None},
+        {"prompt_jsonl": Path("other.jsonl")},
+        {"uniform_prompt_length": 2048},
+        {"max_new_tokens": 499},
+    ),
+)
+def test_canonical_identity_loader_rejects_incompatible_workload_rewrites(tmp_path, overrides) -> None:
+    manifest_path = tmp_path / "base.json"
+    manifest_path.write_text(json.dumps(_canonical_base_manifest().to_dict()), encoding="utf-8")
+    values = {
+        "manifest": manifest_path,
+        "prompt_jsonl": None,
+        "prompt_jsonl_sha256": None,
+        "prompt_tokenizer_json": TOKENIZER_JSON,
+        "expected_prompt_tokens": None,
+        "canonical_identity_case": 0,
+        "canonical_prompts_csv": PROMPTS_CSV,
+        "request_count": 96,
+        "request_id_prefix": "canonical-case0",
+        "uniform_prompt_length": None,
+        "max_new_tokens": None,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match="canonical identity"):
+        runner.load_source_manifest(SimpleNamespace(**values))
+
+
+def _runner_identity_records(manifest, target):
+    return tuple(
+        GenerationRecord(
+            request_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            output_token_ids=tuple(target.encode("ascii")),
+            output_logprobs=(-0.1,) * 500,
+            requested_max_tokens=500,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        )
+        for request in manifest.requests
+    )
+
+
+def _runner_identity_phase(schedule, *, phase_name="identity"):
+    waves = []
+    observations = []
+    start = 0
+    for wave_index, (global_shape, engine_shapes) in enumerate(
+        zip(schedule.global_request_shapes, schedule.engine_request_shapes, strict=True)
+    ):
+        wave_phase = f"{phase_name}.wave-{wave_index:03d}"
+        stop = start + global_shape
+        if schedule.topology == "tp2":
+            observations.append(
+                {
+                    "phase": wave_phase,
+                    "runtime_mode": "CUDAGraphMode.FULL",
+                    "num_unpadded_tokens": global_shape,
+                    "num_padded_tokens": global_shape,
+                    "num_paddings": 0,
+                }
+            )
+            waves.append(
+                {
+                    "wave_index": wave_index,
+                    "start": start,
+                    "stop": stop,
+                    "request_count": global_shape,
+                    "full_decode_proof": {
+                        "batch_size": global_shape,
+                        "max_new_tokens": 500,
+                        "maximum_full_batch": global_shape,
+                        "passed": True,
+                    },
+                    "scheduler_capacity_proof": {
+                        "global_wave_size": global_shape,
+                        "engine_request_count": global_shape,
+                        "maximum_running_requests": global_shape,
+                        "batch_fit_without_preemption": True,
+                    },
+                }
+            )
+        else:
+            engines = []
+            for dp_rank, engine_shape in enumerate(engine_shapes):
+                engine_observations = [
+                    {
+                        "phase": wave_phase,
+                        "runtime_mode": "CUDAGraphMode.FULL",
+                        "num_unpadded_tokens": engine_shape,
+                        "num_padded_tokens": engine_shape,
+                        "num_paddings": 0,
+                    }
+                ]
+                engines.append(
+                    {
+                        "dp_rank": dp_rank,
+                        "request_count": engine_shape,
+                        "cudagraph_observations": engine_observations,
+                        "full_decode_proof": {
+                            "batch_size": engine_shape,
+                            "max_new_tokens": 500,
+                            "maximum_full_batch": engine_shape,
+                            "passed": True,
+                        },
+                        "scheduler_capacity_proof": {
+                            "global_wave_size": global_shape,
+                            "engine_request_count": engine_shape,
+                            "maximum_running_requests": engine_shape,
+                            "batch_fit_without_preemption": True,
+                        },
+                    }
+                )
+            waves.append(
+                {
+                    "wave_index": wave_index,
+                    "start": start,
+                    "stop": stop,
+                    "request_count": global_shape,
+                    "engines": engines,
+                }
+            )
+        start = stop
+    return {
+        "phase": phase_name,
+        "sample": {
+            "request_count": schedule.request_count,
+            "generated_tokens": schedule.request_count * 500,
+            "output_lengths": [500] * schedule.request_count,
+        },
+        "wave_proofs": waves,
+        "cudagraph_observations_retained": observations,
+    }
+
+
+def test_linked_identity_validator_recomputes_raw_outputs_and_physical_shapes(tmp_path) -> None:
+    case = load_canonical_7b_identity_cases(PROMPTS_CSV)[0]
+    manifest = build_canonical_identity_manifest(
+        _canonical_base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+        tokenize=lambda text: tuple(text.encode("ascii")),
+        request_count=2,
+        request_id_prefix="identity-case0",
+    )
+    schedule = build_homogeneous_identity_schedule(topology="tp2", request_count=2, global_wave_size=2)
+    phase = _runner_identity_phase(schedule)
+    executions = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        call_index=0,
+    )
+    phase["full_output_artifact"] = runner.write_full_generation_records_artifact(
+        tmp_path / "linked.outputs.jsonl.gz",
+        records=_runner_identity_records(manifest, case.target),
+        execution_records=executions,
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+    )
+    args = SimpleNamespace(
+        canonical_identity_case=0,
+        canonical_prompts_csv=PROMPTS_CSV,
+        prompt_tokenizer_json=TOKENIZER_JSON,
+    )
+    profile = SimpleNamespace(topology="tp2", global_wave_size=2)
+    phases, summary = runner.canonical_identity_phase_artifacts(
+        args=args,
+        manifest=manifest,
+        profile=profile,
+        phase_artifacts=[phase],
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+        collect_physical_proof=True,
+    )
+    artifact = {"phases": phases, "canonical_identity": summary}
+    contract = build_canonical_identity_contract(
+        case=case,
+        schedule=schedule,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+    )
+
+    recomputed = runner.validate_canonical_identity_proof_evidence(
+        artifact,
+        manifest=manifest,
+        profile=profile,
+        expected_contract={"canonical_identity": contract},
+    )
+    assert recomputed == summary
+
+    artifact["phases"][0]["canonical_identity_evidence"]["outputs"]["passed"] = False
+    with pytest.raises(AssertionError, match="canonical identity"):
+        runner.validate_canonical_identity_proof_evidence(
+            artifact,
+            manifest=manifest,
+            profile=profile,
+            expected_contract={"canonical_identity": contract},
+        )
+
+
 def test_prepare_workload_rejects_synthetic_prompt_or_id_rewrites_for_frozen_source(tmp_path) -> None:
     prompt_source = tmp_path / "matched.jsonl"
     prompt_source.write_text('{"id":"audit-0","prompt":"ACGT"}\n', encoding="utf-8")
@@ -1262,6 +1805,7 @@ def _write_valid_direct_proof_artifact(
     *,
     generation_round: int = 7,
     shared_prefix: bool = False,
+    exact_progress: bool = False,
 ) -> tuple[Path, dict, dict]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     proof_path = tmp_path / "proof.json"
@@ -1269,6 +1813,7 @@ def _write_valid_direct_proof_artifact(
         _shared_prefix_manifest() if shared_prefix else WorkloadManifest.from_path(DATA).request_slice(0, 2)
     ).with_max_new_tokens(3)
     prefix_args = ["--shared-prefix-state-reuse"] if shared_prefix else []
+    progress_args = ["--exact-progress-gate"] if exact_progress else []
     args = runner.build_parser().parse_args(
         [
             "--backend",
@@ -1297,6 +1842,7 @@ def _write_valid_direct_proof_artifact(
             "1",
             "--proof",
             *prefix_args,
+            *progress_args,
             "--output",
             str(proof_path),
         ]
@@ -1431,6 +1977,7 @@ def _write_valid_direct_proof_artifact(
             "call_index": call_index,
             "generation_s": 1.0,
             "full_decode_proof": full_decode,
+            "scheduler_observations": scheduler_observations,
             "scheduler_capacity_proof": scheduler,
         }
         workers = [
@@ -1443,6 +1990,7 @@ def _write_valid_direct_proof_artifact(
                 "pci_bus_id": hardware["devices"][rank]["pci_bus_id"],
                 "cuda_visible_devices": "0,1",
                 "visible_device_selector": str(rank),
+                "engine_seed": manifest.seed,
                 "fir_routes": {
                     "direct": {"calls": 27, "requests": 54, "tokens": 108},
                     "fallback_reasons": {"short_request": 27},
@@ -1508,6 +2056,19 @@ def _write_valid_direct_proof_artifact(
                     "passed": True,
                     "waves": [full_decode],
                 },
+                "exact_generation_progress": (
+                    runner.exact_generation_progress_evidence(
+                        manifest,
+                        sidecar_counts={
+                            "request_count": sidecar["request_count"],
+                            "output_token_id_count": sidecar["output_token_id_count"],
+                            "chosen_token_logprob_count": sidecar["chosen_token_logprob_count"],
+                        },
+                        full_decode_summaries=[full_decode],
+                    )
+                    if exact_progress
+                    else None
+                ),
                 "worker_proof": workers,
                 "shared_prefix_state_reuse": prefix_reuse,
                 "proof_collected": True,
@@ -1516,6 +2077,14 @@ def _write_valid_direct_proof_artifact(
         )
         call_index += 1
 
+    phases, exact_progress_evidence = runner.attach_exact_generation_progress_evidence(
+        phases,
+        manifest=manifest,
+        enabled=exact_progress,
+        proof_collected=True,
+        topology="tp2",
+        linked_proof_artifact=None,
+    )
     initialized_workers = [
         {
             "rank": rank,
@@ -1526,6 +2095,7 @@ def _write_valid_direct_proof_artifact(
             "pci_bus_id": hardware["devices"][rank]["pci_bus_id"],
             "cuda_visible_devices": "0,1",
             "visible_device_selector": str(rank),
+            "engine_seed": manifest.seed,
             "fir_routes": {},
             "compilation": dict(compilation),
         }
@@ -1568,6 +2138,7 @@ def _write_valid_direct_proof_artifact(
         },
         "initialized_worker_proof": initialized_workers,
         "phases": phases,
+        "exact_generation_progress": exact_progress_evidence,
     }
     proof_path.write_text(json.dumps(artifact), encoding="utf-8")
     return proof_path, contract, artifact
@@ -1708,6 +2279,7 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
                 "pci_bus_id": hardware["devices"][shard.replica_index]["pci_bus_id"],
                 "cuda_visible_devices": str(shard.replica_index),
                 "visible_device_selector": str(shard.replica_index),
+                "engine_seed": manifest.seed,
                 "fir_routes": {
                     "direct": {"calls": 27, "requests": 27, "tokens": 54},
                     "fallback_reasons": {"short_request": 27},
@@ -1833,6 +2405,115 @@ def test_linked_proof_validator_accepts_complete_recomputed_direct_evidence(tmp_
     assert evidence["artifact_sha256"] == hashlib.sha256(proof_path.read_bytes()).hexdigest()
 
 
+def test_linked_proof_validator_rejects_tp2_summary_without_raw_scheduler_evidence(tmp_path) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    wave = artifact["phases"][0]["wave_proofs"][0]
+    wave.pop("scheduler_observations")
+    wave["scheduler_capacity_proof"].update(
+        {
+            "scheduler_observation_count": 999,
+            "prompt_tokens_computed": 0,
+            "prompt_tokens_cached": 999_999,
+            "prompt_tokens_total": 1,
+            "maximum_waiting_requests": 999_999,
+            "maximum_skipped_waiting_requests": 999_999,
+            "passed": True,
+        }
+    )
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="scheduler"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
+
+
+def test_linked_proof_validator_rejects_foreign_phase_scheduler_observations(tmp_path) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    observations = artifact["phases"][0]["wave_proofs"][0]["scheduler_observations"]
+    foreign_observation = copy.deepcopy(observations[0])
+    foreign_observation["phase"] = "foreign.wave-000"
+    observations.append(foreign_observation)
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="scheduler"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
+
+
+def test_linked_proof_validator_rejects_cuda_observations_outside_their_physical_wave(tmp_path) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    artifact["phases"][0]["cudagraph_observations_retained"][0]["phase"] = "foreign.wave-000"
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"CUDA|wave|observation"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
+
+
+def test_cuda_phase_evidence_rejects_truncated_middle_observations() -> None:
+    observation = {
+        "phase": "steady-0.wave-000",
+        "engine_index": 0,
+        "num_unpadded_tokens": 2,
+        "num_padded_tokens": 2,
+        "num_paddings": 0,
+        "runtime_mode": "CUDAGraphMode.FULL",
+    }
+    complete = [dict(observation) for _ in range(257)]
+    phase = {
+        "cudagraph_observation_count": len(complete),
+        "cudagraph_observations_retained": [*complete[:128], *complete[-128:]],
+        "cudagraph_summary": runner.summarize_cudagraph_observations(tuple(complete)),
+    }
+
+    with pytest.raises(AssertionError, match=r"complete|lossless|observation"):
+        runner._validate_cudagraph_phase_evidence(phase, maximum_wave_size=2)
+
+
+def test_generation_phase_result_serializes_every_cuda_observation_losslessly() -> None:
+    observations = tuple(
+        {
+            "phase": "steady-0.wave-000",
+            "engine_index": 0,
+            "num_unpadded_tokens": 2,
+            "num_padded_tokens": 2,
+            "num_paddings": 0,
+            "runtime_mode": "CUDAGraphMode.FULL",
+        }
+        for _ in range(257)
+    )
+    result = runner.GenerationPhaseResult(
+        phase="steady-0",
+        sample=SimpleNamespace(to_dict=lambda: {}),
+        generation_call_s=(1.0,),
+        wave_proofs=({"wave_index": 0, "request_count": 2, "generation_s": 1.0},),
+        observations=observations,
+        output_summaries=(),
+        request_executions=(),
+        full_output_artifact={},
+        full_decode_proof=None,
+        worker_proof=(),
+        shared_prefix_state_reuse=None,
+        proof_collected=True,
+        prefix_cache_reset=False,
+    )
+
+    serialized = result.to_dict()
+
+    assert serialized["cudagraph_observation_count"] == 257
+    assert serialized["cudagraph_observations_retained"] == list(observations)
+    assert serialized["cudagraph_summary"][0]["count"] == 257
+
+
 def test_linked_proof_validator_accepts_and_recomputes_dp2_engine_evidence(tmp_path) -> None:
     proof_path, contract, _ = _write_valid_dp2_proof_artifact(tmp_path)
 
@@ -1884,6 +2565,37 @@ def test_linked_proof_validator_recomputes_physical_prefix_reuse(tmp_path) -> No
         )
 
 
+def test_exact_progress_gate_is_linked_and_recomputed_from_raw_proof(tmp_path) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(
+        tmp_path,
+        exact_progress=True,
+    )
+
+    assert contract["exact_generation_progress"] == {
+        "schema_version": 1,
+        "request_count": 2,
+        "max_new_tokens": 3,
+        "expected_first_sampled_tokens": 2,
+        "expected_decode_token_updates": 4,
+        "expected_retained_output_token_ids": 6,
+        "expected_retained_chosen_token_logprobs": 6,
+    }
+    runner.validate_linked_proof_artifact(
+        proof_path,
+        expected_contract=contract,
+        require_memory_headroom=True,
+    )
+
+    artifact["phases"][0]["exact_generation_progress"]["observed_full_decode_token_updates"] -= 1
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(AssertionError, match="exact-generation|exact generation"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
+
+
 @pytest.mark.parametrize(
     "tamper",
     (
@@ -1897,6 +2609,8 @@ def test_linked_proof_validator_recomputes_physical_prefix_reuse(tmp_path) -> No
         "fir_route",
         "fir_unknown_route",
         "gpu_binding",
+        "engine_seed",
+        "phase_gpu_reassignment",
         "runtime_attestation",
         "memory",
     ),
@@ -1930,6 +2644,22 @@ def test_linked_proof_validator_recomputes_all_direct_evidence(tmp_path, tamper)
         }
     elif tamper == "gpu_binding":
         artifact["phases"][0]["worker_proof"][0]["cuda_visible_devices"] = "1,0"
+    elif tamper == "engine_seed":
+        artifact["phases"][0]["worker_proof"][1]["engine_seed"] += 1
+    elif tamper == "phase_gpu_reassignment":
+        workers = artifact["phases"][0]["worker_proof"]
+        fields = (
+            "device",
+            "logical_device",
+            "device_name",
+            "device_uuid",
+            "pci_bus_id",
+            "visible_device_selector",
+        )
+        first = {field: workers[0][field] for field in fields}
+        second = {field: workers[1][field] for field in fields}
+        workers[0].update(second)
+        workers[1].update(first)
     elif tamper == "runtime_attestation":
         artifact["gpu_hardware_provenance"]["devices"][0]["total_memory_bytes"] += 100 * 1024**3
         artifact["gpu_memory_headroom"] = runner.gpu_memory_headroom_evidence(
@@ -2061,8 +2791,59 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs(t
     assert artifact["worker_proof"][0]["fir_routes"]["equal_length_conv"]["calls"] == 9
     assert artifact["request_executions"][0]["seed"] == 42
     assert artifact["full_output_artifact"]["generated_token_count"] == 6
+    assert artifact["full_output_artifact"]["output_token_id_count"] == 6
+    assert artifact["full_output_artifact"]["chosen_token_logprob_count"] == 6
     assert artifact["full_decode_proof"]["passed"] is True
     assert artifact["full_decode_proof"]["full_decode_tokens"] == 4
+
+
+def test_generation_phase_skips_post_generation_evidence_after_namespace_ownership_loss(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    output = tmp_path / "proof.json"
+    marker = runner.reserve_output_namespace(output)
+    sidecar = runner.phase_output_artifact_path(output, phase="steady-0")
+    foreign = tmp_path / "foreign-marker"
+    foreign_payload = "foreign owner\n"
+    foreign.write_text(foreign_payload, encoding="utf-8")
+    recorder = CUDAGraphProofRecorder()
+    execution_records = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        call_index=0,
+    )
+    proof_events = []
+
+    class OwnershipLosingLLM:
+        def generate(self, prompts, sampling_params, *, use_tqdm):
+            foreign.replace(marker)
+            return _fake_outputs(manifest)
+
+    with pytest.raises(RuntimeError, match="ownership"):
+        run_generation_phase(
+            llm=OwnershipLosingLLM(),
+            manifest=manifest,
+            sampling_params=build_request_sampling_params(
+                manifest,
+                sampling_params_factory=SimpleNamespace,
+                execution_records=execution_records,
+            ),
+            phase="steady-0",
+            sample_index=0,
+            recorder=recorder,
+            memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+            execution_records=execution_records,
+            full_output_path=sidecar,
+            namespace_output_path=output,
+            reset_worker_proof=lambda: proof_events.append("reset"),
+            snapshot_worker_proof=lambda: proof_events.append("snapshot"),
+            clock=iter((10.0, 11.0)).__next__,
+        )
+
+    assert proof_events == ["reset"]
+    assert not sidecar.exists()
+    assert marker.read_text(encoding="utf-8") == foreign_payload
 
 
 def test_speed_generation_avoids_proof_callbacks_and_memory_polling(tmp_path) -> None:
@@ -2199,6 +2980,12 @@ def test_generation_phase_executes_explicit_10x96_plus_tail40_calls(tmp_path) ->
     assert [record.seed for record in result.request_executions[96:192]] == list(range(8_000_066, 8_000_162))
     assert [record.seed for record in result.request_executions[-40:]] == list(range(17_000_093, 17_000_133))
     assert all(proof["scheduler_capacity_proof"]["batch_fit_without_preemption"] for proof in result.wave_proofs)
+    assert [len(proof["scheduler_observations"]) for proof in result.wave_proofs] == [2] * 11
+    assert all(
+        observation["phase"] == f"steady-0.wave-{wave_index:03d}"
+        for wave_index, proof in enumerate(result.wave_proofs)
+        for observation in proof["scheduler_observations"]
+    )
     assert result.full_decode_proof["wave_count"] == 11
     assert result.full_decode_proof["expected_decode_tokens"] == 2_000
     assert result.full_decode_proof["full_decode_tokens"] == 2_000
@@ -2296,6 +3083,22 @@ def _prefix_clone_record(
     source_groups = _prefix_attention_groups(num_computed_tokens)
     reused_groups = _prefix_attention_groups(num_computed_tokens)
     copied_bytes = 4 * copied_elements
+    runtime_state_layout = [
+        {
+            key: entry[key]
+            for key in (
+                "kv_cache_group_id",
+                "layer_name",
+                "state_index",
+                "dtype",
+                "state_shape",
+                "block_shape",
+                "copied_elements",
+                "copied_bytes",
+            )
+        }
+        for entry in state_copies
+    ]
     return {
         "request_id": request_id,
         "source_miss_request_id": source_request_id,
@@ -2306,6 +3109,7 @@ def _prefix_clone_record(
         "block_size": 16,
         "source_attention_kv_groups": source_groups,
         "reused_attention_kv_groups": reused_groups,
+        "runtime_state_layout": runtime_state_layout,
         "state_copies": state_copies,
         "copy_entries": copy_entries,
         "copied_elements": copied_elements,
@@ -2450,6 +3254,71 @@ def test_shared_prefix_state_reuse_evidence_requires_cache_hits_and_physical_cop
     assert evidence["expected_fp32_state_copy_bytes_per_request"] == 4_096
     assert [worker["clone_count"] for worker in evidence["worker_state_clones"]] == [1, 1]
     assert evidence["worker_state_clones"][0]["requests"][0]["copied_bytes"] == 4_096
+
+
+def test_shared_prefix_state_reuse_evidence_rejects_empty_self_attested_state_copy() -> None:
+    manifest = _shared_prefix_manifest()
+    clone = _prefix_clone_record("empty")
+    clone.update(
+        {
+            "state_copies": [],
+            "copy_entries": 0,
+            "copied_elements": 0,
+            "copied_bytes": 0,
+            "expected_copy_entries": 0,
+            "expected_copied_elements": 0,
+            "expected_copied_bytes": 0,
+        }
+    )
+
+    with pytest.raises(AssertionError, match=r"state copy|state-copy|recurrent-state"):
+        runner.shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=(0, 16),
+            worker_proof=(
+                {
+                    "rank": 0,
+                    "device": 0,
+                    "mamba_prefix_clones": _prefix_worker_stats([clone]),
+                },
+            ),
+            expected_worker_clone_counts=(1,),
+            cache_block_size=16,
+        )
+
+
+def test_shared_prefix_state_reuse_evidence_rejects_self_consistent_positive_layout_subset() -> None:
+    manifest = _shared_prefix_manifest()
+    clone = _prefix_clone_record("subset", copy_entries=2, copied_elements=8)
+    retained_copy = clone["state_copies"][0]
+    retained_elements = retained_copy["copied_elements"]
+    retained_bytes = retained_copy["copied_bytes"]
+    clone.update(
+        {
+            "state_copies": [retained_copy],
+            "copy_entries": 1,
+            "copied_elements": retained_elements,
+            "copied_bytes": retained_bytes,
+            "expected_copy_entries": 1,
+            "expected_copied_elements": retained_elements,
+            "expected_copied_bytes": retained_bytes,
+        }
+    )
+
+    with pytest.raises(AssertionError, match=r"complete|runtime|layout"):
+        runner.shared_prefix_state_reuse_evidence(
+            manifest,
+            cached_tokens=(0, 16),
+            worker_proof=(
+                {
+                    "rank": 0,
+                    "device": 0,
+                    "mamba_prefix_clones": _prefix_worker_stats([clone]),
+                },
+            ),
+            expected_worker_clone_counts=(1,),
+            cache_block_size=16,
+        )
 
 
 def test_shared_prefix_state_reuse_evidence_proves_exact_96x25k_clone_layout() -> None:

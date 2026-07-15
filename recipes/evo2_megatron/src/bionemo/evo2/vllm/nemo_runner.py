@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import struct
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
@@ -28,15 +29,18 @@ from bionemo.evo2.vllm.profile import Evo2VllmProfile, context_length_preflight,
 from bionemo.evo2.vllm.runner import (
     PeakMemoryMonitor,
     RequestExecutionRecord,
+    attach_exact_generation_progress_evidence,
     benchmark_contract_sha256,
     benchmark_instrumentation_contract,
     benchmark_mode_from_args,
     build_benchmark_contract,
+    canonical_identity_phase_artifacts,
     checkpoint_provenance,
     full_decode_proof_summary,
     gpu_hardware_provenance,
     gpu_memory_headroom_evidence,
     make_nvml_memory_reader,
+    manifest_output_decoder,
     phase_output_artifact_path,
     profile_from_args,
     request_seed,
@@ -354,6 +358,7 @@ def full_vocab_logprob_evidence_from_nemo_output(
     retained_counts: list[list[int]] = []
     retained_finite_counts: list[list[int]] = []
     retained_negative_infinity_counts: list[list[int]] = []
+    chosen_token_ids: list[list[int]] = []
     chosen_token_logprobs: list[list[float]] = []
     for row_index, record in enumerate(records):
         generation_length = len(record.output_token_ids)
@@ -372,6 +377,7 @@ def full_vocab_logprob_evidence_from_nemo_output(
                 f"expected={expected_finite_support}, actual={finite_counts.tolist()}"
             )
 
+        row_chosen_token_ids = []
         row_chosen_logprobs = []
         for position, (token_id, chosen_logprob) in enumerate(
             zip(record.output_token_ids, record.output_logprobs, strict=True)
@@ -381,14 +387,12 @@ def full_vocab_logprob_evidence_from_nemo_output(
             distribution_logprob = float(row[position, token_id])
             if not math.isfinite(distribution_logprob) or not math.isfinite(chosen_logprob):
                 raise AssertionError("chosen token is outside finite processed support")
-            if not math.isclose(
-                distribution_logprob,
-                chosen_logprob,
-                rel_tol=0.0,
-                abs_tol=1e-6,
-            ):
-                raise AssertionError("chosen-token logprob does not match its full-vocabulary distribution entry")
-            row_chosen_logprobs.append(chosen_logprob)
+            if struct.pack(">d", distribution_logprob) != struct.pack(">d", float(chosen_logprob)):
+                raise AssertionError(
+                    "chosen-token logprob does not bitwise match its full-vocabulary distribution entry"
+                )
+            row_chosen_token_ids.append(token_id)
+            row_chosen_logprobs.append(distribution_logprob)
 
         retained.append(
             [[float(value) if math.isfinite(float(value)) else None for value in position] for position in row]
@@ -396,6 +400,7 @@ def full_vocab_logprob_evidence_from_nemo_output(
         retained_counts.append([int(value) for value in row_counts])
         retained_finite_counts.append([int(value) for value in finite_counts])
         retained_negative_infinity_counts.append([int(value) for value in torch.isneginf(row).sum(dim=-1)])
+        chosen_token_ids.append(row_chosen_token_ids)
         chosen_token_logprobs.append(row_chosen_logprobs)
 
     return {
@@ -406,6 +411,7 @@ def full_vocab_logprob_evidence_from_nemo_output(
         "expected_finite_support": expected_finite_support,
         "chosen_token_oracle_passed": True,
         "chosen_token_in_finite_support": True,
+        "chosen_token_ids": chosen_token_ids,
         "chosen_token_logprobs": chosen_token_logprobs,
         "logprobs": retained,
     }
@@ -528,14 +534,22 @@ def run_nemo_generation_phase(
     phase: str,
     sample_index: int,
     full_output_path: str | Path,
+    namespace_output_path: str | Path | None = None,
     memory_monitor_factory: Any,
     ray_get: Any | None = None,
     clock: Any | None = None,
     greedy: bool = False,
     require_full_vocab_logprobs: bool = False,
     expected_finite_logprob_support: int | None = None,
+    decode_output_token_ids: Any | None = None,
 ) -> NemoGenerationPhaseResult:
     """Run exact NeMo-RL waves with per-engine graph, route, seed, and ownership proof."""
+
+    def require_namespace_ownership() -> None:
+        if namespace_output_path is not None:
+            require_output_namespace_reservation(namespace_output_path)
+
+    require_namespace_ownership()
     if not phase:
         raise ValueError("phase cannot be empty")
     if ray_get is None:
@@ -587,6 +601,7 @@ def run_nemo_generation_phase(
                 greedy=greedy,
             )
             generation_call_s.append(clock() - begin)
+            require_namespace_ownership()
             engine_proofs = []
             if profile.proof:
                 engine_proofs = _proof_rpc(
@@ -729,10 +744,12 @@ def run_nemo_generation_phase(
         output_lengths=output_lengths,
         peak_device_memory_bytes=monitor.peak_device_memory_bytes,
     )
+    require_namespace_ownership()
     full_output_artifact = write_full_generation_records_artifact(
         full_output_path,
         records=all_records,
         execution_records=all_executions,
+        decode_output_token_ids=decode_output_token_ids,
     )
     return NemoGenerationPhaseResult(
         phase=phase,
@@ -830,6 +847,9 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
         checkpoint=args.checkpoint,
         load_format=args.load_format,
     )
+    decoder_begin = clock()
+    output_decoder = manifest_output_decoder(manifest)
+    output_decoder_setup_s = clock() - decoder_begin
     memory_reader = make_nvml_memory_reader()
 
     ray_dir_suffix = __import__("hashlib").sha256(str(output_path).encode()).hexdigest()[:10]
@@ -901,9 +921,11 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                     phase=phase,
                     sample_index=sample_index,
                     full_output_path=phase_output_artifact_path(output_path, phase=phase),
+                    namespace_output_path=output_path,
                     memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
                     ray_get=ray.get,
                     clock=clock,
+                    decode_output_token_ids=output_decoder,
                 )
             )
 
@@ -942,6 +964,22 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             memory_headroom = linked_proof["gpu_memory_headroom"]
 
         steady_results = [result for result in phase_results if result.phase.startswith("steady-")]
+        phase_artifacts, exact_progress = attach_exact_generation_progress_evidence(
+            [result.to_dict() for result in phase_results],
+            manifest=manifest,
+            enabled=bool(args.exact_progress_gate),
+            proof_collected=profile.proof,
+            topology=profile.topology,
+            linked_proof_artifact=args.linked_proof_artifact,
+        )
+        phase_artifacts, canonical_identity = canonical_identity_phase_artifacts(
+            args=args,
+            manifest=manifest,
+            profile=profile,
+            phase_artifacts=phase_artifacts,
+            decode_output_token_ids=output_decoder,
+            collect_physical_proof=profile.proof,
+        )
         return {
             "schema_version": 1,
             "backend": "nemo-rl-vllm",
@@ -974,6 +1012,8 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             "vllm_installation_provenance": vllm_identity,
             "gpu_hardware_provenance": gpu_identity,
             "gpu_memory_headroom": memory_headroom,
+            "canonical_identity": canonical_identity,
+            "exact_generation_progress": exact_progress,
             "invocation": {
                 "argv": [__import__("sys").executable, *__import__("sys").argv],
                 "parsed_args": {
@@ -1013,11 +1053,12 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                 "ray_init_s": ray_init_s,
                 "engine_init_s": engine_init_s,
                 "resolved_config_snapshot_s": resolved_config_snapshot_s,
+                "output_decoder_setup_s": output_decoder_setup_s,
                 "engine_init_peak_device_memory_bytes": list(init_memory.peak_device_memory_bytes),
             },
             "initialized_reset": initialized_reset,
             "initialized_engine_proofs": initialized_proofs,
-            "phases": [result.to_dict() for result in phase_results],
+            "phases": phase_artifacts,
             "steady_aggregate": aggregate_samples([result.sample for result in steady_results]),
         }
     finally:

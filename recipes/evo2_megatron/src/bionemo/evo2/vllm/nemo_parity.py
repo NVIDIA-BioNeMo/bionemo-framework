@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import math
 import os
+import struct
 import sys
 import threading
 import time
@@ -60,9 +61,7 @@ def compare_full_vocab_evidence(
     candidate: dict[str, Any],
 ) -> dict[str, Any]:
     """Compare every retained request, continuation step, and vocabulary token."""
-    if not reference.get("chosen_token_oracle_passed") or not candidate.get(
-        "chosen_token_oracle_passed"
-    ):
+    if not reference.get("chosen_token_oracle_passed") or not candidate.get("chosen_token_oracle_passed"):
         raise AssertionError("full-vocabulary evidence did not pass its chosen-token oracle")
     if reference.get("shape") != candidate.get("shape"):
         raise AssertionError("full-vocabulary evidence shapes differ")
@@ -74,9 +73,7 @@ def compare_full_vocab_evidence(
     expected_shape = tuple(int(value) for value in reference["shape"])
     if tuple(reference_tensor.shape) != expected_shape or tuple(candidate_tensor.shape) != expected_shape:
         raise AssertionError("retained logprob arrays do not match their declared shape")
-    if not bool(torch.all(torch.isfinite(reference_tensor))) or not bool(
-        torch.all(torch.isfinite(candidate_tensor))
-    ):
+    if not bool(torch.all(torch.isfinite(reference_tensor))) or not bool(torch.all(torch.isfinite(candidate_tensor))):
         raise AssertionError("full-vocabulary evidence contains non-finite values")
 
     errors = torch.abs(reference_tensor - candidate_tensor)
@@ -295,14 +292,61 @@ def _logprob_evidence_summary(evidence: dict[str, Any]) -> dict[str, Any]:
         raise AssertionError("logprob evidence does not account for every vocabulary token")
     if evidence.get("expected_finite_support") != finite_support:
         raise AssertionError("logprob evidence support does not match its configured contract")
+    chosen_token_ids = evidence.get("chosen_token_ids")
     chosen_logprobs = evidence.get("chosen_token_logprobs")
-    if not isinstance(chosen_logprobs, list) or any(
-        not math.isfinite(float(value)) for row in chosen_logprobs for value in row
+    full_logprobs = evidence.get("logprobs")
+    if (
+        not isinstance(chosen_token_ids, list)
+        or len(chosen_token_ids) != request_count
+        or not isinstance(chosen_logprobs, list)
+        or len(chosen_logprobs) != request_count
+        or not isinstance(full_logprobs, list)
+        or len(full_logprobs) != request_count
     ):
-        raise AssertionError("logprob evidence contains a non-finite chosen-token value")
-    if not evidence.get("chosen_token_in_finite_support") or not evidence.get(
-        "chosen_token_oracle_passed"
-    ):
+        raise AssertionError("logprob evidence does not retain exact chosen-token gather inputs")
+    gathered_logprobs = []
+    for row_index in range(request_count):
+        token_row = chosen_token_ids[row_index]
+        chosen_row = chosen_logprobs[row_index]
+        distribution_row = full_logprobs[row_index]
+        if (
+            not isinstance(token_row, list)
+            or len(token_row) != steps
+            or not isinstance(chosen_row, list)
+            or len(chosen_row) != steps
+            or not isinstance(distribution_row, list)
+            or len(distribution_row) != steps
+        ):
+            raise AssertionError("logprob evidence chosen-token rows do not match the retained tensor shape")
+        gathered_row = []
+        for step in range(steps):
+            token_id = token_row[step]
+            distribution = distribution_row[step]
+            if (
+                isinstance(token_id, bool)
+                or not isinstance(token_id, int)
+                or not 0 <= token_id < vocab_size
+                or not isinstance(distribution, list)
+                or len(distribution) != vocab_size
+            ):
+                raise AssertionError("logprob evidence contains an invalid chosen-token gather coordinate")
+            gathered = distribution[token_id]
+            reported = chosen_row[step]
+            if (
+                isinstance(gathered, bool)
+                or not isinstance(gathered, (int, float))
+                or not math.isfinite(float(gathered))
+                or isinstance(reported, bool)
+                or not isinstance(reported, (int, float))
+                or not math.isfinite(float(reported))
+            ):
+                raise AssertionError("logprob evidence contains a non-finite chosen-token value")
+            gathered_value = float(gathered)
+            if struct.pack(">d", gathered_value) != struct.pack(">d", float(reported)):
+                raise AssertionError("chosen-token summary does not bitwise match the retained full-vocabulary tensor")
+            gathered_row.append(gathered_value)
+        gathered_logprobs.append(gathered_row)
+    if not evidence.get("chosen_token_in_finite_support") or not evidence.get("chosen_token_oracle_passed"):
         raise AssertionError("logprob evidence did not prove its chosen processed-policy token")
 
     return {
@@ -312,7 +356,8 @@ def _logprob_evidence_summary(evidence: dict[str, Any]) -> dict[str, Any]:
         "negative_infinity_exclusions_per_step": negative_infinity,
         "chosen_token_in_finite_support": True,
         "chosen_token_oracle_passed": True,
-        "chosen_token_logprobs": chosen_logprobs,
+        "chosen_token_ids": chosen_token_ids,
+        "chosen_token_logprobs": gathered_logprobs,
     }
 
 
@@ -323,7 +368,13 @@ def _evidence_row(evidence: dict[str, Any], row_index: int) -> dict[str, Any]:
     return {
         "shape": [1, steps, vocab_size],
         "coverage_counts": [evidence["coverage_counts"][row_index]],
+        "finite_support_counts": [evidence["finite_support_counts"][row_index]],
+        "negative_infinity_counts": [evidence["negative_infinity_counts"][row_index]],
+        "expected_finite_support": evidence["expected_finite_support"],
         "chosen_token_oracle_passed": evidence["chosen_token_oracle_passed"],
+        "chosen_token_in_finite_support": evidence["chosen_token_in_finite_support"],
+        "chosen_token_ids": [evidence["chosen_token_ids"][row_index]],
+        "chosen_token_logprobs": [evidence["chosen_token_logprobs"][row_index]],
         "logprobs": [evidence["logprobs"][row_index]],
     }
 
@@ -564,6 +615,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                 phase=phase,
                 sample_index=phase_index,
                 full_output_path=phase_output_artifact_path(output_path, phase=phase),
+                namespace_output_path=output_path,
                 memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
                 ray_get=ray.get,
                 clock=clock,
@@ -856,9 +908,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                 "streams_disjoint": True,
                 "processed_policy_chosen_tokens_finite": True,
                 "processed_policy_support_size": stochastic_manifest.top_k,
-                "processed_policy_negative_infinity_exclusions": (
-                    args.num_logprobs - stochastic_manifest.top_k
-                ),
+                "processed_policy_negative_infinity_exclusions": (args.num_logprobs - stochastic_manifest.top_k),
             },
             "compilation_and_cudagraph_gate_passed": True,
             "final_compilation_validation": final_compilation_validation,
@@ -875,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run and persist the canonical TP2 parity/refit proof."""
     from bionemo.evo2.vllm.runner import (
         complete_output_namespace,
+        require_output_namespace_reservation,
         reserve_output_namespace,
         write_json_artifact,
     )
@@ -882,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     reservation = reserve_output_namespace(args.output)
     artifact = run_tp2_refit_parity(args)
+    require_output_namespace_reservation(args.output)
     write_json_artifact(args.output, artifact)
     complete_output_namespace(reservation, output_path=args.output)
     return 0

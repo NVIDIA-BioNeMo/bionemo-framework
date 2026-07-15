@@ -1,0 +1,585 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from bionemo.evo2.vllm.accuracy import (
+    CANONICAL_7B_CHECKPOINT,
+    CANONICAL_7B_PROMPTS_SHA256,
+    build_canonical_identity_contract,
+    build_canonical_identity_manifest,
+    build_common_prefix_identity_manifest,
+    build_homogeneous_identity_schedule,
+    load_canonical_7b_identity_cases,
+    load_common_prefix_identity_cases,
+    validate_canonical_identity_manifest,
+    validate_canonical_identity_output_artifact,
+    validate_common_prefix_identity_manifest,
+    validate_common_prefix_identity_output_artifacts,
+    validate_homogeneous_identity_phase_evidence,
+)
+from bionemo.evo2.vllm.benchmark import GenerationRecord, WorkloadManifest, WorkloadRequest
+from bionemo.evo2.vllm.runner import (
+    build_request_execution_records,
+    write_full_generation_records_artifact,
+)
+
+
+PROMPTS_CSV = Path(__file__).resolve().parent.parent / "data" / "prompts.csv"
+TOKENIZER_JSON = Path(__file__).resolve().parents[4] / "tokenizers/nucleotide_fast_tokenizer_512/tokenizer.json"
+
+
+def _base_manifest(*, source_checkpoint: str = CANONICAL_7B_CHECKPOINT) -> WorkloadManifest:
+    return WorkloadManifest(
+        schema_version=1,
+        name="canonical-identity-base",
+        source_checkpoint=source_checkpoint,
+        checkpoint_manifest_sha256="1" * 64,
+        checkpoint_index_sha256="2" * 64,
+        tokenizer_sha256="3" * 64,
+        requests=(WorkloadRequest(request_id="base", prompt_token_ids=(1,)),),
+        max_new_tokens=1,
+        temperature=0.5,
+        top_p=0.5,
+        top_k=4,
+        seed=7,
+        dtype="bfloat16",
+        ignore_eos=False,
+        stop_token_ids=(0,),
+    )
+
+
+def test_canonical_7b_identity_cases_pin_unchanged_protocol_and_inputs() -> None:
+    cases = load_canonical_7b_identity_cases(PROMPTS_CSV)
+
+    assert CANONICAL_7B_CHECKPOINT == "evo2/7b-1m:1.0"
+    assert CANONICAL_7B_PROMPTS_SHA256 == "7e525370e8fb66ef20c0e8d7959f6a0f8e78e5e973819cf3db6f4d23b0e19c0c"
+    assert [case.case_index for case in cases] == [0, 1, 2, 3]
+    assert [case.prompt_length for case in cases] == [3269, 3528, 3080, 3808]
+    assert [case.target_length for case in cases] == [500] * 4
+    assert [case.expected_identity_percent for case in cases] == [97.60, 89.63, 80.03, 84.57]
+    assert [case.minimum_identity_percent for case in cases] == pytest.approx([87.84, 80.667, 72.027, 76.113])
+    assert [case.prompt_sha256 for case in cases] == [
+        "a92c212221dbae0b8c8afef6f4cf53ec247efe3c41ca50ce8a5084fe8b275d8e",
+        "b3fc30040112d22c7bc8c699128c3848e56ab3e92fdc0d72dfdcf2fb7bf43db2",
+        "acc63af126428db972b9eda5187db2e3daa5c26d4222365a70d50e00adb91738",
+        "ba411e918b8a75de8be7853075df7e12efff5964bb28fe14e9b3af9cbedc0cbf",
+    ]
+    assert [case.target_sha256 for case in cases] == [
+        "40917dd09186f4ddf54a8963bb7165fb3c91b3141a569dc82682a766cffb500c",
+        "fdf6b6006f176f2c9e8aea829d5360a39718d434cd359e4eb9b29a8832fa8f88",
+        "48db0b8e5a58737820ee7839adfc7b4443990c790eb789c35e7da76127957a96",
+        "29478edc8329aaf37faef18abc5e6c18457f96f9d796b72dd4cf22bebee8dd74",
+    ]
+    assert all(case.midpoint_fraction == 0.5 for case in cases)
+    assert all(case.max_new_tokens == 500 for case in cases)
+    assert all(case.temperature == 1.0 and case.top_k == 1 and case.seed == 42 for case in cases)
+
+
+def test_canonical_identity_loader_rejects_modified_source(tmp_path) -> None:
+    modified = tmp_path / "prompts.csv"
+    modified.write_bytes(PROMPTS_CSV.read_bytes() + b"\n")
+
+    with pytest.raises(ValueError, match="SHA256"):
+        load_canonical_7b_identity_cases(modified)
+
+
+def test_common_2048_cases_are_deterministically_derived_from_frozen_7b_protocol() -> None:
+    canonical = load_canonical_7b_identity_cases(PROMPTS_CSV)
+    common = load_common_prefix_identity_cases(PROMPTS_CSV)
+
+    assert [case.case_index for case in common] == [0, 1, 2, 3]
+    assert [case.prompt for case in common] == [case.sequence[:2048] for case in canonical]
+    assert [case.target for case in common] == [case.sequence[2048:2548] for case in canonical]
+    assert all(case.prompt_length == 2048 and case.target_length == 500 for case in common)
+    assert all(case.max_new_tokens == 500 for case in common)
+    assert all(case.temperature == 1.0 and case.top_k == 1 and case.seed == 42 for case in common)
+
+
+def test_common_2048_manifest_repeats_only_one_case_without_padding(tmp_path) -> None:
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text("{}", encoding="utf-8")
+    case = load_common_prefix_identity_cases(PROMPTS_CSV)[1]
+    manifest = build_common_prefix_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=tokenizer_path,
+        tokenize=lambda text: tuple(ord(character) for character in text),
+        request_count=96,
+        request_id_prefix="common-case1",
+    )
+
+    assert manifest.name == "common-2048-7b-identity-case1-n96"
+    assert len(manifest.requests) == 96
+    assert {len(request.prompt_token_ids) for request in manifest.requests} == {2048}
+    assert len({request.prompt_token_ids for request in manifest.requests}) == 1
+    assert manifest.max_new_tokens == 500
+    assert manifest.top_k == 1
+    validate_common_prefix_identity_manifest(manifest, case=case, request_count=96)
+
+
+def _write_common_outputs(path, manifest, outputs):
+    records = tuple(
+        GenerationRecord(
+            request_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            output_token_ids=tuple(ord(character) for character in output),
+            output_logprobs=(-0.1,) * 500,
+            requested_max_tokens=500,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        )
+        for request, output in zip(manifest.requests, outputs, strict=True)
+    )
+    return write_full_generation_records_artifact(
+        path,
+        records=records,
+        execution_records=build_request_execution_records(
+            manifest,
+            global_request_offset=0,
+            dp_rank=0,
+            dp_size=1,
+            call_index=0,
+        ),
+        decode_output_token_ids=lambda token_ids: "".join(chr(token_id) for token_id in token_ids),
+    )
+
+
+def test_common_2048_output_gate_compares_every_request_to_serial_target_identity(tmp_path) -> None:
+    case = load_common_prefix_identity_cases(PROMPTS_CSV)[0]
+    reference_manifest = build_common_prefix_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+        tokenize=lambda text: tuple(ord(character) for character in text),
+        request_count=1,
+        request_id_prefix="serial",
+    )
+    candidate_manifest = build_common_prefix_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+        tokenize=lambda text: tuple(ord(character) for character in text),
+        request_count=2,
+        request_id_prefix="batched",
+    )
+
+    reference_artifact = _write_common_outputs(
+        tmp_path / "reference.outputs.jsonl.gz",
+        reference_manifest,
+        [case.target],
+    )
+    candidate_artifact = _write_common_outputs(
+        tmp_path / "candidate.outputs.jsonl.gz",
+        candidate_manifest,
+        [case.target, case.target],
+    )
+
+    evidence = validate_common_prefix_identity_output_artifacts(
+        reference_artifact,
+        candidate_artifact,
+        case=case,
+        expected_candidate_request_ids=[request.request_id for request in candidate_manifest.requests],
+        decode_output_token_ids=lambda token_ids: "".join(chr(token_id) for token_id in token_ids),
+    )
+
+    assert evidence["serial_target_identity_percent"] == 100.0
+    assert evidence["minimum_candidate_target_identity_percent"] == 100.0
+    assert evidence["candidate_request_count"] == 2
+    assert evidence["passed"] is True
+
+
+def test_common_2048_output_gate_rejects_one_request_more_than_five_points_below_serial(tmp_path) -> None:
+    case = load_common_prefix_identity_cases(PROMPTS_CSV)[0]
+    reference_manifest = build_common_prefix_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+        tokenize=lambda text: tuple(ord(character) for character in text),
+        request_count=1,
+        request_id_prefix="serial",
+    )
+    candidate_manifest = build_common_prefix_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+        tokenize=lambda text: tuple(ord(character) for character in text),
+        request_count=2,
+        request_id_prefix="batched",
+    )
+    mismatched_prefix = "".join("A" if base != "A" else "C" for base in case.target[:26])
+    low_identity = mismatched_prefix + case.target[26:]
+    reference_artifact = _write_common_outputs(
+        tmp_path / "reference.outputs.jsonl.gz",
+        reference_manifest,
+        [case.target],
+    )
+    candidate_artifact = _write_common_outputs(
+        tmp_path / "candidate.outputs.jsonl.gz",
+        candidate_manifest,
+        [case.target, low_identity],
+    )
+
+    with pytest.raises(AssertionError, match="serial-reference bound"):
+        validate_common_prefix_identity_output_artifacts(
+            reference_artifact,
+            candidate_artifact,
+            case=case,
+            expected_candidate_request_ids=[request.request_id for request in candidate_manifest.requests],
+            decode_output_token_ids=lambda token_ids: "".join(chr(token_id) for token_id in token_ids),
+        )
+
+
+def test_canonical_identity_manifest_is_one_homogeneous_case(tmp_path) -> None:
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text("{}", encoding="utf-8")
+    case = load_canonical_7b_identity_cases(PROMPTS_CSV)[2]
+    manifest = build_canonical_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=tokenizer_path,
+        tokenize=lambda text: tuple(ord(character) for character in text),
+        request_count=1_000,
+        request_id_prefix="identity-case2",
+    )
+
+    assert manifest.source_checkpoint == CANONICAL_7B_CHECKPOINT
+    assert manifest.name == "canonical-7b-identity-case2-n1000"
+    assert len(manifest.requests) == 1_000
+    assert len({request.prompt_token_ids for request in manifest.requests}) == 1
+    assert len(manifest.requests[0].prompt_token_ids) == case.prompt_length
+    assert manifest.max_new_tokens == 500
+    assert manifest.temperature == 1.0
+    assert manifest.top_p == 1.0
+    assert manifest.top_k == 1
+    assert manifest.seed == 42
+    assert manifest.ignore_eos is True
+    assert manifest.stop_token_ids == ()
+    assert manifest.prompt_source_path == str(PROMPTS_CSV.resolve())
+    assert manifest.prompt_source_sha256 == CANONICAL_7B_PROMPTS_SHA256
+    validate_canonical_identity_manifest(manifest, case=case, request_count=1_000)
+
+    requests = list(manifest.requests)
+    requests[-1] = WorkloadRequest(request_id=requests[-1].request_id, prompt_token_ids=(99,))
+    mixed = WorkloadManifest(**{**manifest.constructor_kwargs(), "requests": tuple(requests)})
+    with pytest.raises(AssertionError, match="homogeneous"):
+        validate_canonical_identity_manifest(mixed, case=case, request_count=1_000)
+
+
+def test_canonical_identity_manifest_rejects_noncanonical_checkpoint(tmp_path) -> None:
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text("{}", encoding="utf-8")
+    case = load_canonical_7b_identity_cases(PROMPTS_CSV)[0]
+
+    with pytest.raises(ValueError, match="evo2/7b-1m:1.0"):
+        build_canonical_identity_manifest(
+            _base_manifest(source_checkpoint="microviridae"),
+            case=case,
+            prompts_csv=PROMPTS_CSV,
+            tokenizer_path=tokenizer_path,
+            tokenize=lambda text: tuple(ord(character) for character in text),
+            request_count=96,
+            request_id_prefix="identity-case0",
+        )
+
+
+@pytest.mark.parametrize(
+    ("topology", "request_count", "global_wave_size", "global_shapes", "engine_shapes"),
+    (
+        ("tp2", 96, 96, (96,), ((96,),)),
+        ("dp2", 96, 96, (96,), ((48, 48),)),
+        ("tp2", 1_000, 96, (96,) * 10 + (40,), ((96,),) * 10 + ((40,),)),
+        ("dp2", 1_000, 96, (96,) * 10 + (40,), ((48, 48),) * 10 + ((20, 20),)),
+        ("tp2", 85, 32, (32, 32, 21), ((32,), (32,), (21,))),
+        ("dp2", 85, 32, (32, 32, 21), ((16, 16), (16, 16), (11, 10))),
+    ),
+)
+def test_homogeneous_identity_schedule_pins_every_physical_shape(
+    topology,
+    request_count,
+    global_wave_size,
+    global_shapes,
+    engine_shapes,
+) -> None:
+    schedule = build_homogeneous_identity_schedule(
+        topology=topology,
+        request_count=request_count,
+        global_wave_size=global_wave_size,
+    )
+
+    assert schedule.topology == topology
+    assert schedule.request_count == request_count
+    assert schedule.global_wave_size == global_wave_size
+    assert schedule.global_request_shapes == global_shapes
+    assert schedule.engine_request_shapes == engine_shapes
+    assert schedule.semantic_padding is False
+    assert schedule.mixed_case_batching is False
+
+
+def test_canonical_identity_contract_binds_case_sampling_and_physical_schedule(tmp_path) -> None:
+    case = load_canonical_7b_identity_cases(PROMPTS_CSV)[1]
+    schedule = build_homogeneous_identity_schedule(
+        topology="dp2",
+        request_count=1_000,
+        global_wave_size=96,
+    )
+    contract = build_canonical_identity_contract(
+        case=case,
+        schedule=schedule,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=TOKENIZER_JSON,
+    )
+
+    assert contract["schema_version"] == 1
+    assert contract["checkpoint"] == "evo2/7b-1m:1.0"
+    assert contract["case_index"] == 1
+    assert contract["midpoint_fraction"] == 0.5
+    assert contract["prompt_length"] == 3528
+    assert contract["target_length"] == 500
+    assert contract["target_sha256"] == "fdf6b6006f176f2c9e8aea829d5360a39718d434cd359e4eb9b29a8832fa8f88"
+    assert contract["expected_identity_percent"] == 89.63
+    assert contract["minimum_identity_percent"] == pytest.approx(80.667)
+    assert contract["sampling"] == {
+        "max_new_tokens": 500,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 1,
+        "seed": 42,
+        "ignore_eos": True,
+        "stop_token_ids": [],
+    }
+    assert contract["schedule"]["global_request_shapes"] == [96] * 10 + [40]
+    assert contract["schedule"]["engine_request_shapes"] == [[48, 48]] * 10 + [[20, 20]]
+    assert contract["schedule"]["mixed_case_batching"] is False
+    assert contract["schedule"]["semantic_padding"] is False
+
+
+def _physical_phase(schedule, *, phase_name="identity"):
+    waves = []
+    observations = []
+    start = 0
+    for wave_index, (global_shape, engine_shapes) in enumerate(
+        zip(schedule.global_request_shapes, schedule.engine_request_shapes, strict=True)
+    ):
+        wave_phase = f"{phase_name}.wave-{wave_index:03d}"
+        stop = start + global_shape
+        if schedule.topology == "tp2":
+            observations.append(
+                {
+                    "phase": wave_phase,
+                    "runtime_mode": "CUDAGraphMode.FULL",
+                    "num_unpadded_tokens": global_shape,
+                    "num_padded_tokens": global_shape,
+                    "num_paddings": 0,
+                }
+            )
+            waves.append(
+                {
+                    "wave_index": wave_index,
+                    "start": start,
+                    "stop": stop,
+                    "request_count": global_shape,
+                    "full_decode_proof": {
+                        "batch_size": global_shape,
+                        "max_new_tokens": 500,
+                        "maximum_full_batch": global_shape,
+                        "passed": True,
+                    },
+                    "scheduler_capacity_proof": {
+                        "global_wave_size": global_shape,
+                        "engine_request_count": global_shape,
+                        "maximum_running_requests": global_shape,
+                        "batch_fit_without_preemption": True,
+                    },
+                }
+            )
+        else:
+            engines = []
+            for dp_rank, engine_shape in enumerate(engine_shapes):
+                engine_observations = [
+                    {
+                        "phase": wave_phase,
+                        "runtime_mode": "CUDAGraphMode.FULL",
+                        "num_unpadded_tokens": engine_shape,
+                        "num_padded_tokens": engine_shape,
+                        "num_paddings": 0,
+                    }
+                ]
+                engines.append(
+                    {
+                        "dp_rank": dp_rank,
+                        "request_count": engine_shape,
+                        "cudagraph_observations": engine_observations,
+                        "full_decode_proof": {
+                            "batch_size": engine_shape,
+                            "max_new_tokens": 500,
+                            "maximum_full_batch": engine_shape,
+                            "passed": True,
+                        },
+                        "scheduler_capacity_proof": {
+                            "global_wave_size": global_shape,
+                            "engine_request_count": engine_shape,
+                            "maximum_running_requests": engine_shape,
+                            "batch_fit_without_preemption": True,
+                        },
+                    }
+                )
+            waves.append(
+                {
+                    "wave_index": wave_index,
+                    "start": start,
+                    "stop": stop,
+                    "request_count": global_shape,
+                    "engines": engines,
+                }
+            )
+        start = stop
+    return {
+        "phase": phase_name,
+        "sample": {
+            "request_count": schedule.request_count,
+            "generated_tokens": schedule.request_count * 500,
+            "output_lengths": [500] * schedule.request_count,
+        },
+        "wave_proofs": waves,
+        "cudagraph_observations_retained": observations,
+    }
+
+
+@pytest.mark.parametrize("topology", ("tp2", "dp2"))
+def test_homogeneous_identity_phase_evidence_requires_actual_physical_shapes(topology) -> None:
+    schedule = build_homogeneous_identity_schedule(
+        topology=topology,
+        request_count=1_000,
+        global_wave_size=96,
+    )
+    phase = _physical_phase(schedule)
+
+    evidence = validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)
+
+    assert evidence["passed"] is True
+    assert evidence["global_request_shapes"] == [96] * 10 + [40]
+    expected_engines = [[96]] * 10 + [[40]] if topology == "tp2" else [[48, 48]] * 10 + [[20, 20]]
+    assert evidence["engine_request_shapes"] == expected_engines
+
+
+def test_homogeneous_identity_phase_evidence_rejects_subdivided_capture_shape() -> None:
+    schedule = build_homogeneous_identity_schedule(
+        topology="tp2",
+        request_count=96,
+        global_wave_size=96,
+    )
+    phase = _physical_phase(schedule)
+    phase["cudagraph_observations_retained"][0]["num_unpadded_tokens"] = 24
+    phase["cudagraph_observations_retained"][0]["num_padded_tokens"] = 24
+
+    with pytest.raises(AssertionError, match="physical.*shape"):
+        validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)
+
+
+def _identity_records(manifest, target):
+    return tuple(
+        GenerationRecord(
+            request_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            output_token_ids=tuple(target.encode("ascii")),
+            output_logprobs=(-0.1,) * 500,
+            requested_max_tokens=500,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        )
+        for request in manifest.requests
+    )
+
+
+def test_canonical_identity_artifact_retains_raw_bytes_and_checks_every_request(tmp_path) -> None:
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text("{}", encoding="utf-8")
+    case = load_canonical_7b_identity_cases(PROMPTS_CSV)[0]
+    manifest = build_canonical_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=tokenizer_path,
+        tokenize=lambda text: tuple(text.encode("ascii")),
+        request_count=3,
+        request_id_prefix="identity-case0",
+    )
+    records = _identity_records(manifest, case.target)
+    executions = build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        call_index=0,
+    )
+    artifact = write_full_generation_records_artifact(
+        tmp_path / "identity.outputs.jsonl.gz",
+        records=records,
+        execution_records=executions,
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+    )
+
+    evidence = validate_canonical_identity_output_artifact(
+        artifact,
+        case=case,
+        expected_request_ids=tuple(request.request_id for request in manifest.requests),
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+    )
+
+    assert artifact["decoded_output_bytes_retained"] is True
+    assert artifact["decoded_output_byte_count"] == 1_500
+    assert evidence["passed"] is True
+    assert evidence["request_count"] == 3
+    assert evidence["minimum_observed_identity_percent"] == 100.0
+    assert evidence["raw_output_bytes_retained"] is True
+    assert len(evidence["requests"]) == 3
+
+
+def test_canonical_identity_artifact_rejects_one_low_scoring_request(tmp_path) -> None:
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text("{}", encoding="utf-8")
+    case = load_canonical_7b_identity_cases(PROMPTS_CSV)[1]
+    manifest = build_canonical_identity_manifest(
+        _base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer_path=tokenizer_path,
+        tokenize=lambda text: tuple(text.encode("ascii")),
+        request_count=2,
+        request_id_prefix="identity-case1",
+    )
+    records = list(_identity_records(manifest, case.target))
+    records[1] = replace(records[1], output_token_ids=(ord("N"),) * 500)
+    executions = build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        call_index=0,
+    )
+    artifact = write_full_generation_records_artifact(
+        tmp_path / "identity-fail.outputs.jsonl.gz",
+        records=records,
+        execution_records=executions,
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+    )
+
+    with pytest.raises(AssertionError, match="request.*identity"):
+        validate_canonical_identity_output_artifact(
+            artifact,
+            case=case,
+            expected_request_ids=tuple(request.request_id for request in manifest.requests),
+            decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+        )

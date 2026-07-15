@@ -361,6 +361,28 @@ def test_mamba_prefix_clone_hook_records_exact_request_scoped_fp32_copy_bytes() 
     assert record["expected_copied_elements"] == 11
     assert record["expected_copied_bytes"] == 44
     assert record["all_state_dtypes_fp32"] is True
+    assert record["runtime_state_layout"] == [
+        {
+            "kv_cache_group_id": 0,
+            "layer_name": "layer",
+            "state_index": 0,
+            "dtype": "torch.float32",
+            "state_shape": [3, 2, 3],
+            "block_shape": [2, 3],
+            "copied_elements": 6,
+            "copied_bytes": 24,
+        },
+        {
+            "kv_cache_group_id": 0,
+            "layer_name": "layer",
+            "state_index": 1,
+            "dtype": "torch.float32",
+            "state_shape": [3, 5],
+            "block_shape": [5],
+            "copied_elements": 5,
+            "copied_bytes": 20,
+        },
+    ]
     assert record["source_attention_kv_groups"] == source_snapshot["attention_kv_groups"]
     assert record["reused_attention_kv_groups"] == [
         {

@@ -80,6 +80,7 @@ def test_full_vocab_comparison_retains_all_steps_and_reports_worst_coordinate() 
 
 
 def test_logprob_evidence_summary_records_coverage_support_and_chosen_values() -> None:
+    processed_distribution = [-4.0, -3.0, -2.0, -1.0, *([None] * 508)]
     evidence = {
         "shape": [2, 4, 512],
         "coverage_counts": [[512] * 4] * 2,
@@ -88,7 +89,17 @@ def test_logprob_evidence_summary_records_coverage_support_and_chosen_values() -
         "expected_finite_support": 4,
         "chosen_token_oracle_passed": True,
         "chosen_token_in_finite_support": True,
+        "chosen_token_ids": [[3, 2, 1, 0]] * 2,
         "chosen_token_logprobs": [[-1.0, -2.0, -3.0, -4.0]] * 2,
+        "logprobs": [
+            [
+                processed_distribution,
+                processed_distribution,
+                processed_distribution,
+                processed_distribution,
+            ]
+        ]
+        * 2,
     }
 
     summary = nemo_parity._logprob_evidence_summary(evidence)
@@ -100,8 +111,29 @@ def test_logprob_evidence_summary_records_coverage_support_and_chosen_values() -
         "negative_infinity_exclusions_per_step": 508,
         "chosen_token_in_finite_support": True,
         "chosen_token_oracle_passed": True,
+        "chosen_token_ids": [[3, 2, 1, 0]] * 2,
         "chosen_token_logprobs": [[-1.0, -2.0, -3.0, -4.0]] * 2,
     }
+
+
+def test_logprob_evidence_summary_rejects_one_ulp_selected_value_tamper() -> None:
+    selected = -2.0
+    one_ulp_drift = float.fromhex("-0x1.0000000000001p+1")
+    evidence = {
+        "shape": [1, 1, 4],
+        "coverage_counts": [[4]],
+        "finite_support_counts": [[4]],
+        "negative_infinity_counts": [[0]],
+        "expected_finite_support": 4,
+        "chosen_token_oracle_passed": True,
+        "chosen_token_in_finite_support": True,
+        "chosen_token_ids": [[2]],
+        "chosen_token_logprobs": [[one_ulp_drift]],
+        "logprobs": [[[-4.0, -3.0, selected, -1.0]]],
+    }
+
+    with pytest.raises(AssertionError, match="retained full-vocabulary tensor"):
+        nemo_parity._logprob_evidence_summary(evidence)
 
 
 def test_final_compilation_gate_rejects_drift_in_last_stochastic_phase() -> None:

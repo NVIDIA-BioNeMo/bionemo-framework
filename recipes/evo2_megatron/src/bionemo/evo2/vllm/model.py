@@ -266,18 +266,19 @@ def _expected_mamba_prefix_clone_layout(
     mamba_group_ids: list[int],
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[Any, ...],
-) -> dict[str, int | bool]:
+) -> dict[str, Any]:
     expected_entries = 0
     expected_elements = 0
     expected_bytes = 0
     all_state_dtypes_fp32 = True
+    runtime_state_layout = []
     for group_id in mamba_group_ids:
         group = kv_cache_config.kv_cache_groups[group_id]
         for layer_name in group.layer_names:
             states = forward_context[layer_name].kv_cache
             if len(states) != len(mamba_state_copy_funcs):
                 raise AssertionError("Mamba state tensors and copy functions do not align")
-            for state in states:
+            for state_index, state in enumerate(states):
                 if not isinstance(state, torch.Tensor) or state.ndim < 1 or state.shape[0] < 1:
                     raise AssertionError("Mamba prefix clone state must be a nonempty tensor")
                 block = state[0]
@@ -285,6 +286,18 @@ def _expected_mamba_prefix_clone_layout(
                 expected_elements += block.numel()
                 expected_bytes += block.numel() * block.element_size()
                 all_state_dtypes_fp32 &= state.dtype == torch.float32
+                runtime_state_layout.append(
+                    {
+                        "kv_cache_group_id": int(group_id),
+                        "layer_name": str(layer_name),
+                        "state_index": state_index,
+                        "dtype": str(state.dtype),
+                        "state_shape": list(state.shape),
+                        "block_shape": list(block.shape),
+                        "copied_elements": int(block.numel()),
+                        "copied_bytes": int(block.numel() * block.element_size()),
+                    }
+                )
     if expected_entries == 0:
         raise AssertionError("Mamba prefix clone layout contains no recurrent state")
     if not all_state_dtypes_fp32:
@@ -294,6 +307,7 @@ def _expected_mamba_prefix_clone_layout(
         "expected_copied_elements": expected_elements,
         "expected_copied_bytes": expected_bytes,
         "all_state_dtypes_fp32": all_state_dtypes_fp32,
+        "runtime_state_layout": runtime_state_layout,
     }
 
 
