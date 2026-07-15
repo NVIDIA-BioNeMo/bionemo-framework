@@ -15,6 +15,7 @@
 
 import pytest
 import torch
+from torch.profiler import ProfilerActivity, profile
 
 from bionemo.evo2.models.megatron.hyena.engine import step_iir
 from bionemo.evo2.vllm.packed_iir import packed_iir_reference, packed_modal_iir
@@ -500,6 +501,201 @@ def test_packed_modal_iir_long_prefill_matches_reference():
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(actual_cache, expected_cache, rtol=2e-5, atol=2e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for long-prefill HCL coverage")
+def test_packed_modal_iir_8193_token_prefill_matches_cpu_oracle():
+    length = 8193
+    channels = 8
+    state_size = 4
+    generator = torch.Generator().manual_seed(123456)
+    recurrent_input = torch.randn((length, channels), dtype=torch.bfloat16, generator=generator)
+    gate = torch.randn((length, channels), dtype=torch.bfloat16, generator=generator)
+    decay = torch.exp(-(torch.rand((channels, state_size), generator=generator) * 0.2 + 0.01))
+    residues = torch.randn((channels, state_size), generator=generator) * 0.05
+    diagonal = torch.randn((channels,), generator=generator) * 0.05
+    initial_cache = torch.randn((2, channels, 11), generator=generator)
+    query_start_loc = torch.tensor([0, length], dtype=torch.int64)
+    state_indices = torch.tensor([1], dtype=torch.int64)
+    has_initial_state = torch.tensor([True])
+
+    expected_cache = initial_cache.clone()
+    expected = packed_iir_reference(
+        recurrent_input,
+        gate,
+        decay,
+        residues,
+        diagonal,
+        expected_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        state_size=state_size,
+    )
+    device = torch.device("cuda")
+    actual_cache = initial_cache.to(device)
+    actual = packed_modal_iir(
+        recurrent_input.to(device),
+        gate.to(device),
+        decay.to(device),
+        residues.to(device),
+        diagonal.to(device),
+        actual_cache,
+        query_start_loc.to(device),
+        state_indices.to(device),
+        has_initial_state.to(device),
+        state_size=state_size,
+        max_query_len=length,
+    )
+
+    torch.testing.assert_close(actual.cpu(), expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual_cache.cpu(), expected_cache, rtol=2e-5, atol=2e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for HCL kernel profiling")
+def test_packed_modal_iir_long_prefill_is_one_packed_kernel_launch():
+    device = torch.device("cuda")
+    length = 65
+    channels = 32
+    state_size = 16
+    generator = torch.Generator(device=device).manual_seed(654321)
+    recurrent_input = torch.randn((length, channels), device=device, dtype=torch.bfloat16, generator=generator)
+    gate = torch.randn(recurrent_input.shape, device=device, dtype=torch.bfloat16, generator=generator)
+    decay = torch.exp(-(torch.rand((channels, state_size), device=device, generator=generator) * 0.2 + 0.01))
+    residues = torch.randn((channels, state_size), device=device, generator=generator) * 0.05
+    diagonal = torch.randn((channels,), device=device, generator=generator) * 0.05
+    state_cache = torch.zeros((2, channels, 127), device=device)
+
+    with profile(activities=[ProfilerActivity.CUDA], acc_events=True) as profiler:
+        packed_modal_iir(
+            recurrent_input,
+            gate,
+            decay,
+            residues,
+            diagonal,
+            state_cache,
+            torch.tensor([0, length], device=device, dtype=torch.int32),
+            torch.tensor([1], device=device, dtype=torch.int32),
+            torch.tensor([False], device=device),
+            state_size=state_size,
+            max_query_len=length,
+        )
+        torch.cuda.synchronize()
+
+    launch_count = sum(event.count for event in profiler.key_averages() if "packed_modal_iir_kernel" in event.key)
+    assert launch_count == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for torch.compile HCL coverage")
+def test_packed_modal_iir_long_path_matches_torch_compile():
+    device = torch.device("cuda")
+    lengths = [33, 47, 65]
+    channels = 32
+    state_size = 16
+    generator = torch.Generator(device=device).manual_seed(7777)
+    query_start_loc = _query_start_loc(lengths).to(device=device, dtype=torch.int32)
+    recurrent_input = torch.randn(
+        (int(query_start_loc[-1]), channels),
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    gate = torch.randn(recurrent_input.shape, device=device, dtype=torch.bfloat16, generator=generator)
+    decay = torch.exp(-(torch.rand((channels, state_size), device=device, generator=generator) * 0.2 + 0.01))
+    residues = torch.randn((channels, state_size), device=device, generator=generator) * 0.05
+    diagonal = torch.randn((channels,), device=device, generator=generator) * 0.05
+    state_indices = torch.arange(1, len(lengths) + 1, device=device, dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False, True], device=device)
+    initial_cache = torch.randn(
+        (len(lengths) + 1, channels, 127),
+        device=device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+
+    def run(input_tensor, gate_tensor, cache):
+        return packed_modal_iir(
+            input_tensor,
+            gate_tensor,
+            decay,
+            residues,
+            diagonal,
+            cache,
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            state_size=state_size,
+            max_query_len=max(lengths),
+        )
+
+    eager_cache = initial_cache.clone()
+    expected = run(recurrent_input, gate, eager_cache)
+    compiled_cache = initial_cache.clone()
+    compiled = torch.compile(run, fullgraph=True)
+    actual = compiled(recurrent_input, gate, compiled_cache)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(compiled_cache, eager_cache, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for graph capture")
+def test_packed_modal_iir_long_cuda_graph_replay_uses_static_buffers():
+    device = torch.device("cuda")
+    lengths = [65, 47]
+    channels = 32
+    state_size = 16
+    generator = torch.Generator(device=device).manual_seed(8888)
+    query_start_loc = _query_start_loc(lengths).to(device=device, dtype=torch.int32)
+    recurrent_input = torch.randn(
+        (int(query_start_loc[-1]), channels),
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    gate = torch.randn(recurrent_input.shape, device=device, dtype=torch.bfloat16, generator=generator)
+    decay = torch.exp(-(torch.rand((channels, state_size), device=device, generator=generator) * 0.2 + 0.01))
+    residues = torch.randn((channels, state_size), device=device, generator=generator) * 0.05
+    diagonal = torch.randn((channels,), device=device, generator=generator) * 0.05
+    state_cache = torch.randn((3, channels, 127), device=device, generator=generator)
+    state_cache[0].fill_(23.0)
+    state_indices = torch.tensor([1, 0], device=device, dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False], device=device)
+
+    def run():
+        return packed_modal_iir(
+            recurrent_input,
+            gate,
+            decay,
+            residues,
+            diagonal,
+            state_cache,
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            state_size=state_size,
+            max_query_len=max(lengths),
+        )
+
+    run()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = run()
+
+    output_pointer = output.data_ptr()
+    first_output = output.clone()
+    first_state = state_cache[1].clone()
+    null_state = state_cache[0].clone()
+    recurrent_input.copy_(
+        torch.randn(recurrent_input.shape, device=device, dtype=torch.bfloat16, generator=generator) + 3
+    )
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert output.data_ptr() == output_pointer
+    assert not torch.equal(output, first_output)
+    assert not torch.equal(state_cache[1], first_state)
+    torch.testing.assert_close(state_cache[0], null_state, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for long-prefill HCL coverage")

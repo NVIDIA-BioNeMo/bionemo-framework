@@ -276,6 +276,102 @@ def _packed_modal_iir_kernel(
     )
 
 
+@triton.jit
+def _packed_modal_iir_kernel_long(
+    recurrent_input_ptr,
+    gate_ptr,
+    decay_ptr,
+    residues_ptr,
+    diagonal_ptr,
+    state_ptr,
+    query_start_loc_ptr,
+    state_indices_ptr,
+    has_initial_state_ptr,
+    output_ptr,
+    max_query_len,
+    channels,
+    stride_input_token,
+    stride_input_channel,
+    stride_gate_token,
+    stride_gate_channel,
+    stride_decay_channel,
+    stride_decay_state,
+    stride_residues_channel,
+    stride_residues_state,
+    stride_diagonal,
+    stride_cache_block,
+    stride_cache_channel,
+    stride_cache_state,
+    stride_query_start_loc,
+    stride_state_indices,
+    stride_has_initial_state,
+    stride_output_token,
+    stride_output_channel,
+    state_size: tl.constexpr,
+    block_state: tl.constexpr,
+    block_c: tl.constexpr,
+):
+    request_index = tl.program_id(0)
+    channel_offsets = tl.program_id(1) * block_c + tl.arange(0, block_c)
+    state_offsets = tl.arange(0, block_state)
+    channel_mask = channel_offsets < channels
+    modal_mask = channel_mask[:, None] & (state_offsets[None, :] < state_size)
+
+    request_start = tl.load(query_start_loc_ptr + request_index * stride_query_start_loc).to(tl.int64)
+    request_end = tl.load(query_start_loc_ptr + (request_index + 1) * stride_query_start_loc).to(tl.int64)
+    request_length = request_end - request_start
+    cache_slot = tl.load(state_indices_ptr + request_index * stride_state_indices).to(tl.int64)
+    load_initial_state = tl.load(
+        has_initial_state_ptr + request_index * stride_has_initial_state,
+    ).to(tl.int1)
+
+    modal_offsets = channel_offsets[:, None] * stride_decay_channel + state_offsets[None, :] * stride_decay_state
+    decay = tl.load(decay_ptr + modal_offsets, mask=modal_mask, other=0.0).to(tl.float32)
+    residue_offsets = (
+        channel_offsets[:, None] * stride_residues_channel + state_offsets[None, :] * stride_residues_state
+    )
+    residues = tl.load(residues_ptr + residue_offsets, mask=modal_mask, other=0.0).to(tl.float32)
+    diagonal = tl.load(diagonal_ptr + channel_offsets * stride_diagonal, mask=channel_mask, other=0.0).to(tl.float32)
+    cache_offsets = (
+        cache_slot * stride_cache_block
+        + channel_offsets[:, None] * stride_cache_channel
+        + state_offsets[None, :] * stride_cache_state
+    )
+    state = tl.load(
+        state_ptr + cache_offsets,
+        mask=modal_mask & load_initial_state & (cache_slot != 0),
+        other=0.0,
+    ).to(tl.float32)
+
+    for token_offset in tl.range(0, max_query_len, num_stages=1):
+        token_is_real = token_offset < request_length
+        token_index = request_start + token_offset
+        drive = tl.load(
+            recurrent_input_ptr + token_index * stride_input_token + channel_offsets * stride_input_channel,
+            mask=channel_mask & token_is_real,
+            other=0.0,
+        ).to(tl.float32)
+        gate = tl.load(
+            gate_ptr + token_index * stride_gate_token + channel_offsets * stride_gate_channel,
+            mask=channel_mask & token_is_real,
+            other=0.0,
+        ).to(tl.float32)
+        advanced_state = state * decay + drive[:, None]
+        state = tl.where(token_is_real, advanced_state, state)
+        mixed = tl.sum(residues * state, axis=1) + diagonal * drive
+        tl.store(
+            output_ptr + token_index * stride_output_token + channel_offsets * stride_output_channel,
+            gate * mixed,
+            mask=channel_mask & token_is_real,
+        )
+
+    tl.store(
+        state_ptr + cache_offsets,
+        state,
+        mask=modal_mask & (cache_slot != 0) & (request_length > 0),
+    )
+
+
 def packed_modal_iir(
     recurrent_input: torch.Tensor,
     gate: torch.Tensor,
@@ -325,44 +421,58 @@ def packed_modal_iir(
     block_channels = 32
     block_state = 1 << (state_size - 1).bit_length()
     grid = (num_requests, triton.cdiv(recurrent_input.shape[1], block_channels))
-    chunk_size = 32
-    for query_offset in range(0, max_query_len, chunk_size):
-        kernel_query_len = min(chunk_size, max_query_len - query_offset)
+    kernel_args = (
+        recurrent_input,
+        gate,
+        decay,
+        residues,
+        diagonal,
+        state_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        output,
+    )
+    kernel_strides = (
+        recurrent_input.shape[1],
+        recurrent_input.stride(0),
+        recurrent_input.stride(1),
+        gate.stride(0),
+        gate.stride(1),
+        decay.stride(0),
+        decay.stride(1),
+        residues.stride(0),
+        residues.stride(1),
+        diagonal.stride(0),
+        state_cache.stride(0),
+        state_cache.stride(1),
+        state_cache.stride(2),
+        query_start_loc.stride(0),
+        state_indices.stride(0),
+        has_initial_state.stride(0),
+        output.stride(0),
+        output.stride(1),
+    )
+    kernel_meta = {
+        "state_size": state_size,
+        "block_state": block_state,
+        "block_c": block_channels,
+        "num_warps": 4,
+    }
+    if max_query_len <= 32:
         _packed_modal_iir_kernel[grid](
-            recurrent_input,
-            gate,
-            decay,
-            residues,
-            diagonal,
-            state_cache,
-            query_start_loc,
-            state_indices,
-            has_initial_state,
-            output,
-            query_offset,
-            recurrent_input.shape[1],
-            recurrent_input.stride(0),
-            recurrent_input.stride(1),
-            gate.stride(0),
-            gate.stride(1),
-            decay.stride(0),
-            decay.stride(1),
-            residues.stride(0),
-            residues.stride(1),
-            diagonal.stride(0),
-            state_cache.stride(0),
-            state_cache.stride(1),
-            state_cache.stride(2),
-            query_start_loc.stride(0),
-            state_indices.stride(0),
-            has_initial_state.stride(0),
-            output.stride(0),
-            output.stride(1),
-            state_size=state_size,
-            block_state=block_state,
-            max_query_len=kernel_query_len,
-            block_c=block_channels,
-            num_warps=4,
+            *kernel_args,
+            0,
+            *kernel_strides,
+            max_query_len=max_query_len,
+            **kernel_meta,
+        )
+    else:
+        _packed_modal_iir_kernel_long[grid](
+            *kernel_args,
+            max_query_len,
+            *kernel_strides,
+            **kernel_meta,
         )
     return output
 
