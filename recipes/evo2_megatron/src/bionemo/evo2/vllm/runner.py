@@ -5,13 +5,17 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
+import io
 import json
 import platform
+import subprocess
 import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -19,11 +23,13 @@ from typing import Any
 
 from bionemo.evo2.vllm.benchmark import (
     BenchmarkSample,
+    GenerationRecord,
     WorkloadManifest,
     aggregate_samples,
     benchmark_sample_from_vllm_outputs,
     build_parser,
     build_request_waves,
+    records_from_vllm_outputs,
     sampling_params_kwargs,
     summarize_vllm_outputs,
     validate_compilation_proof,
@@ -58,6 +64,141 @@ def runtime_versions() -> dict[str, Any]:
         "triton": _package_version("triton"),
         "transformers": _package_version("transformers"),
         "nemo_rl": _package_version("nemo-rl"),
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_records(root: Path, paths: Any) -> list[dict[str, Any]]:
+    records = []
+    for path in sorted({Path(path).resolve() for path in paths}):
+        try:
+            relative = path.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"provenance path escapes root {root}: {path}") from error
+        if not path.is_file():
+            raise FileNotFoundError(f"provenance file is missing: {path}")
+        records.append(
+            {
+                "path": relative.as_posix(),
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
+        )
+    return records
+
+
+def _records_sha256(records: list[dict[str, Any]]) -> str:
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def checkpoint_provenance(checkpoint: str | Path) -> dict[str, Any]:
+    """Hash the actual indexed checkpoint shards and every durable checkpoint file."""
+    root = Path(checkpoint).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"checkpoint directory is missing: {root}")
+    config_path = root / "config.json"
+    index_path = root / "model.safetensors.index.json"
+    manifest_path = root / "manifest.json"
+    for required in (config_path, index_path, manifest_path):
+        if not required.is_file():
+            raise FileNotFoundError(f"checkpoint provenance requires {required}")
+
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError("checkpoint index must contain a non-empty weight_map")
+    shard_paths = []
+    for shard_name in sorted(set(weight_map.values())):
+        shard_path = (root / str(shard_name)).resolve()
+        try:
+            shard_path.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"checkpoint shard escapes checkpoint root: {shard_name}") from error
+        shard_paths.append(shard_path)
+    shard_records = _file_records(root, shard_paths)
+    all_records = _file_records(root, (path for path in root.rglob("*") if path.is_file()))
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    digest_verification = {
+        "config": manifest.get("config_sha256") == _sha256_file(config_path),
+        "index": manifest.get("index_sha256") == _sha256_file(index_path),
+    }
+    if not all(digest_verification.values()):
+        raise AssertionError(f"checkpoint manifest digest verification failed: {digest_verification}")
+    return {
+        "path": str(root),
+        "checkpoint_sha256": _records_sha256(all_records),
+        "file_count": len(all_records),
+        "total_file_bytes": sum(item["size_bytes"] for item in all_records),
+        "indexed_weight_bytes": sum(item["size_bytes"] for item in shard_records),
+        "indexed_weight_shards": shard_records,
+        "files": all_records,
+        "manifest_digest_verification": digest_verification,
+    }
+
+
+def _git_output(repository: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def source_provenance(
+    *,
+    repository: str | Path | None = None,
+    source_roots: tuple[str | Path, ...] | None = None,
+) -> dict[str, Any]:
+    """Record git identity plus a content hash of the production vLLM source tree."""
+    if repository is None:
+        repository = _git_output(Path(__file__).resolve().parent, "rev-parse", "--show-toplevel").strip()
+    root = Path(repository).expanduser().resolve()
+    roots = (Path(__file__).resolve().parent,) if source_roots is None else tuple(Path(path) for path in source_roots)
+    source_paths = []
+    for source_root in roots:
+        resolved = source_root.expanduser().resolve()
+        if resolved.is_file():
+            source_paths.append(resolved)
+        elif resolved.is_dir():
+            source_paths.extend(path for path in resolved.rglob("*") if path.is_file())
+        else:
+            raise FileNotFoundError(f"source provenance root is missing: {resolved}")
+    source_records = _file_records(root, source_paths)
+    source_tree_sha256 = _records_sha256(source_records)
+    git_head = _git_output(root, "rev-parse", "HEAD").strip()
+    status = _git_output(root, "status", "--porcelain=v1", "--untracked-files=all")
+    tracked_diff = _git_output(root, "diff", "--binary", "HEAD", "--")
+    dirty_payload = json.dumps(
+        {
+            "status": status,
+            "tracked_diff_sha256": hashlib.sha256(tracked_diff.encode()).hexdigest(),
+            "source_tree_sha256": source_tree_sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return {
+        "repository": str(root),
+        "git_head": git_head,
+        "git_dirty": bool(status),
+        "git_status_porcelain": status.splitlines(),
+        "tracked_diff_sha256": hashlib.sha256(tracked_diff.encode()).hexdigest(),
+        "dirty_fingerprint_sha256": hashlib.sha256(dirty_payload).hexdigest(),
+        "source_tree_sha256": source_tree_sha256,
+        "source_file_count": len(source_records),
+        "source_files": source_records,
     }
 
 
@@ -140,45 +281,92 @@ def validate_full_decode_proof(
     max_new_tokens: int,
 ) -> None:
     """Allow mixed prefill while requiring dense, exact FULL decode replay."""
-    phase_observations = [item for item in observations if item["phase"] == phase]
-    if not phase_observations:
+    summary = full_decode_proof_summary(
+        observations,
+        phase=phase,
+        batch_size=batch_size,
+        max_new_tokens=max_new_tokens,
+    )
+    if summary["observation_count"] == 0:
         raise AssertionError(f"no CUDA graph observations were recorded for {phase}")
+    if summary["eager_decode_dispatch_count"]:
+        raise AssertionError(f"{phase} used forbidden CUDAGraphMode.NONE decode fallback execution")
+    if not summary["full_decode_unpadded"]:
+        raise AssertionError(f"{phase} used semantic or scheduler padding during FULL decode")
+    if max_new_tokens > 1 and not summary["global_batch_hit"]:
+        raise AssertionError(f"{phase} did not execute a FULL global batch")
+    if summary["long_run_gates_applied"] and not summary["coverage_gate_passed"]:
+        raise AssertionError(
+            f"{phase} FULL decode coverage was {summary['full_decode_tokens']}/"
+            f"{summary['expected_decode_tokens']} tokens; at least "
+            f"{summary['minimum_full_decode_tokens']} are required"
+        )
+    if summary["long_run_gates_applied"] and not summary["occupancy_gate_passed"]:
+        raise AssertionError(
+            f"{phase} FULL decode occupancy averaged {summary['average_full_batch_occupancy']:.3f}/"
+            f"{batch_size}; at least {summary['minimum_average_occupancy']:.3f} is required"
+        )
+
+
+def full_decode_proof_summary(
+    observations: list[dict[str, Any]],
+    *,
+    phase: str,
+    batch_size: int,
+    max_new_tokens: int,
+) -> dict[str, Any]:
+    """Return durable numeric evidence for exact, batched FULL decode replay."""
+    if batch_size <= 0 or max_new_tokens <= 0:
+        raise ValueError("batch_size and max_new_tokens must be positive")
+    phase_observations = [item for item in observations if item["phase"] == phase]
     eager_decode = [
         item
         for item in phase_observations
         if item["runtime_mode"].endswith("NONE") and item["num_unpadded_tokens"] <= batch_size
     ]
-    if eager_decode:
-        raise AssertionError(f"{phase} used forbidden CUDAGraphMode.NONE decode fallback execution")
-
     full_decode = [item for item in phase_observations if item["runtime_mode"].endswith("FULL")]
-    if any(
+    full_decode_unpadded = not any(
         item["num_padded_tokens"] != item["num_unpadded_tokens"] or item["num_paddings"] != 0 for item in full_decode
-    ):
-        raise AssertionError(f"{phase} used semantic or scheduler padding during FULL decode")
-    if max_new_tokens > 1 and not any(item["num_unpadded_tokens"] == batch_size for item in full_decode):
-        raise AssertionError(f"{phase} did not execute a FULL global batch")
-
-    # Fresh offline requests can be admitted over multiple scheduler iterations.
-    # Decode work performed alongside those prefills is PIECEWISE and cannot be
-    # separated from prompt tokens in CUDAGraphStat. Long runs therefore allow
-    # one global batch of mixed work, then require dense FULL replay thereafter.
-    if max_new_tokens >= 32:
-        expected_decode_tokens = batch_size * (max_new_tokens - 1)
-        full_decode_tokens = sum(item["num_unpadded_tokens"] for item in full_decode)
-        minimum_full_decode_tokens = expected_decode_tokens - batch_size
-        if full_decode_tokens < minimum_full_decode_tokens:
-            raise AssertionError(
-                f"{phase} FULL decode coverage was {full_decode_tokens}/{expected_decode_tokens} tokens; "
-                f"at least {minimum_full_decode_tokens} are required"
-            )
-        average_batch_occupancy = full_decode_tokens / len(full_decode)
-        minimum_average_occupancy = batch_size * 0.9
-        if average_batch_occupancy < minimum_average_occupancy:
-            raise AssertionError(
-                f"{phase} FULL decode occupancy averaged {average_batch_occupancy:.3f}/{batch_size}; "
-                f"at least {minimum_average_occupancy:.3f} is required"
-            )
+    )
+    full_decode_tokens = sum(item["num_unpadded_tokens"] for item in full_decode)
+    expected_decode_tokens = batch_size * max(0, max_new_tokens - 1)
+    minimum_full_decode_tokens = max(0, expected_decode_tokens - batch_size)
+    average_batch_occupancy = full_decode_tokens / len(full_decode) if full_decode else 0.0
+    minimum_average_occupancy = batch_size * 0.9
+    global_batch_hit = any(item["num_unpadded_tokens"] == batch_size for item in full_decode)
+    long_run_gates_applied = max_new_tokens >= 32
+    coverage_gate_passed = not long_run_gates_applied or full_decode_tokens >= minimum_full_decode_tokens
+    occupancy_gate_passed = not long_run_gates_applied or average_batch_occupancy >= minimum_average_occupancy
+    passed = (
+        bool(phase_observations)
+        and not eager_decode
+        and full_decode_unpadded
+        and (max_new_tokens <= 1 or global_batch_hit)
+        and coverage_gate_passed
+        and occupancy_gate_passed
+    )
+    return {
+        "phase": phase,
+        "batch_size": batch_size,
+        "max_new_tokens": max_new_tokens,
+        "observation_count": len(phase_observations),
+        "eager_decode_dispatch_count": len(eager_decode),
+        "full_dispatch_count": len(full_decode),
+        "expected_decode_tokens": expected_decode_tokens,
+        "full_decode_tokens": full_decode_tokens,
+        "minimum_full_decode_tokens": minimum_full_decode_tokens,
+        "coverage_fraction": full_decode_tokens / expected_decode_tokens if expected_decode_tokens else 1.0,
+        "maximum_full_batch": max((item["num_unpadded_tokens"] for item in full_decode), default=0),
+        "average_full_batch_occupancy": average_batch_occupancy,
+        "minimum_average_occupancy": minimum_average_occupancy,
+        "occupancy_fraction": average_batch_occupancy / batch_size,
+        "global_batch_hit": global_batch_hit,
+        "full_decode_unpadded": full_decode_unpadded,
+        "long_run_gates_applied": long_run_gates_applied,
+        "coverage_gate_passed": coverage_gate_passed,
+        "occupancy_gate_passed": occupancy_gate_passed,
+        "passed": passed,
+    }
 
 
 def request_seed(
@@ -219,6 +407,132 @@ def build_request_sampling_params(
 
 
 @dataclass(frozen=True)
+class RequestExecutionRecord:
+    """Persist deterministic ownership and RNG coordinates for one request."""
+
+    request_id: str
+    global_request_index: int
+    generation_round: int
+    dp_rank: int
+    call_index: int
+    seed: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe execution record."""
+        return asdict(self)
+
+
+def build_request_execution_records(
+    manifest: WorkloadManifest,
+    *,
+    generation_round: int,
+    global_request_offset: int,
+    dp_rank: int,
+    call_index: int,
+) -> tuple[RequestExecutionRecord, ...]:
+    """Build one ownership/seed record for each exact manifest request."""
+    if min(generation_round, global_request_offset, dp_rank, call_index) < 0:
+        raise ValueError("execution coordinates must be nonnegative")
+    return tuple(
+        RequestExecutionRecord(
+            request_id=request.request_id,
+            global_request_index=global_request_offset + local_index,
+            generation_round=generation_round,
+            dp_rank=dp_rank,
+            call_index=call_index,
+            seed=request_seed(
+                manifest.seed,
+                generation_round=generation_round,
+                global_request_index=global_request_offset + local_index,
+            ),
+        )
+        for local_index, request in enumerate(manifest.requests)
+    )
+
+
+def write_full_output_artifact(
+    path: str | Path,
+    *,
+    manifest: WorkloadManifest,
+    outputs: Any,
+    execution_records: tuple[RequestExecutionRecord, ...],
+) -> dict[str, Any]:
+    """Stream every output token and chosen-token logprob to deterministic gzip JSONL."""
+    records = records_from_vllm_outputs(manifest, outputs)
+    return write_full_generation_records_artifact(
+        path,
+        records=records,
+        execution_records=execution_records,
+    )
+
+
+def write_full_generation_records_artifact(
+    path: str | Path,
+    *,
+    records: Sequence[GenerationRecord],
+    execution_records: Sequence[RequestExecutionRecord],
+) -> dict[str, Any]:
+    """Persist backend-neutral exact generation records as deterministic gzip JSONL."""
+    if len(execution_records) != len(records):
+        raise AssertionError("execution records must align with generated outputs")
+    output = Path(path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(f"{output.suffix}.tmp")
+    generated_token_count = 0
+    with temporary.open("wb") as raw_handle:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as compressed:
+            with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as handle:
+                for generation, execution in zip(
+                    records,
+                    execution_records,
+                    strict=True,
+                ):
+                    if execution.request_id != generation.request_id:
+                        raise AssertionError("execution and generation request IDs must align")
+                    row = {
+                        **execution.to_dict(),
+                        "prompt_token_ids": list(generation.prompt_token_ids),
+                        "output_token_ids": list(generation.output_token_ids),
+                        "chosen_token_logprobs": list(generation.output_logprobs),
+                    }
+                    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
+                    handle.write("\n")
+                    generated_token_count += len(generation.output_token_ids)
+    temporary.replace(output)
+    digest = hashlib.sha256()
+    with output.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "schema_version": 1,
+        "format": "jsonl",
+        "compression": "gzip",
+        "path": str(output),
+        "sha256": digest.hexdigest(),
+        "size_bytes": output.stat().st_size,
+        "request_count": len(records),
+        "generated_token_count": generated_token_count,
+    }
+
+
+def phase_output_artifact_path(
+    root_artifact_path: str | Path,
+    *,
+    phase: str,
+    dp_rank: int | None = None,
+) -> Path:
+    """Return a collision-free full-output sidecar path for one phase/replica."""
+    if not phase:
+        raise ValueError("phase cannot be empty")
+    if dp_rank is not None and dp_rank < 0:
+        raise ValueError("dp_rank must be nonnegative")
+    root = Path(root_artifact_path)
+    base_name = root.name.removesuffix(root.suffix)
+    replica_suffix = "" if dp_rank is None else f".dp{dp_rank}"
+    return root.with_name(f"{base_name}.{phase}{replica_suffix}.outputs.jsonl.gz")
+
+
+@dataclass(frozen=True)
 class GenerationPhaseResult:
     """One timed generation phase plus its unreset CUDA graph observations."""
 
@@ -226,6 +540,9 @@ class GenerationPhaseResult:
     sample: BenchmarkSample
     observations: tuple[dict[str, Any], ...]
     output_summaries: tuple[dict[str, Any], ...]
+    request_executions: tuple[RequestExecutionRecord, ...]
+    full_output_artifact: dict[str, Any]
+    full_decode_proof: dict[str, Any]
     worker_proof: tuple[dict[str, Any], ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -242,6 +559,9 @@ class GenerationPhaseResult:
             "cudagraph_observations_retained": retained_observations,
             "cudagraph_summary": summarize_cudagraph_observations(self.observations),
             "outputs": list(self.output_summaries),
+            "request_executions": [record.to_dict() for record in self.request_executions],
+            "full_output_artifact": self.full_output_artifact,
+            "full_decode_proof": self.full_decode_proof,
             "worker_proof": list(self.worker_proof),
         }
 
@@ -280,6 +600,8 @@ def run_generation_phase(
     sample_index: int,
     recorder: CUDAGraphProofRecorder,
     memory_monitor_factory: Callable[[], PeakMemoryMonitor],
+    execution_records: tuple[RequestExecutionRecord, ...],
+    full_output_path: str | Path,
     reset_worker_proof: Callable[[], Any] | None = None,
     snapshot_worker_proof: Callable[[], tuple[dict[str, Any], ...]] | None = None,
     clock: Callable[[], float] = time.perf_counter,
@@ -288,6 +610,13 @@ def run_generation_phase(
     """Time one complete offline vLLM batch with optional DP synchronization."""
     if len(sampling_params) != len(manifest.requests):
         raise ValueError("sampling params must align with every request")
+    if len(execution_records) != len(manifest.requests):
+        raise ValueError("execution records must align with every request")
+    for request, params, execution in zip(manifest.requests, sampling_params, execution_records, strict=True):
+        if execution.request_id != request.request_id:
+            raise ValueError("execution record request IDs must preserve manifest order")
+        if params.seed != execution.seed:
+            raise ValueError("sampling parameter seeds must match persisted execution records")
     prompts = [{"prompt_token_ids": list(request.prompt_token_ids)} for request in manifest.requests]
     recorder.start_phase(phase)
     observation_start = len(recorder.observations)
@@ -312,11 +641,26 @@ def run_generation_phase(
         peak_device_memory_bytes=monitor.peak_device_memory_bytes,
         validated_summaries=output_summaries,
     )
+    full_output_artifact = write_full_output_artifact(
+        full_output_path,
+        manifest=manifest,
+        outputs=outputs,
+        execution_records=execution_records,
+    )
+    full_decode_proof = full_decode_proof_summary(
+        recorder.observations[observation_start:],
+        phase=phase,
+        batch_size=len(manifest.requests),
+        max_new_tokens=manifest.max_new_tokens,
+    )
     return GenerationPhaseResult(
         phase=phase,
         sample=sample,
         observations=tuple(recorder.observations[observation_start:]),
         output_summaries=output_summaries,
+        request_executions=execution_records,
+        full_output_artifact=full_output_artifact,
+        full_decode_proof=full_decode_proof,
         worker_proof=worker_proof,
     )
 
@@ -459,7 +803,15 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     """Run one TP2 Ray engine through cold, warm, and measured exact phases."""
     if args.topology != "tp2":
         raise ValueError("run_tp2_benchmark requires topology=tp2")
+    vllm_import_begin = time.perf_counter()
     from vllm import LLM, SamplingParams
+
+    vllm_import_s = time.perf_counter() - vllm_import_begin
+
+    provenance_begin = time.perf_counter()
+    checkpoint_identity = checkpoint_provenance(args.checkpoint)
+    source_identity = source_provenance()
+    provenance_s = time.perf_counter() - provenance_begin
 
     profile = Evo2VllmProfile(
         topology="tp2",
@@ -492,11 +844,19 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
 
     phase_results = []
     for sample_index, (phase, round_offset) in enumerate(_phase_specs(args.warmups, args.repetitions)):
+        generation_round = args.generation_round + round_offset
         sampling_params = build_request_sampling_params(
             manifest,
             sampling_params_factory=SamplingParams,
-            generation_round=args.generation_round + round_offset,
+            generation_round=generation_round,
             global_request_offset=0,
+        )
+        execution_records = build_request_execution_records(
+            manifest,
+            generation_round=generation_round,
+            global_request_offset=0,
+            dp_rank=0,
+            call_index=sample_index,
         )
         result = run_generation_phase(
             llm=llm,
@@ -506,6 +866,8 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             sample_index=sample_index,
             recorder=recorder,
             memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
+            execution_records=execution_records,
+            full_output_path=phase_output_artifact_path(args.output, phase=phase),
             reset_worker_proof=lambda: _reset_worker_proof(llm),
             snapshot_worker_proof=lambda: _snapshot_worker_proof(llm),
         )
@@ -534,6 +896,16 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         "topology": "tp2",
         "versions": runtime_versions(),
         "checkpoint": str(args.checkpoint),
+        "checkpoint_provenance": checkpoint_identity,
+        "source_provenance": source_identity,
+        "invocation": {
+            "argv": [sys.executable, *sys.argv],
+            "parsed_args": {
+                name: str(value) if isinstance(value, Path) else value for name, value in vars(args).items()
+            },
+            "output_artifact_path": str(Path(args.output).resolve()),
+            "exit_status": 0,
+        },
         "manifest": manifest.to_dict(),
         "manifest_sha256": manifest.sha256,
         "profile": asdict(profile),
@@ -558,6 +930,8 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             for wave in waves
         ],
         "timing": {
+            "vllm_import_s": vllm_import_s,
+            "provenance_hashing_s": provenance_s,
             "engine_init_s": engine_init_s,
             "engine_init_peak_device_memory_bytes": list(init_memory.peak_device_memory_bytes),
         },
@@ -591,9 +965,12 @@ def main(argv: list[str] | None = None) -> int:
         request_id_prefix=args.request_id_prefix,
         max_new_tokens=args.max_new_tokens,
     )
-    if args.topology != "tp2":
-        raise NotImplementedError("DP2 execution is provided by the concurrent replica launcher")
-    artifact = run_tp2_benchmark(args, manifest)
+    if args.topology == "tp2":
+        artifact = run_tp2_benchmark(args, manifest)
+    else:
+        from bionemo.evo2.vllm.nemo_runner import run_nemo_dp2_benchmark
+
+        artifact = run_nemo_dp2_benchmark(args, manifest)
     write_json_artifact(args.output, artifact)
     return 0
 
@@ -602,15 +979,23 @@ __all__ = [
     "CUDAGraphProofRecorder",
     "GenerationPhaseResult",
     "PeakMemoryMonitor",
+    "RequestExecutionRecord",
+    "build_request_execution_records",
     "build_request_sampling_params",
+    "checkpoint_provenance",
+    "full_decode_proof_summary",
+    "phase_output_artifact_path",
     "prepare_workload",
     "request_seed",
     "reset_vllm_worker_proof_state",
     "run_generation_phase",
     "runtime_versions",
     "snapshot_vllm_worker_proof_state",
+    "source_provenance",
     "summarize_cudagraph_observations",
     "validate_full_decode_proof",
+    "write_full_generation_records_artifact",
+    "write_full_output_artifact",
     "write_json_artifact",
 ]
 

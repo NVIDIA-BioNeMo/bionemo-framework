@@ -143,8 +143,22 @@ class Evo2VllmProfile:
             kwargs["distributed_executor_backend"] = "ray"
         return kwargs
 
-    def nemo_rl_generation_config(self, *, load_format: str = "dummy") -> dict[str, Any]:
+    def nemo_rl_generation_config(
+        self,
+        *,
+        load_format: str = "dummy",
+        request_seed: int = 42,
+    ) -> dict[str, Any]:
         """Return the stock NeMo-RL generation subtree for this profile."""
+        if request_seed < 0:
+            raise ValueError("request_seed must be nonnegative")
+        from nemo_rl.distributed.ray_actor_environment_registry import (
+            ACTOR_ENVIRONMENT_REGISTRY,
+            VLLM_EXECUTABLE,
+        )
+
+        generation_worker_cls = "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
+        ACTOR_ENVIRONMENT_REGISTRY[generation_worker_cls] = VLLM_EXECUTABLE
         engine_kwargs = self.engine_kwargs(model="unused-by-nemo-rl", load_format=load_format)
         for key in (
             "model",
@@ -160,12 +174,15 @@ class Evo2VllmProfile:
             "enforce_eager",
             "kv_cache_dtype",
             "worker_extension_cls",
+            "disable_log_stats",
         ):
             engine_kwargs.pop(key)
 
         return {
             "backend": "vllm",
             "generation_batch_size": self.global_batch_size,
+            "request_seed": request_seed,
+            "generation_worker_cls": generation_worker_cls,
             "vllm_cfg": {
                 "tensor_parallel_size": self.tensor_parallel_size,
                 "pipeline_parallel_size": 1,
@@ -180,7 +197,10 @@ class Evo2VllmProfile:
                 "enforce_eager": False,
                 "enable_prefix_caching": False,
             },
-            "vllm_kwargs": engine_kwargs,
+            "vllm_kwargs": {
+                **engine_kwargs,
+                "worker_extension_cls": ("bionemo.evo2.vllm.nemo_worker.Evo2NemoRlVllmWorkerExtension"),
+            },
         }
 
     def expected_resolved_config(self) -> dict[str, Any]:

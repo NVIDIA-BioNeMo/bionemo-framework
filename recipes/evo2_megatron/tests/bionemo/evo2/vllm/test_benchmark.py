@@ -165,6 +165,8 @@ def test_sample_aggregation_reports_median_p95_and_mad_without_hiding_outlier() 
     assert aggregate["generation_s"]["mad"] == 1.0
     assert aggregate["generated_tokens_per_s"]["median"] == 50.0
     assert aggregate["requests_per_s"]["median"] == 5.0
+    assert aggregate["batch_prefill_s"]["median"] == 0.3
+    assert aggregate["batch_decode_s"]["median"] == pytest.approx(0.27)
     assert aggregate["ttft_s"]["median"] == 0.25
     assert aggregate["inter_token_latency_s"]["p95"] == pytest.approx(0.0475)
     assert aggregate["peak_device_memory_bytes"]["max"] == 1800
@@ -347,6 +349,10 @@ def test_benchmark_sample_uses_vllm_request_metrics_without_engine_timing_inflat
     assert sample.inter_token_latency_s == pytest.approx((0.1, 0.1))
     assert sample.output_lengths == (3, 3)
     assert sample.peak_device_memory_bytes == (1_000, 2_000)
+    assert sample.batch_prefill_s == pytest.approx(0.41)
+    assert sample.batch_decode_s == pytest.approx(0.2)
+    assert sample.to_dict()["batch_prefill_s"] == pytest.approx(0.41)
+    assert sample.to_dict()["batch_decode_s"] == pytest.approx(0.2)
 
 
 def test_sampling_params_match_gdpo_and_force_exact_lengths_without_detokenization() -> None:

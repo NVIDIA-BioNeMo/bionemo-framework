@@ -5,6 +5,10 @@ import json
 from dataclasses import replace
 
 import pytest
+from nemo_rl.distributed.ray_actor_environment_registry import (
+    ACTOR_ENVIRONMENT_REGISTRY,
+    VLLM_EXECUTABLE,
+)
 
 from bionemo.evo2.vllm.profile import (
     Evo2VllmProfile,
@@ -70,7 +74,7 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     )
 
     kwargs = profile.engine_kwargs(model="/checkpoint", seed=29, load_format="dummy")
-    nemo_rl = profile.nemo_rl_generation_config(load_format="dummy")
+    nemo_rl = profile.nemo_rl_generation_config(load_format="dummy", request_seed=29)
 
     assert profile.global_batch_size == 96
     assert profile.replica_count == 2
@@ -87,6 +91,9 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
 
     assert nemo_rl["backend"] == "vllm"
     assert nemo_rl["generation_batch_size"] == 96
+    assert nemo_rl["request_seed"] == 29
+    assert nemo_rl["generation_worker_cls"] == ("bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker")
+    assert ACTOR_ENVIRONMENT_REGISTRY[nemo_rl["generation_worker_cls"]] == VLLM_EXECUTABLE
     assert nemo_rl["vllm_cfg"] == {
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
@@ -105,7 +112,29 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert nemo_rl["vllm_kwargs"]["async_scheduling"] is True
     assert nemo_rl["vllm_kwargs"]["mamba_cache_mode"] == "none"
     assert "mamba_block_size" not in nemo_rl["vllm_kwargs"]
-    assert "worker_extension_cls" not in nemo_rl["vllm_kwargs"]
+    assert nemo_rl["vllm_kwargs"]["worker_extension_cls"] == (
+        "bionemo.evo2.vllm.nemo_worker.Evo2NemoRlVllmWorkerExtension"
+    )
+    nemo_owned_llm_kwargs = {
+        "model",
+        "served_model_name",
+        "load_format",
+        "skip_tokenizer_init",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "enable_expert_parallel",
+        "gpu_memory_utilization",
+        "enable_prefix_caching",
+        "dtype",
+        "seed",
+        "enforce_eager",
+        "max_model_len",
+        "trust_remote_code",
+        "enable_sleep_mode",
+        "disable_log_stats",
+        "logprobs_mode",
+    }
+    assert nemo_owned_llm_kwargs.isdisjoint(nemo_rl["vllm_kwargs"])
 
 
 def test_long_prefill_profile_admits_multiple_packed_partial_requests() -> None:

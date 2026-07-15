@@ -322,11 +322,32 @@ class BenchmarkSample:
         """Return completed-request throughput."""
         return self.request_count / self.generation_s
 
+    @property
+    def batch_prefill_s(self) -> float:
+        """Return wall time until every request in the batch emitted its first token."""
+        return max(self.ttft_s)
+
+    @property
+    def batch_decode_s(self) -> float | None:
+        """Return the longest request decode span after its first token."""
+        if not self.inter_token_latency_s:
+            return None
+        return max(
+            latency_s * (output_length - 1)
+            for latency_s, output_length in zip(
+                self.inter_token_latency_s,
+                self.output_lengths,
+                strict=False,
+            )
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe sample including derived throughput."""
         result = asdict(self)
         result["generated_tokens_per_s"] = self.generated_tokens_per_s
         result["requests_per_s"] = self.requests_per_s
+        result["batch_prefill_s"] = self.batch_prefill_s
+        result["batch_decode_s"] = self.batch_decode_s
         return result
 
 
@@ -363,12 +384,15 @@ def aggregate_samples(samples: Sequence[BenchmarkSample]) -> dict[str, Any]:
         raise ValueError("at least one benchmark sample is required")
     ttft = [value for sample in samples for value in sample.ttft_s]
     inter_token_latency = [value for sample in samples for value in sample.inter_token_latency_s]
+    batch_decode = [value for sample in samples if (value := sample.batch_decode_s) is not None]
     peak_memory = [float(value) for sample in samples for value in sample.peak_device_memory_bytes]
     return {
         "sample_count": len(samples),
         "generation_s": _distribution([sample.generation_s for sample in samples]),
         "generated_tokens_per_s": _distribution([sample.generated_tokens_per_s for sample in samples]),
         "requests_per_s": _distribution([sample.requests_per_s for sample in samples]),
+        "batch_prefill_s": _distribution([sample.batch_prefill_s for sample in samples]),
+        "batch_decode_s": _distribution(batch_decode) if batch_decode else None,
         "ttft_s": _distribution(ttft),
         "inter_token_latency_s": _distribution(inter_token_latency) if inter_token_latency else None,
         "peak_device_memory_bytes": _distribution(peak_memory),

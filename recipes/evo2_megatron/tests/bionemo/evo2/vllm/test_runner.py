@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import gzip
+import hashlib
+import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
-from bionemo.evo2.vllm.benchmark import WorkloadManifest
+import bionemo.evo2.vllm.runner as runner
+from bionemo.evo2.vllm.benchmark import WorkloadManifest, records_from_vllm_outputs
 from bionemo.evo2.vllm.runner import (
     CUDAGraphProofRecorder,
     PeakMemoryMonitor,
@@ -231,6 +236,39 @@ def test_long_full_decode_proof_rejects_missing_work_and_serialization() -> None
         )
 
 
+def test_full_decode_proof_summary_persists_long_run_coverage_and_occupancy() -> None:
+    observations = [
+        {
+            "phase": "steady-0",
+            "engine_index": 0,
+            "num_unpadded_tokens": 10,
+            "num_padded_tokens": 10,
+            "num_paddings": 0,
+            "runtime_mode": "CUDAGraphMode.FULL",
+        }
+        for _ in range(98)
+    ]
+
+    summary = runner.full_decode_proof_summary(
+        observations,
+        phase="steady-0",
+        batch_size=10,
+        max_new_tokens=100,
+    )
+
+    assert summary["expected_decode_tokens"] == 990
+    assert summary["full_decode_tokens"] == 980
+    assert summary["coverage_fraction"] == pytest.approx(980 / 990)
+    assert summary["full_dispatch_count"] == 98
+    assert summary["maximum_full_batch"] == 10
+    assert summary["average_full_batch_occupancy"] == 10
+    assert summary["occupancy_fraction"] == 1.0
+    assert summary["global_batch_hit"] is True
+    assert summary["full_decode_unpadded"] is True
+    assert summary["long_run_gates_applied"] is True
+    assert summary["passed"] is True
+
+
 def test_peak_memory_monitor_records_each_device_maximum() -> None:
     samples = iter(((100, 200), (150, 180), (125, 240)))
     monitor = PeakMemoryMonitor(lambda: next(samples))
@@ -283,6 +321,196 @@ def test_request_sampling_params_apply_global_seed_offsets() -> None:
     assert all(param.detokenize is False and param.logprobs == 0 for param in params)
 
 
+def test_request_execution_records_persist_round_rank_call_and_global_seed() -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+
+    records = runner.build_request_execution_records(
+        manifest,
+        generation_round=2,
+        global_request_offset=48,
+        dp_rank=1,
+        call_index=7,
+    )
+
+    assert [record.to_dict() for record in records] == [
+        {
+            "request_id": "gdpo-000",
+            "global_request_index": 48,
+            "generation_round": 2,
+            "dp_rank": 1,
+            "call_index": 7,
+            "seed": request_seed(42, generation_round=2, global_request_index=48),
+        },
+        {
+            "request_id": "gdpo-001",
+            "global_request_index": 49,
+            "generation_round": 2,
+            "dp_rank": 1,
+            "call_index": 7,
+            "seed": request_seed(42, generation_round=2, global_request_index=49),
+        },
+    ]
+
+
+def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    execution_records = runner.build_request_execution_records(
+        manifest,
+        generation_round=3,
+        global_request_offset=48,
+        dp_rank=1,
+        call_index=9,
+    )
+    output_path = tmp_path / "steady-0.outputs.jsonl.gz"
+
+    metadata = runner.write_full_output_artifact(
+        output_path,
+        manifest=manifest,
+        outputs=_fake_outputs(manifest),
+        execution_records=execution_records,
+    )
+
+    with gzip.open(output_path, "rt", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle]
+    assert rows[0]["request_id"] == "gdpo-000"
+    assert rows[0]["generation_round"] == 3
+    assert rows[0]["dp_rank"] == 1
+    assert rows[0]["call_index"] == 9
+    assert rows[0]["global_request_index"] == 48
+    assert rows[0]["seed"] == execution_records[0].seed
+    assert rows[0]["output_token_ids"] == [65, 67, 71]
+    assert rows[0]["chosen_token_logprobs"] == pytest.approx([-0.1, -0.1, -0.1])
+    assert rows[1]["output_token_ids"] == [66, 68, 72]
+    assert metadata == {
+        "schema_version": 1,
+        "format": "jsonl",
+        "compression": "gzip",
+        "path": str(output_path.resolve()),
+        "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+        "size_bytes": output_path.stat().st_size,
+        "request_count": 2,
+        "generated_token_count": 6,
+    }
+
+
+def test_backend_neutral_full_output_artifact_accepts_generation_records(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    execution_records = runner.build_request_execution_records(
+        manifest,
+        generation_round=3,
+        global_request_offset=48,
+        dp_rank=1,
+        call_index=9,
+    )
+    records = records_from_vllm_outputs(manifest, _fake_outputs(manifest))
+    output_path = tmp_path / "nemo-steady-0.outputs.jsonl.gz"
+
+    metadata = runner.write_full_generation_records_artifact(
+        output_path,
+        records=records,
+        execution_records=execution_records,
+    )
+
+    with gzip.open(output_path, "rt", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle]
+    assert [row["request_id"] for row in rows] == ["gdpo-000", "gdpo-001"]
+    assert rows[0]["prompt_token_ids"] == list(manifest.requests[0].prompt_token_ids)
+    assert rows[0]["output_token_ids"] == [65, 67, 71]
+    assert rows[0]["chosen_token_logprobs"] == pytest.approx([-0.1, -0.1, -0.1])
+    assert metadata["generated_token_count"] == 6
+
+
+def test_phase_output_artifact_paths_are_phase_and_replica_specific(tmp_path) -> None:
+    root = tmp_path / "benchmark.json"
+
+    assert runner.phase_output_artifact_path(root, phase="steady-0") == (
+        tmp_path / "benchmark.steady-0.outputs.jsonl.gz"
+    )
+    assert runner.phase_output_artifact_path(root, phase="steady-0", dp_rank=1) == (
+        tmp_path / "benchmark.steady-0.dp1.outputs.jsonl.gz"
+    )
+
+
+def test_checkpoint_provenance_hashes_actual_indexed_weight_shards(tmp_path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    config = checkpoint / "config.json"
+    index = checkpoint / "model.safetensors.index.json"
+    manifest_path = checkpoint / "manifest.json"
+    shard_a = checkpoint / "model-00001-of-00002.safetensors"
+    shard_b = checkpoint / "model-00002-of-00002.safetensors"
+    tokenizer = checkpoint / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir()
+    config.write_text("{}\n")
+    shard_a.write_bytes(b"first-real-shard")
+    shard_b.write_bytes(b"second-real-shard")
+    tokenizer.write_text('{"vocab_size": 512}\n')
+    index.write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": shard_a.stat().st_size + shard_b.stat().st_size},
+                "weight_map": {"a": shard_a.name, "b": shard_b.name},
+            }
+        )
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+            }
+        )
+    )
+
+    first = runner.checkpoint_provenance(checkpoint)
+
+    assert first["checkpoint_sha256"]
+    assert first["indexed_weight_bytes"] == shard_a.stat().st_size + shard_b.stat().st_size
+    assert [item["path"] for item in first["indexed_weight_shards"]] == [shard_a.name, shard_b.name]
+    assert first["indexed_weight_shards"][0]["sha256"] == hashlib.sha256(shard_a.read_bytes()).hexdigest()
+    assert first["manifest_digest_verification"] == {"config": True, "index": True}
+    assert "tokenizer/tokenizer.json" in {item["path"] for item in first["files"]}
+
+    shard_b.write_bytes(b"changed-second-real-shard")
+    second = runner.checkpoint_provenance(checkpoint)
+    assert second["checkpoint_sha256"] != first["checkpoint_sha256"]
+
+
+def test_source_provenance_records_head_dirty_diff_and_actual_source_tree(tmp_path) -> None:
+    source = tmp_path / "src" / "model.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "src/model.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Evo2 Test",
+            "-c",
+            "user.email=evo2@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    clean = runner.source_provenance(repository=tmp_path, source_roots=(source.parent,))
+    assert len(clean["git_head"]) == 40
+    assert clean["git_dirty"] is False
+    assert clean["source_file_count"] == 1
+
+    source.write_text("VALUE = 2\n")
+    dirty = runner.source_provenance(repository=tmp_path, source_roots=(source.parent,))
+    assert dirty["git_head"] == clean["git_head"]
+    assert dirty["git_dirty"] is True
+    assert dirty["dirty_fingerprint_sha256"] != clean["dirty_fingerprint_sha256"]
+    assert dirty["source_tree_sha256"] != clean["source_tree_sha256"]
+
+
 def test_prepare_workload_builds_exact_pressure_shape_without_mutating_manifest() -> None:
     manifest = WorkloadManifest.from_path(DATA)
 
@@ -329,9 +557,16 @@ def _fake_outputs(manifest: WorkloadManifest):
     return outputs
 
 
-def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs() -> None:
+def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs(tmp_path) -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
     recorder = CUDAGraphProofRecorder()
+    execution_records = runner.build_request_execution_records(
+        manifest,
+        generation_round=0,
+        global_request_offset=0,
+        dp_rank=0,
+        call_index=0,
+    )
 
     class FakeLLM:
         def generate(self, prompts, sampling_params, *, use_tqdm):
@@ -363,6 +598,8 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs()
         sample_index=0,
         recorder=recorder,
         memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+        execution_records=execution_records,
+        full_output_path=tmp_path / "steady-0.outputs.jsonl.gz",
         reset_worker_proof=lambda: proof_events.append("reset"),
         snapshot_worker_proof=lambda: (
             {
@@ -381,4 +618,9 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs()
     assert [summary["output_length"] for summary in result.output_summaries] == [3, 3]
     assert proof_events == ["reset"]
     assert result.worker_proof[0]["rank"] == 0
-    assert result.to_dict()["worker_proof"][0]["fir_routes"]["equal_length_conv"]["calls"] == 9
+    artifact = result.to_dict()
+    assert artifact["worker_proof"][0]["fir_routes"]["equal_length_conv"]["calls"] == 9
+    assert artifact["request_executions"][0]["seed"] == 42
+    assert artifact["full_output_artifact"]["generated_token_count"] == 6
+    assert artifact["full_decode_proof"]["passed"] is True
+    assert artifact["full_decode_proof"]["full_decode_tokens"] == 4
