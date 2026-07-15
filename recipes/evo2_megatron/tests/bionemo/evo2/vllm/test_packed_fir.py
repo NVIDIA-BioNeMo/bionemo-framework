@@ -13,20 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+
 import pytest
 import torch
 import torch.nn.functional as functional
 
+import bionemo.evo2.vllm.packed_fir as packed_fir_module
 from bionemo.evo2.models.megatron.hyena.engine import step_fir
 from bionemo.evo2.vllm.packed_fir import (
+    get_fir_route_stats,
     packed_causal_fir,
     packed_fir_reference,
+    reset_fir_route_stats,
     select_fir_path,
     select_production_fir_path,
 )
 
 
 PROMPT_LENGTHS = list(range(4, 13)) * 10 + [4, 5, 6, 7, 8, 9]
+
+
+def test_route_stats_can_record_inside_opaque_compiler_runtime(monkeypatch):
+    telemetry_context = getattr(packed_fir_module, "fir_route_telemetry_context", nullcontext)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    reset_fir_route_stats()
+
+    with telemetry_context():
+        packed_fir_module._record_fir_route(
+            "equal_length_conv",
+            num_requests=3,
+            total_tokens=75_000,
+            max_query_len=25_000,
+            taps=128,
+        )
+
+    assert get_fir_route_stats() == {"equal_length_conv": {"calls": 1, "requests": 3, "tokens": 75_000}}
 
 
 def _query_start_loc(lengths):
@@ -550,7 +572,7 @@ def test_packed_causal_fir_long_prefill_matches_independent_convolution_oracle()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for torch.compile FIR coverage")
-def test_packed_causal_fir_long_path_matches_torch_compile():
+def test_packed_causal_fir_long_kernel_is_torch_compile_compatible():
     device = torch.device("cuda")
     lengths = [1_024, 1_024]
     channels = 16
@@ -618,7 +640,7 @@ def test_packed_causal_fir_long_path_matches_torch_compile():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for graph capture")
 @pytest.mark.parametrize("lengths", ([65, 47], [1_024, 1_024]))
-def test_packed_causal_fir_long_cuda_graph_replay_uses_static_buffers(lengths):
+def test_packed_causal_fir_long_kernel_is_cuda_graph_compatible(lengths):
     device = torch.device("cuda")
     channels = 32
     taps = 128
@@ -687,6 +709,170 @@ def test_packed_causal_fir_long_cuda_graph_replay_uses_static_buffers(lengths):
     assert not torch.equal(output, first_output)
     assert not torch.equal(state_cache[1], first_state)
     torch.testing.assert_close(state_cache[0], null_state, rtol=0, atol=0)
+
+
+def _independent_long_convolution(
+    sequences,
+    histories,
+    weight,
+    bias,
+    *,
+    group_size,
+):
+    channels = sequences.shape[-1]
+    expanded_weight = weight.repeat_interleave(group_size, dim=0).float().flip(-1)
+    expanded_bias = bias.repeat_interleave(group_size, dim=0).float()
+    padded = torch.cat((histories, sequences.transpose(1, 2).float()), dim=-1)
+    output = functional.conv1d(padded, expanded_weight[:, None, :], groups=channels)
+    return (output + expanded_bias[None, :, None] * sequences.transpose(1, 2).float()).transpose(1, 2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")
+def test_equal_long_path_matches_exact_25000_independent_oracle_for_mixed_state_slots():
+    device = torch.device("cuda")
+    request_count = 3
+    length = 25_000
+    channels = 4
+    taps = 128
+    group_size = 2
+    generator = torch.Generator(device=device).manual_seed(2500025000)
+    sequences = torch.randn(
+        (request_count, length, channels),
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    weight = (
+        torch.randn((channels // group_size, taps), device=device, dtype=torch.bfloat16, generator=generator) * 0.01
+    )
+    bias = torch.randn((channels // group_size,), device=device, dtype=torch.bfloat16, generator=generator) * 0.01
+    state_cache = torch.randn((4, channels, 135), device=device, dtype=torch.float32, generator=generator)
+    original_cache = state_cache.clone()
+    state_indices = torch.tensor([2, 1, 0], device=device, dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False, True], device=device)
+    histories = torch.stack(
+        (
+            original_cache[2, :, : taps - 1],
+            torch.zeros_like(original_cache[1, :, : taps - 1]),
+            torch.zeros_like(original_cache[0, :, : taps - 1]),
+        )
+    )
+    expected = _independent_long_convolution(
+        sequences,
+        histories,
+        weight,
+        bias,
+        group_size=group_size,
+    ).to(torch.bfloat16)
+
+    reset_fir_route_stats()
+    actual = packed_causal_fir(
+        sequences.reshape(-1, channels),
+        weight,
+        bias,
+        state_cache,
+        torch.arange(0, (request_count + 1) * length, length, device=device, dtype=torch.int32),
+        state_indices,
+        has_initial_state,
+        group_size=group_size,
+        gated_bias=True,
+        flip_filter=True,
+        max_query_len=length,
+    ).reshape_as(sequences)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(
+        state_cache[2, :, : taps - 1], sequences[0, -(taps - 1) :].transpose(0, 1).float(), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        state_cache[1, :, : taps - 1], sequences[1, -(taps - 1) :].transpose(0, 1).float(), rtol=0, atol=0
+    )
+    torch.testing.assert_close(state_cache[0], original_cache[0], rtol=0, atol=0)
+    stats = get_fir_route_stats()
+    assert stats["equal_length_conv"] == {"calls": 1, "requests": 3, "tokens": 75_000}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")
+def test_equal_long_path_matches_independent_oracle_across_two_continuations():
+    device = torch.device("cuda")
+    length = 1_537
+    channels = 4
+    taps = 128
+    group_size = 2
+    generator = torch.Generator(device=device).manual_seed(15371537)
+    sequence = torch.randn((2, length, channels), device=device, dtype=torch.bfloat16, generator=generator)
+    weight = (
+        torch.randn((channels // group_size, taps), device=device, dtype=torch.bfloat16, generator=generator) * 0.01
+    )
+    bias = torch.randn((channels // group_size,), device=device, dtype=torch.bfloat16, generator=generator) * 0.01
+    state_cache = torch.randn((2, channels, 127), device=device, dtype=torch.float32, generator=generator)
+    initial_history = state_cache[1].clone().unsqueeze(0)
+    expected = (
+        _independent_long_convolution(
+            sequence.reshape(1, 2 * length, channels),
+            initial_history,
+            weight,
+            bias,
+            group_size=group_size,
+        )
+        .to(torch.bfloat16)
+        .reshape(2, length, channels)
+    )
+    metadata = torch.tensor([0, length], device=device, dtype=torch.int32)
+
+    reset_fir_route_stats()
+    outputs = [
+        packed_causal_fir(
+            continuation,
+            weight,
+            bias,
+            state_cache,
+            metadata,
+            torch.tensor([1], device=device, dtype=torch.int32),
+            torch.tensor([True], device=device),
+            group_size=group_size,
+            gated_bias=True,
+            flip_filter=True,
+            max_query_len=length,
+        )
+        for continuation in sequence
+    ]
+
+    torch.testing.assert_close(torch.stack(outputs), expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(state_cache[1], sequence[-1, -(taps - 1) :].transpose(0, 1).float(), rtol=0, atol=0)
+    assert get_fir_route_stats()["equal_length_conv"] == {
+        "calls": 2,
+        "requests": 2,
+        "tokens": 2 * length,
+    }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")
+def test_route_stats_report_ragged_long_fallback_without_semantic_padding():
+    device = torch.device("cuda")
+    lengths = [1_024, 1_025]
+    channels = 4
+    generator = torch.Generator(device=device).manual_seed(2049)
+    starts = _query_start_loc(lengths).to(device=device, dtype=torch.int32)
+    reset_fir_route_stats()
+
+    packed_causal_fir(
+        torch.randn((sum(lengths), channels), device=device, dtype=torch.bfloat16, generator=generator),
+        torch.randn((channels // 2, 128), device=device, dtype=torch.bfloat16, generator=generator) * 0.01,
+        torch.zeros((channels // 2,), device=device, dtype=torch.bfloat16),
+        torch.zeros((3, channels, 127), device=device, dtype=torch.float32),
+        starts,
+        torch.tensor([1, 2], device=device, dtype=torch.int32),
+        torch.zeros(2, device=device, dtype=torch.bool),
+        group_size=2,
+        gated_bias=True,
+        flip_filter=True,
+        max_query_len=max(lengths),
+    )
+
+    stats = get_fir_route_stats()
+    assert stats["direct"] == {"calls": 1, "requests": 2, "tokens": sum(lengths)}
+    assert stats["fallback_reasons"] == {"ragged_or_chunked": 1}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")

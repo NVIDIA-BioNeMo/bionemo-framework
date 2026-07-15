@@ -14,6 +14,7 @@ from bionemo.evo2.vllm.benchmark import (
     aggregate_samples,
     benchmark_sample_from_vllm_outputs,
     build_parser,
+    build_request_waves,
     records_from_vllm_outputs,
     sampling_params_kwargs,
     summarize_vllm_outputs,
@@ -84,6 +85,18 @@ def test_manifest_expands_deterministically_to_full_1000_by_6000_audit() -> None
         .with_max_new_tokens(6_000)
         .sha256
     )
+
+
+def test_full_audit_routes_as_10x96_plus_exact_20_per_dp_replica_tail() -> None:
+    waves = build_request_waves(request_count=1_000, global_batch_size=96, replica_count=2)
+
+    assert len(waves) == 11
+    assert [wave.request_count for wave in waves] == [96] * 10 + [40]
+    assert [[shard.request_count for shard in wave.shards] for wave in waves[:-1]] == [[48, 48]] * 10
+    assert [shard.request_count for shard in waves[-1].shards] == [20, 20]
+    assert [
+        request_index for wave in waves for shard in wave.shards for request_index in range(shard.start, shard.stop)
+    ] == list(range(1_000))
 
 
 def test_manifest_builds_exact_long_prompts_from_real_tokens_without_padding() -> None:
@@ -157,6 +170,24 @@ def test_sample_aggregation_reports_median_p95_and_mad_without_hiding_outlier() 
     assert aggregate["peak_device_memory_bytes"]["max"] == 1800
 
 
+def test_sample_aggregation_marks_single_token_inter_token_latency_undefined() -> None:
+    sample = BenchmarkSample(
+        sample_index=0,
+        generation_s=1.0,
+        request_count=1,
+        prompt_tokens=1_024,
+        generated_tokens=1,
+        ttft_s=(1.0,),
+        inter_token_latency_s=(),
+        output_lengths=(1,),
+        peak_device_memory_bytes=(1_000,),
+    )
+
+    aggregate = aggregate_samples([sample])
+
+    assert aggregate["inter_token_latency_s"] is None
+
+
 def test_generation_validation_requires_exact_ids_lengths_prompts_and_finite_logprobs() -> None:
     manifest = WorkloadManifest.from_path(DATA).with_max_new_tokens(3)
     records = tuple(
@@ -225,6 +256,12 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
     assert args.warmups == 2
     assert args.repetitions == 5
     assert args.proof is False
+    assert args.optimization_level == 2
+    assert args.performance_mode == "balanced"
+    assert args.load_format == "safetensors"
+    assert args.request_count is None
+    assert args.uniform_prompt_length is None
+    assert args.generation_round == 0
 
 
 def _fake_vllm_outputs(manifest: WorkloadManifest):
@@ -232,8 +269,7 @@ def _fake_vllm_outputs(manifest: WorkloadManifest):
     for index, request in enumerate(manifest.requests):
         token_ids = (65 + index, 67 + index, 71 + index)
         logprobs = [
-            {token_id: SimpleNamespace(logprob=-0.1 * (position + 1))}
-            for position, token_id in enumerate(token_ids)
+            {token_id: SimpleNamespace(logprob=-0.1 * (position + 1))} for position, token_id in enumerate(token_ids)
         ]
         completion = SimpleNamespace(token_ids=token_ids, logprobs=logprobs)
         metrics = SimpleNamespace(

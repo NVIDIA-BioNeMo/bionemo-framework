@@ -312,7 +312,11 @@ class IncrementalEvo2WeightLoader:
 
         self._started = True
         self._loaded_parameter_names.update(loaded)
-        if not self._complete and not self._pending_fc1 and self.required_parameter_names <= self._loaded_parameter_names:
+        if (
+            not self._complete
+            and not self._pending_fc1
+            and self.required_parameter_names <= self._loaded_parameter_names
+        ):
             self._complete = True
             self.completed_transactions += 1
         return loaded

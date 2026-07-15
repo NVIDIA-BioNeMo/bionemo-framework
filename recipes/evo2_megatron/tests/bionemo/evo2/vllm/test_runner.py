@@ -10,16 +10,14 @@ from bionemo.evo2.vllm.runner import (
     CUDAGraphProofRecorder,
     PeakMemoryMonitor,
     build_request_sampling_params,
+    prepare_workload,
     request_seed,
     run_generation_phase,
     validate_full_decode_proof,
 )
 
 
-DATA = (
-    __import__("pathlib").Path(__file__).with_name("data")
-    / "gdpo_mixed_96.json"
-)
+DATA = __import__("pathlib").Path(__file__).with_name("data") / "gdpo_mixed_96.json"
 
 
 def _scheduler_stats(
@@ -81,7 +79,7 @@ def test_full_decode_proof_requires_full_unpadded_replay_and_rejects_fallback() 
             "num_unpadded_tokens": 768,
             "num_padded_tokens": 768,
             "num_paddings": 0,
-            "runtime_mode": "CUDAGraphMode.PIECEWISE",
+            "runtime_mode": "CUDAGraphMode.NONE",
         },
         *[
             {
@@ -137,6 +135,102 @@ def test_full_decode_proof_requires_full_unpadded_replay_and_rejects_fallback() 
         )
 
 
+def test_full_decode_proof_allows_staggered_admission_with_full_global_batch() -> None:
+    observations = [
+        {
+            "phase": "cold-generation",
+            "engine_index": 0,
+            "num_unpadded_tokens": 4,
+            "num_padded_tokens": 4,
+            "num_paddings": 0,
+            "runtime_mode": "CUDAGraphMode.PIECEWISE",
+        },
+        {
+            "phase": "cold-generation",
+            "engine_index": 0,
+            "num_unpadded_tokens": 6,
+            "num_padded_tokens": 8,
+            "num_paddings": 2,
+            "runtime_mode": "CUDAGraphMode.PIECEWISE",
+        },
+        {
+            "phase": "cold-generation",
+            "engine_index": 0,
+            "num_unpadded_tokens": 2,
+            "num_padded_tokens": 2,
+            "num_paddings": 0,
+            "runtime_mode": "CUDAGraphMode.FULL",
+        },
+        {
+            "phase": "cold-generation",
+            "engine_index": 0,
+            "num_unpadded_tokens": 1,
+            "num_padded_tokens": 1,
+            "num_paddings": 0,
+            "runtime_mode": "CUDAGraphMode.FULL",
+        },
+    ]
+
+    validate_full_decode_proof(
+        observations,
+        phase="cold-generation",
+        batch_size=2,
+        max_new_tokens=3,
+    )
+
+    steady_observations = [{**item, "phase": "steady-0"} for item in observations]
+    validate_full_decode_proof(
+        steady_observations,
+        phase="steady-0",
+        batch_size=2,
+        max_new_tokens=3,
+    )
+
+    with pytest.raises(AssertionError, match="global batch"):
+        validate_full_decode_proof(
+            [item for item in steady_observations if item["num_unpadded_tokens"] != 2],
+            phase="steady-0",
+            batch_size=2,
+            max_new_tokens=3,
+        )
+
+
+def test_long_full_decode_proof_rejects_missing_work_and_serialization() -> None:
+    def full_observation(unpadded: int) -> dict[str, object]:
+        return {
+            "phase": "steady-0",
+            "engine_index": 0,
+            "num_unpadded_tokens": unpadded,
+            "num_padded_tokens": unpadded,
+            "num_paddings": 0,
+            "runtime_mode": "CUDAGraphMode.FULL",
+        }
+
+    batched = [full_observation(10) for _ in range(98)]
+    validate_full_decode_proof(
+        batched,
+        phase="steady-0",
+        batch_size=10,
+        max_new_tokens=100,
+    )
+
+    with pytest.raises(AssertionError, match="coverage"):
+        validate_full_decode_proof(
+            batched[:40],
+            phase="steady-0",
+            batch_size=10,
+            max_new_tokens=100,
+        )
+
+    with pytest.raises(AssertionError, match="occupancy"):
+        validate_full_decode_proof(
+            [full_observation(10), *[full_observation(1) for _ in range(980)]],
+            phase="steady-0",
+            batch_size=10,
+            max_new_tokens=100,
+        )
+
+
 def test_peak_memory_monitor_records_each_device_maximum() -> None:
     samples = iter(((100, 200), (150, 180), (125, 240)))
     monitor = PeakMemoryMonitor(lambda: next(samples))
@@ -163,9 +257,7 @@ def test_request_seeds_match_between_tp2_and_dp2_and_advance_by_round() -> None:
         *[request_seed(42, generation_round=0, global_request_index=index) for index in range(48)],
         *[request_seed(42, generation_round=0, global_request_index=index) for index in range(48, 96)],
     ]
-    next_round = [
-        request_seed(42, generation_round=1, global_request_index=index) for index in range(96)
-    ]
+    next_round = [request_seed(42, generation_round=1, global_request_index=index) for index in range(96)]
 
     assert tp2 == dp2
     assert len(set(tp2)) == 96
@@ -191,16 +283,35 @@ def test_request_sampling_params_apply_global_seed_offsets() -> None:
     assert all(param.detokenize is False and param.logprobs == 0 for param in params)
 
 
+def test_prepare_workload_builds_exact_pressure_shape_without_mutating_manifest() -> None:
+    manifest = WorkloadManifest.from_path(DATA)
+
+    pressure = prepare_workload(
+        manifest,
+        request_count=3,
+        uniform_prompt_length=25_000,
+        request_id_prefix="pressure",
+        max_new_tokens=25_000,
+    )
+
+    assert len(manifest.requests) == 96
+    assert manifest.max_new_tokens == 5_989
+    assert [len(request.prompt_token_ids) for request in pressure.requests] == [25_000] * 3
+    assert pressure.max_new_tokens == 25_000
+    assert [request.request_id for request in pressure.requests] == [
+        "pressure-0000",
+        "pressure-0001",
+        "pressure-0002",
+    ]
+
+
 def _fake_outputs(manifest: WorkloadManifest):
     outputs = []
     for index, request in enumerate(manifest.requests):
         token_ids = (65 + index, 67 + index, 71 + index)
         completion = SimpleNamespace(
             token_ids=token_ids,
-            logprobs=[
-                {token_id: SimpleNamespace(logprob=-0.1)}
-                for token_id in token_ids
-            ],
+            logprobs=[{token_id: SimpleNamespace(logprob=-0.1)} for token_id in token_ids],
         )
         outputs.append(
             SimpleNamespace(
@@ -224,10 +335,7 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs()
 
     class FakeLLM:
         def generate(self, prompts, sampling_params, *, use_tqdm):
-            assert prompts == [
-                {"prompt_token_ids": list(request.prompt_token_ids)}
-                for request in manifest.requests
-            ]
+            assert prompts == [{"prompt_token_ids": list(request.prompt_token_ids)} for request in manifest.requests]
             assert len(sampling_params) == 2
             assert use_tqdm is False
             recorder.record(
@@ -241,6 +349,7 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs()
             return _fake_outputs(manifest)
 
     times = iter((10.0, 12.5))
+    proof_events = []
     result = run_generation_phase(
         llm=FakeLLM(),
         manifest=manifest,
@@ -254,6 +363,13 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs()
         sample_index=0,
         recorder=recorder,
         memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+        reset_worker_proof=lambda: proof_events.append("reset"),
+        snapshot_worker_proof=lambda: (
+            {
+                "rank": 0,
+                "fir_routes": {"equal_length_conv": {"calls": 9, "requests": 2, "tokens": 10}},
+            },
+        ),
         clock=lambda: next(times),
     )
 
@@ -263,3 +379,6 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs()
     assert result.sample.peak_device_memory_bytes == (1_000, 2_000)
     assert len(result.observations) == 2
     assert [summary["output_length"] for summary in result.output_summaries] == [3, 3]
+    assert proof_events == ["reset"]
+    assert result.worker_proof[0]["rank"] == 0
+    assert result.to_dict()["worker_proof"][0]["fir_routes"]["equal_length_conv"]["calls"] == 9

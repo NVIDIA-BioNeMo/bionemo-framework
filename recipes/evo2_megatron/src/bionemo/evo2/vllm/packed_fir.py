@@ -18,12 +18,73 @@
 import argparse
 import json
 import statistics
+from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from itertools import pairwise
 from pathlib import Path
+from threading import Lock
 
 import torch
 import triton
 import triton.language as tl
+
+
+_FIR_ROUTE_TOTALS: dict[str, Counter[str]] = {}
+_FIR_FALLBACK_REASONS: Counter[str] = Counter()
+_FIR_ROUTE_LOCK = Lock()
+_FIR_ROUTE_OPAQUE_RUNTIME_DEPTH = 0
+
+
+@contextmanager
+def fir_route_telemetry_context() -> Iterator[None]:
+    """Enable route accounting inside an opaque compiler-marked custom op."""
+    global _FIR_ROUTE_OPAQUE_RUNTIME_DEPTH  # noqa: PLW0603 - Dynamo-visible scoped flag.
+    prior_depth = _FIR_ROUTE_OPAQUE_RUNTIME_DEPTH
+    _FIR_ROUTE_OPAQUE_RUNTIME_DEPTH = prior_depth + 1
+    try:
+        yield
+    finally:
+        _FIR_ROUTE_OPAQUE_RUNTIME_DEPTH = prior_depth
+
+
+def reset_fir_route_stats() -> None:
+    """Reset process-local aggregate production FIR route telemetry."""
+    with _FIR_ROUTE_LOCK:
+        _FIR_ROUTE_TOTALS.clear()
+        _FIR_FALLBACK_REASONS.clear()
+
+
+def get_fir_route_stats() -> dict[str, dict[str, int]]:
+    """Return a JSON-serializable snapshot of process-local FIR route telemetry."""
+    with _FIR_ROUTE_LOCK:
+        snapshot = {path: dict(totals) for path, totals in _FIR_ROUTE_TOTALS.items()}
+        if _FIR_FALLBACK_REASONS:
+            snapshot["fallback_reasons"] = dict(_FIR_FALLBACK_REASONS)
+        return snapshot
+
+
+def _record_fir_route(
+    path: str,
+    *,
+    num_requests: int,
+    total_tokens: int,
+    max_query_len: int,
+    taps: int,
+) -> None:
+    if torch.compiler.is_compiling() and _FIR_ROUTE_OPAQUE_RUNTIME_DEPTH == 0:
+        return
+    with _FIR_ROUTE_LOCK:
+        totals = _FIR_ROUTE_TOTALS.setdefault(path, Counter())
+        totals.update(calls=1, requests=num_requests, tokens=total_tokens)
+        if path == "direct":
+            if taps != 128:
+                reason = "non_128_taps"
+            elif max_query_len < 1_024:
+                reason = "short_request"
+            else:
+                reason = "ragged_or_chunked"
+            _FIR_FALLBACK_REASONS[reason] += 1
 
 
 def select_fir_path(*, direct_ms: float, bucketed_ms: float) -> str:
@@ -40,7 +101,14 @@ def select_production_fir_path(
     max_query_len: int,
     taps: int,
 ) -> str:
-    """Select the measured fast path only for equal long 128-tap segments."""
+    """Select the measured fast path only for equal long 128-tap segments.
+
+    vLLM supplies monotonic ``query_start_loc`` metadata ending at ``total_tokens`` and
+    ``max_query_len`` as the true maximum segment length. Under that caller contract,
+    ``total_tokens == num_requests * max_query_len`` is possible only when every segment
+    has exactly ``max_query_len`` tokens. This avoids a device-to-host synchronization in
+    each of the nine medium-filter layers.
+    """
     if num_requests < 1 or total_tokens < 1 or max_query_len < 1 or taps < 2:
         raise ValueError("FIR production path dimensions must be positive")
     equal_length = total_tokens == num_requests * max_query_len
@@ -605,6 +673,13 @@ def packed_causal_fir(
 
     taps = weight.shape[1]
     production_path = select_production_fir_path(
+        num_requests=num_requests,
+        total_tokens=x.shape[0],
+        max_query_len=max_query_len,
+        taps=taps,
+    )
+    _record_fir_route(
+        production_path,
         num_requests=num_requests,
         total_tokens=x.shape[0],
         max_query_len=max_query_len,

@@ -100,13 +100,14 @@ class Evo2VllmProfile:
         load_format: str = "safetensors",
     ) -> dict[str, Any]:
         """Return kwargs accepted directly by ``vllm.LLM``."""
-        return {
+        kwargs = {
             "model": model,
             "load_format": load_format,
             "skip_tokenizer_init": True,
             "model_impl": "vllm",
             "dtype": "bfloat16",
             "seed": seed,
+            "worker_extension_cls": "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension",
             "optimization_level": self.optimization_level,
             "performance_mode": self.performance_mode,
             "tensor_parallel_size": self.tensor_parallel_size,
@@ -138,6 +139,9 @@ class Evo2VllmProfile:
                 "compile_sizes": [self.per_engine_batch_size],
             },
         }
+        if self.topology == "tp2":
+            kwargs["distributed_executor_backend"] = "ray"
+        return kwargs
 
     def nemo_rl_generation_config(self, *, load_format: str = "dummy") -> dict[str, Any]:
         """Return the stock NeMo-RL generation subtree for this profile."""
@@ -155,6 +159,7 @@ class Evo2VllmProfile:
             "enable_prefix_caching",
             "enforce_eager",
             "kv_cache_dtype",
+            "worker_extension_cls",
         ):
             engine_kwargs.pop(key)
 
@@ -303,17 +308,11 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
 
 def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]) -> None:
     """Reject any resolved setting that weakens the optimized proof profile."""
-    assert resolved["runtime"]["optimization_level"] == profile.optimization_level, (
-        "optimization_level drifted"
-    )
-    assert resolved["runtime"]["performance_mode"] == profile.performance_mode, (
-        "performance_mode drifted"
-    )
+    assert resolved["runtime"]["optimization_level"] == profile.optimization_level, "optimization_level drifted"
+    assert resolved["runtime"]["performance_mode"] == profile.performance_mode, "performance_mode drifted"
     assert resolved["model"]["enforce_eager"] is False, "enforce_eager must remain false"
     assert resolved["model"]["max_model_len"] == profile.max_model_len, "max_model_len drifted"
-    assert resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size, (
-        "tensor_parallel_size drifted"
-    )
+    assert resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size, "tensor_parallel_size drifted"
     assert resolved["scheduler"]["max_num_seqs"] == profile.per_engine_batch_size, "max_num_seqs drifted"
     assert resolved["scheduler"]["max_num_batched_tokens"] == profile.max_num_batched_tokens, (
         "max_num_batched_tokens drifted"

@@ -48,6 +48,63 @@ class WorkloadRequest:
 
 
 @dataclass(frozen=True)
+class RequestShard:
+    """One exact contiguous request range assigned to a DP replica."""
+
+    replica_index: int
+    start: int
+    stop: int
+
+    @property
+    def request_count(self) -> int:
+        """Return the number of real, unpadded requests in this shard."""
+        return self.stop - self.start
+
+
+@dataclass(frozen=True)
+class RequestWave:
+    """One global generation wave split into exact DP replica shards."""
+
+    wave_index: int
+    start: int
+    stop: int
+    shards: tuple[RequestShard, ...]
+
+    @property
+    def request_count(self) -> int:
+        """Return the number of real, unpadded requests in this wave."""
+        return self.stop - self.start
+
+
+def build_request_waves(
+    *,
+    request_count: int,
+    global_batch_size: int,
+    replica_count: int,
+) -> tuple[RequestWave, ...]:
+    """Partition requests into exact global waves and balanced contiguous DP shards."""
+    if request_count <= 0 or global_batch_size <= 0 or replica_count <= 0:
+        raise ValueError("request, global batch, and replica counts must be positive")
+    if replica_count > global_batch_size:
+        raise ValueError("replica_count cannot exceed global_batch_size")
+
+    waves = []
+    for wave_index, start in enumerate(range(0, request_count, global_batch_size)):
+        stop = min(start + global_batch_size, request_count)
+        wave_count = stop - start
+        active_replicas = min(replica_count, wave_count)
+        base_size, remainder = divmod(wave_count, active_replicas)
+        shard_start = start
+        shards = []
+        for replica_index in range(active_replicas):
+            shard_stop = shard_start + base_size + (replica_index < remainder)
+            shards.append(RequestShard(replica_index, shard_start, shard_stop))
+            shard_start = shard_stop
+        waves.append(RequestWave(wave_index, start, stop, tuple(shards)))
+    return tuple(waves)
+
+
+@dataclass(frozen=True)
 class WorkloadManifest:
     """Backend-neutral immutable generation workload."""
 
@@ -313,7 +370,7 @@ def aggregate_samples(samples: Sequence[BenchmarkSample]) -> dict[str, Any]:
         "generated_tokens_per_s": _distribution([sample.generated_tokens_per_s for sample in samples]),
         "requests_per_s": _distribution([sample.requests_per_s for sample in samples]),
         "ttft_s": _distribution(ttft),
-        "inter_token_latency_s": _distribution(inter_token_latency),
+        "inter_token_latency_s": _distribution(inter_token_latency) if inter_token_latency else None,
         "peak_device_memory_bytes": _distribution(peak_memory),
     }
 
@@ -429,9 +486,7 @@ def benchmark_sample_from_vllm_outputs(
 ) -> BenchmarkSample:
     """Build one synchronized sample from validated vLLM outputs and request metrics."""
     summaries = (
-        summarize_vllm_outputs(manifest, outputs)
-        if validated_summaries is None
-        else tuple(validated_summaries)
+        summarize_vllm_outputs(manifest, outputs) if validated_summaries is None else tuple(validated_summaries)
     )
     if len(summaries) != len(outputs):
         raise AssertionError("validated summaries must align with vLLM outputs")
@@ -529,6 +584,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu-memory-utilization", type=float, choices=(0.92, 0.95, 0.97), required=True)
     parser.add_argument("--max-model-len", type=int)
     parser.add_argument("--max-new-tokens", type=int)
+    parser.add_argument("--request-count", type=int)
+    parser.add_argument("--uniform-prompt-length", type=int)
+    parser.add_argument("--request-id-prefix", default="benchmark")
+    parser.add_argument("--load-format", choices=("safetensors", "dummy"), default="safetensors")
+    parser.add_argument("--optimization-level", type=int, choices=(2, 3), default=2)
+    parser.add_argument("--performance-mode", choices=("balanced", "throughput"), default="balanced")
+    parser.add_argument("--generation-round", type=int, default=0)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--proof", action="store_true")
@@ -542,11 +604,14 @@ def build_parser() -> argparse.ArgumentParser:
 __all__ = [
     "BenchmarkSample",
     "GenerationRecord",
+    "RequestShard",
+    "RequestWave",
     "WorkloadManifest",
     "WorkloadRequest",
     "aggregate_samples",
     "benchmark_sample_from_vllm_outputs",
     "build_parser",
+    "build_request_waves",
     "records_from_vllm_outputs",
     "sampling_params_kwargs",
     "summarize_vllm_outputs",

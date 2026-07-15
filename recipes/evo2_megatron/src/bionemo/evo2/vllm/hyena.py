@@ -23,7 +23,7 @@ from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
 from bionemo.evo2.vllm.config import Evo2Config
 from bionemo.evo2.vllm.layers import Evo2MLP, _add_norm_weight, apply_pre_norm_residual
-from bionemo.evo2.vllm.packed_fir import packed_causal_fir
+from bionemo.evo2.vllm.packed_fir import fir_route_telemetry_context, packed_causal_fir
 from bionemo.evo2.vllm.packed_iir import packed_modal_iir
 from bionemo.evo2.vllm.weights import load_tensor_parallel_weight
 
@@ -523,7 +523,8 @@ def _hyena_mixer_custom_op(
     mixer = forward_context.no_compile_layers[layer_name]
     if not isinstance(mixer, Evo2HyenaMixer):
         raise TypeError(f"registered Evo2 layer {layer_name!r} is not an Evo2HyenaMixer")
-    mixer.forward_impl(hidden_states, output)
+    with fir_route_telemetry_context():
+        mixer.forward_impl(hidden_states, output)
 
 
 def _hyena_mixer_fake(

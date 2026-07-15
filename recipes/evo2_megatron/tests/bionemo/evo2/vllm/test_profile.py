@@ -31,6 +31,8 @@ def test_tp2_profile_pins_optimized_vllm_020_settings() -> None:
     assert profile.per_engine_batch_size == 96
     assert kwargs["model"] == "/checkpoint"
     assert kwargs["tensor_parallel_size"] == 2
+    assert kwargs["distributed_executor_backend"] == "ray"
+    assert kwargs["worker_extension_cls"] == "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension"
     assert kwargs["max_num_seqs"] == 96
     assert kwargs["max_model_len"] == 50_000
     assert kwargs["max_num_batched_tokens"] == 32_768
@@ -74,6 +76,8 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert profile.replica_count == 2
     assert profile.per_engine_batch_size == 48
     assert kwargs["tensor_parallel_size"] == 1
+    assert "distributed_executor_backend" not in kwargs
+    assert kwargs["worker_extension_cls"] == "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension"
     assert kwargs["max_num_seqs"] == 48
     assert kwargs["async_scheduling"] is True
     assert kwargs["compilation_config"]["compile_sizes"] == [48]
@@ -101,6 +105,7 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert nemo_rl["vllm_kwargs"]["async_scheduling"] is True
     assert nemo_rl["vllm_kwargs"]["mamba_cache_mode"] == "none"
     assert "mamba_block_size" not in nemo_rl["vllm_kwargs"]
+    assert "worker_extension_cls" not in nemo_rl["vllm_kwargs"]
 
 
 def test_long_prefill_profile_admits_multiple_packed_partial_requests() -> None:
