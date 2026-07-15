@@ -942,6 +942,7 @@ def run_context_length_preflight(args: Any, manifest: WorkloadManifest) -> dict[
     preflight = context_length_preflight(
         profile,
         model=args.checkpoint,
+        workload_max_total_tokens=manifest.max_total_tokens,
         load_format=args.load_format,
     )
     preflight_s = time.perf_counter() - preflight_begin
@@ -986,6 +987,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     preflight = context_length_preflight(
         profile,
         model=args.checkpoint,
+        workload_max_total_tokens=manifest.max_total_tokens,
         load_format=args.load_format,
     )
     preflight_s = time.perf_counter() - preflight_begin

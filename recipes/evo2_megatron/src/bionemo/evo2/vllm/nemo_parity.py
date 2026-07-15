@@ -471,6 +471,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
     preflight = context_length_preflight(
         profile,
         model=args.checkpoint,
+        workload_max_total_tokens=parity_manifest.max_total_tokens,
         load_format=args.load_format,
     )
     preflight_s = clock() - preflight_begin

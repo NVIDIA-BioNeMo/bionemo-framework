@@ -382,9 +382,22 @@ def context_length_preflight(
     profile: Evo2VllmProfile,
     *,
     model: str | Path,
+    workload_max_total_tokens: int,
     load_format: str = "safetensors",
 ) -> dict[str, Any]:
     """Resolve the pinned vLLM length contract without loading model weights or GPUs."""
+    if (
+        isinstance(workload_max_total_tokens, bool)
+        or not isinstance(workload_max_total_tokens, int)
+        or workload_max_total_tokens <= 0
+    ):
+        raise ValueError("workload_max_total_tokens must be a positive integer")
+    if profile.max_model_len < workload_max_total_tokens:
+        raise ValueError(
+            f"profile max_model_len={profile.max_model_len} is smaller than "
+            f"workload max_total_tokens={workload_max_total_tokens}"
+        )
+
     checkpoint = Path(model).resolve()
     config_path = checkpoint / "config.json"
     config_payload = config_path.read_bytes()
@@ -431,6 +444,9 @@ def context_length_preflight(
         "checkpoint_declared_max_position_embeddings": declared,
         "requested_max_model_len": profile.max_model_len,
         "resolved_max_model_len": int(engine_config.model_config.max_model_len),
+        "workload_max_total_tokens": workload_max_total_tokens,
+        "workload_fits_resolved_max_model_len": True,
+        "workload_headroom_tokens": int(engine_config.model_config.max_model_len) - workload_max_total_tokens,
         "resolved_hf_max_position_embeddings": resolved_hf_max,
         "long_length_override": {
             "environment_variable": environment_variable,

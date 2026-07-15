@@ -679,6 +679,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     preflight = context_length_preflight(
         profile,
         model=args.checkpoint,
+        workload_max_total_tokens=manifest.max_total_tokens,
         load_format=args.load_format,
     )
     preflight_s = clock() - preflight_begin

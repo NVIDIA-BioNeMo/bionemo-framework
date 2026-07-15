@@ -537,7 +537,46 @@ def test_context_preflight_only_cli_writes_proof_without_launching_generation(
     assert artifact["context_length_preflight"]["checkpoint_declared_max_position_embeddings"] == 10_240
     assert artifact["context_length_preflight"]["requested_max_model_len"] == 50_000
     assert artifact["context_length_preflight"]["resolved_max_model_len"] == 50_000
+    assert artifact["context_length_preflight"]["workload_max_total_tokens"] == 6_001
+    assert artifact["context_length_preflight"]["workload_fits_resolved_max_model_len"] is True
+    assert artifact["context_length_preflight"]["workload_headroom_tokens"] == 43_999
     assert not output.with_name("preflight.inprogress").exists()
+
+
+def test_context_preflight_only_cli_rejects_model_len_shorter_than_manifest(
+    tmp_path,
+) -> None:
+    from bionemo.evo2.vllm.config import Evo2Config
+
+    checkpoint = tmp_path / "checkpoint"
+    Evo2Config(max_position_embeddings=10_240).save_pretrained(checkpoint)
+    output = tmp_path / "undersized.json"
+
+    with pytest.raises(ValueError, match="max_model_len=16.*workload max_total_tokens=6001"):
+        runner.main(
+            [
+                "--backend",
+                "vllm",
+                "--checkpoint",
+                str(checkpoint),
+                "--manifest",
+                str(DATA),
+                "--topology",
+                "tp2",
+                "--max-model-len",
+                "16",
+                "--max-num-batched-tokens",
+                "32768",
+                "--gpu-memory-utilization",
+                "0.92",
+                "--context-preflight-only",
+                "--output",
+                str(output),
+            ]
+        )
+
+    assert not output.exists()
+    assert output.with_name("undersized.inprogress").is_file()
 
 
 def test_checkpoint_provenance_hashes_actual_indexed_weight_shards(tmp_path) -> None:

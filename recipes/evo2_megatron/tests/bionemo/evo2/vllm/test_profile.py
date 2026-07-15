@@ -323,16 +323,27 @@ def test_long_context_preflight_requires_explicit_override_and_preserves_provena
     monkeypatch.delenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", raising=False)
 
     with pytest.raises(RuntimeError, match="VLLM_ALLOW_LONG_MAX_MODEL_LEN=1"):
-        profile_module.context_length_preflight(profile_50k, model=tmp_path)
+        profile_module.context_length_preflight(
+            profile_50k,
+            model=tmp_path,
+            workload_max_total_tokens=50_000,
+        )
 
     monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     for requested in (50_000, 300_012):
         profile = replace(profile_50k, max_model_len=requested)
-        proof = profile_module.context_length_preflight(profile, model=tmp_path)
+        proof = profile_module.context_length_preflight(
+            profile,
+            model=tmp_path,
+            workload_max_total_tokens=50_000,
+        )
 
         assert proof["checkpoint_declared_max_position_embeddings"] == 10_240
         assert proof["requested_max_model_len"] == requested
         assert proof["resolved_max_model_len"] == requested
+        assert proof["workload_max_total_tokens"] == 50_000
+        assert proof["workload_fits_resolved_max_model_len"] is True
+        assert proof["workload_headroom_tokens"] == requested - 50_000
         assert proof["resolved_hf_max_position_embeddings"] == 10_240
         assert proof["long_length_override"] == {
             "environment_variable": "VLLM_ALLOW_LONG_MAX_MODEL_LEN",
