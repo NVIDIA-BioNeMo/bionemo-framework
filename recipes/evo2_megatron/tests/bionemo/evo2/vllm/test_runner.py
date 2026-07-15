@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import copy
 import gzip
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import bionemo.evo2.vllm.runner as runner
-from bionemo.evo2.vllm.benchmark import WorkloadManifest, records_from_vllm_outputs
+from bionemo.evo2.vllm.benchmark import GenerationRecord, WorkloadManifest, records_from_vllm_outputs
 from bionemo.evo2.vllm.runner import (
     CUDAGraphProofRecorder,
     PeakMemoryMonitor,
@@ -184,7 +186,7 @@ def test_profile_from_cli_preserves_physical_wave_and_per_engine_ceiling(tmp_pat
     assert profile.gdpo_waves_to_96 == 5
 
 
-def test_speed_lane_requires_matching_successful_proof_artifact(tmp_path) -> None:
+def test_speed_lane_rejects_minimal_self_attested_proof_artifact(tmp_path) -> None:
     manifest = WorkloadManifest.from_path(DATA)
     proof_path = tmp_path / "proof.json"
     common = [
@@ -243,18 +245,10 @@ def test_speed_lane_requires_matching_successful_proof_artifact(tmp_path) -> Non
         )
     )
 
-    evidence = runner.validate_linked_proof_artifact(
-        proof_path,
-        expected_contract=speed_contract,
-    )
-
-    assert evidence["artifact_path"] == str(proof_path.resolve())
-    assert evidence["benchmark_contract_sha256"] == runner.benchmark_contract_sha256(speed_contract)
-    assert evidence["artifact_sha256"] == hashlib.sha256(proof_path.read_bytes()).hexdigest()
-    with pytest.raises(AssertionError, match="benchmark contract"):
+    with pytest.raises(AssertionError, match="phase evidence"):
         runner.validate_linked_proof_artifact(
             proof_path,
-            expected_contract={**speed_contract, "topology": "dp2"},
+            expected_contract=speed_contract,
         )
 
 
@@ -1027,6 +1021,10 @@ def test_gpu_hardware_provenance_and_memory_headroom_are_exact(monkeypatch) -> N
             return f"NVIDIA H100 {handle}".encode()
 
         @staticmethod
+        def nvmlDeviceGetPciInfo(handle):  # noqa: N802
+            return SimpleNamespace(busId=f"00000000:0{handle + 1}:00.0".encode())
+
+        @staticmethod
         def nvmlDeviceGetMemoryInfo(handle):  # noqa: N802
             total = (80 + handle) * gib
             return SimpleNamespace(total=total, used=3 * gib, free=total - 3 * gib)
@@ -1041,6 +1039,10 @@ def test_gpu_hardware_provenance_and_memory_headroom_are_exact(monkeypatch) -> N
     assert hardware["driver_version"] == "570.86.15"
     assert hardware["cuda_visible_devices"] == "0,1"
     assert [device["uuid"] for device in hardware["devices"]] == ["GPU-uuid-0", "GPU-uuid-1"]
+    assert [device["pci_bus_id"] for device in hardware["devices"]] == [
+        "00000000:01:00.0",
+        "00000000:02:00.0",
+    ]
     assert [device["total_memory_bytes"] for device in hardware["devices"]] == [80 * gib, 81 * gib]
 
     headroom = runner.gpu_memory_headroom_evidence(
@@ -1050,6 +1052,76 @@ def test_gpu_hardware_provenance_and_memory_headroom_are_exact(monkeypatch) -> N
     assert headroom["required_headroom_bytes"] == 2 * gib
     assert [device["headroom_bytes"] for device in headroom["devices"]] == [3 * gib, 3 * gib]
     assert headroom["passed"] is True
+
+    attestation = runner.runtime_attestation_contract(
+        checkpoint={"checkpoint_sha256": "checkpoint"},
+        sources={
+            "bionemo": {
+                "git_dirty": False,
+                "git_head": "head",
+                "source_tree_sha256": "tree",
+            }
+        },
+        vllm_installation={
+            "distribution_version": "0.20.0",
+            "installation_sha256": "installation",
+        },
+        gpu_hardware=hardware,
+    )
+    assert attestation["gpu"]["cuda_visible_devices"] == "0,1"
+    assert [device["pci_bus_id"] for device in attestation["gpu"]["devices"]] == [
+        "00000000:01:00.0",
+        "00000000:02:00.0",
+    ]
+
+
+def test_worker_gpu_identity_resolves_logical_device_to_physical_uuid_and_pci(monkeypatch) -> None:
+    class FakeNvml:
+        @staticmethod
+        def nvmlInit():  # noqa: N802
+            return None
+
+        @staticmethod
+        def nvmlDeviceGetHandleByIndex(index):  # noqa: N802
+            return index
+
+        @staticmethod
+        def nvmlDeviceGetHandleByUUID(uuid):  # noqa: N802
+            return int(str(uuid).rsplit("-", 1)[1])
+
+        @staticmethod
+        def nvmlDeviceGetUUID(handle):  # noqa: N802
+            return f"GPU-uuid-{handle}".encode()
+
+        @staticmethod
+        def nvmlDeviceGetName(handle):  # noqa: N802
+            return f"NVIDIA H100 {handle}".encode()
+
+        @staticmethod
+        def nvmlDeviceGetPciInfo(handle):  # noqa: N802
+            return SimpleNamespace(busId=f"00000000:0{handle + 1}:00.0".encode())
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    assert runner.worker_gpu_identity(
+        logical_device=0,
+        nvml_module=FakeNvml,
+    ) == {
+        "logical_device": 0,
+        "cuda_visible_devices": "1",
+        "visible_device_selector": "1",
+        "device_uuid": "GPU-uuid-1",
+        "pci_bus_id": "00000000:02:00.0",
+        "device_name": "NVIDIA H100 1",
+    }
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-uuid-1")
+    assert (
+        runner.worker_gpu_identity(
+            logical_device=0,
+            nvml_module=FakeNvml,
+        )["pci_bus_id"]
+        == "00000000:02:00.0"
+    )
 
 
 def test_gpu_memory_headroom_rejects_less_than_two_gib() -> None:
@@ -1171,6 +1243,758 @@ def _fake_outputs(manifest: WorkloadManifest):
             )
         )
     return outputs
+
+
+def _compilation_snapshot() -> dict[str, int]:
+    return {
+        "num_models_seen": 1,
+        "num_backend_compilations": 1,
+        "num_inductor_compiles": 2,
+        "num_eager_compiles": 0,
+        "num_gpu_runner_capture_triggers": 1,
+        "num_cudagraph_captured": 2,
+        "stock_torch_compile_count": 1,
+    }
+
+
+def _write_valid_direct_proof_artifact(
+    tmp_path,
+    *,
+    generation_round: int = 7,
+    shared_prefix: bool = False,
+) -> tuple[Path, dict, dict]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    proof_path = tmp_path / "proof.json"
+    manifest = (
+        _shared_prefix_manifest() if shared_prefix else WorkloadManifest.from_path(DATA).request_slice(0, 2)
+    ).with_max_new_tokens(3)
+    prefix_args = ["--shared-prefix-state-reuse"] if shared_prefix else []
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            "/checkpoint",
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "tp2",
+            "--max-model-len",
+            "64",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.95",
+            "--global-wave-size",
+            "2",
+            "--max-num-seqs",
+            "2",
+            "--generation-round",
+            str(generation_round),
+            "--warmups",
+            "0",
+            "--repetitions",
+            "1",
+            "--proof",
+            *prefix_args,
+            "--output",
+            str(proof_path),
+        ]
+    )
+    profile = runner.profile_from_args(args, manifest)
+    compilation = _compilation_snapshot()
+    hardware = {
+        "driver_version": "570.86.15",
+        "cuda_visible_devices": "0,1",
+        "device_count": 2,
+        "devices": [
+            {
+                "index": 0,
+                "uuid": "GPU-uuid-0",
+                "pci_bus_id": "00000000:01:00.0",
+                "name": "NVIDIA H100 0",
+                "total_memory_bytes": 80 * 1024**3,
+                "initial_used_memory_bytes": 0,
+                "initial_free_memory_bytes": 80 * 1024**3,
+            },
+            {
+                "index": 1,
+                "uuid": "GPU-uuid-1",
+                "pci_bus_id": "00000000:02:00.0",
+                "name": "NVIDIA H100 1",
+                "total_memory_bytes": 81 * 1024**3,
+                "initial_used_memory_bytes": 0,
+                "initial_free_memory_bytes": 81 * 1024**3,
+            },
+        ],
+    }
+    checkpoint_identity = {"checkpoint_sha256": "checkpoint-sha256"}
+    source_identity = {
+        "git_dirty": False,
+        "git_head": "bionemo-head",
+        "source_tree_sha256": "bionemo-source-sha256",
+    }
+    vllm_identity = {
+        "distribution_version": "0.20.0",
+        "installation_sha256": "vllm-installation-sha256",
+    }
+    contract = {
+        **runner.build_benchmark_contract(args, manifest, profile),
+        "runtime_attestation": runner.runtime_attestation_contract(
+            checkpoint=checkpoint_identity,
+            sources={"bionemo": source_identity},
+            vllm_installation=vllm_identity,
+            gpu_hardware=hardware,
+        ),
+    }
+    peak_memory = (70 * 1024**3, 71 * 1024**3)
+    phases = []
+    call_index = generation_round
+    for sample_index, phase_name in enumerate(("cold-generation", "steady-0")):
+        wave_phase = f"{phase_name}.wave-000"
+        executions = runner.build_wave_execution_records(
+            manifest,
+            global_wave_size=profile.global_wave_size,
+            call_index_start=call_index,
+        )
+        records = tuple(
+            GenerationRecord(
+                request_id=request.request_id,
+                prompt_token_ids=request.prompt_token_ids,
+                output_token_ids=(65 + index, 67 + index, 71 + index),
+                output_logprobs=(-0.1, -0.2, -0.3),
+                requested_max_tokens=manifest.max_new_tokens,
+                finish_reason="length",
+                stop_reason=None,
+                stopped_on_eos=False,
+            )
+            for index, request in enumerate(manifest.requests)
+        )
+        sidecar = runner.write_full_generation_records_artifact(
+            runner.phase_output_artifact_path(proof_path, phase=phase_name),
+            records=records,
+            execution_records=executions,
+        )
+        observations = [
+            {
+                "phase": wave_phase,
+                "engine_index": 0,
+                "num_unpadded_tokens": 2,
+                "num_padded_tokens": 2,
+                "num_paddings": 0,
+                "runtime_mode": "CUDAGraphMode.FULL",
+            },
+            {
+                "phase": wave_phase,
+                "engine_index": 0,
+                "num_unpadded_tokens": 2,
+                "num_padded_tokens": 2,
+                "num_paddings": 0,
+                "runtime_mode": "CUDAGraphMode.FULL",
+            },
+        ]
+        scheduler_observations = [
+            {
+                "phase": wave_phase,
+                "engine_index": 0,
+                "preemption_events": 0,
+                "recompute_events": 0,
+                "prefix_preempted_requests": 0,
+                "prefix_preempted_queries": 0,
+                "prefix_preempted_hits": 0,
+                "preempted_prompt_recomputed_tokens": 0,
+                "prompt_tokens_computed": sum(len(request.prompt_token_ids) for request in manifest.requests),
+                "prompt_tokens_cached": 0,
+                "prompt_tokens_total": sum(len(request.prompt_token_ids) for request in manifest.requests),
+                "num_running_requests": len(manifest.requests),
+                "num_waiting_requests": 0,
+                "num_skipped_waiting_requests": 0,
+            }
+        ]
+        full_decode = runner.full_decode_proof_summary(
+            observations,
+            phase=wave_phase,
+            batch_size=len(manifest.requests),
+            max_new_tokens=manifest.max_new_tokens,
+        )
+        scheduler = runner.scheduler_capacity_proof_summary(
+            scheduler_observations,
+            phase=wave_phase,
+            global_wave_size=len(manifest.requests),
+            max_num_seqs=profile.resolved_max_num_seqs,
+        )
+        wave = {
+            "wave_index": 0,
+            "start": 0,
+            "stop": len(manifest.requests),
+            "request_count": len(manifest.requests),
+            "call_index": call_index,
+            "generation_s": 1.0,
+            "full_decode_proof": full_decode,
+            "scheduler_capacity_proof": scheduler,
+        }
+        workers = [
+            {
+                "rank": rank,
+                "device": rank,
+                "logical_device": rank,
+                "device_name": hardware["devices"][rank]["name"],
+                "device_uuid": hardware["devices"][rank]["uuid"],
+                "pci_bus_id": hardware["devices"][rank]["pci_bus_id"],
+                "cuda_visible_devices": "0,1",
+                "visible_device_selector": str(rank),
+                "fir_routes": {
+                    "direct": {"calls": 27, "requests": 54, "tokens": 108},
+                    "fallback_reasons": {"short_request": 27},
+                },
+                "compilation": dict(compilation),
+                "cuda_memory": {
+                    "allocated_bytes": 1,
+                    "reserved_bytes": 2,
+                    "peak_allocated_bytes": 3,
+                    "peak_reserved_bytes": 4,
+                },
+                "mamba_state_copies": {},
+                "mamba_prefix_clones": (
+                    _prefix_worker_stats([_prefix_clone_record(f"clone-{rank}")]) if shared_prefix else {}
+                ),
+            }
+            for rank in range(2)
+        ]
+        prefix_reuse = None
+        if shared_prefix:
+            prefix_reuse = runner.shared_prefix_state_reuse_evidence(
+                manifest,
+                cached_tokens=(0, 16),
+                worker_proof=workers,
+                expected_worker_clone_counts=(1, 1),
+                cache_block_size=16,
+            )
+            prefix_reuse = {
+                **prefix_reuse,
+                "phase_prefix_cache_reset": True,
+            }
+        expected_decode_tokens = full_decode["expected_decode_tokens"]
+        full_decode_tokens = full_decode["full_decode_tokens"]
+        phases.append(
+            {
+                "phase": phase_name,
+                "sample": {
+                    "sample_index": sample_index,
+                    "generation_s": 1.0,
+                    "request_count": len(manifest.requests),
+                    "prompt_tokens": sum(len(request.prompt_token_ids) for request in manifest.requests),
+                    "generated_tokens": len(manifest.requests) * manifest.max_new_tokens,
+                    "ttft_s": [0.1, 0.1],
+                    "inter_token_latency_s": [0.1, 0.1],
+                    "output_lengths": [manifest.max_new_tokens] * len(manifest.requests),
+                    "peak_device_memory_bytes": list(peak_memory),
+                },
+                "generation_call_s": [1.0],
+                "wave_proofs": [wave],
+                "wave_execution": runner.wave_execution_summary([wave]),
+                "cudagraph_observation_count": len(observations),
+                "cudagraph_observations_retained": observations,
+                "cudagraph_summary": runner.summarize_cudagraph_observations(tuple(observations)),
+                "outputs": [record.summary_dict() for record in records],
+                "request_executions": [execution.to_dict() for execution in executions],
+                "full_output_artifact": sidecar,
+                "full_decode_proof": {
+                    "phase": phase_name,
+                    "wave_count": 1,
+                    "expected_decode_tokens": expected_decode_tokens,
+                    "full_decode_tokens": full_decode_tokens,
+                    "coverage_fraction": full_decode_tokens / expected_decode_tokens,
+                    "passed": True,
+                    "waves": [full_decode],
+                },
+                "worker_proof": workers,
+                "shared_prefix_state_reuse": prefix_reuse,
+                "proof_collected": True,
+                "prefix_cache_reset": shared_prefix,
+            }
+        )
+        call_index += 1
+
+    initialized_workers = [
+        {
+            "rank": rank,
+            "device": rank,
+            "logical_device": rank,
+            "device_name": hardware["devices"][rank]["name"],
+            "device_uuid": hardware["devices"][rank]["uuid"],
+            "pci_bus_id": hardware["devices"][rank]["pci_bus_id"],
+            "cuda_visible_devices": "0,1",
+            "visible_device_selector": str(rank),
+            "fir_routes": {},
+            "compilation": dict(compilation),
+        }
+        for rank in range(2)
+    ]
+    artifact = {
+        "schema_version": 1,
+        "backend": "vllm",
+        "topology": "tp2",
+        "benchmark_mode": "proof",
+        "benchmark_contract": contract,
+        "benchmark_contract_sha256": runner.benchmark_contract_sha256(contract),
+        "proof_status": {
+            "passed": True,
+            "phase_count": len(phases),
+            "full_decode_passed": True,
+            "compilation_stable": True,
+        },
+        "invocation": {
+            "parsed_args": {
+                name: str(value) if isinstance(value, Path) else value for name, value in vars(args).items()
+            },
+            "output_artifact_path": str(proof_path.resolve()),
+            "exit_status": 0,
+        },
+        "manifest": manifest.to_dict(),
+        "manifest_sha256": manifest.sha256,
+        "profile": vars(profile),
+        "resolved_config": profile.expected_resolved_config(),
+        "checkpoint_provenance": checkpoint_identity,
+        "source_provenance": source_identity,
+        "vllm_installation_provenance": vllm_identity,
+        "gpu_hardware_provenance": hardware,
+        "gpu_memory_headroom": runner.gpu_memory_headroom_evidence(
+            hardware,
+            peak_device_memory_bytes=peak_memory,
+        ),
+        "timing": {
+            "engine_init_peak_device_memory_bytes": list(peak_memory),
+        },
+        "initialized_worker_proof": initialized_workers,
+        "phases": phases,
+    }
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+    return proof_path, contract, artifact
+
+
+def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
+    proof_path, _, base = _write_valid_direct_proof_artifact(tmp_path)
+    manifest = WorkloadManifest.from_dict(base["manifest"])
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            "/checkpoint",
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "dp2",
+            "--max-model-len",
+            "64",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.95",
+            "--global-wave-size",
+            "2",
+            "--max-num-seqs",
+            "1",
+            "--generation-round",
+            "0",
+            "--warmups",
+            "0",
+            "--repetitions",
+            "1",
+            "--proof",
+            "--output",
+            str(proof_path),
+        ]
+    )
+    profile = runner.profile_from_args(args, manifest)
+    hardware = base["gpu_hardware_provenance"]
+    nemo_source_identity = {
+        "git_dirty": False,
+        "git_head": "nemo-rl-head",
+        "source_tree_sha256": "nemo-rl-source-sha256",
+    }
+    source_identities = {
+        "bionemo": base["source_provenance"],
+        "nemo_rl": nemo_source_identity,
+    }
+    contract = {
+        **runner.build_benchmark_contract(args, manifest, profile),
+        "runtime_attestation": runner.runtime_attestation_contract(
+            checkpoint=base["checkpoint_provenance"],
+            sources=source_identities,
+            vllm_installation=base["vllm_installation_provenance"],
+            gpu_hardware=hardware,
+        ),
+    }
+    compilation = _compilation_snapshot()
+    resolved = profile.expected_resolved_config()
+    phases = []
+    call_index = 0
+    global_index = 0
+    for sample_index, phase_name in enumerate(("cold-generation", "steady-0")):
+        wave = runner.build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )[0]
+        executions = tuple(
+            record
+            for shard in wave.shards
+            for record in runner.build_request_execution_records(
+                manifest.request_slice(shard.start, shard.stop),
+                global_request_offset=global_index + shard.start,
+                dp_rank=shard.replica_index,
+                dp_size=profile.replica_count,
+                call_index=call_index,
+            )
+        )
+        records = tuple(
+            GenerationRecord(
+                request_id=request.request_id,
+                prompt_token_ids=request.prompt_token_ids,
+                output_token_ids=(65 + index, 67 + index, 71 + index),
+                output_logprobs=(-0.1, -0.2, -0.3),
+                requested_max_tokens=manifest.max_new_tokens,
+                finish_reason="length",
+                stop_reason=None,
+                stopped_on_eos=False,
+            )
+            for index, request in enumerate(manifest.requests)
+        )
+        sidecar = runner.write_full_generation_records_artifact(
+            runner.phase_output_artifact_path(proof_path, phase=phase_name),
+            records=records,
+            execution_records=executions,
+        )
+        wave_phase = f"{phase_name}.wave-000"
+        engines = []
+        for shard in wave.shards:
+            observations = [
+                {
+                    "phase": wave_phase,
+                    "engine_index": 0,
+                    "num_unpadded_tokens": shard.request_count,
+                    "num_padded_tokens": shard.request_count,
+                    "num_paddings": 0,
+                    "runtime_mode": "CUDAGraphMode.FULL",
+                }
+                for _ in range(2)
+            ]
+            scheduler_observations = [
+                {
+                    "phase": wave_phase,
+                    "engine_index": 0,
+                    "preemption_events": 0,
+                    "recompute_events": 0,
+                    "prefix_preempted_requests": 0,
+                    "prefix_preempted_queries": 0,
+                    "prefix_preempted_hits": 0,
+                    "preempted_prompt_recomputed_tokens": 0,
+                    "prompt_tokens_computed": len(manifest.requests[shard.start].prompt_token_ids),
+                    "prompt_tokens_cached": 0,
+                    "prompt_tokens_total": len(manifest.requests[shard.start].prompt_token_ids),
+                    "num_running_requests": shard.request_count,
+                    "num_waiting_requests": 0,
+                    "num_skipped_waiting_requests": 0,
+                }
+            ]
+            worker = {
+                "rank": 0,
+                "device": 0,
+                "logical_device": 0,
+                "device_name": hardware["devices"][shard.replica_index]["name"],
+                "device_uuid": hardware["devices"][shard.replica_index]["uuid"],
+                "pci_bus_id": hardware["devices"][shard.replica_index]["pci_bus_id"],
+                "cuda_visible_devices": str(shard.replica_index),
+                "visible_device_selector": str(shard.replica_index),
+                "fir_routes": {
+                    "direct": {"calls": 27, "requests": 27, "tokens": 54},
+                    "fallback_reasons": {"short_request": 27},
+                },
+                "compilation": dict(compilation),
+            }
+            engines.append(
+                {
+                    "dp_rank": shard.replica_index,
+                    "request_count": shard.request_count,
+                    "full_decode_proof": runner.full_decode_proof_summary(
+                        observations,
+                        phase=wave_phase,
+                        batch_size=shard.request_count,
+                        max_new_tokens=manifest.max_new_tokens,
+                    ),
+                    "scheduler_capacity_proof": runner.scheduler_capacity_proof_summary(
+                        scheduler_observations,
+                        phase=wave_phase,
+                        global_wave_size=wave.request_count,
+                        engine_request_count=shard.request_count,
+                        max_num_seqs=profile.resolved_max_num_seqs,
+                    ),
+                    "phase": wave_phase,
+                    "resolved_config": resolved,
+                    "cudagraph_observations": observations,
+                    "cudagraph_summary": runner.summarize_cudagraph_observations(tuple(observations)),
+                    "scheduler_observations": scheduler_observations,
+                    "worker_proof": [worker],
+                }
+            )
+        wave_proof = {
+            "wave_index": 0,
+            "phase": wave_phase,
+            "start": 0,
+            "stop": len(manifest.requests),
+            "request_count": len(manifest.requests),
+            "generation_s": 1.0,
+            "reset_proof": [{"phase": wave_phase}] * 2,
+            "engines": engines,
+            "full_vocab_logprobs": None,
+            "shared_prefix_state_reuse": None,
+        }
+        phases.append(
+            {
+                "phase": phase_name,
+                "sample": {
+                    "sample_index": sample_index,
+                    "generation_s": 1.0,
+                    "request_count": len(manifest.requests),
+                    "prompt_tokens": sum(len(request.prompt_token_ids) for request in manifest.requests),
+                    "generated_tokens": len(manifest.requests) * manifest.max_new_tokens,
+                    "ttft_s": [0.1, 0.1],
+                    "inter_token_latency_s": [0.1, 0.1],
+                    "output_lengths": [manifest.max_new_tokens] * len(manifest.requests),
+                    "peak_device_memory_bytes": base["phases"][sample_index]["sample"]["peak_device_memory_bytes"],
+                },
+                "generation_call_s": [1.0],
+                "wave_execution": runner.wave_execution_summary([wave_proof]),
+                "outputs": [record.summary_dict() for record in records],
+                "request_executions": [record.to_dict() for record in executions],
+                "full_output_artifact": sidecar,
+                "waves": [wave_proof],
+                "proof_collected": True,
+                "prefix_cache_reset": False,
+            }
+        )
+        call_index += 1
+        global_index += len(manifest.requests)
+
+    initialized = [
+        {
+            "phase": "engine-initialized",
+            "resolved_config": resolved,
+            "worker_proof": [
+                {
+                    **phases[0]["waves"][0]["engines"][dp_rank]["worker_proof"][0],
+                    "fir_routes": {},
+                }
+            ],
+        }
+        for dp_rank in range(2)
+    ]
+    artifact = {
+        **base,
+        "backend": "nemo-rl-vllm",
+        "topology": "dp2",
+        "benchmark_contract": contract,
+        "benchmark_contract_sha256": runner.benchmark_contract_sha256(contract),
+        "invocation": {
+            "parsed_args": {
+                name: str(value) if isinstance(value, Path) else value for name, value in vars(args).items()
+            },
+            "output_artifact_path": str(proof_path.resolve()),
+            "exit_status": 0,
+        },
+        "profile": vars(profile),
+        "source_provenance": source_identities,
+        "resolved_configs": [resolved, resolved],
+        "initialized_engine_proofs": initialized,
+        "phases": phases,
+        "proof_status": {
+            "passed": True,
+            "phase_count": len(phases),
+            "full_decode_passed": True,
+            "compilation_stable": True,
+        },
+    }
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+    return proof_path, contract, artifact
+
+
+def test_linked_proof_validator_accepts_complete_recomputed_direct_evidence(tmp_path) -> None:
+    proof_path, contract, _ = _write_valid_direct_proof_artifact(tmp_path)
+
+    evidence = runner.validate_linked_proof_artifact(
+        proof_path,
+        expected_contract=contract,
+        require_memory_headroom=True,
+    )
+
+    assert evidence["artifact_path"] == str(proof_path.resolve())
+    assert evidence["artifact_sha256"] == hashlib.sha256(proof_path.read_bytes()).hexdigest()
+
+
+def test_linked_proof_validator_accepts_and_recomputes_dp2_engine_evidence(tmp_path) -> None:
+    proof_path, contract, _ = _write_valid_dp2_proof_artifact(tmp_path)
+
+    evidence = runner.validate_linked_proof_artifact(
+        proof_path,
+        expected_contract=contract,
+        require_memory_headroom=True,
+    )
+
+    assert evidence["validated_evidence"]["final_worker_count"] == 2
+
+
+@pytest.mark.parametrize("tamper", ("scheduler_raw", "resolved_config"))
+def test_linked_proof_validator_rejects_tampered_dp2_engine_evidence(tmp_path, tamper) -> None:
+    proof_path, contract, artifact = _write_valid_dp2_proof_artifact(tmp_path / tamper)
+    if tamper == "scheduler_raw":
+        scheduler = artifact["phases"][0]["waves"][0]["engines"][0]["scheduler_observations"][0]
+        scheduler["preemption_events"] = 1
+    else:
+        artifact["resolved_configs"][0]["model"]["max_model_len"] += 1
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
+
+
+def test_linked_proof_validator_recomputes_physical_prefix_reuse(tmp_path) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(
+        tmp_path,
+        shared_prefix=True,
+    )
+    runner.validate_linked_proof_artifact(
+        proof_path,
+        expected_contract=contract,
+        require_memory_headroom=True,
+    )
+
+    artifact["phases"][0]["shared_prefix_state_reuse"]["cache_hit_request_count"] = 0
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(AssertionError, match="prefix"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "manifest",
+        "sidecar",
+        "scheduler",
+        "scheduler_prefix_preemption",
+        "full_decode",
+        "full_decode_derived",
+        "compilation",
+        "fir_route",
+        "fir_unknown_route",
+        "gpu_binding",
+        "runtime_attestation",
+        "memory",
+    ),
+)
+def test_linked_proof_validator_recomputes_all_direct_evidence(tmp_path, tamper) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path / tamper)
+    artifact = copy.deepcopy(artifact)
+    if tamper == "manifest":
+        artifact["manifest"]["name"] = "forged-manifest"
+    elif tamper == "sidecar":
+        artifact["phases"][0]["full_output_artifact"]["sha256"] = "0" * 64
+    elif tamper == "scheduler":
+        artifact["phases"][0]["wave_proofs"][0]["scheduler_capacity_proof"]["preemption_events"] = 1
+    elif tamper == "scheduler_prefix_preemption":
+        scheduler = artifact["phases"][0]["wave_proofs"][0]["scheduler_capacity_proof"]
+        scheduler["prefix_preempted_queries"] = 1
+        scheduler["prefix_preempted_hits"] = 1
+    elif tamper == "full_decode":
+        artifact["phases"][0]["wave_proofs"][0]["full_decode_proof"]["full_decode_tokens"] += 2
+    elif tamper == "full_decode_derived":
+        artifact["phases"][0]["wave_proofs"][0]["full_decode_proof"]["minimum_average_occupancy"] = 0
+    elif tamper == "compilation":
+        artifact["phases"][-1]["worker_proof"][0]["compilation"]["num_inductor_compiles"] += 1
+    elif tamper == "fir_route":
+        artifact["phases"][0]["worker_proof"][0]["fir_routes"]["fallback_reasons"] = {"ragged_or_chunked": 1}
+    elif tamper == "fir_unknown_route":
+        artifact["phases"][0]["worker_proof"][0]["fir_routes"]["eager_fallback"] = {
+            "calls": 1,
+            "requests": 2,
+            "tokens": 4,
+        }
+    elif tamper == "gpu_binding":
+        artifact["phases"][0]["worker_proof"][0]["cuda_visible_devices"] = "1,0"
+    elif tamper == "runtime_attestation":
+        artifact["gpu_hardware_provenance"]["devices"][0]["total_memory_bytes"] += 100 * 1024**3
+        artifact["gpu_memory_headroom"] = runner.gpu_memory_headroom_evidence(
+            artifact["gpu_hardware_provenance"],
+            peak_device_memory_bytes=artifact["timing"]["engine_init_peak_device_memory_bytes"],
+        )
+    elif tamper == "memory":
+        artifact["gpu_memory_headroom"]["devices"][0]["headroom_bytes"] += 1
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            require_memory_headroom=True,
+        )
+
+
+def test_benchmark_contract_pins_generation_round_seed_stream(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA)
+    common = [
+        "--backend",
+        "vllm",
+        "--checkpoint",
+        "/checkpoint",
+        "--manifest",
+        str(DATA),
+        "--topology",
+        "tp2",
+        "--max-num-batched-tokens",
+        "32768",
+        "--gpu-memory-utilization",
+        "0.95",
+        "--output",
+        str(tmp_path / "proof.json"),
+    ]
+    first_args = runner.build_parser().parse_args([*common, "--generation-round", "7", "--proof"])
+    second_args = runner.build_parser().parse_args(
+        [
+            *common,
+            "--generation-round",
+            "8",
+            "--linked-proof-artifact",
+            str(tmp_path / "proof.json"),
+        ]
+    )
+    first_contract = runner.build_benchmark_contract(
+        first_args,
+        manifest,
+        runner.profile_from_args(first_args, manifest),
+    )
+    second_contract = runner.build_benchmark_contract(
+        second_args,
+        manifest,
+        runner.profile_from_args(second_args, manifest),
+    )
+
+    assert first_contract["seed_stream"] == {
+        "schema_version": 1,
+        "base_seed": manifest.seed,
+        "generation_round": 7,
+        "round_stride": 1_000_003,
+        "modulus": 2**31,
+    }
+    assert first_contract != second_contract
 
 
 def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs(tmp_path) -> None:

@@ -456,6 +456,25 @@ def _proof_rpc(
     return list(ray_get(futures))
 
 
+def snapshot_and_validate_nemo_resolved_configs(
+    generation: Any,
+    *,
+    profile: Evo2VllmProfile,
+    ray_get: Any,
+) -> list[dict[str, Any]]:
+    """Snapshot every DP engine config once, outside timed generation."""
+    futures = generation.worker_group.run_all_workers_single_data(
+        "snapshot_evo2_resolved_config",
+        run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
+    )
+    resolved = list(ray_get(futures))
+    if len(resolved) != profile.replica_count:
+        raise AssertionError("NeMo-RL resolved-config count does not match the DP topology")
+    for config in resolved:
+        validate_resolved_profile(profile, config)
+    return resolved
+
+
 def _validate_wave_execution(
     manifest: WorkloadManifest,
     executions: tuple[RequestExecutionRecord, ...],
@@ -838,6 +857,13 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                 name_prefix=f"evo2_vllm_dp2_{output_path.stem}",
             )
         engine_init_s = clock() - engine_begin
+        resolved_begin = clock()
+        resolved_configs = snapshot_and_validate_nemo_resolved_configs(
+            generation,
+            profile=profile,
+            ray_get=ray.get,
+        )
+        resolved_config_snapshot_s = clock() - resolved_begin
 
         initialized_phase = "engine-initialized"
         initialized_reset = None
@@ -962,7 +988,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
             "profile": asdict(profile),
             "context_length_preflight": preflight,
             "nemo_generation_config": config,
-            "resolved_configs": [proof["resolved_config"] for proof in initialized_proofs],
+            "resolved_configs": resolved_configs,
             "execution_contract": {
                 "production_path": "nemo_rl.models.generation.vllm.VllmGeneration",
                 "replicas": 2,
@@ -986,6 +1012,7 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
                 "provenance_hashing_s": provenance_s,
                 "ray_init_s": ray_init_s,
                 "engine_init_s": engine_init_s,
+                "resolved_config_snapshot_s": resolved_config_snapshot_s,
                 "engine_init_peak_device_memory_bytes": list(init_memory.peak_device_memory_bytes),
             },
             "initialized_reset": initialized_reset,
@@ -1009,4 +1036,5 @@ __all__ = [
     "records_from_nemo_generation_output",
     "run_nemo_dp2_benchmark",
     "run_nemo_generation_phase",
+    "snapshot_and_validate_nemo_resolved_configs",
 ]

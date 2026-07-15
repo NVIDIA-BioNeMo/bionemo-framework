@@ -33,6 +33,10 @@ class Evo2NemoRlGenerationWorkerImpl(VllmGenerationWorkerImpl):
             self._attach_evo2_proof_recorder()
         return result
 
+    def snapshot_evo2_resolved_config(self) -> dict[str, Any]:
+        """Return actual engine resolution without enabling timed proof instrumentation."""
+        return resolved_config_snapshot(self.llm.llm_engine.vllm_config)
+
     def _attach_evo2_proof_recorder(self) -> None:
         """Attach one persistent scheduler recorder to the outer vLLM engine."""
         if not getattr(self, "_evo2_proof_enabled", False):

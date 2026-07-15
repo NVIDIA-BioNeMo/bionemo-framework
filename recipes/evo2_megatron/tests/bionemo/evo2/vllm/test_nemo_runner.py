@@ -17,6 +17,7 @@ from bionemo.evo2.vllm.nemo_runner import (
     full_vocab_logprob_evidence_from_nemo_output,
     records_from_nemo_generation_output,
     run_nemo_generation_phase,
+    snapshot_and_validate_nemo_resolved_configs,
 )
 from bionemo.evo2.vllm.profile import Evo2VllmProfile
 from bionemo.evo2.vllm.runner import PeakMemoryMonitor, request_seed
@@ -657,3 +658,39 @@ def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
     assert result.wave_proofs[0]["reset_proof"] is None
     assert result.wave_proofs[0]["engines"] == []
     assert result.full_output_artifact["generated_token_count"] == 4
+
+
+def test_nemo_speed_snapshots_actual_resolved_configs_outside_generation() -> None:
+    profile = Evo2VllmProfile(
+        topology="dp2",
+        max_model_len=64,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.92,
+        proof=False,
+        global_wave_size=4,
+        max_num_seqs=2,
+    )
+    calls = []
+
+    class FakeWorkerGroup:
+        def run_all_workers_single_data(self, method_name, *, run_rank_0_only_axes):
+            calls.append((method_name, run_rank_0_only_axes))
+            return [profile.expected_resolved_config(), profile.expected_resolved_config()]
+
+    generation = type("Generation", (), {"worker_group": FakeWorkerGroup()})()
+    resolved = snapshot_and_validate_nemo_resolved_configs(
+        generation,
+        profile=profile,
+        ray_get=lambda futures: futures,
+    )
+
+    assert calls == [
+        (
+            "snapshot_evo2_resolved_config",
+            ["tensor_parallel", "pipeline_parallel"],
+        )
+    ]
+    assert resolved == [
+        profile.expected_resolved_config(),
+        profile.expected_resolved_config(),
+    ]

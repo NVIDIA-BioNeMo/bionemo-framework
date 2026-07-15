@@ -110,16 +110,30 @@ def build_benchmark_contract(
     profile: Evo2VllmProfile,
 ) -> dict[str, Any]:
     """Build the optimized engine/workload identity shared by proof and speed lanes."""
+    generation_round = int(args.generation_round)
+    if generation_round < 0:
+        raise ValueError("generation_round must be nonnegative")
     profile_contract = asdict(profile)
     profile_contract.pop("proof")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backend": args.backend,
         "topology": args.topology,
         "checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
         "load_format": args.load_format,
         "manifest_sha256": manifest.sha256,
         "profile": profile_contract,
+        "seed_stream": {
+            "schema_version": 1,
+            "base_seed": manifest.seed,
+            "generation_round": generation_round,
+            "round_stride": _SEED_ROUND_STRIDE,
+            "modulus": _SEED_MODULUS,
+        },
+        "measurement": {
+            "warmups": int(args.warmups),
+            "repetitions": int(args.repetitions),
+        },
     }
 
 
@@ -146,6 +160,9 @@ def validate_linked_proof_artifact(
         raise AssertionError("linked proof artifact did not complete successfully")
     if artifact.get("proof_status", {}).get("passed") is not True:
         raise AssertionError("linked proof artifact did not pass its proof gates")
+    phases = artifact.get("phases")
+    if not isinstance(phases, list) or not phases or any(not isinstance(phase, dict) for phase in phases):
+        raise AssertionError("linked proof artifact is missing concrete phase evidence")
     retained_contract = artifact.get("benchmark_contract")
     if not isinstance(retained_contract, dict):
         raise AssertionError("linked proof artifact is missing its benchmark contract")
@@ -155,17 +172,20 @@ def validate_linked_proof_artifact(
     expected_sha256 = benchmark_contract_sha256(expected_contract)
     if retained_sha256 != expected_sha256 or retained_contract != expected_contract:
         raise AssertionError("linked proof artifact benchmark contract does not match the speed run")
-    memory_headroom = artifact.get("gpu_memory_headroom")
-    if require_memory_headroom and (
-        not isinstance(memory_headroom, dict) or memory_headroom.get("passed") is not True
-    ):
-        raise AssertionError("linked proof artifact is missing passed GPU memory headroom evidence")
+    recomputed = _validate_linked_proof_evidence(
+        artifact,
+        artifact_path=artifact_path,
+        expected_contract=expected_contract,
+        require_memory_headroom=require_memory_headroom,
+    )
+    memory_headroom = recomputed["gpu_memory_headroom"]
     return {
         "artifact_path": str(artifact_path),
         "artifact_sha256": _sha256_file(artifact_path),
         "benchmark_contract_sha256": retained_sha256,
         "proof_status": dict(artifact["proof_status"]),
         "gpu_memory_headroom": memory_headroom,
+        "validated_evidence": recomputed,
     }
 
 
@@ -175,6 +195,1011 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _require_dict(value: Any, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AssertionError(f"{label} must be a JSON object")
+    return value
+
+
+def _require_list(value: Any, *, label: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise AssertionError(f"{label} must be a JSON array")
+    return value
+
+
+def _validate_full_decode_summary_values(
+    summary: dict[str, Any],
+    *,
+    phase: str,
+    batch_size: int,
+    max_new_tokens: int,
+) -> None:
+    expected_tokens = batch_size * max(0, max_new_tokens - 1)
+    minimum_tokens = max(0, expected_tokens - batch_size)
+    if summary.get("phase") != phase:
+        raise AssertionError("FULL decode summary phase does not match its physical wave")
+    if summary.get("batch_size") != batch_size or summary.get("max_new_tokens") != max_new_tokens:
+        raise AssertionError("FULL decode summary workload dimensions drifted")
+    if summary.get("expected_decode_tokens") != expected_tokens:
+        raise AssertionError("FULL decode expected-token count is inconsistent")
+    if summary.get("minimum_full_decode_tokens") != minimum_tokens:
+        raise AssertionError("FULL decode minimum-token gate is inconsistent")
+    observation_count = summary.get("observation_count")
+    dispatch_count = summary.get("full_dispatch_count")
+    full_tokens = summary.get("full_decode_tokens")
+    maximum_full_batch = summary.get("maximum_full_batch")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (observation_count, dispatch_count, full_tokens, maximum_full_batch)
+    ):
+        raise AssertionError("FULL decode numeric evidence is malformed")
+    if observation_count == 0 or (max_new_tokens > 1 and dispatch_count == 0):
+        raise AssertionError("FULL decode proof retained no graph replay")
+    if dispatch_count > observation_count:
+        raise AssertionError("FULL decode dispatch count exceeds scheduler observations")
+    if maximum_full_batch > batch_size or full_tokens > dispatch_count * batch_size:
+        raise AssertionError("FULL decode occupancy exceeds the exact physical batch")
+    if summary.get("eager_decode_dispatch_count") != 0:
+        raise AssertionError("FULL decode proof retained eager decode dispatch")
+    if summary.get("full_decode_unpadded") is not True:
+        raise AssertionError("FULL decode proof retained semantic padding")
+    global_batch_hit = maximum_full_batch == batch_size
+    if summary.get("global_batch_hit") is not global_batch_hit:
+        raise AssertionError("FULL decode global-batch hit is inconsistent")
+    if max_new_tokens > 1 and not global_batch_hit:
+        raise AssertionError("FULL decode proof did not hit the exact physical batch")
+    coverage = full_tokens / expected_tokens if expected_tokens else 1.0
+    if not math.isclose(float(summary.get("coverage_fraction", -1.0)), coverage):
+        raise AssertionError("FULL decode coverage fraction is inconsistent")
+    average_occupancy = full_tokens / dispatch_count if dispatch_count else 0.0
+    if not math.isclose(float(summary.get("average_full_batch_occupancy", -1.0)), average_occupancy):
+        raise AssertionError("FULL decode occupancy is inconsistent")
+    minimum_occupancy = batch_size * 0.9
+    if not math.isclose(float(summary.get("minimum_average_occupancy", -1.0)), minimum_occupancy):
+        raise AssertionError("FULL decode minimum occupancy threshold is inconsistent")
+    occupancy_fraction = average_occupancy / batch_size
+    if not math.isclose(float(summary.get("occupancy_fraction", -1.0)), occupancy_fraction):
+        raise AssertionError("FULL decode occupancy fraction is inconsistent")
+    long_gate = max_new_tokens >= 32
+    coverage_passed = not long_gate or full_tokens >= minimum_tokens
+    occupancy_passed = not long_gate or average_occupancy >= batch_size * 0.9
+    if summary.get("long_run_gates_applied") is not long_gate:
+        raise AssertionError("FULL decode long-run gate selection is inconsistent")
+    if summary.get("coverage_gate_passed") is not coverage_passed:
+        raise AssertionError("FULL decode coverage gate result is inconsistent")
+    if summary.get("occupancy_gate_passed") is not occupancy_passed:
+        raise AssertionError("FULL decode occupancy gate result is inconsistent")
+    if summary.get("passed") is not True or not coverage_passed or not occupancy_passed:
+        raise AssertionError("FULL decode proof did not pass recomputed gates")
+
+
+def _validate_cudagraph_phase_evidence(
+    phase: dict[str, Any],
+    *,
+    maximum_wave_size: int,
+) -> int:
+    observation_count = phase.get("cudagraph_observation_count")
+    if isinstance(observation_count, bool) or not isinstance(observation_count, int) or observation_count <= 0:
+        raise AssertionError("proof phase is missing concrete CUDA graph observations")
+    retained = _require_list(
+        phase.get("cudagraph_observations_retained"),
+        label="retained CUDA graph observations",
+    )
+    expected_retained = min(observation_count, 256)
+    if len(retained) != expected_retained or any(not isinstance(item, dict) for item in retained):
+        raise AssertionError("retained CUDA graph observation count is inconsistent")
+    aggregate = _require_list(phase.get("cudagraph_summary"), label="CUDA graph aggregate")
+    if not aggregate or any(not isinstance(item, dict) for item in aggregate):
+        raise AssertionError("CUDA graph aggregate is empty or malformed")
+    aggregate_counts = {}
+    total_count = 0
+    full_tokens = 0
+    for item in aggregate:
+        count = item.get("count")
+        unpadded = item.get("num_unpadded_tokens")
+        padded = item.get("num_padded_tokens")
+        paddings = item.get("num_paddings")
+        mode = item.get("runtime_mode")
+        engine_index = item.get("engine_index")
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in (engine_index, unpadded, padded, paddings)
+            )
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+            or not isinstance(mode, str)
+        ):
+            raise AssertionError("CUDA graph aggregate contains malformed numeric evidence")
+        key = (engine_index, mode, unpadded, padded, paddings)
+        if key in aggregate_counts:
+            raise AssertionError("CUDA graph aggregate contains duplicate buckets")
+        aggregate_counts[key] = count
+        total_count += count
+        if mode.endswith("FULL"):
+            if padded != unpadded or paddings != 0:
+                raise AssertionError("FULL CUDA graph aggregate contains scheduler padding")
+            full_tokens += count * unpadded
+        if mode.endswith("NONE") and unpadded <= maximum_wave_size:
+            raise AssertionError("CUDA graph aggregate contains eager decode dispatch")
+    if total_count != observation_count:
+        raise AssertionError("CUDA graph aggregate count does not match retained observation count")
+    if observation_count <= 256:
+        if summarize_cudagraph_observations(tuple(retained)) != aggregate:
+            raise AssertionError("CUDA graph aggregate does not match raw retained observations")
+    else:
+        retained_counts = Counter(
+            (
+                item.get("engine_index"),
+                item.get("runtime_mode"),
+                item.get("num_unpadded_tokens"),
+                item.get("num_padded_tokens"),
+                item.get("num_paddings"),
+            )
+            for item in retained
+        )
+        if any(aggregate_counts.get(key, 0) < count for key, count in retained_counts.items()):
+            raise AssertionError("truncated CUDA graph observations do not match their aggregate")
+    return full_tokens
+
+
+def _validate_fir_route_evidence(
+    worker_proof: Sequence[dict[str, Any]],
+    *,
+    manifest: WorkloadManifest,
+) -> None:
+    prompt_lengths = [len(request.prompt_token_ids) for request in manifest.requests]
+    long_equal_prefill = min(prompt_lengths) >= 1_024 and len(set(prompt_lengths)) == 1
+    for worker in worker_proof:
+        routes = _require_dict(worker.get("fir_routes"), label="worker FIR route evidence")
+        fallback_reasons = routes.get("fallback_reasons", {})
+        if not isinstance(fallback_reasons, dict):
+            raise AssertionError("FIR fallback reasons must be a JSON object")
+        forbidden = set(fallback_reasons) - {"short_request"}
+        if forbidden:
+            raise AssertionError(f"FIR production dispatch used forbidden fallback reasons: {sorted(forbidden)}")
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count <= 0 for count in fallback_reasons.values()
+        ):
+            raise AssertionError("FIR fallback counters must be positive integers")
+        route_names = set(routes) - {"fallback_reasons"}
+        if not route_names:
+            raise AssertionError("worker retained no production FIR route hits")
+        unknown_routes = route_names - {"direct", "equal_length_conv"}
+        if unknown_routes:
+            raise AssertionError(f"worker retained unknown FIR routes: {sorted(unknown_routes)}")
+        for route_name in route_names:
+            totals = routes[route_name]
+            if not isinstance(totals, dict) or any(
+                isinstance(totals.get(field), bool) or not isinstance(totals.get(field), int) or totals[field] <= 0
+                for field in ("calls", "requests", "tokens")
+            ):
+                raise AssertionError(f"FIR route {route_name!r} has malformed counters")
+        if "direct" in route_names:
+            if sum(fallback_reasons.values()) != routes["direct"]["calls"]:
+                raise AssertionError("direct FIR route calls do not match their retained reasons")
+        elif fallback_reasons:
+            raise AssertionError("FIR fallback reasons were retained without direct route calls")
+        if long_equal_prefill and "equal_length_conv" not in route_names:
+            raise AssertionError("long equal-length prefill did not hit equal_length_conv")
+        if not long_equal_prefill and "equal_length_conv" in route_names:
+            raise AssertionError("short or ragged workload unexpectedly hit equal_length_conv")
+        if not long_equal_prefill and "direct" not in route_names:
+            raise AssertionError("short or ragged FIR workload did not hit the direct production route")
+        if manifest.max_new_tokens > 1 and "direct" not in route_names:
+            raise AssertionError("autoregressive decode did not hit the direct production FIR route")
+
+
+def _validate_worker_gpu_bindings(
+    workers: Sequence[dict[str, Any]],
+    *,
+    hardware: dict[str, Any],
+    expected_worker_count: int,
+) -> None:
+    devices = _require_list(hardware.get("devices"), label="GPU hardware devices")
+    if len(workers) != expected_worker_count:
+        raise AssertionError("worker proof count does not match the physical model topology")
+    physical = {}
+    physical_by_index = {}
+    physical_by_uuid = {}
+    for device in devices:
+        if not isinstance(device, dict):
+            raise AssertionError("GPU hardware device provenance is malformed")
+        identity = (device.get("uuid"), device.get("pci_bus_id"))
+        if not all(isinstance(value, str) and value for value in identity) or identity in physical:
+            raise AssertionError("GPU UUID/PCI provenance must be complete and unique")
+        physical[identity] = device
+        physical_by_index[str(device.get("index"))] = device
+        physical_by_uuid[device.get("uuid")] = device
+    ranks = []
+    observed = set()
+    for worker in workers:
+        rank = worker.get("rank")
+        identity = (worker.get("device_uuid"), worker.get("pci_bus_id"))
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+            raise AssertionError("worker rank is malformed")
+        if identity not in physical or identity in observed:
+            raise AssertionError("worker rank is not bound to one unique physical GPU UUID/PCI identity")
+        if worker.get("device_name") != physical[identity].get("name"):
+            raise AssertionError("worker device name does not match physical GPU provenance")
+        visible = worker.get("cuda_visible_devices")
+        logical_device = worker.get("logical_device")
+        if (
+            not isinstance(visible, str)
+            or isinstance(logical_device, bool)
+            or not isinstance(logical_device, int)
+            or logical_device < 0
+        ):
+            raise AssertionError("worker proof omitted CUDA_VISIBLE_DEVICES")
+        selectors = tuple(item.strip() for item in visible.split(","))
+        if logical_device >= len(selectors) or not selectors[logical_device]:
+            raise AssertionError("worker logical device is not present in CUDA_VISIBLE_DEVICES")
+        selector = selectors[logical_device]
+        if worker.get("visible_device_selector") != selector:
+            raise AssertionError("worker retained an inconsistent visible-device selector")
+        selected = physical_by_index.get(selector) if selector.isdecimal() else physical_by_uuid.get(selector)
+        if selected is None or (selected.get("uuid"), selected.get("pci_bus_id")) != identity:
+            raise AssertionError("worker CUDA_VISIBLE_DEVICES selector does not match its UUID/PCI binding")
+        ranks.append(rank)
+        observed.add(identity)
+    if sorted(ranks) != list(range(expected_worker_count)):
+        raise AssertionError("worker ranks are not exact and contiguous")
+
+
+def _validate_full_output_sidecar(
+    metadata: dict[str, Any],
+    *,
+    artifact_path: Path,
+    phase: str,
+    manifest: WorkloadManifest,
+    expected_executions: Sequence[RequestExecutionRecord],
+    output_summaries: Any,
+) -> dict[str, int]:
+    if metadata.get("schema_version") != 2 or metadata.get("format") != "jsonl":
+        raise AssertionError("full-output sidecar schema is unsupported")
+    if metadata.get("compression") != "gzip":
+        raise AssertionError("full-output sidecar compression is not gzip")
+    sidecar = Path(str(metadata.get("path", ""))).expanduser().resolve()
+    expected_path = phase_output_artifact_path(artifact_path, phase=phase).resolve()
+    if sidecar != expected_path or not sidecar.is_file():
+        raise AssertionError("full-output sidecar path does not match its proof namespace")
+    if metadata.get("sha256") != _sha256_file(sidecar):
+        raise AssertionError("full-output sidecar SHA256 does not match retained bytes")
+    if metadata.get("size_bytes") != sidecar.stat().st_size:
+        raise AssertionError("full-output sidecar byte count is inconsistent")
+    summaries = _require_list(output_summaries, label="phase output summaries")
+    if len(expected_executions) != len(manifest.requests) or len(summaries) != len(manifest.requests):
+        raise AssertionError("phase outputs do not cover the exact manifest")
+
+    request_count = 0
+    generated_count = 0
+    seen_execution_uids = set()
+    try:
+        with gzip.open(sidecar, mode="rt", encoding="utf-8") as handle:
+            for request_count, line in enumerate(handle, start=1):
+                index = request_count - 1
+                if index >= len(manifest.requests):
+                    raise AssertionError("full-output sidecar contains extra requests")
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise AssertionError("full-output sidecar row is not a JSON object")
+                request = manifest.requests[index]
+                execution = expected_executions[index]
+                if any(row.get(key) != value for key, value in execution.to_dict().items()):
+                    raise AssertionError("sidecar execution ownership or seed coordinates drifted")
+                execution_uid = row.get("execution_uid")
+                if execution_uid in seen_execution_uids:
+                    raise AssertionError("full-output sidecar contains a duplicate execution UID")
+                seen_execution_uids.add(execution_uid)
+                if row.get("prompt_token_ids") != list(request.prompt_token_ids):
+                    raise AssertionError("sidecar prompt tokens do not match the manifest")
+                output_ids = row.get("output_token_ids")
+                logprobs = row.get("chosen_token_logprobs")
+                if (
+                    not isinstance(output_ids, list)
+                    or len(output_ids) != manifest.max_new_tokens
+                    or any(isinstance(token, bool) or not isinstance(token, int) for token in output_ids)
+                ):
+                    raise AssertionError("sidecar output token IDs are malformed or not exact length")
+                if (
+                    not isinstance(logprobs, list)
+                    or len(logprobs) != len(output_ids)
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        for value in logprobs
+                    )
+                ):
+                    raise AssertionError("sidecar chosen-token logprobs are malformed or non-finite")
+                expected_lengths = exact_length_evidence(
+                    prompt_tokens=len(request.prompt_token_ids),
+                    generated_tokens=len(output_ids),
+                    requested_new_tokens=manifest.max_new_tokens,
+                )
+                if any(row.get(key) != value for key, value in expected_lengths.items()):
+                    raise AssertionError("sidecar requested/observed exact-length evidence drifted")
+                if (
+                    row.get("finish_reason") != "length"
+                    or row.get("stop_reason") is not None
+                    or row.get("stopped_on_eos") is not False
+                ):
+                    raise AssertionError("sidecar request did not finish at the exact length boundary")
+                record = GenerationRecord(
+                    request_id=request.request_id,
+                    prompt_token_ids=request.prompt_token_ids,
+                    output_token_ids=tuple(output_ids),
+                    output_logprobs=tuple(float(value) for value in logprobs),
+                    requested_max_tokens=manifest.max_new_tokens,
+                    finish_reason="length",
+                    stop_reason=None,
+                    stopped_on_eos=False,
+                )
+                if summaries[index] != record.summary_dict():
+                    raise AssertionError("phase output summary does not match its full sidecar row")
+                generated_count += len(output_ids)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise AssertionError("full-output sidecar could not be decoded") from error
+    if request_count != len(manifest.requests):
+        raise AssertionError("full-output sidecar omitted manifest requests")
+    if metadata.get("request_count") != request_count:
+        raise AssertionError("full-output sidecar request count is inconsistent")
+    if metadata.get("generated_token_count") != generated_count:
+        raise AssertionError("full-output sidecar generated-token count is inconsistent")
+    return {
+        "request_count": request_count,
+        "generated_token_count": generated_count,
+    }
+
+
+def _validate_phase_sample(
+    phase: dict[str, Any],
+    *,
+    manifest: WorkloadManifest,
+    sample_index: int,
+) -> tuple[int, ...]:
+    sample = _require_dict(phase.get("sample"), label="phase benchmark sample")
+    prompt_tokens = sum(len(request.prompt_token_ids) for request in manifest.requests)
+    generated_tokens = len(manifest.requests) * manifest.max_new_tokens
+    if (
+        sample.get("sample_index") != sample_index
+        or sample.get("request_count") != len(manifest.requests)
+        or sample.get("prompt_tokens") != prompt_tokens
+        or sample.get("generated_tokens") != generated_tokens
+        or sample.get("output_lengths") != [manifest.max_new_tokens] * len(manifest.requests)
+    ):
+        raise AssertionError("phase benchmark sample does not match the exact workload")
+    generation_calls = _require_list(phase.get("generation_call_s"), label="generation call timings")
+    if (
+        not generation_calls
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 for value in generation_calls
+        )
+        or not math.isclose(float(sample.get("generation_s", -1.0)), sum(generation_calls))
+    ):
+        raise AssertionError("phase generation timing does not match its physical calls")
+    peaks = sample.get("peak_device_memory_bytes")
+    if not isinstance(peaks, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in peaks
+    ):
+        raise AssertionError("phase peak-memory evidence is malformed")
+    return tuple(peaks)
+
+
+def _validate_direct_phase_evidence(
+    artifact: dict[str, Any],
+    *,
+    artifact_path: Path,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    generation_round: int,
+) -> tuple[tuple[int, ...], list[dict[str, Any]]]:
+    measurement = _require_dict(
+        artifact["benchmark_contract"].get("measurement"),
+        label="benchmark measurement contract",
+    )
+    warmups = measurement.get("warmups")
+    repetitions = measurement.get("repetitions")
+    if (
+        any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (warmups, repetitions))
+        or repetitions == 0
+    ):
+        raise AssertionError("benchmark measurement counts are malformed")
+    expected_names = [
+        "cold-generation",
+        *(f"warmup-{index}" for index in range(warmups)),
+        *(f"steady-{index}" for index in range(repetitions)),
+    ]
+    phases = _require_list(artifact.get("phases"), label="proof phases")
+    if [phase.get("phase") for phase in phases] != expected_names:
+        raise AssertionError("proof phases do not match the benchmark measurement contract")
+    call_index = generation_round
+    memory_peaks = []
+    final_workers = []
+    for sample_index, phase in enumerate(phases):
+        if not isinstance(phase, dict) or phase.get("proof_collected") is not True:
+            raise AssertionError("proof phase lacks production proof collection")
+        phase_name = expected_names[sample_index]
+        waves = build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=1,
+        )
+        retained_waves = _require_list(phase.get("wave_proofs"), label="physical wave proofs")
+        if len(retained_waves) != len(waves):
+            raise AssertionError("physical proof wave count does not match the exact workload")
+        full_summaries = []
+        for wave, retained in zip(waves, retained_waves, strict=True):
+            expected_phase = f"{phase_name}.wave-{wave.wave_index:03d}"
+            expected_fields = {
+                "wave_index": wave.wave_index,
+                "start": wave.start,
+                "stop": wave.stop,
+                "request_count": wave.request_count,
+                "call_index": call_index + wave.wave_index,
+            }
+            if any(retained.get(key) != value for key, value in expected_fields.items()):
+                raise AssertionError("physical wave boundaries or call indices drifted")
+            full_decode = _require_dict(
+                retained.get("full_decode_proof"),
+                label="wave FULL decode proof",
+            )
+            _validate_full_decode_summary_values(
+                full_decode,
+                phase=expected_phase,
+                batch_size=wave.request_count,
+                max_new_tokens=manifest.max_new_tokens,
+            )
+            scheduler = _require_dict(
+                retained.get("scheduler_capacity_proof"),
+                label="wave scheduler proof",
+            )
+            if (
+                scheduler.get("phase") != expected_phase
+                or scheduler.get("global_wave_size") != wave.request_count
+                or scheduler.get("engine_request_count") != wave.request_count
+                or scheduler.get("max_num_seqs") != profile.resolved_max_num_seqs
+            ):
+                raise AssertionError("scheduler proof dimensions do not match the physical wave")
+            validate_scheduler_capacity_proof(scheduler)
+            full_summaries.append(full_decode)
+        if phase.get("wave_execution") != wave_execution_summary(retained_waves):
+            raise AssertionError("physical wave execution summary is inconsistent")
+        phase_full = _require_dict(phase.get("full_decode_proof"), label="phase FULL decode proof")
+        expected_tokens = sum(item["expected_decode_tokens"] for item in full_summaries)
+        full_tokens = sum(item["full_decode_tokens"] for item in full_summaries)
+        if (
+            phase_full.get("phase") != phase_name
+            or phase_full.get("wave_count") != len(waves)
+            or phase_full.get("expected_decode_tokens") != expected_tokens
+            or phase_full.get("full_decode_tokens") != full_tokens
+            or phase_full.get("waves") != full_summaries
+            or phase_full.get("passed") is not True
+        ):
+            raise AssertionError("phase FULL decode aggregate is inconsistent")
+        coverage = full_tokens / expected_tokens if expected_tokens else 1.0
+        if not math.isclose(float(phase_full.get("coverage_fraction", -1.0)), coverage):
+            raise AssertionError("phase FULL decode aggregate coverage is inconsistent")
+        graph_full_tokens = _validate_cudagraph_phase_evidence(
+            phase,
+            maximum_wave_size=profile.global_wave_size,
+        )
+        if graph_full_tokens != full_tokens:
+            raise AssertionError("raw CUDA graph aggregate does not match wave FULL decode totals")
+
+        executions = build_wave_execution_records(
+            manifest,
+            global_wave_size=profile.global_wave_size,
+            call_index_start=call_index,
+        )
+        if phase.get("request_executions") != [record.to_dict() for record in executions]:
+            raise AssertionError("phase request ownership or seed stream drifted")
+        _validate_full_output_sidecar(
+            _require_dict(phase.get("full_output_artifact"), label="full-output sidecar metadata"),
+            artifact_path=artifact_path,
+            phase=phase_name,
+            manifest=manifest,
+            expected_executions=executions,
+            output_summaries=phase.get("outputs"),
+        )
+        memory_peaks.append(
+            _validate_phase_sample(
+                phase,
+                manifest=manifest,
+                sample_index=sample_index,
+            )
+        )
+        workers = _require_list(phase.get("worker_proof"), label="phase worker proof")
+        hardware = _require_dict(
+            artifact.get("gpu_hardware_provenance"),
+            label="GPU hardware provenance",
+        )
+        _validate_worker_gpu_bindings(
+            workers,
+            hardware=hardware,
+            expected_worker_count=profile.tensor_parallel_size,
+        )
+        _validate_fir_route_evidence(workers, manifest=manifest)
+        if profile.shared_prefix_state_reuse:
+            retained_prefix = _require_dict(
+                phase.get("shared_prefix_state_reuse"),
+                label="shared-prefix state reuse evidence",
+            )
+            resolved = _require_dict(artifact.get("resolved_config"), label="resolved vLLM config")
+            cache = _require_dict(resolved.get("cache"), label="resolved vLLM cache config")
+            recomputed_prefix = shared_prefix_state_reuse_evidence(
+                manifest,
+                cached_tokens=_require_list(
+                    retained_prefix.get("cached_tokens_by_request"),
+                    label="cached-token prefix evidence",
+                ),
+                worker_proof=workers,
+                expected_worker_clone_counts=tuple(len(manifest.requests) - 1 for _ in workers),
+                cache_block_size=int(cache.get("block_size", 0)),
+            )
+            recomputed_prefix = {
+                **recomputed_prefix,
+                "phase_prefix_cache_reset": True,
+            }
+            if phase.get("prefix_cache_reset") is not True or retained_prefix != recomputed_prefix:
+                raise AssertionError("shared-prefix physical reuse evidence failed recomputation")
+        elif phase.get("shared_prefix_state_reuse") is not None or phase.get("prefix_cache_reset") is not False:
+            raise AssertionError("non-prefix proof retained unexpected prefix-clone evidence")
+        final_workers = workers
+        call_index += len(waves)
+
+    initialized = _require_list(
+        artifact.get("initialized_worker_proof"),
+        label="initialized worker proof",
+    )
+    hardware = _require_dict(
+        artifact.get("gpu_hardware_provenance"),
+        label="GPU hardware provenance",
+    )
+    _validate_worker_gpu_bindings(
+        initialized,
+        hardware=hardware,
+        expected_worker_count=profile.tensor_parallel_size,
+    )
+    initialized_by_rank = {worker["rank"]: worker for worker in initialized}
+    final_by_rank = {worker["rank"]: worker for worker in final_workers}
+    if initialized_by_rank.keys() != final_by_rank.keys():
+        raise AssertionError("initialized and final worker ranks differ")
+    for rank in sorted(initialized_by_rank):
+        initialized_worker = initialized_by_rank[rank]
+        final_worker = final_by_rank[rank]
+        if (
+            initialized_worker.get("device_uuid"),
+            initialized_worker.get("pci_bus_id"),
+        ) != (
+            final_worker.get("device_uuid"),
+            final_worker.get("pci_bus_id"),
+        ):
+            raise AssertionError("worker rank moved to a different physical GPU")
+        validate_compilation_proof(
+            _require_dict(initialized_worker.get("compilation"), label="initialized compilation proof"),
+            _require_dict(final_worker.get("compilation"), label="final compilation proof"),
+        )
+    return tuple(max(values) for values in zip(*memory_peaks, strict=True)), final_workers
+
+
+def _expected_dp2_executions(
+    manifest: WorkloadManifest,
+    *,
+    profile: Evo2VllmProfile,
+    call_index_start: int,
+    global_index_start: int,
+) -> tuple[RequestExecutionRecord, ...]:
+    records = []
+    for wave in build_request_waves(
+        request_count=len(manifest.requests),
+        global_batch_size=profile.global_wave_size,
+        replica_count=profile.replica_count,
+    ):
+        for shard in wave.shards:
+            records.extend(
+                build_request_execution_records(
+                    manifest.request_slice(shard.start, shard.stop),
+                    global_request_offset=global_index_start + shard.start,
+                    dp_rank=shard.replica_index,
+                    dp_size=profile.replica_count,
+                    call_index=call_index_start + wave.wave_index,
+                )
+            )
+    return tuple(records)
+
+
+def _validate_dp2_phase_evidence(
+    artifact: dict[str, Any],
+    *,
+    artifact_path: Path,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    generation_round: int,
+) -> tuple[tuple[int, ...], list[dict[str, Any]]]:
+    measurement = _require_dict(
+        artifact["benchmark_contract"].get("measurement"),
+        label="benchmark measurement contract",
+    )
+    warmups = measurement.get("warmups")
+    repetitions = measurement.get("repetitions")
+    if (
+        any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (warmups, repetitions))
+        or repetitions == 0
+    ):
+        raise AssertionError("benchmark measurement counts are malformed")
+    expected_names = [
+        "cold-generation",
+        *(f"warmup-{index}" for index in range(warmups)),
+        *(f"steady-{index}" for index in range(repetitions)),
+    ]
+    phases = _require_list(artifact.get("phases"), label="proof phases")
+    if [phase.get("phase") for phase in phases] != expected_names:
+        raise AssertionError("DP2 proof phases do not match the measurement contract")
+
+    call_index = generation_round
+    global_index = 0
+    memory_peaks = []
+    final_engines = []
+    hardware = _require_dict(
+        artifact.get("gpu_hardware_provenance"),
+        label="GPU hardware provenance",
+    )
+    for sample_index, phase in enumerate(phases):
+        if not isinstance(phase, dict) or phase.get("proof_collected") is not True:
+            raise AssertionError("DP2 proof phase lacks production proof collection")
+        phase_name = expected_names[sample_index]
+        waves = build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )
+        retained_waves = _require_list(phase.get("waves"), label="DP2 physical wave proofs")
+        if len(retained_waves) != len(waves):
+            raise AssertionError("DP2 proof wave count does not match the exact workload")
+        phase_workers = []
+        for wave, retained in zip(waves, retained_waves, strict=True):
+            wave_phase = f"{phase_name}.wave-{wave.wave_index:03d}"
+            expected_wave = {
+                "wave_index": wave.wave_index,
+                "phase": wave_phase,
+                "start": wave.start,
+                "stop": wave.stop,
+                "request_count": wave.request_count,
+            }
+            if any(retained.get(key) != value for key, value in expected_wave.items()):
+                raise AssertionError("DP2 physical wave boundaries drifted")
+            engines = _require_list(retained.get("engines"), label="DP2 engine wave proofs")
+            if len(engines) != len(wave.shards):
+                raise AssertionError("DP2 engine proof count does not match active replicas")
+            for shard, engine in zip(wave.shards, engines, strict=True):
+                if (
+                    engine.get("dp_rank") != shard.replica_index
+                    or engine.get("request_count") != shard.request_count
+                    or engine.get("phase") != wave_phase
+                ):
+                    raise AssertionError("DP2 engine ownership does not match its exact shard")
+                observations = _require_list(
+                    engine.get("cudagraph_observations"),
+                    label="DP2 raw CUDA graph observations",
+                )
+                if engine.get("cudagraph_summary") != summarize_cudagraph_observations(tuple(observations)):
+                    raise AssertionError("DP2 CUDA graph aggregate does not match raw observations")
+                recomputed_full = full_decode_proof_summary(
+                    observations,
+                    phase=wave_phase,
+                    batch_size=shard.request_count,
+                    max_new_tokens=manifest.max_new_tokens,
+                )
+                if engine.get("full_decode_proof") != recomputed_full:
+                    raise AssertionError("DP2 FULL decode proof does not match raw observations")
+                _validate_full_decode_summary_values(
+                    recomputed_full,
+                    phase=wave_phase,
+                    batch_size=shard.request_count,
+                    max_new_tokens=manifest.max_new_tokens,
+                )
+                scheduler_observations = _require_list(
+                    engine.get("scheduler_observations"),
+                    label="DP2 raw scheduler observations",
+                )
+                recomputed_scheduler = scheduler_capacity_proof_summary(
+                    scheduler_observations,
+                    phase=wave_phase,
+                    global_wave_size=wave.request_count,
+                    engine_request_count=shard.request_count,
+                    max_num_seqs=profile.resolved_max_num_seqs,
+                )
+                if engine.get("scheduler_capacity_proof") != recomputed_scheduler:
+                    raise AssertionError("DP2 scheduler proof does not match raw observations")
+                validate_scheduler_capacity_proof(recomputed_scheduler)
+                try:
+                    validate_resolved_profile(
+                        profile,
+                        _require_dict(engine.get("resolved_config"), label="DP2 resolved config"),
+                    )
+                except (AssertionError, KeyError, TypeError, ValueError) as error:
+                    raise AssertionError("DP2 engine resolved config drifted") from error
+                workers = _require_list(engine.get("worker_proof"), label="DP2 inner worker proof")
+                _validate_worker_gpu_bindings(
+                    workers,
+                    hardware=hardware,
+                    expected_worker_count=profile.tensor_parallel_size,
+                )
+                _validate_fir_route_evidence(workers, manifest=manifest.request_slice(wave.start, wave.stop))
+                phase_workers.extend(workers)
+            identities = {
+                (worker.get("device_uuid"), worker.get("pci_bus_id")) for worker in phase_workers[-len(wave.shards) :]
+            }
+            if len(identities) != len(wave.shards):
+                raise AssertionError("DP2 replicas are not bound to distinct physical GPUs")
+            if profile.shared_prefix_state_reuse:
+                retained_prefix = _require_dict(
+                    retained.get("shared_prefix_state_reuse"),
+                    label="DP2 shared-prefix evidence",
+                )
+                workers = [
+                    worker
+                    for engine in engines
+                    for worker in _require_list(engine.get("worker_proof"), label="DP2 worker proof")
+                ]
+                cache = _require_dict(engines[0]["resolved_config"].get("cache"), label="DP2 cache config")
+                recomputed_prefix = shared_prefix_state_reuse_evidence(
+                    manifest.request_slice(wave.start, wave.stop),
+                    cached_tokens=_require_list(
+                        retained_prefix.get("cached_tokens_by_request"),
+                        label="DP2 cached-token evidence",
+                    ),
+                    worker_proof=workers,
+                    expected_worker_clone_counts=tuple(
+                        shard.request_count - int(wave.wave_index == 0) for shard in wave.shards
+                    ),
+                    cache_block_size=int(cache.get("block_size", 0)),
+                    expected_cache_misses=len(wave.shards) if wave.wave_index == 0 else 0,
+                )
+                recomputed_prefix = {
+                    **recomputed_prefix,
+                    "phase_prefix_cache_reset_before_first_wave": True,
+                }
+                if retained_prefix != recomputed_prefix:
+                    raise AssertionError("DP2 shared-prefix evidence failed physical recomputation")
+            elif retained.get("shared_prefix_state_reuse") is not None:
+                raise AssertionError("non-prefix DP2 wave retained unexpected prefix evidence")
+            final_engines = engines
+        if phase.get("wave_execution") != wave_execution_summary(retained_waves):
+            raise AssertionError("DP2 physical wave execution summary is inconsistent")
+        if phase.get("generation_call_s") != [wave["generation_s"] for wave in retained_waves]:
+            raise AssertionError("DP2 generation calls do not match retained physical waves")
+        executions = _expected_dp2_executions(
+            manifest,
+            profile=profile,
+            call_index_start=call_index,
+            global_index_start=global_index,
+        )
+        if phase.get("request_executions") != [record.to_dict() for record in executions]:
+            raise AssertionError("DP2 request ownership or rank-local seed streams drifted")
+        _validate_full_output_sidecar(
+            _require_dict(phase.get("full_output_artifact"), label="DP2 full-output sidecar"),
+            artifact_path=artifact_path,
+            phase=phase_name,
+            manifest=manifest,
+            expected_executions=executions,
+            output_summaries=phase.get("outputs"),
+        )
+        memory_peaks.append(_validate_phase_sample(phase, manifest=manifest, sample_index=sample_index))
+        if phase.get("prefix_cache_reset") is not profile.shared_prefix_state_reuse:
+            raise AssertionError("DP2 phase prefix-cache reset contract drifted")
+        call_index += len(waves)
+        global_index += len(manifest.requests)
+
+    initialized_engines = _require_list(
+        artifact.get("initialized_engine_proofs"),
+        label="initialized DP2 engine proofs",
+    )
+    if len(initialized_engines) != profile.replica_count:
+        raise AssertionError("initialized DP2 engine count does not match the topology")
+    resolved_configs = _require_list(artifact.get("resolved_configs"), label="DP2 resolved configs")
+    if len(resolved_configs) != profile.replica_count:
+        raise AssertionError("DP2 resolved-config count does not match the topology")
+    final_by_rank = {engine["dp_rank"]: engine for engine in final_engines}
+    final_workers = []
+    initialized_identities = set()
+    for dp_rank, (initialized, resolved) in enumerate(zip(initialized_engines, resolved_configs, strict=True)):
+        if initialized.get("resolved_config") != resolved:
+            raise AssertionError("DP2 initialized and retained resolved configs differ")
+        try:
+            validate_resolved_profile(profile, _require_dict(resolved, label="DP2 resolved config"))
+        except (AssertionError, KeyError, TypeError, ValueError) as error:
+            raise AssertionError("DP2 retained resolved config drifted") from error
+        initialized_workers = _require_list(
+            initialized.get("worker_proof"),
+            label="initialized DP2 inner worker proof",
+        )
+        final = final_by_rank.get(dp_rank)
+        if final is None:
+            raise AssertionError("final DP2 wave omitted one replica")
+        retained_final_workers = _require_list(final.get("worker_proof"), label="final DP2 worker proof")
+        _validate_worker_gpu_bindings(
+            initialized_workers,
+            hardware=hardware,
+            expected_worker_count=profile.tensor_parallel_size,
+        )
+        initial_identity = (
+            initialized_workers[0].get("device_uuid"),
+            initialized_workers[0].get("pci_bus_id"),
+        )
+        final_identity = (
+            retained_final_workers[0].get("device_uuid"),
+            retained_final_workers[0].get("pci_bus_id"),
+        )
+        if initial_identity != final_identity or initial_identity in initialized_identities:
+            raise AssertionError("DP2 replica physical GPU binding changed or overlaps")
+        initialized_identities.add(initial_identity)
+        validate_compilation_proof(
+            _require_dict(
+                initialized_workers[0].get("compilation"),
+                label="initialized DP2 compilation proof",
+            ),
+            _require_dict(
+                retained_final_workers[0].get("compilation"),
+                label="final DP2 compilation proof",
+            ),
+        )
+        final_workers.extend(retained_final_workers)
+    return tuple(max(values) for values in zip(*memory_peaks, strict=True)), final_workers
+
+
+def _validate_linked_proof_evidence(
+    artifact: dict[str, Any],
+    *,
+    artifact_path: Path,
+    expected_contract: dict[str, Any],
+    require_memory_headroom: bool,
+) -> dict[str, Any]:
+    try:
+        manifest = WorkloadManifest.from_dict(_require_dict(artifact.get("manifest"), label="proof manifest"))
+    except (KeyError, TypeError, ValueError) as error:
+        raise AssertionError("proof manifest is malformed") from error
+    if (
+        artifact.get("manifest_sha256") != manifest.sha256
+        or expected_contract.get("manifest_sha256") != manifest.sha256
+    ):
+        raise AssertionError("proof manifest SHA256 does not match the benchmark contract")
+    profile_data = _require_dict(artifact.get("profile"), label="proof profile")
+    try:
+        profile = Evo2VllmProfile(**profile_data)
+    except (TypeError, ValueError) as error:
+        raise AssertionError("proof profile is malformed") from error
+    if profile.proof is not True:
+        raise AssertionError("linked proof profile did not enable proof instrumentation")
+    profile_contract = asdict(profile)
+    profile_contract.pop("proof")
+    if expected_contract.get("profile") != profile_contract:
+        raise AssertionError("proof profile does not match the linked benchmark contract")
+    seed_stream = _require_dict(expected_contract.get("seed_stream"), label="seed-stream contract")
+    expected_seed_stream = {
+        "schema_version": 1,
+        "base_seed": manifest.seed,
+        "generation_round": seed_stream.get("generation_round"),
+        "round_stride": _SEED_ROUND_STRIDE,
+        "modulus": _SEED_MODULUS,
+    }
+    if seed_stream != expected_seed_stream:
+        raise AssertionError("benchmark seed-stream contract is malformed")
+    generation_round = seed_stream["generation_round"]
+    if isinstance(generation_round, bool) or not isinstance(generation_round, int) or generation_round < 0:
+        raise AssertionError("benchmark generation round is malformed")
+    invocation = _require_dict(artifact.get("invocation"), label="proof invocation")
+    output_path = Path(str(invocation.get("output_artifact_path", ""))).expanduser().resolve()
+    if output_path != artifact_path:
+        raise AssertionError("proof invocation output path does not match the linked artifact")
+    parsed_args = _require_dict(invocation.get("parsed_args"), label="proof parsed arguments")
+    if parsed_args.get("generation_round") != generation_round:
+        raise AssertionError("proof parsed generation round does not match the seed-stream contract")
+    if artifact.get("topology") != profile.topology or artifact.get("topology") != expected_contract.get("topology"):
+        raise AssertionError("proof topology does not match its profile and benchmark contract")
+    backend = artifact.get("backend")
+    if backend == "vllm" and profile.topology == "tp2":
+        try:
+            validate_resolved_profile(
+                profile,
+                _require_dict(artifact.get("resolved_config"), label="resolved vLLM config"),
+            )
+        except (AssertionError, KeyError, TypeError, ValueError) as error:
+            raise AssertionError("resolved vLLM config does not match the proof profile") from error
+        phase_peak, final_workers = _validate_direct_phase_evidence(
+            artifact,
+            artifact_path=artifact_path,
+            manifest=manifest,
+            profile=profile,
+            generation_round=generation_round,
+        )
+    elif backend == "nemo-rl-vllm" and profile.topology == "dp2":
+        phase_peak, final_workers = _validate_dp2_phase_evidence(
+            artifact,
+            artifact_path=artifact_path,
+            manifest=manifest,
+            profile=profile,
+            generation_round=generation_round,
+        )
+    else:
+        raise AssertionError("linked proof backend/topology schema is unsupported")
+    hardware = _require_dict(
+        artifact.get("gpu_hardware_provenance"),
+        label="GPU hardware provenance",
+    )
+    expected_runtime = _require_dict(
+        expected_contract.get("runtime_attestation"),
+        label="benchmark runtime attestation",
+    )
+    retained_sources = _require_dict(
+        artifact.get("source_provenance"),
+        label="proof source provenance",
+    )
+    if backend == "vllm":
+        sources = {"bionemo": retained_sources}
+    else:
+        expected_source_names = set(_require_dict(expected_runtime.get("sources"), label="runtime source identities"))
+        if set(retained_sources) != expected_source_names:
+            raise AssertionError("DP2 proof source provenance does not match the runtime contract")
+        sources = {
+            name: _require_dict(source, label=f"proof source provenance {name!r}")
+            for name, source in retained_sources.items()
+        }
+    try:
+        recomputed_runtime = runtime_attestation_contract(
+            checkpoint=_require_dict(
+                artifact.get("checkpoint_provenance"),
+                label="proof checkpoint provenance",
+            ),
+            sources=sources,
+            vllm_installation=_require_dict(
+                artifact.get("vllm_installation_provenance"),
+                label="proof vLLM installation provenance",
+            ),
+            gpu_hardware=hardware,
+        )
+    except (KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise AssertionError("proof runtime attestation could not be recomputed") from error
+    if recomputed_runtime != expected_runtime:
+        raise AssertionError("proof runtime provenance does not match the linked speed-run contract")
+    init_peak = _require_dict(artifact.get("timing"), label="proof timing").get("engine_init_peak_device_memory_bytes")
+    if (
+        not isinstance(init_peak, list)
+        or len(init_peak) != len(phase_peak)
+        or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in init_peak)
+    ):
+        raise AssertionError("engine initialization peak-memory evidence is malformed")
+    peak = tuple(max(initialized, phase_value) for initialized, phase_value in zip(init_peak, phase_peak, strict=True))
+    try:
+        recomputed_memory = gpu_memory_headroom_evidence(
+            hardware,
+            peak_device_memory_bytes=peak,
+        )
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise AssertionError("proof GPU memory headroom did not pass recomputation") from error
+    if artifact.get("gpu_memory_headroom") != recomputed_memory:
+        raise AssertionError("retained GPU memory headroom does not match recomputed peaks")
+    if require_memory_headroom and recomputed_memory.get("passed") is not True:
+        raise AssertionError("linked proof lacks passed GPU memory headroom")
+    proof_status = _require_dict(artifact.get("proof_status"), label="proof status")
+    if (
+        proof_status.get("phase_count") != len(artifact["phases"])
+        or proof_status.get("full_decode_passed") is not True
+        or proof_status.get("compilation_stable") is not True
+    ):
+        raise AssertionError("top-level proof status does not match recomputed phase evidence")
+    return {
+        "manifest_sha256": manifest.sha256,
+        "phase_count": len(artifact["phases"]),
+        "final_worker_count": len(final_workers),
+        "runtime_attestation": recomputed_runtime,
+        "gpu_memory_headroom": recomputed_memory,
+        "passed": True,
+    }
 
 
 def _file_records(root: Path, paths: Any) -> list[dict[str, Any]]:
@@ -326,10 +1351,12 @@ def runtime_attestation_contract(
         },
         "gpu": {
             "driver_version": gpu_hardware["driver_version"],
+            "cuda_visible_devices": gpu_hardware.get("cuda_visible_devices"),
             "devices": [
                 {
                     "index": device["index"],
                     "uuid": device["uuid"],
+                    "pci_bus_id": device["pci_bus_id"],
                     "name": device["name"],
                     "total_memory_bytes": device["total_memory_bytes"],
                 }
@@ -645,22 +1672,58 @@ def scheduler_capacity_proof_summary(
 
 def validate_scheduler_capacity_proof(proof: dict[str, Any]) -> None:
     """Fail closed unless one submitted wave fits without preemption or recompute."""
-    if int(proof.get("scheduler_observation_count", 0)) <= 0:
-        raise AssertionError("no scheduler telemetry was retained for the generation wave")
-    if not proof.get("request_count_within_scheduler_ceiling") or not proof.get(
-        "running_count_within_scheduler_ceiling"
-    ):
-        raise AssertionError("generation wave exceeded the per-engine max_num_seqs scheduler ceiling")
+    positive_fields = ("global_wave_size", "engine_request_count", "max_num_seqs")
+    nonnegative_fields = (
+        "scheduler_observation_count",
+        "preemption_events",
+        "recompute_events",
+        "prefix_preempted_requests",
+        "prefix_preempted_queries",
+        "prefix_preempted_hits",
+        "preempted_prompt_recomputed_tokens",
+        "prompt_tokens_computed",
+        "prompt_tokens_cached",
+        "prompt_tokens_total",
+        "maximum_running_requests",
+        "maximum_waiting_requests",
+        "maximum_skipped_waiting_requests",
+    )
     if any(
-        int(proof.get(field, 0)) != 0
-        for field in ("preemption_events", "recompute_events", "prefix_preempted_requests")
+        isinstance(proof.get(field), bool) or not isinstance(proof.get(field), int) or proof[field] <= 0
+        for field in positive_fields
     ):
+        raise AssertionError("scheduler wave dimensions must be positive integers")
+    if any(
+        isinstance(proof.get(field), bool) or not isinstance(proof.get(field), int) or proof[field] < 0
+        for field in nonnegative_fields
+    ):
+        raise AssertionError("scheduler telemetry counters must be nonnegative integers")
+    if proof["scheduler_observation_count"] <= 0:
+        raise AssertionError("no scheduler telemetry was retained for the generation wave")
+    request_within_ceiling = proof["engine_request_count"] <= proof["max_num_seqs"]
+    running_within_ceiling = proof["maximum_running_requests"] <= proof["max_num_seqs"]
+    if proof.get("request_count_within_scheduler_ceiling") is not request_within_ceiling:
+        raise AssertionError("scheduler request-ceiling gate is inconsistent")
+    if proof.get("running_count_within_scheduler_ceiling") is not running_within_ceiling:
+        raise AssertionError("scheduler running-count gate is inconsistent")
+    if not request_within_ceiling or not running_within_ceiling:
+        raise AssertionError("generation wave exceeded the per-engine max_num_seqs scheduler ceiling")
+    preemption_fields = (
+        "preemption_events",
+        "recompute_events",
+        "prefix_preempted_requests",
+        "prefix_preempted_queries",
+        "prefix_preempted_hits",
+        "preempted_prompt_recomputed_tokens",
+    )
+    if any(proof[field] != 0 for field in preemption_fields):
         raise AssertionError("scheduler preemption/recompute occurred during the generation wave")
-    if int(proof.get("prefix_preempted_hits", 0)) > int(proof.get("prefix_preempted_queries", 0)):
+    if proof["prefix_preempted_hits"] > proof["prefix_preempted_queries"]:
         raise AssertionError("scheduler preempted prefix-cache hit telemetry is inconsistent")
-    if int(proof.get("preempted_prompt_recomputed_tokens", 0)) != 0:
-        raise AssertionError("scheduler recomputed prompt tokens after preemption")
-    if proof.get("batch_fit_without_preemption") is not True:
+    expected_fit = (
+        request_within_ceiling and running_within_ceiling and all(proof[field] == 0 for field in preemption_fields)
+    )
+    if proof.get("batch_fit_without_preemption") is not expected_fit or not expected_fit:
         raise AssertionError("generation wave did not prove scheduler fit without preemption")
 
 
@@ -1774,10 +2837,11 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
 
     device = torch.cuda.current_device()
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    gpu_identity = worker_gpu_identity(logical_device=int(device))
     return {
         "rank": int(rank),
         "device": int(device),
-        "device_name": torch.cuda.get_device_name(device),
+        **gpu_identity,
         "fir_routes": get_fir_route_stats(),
         "mamba_state_copies": get_mamba_state_copy_stats(),
         "mamba_prefix_clones": get_mamba_prefix_clone_stats(),
@@ -1878,6 +2942,42 @@ def _nvml_text(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
 
 
+def worker_gpu_identity(
+    *,
+    logical_device: int,
+    nvml_module: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve one CUDA logical device to an exact physical UUID and PCI address."""
+    if isinstance(logical_device, bool) or not isinstance(logical_device, int) or logical_device < 0:
+        raise ValueError("logical_device must be a nonnegative integer")
+    if nvml_module is None:
+        import pynvml as nvml_module
+
+    nvml_module.nvmlInit()
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    selectors = tuple(item.strip() for item in visible.split(",")) if visible is not None and visible.strip() else ()
+    if selectors:
+        if logical_device >= len(selectors) or not selectors[logical_device]:
+            raise RuntimeError("CUDA logical device is not represented by CUDA_VISIBLE_DEVICES")
+        selector = selectors[logical_device]
+    else:
+        selector = str(logical_device)
+    if selector.isdecimal():
+        handle = nvml_module.nvmlDeviceGetHandleByIndex(int(selector))
+    elif selector.startswith("GPU-"):
+        handle = nvml_module.nvmlDeviceGetHandleByUUID(selector)
+    else:
+        raise RuntimeError(f"unsupported CUDA_VISIBLE_DEVICES selector: {selector!r}")
+    return {
+        "logical_device": logical_device,
+        "cuda_visible_devices": visible,
+        "visible_device_selector": selector,
+        "device_uuid": _nvml_text(nvml_module.nvmlDeviceGetUUID(handle)),
+        "pci_bus_id": _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId),
+        "device_name": _nvml_text(nvml_module.nvmlDeviceGetName(handle)),
+    }
+
+
 def gpu_hardware_provenance(
     *,
     nvml_module: Any | None = None,
@@ -1901,6 +3001,7 @@ def gpu_hardware_provenance(
             {
                 "index": index,
                 "uuid": _nvml_text(nvml_module.nvmlDeviceGetUUID(handle)),
+                "pci_bus_id": _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId),
                 "name": _nvml_text(nvml_module.nvmlDeviceGetName(handle)),
                 "total_memory_bytes": int(memory.total),
                 "initial_used_memory_bytes": int(memory.used),
