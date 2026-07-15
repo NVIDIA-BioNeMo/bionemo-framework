@@ -29,6 +29,69 @@ _IGNORED_SOURCE_SUFFIXES = (
 )
 _DERIVED_SOURCE_SUFFIXES = (".filter.h", ".filter.decay", ".filter.p", ".filter.gamma")
 _VORTEX_BLOCK_PATTERN = re.compile(r"^blocks\.(\d+)\.(.+)$")
+_MCORE_QKV_SOURCE_PATTERN = re.compile(
+    r"^(?:model\.)?decoder\.layers\.\d+\.self_attention\.linear_qkv\.(?:weight|bias)$"
+)
+
+
+def mcore_grouped_qkv_to_vllm(
+    tensor: torch.Tensor,
+    *,
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Convert Megatron's per-KV-group Q/K/V rows to vLLM's global Q/K/V rows."""
+    dimensions = (num_attention_heads, num_key_value_heads, head_dim)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in dimensions):
+        raise ValueError("QKV head counts and head_dim must be positive integers")
+    if num_attention_heads % num_key_value_heads:
+        raise ValueError("attention heads must be divisible by key/value heads")
+    if tensor.ndim < 1:
+        raise ValueError("a fused QKV tensor must have an output-row dimension")
+
+    expected_rows = (num_attention_heads + 2 * num_key_value_heads) * head_dim
+    if tensor.shape[0] != expected_rows:
+        raise ValueError(
+            f"MCore fused QKV has {tensor.shape[0]} rows; expected {expected_rows} for "
+            f"Q={num_attention_heads}, KV={num_key_value_heads}, head_dim={head_dim}"
+        )
+
+    q_heads_per_group = num_attention_heads // num_key_value_heads
+    trailing_shape = tensor.shape[1:]
+    grouped = tensor.reshape(num_key_value_heads, q_heads_per_group + 2, head_dim, *trailing_shape)
+    query = grouped[:, :q_heads_per_group].reshape(num_attention_heads * head_dim, *trailing_shape)
+    key = grouped[:, q_heads_per_group].reshape(num_key_value_heads * head_dim, *trailing_shape)
+    value = grouped[:, q_heads_per_group + 1].reshape(num_key_value_heads * head_dim, *trailing_shape)
+    return torch.cat((query, key, value), dim=0).contiguous()
+
+
+def _mcore_qkv_geometry(model: nn.Module) -> tuple[int, int, int]:
+    config = getattr(model, "config", None)
+    if config is None and (inner_model := getattr(model, "model", None)) is not None:
+        config = getattr(inner_model, "config", None)
+    if config is None:
+        raise ValueError("MCore fused QKV loading requires model attention geometry")
+
+    num_attention_heads = int(config.num_attention_heads)
+    num_key_value_heads = int(config.num_key_value_heads)
+    hidden_size = int(config.hidden_size)
+    if hidden_size % num_attention_heads:
+        raise ValueError("model hidden size must be divisible by attention heads")
+    return num_attention_heads, num_key_value_heads, hidden_size // num_attention_heads
+
+
+def _convert_mcore_qkv_source(model: nn.Module, source_name: str, tensor: torch.Tensor) -> torch.Tensor:
+    normalized_name = source_name.removeprefix("module.")
+    if _MCORE_QKV_SOURCE_PATTERN.fullmatch(normalized_name) is None:
+        return tensor
+    num_attention_heads, num_key_value_heads, head_dim = _mcore_qkv_geometry(model)
+    return mcore_grouped_qkv_to_vllm(
+        tensor,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=head_dim,
+    )
 
 
 def load_tensor_parallel_weight(
@@ -254,8 +317,9 @@ def load_evo2_weights(
                     continue
                 raise ValueError(f"Evo2 checkpoint contains unknown weight: {source_name}")
             parameter = parameters[target_name]
+            converted_weight = _convert_mcore_qkv_source(model, source_name, mapped_weight)
             weight_loader = getattr(parameter, "weight_loader", _copy_weight)
-            weight_loader(parameter, mapped_weight)
+            weight_loader(parameter, converted_weight)
             loaded_parameter_ids.add(id(parameter))
             loaded_parameter_names.add(canonical_names[id(parameter)])
 
