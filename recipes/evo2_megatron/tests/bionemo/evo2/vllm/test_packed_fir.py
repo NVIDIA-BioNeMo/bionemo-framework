@@ -15,6 +15,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as functional
 
 from bionemo.evo2.models.megatron.hyena.engine import step_fir
 from bionemo.evo2.vllm.packed_fir import packed_causal_fir, packed_fir_reference, select_fir_path
@@ -356,6 +357,292 @@ def test_packed_causal_fir_matches_reference_and_reuses_slots(
     torch.testing.assert_close(actual_cache, expected_cache, rtol=2e-5, atol=2e-5)
     torch.testing.assert_close(actual_cache[0], initial_cache[0], rtol=0, atol=0)
     torch.testing.assert_close(actual_cache[-1], initial_cache[-1], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")
+@pytest.mark.parametrize(
+    ("taps", "gated_bias", "flip_filter"),
+    [(3, False, False), (7, False, False), (128, True, True)],
+)
+def test_packed_causal_fir_handles_mixed_irregular_lengths_across_internal_tiles(
+    taps,
+    gated_bias,
+    flip_filter,
+):
+    device = torch.device("cuda")
+    lengths = [1, 31, 32, 33, 47, 64, 65, 127, 129, 257, 511, 0]
+    channels = 16
+    group_size = 4
+    generator = torch.Generator(device=device).manual_seed(12000 + taps)
+    query_start_loc = _query_start_loc(lengths).to(device=device, dtype=torch.int64)
+    x = torch.randn(
+        (int(query_start_loc[-1]), channels),
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    weight = (
+        torch.randn(
+            (channels // group_size, taps),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.02
+    )
+    bias = (
+        torch.randn(
+            (channels // group_size,),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.02
+    )
+    state_indices = torch.tensor([1, 2, 0, 3, 4, 5, 6, 7, 8, 9, 10, 0], device=device, dtype=torch.int64)
+    has_initial_state = torch.tensor(
+        [True, False, True, True, False, True, False, True, True, False, True, True],
+        device=device,
+    )
+    initial_cache = torch.randn(
+        (12, channels, max(127, taps - 1) + 3),
+        device=device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+    initial_cache[0].fill_(17.0)
+    expected_cache = initial_cache.clone()
+    actual_cache = initial_cache.clone()
+
+    expected = packed_fir_reference(
+        x,
+        weight,
+        bias,
+        expected_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        group_size=group_size,
+        gated_bias=gated_bias,
+        flip_filter=flip_filter,
+    )
+    actual = packed_causal_fir(
+        x,
+        weight,
+        bias,
+        actual_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        group_size=group_size,
+        gated_bias=gated_bias,
+        flip_filter=flip_filter,
+        max_query_len=max(lengths),
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual_cache, expected_cache, rtol=2e-5, atol=2e-5)
+    torch.testing.assert_close(actual_cache[0], initial_cache[0], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")
+def test_packed_causal_fir_long_prefill_matches_independent_convolution_oracle():
+    device = torch.device("cuda")
+    length = 8193
+    channels = 8
+    taps = 128
+    group_size = 2
+    generator = torch.Generator(device=device).manual_seed(25000)
+    x = torch.randn((length, channels), device=device, dtype=torch.bfloat16, generator=generator)
+    weight = (
+        torch.randn(
+            (channels // group_size, taps),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.01
+    )
+    bias = (
+        torch.randn(
+            (channels // group_size,),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.01
+    )
+    state_cache = torch.randn((2, channels, taps + 5), device=device, dtype=torch.float32, generator=generator)
+    original_cache = state_cache.clone()
+    history = original_cache[1, :, : taps - 1]
+    expanded_weight = weight.repeat_interleave(group_size, dim=0).float().flip(-1)
+    expanded_bias = bias.repeat_interleave(group_size, dim=0).float()
+    padded = torch.cat((history, x.float().transpose(0, 1)), dim=-1)
+    expected = functional.conv1d(
+        padded.unsqueeze(0),
+        expanded_weight[:, None, :],
+        groups=channels,
+    ).squeeze(0)
+    expected = (expected + expanded_bias[:, None] * x.float().transpose(0, 1)).transpose(0, 1).to(x.dtype)
+
+    actual = packed_causal_fir(
+        x,
+        weight,
+        bias,
+        state_cache,
+        torch.tensor([0, length], device=device, dtype=torch.int64),
+        torch.tensor([1], device=device, dtype=torch.int64),
+        torch.tensor([True], device=device),
+        group_size=group_size,
+        gated_bias=True,
+        flip_filter=True,
+        max_query_len=length,
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(state_cache[1, :, : taps - 1], padded[:, -(taps - 1) :], rtol=0, atol=0)
+    torch.testing.assert_close(state_cache[1, :, taps - 1 :], original_cache[1, :, taps - 1 :], rtol=0, atol=0)
+    torch.testing.assert_close(state_cache[0], original_cache[0], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for torch.compile FIR coverage")
+def test_packed_causal_fir_long_path_matches_torch_compile():
+    device = torch.device("cuda")
+    lengths = [33, 47, 65]
+    channels = 16
+    taps = 128
+    group_size = 4
+    generator = torch.Generator(device=device).manual_seed(31415)
+    query_start_loc = _query_start_loc(lengths).to(device=device, dtype=torch.int32)
+    x = torch.randn(
+        (int(query_start_loc[-1]), channels),
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    weight = (
+        torch.randn(
+            (channels // group_size, taps),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.01
+    )
+    bias = (
+        torch.randn(
+            (channels // group_size,),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.01
+    )
+    state_indices = torch.arange(1, len(lengths) + 1, device=device, dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False, True], device=device)
+    initial_cache = torch.randn(
+        (len(lengths) + 1, channels, taps - 1),
+        device=device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+
+    def run(input_tensor, cache):
+        return packed_causal_fir(
+            input_tensor,
+            weight,
+            bias,
+            cache,
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            group_size=group_size,
+            gated_bias=True,
+            flip_filter=True,
+            max_query_len=max(lengths),
+        )
+
+    eager_cache = initial_cache.clone()
+    expected = run(x, eager_cache)
+    compiled_cache = initial_cache.clone()
+    compiled = torch.compile(run, fullgraph=True)
+    actual = compiled(x, compiled_cache)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(compiled_cache, eager_cache, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for graph capture")
+def test_packed_causal_fir_long_cuda_graph_replay_uses_static_buffers():
+    device = torch.device("cuda")
+    lengths = [65, 47]
+    channels = 32
+    taps = 128
+    group_size = 4
+    generator = torch.Generator(device=device).manual_seed(27182)
+    query_start_loc = _query_start_loc(lengths).to(device=device, dtype=torch.int32)
+    x = torch.randn(
+        (int(query_start_loc[-1]), channels),
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    weight = (
+        torch.randn(
+            (channels // group_size, taps),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.01
+    )
+    bias = (
+        torch.randn(
+            (channels // group_size,),
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        * 0.01
+    )
+    state_cache = torch.randn((3, channels, 127), device=device, dtype=torch.float32, generator=generator)
+    state_cache[0].fill_(19.0)
+    state_indices = torch.tensor([1, 0], device=device, dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False], device=device)
+
+    def run():
+        return packed_causal_fir(
+            x,
+            weight,
+            bias,
+            state_cache,
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            group_size=group_size,
+            gated_bias=True,
+            flip_filter=True,
+            max_query_len=max(lengths),
+        )
+
+    run()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = run()
+
+    output_pointer = output.data_ptr()
+    first_output = output.clone()
+    first_state = state_cache[1].clone()
+    null_state = state_cache[0].clone()
+    x.copy_(torch.randn(x.shape, device=device, dtype=torch.bfloat16, generator=generator) + 3)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert output.data_ptr() == output_pointer
+    assert not torch.equal(output, first_output)
+    assert not torch.equal(state_cache[1], first_state)
+    torch.testing.assert_close(state_cache[0], null_state, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the production packed FIR kernel")

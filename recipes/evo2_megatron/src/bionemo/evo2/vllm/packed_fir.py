@@ -313,6 +313,169 @@ def _packed_causal_fir_kernel(
         )
 
 
+@triton.jit
+def _packed_long_causal_fir_kernel(
+    x_ptr,
+    weight_ptr,
+    bias_ptr,
+    state_ptr,
+    query_start_loc_ptr,
+    state_indices_ptr,
+    has_initial_state_ptr,
+    output_ptr,
+    channels,
+    stride_x_token,
+    stride_x_channel,
+    stride_weight_filter,
+    stride_weight_tap,
+    stride_bias,
+    stride_state_block,
+    stride_state_channel,
+    stride_state_tap,
+    stride_query_start_loc,
+    stride_state_indices,
+    stride_has_initial_state,
+    stride_output_token,
+    stride_output_channel,
+    kernel_size: tl.constexpr,
+    group_size: tl.constexpr,
+    has_bias: tl.constexpr,
+    bias_per_channel: tl.constexpr,
+    gated_bias: tl.constexpr,
+    flip_filter: tl.constexpr,
+    block_t: tl.constexpr,
+    block_c: tl.constexpr,
+):
+    request_index = tl.program_id(0)
+    channel_offsets = tl.program_id(1) * block_c + tl.arange(0, block_c)
+    token_offsets = tl.program_id(2) * block_t + tl.arange(0, block_t)
+    channel_mask = channel_offsets < channels
+    request_start = tl.load(query_start_loc_ptr + request_index * stride_query_start_loc).to(tl.int64)
+    request_end = tl.load(query_start_loc_ptr + (request_index + 1) * stride_query_start_loc).to(tl.int64)
+    request_length = request_end - request_start
+    token_mask = token_offsets < request_length
+    cache_slot = tl.load(state_indices_ptr + request_index * stride_state_indices).to(tl.int64)
+    load_initial_state = tl.load(
+        has_initial_state_ptr + request_index * stride_has_initial_state,
+    ).to(tl.int1)
+    filter_offsets = channel_offsets // group_size
+    accumulator = tl.zeros((block_t, block_c), dtype=tl.float32)
+
+    for tap in tl.range(0, kernel_size, num_stages=2):
+        relative_indices = token_offsets + tap - (kernel_size - 1)
+        from_request = relative_indices >= 0
+        request_values = tl.load(
+            x_ptr
+            + (request_start + relative_indices[:, None]) * stride_x_token
+            + channel_offsets[None, :] * stride_x_channel,
+            mask=token_mask[:, None] & from_request[:, None] & channel_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        cached_values = tl.load(
+            state_ptr
+            + cache_slot * stride_state_block
+            + channel_offsets[None, :] * stride_state_channel
+            + (relative_indices[:, None] + kernel_size - 1) * stride_state_tap,
+            mask=(
+                token_mask[:, None]
+                & (~from_request[:, None])
+                & channel_mask[None, :]
+                & load_initial_state
+                & (cache_slot != 0)
+            ),
+            other=0.0,
+        ).to(tl.float32)
+        values = tl.where(from_request[:, None], request_values, cached_values)
+        weight_tap = kernel_size - 1 - tap if flip_filter else tap
+        filter_values = tl.load(
+            weight_ptr + filter_offsets * stride_weight_filter + weight_tap * stride_weight_tap,
+            mask=channel_mask,
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += values * filter_values[None, :]
+
+    current = tl.load(
+        x_ptr
+        + (request_start + token_offsets[:, None]) * stride_x_token
+        + channel_offsets[None, :] * stride_x_channel,
+        mask=token_mask[:, None] & channel_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    if has_bias:
+        bias_offsets = channel_offsets if bias_per_channel else filter_offsets
+        bias_value = tl.load(
+            bias_ptr + bias_offsets * stride_bias,
+            mask=channel_mask,
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += bias_value[None, :] * current if gated_bias else bias_value[None, :]
+    tl.store(
+        output_ptr
+        + (request_start + token_offsets[:, None]) * stride_output_token
+        + channel_offsets[None, :] * stride_output_channel,
+        accumulator,
+        mask=token_mask[:, None] & channel_mask[None, :],
+    )
+
+
+@triton.jit
+def _packed_fir_update_state_kernel(
+    x_ptr,
+    state_ptr,
+    query_start_loc_ptr,
+    state_indices_ptr,
+    has_initial_state_ptr,
+    channels,
+    stride_x_token,
+    stride_x_channel,
+    stride_state_block,
+    stride_state_channel,
+    stride_state_tap,
+    stride_query_start_loc,
+    stride_state_indices,
+    stride_has_initial_state,
+    kernel_size: tl.constexpr,
+    block_c: tl.constexpr,
+):
+    request_index = tl.program_id(0)
+    channel_offsets = tl.program_id(1) * block_c + tl.arange(0, block_c)
+    channel_mask = channel_offsets < channels
+    request_start = tl.load(query_start_loc_ptr + request_index * stride_query_start_loc).to(tl.int64)
+    request_end = tl.load(query_start_loc_ptr + (request_index + 1) * stride_query_start_loc).to(tl.int64)
+    request_length = request_end - request_start
+    cache_slot = tl.load(state_indices_ptr + request_index * stride_state_indices).to(tl.int64)
+    load_initial_state = tl.load(
+        has_initial_state_ptr + request_index * stride_has_initial_state,
+    ).to(tl.int1)
+    write_state = (cache_slot != 0) & (request_length > 0)
+
+    for state_tap in tl.range(0, kernel_size - 1, num_stages=2):
+        source_index = request_length - (kernel_size - 1) + state_tap
+        from_request = source_index >= 0
+        request_value = tl.load(
+            x_ptr + (request_start + source_index) * stride_x_token + channel_offsets * stride_x_channel,
+            mask=channel_mask & write_state & from_request,
+            other=0.0,
+        ).to(tl.float32)
+        cached_value = tl.load(
+            state_ptr
+            + cache_slot * stride_state_block
+            + channel_offsets * stride_state_channel
+            + (source_index + kernel_size - 1) * stride_state_tap,
+            mask=channel_mask & write_state & (~from_request) & load_initial_state,
+            other=0.0,
+        ).to(tl.float32)
+        terminal_value = tl.where(from_request, request_value, cached_value)
+        tl.store(
+            state_ptr
+            + cache_slot * stride_state_block
+            + channel_offsets * stride_state_channel
+            + state_tap * stride_state_tap,
+            terminal_value,
+            mask=channel_mask & write_state,
+        )
+
+
 def packed_causal_fir(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -327,7 +490,7 @@ def packed_causal_fir(
     flip_filter: bool = False,
     max_query_len: int,
 ) -> torch.Tensor:
-    """Run one segmented FIR kernel over packed prefill or decode requests."""
+    """Run segmented FIR kernels over packed prefill or decode requests of any positive length."""
     num_requests = _validate_shapes(
         x,
         weight,
@@ -338,8 +501,8 @@ def packed_causal_fir(
         has_initial_state,
         group_size,
     )
-    if isinstance(max_query_len, bool) or not isinstance(max_query_len, int) or not 1 <= max_query_len <= 32:
-        raise ValueError("max_query_len must be an integer between one and 32 for the direct FIR kernel")
+    if isinstance(max_query_len, bool) or not isinstance(max_query_len, int) or max_query_len < 1:
+        raise ValueError("max_query_len must be a positive integer")
     if not x.is_cuda:
         return packed_fir_reference(
             x,
@@ -356,10 +519,53 @@ def packed_causal_fir(
 
     output = torch.empty_like(x)
     taps = weight.shape[1]
-    block_channels = 32 if taps >= 128 else 128
-    grid = (num_requests, triton.cdiv(x.shape[1], block_channels))
     bias_tensor = x if bias is None else bias
-    _packed_causal_fir_kernel[grid](
+    if max_query_len <= 32:
+        block_channels = 32 if taps >= 128 else 128
+        grid = (num_requests, triton.cdiv(x.shape[1], block_channels))
+        _packed_causal_fir_kernel[grid](
+            x,
+            weight,
+            bias_tensor,
+            state_cache,
+            query_start_loc,
+            state_indices,
+            has_initial_state,
+            output,
+            x.shape[1],
+            x.stride(0),
+            x.stride(1),
+            weight.stride(0),
+            weight.stride(1),
+            bias_tensor.stride(0),
+            state_cache.stride(0),
+            state_cache.stride(1),
+            state_cache.stride(2),
+            query_start_loc.stride(0),
+            state_indices.stride(0),
+            has_initial_state.stride(0),
+            output.stride(0),
+            output.stride(1),
+            kernel_size=taps,
+            max_query_len=max_query_len,
+            group_size=group_size,
+            has_bias=bias is not None,
+            bias_per_channel=bias is not None and bias.shape[0] == x.shape[1],
+            gated_bias=gated_bias,
+            flip_filter=flip_filter,
+            block_c=block_channels,
+            num_warps=4,
+        )
+        return output
+
+    block_tokens = 8 if taps >= 128 else 16
+    block_channels = 16 if taps >= 128 else 32
+    output_grid = (
+        num_requests,
+        triton.cdiv(x.shape[1], block_channels),
+        triton.cdiv(max_query_len, block_tokens),
+    )
+    _packed_long_causal_fir_kernel[output_grid](
         x,
         weight,
         bias_tensor,
@@ -383,12 +589,32 @@ def packed_causal_fir(
         output.stride(0),
         output.stride(1),
         kernel_size=taps,
-        max_query_len=max_query_len,
         group_size=group_size,
         has_bias=bias is not None,
         bias_per_channel=bias is not None and bias.shape[0] == x.shape[1],
         gated_bias=gated_bias,
         flip_filter=flip_filter,
+        block_t=block_tokens,
+        block_c=block_channels,
+        num_warps=4,
+    )
+    state_grid = (num_requests, triton.cdiv(x.shape[1], block_channels))
+    _packed_fir_update_state_kernel[state_grid](
+        x,
+        state_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        x.shape[1],
+        x.stride(0),
+        x.stride(1),
+        state_cache.stride(0),
+        state_cache.stride(1),
+        state_cache.stride(2),
+        query_start_loc.stride(0),
+        state_indices.stride(0),
+        has_initial_state.stride(0),
+        kernel_size=taps,
         block_c=block_channels,
         num_warps=4,
     )
@@ -407,8 +633,8 @@ def _parse_prompt_lengths(value: str) -> tuple[int, ...]:
         raise argparse.ArgumentTypeError(
             "prompt lengths must be an inclusive range or comma-separated integers"
         ) from error
-    if not lengths or any(length < 1 or length > 32 for length in lengths):
-        raise argparse.ArgumentTypeError("direct FIR prompt lengths must be between one and 32")
+    if not lengths or any(length < 1 for length in lengths):
+        raise argparse.ArgumentTypeError("FIR prompt lengths must be positive")
     return lengths
 
 
