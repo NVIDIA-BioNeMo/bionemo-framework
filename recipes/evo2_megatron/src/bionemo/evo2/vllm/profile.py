@@ -20,6 +20,7 @@ PerformanceMode = Literal["balanced", "throughput"]
 
 _GLOBAL_BATCH_SIZE = 96
 _PREFIX_CACHE_BLOCK_SIZE = 16
+_HYENA_MIXER_SPLITTING_OP = "bionemo_evo2::hyena_mixer"
 _TP2_CAPTURE_SIZES = (1, 2, 4, 8, 16, 24, 32, 40, 48, 64, 80, 96)
 _DP2_CAPTURE_SIZES = (1, 2, 4, 8, 16, 20, 24, 32, 40, 48)
 _COUNTER_FIELDS = (
@@ -31,6 +32,25 @@ _COUNTER_FIELDS = (
     "num_cudagraph_captured",
     "stock_torch_compile_count",
 )
+
+
+def _evo2_compilation_splitting_ops() -> list[str]:
+    """Preserve vLLM's stateful split points and add the external Hyena op."""
+    from vllm.config import CompilationConfig
+
+    stock_attention_ops = CompilationConfig._attention_ops
+    if type(stock_attention_ops) is not list or any(type(op) is not str for op in stock_attention_ops):
+        raise RuntimeError("vLLM 0.20 attention splitting-op contract changed")
+    return list(
+        dict.fromkeys(
+            (
+                *stock_attention_ops,
+                "vllm::unified_kv_cache_update",
+                "vllm::unified_mla_kv_cache_update",
+                _HYENA_MIXER_SPLITTING_OP,
+            )
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -200,6 +220,7 @@ class Evo2VllmProfile:
                 "cudagraph_num_of_warmups": 1,
                 "cudagraph_capture_sizes": list(self.cudagraph_capture_sizes),
                 "compile_sizes": sorted({self.per_engine_batch_size, self.resolved_max_num_seqs}),
+                "splitting_ops": _evo2_compilation_splitting_ops(),
             },
         }
         if self.shared_prefix_state_reuse:
@@ -311,6 +332,7 @@ class Evo2VllmProfile:
                 "cudagraph_mode": "FULL_AND_PIECEWISE",
                 "cudagraph_capture_sizes": list(self.cudagraph_capture_sizes),
                 "compile_sizes": sorted({self.per_engine_batch_size, self.resolved_max_num_seqs}),
+                "splitting_ops": _evo2_compilation_splitting_ops(),
             },
             "observability": {"cudagraph_metrics": self.proof},
         }
@@ -393,6 +415,7 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
             "cudagraph_mode": _enum_name_or_value(compilation.cudagraph_mode),
             "cudagraph_capture_sizes": list(compilation.cudagraph_capture_sizes),
             "compile_sizes": list(compilation.compile_sizes),
+            "splitting_ops": list(compilation.splitting_ops),
         },
         "observability": {"cudagraph_metrics": observability.cudagraph_metrics},
     }
@@ -463,6 +486,10 @@ def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]
         resolved["compilation"]["compile_sizes"]
         == sorted({profile.per_engine_batch_size, profile.resolved_max_num_seqs}),
         "real topology batch must be statically compiled",
+    )
+    require(
+        resolved["compilation"]["splitting_ops"] == _evo2_compilation_splitting_ops(),
+        "Hyena compile split points drifted",
     )
     if profile.proof:
         require(resolved["observability"]["cudagraph_metrics"] is True, "proof run requires cudagraph_metrics")

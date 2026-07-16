@@ -68,6 +68,8 @@ def test_tp2_profile_pins_optimized_vllm_020_settings() -> None:
     assert compilation["cudagraph_capture_sizes"][-1] == 96
     assert 48 in compilation["cudagraph_capture_sizes"]
     assert 96 in compilation["cudagraph_capture_sizes"]
+    assert "vllm::mamba_mixer" in compilation["splitting_ops"]
+    assert "bionemo_evo2::hyena_mixer" in compilation["splitting_ops"]
 
 
 def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> None:
@@ -119,6 +121,7 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert nemo_rl["vllm_kwargs"]["async_scheduling"] is True
     assert nemo_rl["vllm_kwargs"]["mamba_cache_mode"] == "none"
     assert "mamba_block_size" not in nemo_rl["vllm_kwargs"]
+    assert "bionemo_evo2::hyena_mixer" in nemo_rl["vllm_kwargs"]["compilation_config"]["splitting_ops"]
     assert nemo_rl["vllm_kwargs"]["worker_extension_cls"] == (
         "bionemo.evo2.vllm.nemo_worker.Evo2NemoRlVllmWorkerExtension"
     )
@@ -352,6 +355,7 @@ def test_resolved_profile_validation_requires_full_decode_graphs_and_no_fallback
         (("model", "enforce_eager"), True, "enforce_eager"),
         (("compilation", "mode"), 0, "VLLM_COMPILE"),
         (("compilation", "cudagraph_mode"), "PIECEWISE", "FULL_AND_PIECEWISE"),
+        (("compilation", "splitting_ops"), ["vllm::mamba_mixer"], "Hyena compile split"),
         (("cache", "enable_prefix_caching"), True, "prefix caching"),
         (("cache", "mamba_cache_mode"), "all", "mamba_cache_mode"),
         (("scheduler", "max_num_seqs"), 48, "max_num_seqs"),
