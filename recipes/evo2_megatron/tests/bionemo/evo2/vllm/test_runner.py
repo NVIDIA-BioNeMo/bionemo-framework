@@ -3077,6 +3077,61 @@ def test_parser_and_loader_build_one_executable_homogeneous_identity_case(tmp_pa
     assert identity["schedule"]["engine_request_shapes"] == [[96]]
 
 
+def test_parser_and_loader_build_one_physical_interleaved_mixed_identity_batch(tmp_path) -> None:
+    manifest_path = tmp_path / "base.json"
+    manifest_path.write_text(json.dumps(_canonical_base_manifest().to_dict()), encoding="utf-8")
+    parsed = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--manifest",
+            str(manifest_path),
+            "--topology",
+            "tp2",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--request-count",
+            "96",
+            "--global-wave-size",
+            "96",
+            "--max-num-seqs",
+            "96",
+            "--request-id-prefix",
+            "mixed",
+            "--prompt-tokenizer-json",
+            str(TOKENIZER_JSON),
+            "--mixed-canonical-identity",
+            "--canonical-prompts-csv",
+            str(PROMPTS_CSV),
+            "--output",
+            str(tmp_path / "mixed.json"),
+        ]
+    )
+
+    manifest = runner.load_source_manifest(parsed)
+    profile = runner.profile_from_args(parsed, manifest)
+    contract = runner.build_benchmark_contract(parsed, manifest, profile)
+    mixed = contract["mixed_canonical_identity"]
+
+    if [len(request.prompt_token_ids) for request in manifest.requests] != [3269, 3528, 3080, 3808] * 24:
+        raise AssertionError("mixed CLI did not preserve the four original variable prompt lengths")
+    if [request.request_id for request in manifest.requests[:4]] != [
+        "mixed-b96-case0-occurrence0000",
+        "mixed-b96-case1-occurrence0000",
+        "mixed-b96-case2-occurrence0000",
+        "mixed-b96-case3-occurrence0000",
+    ]:
+        raise AssertionError("mixed CLI lost interleaved semantic case ownership")
+    if contract["canonical_identity"] is not None or mixed["case_order"] != [0, 1, 2, 3] * 24:
+        raise AssertionError("mixed CLI contract overlapped homogeneous mode or reordered cases")
+    if mixed["schedule"]["global_request_shapes"] != [96] or mixed["schedule"]["engine_request_shapes"] != [[96]]:
+        raise AssertionError("mixed CLI did not bind one physical TP2 B96 call")
+
+
 def test_loader_builds_one_executable_common_prefix_identity_case(tmp_path) -> None:
     manifest_path = tmp_path / "base.json"
     manifest_path.write_text(json.dumps(_canonical_base_manifest().to_dict()), encoding="utf-8")
@@ -3325,6 +3380,54 @@ def test_linked_identity_validator_recomputes_raw_outputs_and_physical_shapes(tm
             profile=profile,
             expected_contract={"canonical_identity": contract},
         )
+
+
+def test_identity_phase_does_not_claim_linked_physical_attestation_without_link(tmp_path) -> None:
+    case = load_canonical_7b_identity_cases(PROMPTS_CSV)[0]
+    manifest = build_canonical_identity_manifest(
+        _canonical_base_manifest(),
+        case=case,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer=SnapshotBoundTokenizer.from_path(TOKENIZER_JSON),
+        request_count=1,
+        request_id_prefix="identity-case0",
+    )
+    schedule = build_homogeneous_identity_schedule(topology="tp2", request_count=1, global_wave_size=1)
+    phase = _runner_identity_phase(schedule)
+    executions = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+    phase["full_output_artifact"] = runner.write_full_generation_records_artifact(
+        tmp_path / "unlinked.outputs.jsonl.gz",
+        records=_runner_identity_records(manifest, case.target),
+        execution_records=executions,
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+    )
+
+    phases, _summary = runner.canonical_identity_phase_artifacts(
+        args=SimpleNamespace(
+            canonical_identity_case=0,
+            canonical_prompts_csv=PROMPTS_CSV,
+            prompt_tokenizer_json=TOKENIZER_JSON,
+            linked_proof_artifact=None,
+        ),
+        manifest=manifest,
+        profile=SimpleNamespace(topology="tp2", global_wave_size=1),
+        phase_artifacts=[phase],
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+        collect_physical_proof=False,
+    )
+
+    evidence = phases[0]["canonical_identity_evidence"]
+    if evidence["physical_schedule"] is not None:
+        raise AssertionError("proof-free identity unexpectedly retained direct physical proof")
+    if evidence["physical_schedule_attested_by_linked_proof"] is not False:
+        raise AssertionError("proof-free identity falsely claimed linked physical attestation")
 
 
 def test_common_prefix_identity_production_caller_compares_serial_and_batched_outputs(tmp_path) -> None:

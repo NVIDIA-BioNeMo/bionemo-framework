@@ -14,7 +14,7 @@ import math
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from bionemo.evo2.vllm.artifact_io import ArtifactSnapshotError, read_byte_snapshot, read_jsonl_snapshot
 from bionemo.evo2.vllm.benchmark import WorkloadManifest, WorkloadRequest, build_request_waves
@@ -91,6 +91,11 @@ class CanonicalIdentityCase:
         return 0.90 * self.expected_identity_percent
 
     @property
+    def minimum_matches(self) -> int:
+        """Return the exact integer match floor over the fixed 500-base target."""
+        return math.ceil(self.minimum_identity_percent * 5)
+
+    @property
     def sequence_sha256(self) -> str:
         """Return the full frozen sequence digest."""
         return _sha256_text(self.sequence)
@@ -153,6 +158,22 @@ class HomogeneousIdentitySchedule:
     mixed_case_batching: bool = False
 
 
+@dataclass(frozen=True)
+class MixedIdentitySchedule:
+    """Exact physical shapes and case ownership for one interleaved four-case call."""
+
+    topology: str
+    request_count: int
+    global_wave_size: int
+    global_request_shapes: tuple[int, ...]
+    engine_request_shapes: tuple[tuple[int, ...], ...]
+    request_ids: tuple[str, ...]
+    case_order: tuple[int, ...]
+    engine_case_counts: tuple[tuple[tuple[int, int, int, int], ...], ...]
+    semantic_padding: bool = False
+    mixed_case_batching: bool = True
+
+
 def _validate_engine_physical_shape(
     *,
     engine: dict[str, Any],
@@ -160,6 +181,7 @@ def _validate_engine_physical_shape(
     wave_phase: str,
     global_shape: int,
     engine_shape: int,
+    require_exact_decode_dimension: bool,
 ) -> None:
     full_decode = engine.get("full_decode_proof")
     scheduler = engine.get("scheduler_capacity_proof")
@@ -193,14 +215,29 @@ def _validate_engine_physical_shape(
         for observation in full_observations
     ):
         raise AssertionError("identity CUDA graph replay did not use the required physical request shape")
+    if require_exact_decode_dimension:
+        for observation in full_observations:
+            dimensions = observation.get("request_dimensions")
+            if (
+                not isinstance(dimensions, dict)
+                or dimensions.get("schema_version") != 1
+                or dimensions.get("source") != "iteration-stats-bound-to-cudagraph-dispatch"
+                or dimensions.get("prefill_req_count") != 0
+                or dimensions.get("decode_req_count") != engine_shape
+                or dimensions.get("token_count") != engine_shape
+                or dimensions.get("prompt_token_count") != 0
+                or dimensions.get("first_token_event_count") != 0
+            ):
+                raise AssertionError("mixed identity CUDA graph replay used the wrong singleton decode dimension")
 
 
-def validate_homogeneous_identity_phase_evidence(
+def _validate_identity_phase_evidence(
     phase: dict[str, Any],
     *,
-    schedule: HomogeneousIdentitySchedule,
+    schedule: HomogeneousIdentitySchedule | MixedIdentitySchedule,
+    expected_execution_coordinates: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Require one phase to execute the exact homogeneous global and engine shapes."""
+    """Require one phase to execute the exact admitted global and engine shapes."""
     phase_name = phase.get("phase")
     if not isinstance(phase_name, str) or not phase_name:
         raise AssertionError("identity phase name is missing")
@@ -214,7 +251,11 @@ def validate_homogeneous_identity_phase_evidence(
     ):
         raise AssertionError("identity phase did not retain exact 500-token outputs for every request")
 
-    waves = phase.get("wave_proofs")
+    direct_waves = phase.get("wave_proofs")
+    nemo_waves = phase.get("waves")
+    if direct_waves is not None and nemo_waves is not None and direct_waves != nemo_waves:
+        raise AssertionError("identity phase retained conflicting direct and NeMo wave evidence")
+    waves = direct_waves if direct_waves is not None else nemo_waves
     if not isinstance(waves, list) or len(waves) != len(schedule.global_request_shapes):
         raise AssertionError("identity phase physical wave count drifted")
     direct_observations = phase.get("cudagraph_observations_retained", [])
@@ -244,6 +285,7 @@ def validate_homogeneous_identity_phase_evidence(
                 wave_phase=wave_phase,
                 global_shape=global_shape,
                 engine_shape=engine_shapes[0],
+                require_exact_decode_dimension=schedule.mixed_case_batching,
             )
         else:
             engines = wave.get("engines")
@@ -265,6 +307,7 @@ def validate_homogeneous_identity_phase_evidence(
                     wave_phase=wave_phase,
                     global_shape=global_shape,
                     engine_shape=engine_shape,
+                    require_exact_decode_dimension=schedule.mixed_case_batching,
                 )
             inactive_engines = wave.get("inactive_engines")
             expected_inactive_ranks = tuple(range(len(engine_shapes), 2))
@@ -281,6 +324,50 @@ def validate_homogeneous_identity_phase_evidence(
                     or engine.get("scheduler_observations") != []
                 ):
                     raise AssertionError("identity DP2 inactive replica executed work or lost ownership evidence")
+        if schedule.mixed_case_batching:
+            if expected_execution_coordinates is None or len(expected_execution_coordinates) != schedule.request_count:
+                raise AssertionError("mixed identity physical proof lacks caller-owned execution coordinates")
+            executions = phase.get("request_executions")
+            if not isinstance(executions, list) or len(executions) != schedule.request_count:
+                raise AssertionError("mixed identity phase is missing caller-bound request execution rows")
+            wave_executions = executions[start:stop]
+            if len(wave_executions) != global_shape:
+                raise AssertionError("mixed identity execution rows do not cover the physical wave")
+            case_counts_by_rank = []
+            case_by_request_id = dict(zip(schedule.request_ids, schedule.case_order, strict=True))
+            for dp_rank, engine_shape in enumerate(engine_shapes):
+                expected_positions = range(sum(engine_shapes[:dp_rank]), sum(engine_shapes[: dp_rank + 1]))
+                actual_cases = []
+                for position in expected_positions:
+                    row = wave_executions[position]
+                    expected_row = expected_execution_coordinates[start + position]
+                    required_fields = (
+                        "request_id",
+                        "global_request_index",
+                        "generation_round",
+                        "dp_rank",
+                        "call_index",
+                        "seed",
+                    )
+                    if not isinstance(row, dict) or type(expected_row) is not dict:
+                        raise AssertionError("mixed identity execution rows are malformed")
+                    if any(
+                        type(row.get(field)) is not type(expected_row.get(field))
+                        or row.get(field) != expected_row.get(field)
+                        for field in required_fields
+                    ):
+                        raise AssertionError("mixed identity execution row drifted from caller admission")
+                    if row.get("dp_rank") != dp_rank:
+                        raise AssertionError("mixed identity DP case ownership changed physical rank")
+                    request_id = row.get("request_id")
+                    if request_id not in case_by_request_id:
+                        raise AssertionError("mixed identity execution row contains a foreign semantic request")
+                    actual_cases.append(case_by_request_id[request_id])
+                if len(actual_cases) != engine_shape:
+                    raise AssertionError("mixed identity physical rank request count drifted")
+                case_counts_by_rank.append(tuple(actual_cases.count(case_index) for case_index in range(4)))
+            if tuple(case_counts_by_rank) != schedule.engine_case_counts[wave_index]:
+                raise AssertionError("mixed identity per-rank case counts drifted")
         start = stop
 
     return {
@@ -290,19 +377,48 @@ def validate_homogeneous_identity_phase_evidence(
         "global_request_shapes": list(schedule.global_request_shapes),
         "engine_request_shapes": [list(shapes) for shapes in schedule.engine_request_shapes],
         "semantic_padding": False,
-        "mixed_case_batching": False,
+        "mixed_case_batching": schedule.mixed_case_batching,
         "passed": True,
     }
 
 
-def validate_canonical_identity_output_artifact(
+def validate_homogeneous_identity_phase_evidence(
+    phase: dict[str, Any],
+    *,
+    schedule: HomogeneousIdentitySchedule,
+) -> dict[str, Any]:
+    """Require one phase to execute the exact homogeneous global and engine shapes."""
+    if type(schedule) is not HomogeneousIdentitySchedule or schedule.mixed_case_batching is not False:
+        raise TypeError("homogeneous identity evidence requires a homogeneous schedule")
+    return _validate_identity_phase_evidence(phase, schedule=schedule)
+
+
+def validate_mixed_identity_phase_evidence(
+    phase: dict[str, Any],
+    *,
+    schedule: MixedIdentitySchedule,
+    expected_execution_coordinates: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Require one mixed phase to execute its one admitted scheduler/CUDA-graph shape."""
+    if type(schedule) is not MixedIdentitySchedule or schedule.mixed_case_batching is not True:
+        raise TypeError("mixed identity evidence requires a mixed schedule")
+    return _validate_identity_phase_evidence(
+        phase,
+        schedule=schedule,
+        expected_execution_coordinates=expected_execution_coordinates,
+    )
+
+
+def _validate_canonical_identity_output_rows(
     artifact: dict[str, Any],
     *,
-    case: CanonicalIdentityCase,
+    cases_by_request: Sequence[CanonicalIdentityCase],
     expected_request_ids: Sequence[str],
+    expected_prompt_token_ids: Sequence[Sequence[int]] | None,
+    expected_execution_coordinates: Sequence[Mapping[str, Any]] | None,
     decode_output_token_ids: Callable[[Sequence[int]], str],
-) -> dict[str, Any]:
-    """Recompute every canonical identity from retained token IDs and raw bytes."""
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Reopen and score canonical rows against caller-owned per-request cases."""
     path = Path(str(artifact.get("path", ""))).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"canonical identity output artifact is missing: {path}")
@@ -323,21 +439,37 @@ def validate_canonical_identity_output_artifact(
     expected_ids = tuple(expected_request_ids)
     if tuple(row.get("request_id") for row in rows) != expected_ids:
         raise AssertionError("canonical identity output requests are missing, duplicated, or reordered")
-    if artifact.get("request_count") != len(rows) or len(rows) != len(expected_ids):
+    expected_cases = tuple(cases_by_request)
+    expected_prompts = None if expected_prompt_token_ids is None else tuple(tuple(row) for row in expected_prompt_token_ids)
+    expected_coordinates = None if expected_execution_coordinates is None else tuple(expected_execution_coordinates)
+    if (
+        artifact.get("request_count") != len(rows)
+        or len(rows) != len(expected_ids)
+        or len(rows) != len(expected_cases)
+        or (expected_prompts is not None and len(rows) != len(expected_prompts))
+        or (expected_coordinates is not None and len(rows) != len(expected_coordinates))
+    ):
         raise AssertionError("canonical identity output request count drifted")
 
     retained = []
     total_bytes = 0
-    for row in rows:
+    allowed_token_ids = {ord("A"), ord("C"), ord("G"), ord("T")}
+    for row_index, (row, case) in enumerate(zip(rows, expected_cases, strict=True)):
+        if type(case) is not CanonicalIdentityCase:
+            raise TypeError("canonical identity cases must be exact CanonicalIdentityCase values")
         request_id = str(row["request_id"])
         token_ids = row.get("output_token_ids")
         logprobs = row.get("chosen_token_logprobs")
         if (
-            not isinstance(token_ids, list)
+            type(token_ids) is not list
             or len(token_ids) != 500
-            or not isinstance(logprobs, list)
+            or any(type(token_id) is not int for token_id in token_ids)
+            or type(logprobs) is not list
             or len(logprobs) != 500
-            or any(not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in logprobs)
+            or any(
+                type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(value)
+                for value in logprobs
+            )
             or row.get("requested_new_tokens") != 500
             or row.get("observed_new_tokens") != 500
             or row.get("finish_reason") != "length"
@@ -345,13 +477,38 @@ def validate_canonical_identity_output_artifact(
             or row.get("stopped_on_eos") is not False
         ):
             raise AssertionError(f"request {request_id} lacks an exact finite 500-token completion")
+        if any(token_id not in allowed_token_ids for token_id in token_ids):
+            raise AssertionError(f"request {request_id} canonical identity output must contain exactly 500 ACGT bases")
+        if expected_prompts is not None:
+            prompt_token_ids = row.get("prompt_token_ids")
+            if type(prompt_token_ids) is not list or tuple(prompt_token_ids) != expected_prompts[row_index]:
+                raise AssertionError(f"request {request_id} prompt token IDs drifted from caller admission")
+        if expected_coordinates is not None:
+            expected_coordinate = expected_coordinates[row_index]
+            required_fields = (
+                "request_id",
+                "global_request_index",
+                "generation_round",
+                "dp_rank",
+                "call_index",
+                "seed",
+            )
+            if type(expected_coordinate) is not dict or any(field not in expected_coordinate for field in required_fields):
+                raise TypeError("expected execution coordinates must be exact dictionaries with all required fields")
+            for field in required_fields:
+                expected_value = expected_coordinate[field]
+                observed_value = row.get(field)
+                if type(observed_value) is not type(expected_value) or observed_value != expected_value:
+                    raise AssertionError(f"request {request_id} execution coordinate {field} drifted")
         try:
             raw_bytes = base64.b64decode(row.get("output_text_utf8_base64", ""), validate=True)
         except (binascii.Error, ValueError) as error:
             raise AssertionError(f"request {request_id} raw output bytes are malformed") from error
-        decoded = decode_output_token_ids(tuple(int(token_id) for token_id in token_ids))
+        decoded = decode_output_token_ids(tuple(token_ids))
         if not isinstance(decoded, str) or decoded.encode("utf-8") != raw_bytes:
             raise AssertionError(f"request {request_id} raw bytes do not match retained output token IDs")
+        if bytes(token_ids) != raw_bytes:
+            raise AssertionError(f"request {request_id} token IDs do not match nucleotide bytes")
         if (
             len(raw_bytes) != 500
             or row.get("output_text_utf8_bytes") != len(raw_bytes)
@@ -362,17 +519,23 @@ def validate_canonical_identity_output_artifact(
             output_text = raw_bytes.decode("ascii")
         except UnicodeDecodeError as error:
             raise AssertionError(f"request {request_id} output is not ASCII nucleotide text") from error
+        if any(base not in "ACGT" for base in output_text):
+            raise AssertionError(f"request {request_id} canonical identity output must contain exactly 500 ACGT bases")
         matches = sum(observed == expected for observed, expected in zip(output_text, case.target, strict=True))
         identity_percent = 100.0 * matches / 500
-        if identity_percent < case.minimum_identity_percent:
+        if matches < case.minimum_matches:
             raise AssertionError(
-                f"request {request_id} identity {identity_percent:.3f}% is below {case.minimum_identity_percent:.3f}%"
+                f"request {request_id} case {case.case_index} identity {matches}/500 is below "
+                f"{case.minimum_matches}/500"
             )
         retained.append(
             {
                 "request_id": request_id,
+                "case_index": case.case_index,
                 "output_text_sha256": _sha256_bytes(raw_bytes),
                 "output_text_utf8_bytes": len(raw_bytes),
+                "matches": matches,
+                "minimum_matches": case.minimum_matches,
                 "identity_percent": identity_percent,
                 "minimum_identity_percent": case.minimum_identity_percent,
                 "passed": True,
@@ -381,12 +544,68 @@ def validate_canonical_identity_output_artifact(
         total_bytes += len(raw_bytes)
     if artifact.get("decoded_output_byte_count") != total_bytes:
         raise AssertionError("canonical identity decoded-byte aggregate is inconsistent")
+    return retained, total_bytes, observed_digest
+
+
+def validate_canonical_identity_output_artifact(
+    artifact: dict[str, Any],
+    *,
+    case: CanonicalIdentityCase,
+    expected_request_ids: Sequence[str],
+    decode_output_token_ids: Callable[[Sequence[int]], str],
+) -> dict[str, Any]:
+    """Recompute every homogeneous canonical identity from retained exact nucleotide bytes."""
+    expected_ids = tuple(expected_request_ids)
+    retained, _total_bytes, observed_digest = _validate_canonical_identity_output_rows(
+        artifact,
+        cases_by_request=(case,) * len(expected_ids),
+        expected_request_ids=expected_ids,
+        expected_prompt_token_ids=None,
+        expected_execution_coordinates=None,
+        decode_output_token_ids=decode_output_token_ids,
+    )
     return {
         "schema_version": 1,
         "case_index": case.case_index,
         "request_count": len(retained),
         "expected_identity_percent": case.expected_identity_percent,
         "minimum_identity_percent": case.minimum_identity_percent,
+        "minimum_observed_identity_percent": min(item["identity_percent"] for item in retained),
+        "raw_output_bytes_retained": True,
+        "full_output_artifact_sha256": observed_digest,
+        "requests": retained,
+        "passed": True,
+    }
+
+
+def validate_mixed_canonical_identity_output_artifact(
+    artifact: dict[str, Any],
+    *,
+    cases_by_request: Sequence[CanonicalIdentityCase],
+    expected_request_ids: Sequence[str],
+    expected_prompt_token_ids: Sequence[Sequence[int]],
+    expected_execution_coordinates: Sequence[Mapping[str, Any]],
+    decode_output_token_ids: Callable[[Sequence[int]], str],
+) -> dict[str, Any]:
+    """Score every interleaved mixed-case occurrence against its caller-owned target."""
+    expected_cases = tuple(cases_by_request)
+    retained, _total_bytes, observed_digest = _validate_canonical_identity_output_rows(
+        artifact,
+        cases_by_request=expected_cases,
+        expected_request_ids=expected_request_ids,
+        expected_prompt_token_ids=expected_prompt_token_ids,
+        expected_execution_coordinates=expected_execution_coordinates,
+        decode_output_token_ids=decode_output_token_ids,
+    )
+    case_counts = [sum(case.case_index == case_index for case in expected_cases) for case_index in range(4)]
+    if any(count <= 0 for count in case_counts):
+        raise AssertionError("mixed canonical output is missing one or more frozen cases")
+    return {
+        "schema_version": 1,
+        "protocol": "mixed-four-case",
+        "request_count": len(retained),
+        "case_request_counts": case_counts,
+        "minimum_observed_matches": min(item["matches"] for item in retained),
         "minimum_observed_identity_percent": min(item["identity_percent"] for item in retained),
         "raw_output_bytes_retained": True,
         "full_output_artifact_sha256": observed_digest,
@@ -812,6 +1031,247 @@ def validate_canonical_identity_manifest(
         raise AssertionError("canonical identity case index is not bound to the manifest")
 
 
+def _require_frozen_mixed_cases(
+    cases: Sequence[CanonicalIdentityCase],
+    *,
+    prompts_csv: str | Path,
+) -> tuple[CanonicalIdentityCase, ...]:
+    frozen = load_canonical_7b_identity_cases(prompts_csv)
+    observed = tuple(cases)
+    if observed != frozen or tuple(case.case_index for case in observed) != (0, 1, 2, 3):
+        raise ValueError("mixed canonical identity requires all four frozen cases in canonical order")
+    return observed
+
+
+def build_mixed_canonical_identity_manifest(
+    base: WorkloadManifest,
+    *,
+    cases: Sequence[CanonicalIdentityCase],
+    prompts_csv: str | Path,
+    tokenizer: SnapshotBoundTokenizer,
+    request_count: int,
+    request_id_prefix: str,
+) -> WorkloadManifest:
+    """Build one interleaved B4 or B96 workload from all four original midpoint prompts."""
+    if base.source_checkpoint != CANONICAL_7B_CHECKPOINT:
+        raise ValueError(f"mixed canonical identity requires source checkpoint {CANONICAL_7B_CHECKPOINT}")
+    if type(request_count) is not int or request_count not in {4, 96}:
+        raise ValueError("mixed canonical identity request_count must be exactly 4 or 96")
+    if type(request_id_prefix) is not str or not request_id_prefix:
+        raise ValueError("mixed canonical identity request_id_prefix cannot be empty")
+    frozen_cases = _require_frozen_mixed_cases(cases, prompts_csv=prompts_csv)
+    if not isinstance(tokenizer, SnapshotBoundTokenizer):
+        raise TypeError("mixed canonical identity requires a SnapshotBoundTokenizer")
+
+    prompt_token_ids = tuple(tokenizer.encode(case.prompt) for case in frozen_cases)
+    tokenizer.verify_source()
+    if tuple(len(tokens) for tokens in prompt_token_ids) != _PROMPT_LENGTHS:
+        raise ValueError("mixed canonical prompts were padded, truncated, or tokenized inconsistently")
+    if any(type(token_id) is not int or token_id < 0 for tokens in prompt_token_ids for token_id in tokens):
+        raise ValueError("mixed canonical identity prompt produced an invalid token ID")
+
+    requests = tuple(
+        WorkloadRequest(
+            request_id=f"{request_id_prefix}-case{index % 4}-occurrence{index // 4:04d}",
+            prompt_token_ids=prompt_token_ids[index % 4],
+        )
+        for index in range(request_count)
+    )
+    manifest = replace(
+        base,
+        name=f"canonical-7b-identity-mixed-n{request_count}",
+        requests=requests,
+        max_new_tokens=500,
+        temperature=1.0,
+        top_p=1.0,
+        top_k=1,
+        seed=42,
+        ignore_eos=True,
+        stop_token_ids=(),
+        prompt_source_path=str(Path(prompts_csv).expanduser().resolve()),
+        prompt_source_sha256=CANONICAL_7B_PROMPTS_SHA256,
+        prompt_tokenizer_path=str(tokenizer.path),
+        prompt_tokenizer_sha256=tokenizer.source_sha256,
+    )
+    validate_mixed_canonical_identity_manifest(manifest, cases=frozen_cases)
+    return manifest
+
+
+def validate_mixed_canonical_identity_manifest(
+    manifest: WorkloadManifest,
+    *,
+    cases: Sequence[CanonicalIdentityCase],
+) -> None:
+    """Require exact interleaved variable-length prompts with no semantic padding."""
+    frozen_cases = tuple(cases)
+    if manifest.source_checkpoint != CANONICAL_7B_CHECKPOINT:
+        raise AssertionError("mixed canonical identity manifest uses the wrong source checkpoint")
+    if len(frozen_cases) != 4 or tuple(case.case_index for case in frozen_cases) != (0, 1, 2, 3):
+        raise AssertionError("mixed canonical identity cases are incomplete or reordered")
+    if len(manifest.requests) not in {4, 96}:
+        raise AssertionError("mixed canonical identity manifest must contain exactly 4 or 96 requests")
+    expected_ids = tuple(
+        f"{manifest.requests[0].request_id.rsplit('-case', 1)[0]}-case{index % 4}-occurrence{index // 4:04d}"
+        for index in range(len(manifest.requests))
+    )
+    if tuple(request.request_id for request in manifest.requests) != expected_ids:
+        raise AssertionError("mixed canonical request case/occurrence identities drifted")
+    for index, request in enumerate(manifest.requests):
+        case = frozen_cases[index % 4]
+        if request.prompt_token_ids != tuple(case.prompt.encode("ascii")):
+            raise AssertionError("mixed canonical prompt bytes were padded, truncated, or reordered")
+    if (
+        manifest.max_new_tokens != 500
+        or manifest.temperature != 1.0
+        or manifest.top_p != 1.0
+        or manifest.top_k != 1
+        or manifest.seed != 42
+        or manifest.ignore_eos is not True
+        or manifest.stop_token_ids
+    ):
+        raise AssertionError("mixed canonical identity sampling contract drifted")
+    if manifest.prompt_source_sha256 != CANONICAL_7B_PROMPTS_SHA256:
+        raise AssertionError("mixed canonical identity source provenance drifted")
+    if manifest.name != f"canonical-7b-identity-mixed-n{len(manifest.requests)}":
+        raise AssertionError("mixed canonical identity manifest name drifted")
+
+
+def build_mixed_identity_schedule(
+    *,
+    topology: str,
+    request_count: int,
+    global_wave_size: int,
+    request_id_prefix: str = "mixed",
+) -> MixedIdentitySchedule:
+    """Build one unpadded interleaved B4 or B96 TP2/DP2 physical call."""
+    if topology not in {"tp2", "dp2"}:
+        raise ValueError("mixed canonical identity topology must be tp2 or dp2")
+    if type(request_count) is not int or request_count not in {4, 96}:
+        raise ValueError("mixed canonical identity request_count must be exactly 4 or 96")
+    if type(global_wave_size) is not int or global_wave_size != request_count:
+        raise ValueError("mixed canonical identity requires one global physical call")
+    if type(request_id_prefix) is not str or not request_id_prefix:
+        raise ValueError("mixed canonical identity request_id_prefix cannot be empty")
+    replica_count = 1 if topology == "tp2" else 2
+    waves = build_request_waves(
+        request_count=request_count,
+        global_batch_size=global_wave_size,
+        replica_count=replica_count,
+    )
+    if len(waves) != 1:
+        raise AssertionError("mixed canonical identity schedule split its admitted physical call")
+    case_order = tuple(range(4)) * (request_count // 4)
+    request_ids = tuple(
+        f"{request_id_prefix}-case{index % 4}-occurrence{index // 4:04d}" for index in range(request_count)
+    )
+    engine_case_counts = tuple(
+        tuple(
+            tuple(case_order[shard.start : shard.stop].count(case_index) for case_index in range(4))
+            for shard in wave.shards
+        )
+        for wave in waves
+    )
+    return MixedIdentitySchedule(
+        topology=topology,
+        request_count=request_count,
+        global_wave_size=global_wave_size,
+        global_request_shapes=tuple(wave.request_count for wave in waves),
+        engine_request_shapes=tuple(tuple(shard.request_count for shard in wave.shards) for wave in waves),
+        request_ids=request_ids,
+        case_order=case_order,
+        engine_case_counts=engine_case_counts,
+    )
+
+
+def build_mixed_identity_admission_bundle(
+    *,
+    topology: str,
+    base_seed: int,
+    manifest_sha256_by_stage: Mapping[str, str] | None = None,
+    request_id_prefix: str = "mixed",
+) -> dict[str, Any]:
+    """Bind B4 then B96 to advancing caller-owned call, request, and seed coordinates."""
+    if topology not in {"tp2", "dp2"}:
+        raise ValueError("mixed canonical identity topology must be tp2 or dp2")
+    if type(base_seed) is not int or base_seed < 0:
+        raise ValueError("mixed canonical identity base_seed must be a nonnegative built-in integer")
+    if manifest_sha256_by_stage is not None:
+        if type(manifest_sha256_by_stage) is not dict or set(manifest_sha256_by_stage) != {"mixed-b4", "mixed-b96"}:
+            raise ValueError("mixed canonical manifest authority must contain exact B4 and B96 stage keys")
+        if any(
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            for digest in manifest_sha256_by_stage.values()
+        ):
+            raise ValueError("mixed canonical stage manifest SHA256 values are malformed")
+    replica_count = 1 if topology == "tp2" else 2
+    attempts = []
+    global_request_index_start = 0
+    for global_call_index, (stage, request_count) in enumerate((("mixed-b4", 4), ("mixed-b96", 96))):
+        stage_request_id_prefix = f"{request_id_prefix}-{'b4' if request_count == 4 else 'b96'}"
+        schedule = build_mixed_identity_schedule(
+            topology=topology,
+            request_count=request_count,
+            global_wave_size=request_count,
+            request_id_prefix=stage_request_id_prefix,
+        )
+        wave = build_request_waves(
+            request_count=request_count,
+            global_batch_size=request_count,
+            replica_count=replica_count,
+        )[0]
+        request_seeds = [None] * request_count
+        execution_coordinates = [None] * request_count
+        for shard in wave.shards:
+            stream_seed = base_seed + (global_call_index * replica_count + shard.replica_index) * 1_000_003
+            for local_ordinal, request_index in enumerate(range(shard.start, shard.stop)):
+                request_seed = stream_seed + local_ordinal
+                if request_seed >= 2**31:
+                    raise ValueError("mixed canonical identity request seed exceeds the no-wrap domain")
+                request_seeds[request_index] = request_seed
+                execution_coordinates[request_index] = {
+                    "request_id": schedule.request_ids[request_index],
+                    "global_request_index": global_request_index_start + request_index,
+                    "generation_round": global_call_index,
+                    "dp_rank": shard.replica_index,
+                    "call_index": global_call_index,
+                    "seed": request_seed,
+                }
+        attempts.append(
+            {
+                "stage": stage,
+                "manifest_sha256": (
+                    None if manifest_sha256_by_stage is None else manifest_sha256_by_stage[stage]
+                ),
+                "global_call_index": global_call_index,
+                "global_request_index_start": global_request_index_start,
+                "request_count": request_count,
+                "case_order": list(schedule.case_order),
+                "engine_request_shapes": [list(shapes) for shapes in schedule.engine_request_shapes],
+                "engine_case_counts": [
+                    [list(case_counts) for case_counts in wave_counts]
+                    for wave_counts in schedule.engine_case_counts
+                ],
+                "request_ids": list(schedule.request_ids),
+                "request_seeds": request_seeds,
+                "execution_coordinates": execution_coordinates,
+            }
+        )
+        global_request_index_start += request_count
+    if set(attempts[0]["request_seeds"]) & set(attempts[1]["request_seeds"]):
+        raise AssertionError("mixed canonical B4/B96 request seed streams overlap")
+    if set(attempts[0]["request_ids"]) & set(attempts[1]["request_ids"]):
+        raise AssertionError("mixed canonical B4/B96 semantic request identities overlap")
+    return {
+        "schema_version": 1,
+        "protocol": "mixed-b4-then-b96",
+        "topology": topology,
+        "base_seed": base_seed,
+        "attempts": attempts,
+    }
+
+
 def build_homogeneous_identity_schedule(
     *,
     topology: str,
@@ -945,17 +1405,130 @@ def build_canonical_identity_contract(
     }
 
 
+def build_mixed_canonical_identity_contract(
+    *,
+    cases: Sequence[CanonicalIdentityCase],
+    schedule: MixedIdentitySchedule,
+    stage_manifests: Mapping[str, WorkloadManifest],
+    prompts_csv: str | Path,
+    tokenizer_path: str | Path,
+) -> dict[str, Any]:
+    """Bind both mixed manifests and their ordered B4-then-B96 execution contract."""
+    frozen_cases = _require_frozen_mixed_cases(cases, prompts_csv=prompts_csv)
+    if type(schedule) is not MixedIdentitySchedule:
+        raise TypeError("mixed canonical identity contract requires an exact mixed schedule")
+    if type(stage_manifests) is not dict or set(stage_manifests) != {"mixed-b4", "mixed-b96"}:
+        raise ValueError("mixed canonical identity contract requires exact B4 and B96 manifests")
+    expected_counts = {"mixed-b4": 4, "mixed-b96": 96}
+    manifest_sha256_by_stage = {}
+    stage_prefixes = {}
+    stages = []
+    for stage, request_count in expected_counts.items():
+        manifest = stage_manifests[stage]
+        if type(manifest) is not WorkloadManifest or len(manifest.requests) != request_count:
+            raise ValueError(f"{stage} manifest does not contain its exact request count")
+        validate_mixed_canonical_identity_manifest(manifest, cases=frozen_cases)
+        stage_prefix = manifest.requests[0].request_id.rsplit("-case", 1)[0]
+        stage_prefixes[stage] = stage_prefix
+        stage_schedule = build_mixed_identity_schedule(
+            topology=schedule.topology,
+            request_count=request_count,
+            global_wave_size=request_count,
+            request_id_prefix=stage_prefix,
+        )
+        if tuple(request.request_id for request in manifest.requests) != stage_schedule.request_ids:
+            raise ValueError(f"{stage} manifest request identities drifted from its schedule")
+        manifest_sha256_by_stage[stage] = manifest.sha256
+        stages.append(
+            {
+                "stage": stage,
+                "manifest_sha256": manifest.sha256,
+                "request_count": request_count,
+                "schedule": {
+                    "global_request_shapes": list(stage_schedule.global_request_shapes),
+                    "engine_request_shapes": [list(shapes) for shapes in stage_schedule.engine_request_shapes],
+                    "engine_case_counts": [
+                        [list(case_counts) for case_counts in wave_counts]
+                        for wave_counts in stage_schedule.engine_case_counts
+                    ],
+                },
+            }
+        )
+
+    if not stage_prefixes["mixed-b4"].endswith("-b4") or not stage_prefixes["mixed-b96"].endswith("-b96"):
+        raise ValueError("mixed canonical stage manifests require stage-qualified request IDs")
+    request_id_prefix = stage_prefixes["mixed-b4"][: -len("-b4")]
+    if stage_prefixes["mixed-b96"][: -len("-b96")] != request_id_prefix:
+        raise ValueError("mixed canonical B4 and B96 manifests use different request-ID roots")
+    current_stage = "mixed-b4" if schedule.request_count == 4 else "mixed-b96"
+    if schedule.request_ids != tuple(request.request_id for request in stage_manifests[current_stage].requests):
+        raise ValueError("mixed canonical active schedule does not match its stage-qualified manifest")
+
+    source = Path(prompts_csv).expanduser().resolve()
+    source_snapshot = read_byte_snapshot(source, label="canonical prompts CSV")
+    if source_snapshot.sha256 != CANONICAL_7B_PROMPTS_SHA256:
+        raise ValueError("canonical identity source SHA256 drifted")
+    tokenizer = SnapshotBoundTokenizer.from_path(tokenizer_path)
+    admission_bundle = build_mixed_identity_admission_bundle(
+        topology=schedule.topology,
+        base_seed=42,
+        manifest_sha256_by_stage=manifest_sha256_by_stage,
+        request_id_prefix=request_id_prefix,
+    )
+    return {
+        "schema_version": 1,
+        "protocol": "mixed-b4-then-b96-single-engine",
+        "checkpoint": CANONICAL_7B_CHECKPOINT,
+        "prompts_csv_path": str(source),
+        "prompts_csv_sha256": CANONICAL_7B_PROMPTS_SHA256,
+        "tokenizer_path": str(tokenizer.path),
+        "tokenizer_sha256": tokenizer.source_sha256,
+        "case_order": list(schedule.case_order),
+        "minimum_matches": [case.minimum_matches for case in frozen_cases],
+        "sampling": {
+            "max_new_tokens": 500,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": 1,
+            "seed": 42,
+            "ignore_eos": True,
+            "stop_token_ids": [],
+        },
+        "schedule": {
+            "topology": schedule.topology,
+            "request_count": schedule.request_count,
+            "global_wave_size": schedule.global_wave_size,
+            "global_request_shapes": list(schedule.global_request_shapes),
+            "engine_request_shapes": [list(shapes) for shapes in schedule.engine_request_shapes],
+            "engine_case_counts": [
+                [list(case_counts) for case_counts in wave_counts]
+                for wave_counts in schedule.engine_case_counts
+            ],
+            "semantic_padding": False,
+            "mixed_case_batching": True,
+        },
+        "stages": stages,
+        "admission_bundle": admission_bundle,
+        "qualification_requires_same_engine_dual_stage_physical_proof": True,
+    }
+
+
 __all__ = [
     "CANONICAL_7B_CHECKPOINT",
     "CANONICAL_7B_PROMPTS_SHA256",
     "CanonicalIdentityCase",
     "CommonPrefixIdentityCase",
     "HomogeneousIdentitySchedule",
+    "MixedIdentitySchedule",
     "build_canonical_identity_contract",
     "build_canonical_identity_manifest",
     "build_common_prefix_identity_contract",
     "build_common_prefix_identity_manifest",
     "build_homogeneous_identity_schedule",
+    "build_mixed_canonical_identity_contract",
+    "build_mixed_canonical_identity_manifest",
+    "build_mixed_identity_admission_bundle",
+    "build_mixed_identity_schedule",
     "load_canonical_7b_identity_cases",
     "load_common_prefix_identity_cases",
     "validate_canonical_identity_manifest",
@@ -963,4 +1536,7 @@ __all__ = [
     "validate_common_prefix_identity_manifest",
     "validate_common_prefix_identity_output_artifacts",
     "validate_homogeneous_identity_phase_evidence",
+    "validate_mixed_canonical_identity_manifest",
+    "validate_mixed_canonical_identity_output_artifact",
+    "validate_mixed_identity_phase_evidence",
 ]

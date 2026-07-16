@@ -33,6 +33,9 @@ from bionemo.evo2.vllm.accuracy import (
     build_canonical_identity_contract,
     build_common_prefix_identity_contract,
     build_homogeneous_identity_schedule,
+    build_mixed_canonical_identity_contract,
+    build_mixed_canonical_identity_manifest,
+    build_mixed_identity_schedule,
     load_canonical_7b_identity_cases,
     load_common_prefix_identity_cases,
     validate_canonical_identity_manifest,
@@ -40,6 +43,9 @@ from bionemo.evo2.vllm.accuracy import (
     validate_common_prefix_identity_manifest,
     validate_common_prefix_identity_output_artifacts,
     validate_homogeneous_identity_phase_evidence,
+    validate_mixed_canonical_identity_manifest,
+    validate_mixed_canonical_identity_output_artifact,
+    validate_mixed_identity_phase_evidence,
 )
 from bionemo.evo2.vllm.artifact_io import (
     ArtifactSnapshotError,
@@ -692,16 +698,23 @@ def build_benchmark_contract(
     generation_round = args.generation_round
     if type(generation_round) is not int or generation_round < 0:
         raise ValueError("generation_round must be a nonnegative built-in integer")
-    if (
-        getattr(args, "canonical_identity_case", None) is not None
-        and getattr(args, "common_prefix_identity_case", None) is not None
-    ):
-        raise ValueError("canonical and common-prefix identity modes are mutually exclusive")
+    mixed_identity = getattr(args, "mixed_canonical_identity", False)
+    if type(mixed_identity) is not bool:
+        raise TypeError("mixed canonical identity flag must be a built-in boolean")
+    if sum(
+        (
+            getattr(args, "canonical_identity_case", None) is not None,
+            getattr(args, "common_prefix_identity_case", None) is not None,
+            mixed_identity,
+        )
+    ) > 1:
+        raise ValueError("canonical, common-prefix, and mixed identity modes are mutually exclusive")
     caller_coordinates = CallerCoordinateContract.from_inputs(manifest, profile, generation_round)
     profile_contract = asdict(profile)
     profile_contract.pop("proof")
     identity_context = canonical_identity_context(args, manifest, profile)
     common_identity_context = common_prefix_identity_context(args, manifest, profile)
+    mixed_identity_context_value = mixed_canonical_identity_context(args, manifest, profile)
     phase_coordinates = benchmark_phase_coordinates(
         manifest,
         profile,
@@ -728,6 +741,9 @@ def build_benchmark_contract(
         },
         "canonical_identity": None if identity_context is None else identity_context[2],
         "common_prefix_identity": None if common_identity_context is None else common_identity_context[3],
+        "mixed_canonical_identity": (
+            None if mixed_identity_context_value is None else mixed_identity_context_value[2]
+        ),
         "exact_generation_progress": (
             exact_generation_progress_contract(
                 manifest,
@@ -776,6 +792,54 @@ def canonical_identity_context(
     ):
         raise AssertionError("canonical identity manifest provenance does not match its linked contract")
     return case, schedule, contract
+
+
+def mixed_canonical_identity_context(
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+) -> tuple[tuple[Any, ...], Any, dict[str, Any]] | None:
+    """Resolve one active mixed stage plus the caller-owned B4/B96 contract."""
+    if getattr(args, "mixed_canonical_identity", False) is not True:
+        return None
+    prompts_csv = getattr(args, "canonical_prompts_csv", None)
+    tokenizer_path = getattr(args, "prompt_tokenizer_json", None)
+    if prompts_csv is None or tokenizer_path is None:
+        raise ValueError("mixed canonical identity requires its source and tokenizer paths")
+    cases = load_canonical_7b_identity_cases(prompts_csv)
+    validate_mixed_canonical_identity_manifest(manifest, cases=cases)
+    tokenizer = SnapshotBoundTokenizer.from_path(tokenizer_path)
+    request_id_root = getattr(args, "request_id_prefix", None)
+    if type(request_id_root) is not str or not request_id_root:
+        raise ValueError("mixed canonical identity requires a request-ID root")
+    stage_manifests = {
+        stage: build_mixed_canonical_identity_manifest(
+            manifest,
+            cases=cases,
+            prompts_csv=prompts_csv,
+            tokenizer=tokenizer,
+            request_count=request_count,
+            request_id_prefix=f"{request_id_root}-{'b4' if request_count == 4 else 'b96'}",
+        )
+        for stage, request_count in (("mixed-b4", 4), ("mixed-b96", 96))
+    }
+    active_stage = "mixed-b4" if len(manifest.requests) == 4 else "mixed-b96"
+    if manifest.sha256 != stage_manifests[active_stage].sha256:
+        raise AssertionError("active mixed manifest does not match its caller-derived stage manifest")
+    schedule = build_mixed_identity_schedule(
+        topology=profile.topology,
+        request_count=len(manifest.requests),
+        global_wave_size=profile.global_wave_size,
+        request_id_prefix=f"{request_id_root}-{'b4' if len(manifest.requests) == 4 else 'b96'}",
+    )
+    contract = build_mixed_canonical_identity_contract(
+        cases=cases,
+        schedule=schedule,
+        stage_manifests=stage_manifests,
+        prompts_csv=prompts_csv,
+        tokenizer_path=tokenizer_path,
+    )
+    return cases, schedule, contract
 
 
 def common_prefix_identity_context(
@@ -869,7 +933,7 @@ def canonical_identity_phase_artifacts(
             "schema_version": 1,
             "outputs": outputs,
             "physical_schedule": physical,
-            "physical_schedule_attested_by_linked_proof": not collect_physical_proof,
+            "physical_schedule_attested_by_linked_proof": False,
             "passed": True,
         }
         phase["canonical_identity_evidence"] = evidence
@@ -890,6 +954,85 @@ def canonical_identity_phase_artifacts(
         "minimum_observed_identity_percent": minimum_identity,
         "phases": phase_summaries,
         "passed": True,
+    }
+
+
+def mixed_canonical_identity_phase_artifacts(
+    *,
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    phase_artifacts: list[dict[str, Any]],
+    decode_output_token_ids: Callable[[Sequence[int]], str] | None,
+    collect_physical_proof: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Score every mixed row while keeping single-stage runs explicitly unqualified."""
+    context = mixed_canonical_identity_context(args, manifest, profile)
+    if context is None:
+        return phase_artifacts, None
+    if decode_output_token_ids is None:
+        raise AssertionError("mixed canonical identity requires decoded raw output retention")
+    if collect_physical_proof:
+        raise AssertionError("mixed qualification requires the dual-stage same-engine proof runner")
+    cases, _schedule, contract = context
+    coordinates_by_phase = {
+        row["phase"]: row
+        for row in benchmark_phase_coordinates(
+            manifest,
+            profile,
+            generation_round_start=args.generation_round,
+            warmups=args.warmups,
+            repetitions=args.repetitions,
+        )
+    }
+    expected_request_ids = tuple(request.request_id for request in manifest.requests)
+    expected_prompts = tuple(request.prompt_token_ids for request in manifest.requests)
+    expected_cases = tuple(cases[index % 4] for index in range(len(manifest.requests)))
+    summaries = []
+    for phase in phase_artifacts:
+        coordinate = coordinates_by_phase.get(phase.get("phase"))
+        if coordinate is None:
+            raise AssertionError("mixed canonical phase lacks caller-owned phase coordinates")
+        expected_executions = build_wave_execution_records(
+            manifest,
+            global_wave_size=profile.global_wave_size,
+            generation_round=coordinate["generation_round"],
+            call_index_start=coordinate["global_call_index_start"],
+            global_request_index_start=coordinate["global_request_index_start"],
+        )
+        outputs = validate_mixed_canonical_identity_output_artifact(
+            phase["full_output_artifact"],
+            cases_by_request=expected_cases,
+            expected_request_ids=expected_request_ids,
+            expected_prompt_token_ids=expected_prompts,
+            expected_execution_coordinates=tuple(record.to_dict() for record in expected_executions),
+            decode_output_token_ids=decode_output_token_ids,
+        )
+        evidence = {
+            "schema_version": 1,
+            "outputs": outputs,
+            "physical_schedule": None,
+            "physical_schedule_attested_by_linked_proof": False,
+            "same_engine_b4_then_b96_qualified": False,
+            "passed": True,
+        }
+        phase["mixed_canonical_identity_evidence"] = evidence
+        summaries.append(
+            {
+                "phase": phase["phase"],
+                "request_count": outputs["request_count"],
+                "minimum_observed_identity_percent": outputs["minimum_observed_identity_percent"],
+                "passed": True,
+            }
+        )
+    return phase_artifacts, {
+        "schema_version": 1,
+        "contract": contract,
+        "phases": summaries,
+        "exploratory_output_correctness_passed": bool(summaries),
+        "same_engine_b4_then_b96_qualified": False,
+        "physical_schedule_attested": False,
+        "passed": bool(summaries),
     }
 
 
@@ -943,7 +1086,7 @@ def common_prefix_identity_phase_artifacts(
             "phase": phase.get("phase"),
             "outputs": outputs,
             "physical_schedule": physical,
-            "physical_schedule_attested_by_linked_proof": not collect_physical_proof,
+            "physical_schedule_attested_by_linked_proof": False,
             "passed": outputs.get("passed") is True and (physical is None or physical.get("passed") is True),
         }
         if evidence["passed"] is not True:
@@ -956,7 +1099,7 @@ def common_prefix_identity_phase_artifacts(
         "serial_reference": {
             "full_output_artifact": serial_output,
             "physical_schedule": serial_physical,
-            "physical_schedule_attested_by_linked_proof": not collect_physical_proof,
+            "physical_schedule_attested_by_linked_proof": False,
         },
         "phases": summaries,
         "passed": bool(summaries)
@@ -2968,9 +3111,41 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
     expected_prompt_tokens = getattr(args, "expected_prompt_tokens", None)
     canonical_case_index = getattr(args, "canonical_identity_case", None)
     common_case_index = getattr(args, "common_prefix_identity_case", None)
+    mixed_identity = getattr(args, "mixed_canonical_identity", False)
     canonical_prompts_csv = getattr(args, "canonical_prompts_csv", None)
-    if canonical_case_index is not None and common_case_index is not None:
-        raise ValueError("canonical and common-prefix identity modes are mutually exclusive")
+    if type(mixed_identity) is not bool:
+        raise TypeError("mixed canonical identity flag must be a built-in boolean")
+    if sum((canonical_case_index is not None, common_case_index is not None, mixed_identity)) > 1:
+        raise ValueError("canonical, common-prefix, and mixed identity modes are mutually exclusive")
+    if mixed_identity:
+        incompatible = {
+            "prompt_jsonl": prompt_jsonl,
+            "prompt_jsonl_sha256": prompt_jsonl_sha256,
+            "expected_prompt_tokens": expected_prompt_tokens,
+            "uniform_prompt_length": getattr(args, "uniform_prompt_length", None),
+        }
+        enabled = sorted(name for name, value in incompatible.items() if value is not None)
+        if enabled:
+            raise ValueError(f"mixed canonical identity is incompatible with workload rewrites: {enabled}")
+        if canonical_prompts_csv is None or prompt_tokenizer_json is None:
+            raise ValueError("mixed canonical identity requires --canonical-prompts-csv and --prompt-tokenizer-json")
+        request_count = getattr(args, "request_count", None)
+        if type(request_count) is not int or request_count not in {4, 96}:
+            raise ValueError("mixed canonical identity requires --request-count 4 or 96")
+        max_new_tokens = getattr(args, "max_new_tokens", None)
+        if max_new_tokens not in (None, 500):
+            raise ValueError("mixed canonical identity requires exactly 500 new tokens")
+        tokenizer = SnapshotBoundTokenizer.from_path(prompt_tokenizer_json)
+        cases = load_canonical_7b_identity_cases(canonical_prompts_csv)
+        stage = "b4" if request_count == 4 else "b96"
+        return build_mixed_canonical_identity_manifest(
+            manifest,
+            cases=cases,
+            prompts_csv=canonical_prompts_csv,
+            tokenizer=tokenizer,
+            request_count=request_count,
+            request_id_prefix=f"{args.request_id_prefix}-{stage}",
+        )
     if common_case_index is not None:
         incompatible = {
             "prompt_jsonl": prompt_jsonl,
@@ -3026,11 +3201,11 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
 
         from bionemo.evo2.vllm.accuracy import (
             build_canonical_identity_manifest,
-            load_canonical_7b_identity_cases,
+            load_canonical_7b_identity_cases as load_canonical_cases,
         )
 
         tokenizer = SnapshotBoundTokenizer.from_path(prompt_tokenizer_json)
-        cases = load_canonical_7b_identity_cases(canonical_prompts_csv)
+        cases = load_canonical_cases(canonical_prompts_csv)
         return build_canonical_identity_manifest(
             manifest,
             case=cases[canonical_case_index],
@@ -3040,7 +3215,10 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
             request_id_prefix=args.request_id_prefix,
         )
     if canonical_prompts_csv is not None:
-        raise ValueError("--canonical-prompts-csv requires --canonical-identity-case or --common-prefix-identity-case")
+        raise ValueError(
+            "--canonical-prompts-csv requires --canonical-identity-case, "
+            "--common-prefix-identity-case, or --mixed-canonical-identity"
+        )
     if prompt_jsonl is None:
         if any(value is not None for value in (prompt_jsonl_sha256, prompt_tokenizer_json, expected_prompt_tokens)):
             raise ValueError("prompt JSONL provenance options require --prompt-jsonl")
@@ -3112,6 +3290,15 @@ class CUDAGraphProofRecorder:
         if graph_stats is None:
             return
         stats = graph_stats
+        prompt_stats = None if iteration_stats is None else getattr(iteration_stats, "prompt_token_stats", None)
+        prompt_token_count = None if prompt_stats is None else int(prompt_stats.total)
+        first_token_event_count = (
+            None if iteration_stats is None else len(getattr(iteration_stats, "time_to_first_tokens_iter", ()))
+        )
+        generation_token_count = (
+            None if iteration_stats is None else int(getattr(iteration_stats, "num_generation_tokens", -1))
+        )
+        pure_decode = prompt_token_count == 0 and first_token_event_count == 0
         self.observations.append(
             {
                 "phase": self._phase,
@@ -3120,6 +3307,15 @@ class CUDAGraphProofRecorder:
                 "num_padded_tokens": int(stats.num_padded_tokens),
                 "num_paddings": int(stats.num_paddings),
                 "runtime_mode": str(stats.runtime_mode),
+                "request_dimensions": {
+                    "schema_version": 1,
+                    "source": "iteration-stats-bound-to-cudagraph-dispatch",
+                    "prefill_req_count": 0 if pure_decode else None,
+                    "decode_req_count": generation_token_count if pure_decode else None,
+                    "token_count": int(stats.num_unpadded_tokens),
+                    "prompt_token_count": prompt_token_count,
+                    "first_token_event_count": first_token_event_count,
+                },
             }
         )
 
@@ -6496,6 +6692,14 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         decode_output_token_ids=output_decoder,
         collect_physical_proof=profile.proof,
     )
+    phase_artifacts, mixed_canonical_identity = mixed_canonical_identity_phase_artifacts(
+        args=args,
+        manifest=manifest,
+        profile=profile,
+        phase_artifacts=phase_artifacts,
+        decode_output_token_ids=output_decoder,
+        collect_physical_proof=profile.proof,
+    )
     phase_artifacts, common_prefix_identity = common_prefix_identity_phase_artifacts(
         args=args,
         manifest=manifest,
@@ -6542,6 +6746,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         "gpu_hardware_provenance": gpu_identity,
         "gpu_memory_headroom": memory_headroom,
         "canonical_identity": canonical_identity,
+        "mixed_canonical_identity": mixed_canonical_identity,
         "common_prefix_identity": common_prefix_identity,
         "common_prefix_serial_reference": (
             None if serial_reference_result is None else serial_reference_result.to_dict()
@@ -6658,7 +6863,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.backend != "vllm":
         raise NotImplementedError("the MCore baseline uses its pinned backend adapter")
     source_manifest = load_source_manifest(args)
-    identity_mode = args.canonical_identity_case is not None or args.common_prefix_identity_case is not None
+    identity_mode = (
+        args.canonical_identity_case is not None
+        or args.common_prefix_identity_case is not None
+        or args.mixed_canonical_identity
+    )
     manifest = prepare_workload(
         source_manifest,
         request_count=None if identity_mode else args.request_count,
