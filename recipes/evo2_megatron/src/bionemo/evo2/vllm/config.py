@@ -15,6 +15,8 @@
 
 """Serializable Transformers configuration for Evo2 vLLM models."""
 
+import math
+
 from transformers import PreTrainedConfig
 
 
@@ -47,6 +49,7 @@ class Evo2Config(PreTrainedConfig):
         num_groups_hyena_short: int = 256,
         rms_norm_eps: float = 1e-6,
         rotary_base: float | None = None,
+        seq_len_interpolation_factor: float | None = None,
         use_short_conv_bias: bool = False,
         hidden_act: str = "gelu",
         gelu_approximate: str = "none",
@@ -62,6 +65,14 @@ class Evo2Config(PreTrainedConfig):
             rotary_base = 10000.0 if rope_theta is None else float(rope_theta)
         elif rope_theta is not None and float(rope_theta) != float(rotary_base):
             raise ValueError("rotary_base and rope_theta must match when both are provided")
+        if seq_len_interpolation_factor is not None:
+            if isinstance(seq_len_interpolation_factor, bool) or not isinstance(
+                seq_len_interpolation_factor, (int, float)
+            ):
+                raise TypeError("seq_len_interpolation_factor must be numeric or None")
+            seq_len_interpolation_factor = float(seq_len_interpolation_factor)
+            if not math.isfinite(seq_len_interpolation_factor) or seq_len_interpolation_factor <= 0:
+                raise ValueError("seq_len_interpolation_factor must be finite and positive")
         super().__init__(**kwargs)
 
         self.vocab_size = vocab_size
@@ -82,6 +93,7 @@ class Evo2Config(PreTrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.rotary_base = float(rotary_base)
         self.rope_theta = float(rotary_base)
+        self.seq_len_interpolation_factor = seq_len_interpolation_factor
         self.use_short_conv_bias = use_short_conv_bias
         self.hidden_act = hidden_act
         self.gelu_approximate = gelu_approximate

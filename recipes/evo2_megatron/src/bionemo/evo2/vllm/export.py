@@ -104,6 +104,9 @@ def infer_evo2_config(checkpoint_path: Path | str) -> tuple[Evo2Config, str]:
         num_groups_hyena_medium=int(model.get("num_groups_hyena_medium") or 256),
         rms_norm_eps=float(model.get("layernorm_epsilon") or 1e-6),
         rotary_base=float(model.get("rotary_base") or 10000.0),
+        seq_len_interpolation_factor=(
+            None if model.get("seq_len_interpolation_factor") is None else float(model["seq_len_interpolation_factor"])
+        ),
         hidden_act=hidden_act,
         gelu_approximate="none",
         gated_linear_unit=bool(model["gated_linear_unit"]),

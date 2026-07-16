@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-Apache2
 
 from contextlib import contextmanager
-from math import isclose
+from math import ceil, isclose
 from tempfile import TemporaryDirectory
 
 import pytest
@@ -16,6 +16,7 @@ from bionemo.evo2.vllm.layers import (
     Evo2AttentionDecoderLayer,
     Evo2MLP,
     apply_pre_norm_residual,
+    build_evo2_rotary_embedding,
 )
 
 
@@ -24,7 +25,7 @@ DTYPE = torch.bfloat16
 CUDA_REQUIRED = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 
-def _config() -> Evo2Config:
+def _config(*, seq_len_interpolation_factor: float | None = None) -> Evo2Config:
     return Evo2Config(
         vocab_size=32,
         hidden_size=64,
@@ -36,6 +37,7 @@ def _config() -> Evo2Config:
         hybrid_override_pattern="*",
         rms_norm_eps=1e-6,
         rotary_base=10_000,
+        seq_len_interpolation_factor=seq_len_interpolation_factor,
     )
 
 
@@ -138,6 +140,35 @@ def test_apply_pre_norm_residual_matches_two_stage_reference() -> None:
     expected_residual = update + hidden_states
     torch.testing.assert_close(new_residual, expected_residual)
     torch.testing.assert_close(normalized, _rms_norm(expected_residual, weight, 1e-6))
+
+
+def test_evo2_rotary_embedding_matches_mcore_linear_interpolation_on_cpu() -> None:
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    factor = 128.0
+    runtime_max_position = 6144
+    config = _config(seq_len_interpolation_factor=factor)
+
+    with set_current_vllm_config(VllmConfig()):
+        rotary_emb = build_evo2_rotary_embedding(
+            config,
+            head_dim=config.head_dim,
+            max_position=runtime_max_position,
+            dtype=torch.float32,
+        )
+
+    assert type(rotary_emb).__name__ == "LinearScalingRotaryEmbedding"
+    assert rotary_emb.scaling_factors == [factor]
+    assert rotary_emb.max_position_embeddings == ceil(runtime_max_position / factor)
+    assert runtime_max_position <= rotary_emb.cos_sin_cache.shape[0] < runtime_max_position + int(factor)
+
+    inv_freq = 1.0 / (
+        config.rotary_base ** (torch.arange(0, config.head_dim, 2, dtype=torch.float32) / config.head_dim)
+    )
+    for position in (0, 1, 3268, 6000):
+        frequency = (torch.tensor(float(position)) / factor) * inv_freq
+        expected = torch.cat((frequency.cos(), frequency.sin()))
+        torch.testing.assert_close(rotary_emb.cos_sin_cache[position], expected, rtol=1e-6, atol=1e-6)
 
 
 @CUDA_REQUIRED

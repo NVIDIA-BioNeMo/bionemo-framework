@@ -4,6 +4,7 @@
 """vLLM attention, MLP, normalization, and residual layers for Evo2."""
 
 import re
+from math import ceil
 from typing import cast
 
 import torch
@@ -13,6 +14,37 @@ from bionemo.evo2.vllm.config import Evo2Config
 
 
 _LAYER_INDEX_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
+
+
+def build_evo2_rotary_embedding(
+    config: Evo2Config,
+    *,
+    head_dim: int,
+    max_position: int,
+    dtype: torch.dtype | None,
+) -> nn.Module:
+    """Build vLLM RoPE with the same position interpolation as MCore Evo2."""
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+
+    if head_dim <= 0:
+        raise ValueError("RoPE head dimension must be positive")
+    if max_position <= 0:
+        raise ValueError("max_position_embeddings must be positive")
+
+    rope_parameters = {"rope_theta": config.rotary_base}
+    rope_cache_base_length = max_position
+    factor = config.seq_len_interpolation_factor
+    if factor is not None:
+        rope_parameters.update({"rope_type": "linear", "factor": factor})
+        rope_cache_base_length = ceil(max_position / factor)
+
+    return get_rope(
+        head_dim,
+        max_position=rope_cache_base_length,
+        is_neox_style=True,
+        rope_parameters=rope_parameters,
+        dtype=dtype,
+    )
 
 
 def apply_pre_norm_residual(
@@ -146,7 +178,6 @@ class Evo2Attention(nn.Module):
         from vllm.distributed import get_tensor_model_parallel_world_size
         from vllm.model_executor.layers.attention import Attention
         from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-        from vllm.model_executor.layers.rotary_embedding import get_rope
 
         tp_size = 1 if disable_tp else get_tensor_model_parallel_world_size()
         if config.num_attention_heads % tp_size:
@@ -191,11 +222,10 @@ class Evo2Attention(nn.Module):
         max_position = config.max_position_embeddings if max_position_embeddings is None else max_position_embeddings
         if max_position <= 0:
             raise ValueError("max_position_embeddings must be positive")
-        self.rotary_emb = get_rope(
-            self.head_dim,
+        self.rotary_emb = build_evo2_rotary_embedding(
+            config,
+            head_dim=self.head_dim,
             max_position=max_position,
-            is_neox_style=True,
-            rope_parameters={"rope_theta": config.rotary_base},
             dtype=params_dtype,
         )
         self.attn = Attention(

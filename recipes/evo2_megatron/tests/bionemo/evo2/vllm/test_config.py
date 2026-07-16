@@ -102,6 +102,7 @@ def test_tensor_parallel_size_must_partition_attention_heads():
 def test_config_round_trip(tmp_path):
     config = Evo2Config(
         max_position_embeddings=10240,
+        seq_len_interpolation_factor=128.0,
         use_short_conv_bias=False,
         eos_token_id=0,
         pad_token_id=1,
@@ -111,6 +112,7 @@ def test_config_round_trip(tmp_path):
     loaded = Evo2Config.from_pretrained(tmp_path)
 
     assert loaded.max_position_embeddings == 10240
+    assert loaded.seq_len_interpolation_factor == 128.0
     assert loaded.use_short_conv_bias is False
     assert loaded.operator_types == tuple(PATTERN_7B)
     assert loaded.layers_block_type == config.layers_block_type

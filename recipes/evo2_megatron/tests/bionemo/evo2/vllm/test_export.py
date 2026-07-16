@@ -48,6 +48,7 @@ def _write_synthetic_checkpoint(tmp_path):
   num_groups_hyena_short: 4
   num_groups_hyena_medium: 4
   rotary_base: 10000
+  seq_len_interpolation_factor: 128
   layernorm_epsilon: 1.0e-6
   activation_func:
     _call_: false
@@ -78,6 +79,7 @@ def test_infer_evo2_config_from_checkpoint_run_config(tmp_path):
     assert config.hybrid_override_pattern == "SDH*"
     assert config.num_groups_hyena_short == 4
     assert config.num_groups_hyena_medium == 4
+    assert config.seq_len_interpolation_factor == 128.0
     assert config.hidden_act == "gelu"
     assert config.gelu_approximate == "none"
     assert config.gated_linear_unit is True
@@ -118,4 +120,5 @@ def test_streaming_export_round_trips_shards_config_index_and_manifest(tmp_path)
     assert manifest["estimated_peak_buffered_bytes"] <= (
         manifest["peak_shard_bytes"] + manifest["largest_tensor_bytes"]
     )
+    assert json.loads(config_path.read_text())["seq_len_interpolation_factor"] == 128.0
     assert (output_dir / "tokenizer" / "tokenizer.json").read_text() == '{"version": "1.0"}\n'
