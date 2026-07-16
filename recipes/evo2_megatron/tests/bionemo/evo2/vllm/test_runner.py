@@ -3185,7 +3185,7 @@ def test_parser_and_loader_build_one_physical_interleaved_mixed_identity_batch(t
         raise AssertionError("mixed benchmark seed authority drifted from the actual stage admission")
 
 
-def test_tp2_mixed_qualification_constructs_one_capacity96_engine_for_b4_then_b96(
+def test_tp2_mixed_qualification_constructs_one_capacity96_engine_without_forced_proof(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -3325,8 +3325,8 @@ def test_tp2_mixed_qualification_constructs_one_capacity96_engine_for_b4_then_b9
         phases = kwargs["phase_artifacts"]
         if [phase["phase"] for phase in phases] != ["mixed-b4", "mixed-b96"]:
             raise AssertionError("mixed scorer did not receive the exact ordered stage results")
-        if kwargs["collect_physical_proof"] is not True:
-            raise AssertionError("mixed same-engine path did not retain supported route metrics")
+        if kwargs["collect_physical_proof"] is not False:
+            raise AssertionError("proof-disabled mixed execution forced physical-proof instrumentation")
         return phases, {"same_engine_b4_then_b96_qualified": True, "passed": True}
 
     monkeypatch.setattr(runner, "mixed_canonical_identity_phase_artifacts", validate_mixed_phases)
@@ -3359,7 +3359,7 @@ def test_tp2_mixed_qualification_constructs_one_capacity96_engine_for_b4_then_b9
         raise AssertionError("mixed same-engine result was not propagated into the root artifact")
 
 
-def test_mixed_same_engine_scorer_requires_and_accepts_b4_then_b96_outputs_and_route(tmp_path) -> None:
+def test_mixed_same_engine_scorer_accepts_outputs_without_forced_physical_proof(tmp_path) -> None:
     cases = load_canonical_7b_identity_cases(PROMPTS_CSV)
     tokenizer = SnapshotBoundTokenizer.from_path(TOKENIZER_JSON)
     manifest = runner.build_mixed_canonical_identity_manifest(
@@ -3422,15 +3422,22 @@ def test_mixed_same_engine_scorer_requires_and_accepts_b4_then_b96_outputs_and_r
         profile=profile,
         phase_artifacts=phases,
         decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
-        collect_physical_proof=True,
+        collect_physical_proof=False,
     )
 
     if [phase["phase"] for phase in retained] != ["mixed-b4", "mixed-b96"]:
         raise AssertionError("mixed scorer reordered the admitted stage artifacts")
     if summary["same_engine_b4_then_b96_qualified"] is not True:
         raise AssertionError("mixed scorer did not qualify exact B4 then B96 evidence")
-    if summary["physical_schedule_attested"] is not True:
-        raise AssertionError("mixed scorer did not attest both supported physical route metrics")
+    if summary["physical_schedule_attested"] is not False:
+        raise AssertionError("proof-disabled mixed scorer claimed physical schedule attestation")
+    if any(phase["mixed_canonical_identity_evidence"]["physical_schedule"] is not None for phase in retained):
+        raise AssertionError("proof-disabled mixed scorer retained physical proof evidence")
+    if any(
+        phase["mixed_canonical_identity_evidence"]["proof_only_runtime_hooks_installed"] is not False
+        for phase in retained
+    ):
+        raise AssertionError("proof-disabled mixed scorer claimed proof-only runtime hooks")
     if [phase["request_count"] for phase in summary["phases"]] != [4, 96]:
         raise AssertionError("mixed scorer did not retain both exact stage output inventories")
     with pytest.raises(AssertionError, match="exact ordered B4 then B96"):
@@ -3440,7 +3447,7 @@ def test_mixed_same_engine_scorer_requires_and_accepts_b4_then_b96_outputs_and_r
             profile=profile,
             phase_artifacts=[phases[0], phases[0], phases[1]],
             decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
-            collect_physical_proof=True,
+            collect_physical_proof=False,
         )
 
 

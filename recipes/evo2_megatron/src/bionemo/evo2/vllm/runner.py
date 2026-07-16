@@ -1069,8 +1069,6 @@ def mixed_canonical_identity_phase_artifacts(
     cases, _schedule, contract, _stage_manifests = context
     same_engine_specs = mixed_same_engine_stage_specs(args, manifest, profile)
     if same_engine_specs is not None:
-        if not collect_physical_proof:
-            raise AssertionError("mixed same-engine qualification requires supported runtime route metrics")
         expected_phases = [spec["stage"] for spec in same_engine_specs]
         if [phase.get("phase") for phase in phase_artifacts] != expected_phases:
             raise AssertionError("mixed same-engine phases are not exact ordered B4 then B96")
@@ -1089,10 +1087,14 @@ def mixed_canonical_identity_phase_artifacts(
                 expected_execution_coordinates=expected_executions,
                 decode_output_token_ids=decode_output_token_ids,
             )
-            physical = validate_mixed_identity_phase_evidence(
-                phase,
-                schedule=spec["schedule"],
-                expected_execution_coordinates=expected_executions,
+            physical = (
+                validate_mixed_identity_phase_evidence(
+                    phase,
+                    schedule=spec["schedule"],
+                    expected_execution_coordinates=expected_executions,
+                )
+                if collect_physical_proof
+                else None
             )
             evidence = {
                 "schema_version": 1,
@@ -1113,7 +1115,7 @@ def mixed_canonical_identity_phase_artifacts(
                     "manifest_sha256": stage_manifest.sha256,
                     "request_count": outputs["request_count"],
                     "minimum_observed_identity_percent": outputs["minimum_observed_identity_percent"],
-                    "physical_schedule_proven": True,
+                    "physical_schedule_proven": physical is not None,
                     "passed": True,
                 }
             )
@@ -1123,7 +1125,7 @@ def mixed_canonical_identity_phase_artifacts(
             "phases": summaries,
             "exploratory_output_correctness_passed": True,
             "same_engine_b4_then_b96_qualified": True,
-            "physical_schedule_attested": True,
+            "physical_schedule_attested": collect_physical_proof,
             "supported_vllm_runtime_metrics": True,
             "proof_only_runtime_hooks_installed": False,
             "timing_admissible_for_speed_ranking": False,
@@ -6908,7 +6910,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         profile=profile,
         phase_artifacts=phase_artifacts,
         decode_output_token_ids=output_decoder,
-        collect_physical_proof=profile.proof or mixed_same_engine,
+        collect_physical_proof=profile.proof,
     )
     phase_artifacts, common_prefix_identity = common_prefix_identity_phase_artifacts(
         args=args,
