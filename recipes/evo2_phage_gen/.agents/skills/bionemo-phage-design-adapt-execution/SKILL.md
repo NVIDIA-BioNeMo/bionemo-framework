@@ -15,12 +15,14 @@ Turn the actual environment into explicit human-runnable stage scripts. Generate
 4. Map paths as shared/node-local and durable/ephemeral, including readers, writer/upload owner, capacity, backup, and visibility across control/compute/monitor nodes.
 5. Read [execution-contract.md](references/execution-contract.md) and the single volatile [resource and OOM policy](references/resource-and-oom-policy.md). Write planning/execution/ENVIRONMENT.yaml, EXECUTION_PLAN.md, ACTIONS.yaml, and scripts/ under the result root. Record unknowns rather than guessing. Default resource tuning maximizes measured stable GPU memory and compute utilization with a safety margin; never trade away full-genome context, approved token batch, correctness, or recoverability to improve utilization.
 
+In a read-only or planning-only session, do not claim those files were written. Instead provide a compact planned-artifacts block with each exact path, minimum required contents, ordered launch/monitor/stop/resume script names, acceptance checks, and the command that would materialize or validate each item. Read-only execution does not turn chat into the command source of truth.
+
 ## Select an operating pattern
 
 - **Local GPU:** run stage scripts directly; use a recurring facility or durable local session for due-gated monitoring.
 - **SSH GPU:** verify mounts/revision remotely, then launch and monitor by stable run identity.
 - **Slurm:** submit from login; run compute-heavy work only in an allocation. Capture job ID, resolved submission script, scheduler/application logs, and site polling policy.
-- **Lepton:** inspect `../../ci/lepton/README.md`, `../../ci/lepton/requirements.txt`, and current launcher help from the recipe root. Generate pinned config plus submit/status/log/resume instructions only after resolving runtime fields. Do not claim untested image, endpoint, mount, auth, or secret variants.
+- **Lepton:** inspect `../../ci/lepton/README.md`, `../../ci/lepton/requirements.txt`, and current launcher help from the recipe root. Generate pinned config plus submit/status/log/resume instructions only after resolving runtime fields, including egress. Do not claim untested image, endpoint, mount, auth, or secret variants.
 - **Manual:** generate complete ordered scripts, acceptance checks, and expected outputs; wait for the user to report completion.
 
 For this recipe, run `.ci_build.sh` before sourcing `.ci_test_env.sh` from the recipe root. Re-discover filenames in another checkout.

@@ -18,6 +18,8 @@ Create `genomes/runs/<attempt>/` under the project result root and read the proj
 
 Use the bounded lookup in `references/collection-contract.md`. Identify through metadata and a capped prefix before transferring large payloads. Never substitute an HTML page, installer, analysis script, or similarly named record for the claimed FASTA.
 
+If the available tools cannot range-fetch and decompress a candidate, emit the exact bounded validation command, mark the biological payload unverified, and stop before download or use. Metadata, MIME, filename, archive size, and a checksum never substitute for content validation.
+
 ## Acquire and validate
 
 - Download to a staging path; preserve source filenames and archive versions. Retry safely, then verify expected size/checksum and format before atomic promotion.

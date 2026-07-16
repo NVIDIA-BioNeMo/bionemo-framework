@@ -8,7 +8,7 @@
       "assertions": [
         "The response identifies a current primary paper and stable versioned repository record whose validated biological genome payload contains more than 10,000 qualifying records, preferring at least 15,000 usable unique genomes when available.",
         "The response reports the exact record and usable-genome counts with their units and does not infer corpus size from a paper title, repository landing page, archive size, script count, or search snippet.",
-        "The response follows Data Availability to an exact file, inspects metadata and a capped payload prefix, and verifies that the payload is nucleotide FASTA rather than HTML, an installer, analysis code, or a similarly named record.",
+        "The response follows Data Availability to an exact file and inspects metadata plus a capped payload prefix; if its read-only tools cannot range-fetch/decompress the file, it gives an exact bounded check, leaves the payload unverified, and does not infer FASTA content from metadata, an installer, analysis code, or a similarly named record.",
         "The response records article and repository versions, access date, license, source checksum when supplied, local checksum plan, retrieval query, eligibility rules, and exclusions.",
         "The response does not inflate the count with exact duplicates, rotations, or accession versions and stops for explicit acceptance when the final validated unique count is 10,000 or fewer.",
         "The result remains valid if a newer qualifying paper and archive supersede the source that existed when this eval was authored."

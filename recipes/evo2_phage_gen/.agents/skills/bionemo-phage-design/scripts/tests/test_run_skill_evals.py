@@ -433,6 +433,43 @@ class EvalRunnerTests(unittest.TestCase):
         ):
             self.assertIn(artifact, text)
 
+    def test_execution_and_collection_evals_are_compatible_with_read_only_generation(self) -> None:
+        adapt_path = (
+            RECIPE_SKILL_ROOT
+            / "bionemo-phage-design-adapt-execution"
+            / "evals"
+            / "evals.json"
+        )
+        adapt = json.loads(adapt_path.read_text(encoding="utf-8"))["evals"]
+        local_preflight = next(case for case in adapt if case["id"].endswith("local-preflight"))
+        lepton = next(case for case in adapt if case["id"].endswith("lepton-contract"))
+        self.assertIn("read-only", local_preflight["assertions"][-1].lower())
+        self.assertIn("when available", lepton["assertions"][0].lower())
+        self.assertIn("orders", lepton["assertions"][1].lower())
+
+        collection_path = (
+            RECIPE_SKILL_ROOT
+            / "bionemo-phage-design-collect-genomes"
+            / "evals"
+            / "evals.json"
+        )
+        collection = json.loads(collection_path.read_text(encoding="utf-8"))["evals"]
+        jumbo = next(case for case in collection if case["id"].endswith("current-jumbo-corpus"))
+        self.assertIn("leaves the payload unverified", jumbo["assertions"][2].lower())
+
+    def test_execution_skill_preserves_read_only_handoff_and_lepton_egress(self) -> None:
+        skill_path = RECIPE_SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "SKILL.md"
+        text = skill_path.read_text(encoding="utf-8").lower()
+        self.assertIn("read-only", text)
+        lepton = text.split("- **lepton:**", maxsplit=1)[1].split("\n", maxsplit=1)[0]
+        self.assertIn("egress", lepton)
+
+    def test_collection_skill_fails_closed_when_prefix_tools_are_unavailable(self) -> None:
+        skill_path = RECIPE_SKILL_ROOT / "bionemo-phage-design-collect-genomes" / "SKILL.md"
+        text = skill_path.read_text(encoding="utf-8").lower()
+        self.assertIn("bounded validation command", text)
+        self.assertIn("unverified", text)
+
     def test_validate_accepts_bionemo_compatible_suite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             skill_root = Path(tmp) / "skills"
