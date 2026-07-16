@@ -569,6 +569,18 @@ def test_hyena_mixer_profile_run_does_not_require_or_mutate_cache() -> None:
         assert all(state.numel() == 0 for state in mixer.kv_cache)
 
 
+def test_hyena_mixer_custom_op_declares_recurrent_state_mutation() -> None:
+    schema = str(torch.ops.bionemo_evo2.hyena_mixer.default._schema)
+    expected = (
+        "Tensor(a1!) output",
+        "Tensor(a2!) projection_state",
+        "Tensor(a3!) operator_state",
+    )
+    missing = [fragment for fragment in expected if fragment not in schema]
+    if missing:
+        raise AssertionError(f"Hyena custom-op schema does not expose mutable recurrent state: {missing}")
+
+
 @CUDA_REQUIRED
 def test_hyena_mixer_custom_op_supports_fullgraph_compile() -> None:
     from vllm.forward_context import set_forward_context
@@ -699,6 +711,71 @@ def test_hyena_mixer_full_decode_cuda_graph_replays_static_packed_buffers() -> N
         torch.testing.assert_close(operator_state, expected_operator_state, rtol=2e-5, atol=2e-5)
         torch.testing.assert_close(projection_state[0], torch.full_like(projection_state[0], 5))
         torch.testing.assert_close(operator_state[0], torch.full_like(operator_state[0], 7))
+
+
+@CUDA_REQUIRED
+def test_hyena_mixer_compiled_cuda_graph_replays_recurrent_state() -> None:
+    from vllm.forward_context import set_forward_context
+
+    config = _config("H")
+    with _vllm_module_context() as (vllm_config, cache_config):
+        mixer = (
+            Evo2HyenaMixer(
+                config,
+                operator_type="H",
+                cache_config=cache_config,
+                prefix="decoder.layers.compiled_graph.mixer",
+                params_dtype=DTYPE,
+                disable_tp=True,
+            )
+            .to(DEVICE)
+            .eval()
+        )
+        _randomize(mixer, seed=53)
+        projection_shape, operator_shape = mixer.get_state_shape()
+        projection_state = torch.zeros((5, *projection_shape), device=DEVICE, dtype=torch.float32)
+        operator_state = torch.zeros((5, *operator_shape), device=DEVICE, dtype=torch.float32)
+        mixer.kv_cache = (projection_state, operator_state)
+        hidden_states = torch.randn((4, config.hidden_size), device=DEVICE, dtype=DTYPE)
+        slots = torch.arange(1, 5, device=DEVICE, dtype=torch.int32)
+        metadata = _metadata(state_indices_tensor_d=slots)
+
+        expected = torch.empty_like(hidden_states)
+        replay_count = 500
+        with set_forward_context({mixer.prefix: metadata}, vllm_config, num_tokens=hidden_states.shape[0]):
+            for _ in range(replay_count):
+                mixer(hidden_states, expected)
+        torch.cuda.synchronize()
+        expected_projection_state = projection_state.clone()
+        expected_operator_state = operator_state.clone()
+        projection_state.zero_()
+        operator_state.zero_()
+
+        def run(hidden: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+            mixer(hidden, output)
+            return output
+
+        compiled = torch.compile(run, fullgraph=True)
+        with set_forward_context({mixer.prefix: metadata}, vllm_config, num_tokens=hidden_states.shape[0]):
+            compiled(hidden_states, torch.empty_like(hidden_states))
+        torch.cuda.synchronize()
+        projection_state.zero_()
+        operator_state.zero_()
+
+        graph_output = torch.empty_like(hidden_states)
+        graph = torch.cuda.CUDAGraph()
+        with set_forward_context({mixer.prefix: metadata}, vllm_config, num_tokens=hidden_states.shape[0]):
+            with torch.cuda.graph(graph):
+                compiled(hidden_states, graph_output)
+            projection_state.zero_()
+            operator_state.zero_()
+            for _ in range(replay_count):
+                graph.replay()
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(graph_output, expected, rtol=2e-4, atol=2e-4)
+        torch.testing.assert_close(projection_state, expected_projection_state, rtol=2e-5, atol=2e-5)
+        torch.testing.assert_close(operator_state, expected_operator_state, rtol=2e-5, atol=2e-5)
 
 
 @CUDA_REQUIRED

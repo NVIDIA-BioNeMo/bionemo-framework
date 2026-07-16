@@ -304,9 +304,12 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor) -> None:
         """Invoke the opaque state-mutating op used by vLLM compilation and graphs."""
+        projection_state, operator_state = self.kv_cache
         torch.ops.bionemo_evo2.hyena_mixer(
             hidden_states,
             output,
+            projection_state,
+            operator_state,
             _encode_layer_name(self.prefix),
         )
 
@@ -316,10 +319,11 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
         query_start_loc: torch.Tensor,
         state_indices: torch.Tensor,
         has_initial_state: torch.Tensor,
+        projection_state: torch.Tensor,
+        operator_state: torch.Tensor,
         *,
         max_query_len: int,
     ) -> torch.Tensor:
-        projection_state, operator_state = self.kv_cache
         projected_states = packed_causal_fir(
             projected_states,
             self.hyena_proj_conv.short_conv_weight,
@@ -386,7 +390,13 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
             max_query_len=max_query_len,
         )
 
-    def forward_impl(self, hidden_states: torch.Tensor, output: torch.Tensor) -> None:
+    def forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        projection_state: torch.Tensor,
+        operator_state: torch.Tensor,
+    ) -> None:
         """Project, mix each packed scheduler segment, and update vLLM's cache in place."""
         forward_context: ForwardContext = get_forward_context()
         metadata_raw = forward_context.attn_metadata
@@ -436,6 +446,8 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 self._decode_query_start_loc[: num_decode_tokens + 1],
                 decode_state_indices,
                 self._decode_has_initial_state[:num_decode_tokens],
+                projection_state,
+                operator_state,
                 max_query_len=1,
             )
 
@@ -459,6 +471,8 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 metadata.query_start_loc_p,
                 prefill_state_indices,
                 metadata.has_initial_states_p,
+                projection_state,
+                operator_state,
                 max_query_len=max_query_len,
             )
 
@@ -527,6 +541,8 @@ class Evo2HyenaDecoderLayer(nn.Module):
 def _hyena_mixer_custom_op(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
+    projection_state: torch.Tensor,
+    operator_state: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
     layer_name = _resolve_layer_name(layer_name)
@@ -535,12 +551,14 @@ def _hyena_mixer_custom_op(
     if not isinstance(mixer, Evo2HyenaMixer):
         raise TypeError(f"registered Evo2 layer {layer_name!r} is not an Evo2HyenaMixer")
     with fir_route_telemetry_context():
-        mixer.forward_impl(hidden_states, output)
+        mixer.forward_impl(hidden_states, output, projection_state, operator_state)
 
 
 def _hyena_mixer_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
+    projection_state: torch.Tensor,
+    operator_state: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
     return None
@@ -549,7 +567,7 @@ def _hyena_mixer_fake(
 direct_register_custom_op(
     op_name="hyena_mixer",
     op_func=_hyena_mixer_custom_op,
-    mutates_args=["output"],
+    mutates_args=["output", "projection_state", "operator_state"],
     fake_impl=_hyena_mixer_fake,
     target_lib=_EVO2_LIBRARY,
 )
