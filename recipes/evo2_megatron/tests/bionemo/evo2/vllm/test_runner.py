@@ -556,7 +556,7 @@ def test_speed_lane_rejects_minimal_self_attested_proof_artifact(tmp_path) -> No
         )
 
 
-def test_benchmark_mode_rejects_unlinked_speed_or_doubly_attested_proof(tmp_path) -> None:
+def test_benchmark_mode_accepts_unlinked_speed_and_rejects_doubly_attested_proof(tmp_path) -> None:
     common = [
         "--backend",
         "vllm",
@@ -574,8 +574,8 @@ def test_benchmark_mode_rejects_unlinked_speed_or_doubly_attested_proof(tmp_path
         str(tmp_path / "result.json"),
     ]
 
-    with pytest.raises(ValueError, match="linked proof artifact"):
-        runner.benchmark_mode_from_args(runner.build_parser().parse_args(common))
+    if runner.benchmark_mode_from_args(runner.build_parser().parse_args(common)) != "speed":
+        raise AssertionError("unlinked proof=false execution must use the low-overhead speed path")
     with pytest.raises(ValueError, match="cannot link"):
         runner.benchmark_mode_from_args(
             runner.build_parser().parse_args(

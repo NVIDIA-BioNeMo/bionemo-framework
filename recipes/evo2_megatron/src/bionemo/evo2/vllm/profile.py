@@ -171,7 +171,6 @@ class Evo2VllmProfile:
             "model_impl": "vllm",
             "dtype": "bfloat16",
             "seed": seed,
-            "worker_extension_cls": "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension",
             "optimization_level": self.optimization_level,
             "performance_mode": self.performance_mode,
             "logprobs_mode": "processed_logprobs",
@@ -206,6 +205,8 @@ class Evo2VllmProfile:
         if self.shared_prefix_state_reuse:
             kwargs["block_size"] = _PREFIX_CACHE_BLOCK_SIZE
             kwargs["mamba_block_size"] = _PREFIX_CACHE_BLOCK_SIZE
+        if self.proof:
+            kwargs["worker_extension_cls"] = "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension"
         if self.topology == "tp2":
             kwargs["distributed_executor_backend"] = "ray"
         return kwargs
@@ -244,7 +245,7 @@ class Evo2VllmProfile:
             "disable_log_stats",
             "logprobs_mode",
         ):
-            engine_kwargs.pop(key)
+            engine_kwargs.pop(key, None)
 
         return {
             "backend": "vllm",

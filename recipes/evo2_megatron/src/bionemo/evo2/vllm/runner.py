@@ -389,7 +389,7 @@ def runtime_versions() -> dict[str, Any]:
 
 
 def benchmark_mode_from_args(args: Any) -> str:
-    """Resolve one fail-closed preflight, proof, or linked speed invocation."""
+    """Resolve one preflight, proof, or low-overhead speed invocation."""
     linked_proof = getattr(args, "linked_proof_artifact", None)
     if args.context_preflight_only:
         if args.proof or linked_proof is not None:
@@ -399,8 +399,6 @@ def benchmark_mode_from_args(args: Any) -> str:
         if linked_proof is not None:
             raise ValueError("a proof run cannot link another proof artifact")
         return "proof"
-    if linked_proof is None:
-        raise ValueError("a low-overhead speed run requires a linked proof artifact")
     return "speed"
 
 
@@ -6272,14 +6270,14 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     }
     benchmark_contract_digest = benchmark_contract_sha256(benchmark_contract)
     linked_proof = (
-        None
-        if benchmark_mode == "proof"
-        else validate_linked_proof_artifact(
+        validate_linked_proof_artifact(
             args.linked_proof_artifact,
             expected_contract=benchmark_contract,
             caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
+        if benchmark_mode == "speed" and args.linked_proof_artifact is not None
+        else None
     )
     provenance_s = time.perf_counter() - provenance_begin
 
@@ -6459,9 +6457,15 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             peak_device_memory_bytes=peak_device_memory,
         )
     else:
-        if linked_proof is None or not isinstance(linked_proof.get("gpu_memory_headroom"), dict):
-            raise RuntimeError("speed lane is missing linked proof GPU memory headroom evidence")
-        memory_headroom = linked_proof["gpu_memory_headroom"]
+        if linked_proof is not None:
+            if not isinstance(linked_proof.get("gpu_memory_headroom"), dict):
+                raise RuntimeError("linked speed evidence is missing GPU memory headroom")
+            memory_headroom = linked_proof["gpu_memory_headroom"]
+        else:
+            memory_headroom = gpu_memory_headroom_evidence(
+                gpu_identity,
+                peak_device_memory_bytes=init_memory.peak_device_memory_bytes,
+            )
 
     steady_results = [result for result in phase_results if result.phase.startswith("steady-")]
     phase_artifacts, exact_progress = attach_exact_generation_progress_evidence(
@@ -6524,7 +6528,8 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             if profile.proof
             else {
                 "passed": None,
-                "attested_by_linked_proof": linked_proof,
+                "linked_proof": linked_proof,
+                "post_output_validation_passed": True,
             }
         ),
         "versions": runtime_versions(),

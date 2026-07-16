@@ -87,7 +87,7 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     assert profile.per_engine_batch_size == 48
     assert kwargs["tensor_parallel_size"] == 1
     assert "distributed_executor_backend" not in kwargs
-    assert kwargs["worker_extension_cls"] == "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension"
+    assert "worker_extension_cls" not in kwargs
     assert kwargs["max_num_seqs"] == 48
     assert kwargs["async_scheduling"] is True
     assert kwargs["compilation_config"]["compile_sizes"] == [48]
