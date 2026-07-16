@@ -30,22 +30,30 @@ Target-profile offline waterfall:
   → 358 synteny/total-gene final passes
 ```
 
-The checked evidence and source hashes are in [historical-evidence.md](.agents/skills/phage-design/references/historical-evidence.md). The recorded source revision is `99673b047a196352afcbb35e7aa4200127af2616`.
+The checked evidence and source hashes are in [historical-evidence.md](.agents/skills/bionemo-phage-design/references/historical-evidence.md). The recorded source revision is `99673b047a196352afcbb35e7aa4200127af2616`.
 
 ## Agent-run end-to-end result
 
 Not recorded yet. This section will be replaced with the first complete run performed through the recipe-local agent workflow, including its target, SFT lineage, selected RL checkpoint, rollout size, and final QC result.
 
-## Run the workflow with Codex
+## Run the workflow with an agent
 
 From the repository root:
 
 ```bash
 codex -C recipes/evo2_phage_gen \
-  'Use $phage-design in interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
+  'Use $bionemo-phage-design in interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
 ```
 
-Codex discovers the skills in this recipe's `.agents/skills/` directory because `-C` makes the recipe its working directory. Other Agent Skills-compatible harnesses can start from [the controller skill](.agents/skills/phage-design/SKILL.md).
+Codex discovers the skills in this recipe's `.agents/skills/` directory because `-C` makes the recipe its working directory. The same bundle includes a validated [Codex plugin manifest](.agents/.codex-plugin/plugin.json) for packaging, while other Agent Skills-compatible harnesses can start from [the controller skill](.agents/skills/bionemo-phage-design/SKILL.md).
+
+With Claude Code, load the same skills as a recipe-local plugin:
+
+```bash
+cd recipes/evo2_phage_gen
+claude --plugin-dir .agents \
+  '/evo2-phage-gen:bionemo-phage-design Use interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
+```
 
 ## Reproduce the RL result
 
@@ -188,15 +196,15 @@ There is not yet a checked-in canonical launcher for the complete paper SFT run,
 ## Troubleshooting
 
 - If an entrypoint is missing, rerun `.ci_build.sh`, source `.ci_test_env.sh`, and check `pyproject.toml` plus `<command> --help`.
-- If GDPO runs out of memory, lower the microbatch first while preserving the effective global batch; see the [resource and OOM guide](.agents/skills/adapt-phage-execution/references/resource-and-oom-policy.md).
+- If GDPO runs out of memory, lower the microbatch first while preserving the effective global batch; see the [resource and OOM guide](.agents/skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md).
 - If external QC fails, verify the large databases completed successfully and inspect the per-stage logs under the rollout root.
 - If a fresh run selects a checkpoint other than step 190, use that checkpoint for rollout and report its validation evidence. Step 190 is historical context, not a fixed target.
 
 ## References
 
 - [Generative design of novel bacteriophages with genome language models](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full)
-- [Checked paper, supplement, and figure assets](.agents/skills/phage-design/assets/literature/king-2025-generative-phage-design/)
-- [Historical result evidence](.agents/skills/phage-design/references/historical-evidence.md)
+- [Checked paper, supplement, and figure assets](.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/)
+- [Historical result evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)
 - [Recipe commands and dependency pins](pyproject.toml)
 - [Evo 2 model and checkpoint notes](../evo2_megatron/README.md)

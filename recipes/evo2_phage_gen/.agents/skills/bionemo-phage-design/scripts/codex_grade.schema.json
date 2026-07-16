@@ -1,0 +1,26 @@
+{
+  "title": "Agent Skill Eval Grade",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_id", "outcome", "passed", "assertions", "summary"],
+  "properties": {
+    "case_id": {"type": "string", "minLength": 1},
+    "outcome": {"type": "string", "enum": ["pass", "fail"]},
+    "passed": {"type": "boolean"},
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assertion", "passed", "evidence"],
+        "properties": {
+          "assertion": {"type": "string", "minLength": 1},
+          "passed": {"type": "boolean"},
+          "evidence": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "summary": {"type": "string", "minLength": 1}
+  }
+}

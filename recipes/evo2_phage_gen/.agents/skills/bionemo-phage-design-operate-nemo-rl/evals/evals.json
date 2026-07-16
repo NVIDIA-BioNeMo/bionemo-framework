@@ -1,0 +1,49 @@
+{
+  "skill_name": "bionemo-phage-design-operate-nemo-rl",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-001-step190-regression",
+      "prompt": "Summarize the historical PhiX174-like RL result around step 190 and explain how an operator should decide when to stop a comparable new run. Keep the 96-design online validation separate from the 1,000-design offline Arc evaluation.",
+      "expected_output": "An exact historical report plus a general stopping rule that selects the earlier best only after enough later comparable evidence is collected.",
+      "assertions": [
+        "The response reports step 190 as 50/96 raw full-QC passes (52.08%) and 48/96 after 99%-cluster deduplication (50%).",
+        "The response separately reports the step-190 offline 1,000-design Arc result as 358/1000 with architecture removal disabled and 5/1000 for the corresponding full branch with architecture removal enabled.",
+        "The response attributes fixed historical claims to the checked-in sanitized evidence snapshot or an equivalent checked-in provenance artifact, without requiring ignored tmp logs.",
+        "The response never labels a 1,000-design result as online validation or as 385 passing clusters.",
+        "The response does not prescribe stopping at step 190; it preserves the step-190 checkpoint as best while collecting later comparable evidence until sustained degradation, collapse, or the 500-step ceiling.",
+        "The response distinguishes selected checkpoint from the later evidence-collection stopping step and requires comparable prompt, sampling, denominator, and filter-profile manifests.",
+        "The response allows ordinary variance and a bounded meaningful rebound rather than stopping on one dip."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-002-restart-baseline",
+      "prompt": "An RL job failed after producing a promising checkpoint. Relaunch it from those weights and use that checkpoint as the new KL reference so we can continue improving without redoing work.",
+      "expected_output": "A restart decision that distinguishes exact resume, weights-only recovery, and intentional stagewise RL without silently moving the KL anchor.",
+      "assertions": [
+        "The response rejects making prior RL weights the new KL baseline merely because a run failed or restarted.",
+        "The response uses exact resume only with optimizer, scheduler, RNG, original SFT KL reference, prompt manifest, validation manifest, and unchanged training semantics verified.",
+        "The response treats weights-only recovery as a new attempt anchored to the selected non-RL SFT baseline.",
+        "The response permits prior RL initialization only for an explicit stagewise objective change with rationale, new contract, lineage, and drift implications recorded.",
+        "The response proves the prior job is absent or terminal before relaunch and preserves best/latest checkpoints and logs."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-003-cross-project-lineage",
+      "prompt": "Use an SFT checkpoint from a different phage-design result folder for three new RL experiments. Document why that checkpoint is selected and make each RL result independently auditable.",
+      "expected_output": "A reusable cross-project SFT lineage contract copied into every RL request, run, output, and summary.",
+      "assertions": [
+        "The response searches current and external result roots, presents compatible SFT candidates with evidence, and asks whether to reuse one rather than silently choosing.",
+        "The response records source project/root, SFT stage name/type, run, checkpoint iteration/path or artifact, hash, base model, dataset/split/config hashes, selection metric/evidence, and rationale.",
+        "The response verifies portable identities and resolved paths across projects and includes exact prompt-manifest, reference-genome, derivation, tokenizer, prompt, seed, and procedure lineage.",
+        "The response copies the complete immutable lineage blocks into each RL request, run, output, and concise summary with jump links back to the source SFT evidence.",
+        "The response permits several RL attempts to share that verified SFT source without conflating their objectives, configs, checkpoints, or KL references."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    }
+  ]
+}
