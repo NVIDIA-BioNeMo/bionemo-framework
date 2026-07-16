@@ -571,10 +571,13 @@ def aggregate_samples(samples: Sequence[BenchmarkSample]) -> dict[str, Any]:
 
 def sampling_params_kwargs(manifest: WorkloadManifest) -> dict[str, Any]:
     """Return exact-length vLLM sampling settings matching the GDPO policy."""
+    greedy = manifest.top_k == 1
     return {
-        "temperature": manifest.temperature,
-        "top_p": manifest.top_p,
-        "top_k": manifest.top_k,
+        # MCore defines top_k=1 as deterministic argmax. vLLM's top-k filter
+        # retains equal maxima unless its temperature-zero greedy path is used.
+        "temperature": 0.0 if greedy else manifest.temperature,
+        "top_p": 1.0 if greedy else manifest.top_p,
+        "top_k": 0 if greedy else manifest.top_k,
         "max_tokens": manifest.max_new_tokens,
         "min_tokens": manifest.max_new_tokens,
         "logprobs": 0,

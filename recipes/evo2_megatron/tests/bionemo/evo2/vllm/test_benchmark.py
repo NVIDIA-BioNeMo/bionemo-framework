@@ -606,6 +606,23 @@ def test_sampling_params_match_gdpo_and_force_exact_lengths_without_detokenizati
     }
 
 
+def test_sampling_params_translate_mcore_top_k_one_to_vllm_true_greedy() -> None:
+    manifest = WorkloadManifest(
+        **{
+            **WorkloadManifest.from_path(DATA).constructor_kwargs(),
+            "temperature": 1.0,
+            "top_k": 1,
+        }
+    )
+
+    kwargs = sampling_params_kwargs(manifest)
+
+    if (kwargs["temperature"], kwargs["top_k"], kwargs["top_p"]) != (0.0, 0, 1.0):
+        raise AssertionError(
+            "MCore top_k=1 must use vLLM's temperature-zero argmax path so exact logit ties remain deterministic"
+        )
+
+
 def test_compilation_proof_requires_inductor_graph_capture_and_stable_warm_replay() -> None:
     initialized = {
         "num_models_seen": 1,
