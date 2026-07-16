@@ -5790,7 +5790,7 @@ def worker_gpu_identity(
         "cuda_visible_devices": visible,
         "visible_device_selector": selector,
         "device_uuid": _nvml_text(nvml_module.nvmlDeviceGetUUID(handle)),
-        "pci_bus_id": _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId),
+        "pci_bus_id": _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId).lower(),
         "device_name": _nvml_text(nvml_module.nvmlDeviceGetName(handle)),
     }
 
@@ -5838,6 +5838,8 @@ def gpu_hardware_provenance(
             for field in ("visible_device_selector", "uuid", "pci_bus_id")
         ):
             raise ValueError("expected GPU selector, UUID, and PCI identity must be nonempty")
+        if assignment["pci_bus_id"] != assignment["pci_bus_id"].lower():
+            raise ValueError("expected GPU PCI identities must use canonical lowercase text")
 
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     expected_visible = ",".join(item["visible_device_selector"] for item in assignments)
@@ -5918,7 +5920,7 @@ def gpu_hardware_provenance(
 
             physical_index = int(nvml_module.nvmlDeviceGetIndex(handle))
             uuid = _nvml_text(nvml_module.nvmlDeviceGetUUID(handle))
-            pci_bus_id = _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId)
+            pci_bus_id = _nvml_text(nvml_module.nvmlDeviceGetPciInfo(handle).busId).lower()
             name = _nvml_text(nvml_module.nvmlDeviceGetName(handle))
             memory = nvml_module.nvmlDeviceGetMemoryInfo(handle, version=memory_version)
             properties = torch_module.cuda.get_device_properties(logical_index)

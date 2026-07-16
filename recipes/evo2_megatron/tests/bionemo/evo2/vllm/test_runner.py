@@ -2609,6 +2609,29 @@ def test_gpu_preflight_binds_assignment_and_exact_nvml_cuda_memory_semantics(mon
         assert memory["usable_total_relation_delta_bytes"] == 0
 
 
+def test_gpu_preflight_canonicalizes_nvml_pci_hex_case(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes()
+    expected_assignments = tuple(dict(item) for item in expected_assignments)
+    expected_assignments[0]["pci_bus_id"] = "00000000:0a:00.0"
+    expected_assignments[1]["pci_bus_id"] = "00000000:18:00.0"
+    fake_nvml.nvmlDeviceGetPciInfo = staticmethod(
+        lambda handle: SimpleNamespace(
+            busId=("00000000:0A:00.0" if handle == 0 else "00000000:18:00.0").encode()
+        )
+    )
+
+    hardware = runner.gpu_hardware_provenance(
+        nvml_module=fake_nvml,
+        torch_module=fake_torch,
+        expected_assignments=expected_assignments,
+    )
+
+    observed = [device["pci_bus_id"] for device in hardware["devices"]]
+    if observed != ["00000000:0a:00.0", "00000000:18:00.0"]:
+        raise AssertionError(f"NVML PCI identities were not canonicalized: {observed!r}")
+
+
 def test_gpu_preflight_retains_raw_one_byte_usable_total_disagreement(monkeypatch) -> None:
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     fake_nvml, fake_torch, expected_assignments = _gpu_preflight_fakes(cuda_total_delta=1)
