@@ -8,16 +8,17 @@ from __future__ import annotations
 import base64
 import binascii
 import csv
-import gzip
 import hashlib
-import json
+import io
 import math
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from bionemo.evo2.vllm.artifact_io import ArtifactSnapshotError, read_byte_snapshot, read_jsonl_snapshot
 from bionemo.evo2.vllm.benchmark import WorkloadManifest, WorkloadRequest, build_request_waves
+from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
 
 
 CANONICAL_7B_CHECKPOINT = "evo2/7b-1m:1.0"
@@ -305,22 +306,20 @@ def validate_canonical_identity_output_artifact(
     path = Path(str(artifact.get("path", ""))).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"canonical identity output artifact is missing: {path}")
-    observed_digest = _sha256_bytes(path.read_bytes())
+    try:
+        snapshot = read_jsonl_snapshot(path, label="canonical identity output", compression="gzip")
+    except ArtifactSnapshotError as error:
+        raise AssertionError("canonical identity output could not be decoded") from error
+    observed_digest = snapshot.sha256
     if artifact.get("sha256") != observed_digest:
         raise AssertionError("canonical identity output artifact SHA256 is invalid")
     if artifact.get("decoded_output_bytes_retained") is not True:
         raise AssertionError("canonical identity output artifact did not retain raw output bytes")
 
-    rows = []
-    with gzip.open(path, mode="rt", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise AssertionError(f"identity output row {line_number} is not valid JSON") from error
-            if not isinstance(row, dict):
-                raise AssertionError(f"identity output row {line_number} is not an object")
-            rows.append(row)
+    rows = list(snapshot.values)
+    for line_number, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise AssertionError(f"identity output row {line_number} is not an object")
     expected_ids = tuple(expected_request_ids)
     if tuple(row.get("request_id") for row in rows) != expected_ids:
         raise AssertionError("canonical identity output requests are missing, duplicated, or reordered")
@@ -405,22 +404,20 @@ def _validate_common_prefix_output_artifact(
     path = Path(str(artifact.get("path", ""))).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"common-prefix identity output artifact is missing: {path}")
-    observed_digest = _sha256_bytes(path.read_bytes())
+    try:
+        snapshot = read_jsonl_snapshot(path, label="common-prefix identity output", compression="gzip")
+    except ArtifactSnapshotError as error:
+        raise AssertionError("common-prefix identity output could not be decoded") from error
+    observed_digest = snapshot.sha256
     if artifact.get("sha256") != observed_digest:
         raise AssertionError("common-prefix identity output artifact SHA256 is invalid")
     if artifact.get("decoded_output_bytes_retained") is not True:
         raise AssertionError("common-prefix identity output artifact did not retain raw output bytes")
 
-    rows = []
-    with gzip.open(path, mode="rt", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise AssertionError(f"common-prefix output row {line_number} is not valid JSON") from error
-            if not isinstance(row, dict):
-                raise AssertionError(f"common-prefix output row {line_number} is not an object")
-            rows.append(row)
+    rows = list(snapshot.values)
+    for line_number, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise AssertionError(f"common-prefix output row {line_number} is not an object")
 
     if expected_request_ids is not None:
         expected_ids = tuple(expected_request_ids)
@@ -577,15 +574,15 @@ def validate_common_prefix_identity_output_artifacts(
 def load_canonical_7b_identity_cases(path: str | Path) -> tuple[CanonicalIdentityCase, ...]:
     """Load and validate the committed four-case Evo2 7B identity protocol."""
     source = Path(path).expanduser().resolve()
-    payload = source.read_bytes()
-    observed_sha256 = _sha256_bytes(payload)
+    snapshot = read_byte_snapshot(source, label="canonical prompts CSV")
+    observed_sha256 = snapshot.sha256
     if observed_sha256 != CANONICAL_7B_PROMPTS_SHA256:
         raise ValueError(
             f"canonical prompts.csv SHA256 mismatch: expected {CANONICAL_7B_PROMPTS_SHA256}, "
             f"observed {observed_sha256}"
         )
 
-    with source.open(newline="", encoding="utf-8") as handle:
+    with io.StringIO(snapshot.payload.decode("utf-8"), newline="") as handle:
         rows = list(csv.DictReader(handle))
     if len(rows) != 4 or any("Sequence" not in row for row in rows):
         raise ValueError("canonical prompts.csv must contain exactly four Sequence rows")
@@ -647,8 +644,7 @@ def build_common_prefix_identity_manifest(
     *,
     case: CommonPrefixIdentityCase,
     prompts_csv: str | Path,
-    tokenizer_path: str | Path,
-    tokenize: Callable[[str], Sequence[int]],
+    tokenizer: SnapshotBoundTokenizer,
     request_count: int,
     request_id_prefix: str,
 ) -> WorkloadManifest:
@@ -661,9 +657,10 @@ def build_common_prefix_identity_manifest(
     if not 0 <= case.case_index < len(cases) or case != cases[case.case_index]:
         raise ValueError("common-prefix identity case does not belong to the frozen prompts.csv")
 
-    tokenizer = Path(tokenizer_path).expanduser().resolve()
-    tokenizer_sha256 = _sha256_bytes(tokenizer.read_bytes())
-    prompt_token_ids = tuple(int(token_id) for token_id in tokenize(case.prompt))
+    if not isinstance(tokenizer, SnapshotBoundTokenizer):
+        raise TypeError("common-prefix identity requires a SnapshotBoundTokenizer")
+    prompt_token_ids = tokenizer.encode(case.prompt)
+    tokenizer.verify_source()
     if len(prompt_token_ids) != 2048 or any(token_id < 0 for token_id in prompt_token_ids):
         raise ValueError("common-prefix identity prompt must tokenize to exactly 2048 nonnegative tokens")
     width = max(4, len(str(request_count - 1)))
@@ -687,8 +684,8 @@ def build_common_prefix_identity_manifest(
         stop_token_ids=(),
         prompt_source_path=str(Path(prompts_csv).expanduser().resolve()),
         prompt_source_sha256=CANONICAL_7B_PROMPTS_SHA256,
-        prompt_tokenizer_path=str(tokenizer),
-        prompt_tokenizer_sha256=tokenizer_sha256,
+        prompt_tokenizer_path=str(tokenizer.path),
+        prompt_tokenizer_sha256=tokenizer.source_sha256,
     )
     validate_common_prefix_identity_manifest(manifest, case=case, request_count=request_count)
     return manifest
@@ -727,8 +724,7 @@ def build_canonical_identity_manifest(
     *,
     case: CanonicalIdentityCase,
     prompts_csv: str | Path,
-    tokenizer_path: str | Path,
-    tokenize: Callable[[str], Sequence[int]],
+    tokenizer: SnapshotBoundTokenizer,
     request_count: int,
     request_id_prefix: str,
 ) -> WorkloadManifest:
@@ -743,9 +739,10 @@ def build_canonical_identity_manifest(
     if not 0 <= case.case_index < len(cases) or case != cases[case.case_index]:
         raise ValueError("canonical identity case does not belong to the frozen prompts.csv")
 
-    tokenizer = Path(tokenizer_path).expanduser().resolve()
-    tokenizer_sha256 = _sha256_bytes(tokenizer.read_bytes())
-    prompt_token_ids = tuple(int(token_id) for token_id in tokenize(case.prompt))
+    if not isinstance(tokenizer, SnapshotBoundTokenizer):
+        raise TypeError("canonical identity requires a SnapshotBoundTokenizer")
+    prompt_token_ids = tokenizer.encode(case.prompt)
+    tokenizer.verify_source()
     if len(prompt_token_ids) != case.prompt_length:
         raise ValueError(
             f"canonical case {case.case_index} prompt must tokenize to {case.prompt_length} tokens, "
@@ -775,8 +772,8 @@ def build_canonical_identity_manifest(
         stop_token_ids=(),
         prompt_source_path=str(Path(prompts_csv).expanduser().resolve()),
         prompt_source_sha256=CANONICAL_7B_PROMPTS_SHA256,
-        prompt_tokenizer_path=str(tokenizer),
-        prompt_tokenizer_sha256=tokenizer_sha256,
+        prompt_tokenizer_path=str(tokenizer.path),
+        prompt_tokenizer_sha256=tokenizer.source_sha256,
     )
     validate_canonical_identity_manifest(manifest, case=case, request_count=request_count)
     return manifest
@@ -849,9 +846,10 @@ def build_common_prefix_identity_contract(
 ) -> dict[str, Any]:
     """Return the immutable serial-vs-batched common-prefix accuracy contract."""
     source = Path(prompts_csv).expanduser().resolve()
-    if _sha256_bytes(source.read_bytes()) != CANONICAL_7B_PROMPTS_SHA256:
+    source_snapshot = read_byte_snapshot(source, label="common-prefix prompts CSV")
+    if source_snapshot.sha256 != CANONICAL_7B_PROMPTS_SHA256:
         raise ValueError("common-prefix identity source SHA256 drifted")
-    tokenizer = Path(tokenizer_path).expanduser().resolve()
+    tokenizer = SnapshotBoundTokenizer.from_path(tokenizer_path)
 
     def schedule_payload(schedule: HomogeneousIdentitySchedule) -> dict[str, Any]:
         return {
@@ -874,8 +872,8 @@ def build_common_prefix_identity_contract(
         "checkpoint": CANONICAL_7B_CHECKPOINT,
         "prompts_csv_path": str(source),
         "prompts_csv_sha256": CANONICAL_7B_PROMPTS_SHA256,
-        "tokenizer_path": str(tokenizer),
-        "tokenizer_sha256": _sha256_bytes(tokenizer.read_bytes()),
+        "tokenizer_path": str(tokenizer.path),
+        "tokenizer_sha256": tokenizer.source_sha256,
         "case_index": case.case_index,
         "prompt_length": case.prompt_length,
         "prompt_sha256": case.prompt_sha256,
@@ -905,17 +903,17 @@ def build_canonical_identity_contract(
 ) -> dict[str, Any]:
     """Return the exact model-quality contract linked across proof and speed lanes."""
     source = Path(prompts_csv).expanduser().resolve()
-    if _sha256_bytes(source.read_bytes()) != CANONICAL_7B_PROMPTS_SHA256:
+    source_snapshot = read_byte_snapshot(source, label="canonical prompts CSV")
+    if source_snapshot.sha256 != CANONICAL_7B_PROMPTS_SHA256:
         raise ValueError("canonical identity source SHA256 drifted")
-    tokenizer = Path(tokenizer_path).expanduser().resolve()
-    tokenizer_sha256 = _sha256_bytes(tokenizer.read_bytes())
+    tokenizer = SnapshotBoundTokenizer.from_path(tokenizer_path)
     return {
         "schema_version": 1,
         "checkpoint": CANONICAL_7B_CHECKPOINT,
         "prompts_csv_path": str(source),
         "prompts_csv_sha256": CANONICAL_7B_PROMPTS_SHA256,
-        "tokenizer_path": str(tokenizer),
-        "tokenizer_sha256": tokenizer_sha256,
+        "tokenizer_path": str(tokenizer.path),
+        "tokenizer_sha256": tokenizer.source_sha256,
         "case_index": case.case_index,
         "midpoint_fraction": case.midpoint_fraction,
         "sequence_length": case.sequence_length,

@@ -1247,8 +1247,8 @@
     }
   ],
   "max_new_tokens": 5989,
-  "temperature": 1,
-  "top_p": 1,
+  "temperature": 1.0,
+  "top_p": 1.0,
   "top_k": 4,
   "seed": 42,
   "dtype": "bfloat16",

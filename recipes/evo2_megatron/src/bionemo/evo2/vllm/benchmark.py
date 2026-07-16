@@ -15,6 +15,12 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from bionemo.evo2.vllm.artifact_io import read_json_snapshot, read_jsonl_snapshot
+from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
+
+
+_MIN_RANDOM_TEMPERATURE = 1e-5
+
 
 def _token_ids_sha256(token_ids: Sequence[int]) -> str:
     digest = hashlib.sha256()
@@ -131,23 +137,39 @@ class WorkloadManifest:
 
     def __post_init__(self) -> None:
         """Validate workload and sampling invariants."""
-        if self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError(f"unsupported workload schema_version: {self.schema_version}")
-        if not self.name:
+        if type(self.name) is not str or not self.name:
             raise ValueError("workload name cannot be empty")
         request_ids = [request.request_id for request in self.requests]
         if len(request_ids) != len(set(request_ids)):
             raise ValueError("request IDs must be unique")
         if not self.requests:
             raise ValueError("workload must contain at least one request")
-        if self.max_new_tokens <= 0:
+        if type(self.max_new_tokens) is not int or self.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
-        if self.temperature < 0:
-            raise ValueError("temperature cannot be negative")
+        if type(self.temperature) is not float or not math.isfinite(self.temperature):
+            raise TypeError("temperature must be a finite built-in float")
+        if self.temperature < _MIN_RANDOM_TEMPERATURE:
+            raise ValueError(
+                f"temperature must be at least {_MIN_RANDOM_TEMPERATURE} to prevent vLLM policy normalization"
+            )
+        if type(self.top_p) is not float or not math.isfinite(self.top_p):
+            raise TypeError("top_p must be a finite built-in float")
         if not 0 < self.top_p <= 1:
             raise ValueError("top_p must be in (0, 1]")
+        if type(self.top_k) is not int:
+            raise TypeError("top_k must be a built-in integer")
         if self.top_k == 0 or self.top_k < -1:
             raise ValueError("top_k must be -1 or positive")
+        if type(self.seed) is not int:
+            raise TypeError("seed must be a built-in integer")
+        if type(self.ignore_eos) is not bool:
+            raise TypeError("ignore_eos must be a built-in bool")
+        if type(self.stop_token_ids) is not tuple or any(
+            type(token_id) is not int or not 0 <= token_id < 512 for token_id in self.stop_token_ids
+        ):
+            raise TypeError("stop_token_ids must contain only built-in integer vocabulary IDs")
         if self.dtype not in ("bfloat16", "float16", "float32"):
             raise ValueError(f"unsupported dtype: {self.dtype}")
         prompt_provenance = (
@@ -189,8 +211,10 @@ class WorkloadManifest:
     @classmethod
     def from_path(cls, path: str | Path) -> WorkloadManifest:
         """Load and validate one JSON manifest."""
-        with Path(path).open(encoding="utf-8") as handle:
-            return cls.from_dict(json.load(handle))
+        snapshot = read_json_snapshot(path, label="workload manifest")
+        if not isinstance(snapshot.value, dict):
+            raise ValueError("workload manifest must be a JSON object")
+        return cls.from_dict(snapshot.value)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the canonical JSON-safe representation."""
@@ -245,8 +269,7 @@ class WorkloadManifest:
         self,
         path: str | Path,
         *,
-        tokenize: Callable[[str], Sequence[int]],
-        tokenizer_path: str | Path,
+        tokenizer: SnapshotBoundTokenizer,
         expected_sha256: str,
         expected_prompt_tokens: int | None = None,
         name: str | None = None,
@@ -254,22 +277,14 @@ class WorkloadManifest:
         """Replace requests with one hash-pinned, ID-preserving prompt JSONL source."""
         if expected_prompt_tokens is not None and expected_prompt_tokens <= 0:
             raise ValueError("expected_prompt_tokens must be positive")
-        source = Path(path).resolve()
-        payload = source.read_bytes()
-        source_sha256 = hashlib.sha256(payload).hexdigest()
-        if source_sha256 != expected_sha256:
-            raise ValueError(f"prompt source SHA256 mismatch: expected {expected_sha256}, observed {source_sha256}")
-        tokenizer = Path(tokenizer_path).resolve()
-        tokenizer_sha256 = hashlib.sha256(tokenizer.read_bytes()).hexdigest()
+        if not isinstance(tokenizer, SnapshotBoundTokenizer):
+            raise TypeError("prompt JSONL loading requires a SnapshotBoundTokenizer")
+        source = read_jsonl_snapshot(path, label="prompt source")
+        if source.sha256 != expected_sha256:
+            raise ValueError(f"prompt source SHA256 mismatch: expected {expected_sha256}, observed {source.sha256}")
         token_cache: dict[str, tuple[int, ...]] = {}
         requests = []
-        for line_number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
-            if not line:
-                raise ValueError(f"prompt source line {line_number} is blank")
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(f"prompt source line {line_number} is not valid JSON") from error
+        for line_number, row in enumerate(source.values, start=1):
             if not isinstance(row, dict) or set(row) != {"id", "prompt"}:
                 raise ValueError(f"prompt source line {line_number} must contain exactly id and prompt")
             request_id = row["id"]
@@ -277,7 +292,7 @@ class WorkloadManifest:
             if not isinstance(request_id, str) or not isinstance(prompt, str):
                 raise ValueError(f"prompt source line {line_number} id and prompt must be strings")
             if prompt not in token_cache:
-                token_cache[prompt] = tuple(int(token_id) for token_id in tokenize(prompt))
+                token_cache[prompt] = tokenizer.encode(prompt)
             prompt_token_ids = token_cache[prompt]
             if expected_prompt_tokens is not None and len(prompt_token_ids) != expected_prompt_tokens:
                 raise ValueError(
@@ -285,14 +300,15 @@ class WorkloadManifest:
                     f"observed {len(prompt_token_ids)}"
                 )
             requests.append(WorkloadRequest(request_id=request_id, prompt_token_ids=prompt_token_ids))
+        tokenizer.verify_source()
         return replace(
             self,
-            name=name or f"{self.name}-{source.stem}",
+            name=name or f"{self.name}-{source.path.stem}",
             requests=tuple(requests),
-            prompt_source_path=str(source),
-            prompt_source_sha256=source_sha256,
-            prompt_tokenizer_path=str(tokenizer),
-            prompt_tokenizer_sha256=tokenizer_sha256,
+            prompt_source_path=str(source.path),
+            prompt_source_sha256=source.sha256,
+            prompt_tokenizer_path=str(tokenizer.path),
+            prompt_tokenizer_sha256=tokenizer.source_sha256,
         )
 
     def with_request_count(
@@ -416,14 +432,55 @@ class BenchmarkSample:
 
     def __post_init__(self) -> None:
         """Reject malformed timing samples."""
+        if type(self.sample_index) is not int or self.sample_index < -1:
+            raise TypeError("sample_index must be a built-in integer >= -1")
+        for field_name in (
+            "request_count",
+            "prompt_tokens",
+            "generated_tokens",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int:
+                raise TypeError(f"{field_name} must be a built-in integer")
+            if value <= 0:
+                raise ValueError(f"{field_name} must be positive")
+        if type(self.generation_s) not in (int, float):
+            raise TypeError("generation_s must be a built-in integer or float")
+        if not math.isfinite(self.generation_s):
+            raise ValueError("generation_s must be finite")
         if self.generation_s <= 0:
             raise ValueError("generation_s must be positive")
-        if self.request_count <= 0:
-            raise ValueError("request_count must be positive")
-        if self.prompt_tokens <= 0 or self.generated_tokens <= 0:
-            raise ValueError("sample token counts must be positive")
+        for field_name in ("ttft_s", "inter_token_latency_s"):
+            values = getattr(self, field_name)
+            if type(values) is not tuple:
+                raise TypeError(f"{field_name} must be a built-in tuple")
+            for value in values:
+                if type(value) not in (int, float):
+                    raise TypeError(
+                        f"{field_name} values must be built-in integers or floats"
+                    )
+                if not math.isfinite(value):
+                    raise ValueError(f"{field_name} values must be finite")
+                if value < 0:
+                    raise ValueError(f"{field_name} values must be nonnegative")
+        if not self.ttft_s:
+            raise ValueError("ttft_s must retain at least one request timing")
+        if type(self.output_lengths) is not tuple or any(
+            type(value) is not int for value in self.output_lengths
+        ):
+            raise TypeError("output_lengths must contain built-in integers")
+        if any(value <= 0 for value in self.output_lengths):
+            raise ValueError("output_lengths must be positive")
         if len(self.output_lengths) != self.request_count:
             raise ValueError("output_lengths must align with requests")
+        if sum(self.output_lengths) != self.generated_tokens:
+            raise ValueError("output_lengths must sum to generated_tokens")
+        if type(self.peak_device_memory_bytes) is not tuple:
+            raise TypeError("peak_device_memory_bytes must be a built-in tuple")
+        if any(type(value) is not int for value in self.peak_device_memory_bytes):
+            raise TypeError("peak_device_memory_bytes must contain built-in integers")
+        if any(value < 0 for value in self.peak_device_memory_bytes):
+            raise ValueError("peak_device_memory_bytes must be nonnegative")
 
     @property
     def generated_tokens_per_s(self) -> float:
@@ -508,7 +565,7 @@ def aggregate_samples(samples: Sequence[BenchmarkSample]) -> dict[str, Any]:
         "batch_decode_s": _distribution(batch_decode) if batch_decode else None,
         "ttft_s": _distribution(ttft),
         "inter_token_latency_s": _distribution(inter_token_latency) if inter_token_latency else None,
-        "peak_device_memory_bytes": _distribution(peak_memory),
+        "peak_device_memory_bytes": _distribution(peak_memory) if peak_memory else None,
     }
 
 
@@ -521,7 +578,7 @@ def sampling_params_kwargs(manifest: WorkloadManifest) -> dict[str, Any]:
         "max_tokens": manifest.max_new_tokens,
         "min_tokens": manifest.max_new_tokens,
         "logprobs": 0,
-        "stop_token_ids": list(manifest.stop_token_ids) or None,
+        "stop_token_ids": list(manifest.stop_token_ids),
         "ignore_eos": manifest.ignore_eos,
         "detokenize": False,
     }
@@ -773,6 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-concurrent-partial-prefills", type=int, default=1)
     parser.add_argument("--long-prefill-chunk-tokens", type=int, default=0)
     parser.add_argument("--shared-prefix-state-reuse", action="store_true")
+    parser.add_argument("--mbs1-exact1k-audit", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     return parser
 

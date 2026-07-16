@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from nemo_rl.models.generation.vllm.vllm_backend import VllmInternalWorkerExtension
@@ -34,6 +35,172 @@ def test_named_worker_extension_delegates_proof_state_without_callable_rpc(monke
         "reset_prefix_sources": False,
     }
     assert worker.snapshot_evo2_proof_state() == {"snapshot": worker}
+
+
+def _rank_local_output(req_ids, sampled_token_ids, chosen_logprobs):
+    token_rows = []
+    logprob_rows = []
+    for request_tokens, request_logprobs in zip(sampled_token_ids, chosen_logprobs, strict=True):
+        for token_id, logprob in zip(request_tokens, request_logprobs, strict=True):
+            token_rows.append([token_id, (token_id + 1) % 512])
+            logprob_rows.append([logprob, logprob - 1.0])
+    return SimpleNamespace(
+        req_ids=list(req_ids),
+        req_id_to_index={req_id: index for index, req_id in enumerate(req_ids)},
+        sampled_token_ids=[list(tokens) for tokens in sampled_token_ids],
+        logprobs=SimpleNamespace(
+            logprob_token_ids=np.asarray(token_rows, dtype=np.int32),
+            logprobs=np.asarray(logprob_rows, dtype=np.float32),
+            sampled_token_ranks=np.zeros(len(token_rows), dtype=np.int32),
+            cu_num_generated_tokens=None,
+        ),
+    )
+
+
+def test_named_worker_extension_derives_independent_tp_evidence_from_model_runner_output() -> None:
+    outputs = [
+        _rank_local_output(("req-0", "req-1"), ((65,), (66,)), ((-0.1,), (-0.2,))),
+        _rank_local_output(("req-1", "req-0"), ((68,), (67,)), ((-0.4,), (-0.3,))),
+    ]
+    worker = Evo2VllmWorkerExtension()
+    worker.execute_model = lambda scheduler_output: pytest.fail(
+        "compiled-DAG TP execution must not depend on worker.execute_model"
+    )
+    worker.model_runner = SimpleNamespace(
+        execute_model=lambda scheduler_output, intermediate_tensors=None: outputs.pop(0),
+        sample_tokens=lambda grammar_output: pytest.fail(
+            f"unexpected sample_tokens fallback: {grammar_output!r}"
+        ),
+    )
+    worker.begin_evo2_rank_local_generation_evidence(
+        phase="steady-0.wave-000",
+        expected_envelope_sha256="a" * 64,
+        expected_request_count=2,
+        expected_max_new_tokens=2,
+    )
+
+    worker.model_runner.execute_model(SimpleNamespace(), None)
+    worker.model_runner.execute_model(SimpleNamespace(), None)
+    evidence = worker.snapshot_evo2_rank_local_generation_evidence()
+
+    assert evidence["source"] == "rank_local_model_runner_execute_or_sample"
+    assert evidence["request_count"] == 2
+    assert evidence["generated_token_count"] == 4
+    assert [row["vllm_request_id"] for row in evidence["requests"]] == ["req-0", "req-1"]
+    assert [row["token_count"] for row in evidence["requests"]] == [2, 2]
+    assert len({row["selected_stream_sha256"] for row in evidence["requests"]}) == 2
+    assert outputs == []
+
+
+def test_named_worker_extension_rejects_missing_rank_local_chosen_logprob() -> None:
+    output = _rank_local_output(("req-0",), ((65,),), ((-0.1,),))
+    output.logprobs.logprob_token_ids[0] = [66, 67]
+    worker = Evo2VllmWorkerExtension()
+    worker.model_runner = SimpleNamespace(
+        execute_model=lambda scheduler_output, intermediate_tensors=None: output,
+        sample_tokens=lambda grammar_output: None,
+    )
+    worker.begin_evo2_rank_local_generation_evidence(
+        phase="steady-0.wave-000",
+        expected_envelope_sha256="a" * 64,
+        expected_request_count=1,
+        expected_max_new_tokens=1,
+    )
+
+    with pytest.raises(RuntimeError, match="chosen token"):
+        worker.model_runner.execute_model(SimpleNamespace(), None)
+
+
+def test_named_worker_extension_observes_compiled_dag_sample_tokens_fallback() -> None:
+    output = _rank_local_output(("req-0",), ((65,),), ((0.0,),))
+    worker = Evo2VllmWorkerExtension()
+    worker.model_runner = SimpleNamespace(
+        execute_model=lambda scheduler_output, intermediate_tensors=None: None,
+        sample_tokens=lambda grammar_output: output,
+    )
+    worker.begin_evo2_rank_local_generation_evidence(
+        phase="steady-0.wave-000",
+        expected_envelope_sha256="a" * 64,
+        expected_request_count=1,
+        expected_max_new_tokens=1,
+    )
+
+    assert worker.model_runner.execute_model(SimpleNamespace(), None) is None
+    assert worker.model_runner.sample_tokens(SimpleNamespace()) is output
+    evidence = worker.snapshot_evo2_rank_local_generation_evidence()
+
+    assert evidence["execution_call_count"] == 1
+    assert evidence["generated_token_count"] == 1
+
+
+def test_named_worker_extension_aborts_incomplete_epoch_and_retries_without_stale_rows() -> None:
+    incomplete = _rank_local_output(("req-0",), ((65,),), ((-0.1,),))
+    complete = _rank_local_output(("req-1",), ((66,),), ((-0.2,),))
+    outputs = [incomplete, complete]
+    worker = Evo2VllmWorkerExtension()
+    worker.model_runner = SimpleNamespace(
+        execute_model=lambda scheduler_output, intermediate_tensors=None: outputs.pop(0),
+        sample_tokens=lambda grammar_output: None,
+    )
+    worker.begin_evo2_rank_local_generation_evidence(
+        phase="steady-0.wave-000",
+        expected_envelope_sha256="a" * 64,
+        expected_request_count=2,
+        expected_max_new_tokens=1,
+    )
+    worker.model_runner.execute_model(SimpleNamespace(), None)
+
+    with pytest.raises(RuntimeError, match="request count is incomplete"):
+        worker.snapshot_evo2_rank_local_generation_evidence()
+
+    assert worker.abort_evo2_rank_local_generation_evidence() == {
+        "tp_rank": 0,
+        "aborted": True,
+        "phase": "steady-0.wave-000",
+    }
+    worker.begin_evo2_rank_local_generation_evidence(
+        phase="steady-0.wave-001",
+        expected_envelope_sha256="b" * 64,
+        expected_request_count=1,
+        expected_max_new_tokens=1,
+    )
+    worker.model_runner.execute_model(SimpleNamespace(), None)
+    evidence = worker.snapshot_evo2_rank_local_generation_evidence()
+
+    assert evidence["phase"] == "steady-0.wave-001"
+    assert evidence["request_order"] == ["req-1"]
+    assert outputs == []
+
+
+def test_named_worker_extension_reset_aborts_active_rank_local_epoch(monkeypatch) -> None:
+    delegated = []
+    monkeypatch.setattr(
+        runner,
+        "reset_vllm_worker_proof_state",
+        lambda owner, reset_prefix_sources: delegated.append(
+            (owner, reset_prefix_sources)
+        )
+        or {"reset": True},
+    )
+    worker = Evo2VllmWorkerExtension()
+    worker.model_runner = SimpleNamespace(
+        execute_model=lambda scheduler_output, intermediate_tensors=None: None,
+        sample_tokens=lambda grammar_output: None,
+    )
+    worker.begin_evo2_rank_local_generation_evidence(
+        phase="cold-generation.wave-000",
+        expected_envelope_sha256="a" * 64,
+        expected_request_count=1,
+        expected_max_new_tokens=1,
+    )
+
+    assert worker.reset_evo2_proof_state(False) == {"reset": True}
+    assert worker.abort_evo2_rank_local_generation_evidence() == {
+        "tp_rank": 0,
+        "aborted": False,
+        "phase": None,
+    }
+    assert delegated == [(worker, False)]
 
 
 def test_nemo_worker_extension_composes_refit_and_evo2_proof_controls() -> None:

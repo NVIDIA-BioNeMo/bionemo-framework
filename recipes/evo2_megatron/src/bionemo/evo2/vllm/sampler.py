@@ -297,6 +297,12 @@ def _fp32_hex(value: float) -> str:
     return struct.pack(">f", value).hex()
 
 
+def _generator_state_sha256(generator: Any) -> str:
+    state = generator.get_state()
+    raw = state.detach().cpu().contiguous().numpy().tobytes()
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _execute_schedule(
     sampler: Any,
     *,
@@ -328,7 +334,15 @@ def _execute_schedule(
             logits = base_logits.repeat(len(group), 1)
             top_k = torch.full((len(group),), 4, dtype=torch.int32, device=device)
             local_generators = {index: generators[request_id] for index, request_id in enumerate(group)}
+            before_states = {
+                request_id: _generator_state_sha256(generators[request_id]) for request_id in group
+            }
             sampled, processed_logprobs = sampler(logits, local_generators, top_k, None)
+            if any(
+                _generator_state_sha256(generators[request_id]) == before_states[request_id]
+                for request_id in group
+            ):
+                raise RuntimeError("sampler behavioral preflight native forward did not advance generator state")
             if processed_logprobs is None or processed_logprobs.shape != logits.shape:
                 raise RuntimeError("processed-logprob sampler route did not retain its chosen-policy distribution")
             for row in processed_logprobs.detach().cpu().tolist():
@@ -377,7 +391,8 @@ def run_sampler_seed_behavioral_preflight(
 ) -> dict[str, Any]:
     """Exercise the actual production sampler under adversarial physical schedules."""
     environment = sampler_runtime_environment_contract(environ)
-    sampler, route = _resolve_native_topk_sampler(worker)
+    sampler_object, route = _resolve_native_topk_sampler(worker)
+    sampler = getattr(sampler_object, "_evo2_sampler_original_forward", sampler_object)
     device = getattr(worker.model_runner, "device", None)
     if device is None:
         raise RuntimeError("vLLM model runner did not expose its sampler device")
@@ -480,6 +495,7 @@ def run_sampler_seed_behavioral_preflight(
         "oracle_replay_streams": [{"request_id": request_id, **replay[request_id]} for request_id in _REQUEST_IDS],
         "oracle_replay_exact": replay == oracle,
         "variants": variants,
+        "native_forward_state_advancement_proven": True,
         "flashinfer_sampling_calls": 0,
         "passed": True,
     }
@@ -499,24 +515,68 @@ def install_sampler_route_proof_hook(
 
         def monitored_forward(logits, generators, k, p):
             rows = int(logits.shape[0])
-            indices = sorted(generators)
-            if indices != list(range(rows)):
+            if rows <= 0:
+                raise RuntimeError("production sampler rejects an empty dummy/capture batch")
+            if len(generators) != rows:
                 raise RuntimeError("production sampler requires one explicit generator per active row")
-            result = original(logits, generators, k, p)
-            worker._evo2_sampler_route_observations.append(
-                {
-                    "batch_rows": rows,
-                    "generator_count": len(generators),
-                    "generator_indices": indices,
-                    "generator_seeds": [int(generators[index].initial_seed()) for index in indices],
-                    "route": route["selected_route"],
-                    "passed": True,
-                }
+            first_generator = generators.get(0)
+            final_generator = generators.get(rows - 1)
+            if first_generator is None or final_generator is None:
+                raise RuntimeError("production sampler generator rows are not contiguous")
+            hot_signature = (
+                id(generators),
+                rows,
+                id(first_generator),
+                id(final_generator),
             )
+            descriptor = worker._evo2_sampler_active_batch_descriptor
+            if descriptor is None or descriptor["hot_signature"] != hot_signature:
+                if descriptor is not None and (
+                    descriptor["boundary_verified_sampler_call_count"]
+                    != descriptor["sampler_call_count"]
+                ):
+                    raise RuntimeError(
+                        "production sampler requires full-row boundary verification before a physical batch transition"
+                    )
+                indices = tuple(sorted(generators))
+                if indices != tuple(range(rows)):
+                    raise RuntimeError("production sampler generator rows are not contiguous")
+                generator_objects = tuple(generators[index] for index in indices)
+                seeds = tuple(int(generator.initial_seed()) for generator in generator_objects)
+                if len(seeds) != len(set(seeds)):
+                    raise RuntimeError("production sampler request generators must have unique seeds")
+                retained_generators = worker._evo2_sampler_generators_by_seed
+                for seed, generator in zip(seeds, generator_objects, strict=True):
+                    retained = retained_generators.get(seed)
+                    if retained is not None and retained is not generator:
+                        raise RuntimeError(
+                            "production sampler requires one persistent request-local generator"
+                        )
+                    retained_generators[seed] = generator
+                descriptor = {
+                    "descriptor_index": len(worker._evo2_sampler_batch_descriptors),
+                    "hot_signature": hot_signature,
+                    "generator_mapping": generators,
+                    "generator_objects": generator_objects,
+                    "generator_seeds": seeds,
+                    "identity_probe_mask": 0,
+                    "boundary_verified_sampler_call_count": None,
+                    "sampler_call_count": 0,
+                }
+                worker._evo2_sampler_batch_descriptors.append(descriptor)
+                worker._evo2_sampler_active_batch_descriptor = descriptor
+            probe_index = descriptor["sampler_call_count"] % rows
+            if generators.get(probe_index) is not descriptor["generator_objects"][probe_index]:
+                raise RuntimeError("production request-local generator identity changed within a physical batch")
+            descriptor["identity_probe_mask"] |= 1 << probe_index
+            result = original(logits, generators, k, p)
+            descriptor["sampler_call_count"] += 1
             return result
 
         sampler.forward = monitored_forward
-    worker._evo2_sampler_route_observations = []
+    worker._evo2_sampler_batch_descriptors = []
+    worker._evo2_sampler_active_batch_descriptor = None
+    worker._evo2_sampler_generators_by_seed = {}
     return {"environment_contract": environment, **route}
 
 
@@ -531,31 +591,86 @@ def snapshot_sampler_route_proof(
     _, route = _resolve_native_topk_sampler(worker)
     preflight = getattr(worker, "_evo2_sampler_seed_preflight", None)
     if preflight is None:
-        retained_observations = list(getattr(worker, "_evo2_sampler_route_observations", ()))
-        worker._evo2_sampler_route_observations = []
-        try:
-            preflight = run_sampler_seed_behavioral_preflight(worker, environ=environ)
-        finally:
-            worker._evo2_sampler_route_observations = retained_observations
+        preflight = run_sampler_seed_behavioral_preflight(worker, environ=environ)
         worker._evo2_sampler_seed_preflight = preflight
-    observations = list(getattr(worker, "_evo2_sampler_route_observations", ()))
-    if require_generation_observations and not observations:
-        raise RuntimeError("production proof retained no sampler route observations")
-    if any(
-        observation.get("passed") is not True
-        or observation.get("route") != _NATIVE_ROUTE
-        or observation.get("generator_count") != observation.get("batch_rows")
-        or observation.get("generator_indices") != list(range(observation.get("batch_rows", -1)))
-        for observation in observations
-    ):
-        raise RuntimeError("production sampler route observations failed recomputation")
+    retained_descriptors = list(getattr(worker, "_evo2_sampler_batch_descriptors", ()))
+    if require_generation_observations and not retained_descriptors:
+        raise RuntimeError("production proof retained no sampler batch descriptors")
+    descriptor_rows = []
+    if retained_descriptors:
+        import torch
+
+        active_descriptor = getattr(worker, "_evo2_sampler_active_batch_descriptor", None)
+        if active_descriptor is not retained_descriptors[-1]:
+            raise RuntimeError("production sampler active batch descriptor is stale or missing")
+        for descriptor_index, descriptor in enumerate(retained_descriptors):
+            generator_objects = descriptor["generator_objects"]
+            generator_seeds = descriptor["generator_seeds"]
+            sampler_call_count = descriptor["sampler_call_count"]
+            if (
+                descriptor["descriptor_index"] != descriptor_index
+                or not generator_objects
+                or len(generator_objects) != len(generator_seeds)
+                or sampler_call_count <= 0
+            ):
+                raise RuntimeError("production sampler batch descriptor is malformed")
+            if descriptor is active_descriptor:
+                generator_mapping = descriptor["generator_mapping"]
+                current_indices = tuple(sorted(generator_mapping))
+                if current_indices != tuple(range(len(generator_objects))):
+                    raise RuntimeError("production sampler phase-boundary generator rows are not contiguous")
+                current_objects = tuple(generator_mapping[index] for index in current_indices)
+                if any(
+                    current is not retained
+                    for current, retained in zip(current_objects, generator_objects, strict=True)
+                ):
+                    raise RuntimeError("production request-local generator identity changed at phase boundary")
+                if tuple(int(generator.initial_seed()) for generator in current_objects) != generator_seeds:
+                    raise RuntimeError("production request-local generator seed changed at phase boundary")
+                descriptor["boundary_verified_sampler_call_count"] = sampler_call_count
+            else:
+                if descriptor["boundary_verified_sampler_call_count"] != sampler_call_count:
+                    raise RuntimeError(
+                        "production sampler descriptor retired without full-row boundary verification"
+                    )
+            identity_verification_mode = "generation-call-boundary-full-row"
+            initial_state_sha256 = []
+            phase_end_state_sha256 = []
+            for seed, generator in zip(generator_seeds, generator_objects, strict=True):
+                if int(generator.initial_seed()) != seed:
+                    raise RuntimeError("production request-local generator seed changed across the phase")
+                initial_reference = torch.Generator(device=generator.device).manual_seed(seed)
+                initial_hash = _generator_state_sha256(initial_reference)
+                phase_end_hash = _generator_state_sha256(generator)
+                if initial_hash == phase_end_hash:
+                    raise RuntimeError("production request-local generator did not advance across the phase")
+                initial_state_sha256.append(initial_hash)
+                phase_end_state_sha256.append(phase_end_hash)
+            descriptor_rows.append(
+                {
+                    "descriptor_index": descriptor_index,
+                    "batch_rows": len(generator_objects),
+                    "generator_count": len(generator_objects),
+                    "generator_indices": list(range(len(generator_objects))),
+                    "generator_seeds": list(generator_seeds),
+                    "sampler_call_count": sampler_call_count,
+                    "full_row_identity_verified": True,
+                    "full_row_identity_verification_mode": identity_verification_mode,
+                    "initial_reference_state_sha256": initial_state_sha256,
+                    "phase_end_state_sha256": phase_end_state_sha256,
+                    "persistent_generator_identity": True,
+                    "state_changed_from_seeded_initial": True,
+                    "route": route["selected_route"],
+                    "passed": True,
+                }
+            )
     return {
-        "schema_version": 1,
+        "schema_version": 4,
         "environment_contract": environment,
         **route,
         "installation": sampler_installation_provenance(),
         "behavioral_preflight": preflight,
-        "generation_observations": observations,
+        "generation_batch_descriptors": descriptor_rows,
         "flashinfer_sampling_calls": 0,
         "passed": preflight.get("passed") is True,
     }
@@ -637,10 +752,11 @@ def validate_sampler_proof_evidence(
     expected_environment: Mapping[str, Any],
     expected_installation: Mapping[str, Any],
     expected_seed_batches: Sequence[Sequence[int]],
+    expected_request_generations: Sequence[Mapping[str, Any]],
     require_generation_observations: bool,
 ) -> dict[str, Any]:
     """Recompute sampler safety from retained streams, route calls, and installation evidence."""
-    if not isinstance(proof, dict) or proof.get("schema_version") != 1:
+    if not isinstance(proof, dict) or proof.get("schema_version") != 4:
         raise AssertionError("sampler proof schema is unsupported")
     if proof.get("environment_contract") != expected_environment:
         raise AssertionError("sampler environment contract drifted")
@@ -685,6 +801,7 @@ def validate_sampler_proof_evidence(
         or preflight.get("request_ids") != list(_REQUEST_IDS)
         or preflight.get("request_seeds") != list(_REQUEST_SEEDS)
         or preflight.get("steps_per_request") != _STEPS
+        or preflight.get("native_forward_state_advancement_proven") is not True
         or preflight.get("flashinfer_sampling_calls") != 0
     ):
         raise AssertionError("sampler behavioral preflight contract drifted")
@@ -809,44 +926,154 @@ def validate_sampler_proof_evidence(
         label="padding row",
     )
 
-    expected_batches = {tuple(int(seed) for seed in batch) for batch in expected_seed_batches}
+    if type(expected_request_generations) not in (list, tuple):
+        raise AssertionError("expected request generations must be an exact sequence")
+    expected_requests = []
+    for row in expected_request_generations:
+        if type(row) is not dict or set(row) != {
+            "request_id",
+            "seed",
+            "accepted_output_token_count",
+        }:
+            raise AssertionError("expected request generation row fields are not exact")
+        if type(row["request_id"]) is not str or not row["request_id"]:
+            raise AssertionError("expected request generation ID is malformed")
+        if type(row["seed"]) is not int or row["seed"] < 0:
+            raise AssertionError("expected request generation seed is malformed")
+        if type(row["accepted_output_token_count"]) is not int or row["accepted_output_token_count"] <= 0:
+            raise AssertionError("expected accepted output token count is malformed")
+        expected_requests.append(dict(row))
+    if len({row["request_id"] for row in expected_requests}) != len(expected_requests) or len(
+        {row["seed"] for row in expected_requests}
+    ) != len(expected_requests):
+        raise AssertionError("expected request generation IDs or seeds are not unique")
+    if require_generation_observations and not expected_requests:
+        raise AssertionError("generation sampler proof requires exact expected requests")
+
+    if type(expected_seed_batches) not in (list, tuple):
+        raise AssertionError("expected sampler seed batches must be an exact sequence")
+    expected_batch_rows = []
+    for batch in expected_seed_batches:
+        if type(batch) not in (list, tuple) or not batch:
+            raise AssertionError("expected sampler seed batch is empty or malformed")
+        normalized = tuple(batch)
+        if any(type(seed) is not int or seed < 0 for seed in normalized) or len(normalized) != len(set(normalized)):
+            raise AssertionError("expected sampler seed batch is malformed or non-unique")
+        expected_batch_rows.append(normalized)
+    if len(expected_batch_rows) != len(set(expected_batch_rows)):
+        raise AssertionError("expected sampler seed batches are duplicated")
+    expected_batches = set(expected_batch_rows)
     if require_generation_observations and not expected_batches:
         raise AssertionError("generation sampler proof requires exact expected seed batches")
-    if any(not batch or len(batch) != len(set(batch)) for batch in expected_batches):
-        raise AssertionError("expected sampler seed batches are empty or non-unique")
-    observations = proof.get("generation_observations")
-    if not isinstance(observations, list) or (require_generation_observations and not observations):
-        raise AssertionError("sampler generation route observations are missing")
-    observed_batches = set()
-    for observation in observations:
-        if not isinstance(observation, dict):
-            raise AssertionError("sampler generation observation is malformed")
-        rows = observation.get("batch_rows")
-        seeds = observation.get("generator_seeds")
+    expected_by_seed = {row["seed"]: row for row in expected_requests}
+    flattened_batched_seeds = [seed for batch in expected_batch_rows for seed in batch]
+    if len(flattened_batched_seeds) != len(set(flattened_batched_seeds)):
+        raise AssertionError("expected sampler batches reuse a caller request seed")
+    batched_seeds = set(flattened_batched_seeds)
+    if batched_seeds != set(expected_by_seed):
+        raise AssertionError("expected sampler batches do not cover the caller request seeds")
+    expected_batch_call_counts = {}
+    for batch in expected_batch_rows:
+        accepted_counts = {expected_by_seed[seed]["accepted_output_token_count"] for seed in batch}
+        if len(accepted_counts) != 1:
+            raise AssertionError("one physical sampler batch has inconsistent accepted output lengths")
+        expected_batch_call_counts[batch] = next(iter(accepted_counts))
+
+    descriptors = proof.get("generation_batch_descriptors")
+    if not isinstance(descriptors, list) or (require_generation_observations and not descriptors):
+        raise AssertionError("sampler generation batch descriptors are missing")
+    observed_batch_call_counts: dict[tuple[int, ...], int] = {}
+    observed_seed_call_counts = {seed: 0 for seed in expected_by_seed}
+    descriptor_fields = {
+        "descriptor_index",
+        "batch_rows",
+        "generator_count",
+        "generator_indices",
+        "generator_seeds",
+        "sampler_call_count",
+        "full_row_identity_verified",
+        "full_row_identity_verification_mode",
+        "initial_reference_state_sha256",
+        "phase_end_state_sha256",
+        "persistent_generator_identity",
+        "state_changed_from_seeded_initial",
+        "route",
+        "passed",
+    }
+    for descriptor_index, descriptor in enumerate(descriptors):
+        if type(descriptor) is not dict or set(descriptor) != descriptor_fields:
+            raise AssertionError("sampler generation batch descriptor fields are not exact")
+        rows = descriptor.get("batch_rows")
+        seeds = descriptor.get("generator_seeds")
+        sampler_call_count = descriptor.get("sampler_call_count")
+        initial_states = descriptor.get("initial_reference_state_sha256")
+        final_states = descriptor.get("phase_end_state_sha256")
         if (
-            isinstance(rows, bool)
-            or not isinstance(rows, int)
+            type(rows) is not int
             or rows <= 0
-            or observation.get("generator_count") != rows
-            or observation.get("generator_indices") != list(range(rows))
-            or not isinstance(seeds, list)
+            or descriptor.get("generator_count") != rows
+            or descriptor.get("generator_indices") != list(range(rows))
+            or type(seeds) is not list
             or len(seeds) != rows
             or len(seeds) != len(set(seeds))
+            or any(type(seed) is not int or seed < 0 for seed in seeds)
             or tuple(seeds) not in expected_batches
-            or observation.get("route") != _NATIVE_ROUTE
-            or observation.get("passed") is not True
+            or type(sampler_call_count) is not int
+            or sampler_call_count <= 0
+            or descriptor.get("full_row_identity_verified") is not True
+            or descriptor.get("full_row_identity_verification_mode")
+            != "generation-call-boundary-full-row"
+            or type(initial_states) is not list
+            or len(initial_states) != rows
+            or type(final_states) is not list
+            or len(final_states) != rows
+            or descriptor.get("descriptor_index") != descriptor_index
+            or descriptor.get("persistent_generator_identity") is not True
+            or descriptor.get("state_changed_from_seeded_initial") is not True
+            or descriptor.get("route") != _NATIVE_ROUTE
+            or descriptor.get("passed") is not True
         ):
-            raise AssertionError("sampler generation observation drifted from exact request seeds")
-        observed_batches.add(tuple(seeds))
-    if require_generation_observations and observed_batches != expected_batches:
-        raise AssertionError("sampler route proof did not exercise every exact physical seed batch")
+            raise AssertionError("sampler generation batch descriptor drifted from exact requests")
+        if any(
+            type(state) is not str
+            or len(state) != 64
+            or any(character not in "0123456789abcdef" for character in state)
+            for state in (*initial_states, *final_states)
+        ) or any(initial == final for initial, final in zip(initial_states, final_states, strict=True)):
+            raise AssertionError("sampler generator endpoint state evidence is malformed")
+        batch = tuple(seeds)
+        if batch in observed_batch_call_counts:
+            raise AssertionError("sampler proof repeated one physical batch descriptor")
+        observed_batch_call_counts[batch] = sampler_call_count
+        for seed in seeds:
+            observed_seed_call_counts[seed] = sampler_call_count
+    if require_generation_observations and observed_batch_call_counts != expected_batch_call_counts:
+        raise AssertionError("sampler calls do not match accepted output token counts for every physical batch")
+    for seed, expected in expected_by_seed.items():
+        if observed_seed_call_counts[seed] != expected["accepted_output_token_count"]:
+            raise AssertionError("request generator advancement differs from accepted output token accounting")
     if proof.get("passed") is not True or preflight.get("passed") is not True:
         raise AssertionError("sampler proof did not pass")
     return {
-        "schema_version": 1,
+        "schema_version": 4,
         "selected_route": _NATIVE_ROUTE,
-        "physical_seed_batches": [list(batch) for batch in sorted(expected_batches)],
-        "generation_observation_count": len(observations),
+        "physical_seed_batches": [list(batch) for batch in expected_batch_rows],
+        "physical_seed_batch_call_counts": [
+            {
+                "seeds": list(batch),
+                "accepted_output_token_count": expected_batch_call_counts[batch],
+                "observed_sampler_call_count": observed_batch_call_counts[batch],
+            }
+            for batch in expected_batch_rows
+        ],
+        "request_generator_advancement": [
+            {
+                **expected,
+                "observed_sampler_call_count": observed_seed_call_counts[expected["seed"]],
+            }
+            for expected in expected_requests
+        ],
+        "generation_batch_descriptor_count": len(descriptors),
         "flashinfer_sampling_calls": 0,
         "passed": True,
     }

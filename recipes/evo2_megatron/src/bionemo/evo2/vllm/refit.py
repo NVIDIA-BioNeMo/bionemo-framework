@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import time
 from dataclasses import dataclass
@@ -17,6 +16,8 @@ from typing import Any, Callable, Iterator
 import torch
 from nemo_rl.models.policy.utils import calculate_aligned_size
 from safetensors import safe_open
+
+from bionemo.evo2.vllm.artifact_io import read_json_snapshot
 
 
 _SAFETENSORS_DTYPES = {
@@ -119,7 +120,10 @@ def indexed_safetensors_layout(checkpoint: str | Path) -> IndexedSafetensorsLayo
     index_path = root / "model.safetensors.index.json"
     if not index_path.is_file():
         raise FileNotFoundError(f"safetensors index is missing: {index_path}")
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index_snapshot = read_json_snapshot(index_path, label="safetensors index")
+    index = index_snapshot.value
+    if not isinstance(index, dict):
+        raise ValueError("safetensors index must be a JSON object")
     weight_map = index.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError("safetensors index must contain a non-empty weight_map")

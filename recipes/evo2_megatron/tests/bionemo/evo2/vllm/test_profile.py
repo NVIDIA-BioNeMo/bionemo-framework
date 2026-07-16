@@ -7,6 +7,7 @@ import json
 import textwrap
 from dataclasses import replace
 
+import numpy as np
 import pytest
 from nemo_rl.distributed.ray_actor_environment_registry import (
     ACTOR_ENVIRONMENT_REGISTRY,
@@ -305,6 +306,34 @@ def test_profile_rejects_unsupported_or_misleading_settings() -> None:
         replace(base, topology="dp2", global_wave_size=95)
     with pytest.raises(ValueError, match="max_num_seqs"):
         replace(base, max_num_seqs=95, global_wave_size=96)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("max_model_len", 10_240.0),
+        ("max_num_batched_tokens", 16_384.0),
+        ("gpu_memory_utilization", np.float64(0.92)),
+        ("async_scheduling", 0),
+        ("proof", 0),
+        ("max_concurrent_partial_prefills", 1.0),
+        ("long_prefill_chunk_tokens", 0.0),
+        ("optimization_level", 2.0),
+        ("shared_prefix_state_reuse", 0),
+        ("global_wave_size", 96.0),
+        ("max_num_seqs", 96.0),
+    ),
+)
+def test_profile_rejects_raw_field_type_coercion(field: str, value: object) -> None:
+    base = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=10_240,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.92,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=field):
+        replace(base, **{field: value})
 
 
 def test_resolved_profile_validation_requires_full_decode_graphs_and_no_fallback() -> None:

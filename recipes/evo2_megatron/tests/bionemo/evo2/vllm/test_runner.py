@@ -7,9 +7,11 @@ import hashlib
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -40,6 +42,7 @@ from bionemo.evo2.vllm.runner import (
     run_generation_phase,
     validate_full_decode_proof,
 )
+from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
 
 
 DATA = __import__("pathlib").Path(__file__).with_name("data") / "gdpo_mixed_96.json"
@@ -94,6 +97,123 @@ def _sampler_installation_provenance() -> dict:
     }
 
 
+def _phase_with_coordinator_timing(
+    manifest: WorkloadManifest,
+    *,
+    sample_generation_s: object = 1.0,
+    generation_call_s: object = None,
+    coordinator_generation_wall_s: object = 1.0,
+    generation_timing_authority: object = "coordinator_monotonic_generation_wall",
+) -> dict:
+    call_timings = [1.0] if generation_call_s is None else generation_call_s
+    return {
+        "sample": {
+            "sample_index": 0,
+            "generation_s": sample_generation_s,
+            "request_count": len(manifest.requests),
+            "prompt_tokens": sum(
+                len(request.prompt_token_ids) for request in manifest.requests
+            ),
+            "generated_tokens": len(manifest.requests) * manifest.max_new_tokens,
+            "ttft_s": [0.1] * len(manifest.requests),
+            "inter_token_latency_s": [0.01] * len(manifest.requests),
+            "output_lengths": [manifest.max_new_tokens] * len(manifest.requests),
+            "peak_device_memory_bytes": [1_000],
+        },
+        "generation_call_s": call_timings,
+        "coordinator_generation_wall_s": coordinator_generation_wall_s,
+        "generation_timing_authority": generation_timing_authority,
+    }
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        {"sample_generation_s": True},
+        {"sample_generation_s": float("nan")},
+        {"generation_call_s": [float("inf")]},
+        {"coordinator_generation_wall_s": float("nan")},
+        {"generation_timing_authority": "worker-reported"},
+    ),
+)
+def test_phase_sample_rejects_nonfinite_or_noncoordinator_generation_timing(tamper) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1).with_max_new_tokens(1)
+    phase = _phase_with_coordinator_timing(manifest, **tamper)
+
+    with pytest.raises(AssertionError):
+        runner._validate_phase_sample(phase, manifest=manifest, sample_index=0)
+
+
+def test_phase_sample_requires_explicit_coordinator_generation_timing_authority() -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1).with_max_new_tokens(1)
+    phase = _phase_with_coordinator_timing(manifest)
+    del phase["coordinator_generation_wall_s"]
+
+    with pytest.raises(AssertionError, match="coordinator"):
+        runner._validate_phase_sample(phase, manifest=manifest, sample_index=0)
+
+
+def test_shared_prefix_manifest_uses_generation_prompt_token_ids_v1_digest() -> None:
+    base = WorkloadManifest.from_path(DATA).request_slice(0, 2)
+    manifest = replace(
+        base,
+        requests=(
+            WorkloadRequest(request_id="shared-43-a", prompt_token_ids=(43,)),
+            WorkloadRequest(request_id="shared-43-b", prompt_token_ids=(43,)),
+        ),
+    )
+
+    evidence = runner.shared_prefix_manifest_evidence(manifest)
+
+    assert evidence["prompt_token_ids_sha256"] == (
+        "8fcfb284618fdd1c28d8a7022eee50831e44986fac86e48b396800bf5ba2c93b"
+    )
+
+
+def test_rank_local_generation_contract_uses_v1_prompt_digest() -> None:
+    base = WorkloadManifest.from_path(DATA).request_slice(0, 1)
+    request = WorkloadRequest(request_id="semantic-43", prompt_token_ids=(43,))
+    manifest = replace(base, requests=(request,))
+    execution = runner.RequestExecutionRecord(
+        request_id=request.request_id,
+        global_request_index=0,
+        generation_round=0,
+        dp_rank=0,
+        call_index=0,
+        seed=42,
+    )
+    expected_payload = {
+        "schema_version": "evo2-rank-local-generation-contract/v1",
+        "phase": "cold-generation",
+        "semantic_namespace": "proof/cold",
+        "wave_index": 0,
+        "manifest_sha256": manifest.sha256,
+        "requested_max_new_tokens": manifest.max_new_tokens,
+        "requests": [
+            {
+                "request_id": request.request_id,
+                "qualified_request_identity": ["proof/cold", request.request_id],
+                "prompt_token_ids_sha256": (
+                    "8fcfb284618fdd1c28d8a7022eee50831e44986fac86e48b396800bf5ba2c93b"
+                ),
+                "execution": execution.to_dict(),
+            }
+        ],
+    }
+
+    observed = runner.rank_local_generation_contract_sha256(
+        "cold-generation",
+        "proof/cold",
+        0,
+        manifest,
+        (execution,),
+    )
+
+    assert observed == hashlib.sha256(
+        json.dumps(expected_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 class _RunnerTestNativeTopKSampler:
     __module__ = "vllm.v1.sample.ops.topk_topp_sampler"
     logprobs_mode = "processed_logprobs"
@@ -124,7 +244,11 @@ class _RunnerTestV1ModelRunner:
 _SAMPLER_BEHAVIORAL_PREFLIGHT = [None]
 
 
-def _sampler_worker_proof(seed_batches: tuple[tuple[int, ...], ...]) -> dict:
+def _sampler_worker_proof(
+    seed_batches: tuple[tuple[int, ...], ...],
+    *,
+    accepted_output_token_count: int = 3,
+) -> dict:
     environment = sampler_module.sampler_runtime_environment_contract()
     if _SAMPLER_BEHAVIORAL_PREFLIGHT[0] is None:
         worker = SimpleNamespace(model_runner=_RunnerTestV1ModelRunner())
@@ -146,23 +270,35 @@ def _sampler_worker_proof(seed_batches: tuple[tuple[int, ...], ...]) -> dict:
         "flashinfer.sampling": {"loaded": False, "path": None, "sha256": None},
     }
     return {
-        "schema_version": 1,
+        "schema_version": 4,
         "environment_contract": environment,
         "model_runner_type": "vllm.v1.worker.gpu_model_runner._RunnerTestV1ModelRunner",
         "sampler_type": "vllm.v1.sample.ops.topk_topp_sampler._RunnerTestNativeTopKSampler",
         "selected_route": "vllm.v1.sample.ops.topk_topp_sampler.TopKTopPSampler.forward_native",
         "installation": installation,
         "behavioral_preflight": copy.deepcopy(_SAMPLER_BEHAVIORAL_PREFLIGHT[0]),
-        "generation_observations": [
+        "generation_batch_descriptors": [
             {
+                "descriptor_index": descriptor_index,
                 "batch_rows": len(seeds),
                 "generator_count": len(seeds),
                 "generator_indices": list(range(len(seeds))),
                 "generator_seeds": list(seeds),
+                "sampler_call_count": accepted_output_token_count,
+                "full_row_identity_verified": True,
+                "full_row_identity_verification_mode": "generation-call-boundary-full-row",
+                "initial_reference_state_sha256": [
+                    hashlib.sha256(f"initial:{seed}".encode()).hexdigest() for seed in seeds
+                ],
+                "phase_end_state_sha256": [
+                    hashlib.sha256(f"final:{seed}".encode()).hexdigest() for seed in seeds
+                ],
+                "persistent_generator_identity": True,
+                "state_changed_from_seeded_initial": True,
                 "route": "vllm.v1.sample.ops.topk_topp_sampler.TopKTopPSampler.forward_native",
                 "passed": True,
             }
-            for seeds in seed_batches
+            for descriptor_index, seeds in enumerate(seed_batches)
         ],
         "flashinfer_sampling_calls": 0,
         "passed": True,
@@ -387,10 +523,11 @@ def test_speed_lane_rejects_minimal_self_attested_proof_artifact(tmp_path) -> No
         manifest,
         runner.profile_from_args(proof_args, manifest),
     )
+    speed_profile = runner.profile_from_args(speed_args, manifest)
     speed_contract = runner.build_benchmark_contract(
         speed_args,
         manifest,
-        runner.profile_from_args(speed_args, manifest),
+        speed_profile,
     )
     assert proof_contract == speed_contract
     assert "proof" not in proof_contract["profile"]
@@ -411,6 +548,11 @@ def test_speed_lane_rejects_minimal_self_attested_proof_artifact(tmp_path) -> No
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=speed_contract,
+            caller_coordinates=runner.CallerCoordinateContract.from_inputs(
+                manifest,
+                speed_profile,
+                speed_args.generation_round,
+            ),
         )
 
 
@@ -446,20 +588,26 @@ def test_benchmark_instrumentation_contract_distinguishes_proof_and_speed() -> N
     proof = runner.benchmark_instrumentation_contract("proof")
     speed = runner.benchmark_instrumentation_contract("speed")
 
-    assert proof == {
+    expected_proof = {
         "scheduler_callbacks_during_generation": True,
         "worker_proof_rpcs": True,
+        "sampler_call_counter_during_generation": True,
+        "sampler_endpoint_state_hashing_during_generation": False,
         "prefix_clone_instrumentation": True,
         "peak_memory_polling_during_generation": True,
         "post_generation_exact_output_validation": True,
     }
-    assert speed == {
+    expected_speed = {
         "scheduler_callbacks_during_generation": False,
         "worker_proof_rpcs": False,
+        "sampler_call_counter_during_generation": False,
+        "sampler_endpoint_state_hashing_during_generation": False,
         "prefix_clone_instrumentation": False,
         "peak_memory_polling_during_generation": False,
         "post_generation_exact_output_validation": True,
     }
+    if proof != expected_proof or speed != expected_speed:
+        raise AssertionError("proof and speed instrumentation contracts are not explicit and disjoint")
 
 
 def test_full_decode_proof_requires_full_unpadded_replay_and_rejects_fallback() -> None:
@@ -796,6 +944,308 @@ def test_exact_progress_artifacts_cover_proof_topologies_without_timed_callbacks
     assert aggregate["passed"] is True
 
 
+def _exact_1k_contract(topology: str, *, global_wave_size: int) -> dict:
+    manifest = WorkloadManifest.from_path(DATA).with_request_count(1_000, request_id_prefix="audit")
+    max_num_seqs = global_wave_size if topology == "tp2" else global_wave_size // 2
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            "/checkpoint",
+            "--manifest",
+            str(DATA),
+            "--topology",
+            topology,
+            "--max-model-len",
+            "64",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.95",
+            "--global-wave-size",
+            str(global_wave_size),
+            "--max-num-seqs",
+            str(max_num_seqs),
+            "--exact-progress-gate",
+            "--proof",
+            "--output",
+            "/tmp/exact-1k-proof.json",
+        ]
+    )
+    profile = runner.profile_from_args(args, manifest)
+    return runner.build_benchmark_contract(args, manifest, profile)
+
+
+def _mbs1_exact_1k_inputs(topology: str):
+    manifest = (
+        WorkloadManifest.from_path(DATA)
+        .request_slice(0, 1)
+        .with_request_count(1_000, request_id_prefix="mbs1")
+        .with_max_new_tokens(3)
+    )
+    max_num_seqs = 96 if topology == "tp2" else 48
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            "/checkpoint",
+            "--manifest",
+            str(DATA),
+            "--topology",
+            topology,
+            "--max-model-len",
+            "64",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.95",
+            "--global-wave-size",
+            "96",
+            "--max-num-seqs",
+            str(max_num_seqs),
+            "--exact-progress-gate",
+            "--shared-prefix-state-reuse",
+            "--mbs1-exact1k-audit",
+            "--proof",
+            "--output",
+            "/tmp/mbs1-exact-1k-proof.json",
+        ]
+    )
+    return args, manifest, runner.profile_from_args(args, manifest)
+
+
+@pytest.mark.parametrize(
+    ("topology", "expected_local_counts", "expected_first_wave_misses"),
+    (
+        ("tp2", [[96]] * 10 + [[40]], 1),
+        ("dp2", [[48, 48]] * 10 + [[20, 20]], 2),
+    ),
+)
+def test_mbs1_exact_1k_contract_seals_one_prompt_and_physical_schedule(
+    topology: str,
+    expected_local_counts: list[list[int]],
+    expected_first_wave_misses: int,
+) -> None:
+    args, manifest, profile = _mbs1_exact_1k_inputs(topology)
+
+    contract = runner.build_benchmark_contract(args, manifest, profile)["mbs1_exact1k"]
+
+    expected_prompt = runner.shared_prefix_manifest_evidence(manifest)
+    if contract["prompt_identity"] != expected_prompt:
+        raise AssertionError("MBS=1 contract did not bind the exact repeated prompt")
+    if contract["semantic_request_count"] != 1_000 or contract["unique_semantic_request_ids"] is not True:
+        raise AssertionError("MBS=1 contract collapsed or omitted semantic requests")
+    if contract["global_call_request_counts"] != [96] * 10 + [40]:
+        raise AssertionError("MBS=1 contract did not retain 10x96 plus tail40")
+    if contract["per_engine_call_request_counts"] != expected_local_counts:
+        raise AssertionError("MBS=1 contract did not retain exact local physical shapes")
+    if contract["expected_first_wave_cache_misses"] != expected_first_wave_misses:
+        raise AssertionError("MBS=1 contract did not require one primer per replica")
+
+
+def test_mbs1_exact_1k_contract_rejects_distinct_prompt_diagnostic() -> None:
+    args, _manifest, profile = _mbs1_exact_1k_inputs("tp2")
+    distinct = WorkloadManifest.from_path(DATA).with_request_count(1_000, request_id_prefix="diagnostic")
+
+    with pytest.raises(AssertionError, match="identical prompt"):
+        runner.build_benchmark_contract(args, distinct, profile)
+
+
+def test_benchmark_phase_coordinates_advance_round_calls_requests_and_seeds() -> None:
+    _args, manifest, profile = _mbs1_exact_1k_inputs("tp2")
+
+    coordinates = runner.benchmark_phase_coordinates(
+        manifest,
+        profile,
+        generation_round_start=3,
+        warmups=1,
+        repetitions=2,
+    )
+
+    if [row["phase"] for row in coordinates] != [
+        "cold-generation",
+        "warmup-0",
+        "steady-0",
+        "steady-1",
+    ]:
+        raise AssertionError("benchmark phases changed")
+    if [row["generation_round"] for row in coordinates] != [3, 4, 5, 6]:
+        raise AssertionError("benchmark phases reused a semantic generation round")
+    if [row["global_call_index_start"] for row in coordinates] != [33, 44, 55, 66]:
+        raise AssertionError("benchmark phases reused physical call coordinates")
+    if [row["global_request_index_start"] for row in coordinates] != [3_000, 4_000, 5_000, 6_000]:
+        raise AssertionError("benchmark phases reused global request coordinates")
+    first_records = runner.build_wave_execution_records(
+        manifest,
+        global_wave_size=96,
+        generation_round=coordinates[0]["generation_round"],
+        call_index_start=coordinates[0]["global_call_index_start"],
+        global_request_index_start=coordinates[0]["global_request_index_start"],
+    )
+    second_records = runner.build_wave_execution_records(
+        manifest,
+        global_wave_size=96,
+        generation_round=coordinates[1]["generation_round"],
+        call_index_start=coordinates[1]["global_call_index_start"],
+        global_request_index_start=coordinates[1]["global_request_index_start"],
+    )
+    if {record.seed for record in first_records} & {record.seed for record in second_records}:
+        raise AssertionError("consecutive benchmark phases reused stochastic request seeds")
+    if {record.global_request_index for record in first_records} & {
+        record.global_request_index for record in second_records
+    }:
+        raise AssertionError("consecutive benchmark phases reused global request ownership")
+
+
+def test_mbs1_exact_1k_phase_timing_separates_cold_warm_repeat_and_tail() -> None:
+    _args, manifest, profile = _mbs1_exact_1k_inputs("tp2")
+    coordinates = runner.benchmark_phase_coordinates(
+        manifest,
+        profile,
+        generation_round_start=0,
+        warmups=0,
+        repetitions=1,
+    )
+    phase_coordinate = coordinates[0]
+    executions = runner.build_wave_execution_records(
+        manifest,
+        global_wave_size=96,
+        generation_round=phase_coordinate["generation_round"],
+        call_index_start=phase_coordinate["global_call_index_start"],
+        global_request_index_start=phase_coordinate["global_request_index_start"],
+    )
+    request_counts = [96] * 10 + [40]
+    phase = {
+        "phase": "cold-generation",
+        "wave_proofs": [
+            {
+                "wave_index": wave_index,
+                "request_count": request_count,
+                "generation_round": phase_coordinate["generation_round"],
+                "call_index": phase_coordinate["global_call_index_start"] + wave_index,
+                "generation_s": float(wave_index + 1),
+            }
+            for wave_index, request_count in enumerate(request_counts)
+        ],
+        "request_executions": [record.to_dict() for record in executions],
+        "shared_prefix_state_reuse": None,
+        "prefix_cache_reset": True,
+        "proof_collected": False,
+    }
+
+    evidence = runner.mbs1_exact1k_phase_evidence(
+        phase,
+        manifest=manifest,
+        profile=profile,
+        phase_coordinate=phase_coordinate,
+        proof_collected=False,
+        linked_proof_artifact=Path("/tmp/linked-proof.json"),
+    )
+
+    if evidence["first_96"]["generation_s"] != 1.0:
+        raise AssertionError("first-96 timing did not include the first physical call")
+    if evidence["first_96"]["includes_prefix_materialization"] is not True:
+        raise AssertionError("first-96 timing omitted prefix materialization")
+    if evidence["warmed_repeat_96"]["generation_s"] != 2.0:
+        raise AssertionError("warmed repeat timing did not use the second physical call")
+    if evidence["tail_40"]["generation_s"] != 11.0:
+        raise AssertionError("tail timing did not use the exact final 40-request call")
+    if evidence["exact_1000_generation_s"] != 66.0:
+        raise AssertionError("exact-1k generation wall did not include all eleven calls")
+    if evidence["token_equality_between_phases_required"] is not False:
+        raise AssertionError("MBS=1 timing incorrectly required cold/warm token equality")
+
+
+@pytest.mark.parametrize("topology", ("tp2", "dp2"))
+def test_exact_1k_contract_rejects_noncanonical_global_wave_size(topology) -> None:
+    with pytest.raises(ValueError, match="1,000-request audit requires global_wave_size=96"):
+        _exact_1k_contract(topology, global_wave_size=80)
+
+
+@pytest.mark.parametrize(
+    "topology,expected_local_counts",
+    (
+        ("tp2", [[96]] * 10 + [[40]]),
+        ("dp2", [[48, 48]] * 10 + [[20, 20]]),
+    ),
+)
+def test_exact_1k_contract_freezes_10x96_plus_global40_tail(topology, expected_local_counts) -> None:
+    contract = _exact_1k_contract(topology, global_wave_size=96)
+
+    schedule = contract["exact_generation_progress"]["physical_schedule"]
+    assert schedule["generation_round"] == 0
+    assert schedule["global_call_index_start"] == 0
+    assert schedule["global_wave_size"] == 96
+    assert schedule["physical_calls_per_round"] == 11
+    assert schedule["global_call_request_counts"] == [96] * 10 + [40]
+    assert schedule["per_engine_call_request_counts"] == expected_local_counts
+    assert [call["call_in_round"] for call in schedule["calls"]] == list(range(11))
+    assert [call["global_call_index"] for call in schedule["calls"]] == list(range(11))
+    assert [call["global_request_count"] for call in schedule["calls"]] == [96] * 10 + [40]
+    assert [
+        [replica["local_request_count"] for replica in call["replicas"]] for call in schedule["calls"]
+    ] == expected_local_counts
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    (0.0, np.int64(0), "0", False, float("nan"), float("inf")),
+)
+def test_exact_1k_contract_rejects_non_builtin_raw_coordinate_values(bad_value: object) -> None:
+    contract = _exact_1k_contract("dp2", global_wave_size=96)
+    progress = copy.deepcopy(contract["exact_generation_progress"])
+    progress["physical_schedule"]["calls"][0]["replicas"][0]["dp_rank"] = bad_value
+
+    with pytest.raises(AssertionError, match="built-in integer"):
+        runner.validate_exact_generation_progress_contract(
+            progress,
+            manifest=WorkloadManifest.from_path(DATA).with_request_count(1_000, request_id_prefix="audit"),
+            profile=runner.Evo2VllmProfile(
+                topology="dp2",
+                max_model_len=64,
+                max_num_batched_tokens=16_384,
+                gpu_memory_utilization=0.95,
+                proof=True,
+                global_wave_size=96,
+                max_num_seqs=48,
+            ),
+            generation_round=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "generation_round",
+        "global_call_index_start",
+        "global_wave_size",
+        "physical_calls_per_round",
+    ),
+)
+def test_exact_1k_contract_rejects_integral_float_schedule_summaries(field: str) -> None:
+    contract = _exact_1k_contract("tp2", global_wave_size=96)
+    progress = copy.deepcopy(contract["exact_generation_progress"])
+    progress["physical_schedule"][field] = float(progress["physical_schedule"][field])
+
+    with pytest.raises(AssertionError, match="built-in integer"):
+        runner.validate_exact_generation_progress_contract(
+            progress,
+            manifest=WorkloadManifest.from_path(DATA).with_request_count(1_000, request_id_prefix="audit"),
+            profile=runner.Evo2VllmProfile(
+                topology="tp2",
+                max_model_len=64,
+                max_num_batched_tokens=16_384,
+                gpu_memory_utilization=0.95,
+                proof=True,
+                global_wave_size=96,
+                max_num_seqs=96,
+            ),
+            generation_round=0,
+        )
+
+
 def test_exact_progress_speed_artifact_retains_counts_and_links_physical_proof(tmp_path) -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
     proof_path = tmp_path / "proof.json"
@@ -895,6 +1345,165 @@ def test_request_seeds_encode_call_and_dp_stream_coordinates() -> None:
     assert set(dp2_call0_rank0).isdisjoint(dp2_call0_rank1)
 
 
+def _seed_capacity_manifest(*, request_count: int, seed: int) -> WorkloadManifest:
+    base = WorkloadManifest.from_path(DATA).request_slice(0, 1)
+    prompt_token_ids = base.requests[0].prompt_token_ids
+    return replace(
+        base,
+        requests=tuple(
+            WorkloadRequest(
+                request_id=f"seed-capacity-{index}",
+                prompt_token_ids=prompt_token_ids,
+            )
+            for index in range(request_count)
+        ),
+        seed=seed,
+    )
+
+
+def _seed_capacity_profile(topology: str) -> runner.Evo2VllmProfile:
+    return runner.Evo2VllmProfile(
+        topology=topology,
+        max_model_len=64,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.95,
+        global_wave_size=96,
+        max_num_seqs=96 if topology == "tp2" else 48,
+    )
+
+
+def test_request_seed_rejects_modulus_wrap_instead_of_reusing_zero() -> None:
+    last_seed = request_seed(
+        2**31 - 1,
+        call_index=0,
+        dp_rank=0,
+        dp_size=1,
+        request_index_in_stream=0,
+    )
+    if last_seed != 2**31 - 1:
+        raise AssertionError("the final nonwrapping request seed changed")
+
+    with pytest.raises(ValueError, match="wraparound"):
+        request_seed(
+            2**31,
+            call_index=0,
+            dp_rank=0,
+            dp_size=1,
+            request_index_in_stream=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("topology", "maximum_coordinate_offset"),
+    (("tp2", 10 * 1_000_003 + 39), ("dp2", 21 * 1_000_003 + 19)),
+)
+def test_caller_seed_capacity_accepts_last_value_and_rejects_one_over(
+    topology: str,
+    maximum_coordinate_offset: int,
+) -> None:
+    last_valid_base_seed = 2**31 - 1 - maximum_coordinate_offset
+    profile = _seed_capacity_profile(topology)
+    accepted = runner.CallerCoordinateContract.from_inputs(
+        _seed_capacity_manifest(request_count=1_000, seed=last_valid_base_seed),
+        profile,
+        generation_round=0,
+    )
+    capacity = accepted.seed_stream_contract()["capacity_proof"]
+    if capacity["maximum_pre_modulo_seed"] != 2**31 - 1:
+        raise AssertionError("caller seed-capacity proof did not reach the exact last valid seed")
+    if max(record.seed for record in accepted.expected_phase_executions()) != 2**31 - 1:
+        raise AssertionError("execution records did not retain the exact last valid seed")
+
+    with pytest.raises(ValueError, match="wraparound"):
+        runner.CallerCoordinateContract.from_inputs(
+            _seed_capacity_manifest(request_count=1_000, seed=last_valid_base_seed + 1),
+            profile,
+            generation_round=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("topology", "first_local_counts", "tail_local_counts"),
+    (("tp2", [96], [40]), ("dp2", [48, 48], [20, 20])),
+)
+def test_exact1k_seed_capacity_covers_first_second_and_tail_without_collisions(
+    topology: str,
+    first_local_counts: list[int],
+    tail_local_counts: list[int],
+) -> None:
+    caller = runner.CallerCoordinateContract.from_inputs(
+        _seed_capacity_manifest(request_count=1_000, seed=42),
+        _seed_capacity_profile(topology),
+        generation_round=0,
+    )
+    capacity = caller.seed_stream_contract()["capacity_proof"]
+    calls = capacity["physical_calls"]
+    if len(calls) != 11:
+        raise AssertionError("exact-1k seed proof must contain ten full calls plus one tail")
+    if [row["local_request_count"] for row in calls[0]["replicas"]] != first_local_counts:
+        raise AssertionError("first full call has the wrong physical seed-stream geometry")
+    if [row["local_request_count"] for row in calls[1]["replicas"]] != first_local_counts:
+        raise AssertionError("second full call has the wrong physical seed-stream geometry")
+    if [row["local_request_count"] for row in calls[-1]["replicas"]] != tail_local_counts:
+        raise AssertionError("tail call has the wrong physical seed-stream geometry")
+
+    seeds_by_call: dict[int, set[int]] = {}
+    for record in caller.expected_phase_executions():
+        seeds_by_call.setdefault(record.call_index, set()).add(record.seed)
+    first = seeds_by_call[0]
+    second = seeds_by_call[1]
+    tail = seeds_by_call[10]
+    if (len(first), len(second), len(tail)) != (96, 96, 40):
+        raise AssertionError("exact-1k full/full/tail calls did not retain every unique seed")
+    if first & second or first & tail or second & tail:
+        raise AssertionError("exact-1k first, second, and tail calls reused a request seed")
+    if max(first | second | tail) >= 2**31:
+        raise AssertionError("exact-1k request seeds exceeded the admitted nonwrapping domain")
+
+
+def test_tp2_seed_capacity_rejects_before_context_or_gpu_preflight(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "seed-capacity-preflight.json"
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "tp2",
+            "--max-model-len",
+            "7000",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--proof",
+            "--output",
+            str(output),
+        ]
+    )
+    manifest = replace(WorkloadManifest.from_path(DATA), seed=2**31)
+    runner.reserve_output_namespace(output)
+    forbidden_calls: list[str] = []
+
+    def forbidden(stage: str):
+        def fail(*_args, **_kwargs):
+            forbidden_calls.append(stage)
+            raise AssertionError(f"seed-capacity rejection reached {stage}")
+
+        return fail
+
+    monkeypatch.setattr(runner, "context_length_preflight", forbidden("context preflight"))
+    monkeypatch.setattr(runner, "gpu_hardware_provenance", forbidden("GPU preflight"))
+
+    with pytest.raises(ValueError, match="wraparound"):
+        runner.run_tp2_benchmark(args, manifest)
+    if forbidden_calls:
+        raise AssertionError(f"seed-capacity rejection performed forbidden work: {forbidden_calls}")
+
+
 def test_request_sampling_params_consume_persisted_stream_seeds() -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
     records = runner.build_request_execution_records(
@@ -916,6 +1525,42 @@ def test_request_sampling_params_consume_persisted_stream_seeds() -> None:
     assert [param.seed for param in params] == [15_000_087, 15_000_088]
     assert all(param.max_tokens == 3 and param.min_tokens == 3 for param in params)
     assert all(param.detokenize is False and param.logprobs == 0 for param in params)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("temperature", 0.0),
+        ("top_p", 0.5),
+        ("top_k", 0),
+        ("max_tokens", 2),
+        ("min_tokens", 2),
+        ("logprobs", None),
+        ("ignore_eos", False),
+        ("detokenize", True),
+        ("seed", 7),
+    ),
+)
+def test_request_sampling_params_reject_constructor_policy_normalization(field: str, replacement: object) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1).with_max_new_tokens(3)
+    records = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+
+    def mutating_factory(**kwargs):
+        return SimpleNamespace(**{**kwargs, field: replacement})
+
+    with pytest.raises(RuntimeError, match=f"sampling parameter {field}"):
+        build_request_sampling_params(
+            manifest,
+            sampling_params_factory=mutating_factory,
+            execution_records=records,
+        )
 
 
 def test_request_execution_records_persist_round_rank_call_and_global_seed() -> None:
@@ -950,6 +1595,51 @@ def test_request_execution_records_persist_round_rank_call_and_global_seed() -> 
             "seed": 15_000_088,
         },
     ]
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    (0.0, np.int64(0), "0", False, float("nan"), float("inf")),
+)
+@pytest.mark.parametrize(
+    "field",
+    ("global_request_index", "generation_round", "dp_rank", "call_index", "seed"),
+)
+def test_retained_request_execution_rows_reject_non_builtin_coordinates(field: str, bad_value: object) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1)
+    expected = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+    retained = [expected[0].to_dict()]
+    retained[0][field] = bad_value
+
+    with pytest.raises(AssertionError, match="built-in integer"):
+        runner._validate_request_execution_rows(retained, expected=expected)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    (0.0, np.int64(0), "0", False, float("nan"), float("inf")),
+)
+def test_retained_physical_wave_rejects_non_builtin_coordinate_values(bad_value: object) -> None:
+    expected = {
+        "wave_index": 0,
+        "start": 0,
+        "stop": 96,
+        "request_count": 96,
+        "generation_round": 0,
+        "call_index": 0,
+    }
+    retained = dict(expected)
+    retained["wave_index"] = bad_value
+
+    with pytest.raises(AssertionError, match="built-in integer"):
+        runner._validate_exact_wave_coordinates(retained, expected=expected)
 
 
 def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path) -> None:
@@ -993,6 +1683,9 @@ def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path)
     assert rows[0]["output_token_ids"] == [65, 67, 71]
     assert rows[0]["chosen_token_logprobs"] == pytest.approx([-0.1, -0.1, -0.1])
     assert rows[1]["output_token_ids"] == [66, 68, 72]
+    publication_receipt = metadata["publication_receipt"]
+    assert publication_receipt["final_path"] == str(output_path.resolve())
+    assert publication_receipt["sha256"] == hashlib.sha256(output_path.read_bytes()).hexdigest()
     assert metadata == {
         "schema_version": 2,
         "format": "jsonl",
@@ -1000,6 +1693,7 @@ def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path)
         "path": str(output_path.resolve()),
         "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
         "size_bytes": output_path.stat().st_size,
+        "publication_receipt": publication_receipt,
         "request_count": 2,
         "generated_token_count": 6,
         "output_token_id_count": 6,
@@ -1035,7 +1729,7 @@ def test_backend_neutral_full_output_artifact_accepts_generation_records(tmp_pat
     assert metadata["generated_token_count"] == 6
 
 
-def test_full_output_writer_never_overwrites_foreign_sidecar_created_before_publish(tmp_path, monkeypatch) -> None:
+def test_full_output_writer_never_overwrites_foreign_sidecar_created_before_publish(tmp_path) -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
     executions = runner.build_request_execution_records(
         manifest,
@@ -1048,13 +1742,7 @@ def test_full_output_writer_never_overwrites_foreign_sidecar_created_before_publ
     records = records_from_vllm_outputs(manifest, _fake_outputs(manifest))
     output = tmp_path / "foreign.outputs.jsonl.gz"
     foreign = b"foreign-sidecar\n"
-    real_link = runner.os.link
-
-    def create_foreign_then_link(source, destination, **kwargs):
-        Path(destination).write_bytes(foreign)
-        return real_link(source, destination, **kwargs)
-
-    monkeypatch.setattr(runner.os, "link", create_foreign_then_link)
+    output.write_bytes(foreign)
 
     with pytest.raises(FileExistsError):
         runner.write_full_generation_records_artifact(
@@ -1189,6 +1877,91 @@ def test_output_namespace_rejects_self_consistent_foreign_inode_metadata(tmp_pat
 
     with pytest.raises(RuntimeError, match="ownership"):
         runner.require_output_namespace_reservation(output)
+
+
+def test_output_namespace_completion_rejects_unregistered_final_path(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    marker = runner.reserve_output_namespace(output)
+    output.write_text("foreign but present\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="coordinator-owned final receipt"):
+        runner.complete_output_namespace(marker, output_path=output)
+
+    assert marker.exists()
+    assert output.read_text(encoding="utf-8") == "foreign but present\n"
+    output.unlink()
+    runner.complete_output_namespace(marker, output_path=output, require_final_artifact=False)
+
+
+def test_output_namespace_completion_rejects_unregistered_sidecar(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    marker = runner.reserve_output_namespace(output)
+    runner.write_json_artifact(
+        output,
+        {"status": "passed"},
+        ownership_validator=lambda: runner.require_output_namespace_reservation(output),
+    )
+    foreign_sidecar = runner.phase_output_artifact_path(output, phase="foreign")
+    foreign_sidecar.write_bytes(b"foreign\n")
+
+    with pytest.raises(RuntimeError, match="unregistered"):
+        runner.complete_output_namespace(marker, output_path=output)
+
+    assert marker.exists()
+    assert foreign_sidecar.read_bytes() == b"foreign\n"
+
+
+def test_output_namespace_completion_reopens_registered_root_and_sidecar_receipts(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    marker = runner.reserve_output_namespace(output)
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    executions = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+    sidecar = runner.phase_output_artifact_path(output, phase="steady-0")
+    sidecar_metadata = runner.write_full_generation_records_artifact(
+        sidecar,
+        records=records_from_vllm_outputs(manifest, _fake_outputs(manifest)),
+        execution_records=executions,
+        ownership_validator=lambda: runner.require_output_namespace_reservation(output),
+    )
+    root_receipt = runner.write_json_artifact(
+        output,
+        {"status": "passed", "sidecar": sidecar_metadata},
+        ownership_validator=lambda: runner.require_output_namespace_reservation(output),
+    )
+
+    runner.complete_output_namespace(marker, output_path=output)
+
+    assert not marker.exists()
+    assert output.exists()
+    assert sidecar.exists()
+    assert root_receipt.final_path == str(output.resolve())
+    assert sidecar_metadata["publication_receipt"]["final_path"] == str(sidecar.resolve())
+
+
+def test_output_namespace_completion_rejects_foreign_replacement_of_registered_final(tmp_path) -> None:
+    output = tmp_path / "benchmark.json"
+    marker = runner.reserve_output_namespace(output)
+    runner.write_json_artifact(
+        output,
+        {"status": "passed"},
+        ownership_validator=lambda: runner.require_output_namespace_reservation(output),
+    )
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text("foreign\n", encoding="utf-8")
+    foreign.replace(output)
+
+    with pytest.raises(RuntimeError, match="inode"):
+        runner.complete_output_namespace(marker, output_path=output)
+
+    assert marker.exists()
+    assert output.read_text(encoding="utf-8") == "foreign\n"
 
 
 def test_main_does_not_publish_evidence_after_namespace_ownership_loss(tmp_path, monkeypatch) -> None:
@@ -1368,16 +2141,10 @@ def test_json_artifact_writer_refuses_to_overwrite_prior_success(tmp_path) -> No
     assert json.loads(output.read_text()) == {"run": 1}
 
 
-def test_json_artifact_writer_never_overwrites_foreign_output_created_before_publish(tmp_path, monkeypatch) -> None:
+def test_json_artifact_writer_never_overwrites_foreign_output_created_before_publish(tmp_path) -> None:
     output = tmp_path / "benchmark.json"
     foreign = b"foreign-output\n"
-    real_link = runner.os.link
-
-    def create_foreign_then_link(source, destination, **kwargs):
-        Path(destination).write_bytes(foreign)
-        return real_link(source, destination, **kwargs)
-
-    monkeypatch.setattr(runner.os, "link", create_foreign_then_link)
+    output.write_bytes(foreign)
 
     with pytest.raises(FileExistsError):
         runner.write_json_artifact(output, {"run": 1})
@@ -2080,18 +2847,34 @@ def test_worker_sampler_proof_uses_exact_runtime_and_physical_seed_batches(monke
     workers = [{"sampler": {"worker": rank}} for rank in range(2)]
     installation = sampler_module.sampler_installation_contract(_sampler_installation_provenance())
     seed_batches = ((11, 13), (17, 19))
+    request_generations = tuple(
+        {
+            "request_id": f"request-{seed}",
+            "seed": seed,
+            "accepted_output_token_count": 3,
+        }
+        for batch in seed_batches
+        for seed in batch
+    )
 
     summaries = runner._validate_worker_sampler_evidence(
         workers,
         expected_installation=installation,
         expected_seed_batches=seed_batches,
+        expected_request_generations=request_generations,
         require_generation_observations=True,
     )
 
-    assert summaries == [{"passed": True}, {"passed": True}]
-    assert [proof for proof, _ in calls] == [{"worker": 0}, {"worker": 1}]
-    assert all(call["expected_seed_batches"] == seed_batches for _, call in calls)
-    assert all(call["require_generation_observations"] is True for _, call in calls)
+    if summaries != [{"passed": True}, {"passed": True}]:
+        raise AssertionError("worker sampler summaries drifted")
+    if [proof for proof, _ in calls] != [{"worker": 0}, {"worker": 1}]:
+        raise AssertionError("worker sampler proofs were not forwarded exactly")
+    if any(call["expected_seed_batches"] != seed_batches for _, call in calls):
+        raise AssertionError("physical sampler seed batches were not forwarded exactly")
+    if any(call["expected_request_generations"] != request_generations for _, call in calls):
+        raise AssertionError("caller-reopened request generations were not forwarded exactly")
+    if any(call["require_generation_observations"] is not True for _, call in calls):
+        raise AssertionError("worker sampler generation evidence was not required")
 
 
 def test_worker_gpu_identity_resolves_logical_device_to_physical_uuid_and_pci(monkeypatch) -> None:
@@ -2461,8 +3244,7 @@ def test_linked_identity_validator_recomputes_raw_outputs_and_physical_shapes(tm
         _canonical_base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=TOKENIZER_JSON,
-        tokenize=lambda text: tuple(text.encode("ascii")),
+        tokenizer=SnapshotBoundTokenizer.from_path(TOKENIZER_JSON),
         request_count=2,
         request_id_prefix="identity-case0",
     )
@@ -2528,8 +3310,7 @@ def test_common_prefix_identity_production_caller_compares_serial_and_batched_ou
         _canonical_base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=TOKENIZER_JSON,
-        tokenize=lambda text: tuple(text.encode("ascii")),
+        tokenizer=SnapshotBoundTokenizer.from_path(TOKENIZER_JSON),
         request_count=1,
         request_id_prefix="common-serial",
     )
@@ -2537,8 +3318,7 @@ def test_common_prefix_identity_production_caller_compares_serial_and_batched_ou
         _canonical_base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=TOKENIZER_JSON,
-        tokenize=lambda text: tuple(text.encode("ascii")),
+        tokenizer=SnapshotBoundTokenizer.from_path(TOKENIZER_JSON),
         request_count=2,
         request_id_prefix="common-candidate",
     )
@@ -2625,12 +3405,9 @@ def test_common_prefix_identity_production_caller_compares_serial_and_batched_ou
 def test_prepare_workload_rejects_synthetic_prompt_or_id_rewrites_for_frozen_source(tmp_path) -> None:
     prompt_source = tmp_path / "matched.jsonl"
     prompt_source.write_text('{"id":"audit-0","prompt":"ACGT"}\n', encoding="utf-8")
-    tokenizer_json = tmp_path / "tokenizer.json"
-    tokenizer_json.write_text("{}\n", encoding="utf-8")
     manifest = WorkloadManifest.from_path(DATA).with_prompt_jsonl(
         prompt_source,
-        tokenize=lambda prompt: tuple(map(ord, prompt)),
-        tokenizer_path=tokenizer_json,
+        tokenizer=SnapshotBoundTokenizer.from_path(TOKENIZER_JSON),
         expected_sha256=hashlib.sha256(prompt_source.read_bytes()).hexdigest(),
         expected_prompt_tokens=4,
     )
@@ -2657,6 +3434,7 @@ def _fake_outputs(manifest: WorkloadManifest):
         )
         outputs.append(
             SimpleNamespace(
+                request_id=str(index),
                 prompt_token_ids=list(request.prompt_token_ids),
                 outputs=[completion],
                 finished=True,
@@ -2760,6 +3538,7 @@ def _write_valid_direct_proof_artifact(
     tmp_path,
     *,
     generation_round: int = 7,
+    global_request_index_start: int = 0,
     shared_prefix: bool = False,
     exact_progress: bool = False,
 ) -> tuple[Path, dict, dict]:
@@ -2831,11 +3610,13 @@ def _write_valid_direct_proof_artifact(
     call_index = generation_round
     for sample_index, phase_name in enumerate(("cold-generation", "steady-0")):
         wave_phase = f"{phase_name}.wave-000"
-        executions = runner.build_wave_execution_records(
+        executions = runner.build_request_execution_records(
             manifest,
-            global_wave_size=profile.global_wave_size,
+            global_request_offset=global_request_index_start,
+            dp_rank=0,
+            dp_size=1,
             generation_round=generation_round,
-            call_index_start=call_index,
+            call_index=call_index,
         )
         records = tuple(
             GenerationRecord(
@@ -2975,6 +3756,8 @@ def _write_valid_direct_proof_artifact(
                     "peak_device_memory_bytes": list(peak_memory),
                 },
                 "generation_call_s": [1.0],
+                "generation_timing_authority": runner.COORDINATOR_GENERATION_TIMING_AUTHORITY,
+                "coordinator_generation_wall_s": 1.0,
                 "wave_proofs": [wave],
                 "wave_execution": runner.wave_execution_summary([wave]),
                 "cudagraph_observation_count": len(observations),
@@ -3080,7 +3863,33 @@ def _write_valid_direct_proof_artifact(
     return proof_path, contract, artifact
 
 
-def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
+def _fixture_caller_profile(topology: str) -> runner.Evo2VllmProfile:
+    return runner.Evo2VllmProfile(
+        topology=topology,
+        max_model_len=64,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.95,
+        global_wave_size=2,
+        max_num_seqs=2 if topology == "tp2" else 1,
+    )
+
+
+def _fixture_caller_coordinates(artifact: dict, contract: dict) -> runner.CallerCoordinateContract:
+    profile_data = dict(artifact["profile"])
+    profile_data["proof"] = False
+    return runner.CallerCoordinateContract.from_inputs(
+        WorkloadManifest.from_dict(artifact["manifest"]),
+        runner.Evo2VllmProfile(**profile_data),
+        contract["seed_stream"]["generation_round"],
+    )
+
+
+def _write_valid_dp2_proof_artifact(
+    tmp_path,
+    *,
+    generation_round: int = 0,
+    global_request_index_start: int = 0,
+) -> tuple[Path, dict, dict]:
     _, _, base = _write_valid_direct_proof_artifact(tmp_path / "direct-base")
     tmp_path.mkdir(parents=True, exist_ok=True)
     proof_path = tmp_path / "proof.json"
@@ -3106,7 +3915,7 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
             "--max-num-seqs",
             "1",
             "--generation-round",
-            "0",
+            str(generation_round),
             "--warmups",
             "0",
             "--repetitions",
@@ -3140,8 +3949,8 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
     compilation = _compilation_snapshot()
     resolved = profile.expected_resolved_config()
     phases = []
-    call_index = 0
-    global_index = 0
+    call_index = generation_round
+    global_index = global_request_index_start
     for sample_index, phase_name in enumerate(("cold-generation", "steady-0")):
         wave = runner.build_request_waves(
             request_count=len(manifest.requests),
@@ -3156,7 +3965,7 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
                 global_request_offset=global_index + shard.start,
                 dp_rank=shard.replica_index,
                 dp_size=profile.replica_count,
-                generation_round=0,
+                generation_round=generation_round,
                 call_index=call_index,
             )
         )
@@ -3260,7 +4069,7 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
             "start": 0,
             "stop": len(manifest.requests),
             "request_count": len(manifest.requests),
-            "generation_round": 0,
+            "generation_round": generation_round,
             "call_index": call_index,
             "generation_s": 1.0,
             "reset_proof": [{"phase": wave_phase}] * 2,
@@ -3283,6 +4092,8 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
                     "peak_device_memory_bytes": base["phases"][sample_index]["sample"]["peak_device_memory_bytes"],
                 },
                 "generation_call_s": [1.0],
+                "generation_timing_authority": runner.COORDINATOR_GENERATION_TIMING_AUTHORITY,
+                "coordinator_generation_wall_s": 1.0,
                 "wave_execution": runner.wave_execution_summary([wave_proof]),
                 "outputs": [record.summary_dict() for record in records],
                 "request_executions": [record.to_dict() for record in executions],
@@ -3336,34 +4147,334 @@ def _write_valid_dp2_proof_artifact(tmp_path) -> tuple[Path, dict, dict]:
 
 
 def test_linked_proof_validator_accepts_complete_recomputed_direct_evidence(tmp_path) -> None:
-    proof_path, contract, _ = _write_valid_direct_proof_artifact(tmp_path)
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
 
     evidence = runner.validate_linked_proof_artifact(
         proof_path,
         expected_contract=contract,
+        caller_coordinates=caller_coordinates,
         require_memory_headroom=True,
     )
 
-    assert evidence["artifact_path"] == str(proof_path.resolve())
-    assert evidence["artifact_sha256"] == hashlib.sha256(proof_path.read_bytes()).hexdigest()
+    if evidence["artifact_path"] != str(proof_path.resolve()):
+        raise AssertionError("linked direct proof path drifted")
+    if evidence["artifact_sha256"] != hashlib.sha256(proof_path.read_bytes()).hexdigest():
+        raise AssertionError("linked direct proof digest drifted")
 
 
-def test_linked_proof_validator_rejects_sampler_seed_batch_outside_physical_wave(tmp_path) -> None:
-    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
-    observation = artifact["phases"][0]["worker_proof"][0]["sampler"]["generation_observations"][0]
-    observation["generator_seeds"][0] += 1
-    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+def test_linked_proof_rejects_consistent_tp2_coordinate_shift_from_external_caller_contract(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    caller_coordinates = runner.CallerCoordinateContract.from_inputs(
+        manifest,
+        _fixture_caller_profile("tp2"),
+        7,
+    )
+    proof_path, shifted_contract, _ = _write_valid_direct_proof_artifact(
+        tmp_path,
+        generation_round=8,
+        global_request_index_start=100,
+    )
 
-    with pytest.raises(AssertionError, match="exact request seeds"):
+    with pytest.raises(AssertionError, match="caller coordinate"):
         runner.validate_linked_proof_artifact(
             proof_path,
-            expected_contract=contract,
+            expected_contract=shifted_contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
 
+def test_linked_proof_rejects_consistent_dp2_coordinate_shift_from_external_caller_contract(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    caller_coordinates = runner.CallerCoordinateContract.from_inputs(
+        manifest,
+        _fixture_caller_profile("dp2"),
+        0,
+    )
+    proof_path, shifted_contract, _ = _write_valid_dp2_proof_artifact(
+        tmp_path,
+        generation_round=1,
+        global_request_index_start=100,
+    )
+
+    with pytest.raises(AssertionError, match="caller coordinate"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=shifted_contract,
+            caller_coordinates=caller_coordinates,
+            require_memory_headroom=True,
+        )
+
+
+def test_linked_proof_rejects_duplicate_root_and_sidecar_json_keys(tmp_path) -> None:
+    root_dir = tmp_path / "duplicate-root"
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(root_dir)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
+    payload = proof_path.read_text(encoding="utf-8")
+    proof_path.write_text(
+        '{"benchmark_mode":"foreign",' + payload.lstrip()[1:],
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate key 'benchmark_mode'"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            caller_coordinates=caller_coordinates,
+            require_memory_headroom=True,
+        )
+
+    sidecar_dir = tmp_path / "duplicate-sidecar"
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(sidecar_dir)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
+    metadata = artifact["phases"][0]["full_output_artifact"]
+    sidecar = Path(metadata["path"])
+    uncompressed = gzip.decompress(sidecar.read_bytes())
+    first_row = json.loads(uncompressed.splitlines()[0])
+    request_field = f'"request_id":"{first_row["request_id"]}"'.encode()
+    tampered = uncompressed.replace(request_field, request_field + b"," + request_field, 1)
+    compressed = gzip.compress(tampered, mtime=0)
+    sidecar.write_bytes(compressed)
+    metadata["sha256"] = hashlib.sha256(compressed).hexdigest()
+    metadata["size_bytes"] = len(compressed)
+    proof_path.write_text(json.dumps(artifact, sort_keys=True), encoding="utf-8")
+    with pytest.raises(AssertionError, match="could not be decoded"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            caller_coordinates=caller_coordinates,
+            require_memory_headroom=True,
+        )
+
+
+def test_linked_proof_digest_remains_bound_to_captured_root_after_path_replacement(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
+    original = proof_path.read_bytes()
+    foreign = b'{"benchmark_mode":"foreign"}\n'
+    real_reader = runner.read_json_snapshot
+    replaced = False
+
+    def replace_after_snapshot(path, *, label):
+        nonlocal replaced
+        snapshot = real_reader(path, label=label)
+        if Path(path).resolve() == proof_path.resolve() and not replaced:
+            proof_path.write_bytes(foreign)
+            replaced = True
+        return snapshot
+
+    monkeypatch.setattr(runner, "read_json_snapshot", replace_after_snapshot)
+    evidence = runner.validate_linked_proof_artifact(
+        proof_path,
+        expected_contract=contract,
+        caller_coordinates=caller_coordinates,
+        require_memory_headroom=True,
+    )
+
+    assert replaced is True
+    assert evidence["artifact_sha256"] == hashlib.sha256(original).hexdigest()
+    assert proof_path.read_bytes() == foreign
+
+
+def test_linked_proof_rejects_coherent_foreign_profile_from_external_caller_contract(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    caller_profile = replace(
+        _fixture_caller_profile("tp2"),
+        max_num_batched_tokens=32_768,
+    )
+    caller_coordinates = runner.CallerCoordinateContract.from_inputs(
+        manifest,
+        caller_profile,
+        7,
+    )
+    proof_path, foreign_contract, _ = _write_valid_direct_proof_artifact(tmp_path)
+
+    with pytest.raises(AssertionError, match="caller coordinate"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=foreign_contract,
+            caller_coordinates=caller_coordinates,
+            require_memory_headroom=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "missing_tp_rank",
+        "extra_tp_rank",
+        "duplicate_tp_rank",
+        "policy_sampling_drift",
+        "profile_config_drift",
+        "global_wave_size_drift",
+        "row_truncation",
+        "row_extension",
+    ),
+)
+def test_linked_proof_caller_binding_rejects_tp2_admission_matrix(tmp_path, tamper) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    caller_manifest = manifest
+    caller_profile = _fixture_caller_profile("tp2")
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path / tamper)
+
+    if tamper == "missing_tp_rank":
+        artifact["phases"][0]["worker_proof"].pop()
+    elif tamper == "extra_tp_rank":
+        extra = copy.deepcopy(artifact["phases"][0]["worker_proof"][-1])
+        extra["rank"] = 2
+        artifact["phases"][0]["worker_proof"].append(extra)
+    elif tamper == "duplicate_tp_rank":
+        artifact["phases"][0]["worker_proof"][1]["rank"] = 0
+    elif tamper == "policy_sampling_drift":
+        caller_manifest = replace(manifest, top_k=manifest.top_k + 1)
+    elif tamper == "profile_config_drift":
+        caller_profile = replace(caller_profile, max_num_batched_tokens=32_768)
+    elif tamper == "global_wave_size_drift":
+        caller_profile = replace(caller_profile, global_wave_size=1, max_num_seqs=1)
+    elif tamper == "row_truncation":
+        artifact["phases"][0]["request_executions"].pop()
+    elif tamper == "row_extension":
+        artifact["phases"][0]["request_executions"].append(
+            copy.deepcopy(artifact["phases"][0]["request_executions"][-1])
+        )
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+    caller_coordinates = runner.CallerCoordinateContract.from_inputs(
+        caller_manifest,
+        caller_profile,
+        7,
+    )
+
+    with pytest.raises(AssertionError):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            caller_coordinates=caller_coordinates,
+            require_memory_headroom=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "missing_dp_rank",
+        "extra_dp_rank",
+        "duplicate_dp_rank",
+        "rank_row_truncation",
+        "rank_row_extension",
+    ),
+)
+def test_linked_proof_caller_binding_rejects_dp2_admission_matrix(tmp_path, tamper) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    caller_coordinates = runner.CallerCoordinateContract.from_inputs(
+        manifest,
+        _fixture_caller_profile("dp2"),
+        0,
+    )
+    proof_path, contract, artifact = _write_valid_dp2_proof_artifact(tmp_path / tamper)
+    engines = artifact["phases"][0]["waves"][0]["engines"]
+    executions = artifact["phases"][0]["request_executions"]
+
+    if tamper == "missing_dp_rank":
+        engines.pop()
+    elif tamper == "extra_dp_rank":
+        extra = copy.deepcopy(engines[-1])
+        extra["dp_rank"] = 2
+        engines.append(extra)
+    elif tamper == "duplicate_dp_rank":
+        engines[1]["dp_rank"] = 0
+    elif tamper == "rank_row_truncation":
+        executions.pop(next(index for index, row in enumerate(executions) if row["dp_rank"] == 1))
+    elif tamper == "rank_row_extension":
+        executions.append(copy.deepcopy(next(row for row in executions if row["dp_rank"] == 1)))
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            caller_coordinates=caller_coordinates,
+            require_memory_headroom=True,
+        )
+
+
+def test_linked_proof_validator_rejects_sampler_seed_batch_outside_physical_wave(tmp_path) -> None:
+    proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
+    descriptor = artifact["phases"][0]["worker_proof"][0]["sampler"]["generation_batch_descriptors"][0]
+    descriptor["generator_seeds"][0] += 1
+    proof_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="batch descriptor drifted from exact requests"):
+        runner.validate_linked_proof_artifact(
+            proof_path,
+            expected_contract=contract,
+            caller_coordinates=caller_coordinates,
+            require_memory_headroom=True,
+        )
+
+
+@pytest.mark.parametrize("topology", ("tp2", "dp2"))
+def test_linked_sampler_admission_uses_caller_reopened_sidecar_before_generation_validation(
+    tmp_path,
+    monkeypatch,
+    topology: str,
+) -> None:
+    writer = _write_valid_direct_proof_artifact if topology == "tp2" else _write_valid_dp2_proof_artifact
+    proof_path, contract, artifact = writer(tmp_path / topology)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
+    events = []
+    original_sidecar = runner._validate_full_output_sidecar
+    original_sampler = runner._validate_worker_sampler_evidence
+
+    def validate_sidecar(*args, **kwargs):
+        result = original_sidecar(*args, **kwargs)
+        events.append(("sidecar", tuple(copy.deepcopy(result["request_generations"]))))
+        return result
+
+    def validate_sampler(*args, **kwargs):
+        rows = tuple(copy.deepcopy(kwargs["expected_request_generations"]))
+        events.append(("sampler", rows))
+        return original_sampler(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_validate_full_output_sidecar", validate_sidecar)
+    monkeypatch.setattr(runner, "_validate_worker_sampler_evidence", validate_sampler)
+
+    runner.validate_linked_proof_artifact(
+        proof_path,
+        expected_contract=contract,
+        caller_coordinates=caller_coordinates,
+        require_memory_headroom=True,
+    )
+
+    sidecar_indices = [index for index, event in enumerate(events) if event[0] == "sidecar"]
+    if not sidecar_indices:
+        raise AssertionError("linked sampler admission never reopened the caller sidecar")
+    for phase_index, sidecar_index in enumerate(sidecar_indices):
+        stop = sidecar_indices[phase_index + 1] if phase_index + 1 < len(sidecar_indices) else len(events)
+        generation_events = [
+            rows
+            for kind, rows in events[sidecar_index + 1 : stop]
+            if kind == "sampler" and rows
+        ]
+        if not generation_events:
+            raise AssertionError("one proof phase did not validate sampler evidence after sidecar reopen")
+        joined = [row for rows in generation_events for row in rows]
+        sidecar_rows = list(events[sidecar_index][1])
+        if sorted(joined, key=lambda row: (row["request_id"], row["seed"])) != sorted(
+            sidecar_rows,
+            key=lambda row: (row["request_id"], row["seed"]),
+        ):
+            raise AssertionError("sampler shard admission is not disjoint and complete over the caller sidecar")
+        if any(row["accepted_output_token_count"] != 3 for row in joined):
+            raise AssertionError("sampler accepted-token counts did not come from retained sidecar rows")
+
+
 def test_linked_proof_validator_rejects_tp2_summary_without_raw_scheduler_evidence(tmp_path) -> None:
     proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
     wave = artifact["phases"][0]["wave_proofs"][0]
     wave.pop("scheduler_observations")
     wave["scheduler_capacity_proof"].update(
@@ -3383,12 +4494,14 @@ def test_linked_proof_validator_rejects_tp2_summary_without_raw_scheduler_eviden
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
 
 def test_linked_proof_validator_rejects_foreign_phase_scheduler_observations(tmp_path) -> None:
     proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
     observations = artifact["phases"][0]["wave_proofs"][0]["scheduler_observations"]
     foreign_observation = copy.deepcopy(observations[0])
     foreign_observation["phase"] = "foreign.wave-000"
@@ -3399,12 +4512,14 @@ def test_linked_proof_validator_rejects_foreign_phase_scheduler_observations(tmp
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
 
 def test_linked_proof_validator_rejects_cuda_observations_outside_their_physical_wave(tmp_path) -> None:
     proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
     artifact["phases"][0]["cudagraph_observations_retained"][0]["phase"] = "foreign.wave-000"
     proof_path.write_text(json.dumps(artifact), encoding="utf-8")
 
@@ -3412,6 +4527,7 @@ def test_linked_proof_validator_rejects_cuda_observations_outside_their_physical
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
@@ -3472,20 +4588,24 @@ def test_generation_phase_result_serializes_every_cuda_observation_losslessly() 
 
 
 def test_linked_proof_validator_accepts_and_recomputes_dp2_engine_evidence(tmp_path) -> None:
-    proof_path, contract, _ = _write_valid_dp2_proof_artifact(tmp_path)
+    proof_path, contract, artifact = _write_valid_dp2_proof_artifact(tmp_path)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
 
     evidence = runner.validate_linked_proof_artifact(
         proof_path,
         expected_contract=contract,
+        caller_coordinates=caller_coordinates,
         require_memory_headroom=True,
     )
 
-    assert evidence["validated_evidence"]["final_worker_count"] == 2
+    if evidence["validated_evidence"]["final_worker_count"] != 2:
+        raise AssertionError("linked DP2 proof did not retain both final workers")
 
 
 @pytest.mark.parametrize("tamper", ("scheduler_raw", "resolved_config"))
 def test_linked_proof_validator_rejects_tampered_dp2_engine_evidence(tmp_path, tamper) -> None:
     proof_path, contract, artifact = _write_valid_dp2_proof_artifact(tmp_path / tamper)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
     if tamper == "scheduler_raw":
         scheduler = artifact["phases"][0]["waves"][0]["engines"][0]["scheduler_observations"][0]
         scheduler["preemption_events"] = 1
@@ -3497,6 +4617,7 @@ def test_linked_proof_validator_rejects_tampered_dp2_engine_evidence(tmp_path, t
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
@@ -3506,9 +4627,11 @@ def test_linked_proof_validator_recomputes_physical_prefix_reuse(tmp_path) -> No
         tmp_path,
         shared_prefix=True,
     )
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
     runner.validate_linked_proof_artifact(
         proof_path,
         expected_contract=contract,
+        caller_coordinates=caller_coordinates,
         require_memory_headroom=True,
     )
 
@@ -3518,6 +4641,7 @@ def test_linked_proof_validator_recomputes_physical_prefix_reuse(tmp_path) -> No
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
@@ -3527,6 +4651,7 @@ def test_exact_progress_gate_is_linked_and_recomputed_from_raw_proof(tmp_path) -
         tmp_path,
         exact_progress=True,
     )
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
 
     assert contract["exact_generation_progress"] == {
         "schema_version": 1,
@@ -3540,6 +4665,7 @@ def test_exact_progress_gate_is_linked_and_recomputed_from_raw_proof(tmp_path) -
     runner.validate_linked_proof_artifact(
         proof_path,
         expected_contract=contract,
+        caller_coordinates=caller_coordinates,
         require_memory_headroom=True,
     )
 
@@ -3549,6 +4675,7 @@ def test_exact_progress_gate_is_linked_and_recomputed_from_raw_proof(tmp_path) -
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
@@ -3574,6 +4701,7 @@ def test_exact_progress_gate_is_linked_and_recomputed_from_raw_proof(tmp_path) -
 )
 def test_linked_proof_validator_recomputes_all_direct_evidence(tmp_path, tamper) -> None:
     proof_path, contract, artifact = _write_valid_direct_proof_artifact(tmp_path / tamper)
+    caller_coordinates = _fixture_caller_coordinates(artifact, contract)
     artifact = copy.deepcopy(artifact)
     if tamper == "manifest":
         artifact["manifest"]["name"] = "forged-manifest"
@@ -3627,6 +4755,7 @@ def test_linked_proof_validator_recomputes_all_direct_evidence(tmp_path, tamper)
         runner.validate_linked_proof_artifact(
             proof_path,
             expected_contract=contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
 
@@ -3670,8 +4799,10 @@ def test_benchmark_contract_pins_generation_round_seed_stream(tmp_path) -> None:
         runner.profile_from_args(second_args, manifest),
     )
 
-    assert first_contract["seed_stream"] == {
-        "schema_version": 2,
+    first_seed_stream = first_contract["seed_stream"]
+    capacity = first_seed_stream["capacity_proof"]
+    expected_seed_stream = {
+        "schema_version": 3,
         "base_seed": manifest.seed,
         "generation_round": 7,
         "physical_calls_per_round": 11,
@@ -3679,8 +4810,26 @@ def test_benchmark_contract_pins_generation_round_seed_stream(tmp_path) -> None:
         "round_stride": 1_000_003,
         "modulus": 2**31,
     }
-    assert second_contract["seed_stream"]["global_call_index_start"] == 88
-    assert first_contract != second_contract
+    if {key: first_seed_stream[key] for key in expected_seed_stream} != expected_seed_stream:
+        raise AssertionError("generation-round seed-stream coordinates changed")
+    if (
+        capacity["maximum_pre_modulo_seed"] != 87_000_342
+        or capacity["maximum_coordinates"]
+        != {
+            "call_in_round": 10,
+            "global_call_index": 87,
+            "dp_rank": 0,
+            "request_index_in_stream": 39,
+        }
+        or [call["global_call_index"] for call in capacity["physical_calls"]] != list(range(77, 88))
+        or [call["global_request_count"] for call in capacity["physical_calls"]] != [96] * 10 + [40]
+        or capacity["passed"] is not True
+    ):
+        raise AssertionError("generation-round seed-capacity proof changed")
+    if second_contract["seed_stream"]["global_call_index_start"] != 88:
+        raise AssertionError("second generation round did not advance by eleven physical calls")
+    if first_contract == second_contract:
+        raise AssertionError("distinct generation rounds produced an identical benchmark contract")
 
 
 def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs(tmp_path) -> None:
@@ -3754,6 +4903,241 @@ def test_generation_phase_times_one_complete_batch_and_preserves_exact_outputs(t
     assert artifact["full_decode_proof"]["full_decode_tokens"] == 4
 
 
+def _rank_local_test_evidence(
+    outputs,
+    *,
+    phase,
+    contract_sha256,
+    tp_rank,
+    request_order,
+):
+    rows_by_id = {
+        row["vllm_request_id"]: row
+        for row in runner.rank_local_selected_stream_rows(outputs)
+    }
+    requests = [rows_by_id[request_id] for request_id in request_order]
+    aggregate = hashlib.sha256(
+        json.dumps(requests, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": "evo2-rank-local-generation-evidence/v1",
+        "source": "rank_local_model_runner_execute_or_sample",
+        "tp_rank": tp_rank,
+        "phase": phase,
+        "expected_envelope_sha256": contract_sha256,
+        "request_count": len(requests),
+        "generated_token_count": sum(row["token_count"] for row in requests),
+        "execution_call_count": 3,
+        "request_order": list(request_order),
+        "requests": requests,
+        "aggregate_selected_stream_sha256": aggregate,
+    }
+
+
+def test_generation_phase_consumes_every_tp_rank_witness_for_reordered_short_final_wave(
+    tmp_path,
+) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 12).with_max_new_tokens(3)
+    recorder = CUDAGraphProofRecorder()
+    execution_records = runner.build_wave_execution_records(
+        manifest,
+        global_wave_size=10,
+        generation_round=4,
+        call_index_start=44,
+    )
+    state = {"cursor": 0, "latest": None, "begin": None}
+    events = []
+
+    class FakeLLM:
+        def generate(self, prompts, sampling_params, *, use_tqdm):
+            request_count = len(prompts)
+            start = state["cursor"]
+            wave_manifest = manifest.request_slice(start, start + request_count)
+            outputs = _fake_outputs(wave_manifest)
+            for offset, output in enumerate(outputs):
+                output.request_id = str(8 + start + offset)
+            state["cursor"] += request_count
+            state["latest"] = outputs
+            events.append(("generate", request_count))
+            for _ in range(2):
+                recorder.record(
+                    _scheduler_stats(
+                        unpadded=request_count,
+                        padded=request_count,
+                        mode="CUDAGraphMode.FULL",
+                    ),
+                    _iteration_stats(computed=request_count, total=request_count),
+                )
+            return outputs
+
+    def begin(**kwargs):
+        state["begin"] = kwargs
+        events.append(("begin", kwargs["expected_request_count"]))
+        return tuple(
+            {
+                "tp_rank": tp_rank,
+                "phase": kwargs["phase"],
+                "expected_envelope_sha256": kwargs["contract_sha256"],
+                "expected_request_count": kwargs["expected_request_count"],
+                "expected_max_new_tokens": kwargs["expected_max_new_tokens"],
+                "source": "rank_local_model_runner_execute_or_sample",
+            }
+            for tp_rank in range(2)
+        )
+
+    def snapshot():
+        kwargs = state["begin"]
+        outputs = state["latest"]
+        request_order = [output.request_id for output in outputs]
+        request_order = request_order[-1:] + request_order[:-1]
+        events.append(("snapshot", len(request_order)))
+        return tuple(
+            _rank_local_test_evidence(
+                outputs,
+                phase=kwargs["phase"],
+                contract_sha256=kwargs["contract_sha256"],
+                tp_rank=tp_rank,
+                request_order=request_order,
+            )
+            for tp_rank in range(2)
+        )
+
+    result = run_generation_phase(
+        llm=FakeLLM(),
+        manifest=manifest,
+        sampling_params=build_request_sampling_params(
+            manifest,
+            sampling_params_factory=SimpleNamespace,
+            execution_records=execution_records,
+        ),
+        phase="steady-0",
+        sample_index=0,
+        recorder=recorder,
+        memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+        execution_records=execution_records,
+        full_output_path=tmp_path / "tp-rank.outputs.jsonl.gz",
+        require_rank_local_evidence=True,
+        rank_local_semantic_namespace="proof-plan/steady-0",
+        expected_tensor_parallel_size=2,
+        begin_rank_local_evidence=begin,
+        snapshot_rank_local_evidence=snapshot,
+        abort_rank_local_evidence=lambda: events.append(("abort", 0)),
+        global_wave_size=10,
+        scheduler_max_num_seqs=10,
+        clock=iter((10.0, 11.0, 20.0, 21.0)).__next__,
+    )
+
+    assert events == [
+        ("begin", 10),
+        ("generate", 10),
+        ("snapshot", 10),
+        ("begin", 2),
+        ("generate", 2),
+        ("snapshot", 2),
+    ]
+    assert [wave["request_count"] for wave in result.wave_proofs] == [10, 2]
+    for wave in result.wave_proofs:
+        evidence = wave["rank_local_generation_evidence"]
+        assert evidence["passed"] is True
+        assert evidence["tensor_parallel_ranks"] == [0, 1]
+        assert [
+            row["request_ordinal"] for row in evidence["semantic_streams"]
+        ] == list(range(wave["request_count"]))
+        assert all(
+            row["qualified_request_identity"]
+            == ["proof-plan/steady-0", row["local_request_id"]]
+            for row in evidence["semantic_streams"]
+        )
+
+
+def test_generation_phase_aborts_rank_epoch_when_one_tp_witness_is_missing(
+    tmp_path,
+) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    recorder = CUDAGraphProofRecorder()
+    execution_records = runner.build_wave_execution_records(
+        manifest,
+        global_wave_size=2,
+        generation_round=0,
+        call_index_start=0,
+    )
+    outputs = _fake_outputs(manifest)
+    for index, output in enumerate(outputs):
+        output.request_id = str(10 + index)
+    contract = {}
+    events = []
+
+    class FakeLLM:
+        def generate(self, prompts, sampling_params, *, use_tqdm):
+            events.append("generate")
+            for _ in range(2):
+                recorder.record(
+                    _scheduler_stats(
+                        unpadded=2,
+                        padded=2,
+                        mode="CUDAGraphMode.FULL",
+                    ),
+                    _iteration_stats(computed=2, total=2),
+                )
+            return outputs
+
+    def begin(**kwargs):
+        contract.update(kwargs)
+        events.append("begin")
+        return tuple(
+            {
+                "tp_rank": tp_rank,
+                "phase": kwargs["phase"],
+                "expected_envelope_sha256": kwargs["contract_sha256"],
+                "expected_request_count": kwargs["expected_request_count"],
+                "expected_max_new_tokens": kwargs["expected_max_new_tokens"],
+                "source": "rank_local_model_runner_execute_or_sample",
+            }
+            for tp_rank in range(2)
+        )
+
+    def snapshot():
+        events.append("snapshot")
+        return (
+            _rank_local_test_evidence(
+                outputs,
+                phase=contract["phase"],
+                contract_sha256=contract["contract_sha256"],
+                tp_rank=0,
+                request_order=[output.request_id for output in outputs],
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="TP ranks are incomplete"):
+        run_generation_phase(
+            llm=FakeLLM(),
+            manifest=manifest,
+            sampling_params=build_request_sampling_params(
+                manifest,
+                sampling_params_factory=SimpleNamespace,
+                execution_records=execution_records,
+            ),
+            phase="steady-0",
+            sample_index=0,
+            recorder=recorder,
+            memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+            execution_records=execution_records,
+            full_output_path=tmp_path / "missing-rank.outputs.jsonl.gz",
+            require_rank_local_evidence=True,
+            rank_local_semantic_namespace="proof-plan/steady-0",
+            expected_tensor_parallel_size=2,
+            begin_rank_local_evidence=begin,
+            snapshot_rank_local_evidence=snapshot,
+            abort_rank_local_evidence=lambda: events.append("abort"),
+            global_wave_size=2,
+            scheduler_max_num_seqs=2,
+            clock=iter((10.0, 11.0)).__next__,
+        )
+
+    assert events == ["begin", "generate", "snapshot", "abort"]
+    assert not (tmp_path / "missing-rank.outputs.jsonl.gz").exists()
+
+
 def test_generation_phase_skips_post_generation_evidence_after_namespace_ownership_loss(tmp_path) -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
     output = tmp_path / "proof.json"
@@ -3823,8 +5207,8 @@ def test_speed_generation_avoids_proof_callbacks_and_memory_polling(tmp_path) ->
             return True
 
         def generate(self, prompts, sampling_params, *, use_tqdm):
-            assert len(prompts) == len(sampling_params) == 2
-            assert use_tqdm is False
+            if len(prompts) != 2 or len(sampling_params) != 2 or use_tqdm is not False:
+                raise AssertionError("speed lane changed the exact generation call")
             return _fake_outputs(manifest)
 
     llm = FakeLLM()
@@ -3852,18 +5236,87 @@ def test_speed_generation_avoids_proof_callbacks_and_memory_polling(tmp_path) ->
         clock=lambda: next(times),
     )
 
-    assert llm.cache_resets == 1
-    assert result.sample.generation_s == 1.0
-    assert result.sample.peak_device_memory_bytes == ()
-    assert result.proof_collected is False
-    assert result.prefix_cache_reset is True
-    assert result.observations == ()
-    assert result.worker_proof == ()
-    assert result.shared_prefix_state_reuse is None
-    assert result.full_decode_proof is None
-    assert result.wave_proofs[0]["full_decode_proof"] is None
-    assert result.wave_proofs[0]["scheduler_capacity_proof"] is None
-    assert result.full_output_artifact["generated_token_count"] == 6
+    if llm.cache_resets != 1 or result.sample.generation_s != 1.0:
+        raise AssertionError("speed lane cache reset or generation timing drifted")
+    if result.sample.peak_device_memory_bytes != ():
+        raise AssertionError("speed lane fabricated peak-memory observations")
+    if (
+        result.proof_collected is not False
+        or result.prefix_cache_reset is not True
+        or result.observations != ()
+        or result.worker_proof != ()
+        or result.shared_prefix_state_reuse is not None
+        or result.full_decode_proof is not None
+        or result.wave_proofs[0]["full_decode_proof"] is not None
+        or result.wave_proofs[0]["scheduler_capacity_proof"] is not None
+    ):
+        raise AssertionError("speed lane retained proof-only instrumentation")
+    if result.full_output_artifact["generated_token_count"] != 6:
+        raise AssertionError("speed lane did not retain every generated token")
+
+
+def test_generation_timer_excludes_worker_sampler_endpoint_snapshot(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    execution_records = runner.build_wave_execution_records(
+        manifest,
+        global_wave_size=2,
+        generation_round=0,
+        call_index_start=0,
+    )
+    recorder = CUDAGraphProofRecorder()
+    events = []
+
+    class FakeLLM:
+        def generate(self, prompts, sampling_params, *, use_tqdm):
+            events.append("generate")
+            for _ in range(2):
+                recorder.record(
+                    _scheduler_stats(unpadded=2, padded=2, mode="CUDAGraphMode.FULL"),
+                    _iteration_stats(),
+                )
+            return _fake_outputs(manifest)
+
+    times = iter((10.0, 11.0))
+
+    def clock():
+        events.append("clock")
+        return next(times)
+
+    def snapshot_worker_proof():
+        events.append("endpoint-state-snapshot")
+        return ({"sampler": "phase-end"},)
+
+    result = run_generation_phase(
+        llm=FakeLLM(),
+        manifest=manifest,
+        sampling_params=build_request_sampling_params(
+            manifest,
+            sampling_params_factory=SimpleNamespace,
+            execution_records=execution_records,
+        ),
+        phase="steady-0",
+        sample_index=0,
+        recorder=recorder,
+        memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+        execution_records=execution_records,
+        full_output_path=tmp_path / "proof.outputs.jsonl.gz",
+        reset_worker_proof=lambda: events.append("reset-worker-proof"),
+        snapshot_worker_proof=snapshot_worker_proof,
+        global_wave_size=2,
+        scheduler_max_num_seqs=2,
+        clock=clock,
+    )
+
+    if events != [
+        "reset-worker-proof",
+        "clock",
+        "generate",
+        "clock",
+        "endpoint-state-snapshot",
+    ]:
+        raise AssertionError("sampler endpoint snapshot overlapped the coordinator generation timer")
+    if result.sample.generation_s != 1.0:
+        raise AssertionError("generation timer included post-generation sampler proof work")
 
 
 def test_generation_phase_round1_executes_global_calls_11_through_21_and_replays_exactly(tmp_path) -> None:
@@ -3940,6 +5393,7 @@ def test_generation_phase_round1_executes_global_calls_11_through_21_and_replays
     assert calls == [96] * 10 + [40]
     assert result.generation_call_s == (1.0,) * 11
     assert [proof["request_count"] for proof in result.wave_proofs] == calls
+    assert [proof["generation_round"] for proof in result.wave_proofs] == [1] * 11
     assert [proof["call_index"] for proof in result.wave_proofs] == list(range(11, 22))
     assert {record.generation_round for record in result.request_executions} == {1}
     assert [record.seed for record in result.request_executions[:96]] == list(range(11_000_075, 11_000_171))

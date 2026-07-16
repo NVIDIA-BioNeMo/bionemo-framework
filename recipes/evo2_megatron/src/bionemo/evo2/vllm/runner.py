@@ -14,17 +14,20 @@ import math
 import os
 import platform
 import stat
+import struct
 import subprocess
 import sys
 import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from importlib.metadata import PackageNotFoundError, distribution, version
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
+
+from nemo_rl.models.generation.interfaces import generation_prompt_token_ids_sha256
 
 from bionemo.evo2.vllm.accuracy import (
     build_canonical_identity_contract,
@@ -37,6 +40,18 @@ from bionemo.evo2.vllm.accuracy import (
     validate_common_prefix_identity_manifest,
     validate_common_prefix_identity_output_artifacts,
     validate_homogeneous_identity_phase_evidence,
+)
+from bionemo.evo2.vllm.artifact_io import (
+    ArtifactSnapshotError,
+    PublicationReceipt,
+    parse_json_bytes,
+    publish_bytes_noreplace,
+    publish_file_noreplace,
+    read_byte_snapshot,
+    read_file_digest_snapshot,
+    read_json_snapshot,
+    read_jsonl_snapshot,
+    validate_publication_receipt,
 )
 from bionemo.evo2.vllm.benchmark import (
     BenchmarkSample,
@@ -58,11 +73,42 @@ from bionemo.evo2.vllm.profile import (
     resolved_config_snapshot,
     validate_resolved_profile,
 )
+from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
 
 
 _SEED_ROUND_STRIDE = 1_000_003
 _SEED_MODULUS = 2**31
 _REQUIRED_GPU_HEADROOM_BYTES = 2 * 1024**3
+COORDINATOR_GENERATION_TIMING_AUTHORITY = "coordinator_monotonic_generation_wall"
+
+
+def _request_seed_preimage(
+    base_seed: int,
+    *,
+    call_index: int,
+    dp_rank: int,
+    dp_size: int,
+    request_index_in_stream: int,
+) -> int:
+    """Return the exact request-seed coordinate before any forbidden modulus."""
+    for label, value in (
+        ("base_seed", base_seed),
+        ("call_index", call_index),
+        ("dp_rank", dp_rank),
+        ("dp_size", dp_size),
+        ("request_index_in_stream", request_index_in_stream),
+    ):
+        if type(value) is not int:
+            raise TypeError(f"{label} must be a built-in integer")
+    if min(base_seed, call_index, dp_rank, request_index_in_stream) < 0 or dp_size <= 0:
+        raise ValueError("seed coordinates must be nonnegative")
+    if dp_rank >= dp_size:
+        raise ValueError("dp_rank must be smaller than dp_size")
+    if request_index_in_stream >= _SEED_ROUND_STRIDE:
+        raise ValueError("request index exceeds the collision-free stream stride")
+    return base_seed + (call_index * dp_size + dp_rank) * _SEED_ROUND_STRIDE + request_index_in_stream
+
+
 _FROZEN_GPU_ASSIGNMENTS: tuple[dict[str, Any], ...] = (
     {
         "logical_device_index": 0,
@@ -79,8 +125,236 @@ _FROZEN_GPU_ASSIGNMENTS: tuple[dict[str, Any], ...] = (
         "pci_bus_id": "00000000:18:00.0",
     },
 )
-_OUTPUT_NAMESPACE_OWNERSHIP: dict[Path, tuple[int, int]] = {}
+@dataclass
+class _OutputNamespaceOwnership:
+    output_path: Path
+    marker_identity: tuple[int, int]
+    parent_identity: tuple[int, int]
+    publications: dict[Path, PublicationReceipt] = field(default_factory=dict)
+
+
+_OUTPUT_NAMESPACE_OWNERSHIP: dict[Path, _OutputNamespaceOwnership] = {}
 _OUTPUT_NAMESPACE_OWNERSHIP_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class CallerCoordinateContract:
+    """Immutable caller-owned coordinates used to validate worker evidence."""
+
+    manifest: WorkloadManifest
+    profile: Evo2VllmProfile
+    generation_round: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.manifest, WorkloadManifest):
+            raise TypeError("caller coordinate manifest must be a WorkloadManifest")
+        if not isinstance(self.profile, Evo2VllmProfile):
+            raise TypeError("caller coordinate profile must be an Evo2VllmProfile")
+        if (
+            isinstance(self.generation_round, bool)
+            or not isinstance(self.generation_round, int)
+            or self.generation_round < 0
+        ):
+            raise ValueError("caller coordinate generation round must be a nonnegative integer")
+        self.seed_capacity_contract()
+
+    @classmethod
+    def from_inputs(
+        cls,
+        manifest: WorkloadManifest,
+        profile: Evo2VllmProfile,
+        generation_round: int,
+    ) -> CallerCoordinateContract:
+        """Freeze coordinates directly from caller-owned runtime inputs."""
+        return cls(
+            manifest=manifest,
+            profile=profile,
+            generation_round=generation_round,
+        )
+
+    @property
+    def topology(self) -> str:
+        return self.profile.topology
+
+    @property
+    def global_wave_size(self) -> int:
+        return self.profile.global_wave_size
+
+    @property
+    def replica_count(self) -> int:
+        return self.profile.replica_count
+
+    def profile_contract(self) -> dict[str, Any]:
+        """Return the complete optimized profile except proof instrumentation."""
+        contract = asdict(self.profile)
+        contract.pop("proof")
+        return contract
+
+    @property
+    def physical_calls_per_round(self) -> int:
+        """Return the exact physical wave count derived from immutable inputs."""
+        return len(
+            build_request_waves(
+                request_count=len(self.manifest.requests),
+                global_batch_size=self.global_wave_size,
+                replica_count=self.replica_count,
+            )
+        )
+
+    @property
+    def global_call_index_start(self) -> int:
+        """Return the first physical call for the semantic generation round."""
+        return self.generation_round * self.physical_calls_per_round
+
+    def seed_capacity_contract(self) -> dict[str, Any]:
+        """Prove every exact physical request seed remains below the modulus."""
+        waves = build_request_waves(
+            request_count=len(self.manifest.requests),
+            global_batch_size=self.global_wave_size,
+            replica_count=self.replica_count,
+        )
+        global_call_index_start = self.generation_round * len(waves)
+        maximum_pre_modulo_seed = -1
+        maximum_coordinates: dict[str, int] | None = None
+        physical_calls: list[dict[str, Any]] = []
+        for wave in waves:
+            global_call_index = global_call_index_start + wave.wave_index
+            replicas = []
+            for shard in wave.shards:
+                maximum_request_index = shard.request_count - 1
+                shard_maximum = _request_seed_preimage(
+                    self.manifest.seed,
+                    call_index=global_call_index,
+                    dp_rank=shard.replica_index,
+                    dp_size=self.replica_count,
+                    request_index_in_stream=maximum_request_index,
+                )
+                replicas.append(
+                    {
+                        "dp_rank": shard.replica_index,
+                        "local_request_count": shard.request_count,
+                        "maximum_request_index_in_stream": maximum_request_index,
+                        "maximum_pre_modulo_seed": shard_maximum,
+                    }
+                )
+                if shard_maximum > maximum_pre_modulo_seed:
+                    maximum_pre_modulo_seed = shard_maximum
+                    maximum_coordinates = {
+                        "call_in_round": wave.wave_index,
+                        "global_call_index": global_call_index,
+                        "dp_rank": shard.replica_index,
+                        "request_index_in_stream": maximum_request_index,
+                    }
+            physical_calls.append(
+                {
+                    "call_in_round": wave.wave_index,
+                    "global_call_index": global_call_index,
+                    "global_request_count": wave.request_count,
+                    "replicas": replicas,
+                }
+            )
+        if maximum_coordinates is None:
+            raise RuntimeError("seed-capacity proof requires at least one physical request")
+        if maximum_pre_modulo_seed >= _SEED_MODULUS:
+            raise ValueError(
+                "request seed wraparound is forbidden: maximum pre-modulo seed "
+                f"{maximum_pre_modulo_seed} reaches modulus {_SEED_MODULUS} at "
+                f"{maximum_coordinates}"
+            )
+        return {
+            "schema_version": 1,
+            "round_stride": _SEED_ROUND_STRIDE,
+            "modulus": _SEED_MODULUS,
+            "maximum_pre_modulo_seed": maximum_pre_modulo_seed,
+            "maximum_coordinates": maximum_coordinates,
+            "physical_calls": physical_calls,
+            "passed": True,
+        }
+
+    def seed_stream_contract(self) -> dict[str, Any]:
+        """Return caller-derived stream coordinates without worker-owned input."""
+        return {
+            "schema_version": 3,
+            "base_seed": self.manifest.seed,
+            "generation_round": self.generation_round,
+            "physical_calls_per_round": self.physical_calls_per_round,
+            "global_call_index_start": self.global_call_index_start,
+            "round_stride": _SEED_ROUND_STRIDE,
+            "modulus": _SEED_MODULUS,
+            "capacity_proof": self.seed_capacity_contract(),
+        }
+
+    def expected_phase_executions(self) -> tuple[RequestExecutionRecord, ...]:
+        """Reconstruct every phase row from caller-owned manifest and topology."""
+        if self.topology == "tp2":
+            return build_wave_execution_records(
+                self.manifest,
+                global_wave_size=self.global_wave_size,
+                generation_round=self.generation_round,
+                call_index_start=self.global_call_index_start,
+            )
+        return _expected_dp2_executions(
+            self.manifest,
+            profile=self.profile,
+            generation_round=self.generation_round,
+            call_index_start=self.global_call_index_start,
+            global_index_start=0,
+        )
+
+    def rank_row_bindings(self) -> list[dict[str, Any]]:
+        """Hash exact caller-derived request IDs and coordinate rows per DP rank."""
+        executions = self.expected_phase_executions()
+        bindings = []
+        for dp_rank in range(self.replica_count):
+            rows = [execution.to_dict() for execution in executions if execution.dp_rank == dp_rank]
+            request_ids = [row["request_id"] for row in rows]
+            bindings.append(
+                {
+                    "dp_rank": dp_rank,
+                    "request_count": len(rows),
+                    "request_ids_sha256": hashlib.sha256(
+                        json.dumps(request_ids, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                    "coordinate_rows_sha256": hashlib.sha256(
+                        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                }
+            )
+        return bindings
+
+    def summary(self) -> dict[str, Any]:
+        """Return durable evidence for the independently reconstructed binding."""
+        request_ids = [request.request_id for request in self.manifest.requests]
+        request_ids_sha256 = hashlib.sha256(
+            json.dumps(request_ids, separators=(",", ":")).encode()
+        ).hexdigest()
+        profile_contract = self.profile_contract()
+        profile_sha256 = hashlib.sha256(
+            json.dumps(profile_contract, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return {
+            "schema_version": 1,
+            "manifest_sha256": self.manifest.sha256,
+            "request_count": len(request_ids),
+            "request_ids_sha256": request_ids_sha256,
+            "base_seed": self.manifest.seed,
+            "topology": self.topology,
+            "global_wave_size": self.global_wave_size,
+            "replica_count": self.replica_count,
+            "tensor_parallel_size": self.profile.tensor_parallel_size,
+            "tp_ranks": list(range(self.profile.tensor_parallel_size)),
+            "dp_ranks": list(range(self.replica_count)),
+            "worker_rank_pairs": [
+                {"dp_rank": dp_rank, "tp_rank": tp_rank}
+                for dp_rank in range(self.replica_count)
+                for tp_rank in range(self.profile.tensor_parallel_size)
+            ],
+            "rank_row_bindings": self.rank_row_bindings(),
+            "profile_sha256": profile_sha256,
+            "generation_round": self.generation_round,
+            "physical_calls_per_round": self.physical_calls_per_round,
+            "global_call_index_start": self.global_call_index_start,
+        }
 
 
 class GpuPreflightError(RuntimeError):
@@ -138,17 +412,102 @@ def benchmark_instrumentation_contract(mode: str) -> dict[str, bool]:
     return {
         "scheduler_callbacks_during_generation": collect_proof,
         "worker_proof_rpcs": collect_proof,
+        "sampler_call_counter_during_generation": collect_proof,
+        "sampler_endpoint_state_hashing_during_generation": False,
         "prefix_clone_instrumentation": collect_proof,
         "peak_memory_polling_during_generation": collect_proof,
         "post_generation_exact_output_validation": True,
     }
 
 
-def exact_generation_progress_contract(manifest: WorkloadManifest) -> dict[str, int]:
+def benchmark_phase_coordinates(
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    *,
+    generation_round_start: int,
+    warmups: int,
+    repetitions: int,
+) -> tuple[dict[str, Any], ...]:
+    """Allocate one disjoint semantic round, call range, and request range per phase."""
+    if not isinstance(manifest, WorkloadManifest) or not isinstance(profile, Evo2VllmProfile):
+        raise TypeError("benchmark phase coordinates require exact manifest and profile objects")
+    if type(generation_round_start) is not int or generation_round_start < 0:
+        raise ValueError("generation_round_start must be a nonnegative built-in integer")
+    phase_specs = _phase_specs(warmups, repetitions)
+    physical_calls_per_round = len(
+        build_request_waves(
+            request_count=len(manifest.requests),
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )
+    )
+    return tuple(
+        {
+            "phase": phase,
+            "sample_index": sample_index,
+            "generation_round": generation_round,
+            "global_call_index_start": generation_round * physical_calls_per_round,
+            "global_request_index_start": generation_round * len(manifest.requests),
+            "physical_calls_per_round": physical_calls_per_round,
+            "semantic_request_count": len(manifest.requests),
+        }
+        for sample_index, (phase, _phase_index) in enumerate(phase_specs)
+        for generation_round in (generation_round_start + sample_index,)
+    )
+
+
+def mbs1_exact1k_contract(
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+) -> dict[str, Any]:
+    """Seal the primary repeated-prompt 10x96+40 stochastic audit workload."""
+    if len(manifest.requests) != 1_000:
+        raise ValueError("MBS=1 exact-1k audit requires exactly 1,000 semantic requests")
+    if profile.global_wave_size != 96:
+        raise ValueError("MBS=1 exact-1k audit requires global_wave_size=96")
+    if profile.shared_prefix_state_reuse is not True:
+        raise ValueError("MBS=1 exact-1k audit requires physical shared-prefix state reuse")
+    prompt_identity = shared_prefix_manifest_evidence(manifest)
+    waves = build_request_waves(
+        request_count=len(manifest.requests),
+        global_batch_size=profile.global_wave_size,
+        replica_count=profile.replica_count,
+    )
+    global_counts = [wave.request_count for wave in waves]
+    local_counts = [[shard.request_count for shard in wave.shards] for wave in waves]
+    expected_local = [[96]] * 10 + [[40]] if profile.topology == "tp2" else [[48, 48]] * 10 + [[20, 20]]
+    if global_counts != [96] * 10 + [40] or local_counts != expected_local:
+        raise AssertionError("MBS=1 exact-1k physical schedule is not 10x96 plus tail40")
+    return {
+        "schema_version": 1,
+        "workload": "primary-homogeneous-mbs1-exact1k",
+        "semantic_request_count": 1_000,
+        "unique_semantic_request_ids": len({request.request_id for request in manifest.requests}) == 1_000,
+        "prompt_identity": prompt_identity,
+        "physical_call_count": 11,
+        "global_call_request_counts": global_counts,
+        "per_engine_call_request_counts": local_counts,
+        "expected_first_wave_cache_misses": profile.replica_count,
+        "expected_first_wave_cache_hits": 96 - profile.replica_count,
+        "expected_later_wave_cache_misses": 0,
+        "first_wave_includes_prefix_materialization": True,
+        "second_wave_is_warmed_prefix_repeat": True,
+        "semantic_padding": False,
+    }
+
+
+def exact_generation_progress_contract(
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    *,
+    generation_round: int,
+) -> dict[str, Any]:
     """Describe exact first-sample, decode-update, and retained-output counts."""
+    if type(generation_round) is not int or generation_round < 0:
+        raise ValueError("generation_round must be a nonnegative built-in integer")
     request_count = len(manifest.requests)
     retained_tokens = request_count * manifest.max_new_tokens
-    return {
+    contract: dict[str, Any] = {
         "schema_version": 1,
         "request_count": request_count,
         "max_new_tokens": manifest.max_new_tokens,
@@ -157,6 +516,173 @@ def exact_generation_progress_contract(manifest: WorkloadManifest) -> dict[str, 
         "expected_retained_output_token_ids": retained_tokens,
         "expected_retained_chosen_token_logprobs": retained_tokens,
     }
+    if request_count == 1_000:
+        if profile.global_wave_size != 96:
+            raise ValueError("1,000-request audit requires global_wave_size=96")
+        waves = build_request_waves(
+            request_count=request_count,
+            global_batch_size=profile.global_wave_size,
+            replica_count=profile.replica_count,
+        )
+        global_call_index_start = generation_round * len(waves)
+        contract["physical_schedule"] = {
+            "generation_round": generation_round,
+            "global_call_index_start": global_call_index_start,
+            "global_wave_size": profile.global_wave_size,
+            "physical_calls_per_round": len(waves),
+            "global_call_request_counts": [wave.request_count for wave in waves],
+            "per_engine_call_request_counts": [
+                [shard.request_count for shard in wave.shards] for wave in waves
+            ],
+            "calls": [
+                {
+                    "call_in_round": wave.wave_index,
+                    "global_call_index": global_call_index_start + wave.wave_index,
+                    "global_start": wave.start,
+                    "global_stop": wave.stop,
+                    "global_request_count": wave.request_count,
+                    "replicas": [
+                        {
+                            "dp_rank": shard.replica_index,
+                            "global_start": shard.start,
+                            "global_stop": shard.stop,
+                            "local_request_count": shard.request_count,
+                        }
+                        for shard in wave.shards
+                    ],
+                }
+                for wave in waves
+            ],
+        }
+    return contract
+
+
+def _require_builtin_integer(value: Any, *, label: str, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise AssertionError(f"{label} must be a built-in integer >= {minimum}")
+    return value
+
+
+def _require_finite_number(
+    value: Any,
+    *,
+    label: str,
+    minimum: float = 0.0,
+    strictly_positive: bool = False,
+) -> int | float:
+    if type(value) not in (int, float):
+        raise AssertionError(f"{label} must be a built-in integer or float")
+    if not math.isfinite(value):
+        raise AssertionError(f"{label} must be finite")
+    if value < minimum or (strictly_positive and value <= minimum):
+        comparator = ">" if strictly_positive else ">="
+        raise AssertionError(f"{label} must be {comparator} {minimum}")
+    return value
+
+
+def _validate_exact_wave_coordinates(
+    retained: Mapping[str, Any],
+    *,
+    expected: Mapping[str, Any],
+) -> None:
+    """Require exact raw physical-wave coordinates without numeric aliases."""
+    for field, expected_value in expected.items():
+        observed_value = retained.get(field)
+        if type(expected_value) is int:
+            _require_builtin_integer(observed_value, label=f"physical wave {field}")
+        elif type(observed_value) is not type(expected_value):
+            raise AssertionError(f"physical wave {field} has the wrong raw type")
+        if observed_value != expected_value:
+            raise AssertionError(f"physical wave {field} does not match reconstructed geometry")
+
+
+def validate_exact_generation_progress_contract(
+    retained: Any,
+    *,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    generation_round: int,
+) -> dict[str, Any]:
+    """Reconstruct exact progress and reject numeric aliases in retained raw geometry."""
+    if not isinstance(retained, dict):
+        raise AssertionError("exact-generation progress contract must be a JSON object")
+    expected = exact_generation_progress_contract(
+        manifest,
+        profile,
+        generation_round=generation_round,
+    )
+    for field in (
+        "schema_version",
+        "request_count",
+        "max_new_tokens",
+        "expected_first_sampled_tokens",
+        "expected_decode_token_updates",
+        "expected_retained_output_token_ids",
+        "expected_retained_chosen_token_logprobs",
+    ):
+        _require_builtin_integer(retained.get(field), label=f"exact-generation {field}")
+    if len(manifest.requests) == 1_000:
+        schedule = retained.get("physical_schedule")
+        if not isinstance(schedule, dict):
+            raise AssertionError("exact-generation physical schedule must be a JSON object")
+        for field in (
+            "generation_round",
+            "global_call_index_start",
+            "global_wave_size",
+            "physical_calls_per_round",
+        ):
+            _require_builtin_integer(schedule.get(field), label=f"physical schedule {field}")
+        for field in ("global_call_request_counts",):
+            values = schedule.get(field)
+            if not isinstance(values, list):
+                raise AssertionError(f"physical schedule {field} must be a JSON array")
+            for index, value in enumerate(values):
+                _require_builtin_integer(value, label=f"physical schedule {field}[{index}]", minimum=1)
+        local_counts = schedule.get("per_engine_call_request_counts")
+        if not isinstance(local_counts, list):
+            raise AssertionError("per-engine request counts must be a JSON array")
+        for call_index, values in enumerate(local_counts):
+            if not isinstance(values, list):
+                raise AssertionError("per-engine call request counts must be JSON arrays")
+            for dp_rank, value in enumerate(values):
+                _require_builtin_integer(
+                    value,
+                    label=f"per-engine call {call_index} rank {dp_rank} request count",
+                    minimum=1,
+                )
+        calls = schedule.get("calls")
+        if not isinstance(calls, list):
+            raise AssertionError("physical schedule calls must be a JSON array")
+        for call_position, call in enumerate(calls):
+            if not isinstance(call, dict):
+                raise AssertionError("physical schedule call rows must be JSON objects")
+            for field in (
+                "call_in_round",
+                "global_call_index",
+                "global_start",
+                "global_stop",
+                "global_request_count",
+            ):
+                _require_builtin_integer(
+                    call.get(field),
+                    label=f"physical call {call_position} {field}",
+                    minimum=1 if field in {"global_stop", "global_request_count"} else 0,
+                )
+            replicas = call.get("replicas")
+            if not isinstance(replicas, list):
+                raise AssertionError("physical call replicas must be a JSON array")
+            for replica_position, replica in enumerate(replicas):
+                if not isinstance(replica, dict):
+                    raise AssertionError("physical call replica rows must be JSON objects")
+                for field in ("dp_rank", "global_start", "global_stop", "local_request_count"):
+                    _require_builtin_integer(
+                        replica.get(field),
+                        label=f"physical call {call_position} replica {replica_position} {field}",
+                        minimum=1 if field in {"global_stop", "local_request_count"} else 0,
+                    )
+    if retained != expected:
+        raise AssertionError("exact-generation progress contract does not match reconstructed raw geometry")
+    return expected
 
 
 def build_benchmark_contract(
@@ -165,52 +691,55 @@ def build_benchmark_contract(
     profile: Evo2VllmProfile,
 ) -> dict[str, Any]:
     """Build the optimized engine/workload identity shared by proof and speed lanes."""
-    generation_round = int(args.generation_round)
-    if generation_round < 0:
-        raise ValueError("generation_round must be nonnegative")
+    generation_round = args.generation_round
+    if type(generation_round) is not int or generation_round < 0:
+        raise ValueError("generation_round must be a nonnegative built-in integer")
     if (
         getattr(args, "canonical_identity_case", None) is not None
         and getattr(args, "common_prefix_identity_case", None) is not None
     ):
         raise ValueError("canonical and common-prefix identity modes are mutually exclusive")
-    physical_calls_per_round = len(
-        build_request_waves(
-            request_count=len(manifest.requests),
-            global_batch_size=profile.global_wave_size,
-            replica_count=profile.replica_count,
-        )
-    )
-    global_call_index_start = generation_round * physical_calls_per_round
+    caller_coordinates = CallerCoordinateContract.from_inputs(manifest, profile, generation_round)
     profile_contract = asdict(profile)
     profile_contract.pop("proof")
     identity_context = canonical_identity_context(args, manifest, profile)
     common_identity_context = common_prefix_identity_context(args, manifest, profile)
+    phase_coordinates = benchmark_phase_coordinates(
+        manifest,
+        profile,
+        generation_round_start=generation_round,
+        warmups=args.warmups,
+        repetitions=args.repetitions,
+    )
+    mbs1_enabled = bool(getattr(args, "mbs1_exact1k_audit", False))
+    if mbs1_enabled and not bool(getattr(args, "exact_progress_gate", False)):
+        raise ValueError("MBS=1 exact-1k audit requires --exact-progress-gate")
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "backend": args.backend,
         "topology": args.topology,
         "checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
         "load_format": args.load_format,
         "manifest_sha256": manifest.sha256,
         "profile": profile_contract,
-        "seed_stream": {
-            "schema_version": 2,
-            "base_seed": manifest.seed,
-            "generation_round": generation_round,
-            "physical_calls_per_round": physical_calls_per_round,
-            "global_call_index_start": global_call_index_start,
-            "round_stride": _SEED_ROUND_STRIDE,
-            "modulus": _SEED_MODULUS,
-        },
+        "seed_stream": caller_coordinates.seed_stream_contract(),
         "measurement": {
             "warmups": int(args.warmups),
             "repetitions": int(args.repetitions),
+            "phase_coordinates": list(phase_coordinates),
         },
         "canonical_identity": None if identity_context is None else identity_context[2],
         "common_prefix_identity": None if common_identity_context is None else common_identity_context[3],
         "exact_generation_progress": (
-            exact_generation_progress_contract(manifest) if bool(getattr(args, "exact_progress_gate", False)) else None
+            exact_generation_progress_contract(
+                manifest,
+                profile,
+                generation_round=generation_round,
+            )
+            if bool(getattr(args, "exact_progress_gate", False))
+            else None
         ),
+        "mbs1_exact1k": mbs1_exact1k_contract(manifest, profile) if mbs1_enabled else None,
     }
 
 
@@ -303,13 +832,10 @@ def manifest_output_decoder(manifest: WorkloadManifest) -> Callable[[Sequence[in
             raise AssertionError("output tokenizer provenance is incomplete")
         return None
     path = Path(tokenizer_path).expanduser().resolve()
-    if tokenizer_sha256 is None or _sha256_file(path) != tokenizer_sha256:
+    tokenizer = SnapshotBoundTokenizer.from_path(path)
+    if tokenizer_sha256 is None or tokenizer.source_sha256 != tokenizer_sha256:
         raise AssertionError("output tokenizer SHA256 does not match the workload manifest")
-
-    from tokenizers import Tokenizer
-
-    tokenizer = Tokenizer.from_file(str(path))
-    return lambda token_ids: tokenizer.decode(list(token_ids), skip_special_tokens=False)
+    return tokenizer
 
 
 def canonical_identity_phase_artifacts(
@@ -654,13 +1180,17 @@ def validate_linked_proof_artifact(
     path: str | Path,
     *,
     expected_contract: dict[str, Any],
+    caller_coordinates: CallerCoordinateContract,
     require_memory_headroom: bool = False,
 ) -> dict[str, Any]:
     """Require one successful proof artifact with the exact speed-run contract."""
+    if not isinstance(caller_coordinates, CallerCoordinateContract):
+        raise TypeError("linked proof validation requires an external caller coordinate contract")
     artifact_path = Path(path).expanduser().resolve()
     if not artifact_path.is_file():
         raise FileNotFoundError(f"linked proof artifact is missing: {artifact_path}")
-    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact_snapshot = read_json_snapshot(artifact_path, label="linked proof artifact")
+    artifact = _require_dict(artifact_snapshot.value, label="linked proof artifact")
     if artifact.get("benchmark_mode") != "proof":
         raise AssertionError("linked artifact is not a proof benchmark")
     if artifact.get("invocation", {}).get("exit_status") != 0:
@@ -683,12 +1213,13 @@ def validate_linked_proof_artifact(
         artifact,
         artifact_path=artifact_path,
         expected_contract=expected_contract,
+        caller_coordinates=caller_coordinates,
         require_memory_headroom=require_memory_headroom,
     )
     memory_headroom = recomputed["gpu_memory_headroom"]
     return {
         "artifact_path": str(artifact_path),
-        "artifact_sha256": _sha256_file(artifact_path),
+        "artifact_sha256": artifact_snapshot.sha256,
         "benchmark_contract_sha256": retained_sha256,
         "proof_status": dict(artifact["proof_status"]),
         "gpu_memory_headroom": memory_headroom,
@@ -990,6 +1521,7 @@ def _validate_worker_sampler_evidence(
     *,
     expected_installation: Mapping[str, Any],
     expected_seed_batches: Sequence[Sequence[int]],
+    expected_request_generations: Sequence[Mapping[str, Any]],
     require_generation_observations: bool,
 ) -> list[dict[str, Any]]:
     from bionemo.evo2.vllm.sampler import (
@@ -1004,6 +1536,7 @@ def _validate_worker_sampler_evidence(
             expected_environment=expected_environment,
             expected_installation=expected_installation,
             expected_seed_batches=expected_seed_batches,
+            expected_request_generations=expected_request_generations,
             require_generation_observations=require_generation_observations,
         )
         for worker in workers
@@ -1031,7 +1564,7 @@ def _validate_full_output_sidecar(
     manifest: WorkloadManifest,
     expected_executions: Sequence[RequestExecutionRecord],
     output_summaries: Any,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     if metadata.get("schema_version") != 2 or metadata.get("format") != "jsonl":
         raise AssertionError("full-output sidecar schema is unsupported")
     if metadata.get("compression") != "gzip":
@@ -1040,9 +1573,17 @@ def _validate_full_output_sidecar(
     expected_path = phase_output_artifact_path(artifact_path, phase=phase).resolve()
     if sidecar != expected_path or not sidecar.is_file():
         raise AssertionError("full-output sidecar path does not match its proof namespace")
-    if metadata.get("sha256") != _sha256_file(sidecar):
+    try:
+        sidecar_snapshot = read_jsonl_snapshot(
+            sidecar,
+            label=f"{phase} full-output sidecar",
+            compression="gzip",
+        )
+    except ArtifactSnapshotError as error:
+        raise AssertionError("full-output sidecar could not be decoded") from error
+    if metadata.get("sha256") != sidecar_snapshot.sha256:
         raise AssertionError("full-output sidecar SHA256 does not match retained bytes")
-    if metadata.get("size_bytes") != sidecar.stat().st_size:
+    if metadata.get("size_bytes") != sidecar_snapshot.size_bytes:
         raise AssertionError("full-output sidecar byte count is inconsistent")
     summaries = _require_list(output_summaries, label="phase output summaries")
     if len(expected_executions) != len(manifest.requests) or len(summaries) != len(manifest.requests):
@@ -1050,73 +1591,76 @@ def _validate_full_output_sidecar(
 
     request_count = 0
     generated_count = 0
+    request_generations = []
     seen_execution_uids = set()
-    try:
-        with gzip.open(sidecar, mode="rt", encoding="utf-8") as handle:
-            for request_count, line in enumerate(handle, start=1):
-                index = request_count - 1
-                if index >= len(manifest.requests):
-                    raise AssertionError("full-output sidecar contains extra requests")
-                row = json.loads(line)
-                if not isinstance(row, dict):
-                    raise AssertionError("full-output sidecar row is not a JSON object")
-                request = manifest.requests[index]
-                execution = expected_executions[index]
-                if any(row.get(key) != value for key, value in execution.to_dict().items()):
-                    raise AssertionError("sidecar execution ownership or seed coordinates drifted")
-                execution_uid = row.get("execution_uid")
-                if execution_uid in seen_execution_uids:
-                    raise AssertionError("full-output sidecar contains a duplicate execution UID")
-                seen_execution_uids.add(execution_uid)
-                if row.get("prompt_token_ids") != list(request.prompt_token_ids):
-                    raise AssertionError("sidecar prompt tokens do not match the manifest")
-                output_ids = row.get("output_token_ids")
-                logprobs = row.get("chosen_token_logprobs")
-                if (
-                    not isinstance(output_ids, list)
-                    or len(output_ids) != manifest.max_new_tokens
-                    or any(isinstance(token, bool) or not isinstance(token, int) for token in output_ids)
-                ):
-                    raise AssertionError("sidecar output token IDs are malformed or not exact length")
-                if (
-                    not isinstance(logprobs, list)
-                    or len(logprobs) != len(output_ids)
-                    or any(
-                        isinstance(value, bool)
-                        or not isinstance(value, (int, float))
-                        or not math.isfinite(float(value))
-                        for value in logprobs
-                    )
-                ):
-                    raise AssertionError("sidecar chosen-token logprobs are malformed or non-finite")
-                expected_lengths = exact_length_evidence(
-                    prompt_tokens=len(request.prompt_token_ids),
-                    generated_tokens=len(output_ids),
-                    requested_new_tokens=manifest.max_new_tokens,
-                )
-                if any(row.get(key) != value for key, value in expected_lengths.items()):
-                    raise AssertionError("sidecar requested/observed exact-length evidence drifted")
-                if (
-                    row.get("finish_reason") != "length"
-                    or row.get("stop_reason") is not None
-                    or row.get("stopped_on_eos") is not False
-                ):
-                    raise AssertionError("sidecar request did not finish at the exact length boundary")
-                record = GenerationRecord(
-                    request_id=request.request_id,
-                    prompt_token_ids=request.prompt_token_ids,
-                    output_token_ids=tuple(output_ids),
-                    output_logprobs=tuple(float(value) for value in logprobs),
-                    requested_max_tokens=manifest.max_new_tokens,
-                    finish_reason="length",
-                    stop_reason=None,
-                    stopped_on_eos=False,
-                )
-                if summaries[index] != record.summary_dict():
-                    raise AssertionError("phase output summary does not match its full sidecar row")
-                generated_count += len(output_ids)
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise AssertionError("full-output sidecar could not be decoded") from error
+    for request_count, row in enumerate(sidecar_snapshot.values, start=1):
+        index = request_count - 1
+        if index >= len(manifest.requests):
+            raise AssertionError("full-output sidecar contains extra requests")
+        if not isinstance(row, dict):
+            raise AssertionError("full-output sidecar row is not a JSON object")
+        request = manifest.requests[index]
+        execution = expected_executions[index]
+        if any(row.get(key) != value for key, value in execution.to_dict().items()):
+            raise AssertionError("sidecar execution ownership or seed coordinates drifted")
+        execution_uid = row.get("execution_uid")
+        if execution_uid in seen_execution_uids:
+            raise AssertionError("full-output sidecar contains a duplicate execution UID")
+        seen_execution_uids.add(execution_uid)
+        if row.get("prompt_token_ids") != list(request.prompt_token_ids):
+            raise AssertionError("sidecar prompt tokens do not match the manifest")
+        output_ids = row.get("output_token_ids")
+        logprobs = row.get("chosen_token_logprobs")
+        if (
+            not isinstance(output_ids, list)
+            or len(output_ids) != manifest.max_new_tokens
+            or any(isinstance(token, bool) or not isinstance(token, int) for token in output_ids)
+        ):
+            raise AssertionError("sidecar output token IDs are malformed or not exact length")
+        if (
+            not isinstance(logprobs, list)
+            or len(logprobs) != len(output_ids)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in logprobs
+            )
+        ):
+            raise AssertionError("sidecar chosen-token logprobs are malformed or non-finite")
+        expected_lengths = exact_length_evidence(
+            prompt_tokens=len(request.prompt_token_ids),
+            generated_tokens=len(output_ids),
+            requested_new_tokens=manifest.max_new_tokens,
+        )
+        if any(row.get(key) != value for key, value in expected_lengths.items()):
+            raise AssertionError("sidecar requested/observed exact-length evidence drifted")
+        if (
+            row.get("finish_reason") != "length"
+            or row.get("stop_reason") is not None
+            or row.get("stopped_on_eos") is not False
+        ):
+            raise AssertionError("sidecar request did not finish at the exact length boundary")
+        record = GenerationRecord(
+            request_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            output_token_ids=tuple(output_ids),
+            output_logprobs=tuple(float(value) for value in logprobs),
+            requested_max_tokens=manifest.max_new_tokens,
+            finish_reason="length",
+            stop_reason=None,
+            stopped_on_eos=False,
+        )
+        if summaries[index] != record.summary_dict():
+            raise AssertionError("phase output summary does not match its full sidecar row")
+        generated_count += len(output_ids)
+        request_generations.append(
+            {
+                "request_id": execution.request_id,
+                "seed": execution.seed,
+                "accepted_output_token_count": len(output_ids),
+            }
+        )
     if request_count != len(manifest.requests):
         raise AssertionError("full-output sidecar omitted manifest requests")
     if metadata.get("request_count") != request_count:
@@ -1131,7 +1675,37 @@ def _validate_full_output_sidecar(
         "request_count": request_count,
         "output_token_id_count": generated_count,
         "chosen_token_logprob_count": generated_count,
+        "request_generations": request_generations,
     }
+
+
+def _sidecar_request_generations_for_executions(
+    sidecar_counts: Mapping[str, Any],
+    executions: Sequence[RequestExecutionRecord],
+) -> tuple[dict[str, Any], ...]:
+    rows = _require_list(
+        sidecar_counts.get("request_generations"),
+        label="caller-reopened sidecar request generations",
+    )
+    expected_fields = {"request_id", "seed", "accepted_output_token_count"}
+    by_key = {}
+    for row in rows:
+        if type(row) is not dict or set(row) != expected_fields:
+            raise AssertionError("caller-reopened request generation fields are not exact")
+        key = (row.get("request_id"), row.get("seed"))
+        if key in by_key:
+            raise AssertionError("caller-reopened sidecar repeated one request and seed")
+        by_key[key] = row
+    selected = []
+    seen = set()
+    for execution in executions:
+        key = (execution.request_id, execution.seed)
+        row = by_key.get(key)
+        if row is None or key in seen:
+            raise AssertionError("sampler execution does not join bijectively to the caller sidecar")
+        seen.add(key)
+        selected.append(dict(row))
+    return tuple(selected)
 
 
 def _validate_phase_sample(
@@ -1143,26 +1717,67 @@ def _validate_phase_sample(
     sample = _require_dict(phase.get("sample"), label="phase benchmark sample")
     prompt_tokens = sum(len(request.prompt_token_ids) for request in manifest.requests)
     generated_tokens = len(manifest.requests) * manifest.max_new_tokens
-    if (
-        sample.get("sample_index") != sample_index
-        or sample.get("request_count") != len(manifest.requests)
-        or sample.get("prompt_tokens") != prompt_tokens
-        or sample.get("generated_tokens") != generated_tokens
-        or sample.get("output_lengths") != [manifest.max_new_tokens] * len(manifest.requests)
+    for field, expected in (
+        ("sample_index", sample_index),
+        ("request_count", len(manifest.requests)),
+        ("prompt_tokens", prompt_tokens),
+        ("generated_tokens", generated_tokens),
     ):
-        raise AssertionError("phase benchmark sample does not match the exact workload")
-    generation_calls = _require_list(phase.get("generation_call_s"), label="generation call timings")
-    if (
-        not generation_calls
-        or any(
-            isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 for value in generation_calls
+        observed = _require_builtin_integer(
+            sample.get(field),
+            label=f"phase benchmark sample {field}",
+            minimum=0,
         )
-        or not math.isclose(float(sample.get("generation_s", -1.0)), sum(generation_calls))
+        if observed != expected:
+            raise AssertionError("phase benchmark sample does not match the exact workload")
+    output_lengths = sample.get("output_lengths")
+    if type(output_lengths) is not list or any(
+        type(value) is not int or value <= 0 for value in output_lengths
     ):
-        raise AssertionError("phase generation timing does not match its physical calls")
+        raise AssertionError("phase benchmark sample output_lengths are malformed")
+    if output_lengths != [manifest.max_new_tokens] * len(manifest.requests):
+        raise AssertionError("phase benchmark sample does not match the exact workload")
+    for field, allow_empty in (
+        ("ttft_s", False),
+        ("inter_token_latency_s", True),
+    ):
+        timings = sample.get(field)
+        if type(timings) is not list or (not allow_empty and not timings):
+            raise AssertionError(f"phase benchmark sample {field} is malformed")
+        for index, value in enumerate(timings):
+            _require_finite_number(
+                value,
+                label=f"phase benchmark sample {field}[{index}]",
+            )
+    sample_generation_s = _require_finite_number(
+        sample.get("generation_s"),
+        label="phase benchmark sample generation_s",
+        strictly_positive=True,
+    )
+    generation_calls = _require_list(phase.get("generation_call_s"), label="generation call timings")
+    if not generation_calls:
+        raise AssertionError("phase generation timing has no physical calls")
+    for index, value in enumerate(generation_calls):
+        _require_finite_number(
+            value,
+            label=f"generation call timings[{index}]",
+            strictly_positive=True,
+        )
+    if phase.get("generation_timing_authority") != COORDINATOR_GENERATION_TIMING_AUTHORITY:
+        raise AssertionError("phase generation timing authority is not the coordinator monotonic wall")
+    coordinator_wall_s = _require_finite_number(
+        phase.get("coordinator_generation_wall_s"),
+        label="coordinator generation wall time",
+        strictly_positive=True,
+    )
+    if not math.isclose(float(sample_generation_s), float(coordinator_wall_s)) or not math.isclose(
+        float(coordinator_wall_s),
+        float(sum(generation_calls)),
+    ):
+        raise AssertionError("phase generation timing does not match its coordinator physical-call wall")
     peaks = sample.get("peak_device_memory_bytes")
-    if not isinstance(peaks, list) or any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in peaks
+    if type(peaks) is not list or not peaks or any(
+        type(value) is not int or value < 0 for value in peaks
     ):
         raise AssertionError("phase peak-memory evidence is malformed")
     return tuple(peaks)
@@ -1196,13 +1811,15 @@ def _validate_direct_phase_evidence(
     phases = _require_list(artifact.get("phases"), label="proof phases")
     if [phase.get("phase") for phase in phases] != expected_names:
         raise AssertionError("proof phases do not match the benchmark measurement contract")
-    call_index = generation_round * len(
-        build_request_waves(
-            request_count=len(manifest.requests),
-            global_batch_size=profile.global_wave_size,
-            replica_count=profile.replica_count,
-        )
+    expected_phase_coordinates = benchmark_phase_coordinates(
+        manifest,
+        profile,
+        generation_round_start=generation_round,
+        warmups=warmups,
+        repetitions=repetitions,
     )
+    if measurement.get("phase_coordinates") != list(expected_phase_coordinates):
+        raise AssertionError("benchmark measurement phase coordinates are not caller-reconstructed")
     memory_peaks = []
     final_workers = []
     initialized = _require_list(
@@ -1213,9 +1830,12 @@ def _validate_direct_phase_evidence(
         initialized,
         expected_installation=expected_sampler_installation,
         expected_seed_batches=(),
+        expected_request_generations=(),
         require_generation_observations=False,
     )
-    for sample_index, phase in enumerate(phases):
+    for sample_index, (phase, phase_coordinate) in enumerate(
+        zip(phases, expected_phase_coordinates, strict=True)
+    ):
         if not isinstance(phase, dict) or phase.get("proof_collected") is not True:
             raise AssertionError("proof phase lacks production proof collection")
         phase_name = expected_names[sample_index]
@@ -1242,11 +1862,10 @@ def _validate_direct_phase_evidence(
                 "start": wave.start,
                 "stop": wave.stop,
                 "request_count": wave.request_count,
-                "generation_round": generation_round,
-                "call_index": call_index + wave.wave_index,
+                "generation_round": phase_coordinate["generation_round"],
+                "call_index": phase_coordinate["global_call_index_start"] + wave.wave_index,
             }
-            if any(retained.get(key) != value for key, value in expected_fields.items()):
-                raise AssertionError("physical wave boundaries or call indices drifted")
+            _validate_exact_wave_coordinates(retained, expected=expected_fields)
             full_decode = _require_dict(
                 retained.get("full_decode_proof"),
                 label="wave FULL decode proof",
@@ -1312,11 +1931,11 @@ def _validate_direct_phase_evidence(
         executions = build_wave_execution_records(
             manifest,
             global_wave_size=profile.global_wave_size,
-            generation_round=generation_round,
-            call_index_start=call_index,
+            generation_round=phase_coordinate["generation_round"],
+            call_index_start=phase_coordinate["global_call_index_start"],
+            global_request_index_start=phase_coordinate["global_request_index_start"],
         )
-        if phase.get("request_executions") != [record.to_dict() for record in executions]:
-            raise AssertionError("phase request ownership or seed stream drifted")
+        _validate_request_execution_rows(phase.get("request_executions"), expected=executions)
         sidecar_counts = _validate_full_output_sidecar(
             _require_dict(phase.get("full_output_artifact"), label="full-output sidecar metadata"),
             artifact_path=artifact_path,
@@ -1361,6 +1980,10 @@ def _validate_direct_phase_evidence(
             workers,
             expected_installation=expected_sampler_installation,
             expected_seed_batches=_execution_seed_batches(executions),
+            expected_request_generations=_sidecar_request_generations_for_executions(
+                sidecar_counts,
+                executions,
+            ),
             require_generation_observations=True,
         )
         _validate_fir_route_evidence(workers, manifest=manifest)
@@ -1508,6 +2131,7 @@ def _validate_dp2_phase_evidence(
             ),
             expected_installation=expected_sampler_installation,
             expected_seed_batches=(),
+            expected_request_generations=(),
             require_generation_observations=False,
         )
     for sample_index, phase in enumerate(phases):
@@ -1524,6 +2148,7 @@ def _validate_dp2_phase_evidence(
             raise AssertionError("DP2 proof wave count does not match the exact workload")
         phase_workers = []
         phase_full_summaries = []
+        pending_sampler_validations = []
         for wave, retained in zip(waves, retained_waves, strict=True):
             wave_phase = f"{phase_name}.wave-{wave.wave_index:03d}"
             expected_wave = {
@@ -1535,12 +2160,17 @@ def _validate_dp2_phase_evidence(
                 "generation_round": generation_round,
                 "call_index": call_index + wave.wave_index,
             }
-            if any(retained.get(key) != value for key, value in expected_wave.items()):
-                raise AssertionError("DP2 physical wave boundaries drifted")
+            _validate_exact_wave_coordinates(retained, expected=expected_wave)
             engines = _require_list(retained.get("engines"), label="DP2 engine wave proofs")
             if len(engines) != len(wave.shards):
                 raise AssertionError("DP2 engine proof count does not match active replicas")
             for shard, engine in zip(wave.shards, engines, strict=True):
+                _require_builtin_integer(engine.get("dp_rank"), label="DP2 engine dp_rank")
+                _require_builtin_integer(
+                    engine.get("request_count"),
+                    label="DP2 engine request_count",
+                    minimum=1,
+                )
                 if (
                     engine.get("dp_rank") != shard.replica_index
                     or engine.get("request_count") != shard.request_count
@@ -1617,12 +2247,7 @@ def _validate_dp2_phase_evidence(
                     generation_round=generation_round,
                     call_index=call_index + wave.wave_index,
                 )
-                _validate_worker_sampler_evidence(
-                    workers,
-                    expected_installation=expected_sampler_installation,
-                    expected_seed_batches=_execution_seed_batches(shard_executions),
-                    require_generation_observations=True,
-                )
+                pending_sampler_validations.append((workers, shard_executions))
                 _validate_fir_route_evidence(workers, manifest=manifest.request_slice(wave.start, wave.stop))
                 phase_workers.extend(workers)
             identities = {
@@ -1677,8 +2302,7 @@ def _validate_dp2_phase_evidence(
             call_index_start=call_index,
             global_index_start=global_index,
         )
-        if phase.get("request_executions") != [record.to_dict() for record in executions]:
-            raise AssertionError("DP2 request ownership or rank-local seed streams drifted")
+        _validate_request_execution_rows(phase.get("request_executions"), expected=executions)
         sidecar_counts = _validate_full_output_sidecar(
             _require_dict(phase.get("full_output_artifact"), label="DP2 full-output sidecar"),
             artifact_path=artifact_path,
@@ -1687,6 +2311,32 @@ def _validate_dp2_phase_evidence(
             expected_executions=executions,
             output_summaries=phase.get("outputs"),
         )
+        sampler_joined_keys = set()
+        for workers, shard_executions in pending_sampler_validations:
+            request_generations = _sidecar_request_generations_for_executions(
+                sidecar_counts,
+                shard_executions,
+            )
+            joined_keys = {(row["request_id"], row["seed"]) for row in request_generations}
+            if sampler_joined_keys & joined_keys:
+                raise AssertionError("DP2 sampler validation joined one caller request more than once")
+            sampler_joined_keys.update(joined_keys)
+            _validate_worker_sampler_evidence(
+                workers,
+                expected_installation=expected_sampler_installation,
+                expected_seed_batches=_execution_seed_batches(shard_executions),
+                expected_request_generations=request_generations,
+                require_generation_observations=True,
+            )
+        sidecar_keys = {
+            (row["request_id"], row["seed"])
+            for row in _require_list(
+                sidecar_counts.get("request_generations"),
+                label="DP2 caller-reopened sampler request generations",
+            )
+        }
+        if sampler_joined_keys != sidecar_keys:
+            raise AssertionError("DP2 sampler validations do not cover the complete caller sidecar")
         progress_contract = artifact["benchmark_contract"].get("exact_generation_progress")
         if progress_contract is None:
             if phase.get("exact_generation_progress") is not None:
@@ -1760,20 +2410,31 @@ def _validate_linked_proof_evidence(
     *,
     artifact_path: Path,
     expected_contract: dict[str, Any],
+    caller_coordinates: CallerCoordinateContract,
     require_memory_headroom: bool,
 ) -> dict[str, Any]:
     try:
-        manifest = WorkloadManifest.from_dict(_require_dict(artifact.get("manifest"), label="proof manifest"))
+        retained_manifest = WorkloadManifest.from_dict(
+            _require_dict(artifact.get("manifest"), label="proof manifest")
+        )
     except (KeyError, TypeError, ValueError) as error:
         raise AssertionError("proof manifest is malformed") from error
+    manifest = caller_coordinates.manifest
+    if retained_manifest != manifest:
+        raise AssertionError("proof manifest does not match the external caller coordinate contract")
     if (
         artifact.get("manifest_sha256") != manifest.sha256
         or expected_contract.get("manifest_sha256") != manifest.sha256
     ):
         raise AssertionError("proof manifest SHA256 does not match the benchmark contract")
     progress_contract = expected_contract.get("exact_generation_progress")
-    if progress_contract is not None and progress_contract != exact_generation_progress_contract(manifest):
-        raise AssertionError("exact-generation progress contract does not match the immutable manifest")
+    if progress_contract is not None:
+        validate_exact_generation_progress_contract(
+            progress_contract,
+            manifest=manifest,
+            profile=caller_coordinates.profile,
+            generation_round=caller_coordinates.generation_round,
+        )
     profile_data = _require_dict(artifact.get("profile"), label="proof profile")
     try:
         profile = Evo2VllmProfile(**profile_data)
@@ -1781,38 +2442,22 @@ def _validate_linked_proof_evidence(
         raise AssertionError("proof profile is malformed") from error
     if profile.proof is not True:
         raise AssertionError("linked proof profile did not enable proof instrumentation")
+    if (
+        profile.topology != caller_coordinates.topology
+        or profile.global_wave_size != caller_coordinates.global_wave_size
+        or profile.replica_count != caller_coordinates.replica_count
+    ):
+        raise AssertionError("proof topology does not match the external caller coordinate contract")
     profile_contract = asdict(profile)
     profile_contract.pop("proof")
-    if expected_contract.get("profile") != profile_contract:
-        raise AssertionError("proof profile does not match the linked benchmark contract")
+    caller_profile_contract = caller_coordinates.profile_contract()
+    if profile_contract != caller_profile_contract or expected_contract.get("profile") != caller_profile_contract:
+        raise AssertionError("proof profile does not match the external caller coordinate contract")
     seed_stream = _require_dict(expected_contract.get("seed_stream"), label="seed-stream contract")
-    expected_seed_stream = {
-        "schema_version": 2,
-        "base_seed": manifest.seed,
-        "generation_round": seed_stream.get("generation_round"),
-        "physical_calls_per_round": len(
-            build_request_waves(
-                request_count=len(manifest.requests),
-                global_batch_size=profile.global_wave_size,
-                replica_count=profile.replica_count,
-            )
-        ),
-        "global_call_index_start": seed_stream.get("generation_round")
-        * len(
-            build_request_waves(
-                request_count=len(manifest.requests),
-                global_batch_size=profile.global_wave_size,
-                replica_count=profile.replica_count,
-            )
-        ),
-        "round_stride": _SEED_ROUND_STRIDE,
-        "modulus": _SEED_MODULUS,
-    }
+    expected_seed_stream = caller_coordinates.seed_stream_contract()
     if seed_stream != expected_seed_stream:
-        raise AssertionError("benchmark seed-stream contract is malformed")
-    generation_round = seed_stream["generation_round"]
-    if isinstance(generation_round, bool) or not isinstance(generation_round, int) or generation_round < 0:
-        raise AssertionError("benchmark generation round is malformed")
+        raise AssertionError("benchmark seed stream does not match the external caller coordinate contract")
+    generation_round = caller_coordinates.generation_round
     invocation = _require_dict(artifact.get("invocation"), label="proof invocation")
     output_path = Path(str(invocation.get("output_artifact_path", ""))).expanduser().resolve()
     if output_path != artifact_path:
@@ -1820,7 +2465,10 @@ def _validate_linked_proof_evidence(
     parsed_args = _require_dict(invocation.get("parsed_args"), label="proof parsed arguments")
     if parsed_args.get("generation_round") != generation_round:
         raise AssertionError("proof parsed generation round does not match the seed-stream contract")
-    if artifact.get("topology") != profile.topology or artifact.get("topology") != expected_contract.get("topology"):
+    if (
+        artifact.get("topology") != caller_coordinates.topology
+        or expected_contract.get("topology") != caller_coordinates.topology
+    ):
         raise AssertionError("proof topology does not match its profile and benchmark contract")
     expected_runtime = _require_dict(
         expected_contract.get("runtime_attestation"),
@@ -1872,6 +2520,20 @@ def _validate_linked_proof_evidence(
         )
         if artifact.get("exact_generation_progress") != recomputed_progress:
             raise AssertionError("exact-generation aggregate failed phase recomputation")
+    mbs1_contract = expected_contract.get("mbs1_exact1k")
+    recomputed_phases, recomputed_mbs1 = attach_mbs1_exact1k_evidence(
+        _require_list(artifact.get("phases"), label="proof phases"),
+        manifest=manifest,
+        profile=profile,
+        generation_round_start=generation_round,
+        warmups=_require_dict(expected_contract.get("measurement"), label="measurement")["warmups"],
+        repetitions=_require_dict(expected_contract.get("measurement"), label="measurement")["repetitions"],
+        enabled=mbs1_contract is not None,
+        proof_collected=True,
+        linked_proof_artifact=None,
+    )
+    if artifact.get("phases") != recomputed_phases or artifact.get("mbs1_exact1k") != recomputed_mbs1:
+        raise AssertionError("MBS=1 exact-1k proof failed caller-side recomputation")
     hardware = _require_dict(
         artifact.get("gpu_hardware_provenance"),
         label="GPU hardware provenance",
@@ -1951,6 +2613,7 @@ def _validate_linked_proof_evidence(
     )
     return {
         "manifest_sha256": manifest.sha256,
+        "caller_coordinate_binding": caller_coordinates.summary(),
         "phase_count": len(artifact["phases"]),
         "final_worker_count": len(final_workers),
         "runtime_attestation": recomputed_runtime,
@@ -1968,13 +2631,12 @@ def _file_records(root: Path, paths: Any) -> list[dict[str, Any]]:
             relative = path.relative_to(root)
         except ValueError as error:
             raise ValueError(f"provenance path escapes root {root}: {path}") from error
-        if not path.is_file():
-            raise FileNotFoundError(f"provenance file is missing: {path}")
+        snapshot = read_file_digest_snapshot(path, label=f"provenance file {relative.as_posix()}")
         records.append(
             {
                 "path": relative.as_posix(),
-                "size_bytes": path.stat().st_size,
-                "sha256": _sha256_file(path),
+                "size_bytes": snapshot.size_bytes,
+                "sha256": snapshot.sha256,
             }
         )
     return records
@@ -2016,13 +2678,12 @@ def package_installation_provenance(
     binary_records = _file_records(root, binary_paths)
     metadata_records = []
     for metadata_path in sorted({Path(path).expanduser().resolve() for path in metadata_paths}):
-        if not metadata_path.is_file():
-            raise FileNotFoundError(f"installed package metadata is missing: {metadata_path}")
+        snapshot = read_file_digest_snapshot(metadata_path, label=f"installed package metadata {metadata_path}")
         metadata_records.append(
             {
                 "path": str(metadata_path),
-                "size_bytes": metadata_path.stat().st_size,
-                "sha256": _sha256_file(metadata_path),
+                "size_bytes": snapshot.size_bytes,
+                "sha256": snapshot.sha256,
             }
         )
     installation_identity = {
@@ -2155,7 +2816,12 @@ def checkpoint_provenance(checkpoint: str | Path) -> dict[str, Any]:
         if not required.is_file():
             raise FileNotFoundError(f"checkpoint provenance requires {required}")
 
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    config_snapshot = read_json_snapshot(config_path, label="checkpoint config")
+    index_snapshot = read_json_snapshot(index_path, label="checkpoint index")
+    manifest_snapshot = read_json_snapshot(manifest_path, label="checkpoint manifest")
+    index = index_snapshot.value
+    if not isinstance(index, dict):
+        raise ValueError("checkpoint index must be a JSON object")
     weight_map = index.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError("checkpoint index must contain a non-empty weight_map")
@@ -2170,10 +2836,26 @@ def checkpoint_provenance(checkpoint: str | Path) -> dict[str, Any]:
     shard_records = _file_records(root, shard_paths)
     all_records = _file_records(root, (path for path in root.rglob("*") if path.is_file()))
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = manifest_snapshot.value
+    if not isinstance(manifest, dict):
+        raise ValueError("checkpoint manifest must be a JSON object")
+    records_by_path = {record["path"]: record for record in all_records}
+    snapshot_records = {
+        "config.json": config_snapshot,
+        "model.safetensors.index.json": index_snapshot,
+        "manifest.json": manifest_snapshot,
+    }
+    for relative_path, snapshot in snapshot_records.items():
+        record = records_by_path.get(relative_path)
+        if (
+            record is None
+            or record.get("sha256") != snapshot.sha256
+            or record.get("size_bytes") != snapshot.size_bytes
+        ):
+            raise AssertionError(f"checkpoint metadata changed during provenance capture: {relative_path}")
     digest_verification = {
-        "config": manifest.get("config_sha256") == _sha256_file(config_path),
-        "index": manifest.get("index_sha256") == _sha256_file(index_path),
+        "config": manifest.get("config_sha256") == config_snapshot.sha256,
+        "index": manifest.get("index_sha256") == index_snapshot.sha256,
     }
     if not all(digest_verification.values()):
         raise AssertionError(f"checkpoint manifest digest verification failed: {digest_verification}")
@@ -2310,21 +2992,18 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
         if max_new_tokens not in (None, 500):
             raise ValueError("common-prefix identity requires exactly 500 new tokens")
 
-        from tokenizers import Tokenizer
-
         from bionemo.evo2.vllm.accuracy import (
             build_common_prefix_identity_manifest,
             load_common_prefix_identity_cases,
         )
 
-        tokenizer = Tokenizer.from_file(str(prompt_tokenizer_json))
+        tokenizer = SnapshotBoundTokenizer.from_path(prompt_tokenizer_json)
         cases = load_common_prefix_identity_cases(canonical_prompts_csv)
         return build_common_prefix_identity_manifest(
             manifest,
             case=cases[common_case_index],
             prompts_csv=canonical_prompts_csv,
-            tokenizer_path=prompt_tokenizer_json,
-            tokenize=lambda prompt: tokenizer.encode(prompt, add_special_tokens=False).ids,
+            tokenizer=tokenizer,
             request_count=request_count,
             request_id_prefix=args.request_id_prefix,
         )
@@ -2347,21 +3026,18 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
         if max_new_tokens not in (None, 500):
             raise ValueError("canonical identity requires exactly 500 new tokens")
 
-        from tokenizers import Tokenizer
-
         from bionemo.evo2.vllm.accuracy import (
             build_canonical_identity_manifest,
             load_canonical_7b_identity_cases,
         )
 
-        tokenizer = Tokenizer.from_file(str(prompt_tokenizer_json))
+        tokenizer = SnapshotBoundTokenizer.from_path(prompt_tokenizer_json)
         cases = load_canonical_7b_identity_cases(canonical_prompts_csv)
         return build_canonical_identity_manifest(
             manifest,
             case=cases[canonical_case_index],
             prompts_csv=canonical_prompts_csv,
-            tokenizer_path=prompt_tokenizer_json,
-            tokenize=lambda prompt: tokenizer.encode(prompt, add_special_tokens=False).ids,
+            tokenizer=tokenizer,
             request_count=request_count,
             request_id_prefix=args.request_id_prefix,
         )
@@ -2374,13 +3050,10 @@ def load_source_manifest(args: Any) -> WorkloadManifest:
     if prompt_jsonl_sha256 is None or prompt_tokenizer_json is None:
         raise ValueError("--prompt-jsonl requires --prompt-jsonl-sha256 and --prompt-tokenizer-json")
 
-    from tokenizers import Tokenizer
-
-    tokenizer = Tokenizer.from_file(str(prompt_tokenizer_json))
+    tokenizer = SnapshotBoundTokenizer.from_path(prompt_tokenizer_json)
     return manifest.with_prompt_jsonl(
         prompt_jsonl,
-        tokenize=lambda prompt: tokenizer.encode(prompt, add_special_tokens=False).ids,
-        tokenizer_path=prompt_tokenizer_json,
+        tokenizer=tokenizer,
         expected_sha256=prompt_jsonl_sha256,
         expected_prompt_tokens=expected_prompt_tokens,
     )
@@ -2842,14 +3515,18 @@ def request_seed(
     request_index_in_stream: int,
 ) -> int:
     """Return one deterministic request seed from physical call and DP stream coordinates."""
-    if min(base_seed, call_index, dp_rank, request_index_in_stream) < 0 or dp_size <= 0:
-        raise ValueError("seed coordinates must be nonnegative")
-    if dp_rank >= dp_size:
-        raise ValueError("dp_rank must be smaller than dp_size")
-    if request_index_in_stream >= _SEED_ROUND_STRIDE:
-        raise ValueError("request index exceeds the collision-free stream stride")
-    stream_seed = (base_seed + (call_index * dp_size + dp_rank) * _SEED_ROUND_STRIDE) % _SEED_MODULUS
-    return (stream_seed + request_index_in_stream) % _SEED_MODULUS
+    seed = _request_seed_preimage(
+        base_seed,
+        call_index=call_index,
+        dp_rank=dp_rank,
+        dp_size=dp_size,
+        request_index_in_stream=request_index_in_stream,
+    )
+    if seed >= _SEED_MODULUS:
+        raise ValueError(
+            f"request seed wraparound is forbidden: pre-modulo seed {seed} reaches modulus {_SEED_MODULUS}"
+        )
+    return seed
 
 
 def build_request_sampling_params(
@@ -2867,13 +3544,19 @@ def build_request_sampling_params(
     ):
         raise ValueError("execution record request IDs must preserve manifest order")
     common_kwargs = sampling_params_kwargs(manifest)
-    return [
-        sampling_params_factory(
-            **common_kwargs,
-            seed=record.seed,
-        )
-        for record in execution_records
-    ]
+    params_by_request = []
+    for record in execution_records:
+        expected = {**common_kwargs, "seed": record.seed}
+        params = sampling_params_factory(**expected)
+        for field, expected_value in expected.items():
+            observed_value = getattr(params, field, None)
+            if type(observed_value) is not type(expected_value) or observed_value != expected_value:
+                raise RuntimeError(
+                    f"sampling parameter {field} changed during construction: "
+                    f"expected {expected_value!r}, observed {observed_value!r}"
+                )
+        params_by_request.append(params)
+    return params_by_request
 
 
 @dataclass(frozen=True)
@@ -2886,6 +3569,14 @@ class RequestExecutionRecord:
     dp_rank: int
     call_index: int
     seed: int
+
+    def __post_init__(self) -> None:
+        if type(self.request_id) is not str or not self.request_id:
+            raise TypeError("execution request_id must be a nonempty built-in string")
+        for field in ("global_request_index", "generation_round", "dp_rank", "call_index", "seed"):
+            value = getattr(self, field)
+            if type(value) is not int or value < 0:
+                raise TypeError(f"execution {field} must be a nonnegative built-in integer")
 
     @property
     def execution_uid(self) -> str:
@@ -2900,6 +3591,28 @@ class RequestExecutionRecord:
         return {"execution_uid": self.execution_uid, **asdict(self)}
 
 
+def _validate_request_execution_rows(
+    retained: Any,
+    *,
+    expected: Sequence[RequestExecutionRecord],
+) -> None:
+    """Bind retained request coordinates to exact independently reconstructed rows."""
+    if not isinstance(retained, list) or len(retained) != len(expected):
+        raise AssertionError("retained request execution rows do not cover the exact workload")
+    expected_rows = [record.to_dict() for record in expected]
+    expected_fields = set(expected_rows[0]) if expected_rows else set()
+    for row_index, (row, expected_row) in enumerate(zip(retained, expected_rows, strict=True)):
+        if not isinstance(row, dict) or set(row) != expected_fields:
+            raise AssertionError("retained request execution row fields are not exact")
+        for field in ("global_request_index", "generation_round", "dp_rank", "call_index", "seed"):
+            _require_builtin_integer(row.get(field), label=f"request execution row {row_index} {field}")
+        for field in ("execution_uid", "request_id"):
+            if type(row.get(field)) is not str:
+                raise AssertionError(f"request execution row {row_index} {field} must be a built-in string")
+        if row != expected_row:
+            raise AssertionError("retained request execution row does not match reconstructed coordinates")
+
+
 def build_request_execution_records(
     manifest: WorkloadManifest,
     *,
@@ -2910,6 +3623,15 @@ def build_request_execution_records(
     call_index: int,
 ) -> tuple[RequestExecutionRecord, ...]:
     """Build one ownership/seed record for each exact manifest request."""
+    for label, value in (
+        ("global_request_offset", global_request_offset),
+        ("dp_rank", dp_rank),
+        ("dp_size", dp_size),
+        ("generation_round", generation_round),
+        ("call_index", call_index),
+    ):
+        if type(value) is not int:
+            raise TypeError(f"{label} must be a built-in integer")
     if min(global_request_offset, dp_rank, generation_round, call_index) < 0 or dp_size <= 0:
         raise ValueError("execution coordinates must be nonnegative")
     if dp_rank >= dp_size:
@@ -2939,9 +3661,18 @@ def build_wave_execution_records(
     global_wave_size: int,
     generation_round: int,
     call_index_start: int,
+    global_request_index_start: int = 0,
 ) -> tuple[RequestExecutionRecord, ...]:
     """Build exact request records whose call indices match physical generation calls."""
-    if min(generation_round, call_index_start) < 0:
+    for label, value in (
+        ("global_wave_size", global_wave_size),
+        ("generation_round", generation_round),
+        ("call_index_start", call_index_start),
+        ("global_request_index_start", global_request_index_start),
+    ):
+        if type(value) is not int:
+            raise TypeError(f"{label} must be a built-in integer")
+    if min(generation_round, call_index_start, global_request_index_start) < 0:
         raise ValueError("generation round and call index start must be nonnegative")
     records = []
     for wave in build_request_waves(
@@ -2952,7 +3683,7 @@ def build_wave_execution_records(
         records.extend(
             build_request_execution_records(
                 manifest.request_slice(wave.start, wave.stop),
-                global_request_offset=wave.start,
+                global_request_offset=global_request_index_start + wave.start,
                 dp_rank=0,
                 dp_size=1,
                 generation_round=generation_round,
@@ -2969,7 +3700,7 @@ def write_full_output_artifact(
     outputs: Any,
     execution_records: tuple[RequestExecutionRecord, ...],
     decode_output_token_ids: Callable[[Sequence[int]], str] | None = None,
-    ownership_validator: Callable[[], None] | None = None,
+    ownership_validator: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """Stream every output token and chosen-token logprob to deterministic gzip JSONL."""
     records = records_from_vllm_outputs(manifest, outputs)
@@ -2988,89 +3719,73 @@ def write_full_generation_records_artifact(
     records: Sequence[GenerationRecord],
     execution_records: Sequence[RequestExecutionRecord],
     decode_output_token_ids: Callable[[Sequence[int]], str] | None = None,
-    ownership_validator: Callable[[], None] | None = None,
+    ownership_validator: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """Persist backend-neutral exact generation records as deterministic gzip JSONL."""
     if len(execution_records) != len(records):
         raise AssertionError("execution records must align with generated outputs")
     output = Path(path).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(f"{output.suffix}.tmp")
     generated_token_count = 0
     decoded_output_byte_count = 0
-    temporary_identity = None
-    published = False
-    try:
-        with temporary.open("xb") as raw_handle:
-            temporary_stat = os.fstat(raw_handle.fileno())
-            temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
-            if ownership_validator is not None:
-                ownership_validator()
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as compressed:
-                with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as handle:
-                    for generation, execution in zip(
-                        records,
-                        execution_records,
-                        strict=True,
-                    ):
-                        if ownership_validator is not None:
-                            ownership_validator()
-                        if execution.request_id != generation.request_id:
-                            raise AssertionError("execution and generation request IDs must align")
-                        row = {
-                            **execution.to_dict(),
-                            "prompt_token_ids": list(generation.prompt_token_ids),
-                            "output_token_ids": list(generation.output_token_ids),
-                            "chosen_token_logprobs": list(generation.output_logprobs),
-                            **exact_length_evidence(
-                                prompt_tokens=len(generation.prompt_token_ids),
-                                generated_tokens=len(generation.output_token_ids),
-                                requested_new_tokens=generation.requested_max_tokens,
-                            ),
-                            "finish_reason": generation.finish_reason,
-                            "stop_reason": generation.stop_reason,
-                            "stopped_on_eos": generation.stopped_on_eos,
-                        }
-                        if decode_output_token_ids is not None:
-                            decoded = decode_output_token_ids(generation.output_token_ids)
-                            if not isinstance(decoded, str):
-                                raise TypeError("output token decoder must return text")
-                            decoded_bytes = decoded.encode("utf-8")
-                            row.update(
-                                {
-                                    "output_text_utf8_base64": base64.b64encode(decoded_bytes).decode("ascii"),
-                                    "output_text_sha256": hashlib.sha256(decoded_bytes).hexdigest(),
-                                    "output_text_utf8_bytes": len(decoded_bytes),
-                                }
-                            )
-                            decoded_output_byte_count += len(decoded_bytes)
-                        handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
-                        handle.write("\n")
-                        generated_token_count += len(generation.output_token_ids)
-        if ownership_validator is not None:
-            ownership_validator()
-        os.link(temporary, output, follow_symlinks=False)
-        published = True
-        if ownership_validator is not None:
-            ownership_validator()
-    except BaseException:
-        if published and temporary_identity is not None:
-            _unlink_path_if_identity(output, temporary_identity)
-        raise
-    finally:
-        if temporary_identity is not None:
-            _unlink_path_if_identity(temporary, temporary_identity)
-    digest = hashlib.sha256()
-    with output.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+
+    def writer(raw_handle: Any) -> None:
+        nonlocal decoded_output_byte_count, generated_token_count
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as compressed:
+            with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as handle:
+                for generation, execution in zip(
+                    records,
+                    execution_records,
+                    strict=True,
+                ):
+                    if ownership_validator is not None:
+                        ownership_validator()
+                    if execution.request_id != generation.request_id:
+                        raise AssertionError("execution and generation request IDs must align")
+                    row = {
+                        **execution.to_dict(),
+                        "prompt_token_ids": list(generation.prompt_token_ids),
+                        "output_token_ids": list(generation.output_token_ids),
+                        "chosen_token_logprobs": list(generation.output_logprobs),
+                        **exact_length_evidence(
+                            prompt_tokens=len(generation.prompt_token_ids),
+                            generated_tokens=len(generation.output_token_ids),
+                            requested_new_tokens=generation.requested_max_tokens,
+                        ),
+                        "finish_reason": generation.finish_reason,
+                        "stop_reason": generation.stop_reason,
+                        "stopped_on_eos": generation.stopped_on_eos,
+                    }
+                    if decode_output_token_ids is not None:
+                        decoded = decode_output_token_ids(generation.output_token_ids)
+                        if not isinstance(decoded, str):
+                            raise TypeError("output token decoder must return text")
+                        decoded_bytes = decoded.encode("utf-8")
+                        row.update(
+                            {
+                                "output_text_utf8_base64": base64.b64encode(decoded_bytes).decode("ascii"),
+                                "output_text_sha256": hashlib.sha256(decoded_bytes).hexdigest(),
+                                "output_text_utf8_bytes": len(decoded_bytes),
+                            }
+                        )
+                        decoded_output_byte_count += len(decoded_bytes)
+                    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
+                    handle.write("\n")
+                    generated_token_count += len(generation.output_token_ids)
+
+    receipt, _ = publish_file_noreplace(
+        output,
+        writer,
+        ownership_validator=ownership_validator,
+        publication_recorder=_record_output_namespace_publication,
+    )
     metadata = {
         "schema_version": 2,
         "format": "jsonl",
         "compression": "gzip",
         "path": str(output),
-        "sha256": digest.hexdigest(),
-        "size_bytes": output.stat().st_size,
+        "sha256": receipt.sha256,
+        "size_bytes": receipt.size_bytes,
+        "publication_receipt": receipt.to_dict(),
         "request_count": len(records),
         "generated_token_count": generated_token_count,
         "output_token_id_count": generated_token_count,
@@ -3124,6 +3839,8 @@ def reserve_output_namespace(path: str | Path) -> Path:
     """Atomically reserve a new artifact namespace and refuse any stale outputs."""
     output = Path(path).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    parent = output.parent.resolve(strict=True)
+    output = parent / output.name
     marker = _output_namespace_marker_path(output)
     legacy_marker = output.with_name(f"{output.name}.inprogress")
     temporary = output.with_suffix(f"{output.suffix}.tmp")
@@ -3138,62 +3855,122 @@ def reserve_output_namespace(path: str | Path) -> Path:
     if collisions:
         names = ", ".join(sorted({candidate.name for candidate in collisions}))
         raise FileExistsError(f"output namespace already contains prior artifacts: {names}")
-    with marker.open("x", encoding="utf-8") as handle:
-        marker_stat = os.fstat(handle.fileno())
-        json.dump(
-            {
-                "schema_version": 2,
-                "state": "in_progress",
-                "output_artifact_path": str(output),
-                "marker_device": marker_stat.st_dev,
-                "marker_inode": marker_stat.st_ino,
-                "started_unix_s": time.time(),
-                "argv": [sys.executable, *sys.argv],
-            },
-            handle,
-            sort_keys=True,
+    parent_fd = os.open(
+        parent,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    marker_fd = -1
+    marker_identity: tuple[int, int] | None = None
+    try:
+        parent_stat = os.fstat(parent_fd)
+        marker_fd = os.open(
+            marker.name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
         )
-        handle.write("\n")
-    marker_identity = (marker_stat.st_dev, marker_stat.st_ino)
-    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
-        if marker in _OUTPUT_NAMESPACE_OWNERSHIP:
-            raise RuntimeError(f"output namespace ownership is already registered: {marker}")
-        _OUTPUT_NAMESPACE_OWNERSHIP[marker] = marker_identity
-    return marker
+        marker_stat = os.fstat(marker_fd)
+        marker_identity = (marker_stat.st_dev, marker_stat.st_ino)
+        marker_payload = (
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "state": "in_progress",
+                    "output_artifact_path": str(output),
+                    "parent_device": parent_stat.st_dev,
+                    "parent_inode": parent_stat.st_ino,
+                    "marker_device": marker_stat.st_dev,
+                    "marker_inode": marker_stat.st_ino,
+                    "started_unix_s": time.time(),
+                    "argv": [sys.executable, *sys.argv],
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        with os.fdopen(os.dup(marker_fd), "wb") as handle:
+            handle.write(marker_payload)
+            handle.flush()
+        os.fsync(marker_fd)
+        marker_path_stat = os.stat(marker.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (marker_path_stat.st_dev, marker_path_stat.st_ino) != marker_identity:
+            raise RuntimeError("output namespace marker changed during reservation")
+        os.fsync(parent_fd)
+        ownership = _OutputNamespaceOwnership(
+            output_path=output,
+            marker_identity=marker_identity,
+            parent_identity=(parent_stat.st_dev, parent_stat.st_ino),
+        )
+        with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+            if marker in _OUTPUT_NAMESPACE_OWNERSHIP:
+                raise RuntimeError(f"output namespace ownership is already registered: {marker}")
+            _OUTPUT_NAMESPACE_OWNERSHIP[marker] = ownership
+        return marker
+    except BaseException:
+        if marker_identity is not None:
+            try:
+                if _unlink_path_if_identity(marker, marker_identity):
+                    os.fsync(parent_fd)
+            except BaseException:
+                pass
+        raise
+    finally:
+        if marker_fd >= 0:
+            os.close(marker_fd)
+        os.close(parent_fd)
 
 
-def _validate_output_namespace_ownership(marker: Path, *, output: Path) -> None:
+def _validate_output_namespace_ownership(marker: Path, *, output: Path) -> _OutputNamespaceOwnership:
     expected_marker = _output_namespace_marker_path(output)
     lexical_marker = Path(os.path.abspath(marker.expanduser()))
     if lexical_marker != expected_marker:
         raise ValueError("output namespace marker does not match the requested artifact")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+        ownership = _OUTPUT_NAMESPACE_OWNERSHIP.get(lexical_marker)
+    if ownership is None:
+        raise RuntimeError("output namespace reservation ownership is not bound to this process")
+    if ownership.output_path != output:
+        raise RuntimeError("output namespace reservation is bound to another output path")
+    parent_fd = -1
+    descriptor = -1
     try:
-        descriptor = os.open(lexical_marker, flags)
-    except OSError as error:
-        raise RuntimeError(f"output namespace reservation ownership is unavailable: {lexical_marker}") from error
-    try:
+        parent_fd = os.open(
+            lexical_marker.parent,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        parent_stat = os.fstat(parent_fd)
+        if (parent_stat.st_dev, parent_stat.st_ino) != ownership.parent_identity:
+            raise RuntimeError("output namespace parent directory ownership changed")
+        descriptor = os.open(
+            lexical_marker.name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
         marker_stat = os.fstat(descriptor)
         if not stat.S_ISREG(marker_stat.st_mode):
             raise RuntimeError("output namespace reservation ownership is not a regular file")
-        with os.fdopen(descriptor, mode="r", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, mode="rb") as handle:
             descriptor = -1
-            payload = json.load(handle)
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as error:
-        raise RuntimeError("output namespace reservation ownership metadata is invalid") from error
+            payload = parse_json_bytes(handle.read(), label="output namespace marker")
+    except (OSError, ArtifactSnapshotError, TypeError) as error:
+        raise RuntimeError(f"output namespace reservation ownership is invalid: {lexical_marker}") from error
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
-        expected_identity = _OUTPUT_NAMESPACE_OWNERSHIP.get(lexical_marker)
-    if expected_identity is None:
-        raise RuntimeError("output namespace reservation ownership is not bound to this process")
+        if parent_fd >= 0:
+            os.close(parent_fd)
+    expected_identity = ownership.marker_identity
     observed_identity = (marker_stat.st_dev, marker_stat.st_ino)
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 2
+        or payload.get("schema_version") != 3
         or payload.get("state") != "in_progress"
         or payload.get("output_artifact_path") != str(output)
+        or (payload.get("parent_device"), payload.get("parent_inode")) != ownership.parent_identity
         or (payload.get("marker_device"), payload.get("marker_inode")) != expected_identity
         or observed_identity != expected_identity
     ):
@@ -3204,6 +3981,53 @@ def _validate_output_namespace_ownership(marker: Path, *, output: Path) -> None:
         raise RuntimeError("output namespace reservation ownership was lost during validation") from error
     if (path_stat.st_dev, path_stat.st_ino) != expected_identity:
         raise RuntimeError("output namespace reservation ownership was replaced during validation")
+    return ownership
+
+
+def _record_output_namespace_publication(receipt: PublicationReceipt, ownership_token: Any) -> None:
+    """Bind one publisher-created receipt to its coordinator-owned output namespace."""
+    if ownership_token is None:
+        return
+    if not isinstance(ownership_token, Path):
+        raise TypeError("output namespace publication token must be a Path")
+    marker = Path(os.path.abspath(ownership_token.expanduser()))
+    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+        ownership = _OUTPUT_NAMESPACE_OWNERSHIP.get(marker)
+    if ownership is None:
+        raise RuntimeError("cannot register a publication without coordinator-owned namespace state")
+    _validate_output_namespace_ownership(marker, output=ownership.output_path)
+    validate_publication_receipt(receipt)
+    published_path = Path(receipt.final_path)
+    is_root = published_path == ownership.output_path
+    is_sidecar = (
+        published_path.parent == ownership.output_path.parent
+        and published_path.name.startswith(f"{ownership.output_path.name}.")
+        and published_path.name.endswith(".outputs.jsonl.gz")
+    )
+    if not is_root and not is_sidecar:
+        raise RuntimeError("published artifact path is outside its reserved output namespace")
+    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+        current = _OUTPUT_NAMESPACE_OWNERSHIP.get(marker)
+        if current is not ownership:
+            raise RuntimeError("output namespace ownership changed during publication registration")
+        if published_path in ownership.publications:
+            raise RuntimeError("output namespace already registered this publication path")
+        ownership.publications[published_path] = receipt
+
+
+def _observed_output_namespace_publications(output: Path) -> set[Path]:
+    sidecar_prefix = f"{output.name.removesuffix(output.suffix)}."
+    observed = set()
+    for candidate in output.parent.iterdir():
+        if candidate == output or (
+            candidate.name.startswith(sidecar_prefix)
+            and (
+                candidate.name.endswith(".outputs.jsonl.gz")
+                or candidate.name.endswith(".outputs.jsonl.gz.tmp")
+            )
+        ):
+            observed.add(candidate)
+    return observed
 
 
 def require_output_namespace_reservation(path: str | Path) -> Path:
@@ -3212,6 +4036,17 @@ def require_output_namespace_reservation(path: str | Path) -> Path:
     marker = _output_namespace_marker_path(output)
     _validate_output_namespace_ownership(marker, output=output)
     return marker
+
+
+def register_output_namespace_publication(
+    path: str | Path,
+    receipt: PublicationReceipt,
+) -> None:
+    """Register one coordinator-finalized external worker publication."""
+    if not isinstance(receipt, PublicationReceipt):
+        raise TypeError("external namespace publication must provide a PublicationReceipt")
+    marker = require_output_namespace_reservation(path)
+    _record_output_namespace_publication(receipt, marker)
 
 
 def complete_output_namespace(
@@ -3225,13 +4060,47 @@ def complete_output_namespace(
     reservation = Path(os.path.abspath(Path(marker).expanduser()))
     if reservation != _output_namespace_marker_path(output):
         raise ValueError("output namespace marker does not match the requested artifact")
-    _validate_output_namespace_ownership(reservation, output=output)
-    if require_final_artifact and not output.is_file():
-        raise RuntimeError("cannot complete an output namespace before its final artifact exists")
-    _validate_output_namespace_ownership(reservation, output=output)
-    reservation.unlink()
+    ownership = _validate_output_namespace_ownership(reservation, output=output)
     with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
-        _OUTPUT_NAMESPACE_OWNERSHIP.pop(reservation, None)
+        publications = dict(ownership.publications)
+    if require_final_artifact and output not in publications:
+        raise RuntimeError("cannot complete an output namespace without its coordinator-owned final receipt")
+    for published_path, receipt in publications.items():
+        if Path(receipt.final_path) != published_path:
+            raise RuntimeError("output namespace publication key and receipt path differ")
+        validate_publication_receipt(receipt)
+    observed_publications = _observed_output_namespace_publications(output)
+    registered_publications = set(publications)
+    if observed_publications != registered_publications:
+        missing = sorted(str(path) for path in registered_publications - observed_publications)
+        foreign = sorted(str(path) for path in observed_publications - registered_publications)
+        raise RuntimeError(
+            "output namespace paths differ from coordinator-owned receipts: "
+            f"missing={missing}, unregistered={foreign}"
+        )
+    _validate_output_namespace_ownership(reservation, output=output)
+    parent_fd = os.open(
+        reservation.parent,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        parent_stat = os.fstat(parent_fd)
+        if (parent_stat.st_dev, parent_stat.st_ino) != ownership.parent_identity:
+            raise RuntimeError("output namespace parent changed before completion")
+        marker_stat = os.stat(reservation.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (marker_stat.st_dev, marker_stat.st_ino) != ownership.marker_identity:
+            raise RuntimeError("output namespace marker changed before completion")
+        os.unlink(reservation.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    for receipt in publications.values():
+        validate_publication_receipt(receipt)
+    with _OUTPUT_NAMESPACE_OWNERSHIP_LOCK:
+        current = _OUTPUT_NAMESPACE_OWNERSHIP.get(reservation)
+        if current is not ownership:
+            raise RuntimeError("output namespace ownership changed during completion")
+        _OUTPUT_NAMESPACE_OWNERSHIP.pop(reservation)
 
 
 def shared_prefix_manifest_evidence(manifest: WorkloadManifest) -> dict[str, Any]:
@@ -3243,11 +4112,10 @@ def shared_prefix_manifest_evidence(manifest: WorkloadManifest) -> dict[str, Any
         raise AssertionError("shared-prefix reuse requires a nonempty prompt")
     if any(request.prompt_token_ids != prompt for request in manifest.requests[1:]):
         raise AssertionError("shared-prefix reuse requires identical prompt token IDs")
-    payload = json.dumps(list(prompt), separators=(",", ":")).encode()
     return {
         "identical_prompt_count": len(manifest.requests),
         "prompt_tokens_per_request": len(prompt),
-        "prompt_token_ids_sha256": hashlib.sha256(payload).hexdigest(),
+        "prompt_token_ids_sha256": generation_prompt_token_ids_sha256(prompt),
     }
 
 
@@ -3870,6 +4738,529 @@ def wave_execution_summary(
     }
 
 
+def mbs1_exact1k_phase_evidence(
+    phase: Mapping[str, Any],
+    *,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    phase_coordinate: Mapping[str, Any],
+    proof_collected: bool,
+    linked_proof_artifact: str | Path | None,
+) -> dict[str, Any]:
+    """Reconstruct first-fill, warmed-repeat, tail, and exact-1k timing from physical calls."""
+    contract = mbs1_exact1k_contract(manifest, profile)
+    if type(proof_collected) is not bool:
+        raise TypeError("proof_collected must be a built-in bool")
+    if not proof_collected and linked_proof_artifact is None:
+        raise ValueError("MBS=1 speed evidence requires its linked proof artifact")
+    expected_coordinate_fields = {
+        "phase",
+        "sample_index",
+        "generation_round",
+        "global_call_index_start",
+        "global_request_index_start",
+        "physical_calls_per_round",
+        "semantic_request_count",
+    }
+    if type(phase_coordinate) is not dict or set(phase_coordinate) != expected_coordinate_fields:
+        raise AssertionError("MBS=1 phase coordinate fields are not exact")
+    if phase.get("phase") != phase_coordinate["phase"]:
+        raise AssertionError("MBS=1 phase name differs from its caller coordinate")
+    retained_waves = phase.get("wave_proofs") if profile.topology == "tp2" else phase.get("waves")
+    if type(retained_waves) is not list or len(retained_waves) != 11:
+        raise AssertionError("MBS=1 phase must retain exactly eleven physical calls")
+    expected_counts = [96] * 10 + [40]
+    timings = []
+    for wave_index, (wave, expected_count) in enumerate(zip(retained_waves, expected_counts, strict=True)):
+        if type(wave) is not dict:
+            raise AssertionError("MBS=1 physical wave evidence is malformed")
+        elapsed = wave.get("generation_s")
+        if (
+            wave.get("wave_index") != wave_index
+            or wave.get("request_count") != expected_count
+            or wave.get("generation_round") != phase_coordinate["generation_round"]
+            or wave.get("call_index") != phase_coordinate["global_call_index_start"] + wave_index
+            or type(elapsed) not in (int, float)
+            or isinstance(elapsed, bool)
+            or not math.isfinite(elapsed)
+            or elapsed <= 0
+        ):
+            raise AssertionError("MBS=1 physical wave coordinates or timing drifted")
+        timings.append(float(elapsed))
+
+    expected_executions = (
+        build_wave_execution_records(
+            manifest,
+            global_wave_size=profile.global_wave_size,
+            generation_round=phase_coordinate["generation_round"],
+            call_index_start=phase_coordinate["global_call_index_start"],
+            global_request_index_start=phase_coordinate["global_request_index_start"],
+        )
+        if profile.topology == "tp2"
+        else _expected_dp2_executions(
+            manifest,
+            profile=profile,
+            generation_round=phase_coordinate["generation_round"],
+            call_index_start=phase_coordinate["global_call_index_start"],
+            global_index_start=phase_coordinate["global_request_index_start"],
+        )
+    )
+    _validate_request_execution_rows(phase.get("request_executions"), expected=expected_executions)
+
+    first_misses = None
+    first_hits = None
+    second_misses = None
+    second_hits = None
+    tail_misses = None
+    tail_hits = None
+    if proof_collected:
+        if profile.topology == "tp2":
+            prefix = _require_dict(
+                phase.get("shared_prefix_state_reuse"),
+                label="MBS=1 shared-prefix proof",
+            )
+            cached = _require_list(
+                prefix.get("cached_tokens_by_request"),
+                label="MBS=1 cached-token rows",
+            )
+            if len(cached) != 1_000:
+                raise AssertionError("MBS=1 cached-token proof omitted semantic requests")
+            sections = (cached[:96], cached[96:192], cached[-40:])
+            counts = tuple(
+                (sum(value == 0 for value in section), sum(value > 0 for value in section))
+                for section in sections
+            )
+            (first_misses, first_hits), (second_misses, second_hits), (tail_misses, tail_hits) = counts
+        else:
+            prefix_rows = [
+                _require_dict(wave.get("shared_prefix_state_reuse"), label="MBS=1 DP2 prefix wave")
+                for wave in retained_waves
+            ]
+            first_misses = prefix_rows[0].get("cache_miss_request_count")
+            first_hits = prefix_rows[0].get("cache_hit_request_count")
+            second_misses = prefix_rows[1].get("cache_miss_request_count")
+            second_hits = prefix_rows[1].get("cache_hit_request_count")
+            tail_misses = prefix_rows[-1].get("cache_miss_request_count")
+            tail_hits = prefix_rows[-1].get("cache_hit_request_count")
+        if (
+            (first_misses, first_hits) != (profile.replica_count, 96 - profile.replica_count)
+            or (second_misses, second_hits) != (0, 96)
+            or (tail_misses, tail_hits) != (0, 40)
+        ):
+            raise AssertionError("MBS=1 prefix cache did not progress from primer to warm hits")
+        proof_source = "current-proof-run"
+    else:
+        proof_source = "linked-proof-artifact"
+    if phase.get("prefix_cache_reset") is not True:
+        raise AssertionError("MBS=1 phase must reset prefix state before its first physical wave")
+    return {
+        "schema_version": 1,
+        "contract": contract,
+        "phase": phase_coordinate["phase"],
+        "generation_round": phase_coordinate["generation_round"],
+        "global_call_index_start": phase_coordinate["global_call_index_start"],
+        "global_request_index_start": phase_coordinate["global_request_index_start"],
+        "semantic_request_count": 1_000,
+        "physical_call_count": 11,
+        "first_96": {
+            "generation_s": timings[0],
+            "includes_prefix_materialization": True,
+            "cache_miss_request_count": first_misses,
+            "cache_hit_request_count": first_hits,
+        },
+        "warmed_repeat_96": {
+            "generation_s": timings[1],
+            "cache_miss_request_count": second_misses,
+            "cache_hit_request_count": second_hits,
+        },
+        "tail_40": {
+            "generation_s": timings[-1],
+            "cache_miss_request_count": tail_misses,
+            "cache_hit_request_count": tail_hits,
+        },
+        "exact_1000_generation_s": sum(timings),
+        "prefix_proof_source": proof_source,
+        "token_equality_between_phases_required": False,
+        "passed": True,
+    }
+
+
+def attach_mbs1_exact1k_evidence(
+    phase_artifacts: list[dict[str, Any]],
+    *,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+    generation_round_start: int,
+    warmups: int,
+    repetitions: int,
+    enabled: bool,
+    proof_collected: bool,
+    linked_proof_artifact: str | Path | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Attach caller-reconstructed primary MBS=1 timing and prefix evidence."""
+    if type(enabled) is not bool:
+        raise TypeError("MBS=1 evidence enablement must be a built-in bool")
+    if not enabled:
+        if any(phase.get("mbs1_exact1k") is not None for phase in phase_artifacts):
+            raise AssertionError("disabled MBS=1 audit retained unexpected phase evidence")
+        return phase_artifacts, None
+    coordinates = benchmark_phase_coordinates(
+        manifest,
+        profile,
+        generation_round_start=generation_round_start,
+        warmups=warmups,
+        repetitions=repetitions,
+    )
+    if len(phase_artifacts) != len(coordinates):
+        raise AssertionError("MBS=1 phase inventory differs from its caller coordinate schedule")
+    retained_phases = []
+    summaries = []
+    global_indices: set[int] = set()
+    request_seeds: set[int] = set()
+    for phase, coordinate in zip(phase_artifacts, coordinates, strict=True):
+        retained = dict(phase)
+        evidence = mbs1_exact1k_phase_evidence(
+            retained,
+            manifest=manifest,
+            profile=profile,
+            phase_coordinate=coordinate,
+            proof_collected=proof_collected,
+            linked_proof_artifact=linked_proof_artifact,
+        )
+        executions = _require_list(retained.get("request_executions"), label="MBS=1 request executions")
+        phase_global_indices = {row.get("global_request_index") for row in executions}
+        phase_request_seeds = {row.get("seed") for row in executions}
+        if (
+            len(phase_global_indices) != 1_000
+            or len(phase_request_seeds) != 1_000
+            or global_indices & phase_global_indices
+            or request_seeds & phase_request_seeds
+        ):
+            raise AssertionError("MBS=1 benchmark phases reused caller request or RNG coordinates")
+        global_indices.update(phase_global_indices)
+        request_seeds.update(phase_request_seeds)
+        retained["mbs1_exact1k"] = evidence
+        retained_phases.append(retained)
+        summaries.append(
+            {
+                "phase": evidence["phase"],
+                "generation_round": evidence["generation_round"],
+                "global_call_index_start": evidence["global_call_index_start"],
+                "global_request_index_start": evidence["global_request_index_start"],
+                "first_96_generation_s": evidence["first_96"]["generation_s"],
+                "warmed_repeat_96_generation_s": evidence["warmed_repeat_96"]["generation_s"],
+                "tail_40_generation_s": evidence["tail_40"]["generation_s"],
+                "exact_1000_generation_s": evidence["exact_1000_generation_s"],
+            }
+        )
+    return retained_phases, {
+        "schema_version": 1,
+        "contract": mbs1_exact1k_contract(manifest, profile),
+        "phase_count": len(summaries),
+        "semantic_request_count_per_phase": 1_000,
+        "total_semantic_request_occurrences": len(summaries) * 1_000,
+        "phase_coordinates_disjoint": True,
+        "token_equality_between_phases_required": False,
+        "phases": summaries,
+        "passed": True,
+    }
+
+
+def rank_local_generation_contract_sha256(
+    phase: str,
+    semantic_namespace: str,
+    wave_index: int,
+    manifest: WorkloadManifest,
+    execution_records: Sequence[RequestExecutionRecord],
+) -> str:
+    """Seal one physical TP wave to caller-owned prompts and RNG coordinates."""
+    if type(phase) is not str or not phase:
+        raise TypeError("rank-local generation phase must be a nonempty string")
+    if type(semantic_namespace) is not str or not semantic_namespace:
+        raise TypeError("rank-local semantic namespace must be a nonempty string")
+    if type(wave_index) is not int or wave_index < 0:
+        raise TypeError("rank-local wave index must be a nonnegative built-in integer")
+    if len(execution_records) != len(manifest.requests) or not execution_records:
+        raise ValueError("rank-local generation executions must cover one nonempty wave")
+    requests = []
+    for request, execution in zip(manifest.requests, execution_records, strict=True):
+        if request.request_id != execution.request_id:
+            raise ValueError("rank-local generation execution order differs from the manifest")
+        requests.append(
+            {
+                "request_id": request.request_id,
+                "qualified_request_identity": [
+                    semantic_namespace,
+                    request.request_id,
+                ],
+                "prompt_token_ids_sha256": generation_prompt_token_ids_sha256(
+                    request.prompt_token_ids
+                ),
+                "execution": execution.to_dict(),
+            }
+        )
+    payload = {
+        "schema_version": "evo2-rank-local-generation-contract/v1",
+        "phase": phase,
+        "semantic_namespace": semantic_namespace,
+        "wave_index": wave_index,
+        "manifest_sha256": manifest.sha256,
+        "requested_max_new_tokens": manifest.max_new_tokens,
+        "requests": requests,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def rank_local_selected_stream_rows(outputs: Sequence[Any]) -> tuple[dict[str, Any], ...]:
+    """Derive selected token/logprob stream hashes from returned production outputs."""
+    from bionemo.evo2.vllm.worker import selected_stream_sha256
+
+    rows = []
+    for output in outputs:
+        request_id = getattr(output, "request_id", None)
+        completions = getattr(output, "outputs", None)
+        if type(request_id) is not str or not request_id:
+            raise RuntimeError("vLLM output omitted its internal request ID")
+        if type(completions) is not list or len(completions) != 1:
+            raise RuntimeError("vLLM output must contain exactly one completion")
+        completion = completions[0]
+        token_ids = getattr(completion, "token_ids", None)
+        positions = getattr(completion, "logprobs", None)
+        if type(token_ids) not in (list, tuple) or any(
+            type(token_id) is not int for token_id in token_ids
+        ):
+            raise RuntimeError("vLLM output token IDs are malformed")
+        if type(positions) is not list or len(positions) != len(token_ids):
+            raise RuntimeError("vLLM output chosen-token logprobs are incomplete")
+        logprob_bits = []
+        for token_id, position in zip(token_ids, positions, strict=True):
+            if type(position) is not dict or token_id not in position:
+                raise RuntimeError("vLLM output omitted a chosen-token logprob")
+            value = getattr(position[token_id], "logprob", None)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RuntimeError("vLLM output chosen-token logprob is not numeric")
+            value = float(value)
+            if not math.isfinite(value):
+                raise RuntimeError("vLLM output chosen-token logprob is not finite")
+            logprob_bits.append(struct.pack("<f", value).hex())
+        token_id_list = list(token_ids)
+        rows.append(
+            {
+                "vllm_request_id": request_id,
+                "token_count": len(token_id_list),
+                "selected_stream_sha256": selected_stream_sha256(
+                    request_id,
+                    token_id_list,
+                    logprob_bits,
+                ),
+            }
+        )
+    if len({row["vllm_request_id"] for row in rows}) != len(rows):
+        raise RuntimeError("vLLM output internal request IDs are not unique")
+    return tuple(rows)
+
+
+def validate_rank_local_generation_evidence(
+    *,
+    phase: str,
+    semantic_namespace: str,
+    wave_index: int,
+    contract_sha256: str,
+    expected_tensor_parallel_size: int,
+    expected_request_count: int,
+    expected_max_new_tokens: int,
+    begin_evidence: Sequence[dict[str, Any]],
+    rank_evidence: Sequence[dict[str, Any]],
+    manifest: WorkloadManifest,
+    execution_records: Sequence[RequestExecutionRecord],
+    outputs: Sequence[Any],
+) -> dict[str, Any]:
+    """Require every TP rank to reconstruct the returned selected-token streams."""
+    if type(expected_tensor_parallel_size) is not int or expected_tensor_parallel_size <= 0:
+        raise TypeError("expected tensor-parallel size must be a positive built-in integer")
+    expected_contract = rank_local_generation_contract_sha256(
+        phase,
+        semantic_namespace,
+        wave_index,
+        manifest,
+        execution_records,
+    )
+    if contract_sha256 != expected_contract:
+        raise RuntimeError("rank-local contract digest differs from caller-owned coordinates")
+    expected_ranks = list(range(expected_tensor_parallel_size))
+    if len(begin_evidence) != expected_tensor_parallel_size:
+        raise RuntimeError("rank-local begin evidence does not cover every TP rank")
+    begin_by_rank = {}
+    expected_begin_fields = {
+        "tp_rank",
+        "phase",
+        "expected_envelope_sha256",
+        "expected_request_count",
+        "expected_max_new_tokens",
+        "source",
+    }
+    for item in begin_evidence:
+        if type(item) is not dict or set(item) != expected_begin_fields:
+            raise RuntimeError("rank-local begin evidence fields are not exact")
+        rank = item["tp_rank"]
+        if type(rank) is not int or rank in begin_by_rank:
+            raise RuntimeError("rank-local begin TP rank set is malformed")
+        if item != {
+            "tp_rank": rank,
+            "phase": phase,
+            "expected_envelope_sha256": contract_sha256,
+            "expected_request_count": expected_request_count,
+            "expected_max_new_tokens": expected_max_new_tokens,
+            "source": "rank_local_model_runner_execute_or_sample",
+        }:
+            raise RuntimeError("rank-local begin evidence differs from the caller contract")
+        begin_by_rank[rank] = item
+    if sorted(begin_by_rank) != expected_ranks:
+        raise RuntimeError("rank-local begin evidence TP ranks are incomplete")
+
+    outer_internal_rows = list(rank_local_selected_stream_rows(outputs))
+    if (
+        len(outer_internal_rows) != expected_request_count
+        or len(manifest.requests) != expected_request_count
+        or len(execution_records) != expected_request_count
+        or sum(row["token_count"] for row in outer_internal_rows)
+        != expected_request_count * expected_max_new_tokens
+    ):
+        raise RuntimeError("returned vLLM streams do not cover the sealed wave")
+    semantic_rows = []
+    for request_ordinal, (request, execution, stream) in enumerate(
+        zip(
+            manifest.requests,
+            execution_records,
+            outer_internal_rows,
+            strict=True,
+        )
+    ):
+        if request.request_id != execution.request_id:
+            raise RuntimeError("rank-local semantic request order differs from execution records")
+        semantic_rows.append(
+            {
+                "semantic_namespace": semantic_namespace,
+                "local_request_id": request.request_id,
+                "qualified_request_identity": [
+                    semantic_namespace,
+                    request.request_id,
+                ],
+                "request_ordinal": request_ordinal,
+                "wave_index": wave_index,
+                "global_request_index": execution.global_request_index,
+                "generation_round": execution.generation_round,
+                "global_call_index": execution.call_index,
+                "dp_rank": execution.dp_rank,
+                "seed": execution.seed,
+                **stream,
+            }
+        )
+    outer_aggregate = hashlib.sha256(
+        json.dumps(semantic_rows, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    if sum(
+        row["token_count"] for row in semantic_rows
+    ) != expected_request_count * expected_max_new_tokens:
+        raise RuntimeError("returned vLLM streams do not cover the sealed wave")
+
+    expected_snapshot_fields = {
+        "schema_version",
+        "source",
+        "tp_rank",
+        "phase",
+        "expected_envelope_sha256",
+        "request_count",
+        "generated_token_count",
+        "execution_call_count",
+        "request_order",
+        "requests",
+        "aggregate_selected_stream_sha256",
+    }
+    snapshots_by_rank = {}
+    for item in rank_evidence:
+        if type(item) is not dict or set(item) != expected_snapshot_fields:
+            raise RuntimeError("rank-local snapshot evidence fields are not exact")
+        rank = item["tp_rank"]
+        if type(rank) is not int or rank in snapshots_by_rank:
+            raise RuntimeError("rank-local snapshot TP rank set is malformed")
+        if (
+            item["schema_version"] != "evo2-rank-local-generation-evidence/v1"
+            or item["source"] != "rank_local_model_runner_execute_or_sample"
+            or item["phase"] != phase
+            or item["expected_envelope_sha256"] != contract_sha256
+            or item["request_count"] != expected_request_count
+            or item["generated_token_count"]
+            != expected_request_count * expected_max_new_tokens
+            or type(item["execution_call_count"]) is not int
+            or item["execution_call_count"] <= 0
+        ):
+            raise RuntimeError("rank-local TP stream evidence differs from returned output")
+        request_order = item["request_order"]
+        requests = item["requests"]
+        if (
+            type(request_order) is not list
+            or any(type(request_id) is not str for request_id in request_order)
+            or len(request_order) != expected_request_count
+            or len(set(request_order)) != expected_request_count
+            or type(requests) is not list
+            or len(requests) != expected_request_count
+            or [request.get("vllm_request_id") for request in requests]
+            != request_order
+        ):
+            raise RuntimeError("rank-local TP witness request order is malformed")
+        observed_by_id = {
+            request["vllm_request_id"]: request
+            for request in requests
+            if type(request) is dict
+            and set(request)
+            == {"vllm_request_id", "token_count", "selected_stream_sha256"}
+        }
+        expected_by_id = {
+            request["vllm_request_id"]: {
+                "vllm_request_id": request["vllm_request_id"],
+                "token_count": request["token_count"],
+                "selected_stream_sha256": request["selected_stream_sha256"],
+            }
+            for request in outer_internal_rows
+        }
+        rank_aggregate = hashlib.sha256(
+            json.dumps(requests, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        if (
+            observed_by_id != expected_by_id
+            or item["aggregate_selected_stream_sha256"] != rank_aggregate
+        ):
+            raise RuntimeError("rank-local TP stream evidence differs from returned output")
+        snapshots_by_rank[rank] = item
+    if sorted(snapshots_by_rank) != expected_ranks:
+        raise RuntimeError("rank-local snapshot evidence TP ranks are incomplete")
+    if len({item["execution_call_count"] for item in snapshots_by_rank.values()}) != 1:
+        raise RuntimeError("rank-local TP ranks observed different execution call counts")
+    if len({tuple(item["request_order"]) for item in snapshots_by_rank.values()}) != 1:
+        raise RuntimeError("rank-local TP ranks observed different scheduler request order")
+    return {
+        "schema_version": "evo2-rank-local-generation-validation/v1",
+        "passed": True,
+        "phase": phase,
+        "semantic_namespace": semantic_namespace,
+        "wave_index": wave_index,
+        "contract_sha256": contract_sha256,
+        "tensor_parallel_ranks": expected_ranks,
+        "request_count": expected_request_count,
+        "generated_token_count": expected_request_count * expected_max_new_tokens,
+        "aggregate_selected_stream_sha256": outer_aggregate,
+        "semantic_streams": semantic_rows,
+        "rank_evidence": [snapshots_by_rank[rank] for rank in expected_ranks],
+    }
+
+
 @dataclass(frozen=True)
 class GenerationPhaseResult:
     """One timed generation phase plus its unreset CUDA graph observations."""
@@ -3895,6 +5286,8 @@ class GenerationPhaseResult:
             "phase": self.phase,
             "sample": self.sample.to_dict(),
             "generation_call_s": list(self.generation_call_s),
+            "generation_timing_authority": COORDINATOR_GENERATION_TIMING_AUTHORITY,
+            "coordinator_generation_wall_s": self.sample.generation_s,
             "wave_proofs": list(self.wave_proofs),
             "wave_execution": wave_execution_summary(self.wave_proofs),
             "cudagraph_observation_count": len(self.observations),
@@ -3951,6 +5344,12 @@ def run_generation_phase(
     collect_proof: bool = True,
     reset_worker_proof: Callable[[], Any] | None = None,
     snapshot_worker_proof: Callable[[], tuple[dict[str, Any], ...]] | None = None,
+    require_rank_local_evidence: bool = False,
+    rank_local_semantic_namespace: str | None = None,
+    expected_tensor_parallel_size: int | None = None,
+    begin_rank_local_evidence: Callable[..., Sequence[dict[str, Any]]] | None = None,
+    snapshot_rank_local_evidence: Callable[[], Sequence[dict[str, Any]]] | None = None,
+    abort_rank_local_evidence: Callable[[], Any] | None = None,
     prefix_cache_block_size: int | None = None,
     require_shared_prefix_state_reuse: bool = False,
     global_wave_size: int | None = None,
@@ -3968,6 +5367,24 @@ def run_generation_phase(
     require_namespace_ownership()
     if collect_proof and recorder is None:
         raise ValueError("proof collection requires a CUDA graph recorder")
+    if type(require_rank_local_evidence) is not bool:
+        raise TypeError("require_rank_local_evidence must be a built-in bool")
+    if require_rank_local_evidence:
+        if not collect_proof:
+            raise ValueError("rank-local evidence is restricted to the proof lane")
+        if type(rank_local_semantic_namespace) is not str or not rank_local_semantic_namespace:
+            raise ValueError("rank-local evidence requires a semantic namespace")
+        if type(expected_tensor_parallel_size) is not int or expected_tensor_parallel_size <= 0:
+            raise ValueError("rank-local evidence requires a positive tensor-parallel size")
+        if not all(
+            callable(callback)
+            for callback in (
+                begin_rank_local_evidence,
+                snapshot_rank_local_evidence,
+                abort_rank_local_evidence,
+            )
+        ):
+            raise ValueError("rank-local evidence requires begin, snapshot, and abort callbacks")
     if len(sampling_params) != len(manifest.requests):
         raise ValueError("sampling params must align with every request")
     if len(execution_records) != len(manifest.requests):
@@ -3985,6 +5402,10 @@ def run_generation_phase(
     )
     if scheduler_max_num_seqs is not None and scheduler_max_num_seqs <= 0:
         raise ValueError("scheduler_max_num_seqs must be positive")
+    generation_rounds = {record.generation_round for record in execution_records}
+    if len(generation_rounds) != 1:
+        raise ValueError("all execution records in one phase must share one semantic generation round")
+    generation_round = next(iter(generation_rounds))
     call_index_start = execution_records[0].call_index
     for wave in waves:
         call_indexes = {record.call_index for record in execution_records[wave.start : wave.stop]}
@@ -4006,11 +5427,13 @@ def run_generation_phase(
     outputs = []
     generation_call_s = []
     wave_proofs = []
+    latest_worker_proof: tuple[dict[str, Any], ...] = ()
     monitor_context = memory_monitor_factory() if collect_proof else _UnmonitoredMemory()
     with monitor_context as monitor:
         for wave in waves:
             wave_phase = f"{phase}.wave-{wave.wave_index:03d}"
             wave_manifest = manifest.request_slice(wave.start, wave.stop)
+            wave_execution_records = execution_records[wave.start : wave.stop]
             wave_prompts = [{"prompt_token_ids": list(request.prompt_token_ids)} for request in wave_manifest.requests]
             if collect_proof:
                 recorder.start_phase(wave_phase)
@@ -4018,20 +5441,62 @@ def run_generation_phase(
                 wave_scheduler_start = len(recorder.scheduler_observations)
             if barrier is not None:
                 barrier.wait()
-            begin = clock()
-            wave_outputs = list(
-                llm.generate(
-                    wave_prompts,
-                    sampling_params[wave.start : wave.stop],
-                    use_tqdm=False,
+            rank_local_validation = None
+            rank_local_started = False
+            try:
+                if require_rank_local_evidence:
+                    wave_contract_sha256 = rank_local_generation_contract_sha256(
+                        wave_phase,
+                        rank_local_semantic_namespace,
+                        wave.wave_index,
+                        wave_manifest,
+                        wave_execution_records,
+                    )
+                    rank_local_started = True
+                    begin_evidence = tuple(
+                        begin_rank_local_evidence(
+                            phase=wave_phase,
+                            contract_sha256=wave_contract_sha256,
+                            expected_request_count=wave.request_count,
+                            expected_max_new_tokens=manifest.max_new_tokens,
+                        )
+                    )
+                begin = clock()
+                wave_outputs = list(
+                    llm.generate(
+                        wave_prompts,
+                        sampling_params[wave.start : wave.stop],
+                        use_tqdm=False,
+                    )
                 )
-            )
-            if barrier is not None:
-                barrier.wait()
-            elapsed = clock() - begin
-            require_namespace_ownership()
+                elapsed = clock() - begin
+                if barrier is not None:
+                    barrier.wait()
+                require_namespace_ownership()
+                if require_rank_local_evidence:
+                    rank_evidence = tuple(snapshot_rank_local_evidence())
+                    rank_local_validation = validate_rank_local_generation_evidence(
+                        phase=wave_phase,
+                        semantic_namespace=rank_local_semantic_namespace,
+                        wave_index=wave.wave_index,
+                        contract_sha256=wave_contract_sha256,
+                        expected_tensor_parallel_size=expected_tensor_parallel_size,
+                        expected_request_count=wave.request_count,
+                        expected_max_new_tokens=manifest.max_new_tokens,
+                        begin_evidence=begin_evidence,
+                        rank_evidence=rank_evidence,
+                        manifest=wave_manifest,
+                        execution_records=wave_execution_records,
+                        outputs=wave_outputs,
+                    )
+                    rank_local_started = False
+            finally:
+                if rank_local_started:
+                    abort_rank_local_evidence()
             if len(wave_outputs) != wave.request_count:
                 raise AssertionError("vLLM output count must match the explicit generation wave")
+            if collect_proof and snapshot_worker_proof is not None:
+                latest_worker_proof = snapshot_worker_proof()
             generation_call_s.append(elapsed)
             outputs.extend(wave_outputs)
 
@@ -4060,15 +5525,17 @@ def run_generation_phase(
                     "start": wave.start,
                     "stop": wave.stop,
                     "request_count": wave.request_count,
+                    "generation_round": generation_round,
                     "call_index": call_index_start + wave.wave_index,
                     "generation_s": elapsed,
                     "full_decode_proof": full_decode,
                     "scheduler_observations": scheduler_observations,
                     "scheduler_capacity_proof": scheduler_proof,
+                    "rank_local_generation_evidence": rank_local_validation,
                 }
             )
     require_namespace_ownership()
-    worker_proof = () if not collect_proof or snapshot_worker_proof is None else snapshot_worker_proof()
+    worker_proof = latest_worker_proof
     shared_prefix_reuse = None
     if collect_proof and require_shared_prefix_state_reuse:
         if prefix_cache_block_size is None:
@@ -4190,7 +5657,7 @@ def snapshot_vllm_worker_proof_state(worker: Any) -> dict[str, Any]:
         **gpu_identity,
         "sampler": snapshot_sampler_route_proof(
             worker,
-            require_generation_observations=hasattr(worker, "_evo2_sampler_route_observations"),
+            require_generation_observations=hasattr(worker, "_evo2_sampler_batch_descriptors"),
         ),
         "fir_routes": get_fir_route_stats(),
         "mamba_state_copies": get_mamba_state_copy_stats(),
@@ -4642,6 +6109,39 @@ def _snapshot_worker_proof(llm: Any) -> tuple[dict[str, Any], ...]:
     return tuple(llm.collective_rpc("snapshot_evo2_proof_state"))
 
 
+def _begin_rank_local_generation_evidence(
+    llm: Any,
+    *,
+    phase: str,
+    contract_sha256: str,
+    expected_request_count: int,
+    expected_max_new_tokens: int,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        llm.collective_rpc(
+            "begin_evo2_rank_local_generation_evidence",
+            args=(
+                phase,
+                contract_sha256,
+                expected_request_count,
+                expected_max_new_tokens,
+            ),
+        )
+    )
+
+
+def _snapshot_rank_local_generation_evidence(
+    llm: Any,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(llm.collective_rpc("snapshot_evo2_rank_local_generation_evidence"))
+
+
+def _abort_rank_local_generation_evidence(
+    llm: Any,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(llm.collective_rpc("abort_evo2_rank_local_generation_evidence"))
+
+
 def _phase_specs(warmups: int, repetitions: int) -> tuple[tuple[str, int], ...]:
     if warmups < 0 or repetitions < 1:
         raise ValueError("warmups must be nonnegative and repetitions must be positive")
@@ -4725,6 +6225,11 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         raise ValueError("run_tp2_benchmark requires topology=tp2")
     require_output_namespace_reservation(args.output)
     profile = profile_from_args(args, manifest)
+    caller_coordinates = CallerCoordinateContract.from_inputs(
+        manifest,
+        profile,
+        args.generation_round,
+    )
     benchmark_mode = benchmark_mode_from_args(args)
     instrumentation = benchmark_instrumentation_contract(benchmark_mode)
     preflight_begin = time.perf_counter()
@@ -4763,12 +6268,14 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         **build_benchmark_contract(args, manifest, profile),
         "runtime_attestation": runtime_attestation,
     }
+    benchmark_contract_digest = benchmark_contract_sha256(benchmark_contract)
     linked_proof = (
         None
         if benchmark_mode == "proof"
         else validate_linked_proof_artifact(
             args.linked_proof_artifact,
             expected_contract=benchmark_contract,
+            caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
     )
@@ -4797,14 +6304,14 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
 
     common_identity = common_prefix_identity_context(args, manifest, profile)
     serial_reference_result = None
-    calls_per_generation_round = len(
-        build_request_waves(
-            request_count=len(manifest.requests),
-            global_batch_size=profile.global_wave_size,
-            replica_count=profile.replica_count,
-        )
+    phase_coordinates = benchmark_phase_coordinates(
+        manifest,
+        profile,
+        generation_round_start=args.generation_round,
+        warmups=args.warmups,
+        repetitions=args.repetitions,
     )
-    call_index_start = args.generation_round * calls_per_generation_round
+    call_index_start = phase_coordinates[0]["global_call_index_start"]
     if common_identity is not None:
         serial_manifest = manifest.request_slice(0, 1)
         serial_executions = build_request_execution_records(
@@ -4836,6 +6343,28 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             collect_proof=profile.proof,
             reset_worker_proof=(lambda: _reset_worker_proof(llm)) if profile.proof else None,
             snapshot_worker_proof=(lambda: _snapshot_worker_proof(llm)) if profile.proof else None,
+            require_rank_local_evidence=profile.proof,
+            rank_local_semantic_namespace=(
+                f"{benchmark_contract_digest}:common-prefix-serial-reference"
+                if profile.proof
+                else None
+            ),
+            expected_tensor_parallel_size=2 if profile.proof else None,
+            begin_rank_local_evidence=(
+                lambda **kwargs: _begin_rank_local_generation_evidence(llm, **kwargs)
+                if profile.proof
+                else None
+            ),
+            snapshot_rank_local_evidence=(
+                lambda: _snapshot_rank_local_generation_evidence(llm)
+                if profile.proof
+                else None
+            ),
+            abort_rank_local_evidence=(
+                lambda: _abort_rank_local_generation_evidence(llm)
+                if profile.proof
+                else None
+            ),
             require_shared_prefix_state_reuse=profile.shared_prefix_state_reuse,
             prefix_cache_block_size=int(resolved["cache"]["block_size"]),
             global_wave_size=1,
@@ -4844,12 +6373,15 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         )
 
     phase_results = []
-    for sample_index, (phase, _) in enumerate(_phase_specs(args.warmups, args.repetitions)):
+    for phase_coordinate in phase_coordinates:
+        sample_index = phase_coordinate["sample_index"]
+        phase = phase_coordinate["phase"]
         execution_records = build_wave_execution_records(
             manifest,
             global_wave_size=profile.global_wave_size,
-            generation_round=args.generation_round,
-            call_index_start=call_index_start,
+            generation_round=phase_coordinate["generation_round"],
+            call_index_start=phase_coordinate["global_call_index_start"],
+            global_request_index_start=phase_coordinate["global_request_index_start"],
         )
         sampling_params = build_request_sampling_params(
             manifest,
@@ -4870,6 +6402,26 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             collect_proof=profile.proof,
             reset_worker_proof=(lambda: _reset_worker_proof(llm)) if profile.proof else None,
             snapshot_worker_proof=(lambda: _snapshot_worker_proof(llm)) if profile.proof else None,
+            require_rank_local_evidence=profile.proof,
+            rank_local_semantic_namespace=(
+                f"{benchmark_contract_digest}:{phase}" if profile.proof else None
+            ),
+            expected_tensor_parallel_size=2 if profile.proof else None,
+            begin_rank_local_evidence=(
+                lambda **kwargs: _begin_rank_local_generation_evidence(llm, **kwargs)
+                if profile.proof
+                else None
+            ),
+            snapshot_rank_local_evidence=(
+                lambda: _snapshot_rank_local_generation_evidence(llm)
+                if profile.proof
+                else None
+            ),
+            abort_rank_local_evidence=(
+                lambda: _abort_rank_local_generation_evidence(llm)
+                if profile.proof
+                else None
+            ),
             require_shared_prefix_state_reuse=profile.shared_prefix_state_reuse,
             prefix_cache_block_size=int(resolved["cache"]["block_size"]),
             global_wave_size=profile.global_wave_size,
@@ -4918,6 +6470,17 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         topology=profile.topology,
         linked_proof_artifact=args.linked_proof_artifact,
     )
+    phase_artifacts, mbs1_exact1k = attach_mbs1_exact1k_evidence(
+        phase_artifacts,
+        manifest=manifest,
+        profile=profile,
+        generation_round_start=args.generation_round,
+        warmups=args.warmups,
+        repetitions=args.repetitions,
+        enabled=bool(getattr(args, "mbs1_exact1k_audit", False)),
+        proof_collected=profile.proof,
+        linked_proof_artifact=args.linked_proof_artifact,
+    )
     phase_artifacts, canonical_identity = canonical_identity_phase_artifacts(
         args=args,
         manifest=manifest,
@@ -4946,7 +6509,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         "topology": "tp2",
         "benchmark_mode": benchmark_mode,
         "benchmark_contract": benchmark_contract,
-        "benchmark_contract_sha256": benchmark_contract_sha256(benchmark_contract),
+        "benchmark_contract_sha256": benchmark_contract_digest,
         "instrumentation": instrumentation,
         "linked_proof_artifact": linked_proof,
         "proof_status": (
@@ -4976,6 +6539,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             None if serial_reference_result is None else serial_reference_result.to_dict()
         ),
         "exact_generation_progress": exact_progress,
+        "mbs1_exact1k": mbs1_exact1k,
         "invocation": {
             "argv": [sys.executable, *sys.argv],
             "parsed_args": {
@@ -5034,37 +6598,16 @@ def write_json_artifact(
     path: str | Path,
     artifact: dict[str, Any],
     *,
-    ownership_validator: Callable[[], None] | None = None,
-) -> None:
+    ownership_validator: Callable[[], Any] | None = None,
+) -> PublicationReceipt:
     """Write one durable, deterministic benchmark artifact."""
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
-        raise FileExistsError(f"refusing to overwrite existing artifact: {output}")
-    temporary = output.with_suffix(f"{output.suffix}.tmp")
-    temporary_identity = None
-    published = False
-    try:
-        with temporary.open("x", encoding="utf-8") as handle:
-            temporary_stat = os.fstat(handle.fileno())
-            temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
-            if ownership_validator is not None:
-                ownership_validator()
-            json.dump(artifact, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        if ownership_validator is not None:
-            ownership_validator()
-        os.link(temporary, output, follow_symlinks=False)
-        published = True
-        if ownership_validator is not None:
-            ownership_validator()
-    except BaseException:
-        if published and temporary_identity is not None:
-            _unlink_path_if_identity(output, temporary_identity)
-        raise
-    finally:
-        if temporary_identity is not None:
-            _unlink_path_if_identity(temporary, temporary_identity)
+    payload = (json.dumps(artifact, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return publish_bytes_noreplace(
+        path,
+        payload,
+        ownership_validator=ownership_validator,
+        publication_recorder=_record_output_namespace_publication,
+    )
 
 
 def _gpu_preflight_failure_artifact(
@@ -5159,6 +6702,7 @@ __all__ = [
     "prepare_workload",
     "request_seed",
     "require_output_namespace_reservation",
+    "register_output_namespace_publication",
     "reserve_output_namespace",
     "reset_vllm_worker_proof_state",
     "run_context_length_preflight",

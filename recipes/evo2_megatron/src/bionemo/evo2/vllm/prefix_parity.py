@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import argparse
 import copy
-import gzip
-import hashlib
-import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from bionemo.evo2.vllm.artifact_io import (
+    ArtifactSnapshotError,
+    JsonSnapshot,
+    read_json_snapshot,
+    read_jsonl_snapshot,
+)
 from bionemo.evo2.vllm.benchmark import WorkloadManifest
 from bionemo.evo2.vllm.runner import benchmark_contract_sha256, validate_linked_proof_artifact
 
@@ -62,14 +65,6 @@ EXACT_25K_PREFIX_ACCEPTANCE = PrefixParityAcceptance(
 )
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _require_dict(value: Any, *, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AssertionError(f"{label} must be a JSON object")
@@ -82,23 +77,25 @@ def _require_list(value: Any, *, label: str) -> list[Any]:
     return value
 
 
-def _load_json(path: Path, *, label: str) -> dict[str, Any]:
+def _load_json(path: Path, *, label: str) -> JsonSnapshot:
     if not path.is_file():
         raise FileNotFoundError(f"{label} is missing: {path}")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        snapshot = read_json_snapshot(path, label=label)
+    except ArtifactSnapshotError as error:
         raise AssertionError(f"{label} is not valid JSON") from error
-    return _require_dict(value, label=label)
+    _require_dict(snapshot.value, label=label)
+    return snapshot
 
 
 def _load_speed_artifact(
     path: str | Path,
     *,
     proof_validator: Callable[..., dict[str, Any]],
-) -> tuple[Path, dict[str, Any], WorkloadManifest, dict[str, Any]]:
+) -> tuple[Path, dict[str, Any], WorkloadManifest, dict[str, Any], str]:
     artifact_path = Path(path).expanduser().resolve()
-    artifact = _load_json(artifact_path, label="prefix parity speed artifact")
+    artifact_snapshot = _load_json(artifact_path, label="prefix parity speed artifact")
+    artifact = _require_dict(artifact_snapshot.value, label="prefix parity speed artifact")
     if (
         artifact.get("benchmark_mode") != "speed"
         or artifact.get("backend") != "vllm"
@@ -145,7 +142,7 @@ def _load_speed_artifact(
     )
     if retained_proof != recomputed_proof:
         raise AssertionError("prefix parity linked proof evidence failed recomputation")
-    return artifact_path, artifact, manifest, retained_proof
+    return artifact_path, artifact, manifest, retained_proof, artifact_snapshot.sha256
 
 
 def _validate_acceptance_manifest(
@@ -221,9 +218,17 @@ def _load_sidecar_rows(
     ):
         raise AssertionError("prefix parity sidecar schema is unsupported")
     sidecar = Path(str(metadata.get("path", ""))).expanduser().resolve()
-    if not sidecar.is_file() or metadata.get("sha256") != _sha256_file(sidecar):
+    try:
+        sidecar_snapshot = read_jsonl_snapshot(
+            sidecar,
+            label="prefix parity output sidecar",
+            compression="gzip",
+        )
+    except ArtifactSnapshotError as error:
+        raise AssertionError("prefix parity sidecar could not be decoded") from error
+    if metadata.get("sha256") != sidecar_snapshot.sha256:
         raise AssertionError(f"prefix parity sidecar hash is invalid for {artifact_path}")
-    if metadata.get("size_bytes") != sidecar.stat().st_size:
+    if metadata.get("size_bytes") != sidecar_snapshot.size_bytes:
         raise AssertionError("prefix parity sidecar byte count is invalid")
     expected_tokens = len(manifest.requests) * manifest.max_new_tokens
     expected_metadata = {
@@ -234,14 +239,10 @@ def _load_sidecar_rows(
     }
     if any(metadata.get(key) != value for key, value in expected_metadata.items()):
         raise AssertionError("prefix parity sidecar retained counts are not exact")
-    rows = []
-    try:
-        with gzip.open(sidecar, mode="rt", encoding="utf-8") as handle:
-            for line in handle:
-                row = json.loads(line)
-                rows.append(_require_dict(row, label="prefix parity sidecar row"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise AssertionError("prefix parity sidecar could not be decoded") from error
+    rows = [
+        _require_dict(row, label="prefix parity sidecar row")
+        for row in sidecar_snapshot.values
+    ]
     if len(rows) != len(manifest.requests):
         raise AssertionError("prefix parity sidecar does not cover every request")
     for request, row in zip(manifest.requests, rows, strict=True):
@@ -473,11 +474,11 @@ def _compare_prefix_artifacts(
     proof_validator: Callable[..., dict[str, Any]] = validate_linked_proof_artifact,
 ) -> dict[str, Any]:
     """Internal comparator with injectable fixture contracts for focused CPU tests."""
-    independent_path, independent, independent_manifest, independent_link = _load_speed_artifact(
+    independent_path, independent, independent_manifest, independent_link, independent_sha256 = _load_speed_artifact(
         independent_artifact,
         proof_validator=proof_validator,
     )
-    cached_path, cached, cached_manifest, cached_link = _load_speed_artifact(
+    cached_path, cached, cached_manifest, cached_link, cached_sha256 = _load_speed_artifact(
         cached_artifact,
         proof_validator=proof_validator,
     )
@@ -495,13 +496,15 @@ def _compare_prefix_artifacts(
     )
     independent_proof_path = Path(independent_link["artifact_path"])
     cached_proof_path = Path(cached_link["artifact_path"])
-    if independent_link.get("artifact_sha256") != _sha256_file(independent_proof_path):
+    independent_proof = _load_json(independent_proof_path, label="independent prefix proof")
+    cached_proof = _load_json(cached_proof_path, label="cached prefix proof")
+    if independent_link.get("artifact_sha256") != independent_proof.sha256:
         raise AssertionError("independent physical proof hash drifted")
-    if cached_link.get("artifact_sha256") != _sha256_file(cached_proof_path):
+    if cached_link.get("artifact_sha256") != cached_proof.sha256:
         raise AssertionError("cached physical proof hash drifted")
     physical_reuse = _validate_physical_prefix_reuse(
-        _load_json(independent_proof_path, label="independent prefix proof"),
-        _load_json(cached_proof_path, label="cached prefix proof"),
+        _require_dict(independent_proof.value, label="independent prefix proof"),
+        _require_dict(cached_proof.value, label="cached prefix proof"),
         acceptance=acceptance,
     )
     phase_comparisons, compared_tokens, maximum_error = _compare_steady_outputs(
@@ -521,13 +524,13 @@ def _compare_prefix_artifacts(
         "checkpoint_provenance": independent["checkpoint_provenance"],
         "independent_artifact": {
             "path": str(independent_path),
-            "sha256": _sha256_file(independent_path),
+            "sha256": independent_sha256,
             "linked_proof_path": str(independent_proof_path),
             "linked_proof_sha256": independent_link["artifact_sha256"],
         },
         "cached_artifact": {
             "path": str(cached_path),
-            "sha256": _sha256_file(cached_path),
+            "sha256": cached_sha256,
             "linked_proof_path": str(cached_proof_path),
             "linked_proof_sha256": cached_link["artifact_sha256"],
         },

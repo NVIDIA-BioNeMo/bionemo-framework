@@ -477,6 +477,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
     from nemo_rl.utils.nvml import get_device_uuid
 
     from bionemo.evo2.vllm.nemo_runner import (
+        build_nemo_generation_caller_ledgers,
         build_nemo_generation_config,
         run_nemo_generation_phase,
     )
@@ -616,6 +617,15 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                     replica_count=profile.replica_count,
                 )
             )
+            request_envelope_namespace = f"tp2-parity/{output_path.stem}"
+            caller_ledger = build_nemo_generation_caller_ledgers(
+                manifest=manifest,
+                profile=profile,
+                phases=(phase,),
+                generation_round=phase_index,
+                global_request_index_start=0,
+                request_envelope_namespace=request_envelope_namespace,
+            )[phase]
             result = run_nemo_generation_phase(
                 generation=generation,
                 manifest=manifest,
@@ -625,6 +635,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                 generation_round=phase_index,
                 global_call_index_start=global_call_index,
                 global_request_index_start=0,
+                caller_ledger_admission=caller_ledger,
                 full_output_path=phase_output_artifact_path(output_path, phase=phase),
                 namespace_output_path=output_path,
                 memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
@@ -633,6 +644,7 @@ def run_tp2_refit_parity(args: Any) -> dict[str, Any]:
                 greedy=greedy,
                 require_full_vocab_logprobs=True,
                 expected_finite_logprob_support=expected_finite_support,
+                request_envelope_namespace=request_envelope_namespace,
             )
             phase_index += 1
             global_call_index += phase_call_count

@@ -26,10 +26,15 @@ from bionemo.evo2.vllm.runner import (
     build_request_execution_records,
     write_full_generation_records_artifact,
 )
+from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
 
 
 PROMPTS_CSV = Path(__file__).resolve().parent.parent / "data" / "prompts.csv"
 TOKENIZER_JSON = Path(__file__).resolve().parents[4] / "tokenizers/nucleotide_fast_tokenizer_512/tokenizer.json"
+
+
+def _tokenizer() -> SnapshotBoundTokenizer:
+    return SnapshotBoundTokenizer.from_path(TOKENIZER_JSON)
 
 
 def _base_manifest(*, source_checkpoint: str = CANONICAL_7B_CHECKPOINT) -> WorkloadManifest:
@@ -99,16 +104,13 @@ def test_common_2048_cases_are_deterministically_derived_from_frozen_7b_protocol
     assert all(case.temperature == 1.0 and case.top_k == 1 and case.seed == 42 for case in common)
 
 
-def test_common_2048_manifest_repeats_only_one_case_without_padding(tmp_path) -> None:
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tokenizer_path.write_text("{}", encoding="utf-8")
+def test_common_2048_manifest_repeats_only_one_case_without_padding() -> None:
     case = load_common_prefix_identity_cases(PROMPTS_CSV)[1]
     manifest = build_common_prefix_identity_manifest(
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=tokenizer_path,
-        tokenize=lambda text: tuple(ord(character) for character in text),
+        tokenizer=_tokenizer(),
         request_count=96,
         request_id_prefix="common-case1",
     )
@@ -157,8 +159,7 @@ def test_common_2048_output_gate_compares_every_request_to_serial_target_identit
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=TOKENIZER_JSON,
-        tokenize=lambda text: tuple(ord(character) for character in text),
+        tokenizer=_tokenizer(),
         request_count=1,
         request_id_prefix="serial",
     )
@@ -166,8 +167,7 @@ def test_common_2048_output_gate_compares_every_request_to_serial_target_identit
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=TOKENIZER_JSON,
-        tokenize=lambda text: tuple(ord(character) for character in text),
+        tokenizer=_tokenizer(),
         request_count=2,
         request_id_prefix="batched",
     )
@@ -203,8 +203,7 @@ def test_common_2048_output_gate_rejects_one_request_more_than_five_points_below
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=TOKENIZER_JSON,
-        tokenize=lambda text: tuple(ord(character) for character in text),
+        tokenizer=_tokenizer(),
         request_count=1,
         request_id_prefix="serial",
     )
@@ -212,8 +211,7 @@ def test_common_2048_output_gate_rejects_one_request_more_than_five_points_below
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=TOKENIZER_JSON,
-        tokenize=lambda text: tuple(ord(character) for character in text),
+        tokenizer=_tokenizer(),
         request_count=2,
         request_id_prefix="batched",
     )
@@ -240,16 +238,13 @@ def test_common_2048_output_gate_rejects_one_request_more_than_five_points_below
         )
 
 
-def test_canonical_identity_manifest_is_one_homogeneous_case(tmp_path) -> None:
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tokenizer_path.write_text("{}", encoding="utf-8")
+def test_canonical_identity_manifest_is_one_homogeneous_case() -> None:
     case = load_canonical_7b_identity_cases(PROMPTS_CSV)[2]
     manifest = build_canonical_identity_manifest(
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=tokenizer_path,
-        tokenize=lambda text: tuple(ord(character) for character in text),
+        tokenizer=_tokenizer(),
         request_count=1_000,
         request_id_prefix="identity-case2",
     )
@@ -277,9 +272,7 @@ def test_canonical_identity_manifest_is_one_homogeneous_case(tmp_path) -> None:
         validate_canonical_identity_manifest(mixed, case=case, request_count=1_000)
 
 
-def test_canonical_identity_manifest_rejects_noncanonical_checkpoint(tmp_path) -> None:
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tokenizer_path.write_text("{}", encoding="utf-8")
+def test_canonical_identity_manifest_rejects_noncanonical_checkpoint() -> None:
     case = load_canonical_7b_identity_cases(PROMPTS_CSV)[0]
 
     with pytest.raises(ValueError, match="evo2/7b-1m:1.0"):
@@ -287,8 +280,7 @@ def test_canonical_identity_manifest_rejects_noncanonical_checkpoint(tmp_path) -
             _base_manifest(source_checkpoint="microviridae"),
             case=case,
             prompts_csv=PROMPTS_CSV,
-            tokenizer_path=tokenizer_path,
-            tokenize=lambda text: tuple(ord(character) for character in text),
+            tokenizer=_tokenizer(),
             request_count=96,
             request_id_prefix="identity-case0",
         )
@@ -533,15 +525,12 @@ def _identity_records(manifest, target):
 
 
 def test_canonical_identity_artifact_retains_raw_bytes_and_checks_every_request(tmp_path) -> None:
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tokenizer_path.write_text("{}", encoding="utf-8")
     case = load_canonical_7b_identity_cases(PROMPTS_CSV)[0]
     manifest = build_canonical_identity_manifest(
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=tokenizer_path,
-        tokenize=lambda text: tuple(text.encode("ascii")),
+        tokenizer=_tokenizer(),
         request_count=3,
         request_id_prefix="identity-case0",
     )
@@ -578,15 +567,12 @@ def test_canonical_identity_artifact_retains_raw_bytes_and_checks_every_request(
 
 
 def test_canonical_identity_artifact_rejects_one_low_scoring_request(tmp_path) -> None:
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tokenizer_path.write_text("{}", encoding="utf-8")
     case = load_canonical_7b_identity_cases(PROMPTS_CSV)[1]
     manifest = build_canonical_identity_manifest(
         _base_manifest(),
         case=case,
         prompts_csv=PROMPTS_CSV,
-        tokenizer_path=tokenizer_path,
-        tokenize=lambda text: tuple(text.encode("ascii")),
+        tokenizer=_tokenizer(),
         request_count=2,
         request_id_prefix="identity-case1",
     )

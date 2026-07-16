@@ -28,9 +28,11 @@ from bionemo.evo2.vllm.benchmark import (
     validate_compilation_proof,
     validate_generation_records,
 )
+from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
 
 
 DATA = Path(__file__).with_name("data") / "gdpo_mixed_96.json"
+TOKENIZER_JSON = Path(__file__).resolve().parents[4] / "tokenizers/nucleotide_fast_tokenizer_512/tokenizer.json"
 BASE_MANIFEST_SHA256 = "6f85cf5681e194c6499b0ea967acdc70d6706abc41f5c579bdc785b787fc2207"
 BASE_INDEX_SHA256 = "f9a37408f07c774c13b55648c40f9a4f7fe2847114f988541e5b501bf59f127f"
 
@@ -54,7 +56,7 @@ def test_gdpo_manifest_is_immutable_and_matches_the_production_workload() -> Non
     assert manifest.stop_token_ids == ()
     assert manifest.checkpoint_manifest_sha256 == BASE_MANIFEST_SHA256
     assert manifest.checkpoint_index_sha256 == BASE_INDEX_SHA256
-    assert manifest.sha256 == "391647d48dbf06fb2b340eb55bbfc672ea768d2d948513e74dc319fd9789faa9"
+    assert manifest.sha256 == "da98065224de1603a0f4b0103669cffdc7ba221ac64e914bf42b7ad3129c4126"
 
 
 def test_manifest_validation_rejects_duplicate_ids_and_invalid_sampling() -> None:
@@ -71,6 +73,54 @@ def test_manifest_validation_rejects_duplicate_ids_and_invalid_sampling() -> Non
         WorkloadManifest(**{**manifest.constructor_kwargs(), "temperature": -1.0})
     with pytest.raises(ValueError, match="max_new_tokens"):
         WorkloadManifest(**{**manifest.constructor_kwargs(), "max_new_tokens": 0})
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("max_new_tokens", 3.0, "max_new_tokens"),
+        ("max_new_tokens", True, "max_new_tokens"),
+        ("temperature", 1, "temperature"),
+        ("temperature", True, "temperature"),
+        ("temperature", float("nan"), "temperature"),
+        ("temperature", float("inf"), "temperature"),
+        ("temperature", 1e-6, "temperature"),
+        ("top_p", 1, "top_p"),
+        ("top_p", True, "top_p"),
+        ("top_p", float("nan"), "top_p"),
+        ("top_p", float("inf"), "top_p"),
+        ("top_k", 4.0, "top_k"),
+        ("top_k", True, "top_k"),
+        ("seed", 42.0, "seed"),
+        ("seed", True, "seed"),
+        ("ignore_eos", 1, "ignore_eos"),
+        ("stop_token_ids", (1.0,), "stop_token_ids"),
+        ("stop_token_ids", (True,), "stop_token_ids"),
+    ),
+)
+def test_manifest_rejects_raw_sampling_type_coercion_and_nonfinite_values(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    manifest = WorkloadManifest.from_path(DATA)
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        WorkloadManifest(**{**manifest.constructor_kwargs(), field: value})
+
+
+def test_manifest_preserves_top_k_equal_to_vocab_size_as_an_explicit_policy() -> None:
+    manifest = WorkloadManifest(
+        **{
+            **WorkloadManifest.from_path(DATA).constructor_kwargs(),
+            "top_k": 512,
+        }
+    )
+
+    kwargs = sampling_params_kwargs(manifest)
+
+    assert kwargs["top_k"] == 512
+    assert type(kwargs["top_k"]) is int
 
 
 def test_manifest_expands_deterministically_to_full_1000_by_6000_audit() -> None:
@@ -133,19 +183,11 @@ def test_prompt_jsonl_loader_preserves_ids_hash_and_exact_length_lanes(tmp_path)
         '{"id":"audit_prompt10_0000","prompt":"+~GAGTTTTATC"}\n{"id":"audit_prompt10_0001","prompt":"+~GAGTTTTATC"}\n'
     )
     prompt_source.write_text(prompt_payload, encoding="utf-8")
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tokenizer_path.write_text('{"type":"test-tokenizer"}\n', encoding="utf-8")
-    tokenize_calls = []
-
-    def tokenize(prompt: str) -> tuple[int, ...]:
-        tokenize_calls.append(prompt)
-        return tuple(ord(character) for character in prompt)
-
+    tokenizer = SnapshotBoundTokenizer.from_path(TOKENIZER_JSON)
     source_sha256 = hashlib.sha256(prompt_payload.encode()).hexdigest()
     manifest = WorkloadManifest.from_path(DATA).with_prompt_jsonl(
         prompt_source,
-        tokenize=tokenize,
-        tokenizer_path=tokenizer_path,
+        tokenizer=tokenizer,
         expected_sha256=source_sha256,
         expected_prompt_tokens=12,
         name="matched-audit-96",
@@ -156,11 +198,10 @@ def test_prompt_jsonl_loader_preserves_ids_hash_and_exact_length_lanes(tmp_path)
         "audit_prompt10_0001",
     ]
     assert [len(request.prompt_token_ids) for request in manifest.requests] == [12, 12]
-    assert tokenize_calls == ["+~GAGTTTTATC"]
     assert manifest.prompt_source_path == str(prompt_source.resolve())
     assert manifest.prompt_source_sha256 == source_sha256
-    assert manifest.prompt_tokenizer_path == str(tokenizer_path.resolve())
-    assert manifest.prompt_tokenizer_sha256 == hashlib.sha256(tokenizer_path.read_bytes()).hexdigest()
+    assert manifest.prompt_tokenizer_path == str(TOKENIZER_JSON.resolve())
+    assert manifest.prompt_tokenizer_sha256 == tokenizer.source_sha256
     assert WorkloadManifest.from_dict(manifest.to_dict()) == manifest
 
     exact_6k_total = manifest.with_max_new_tokens(5_988)
@@ -172,15 +213,13 @@ def test_prompt_jsonl_loader_preserves_ids_hash_and_exact_length_lanes(tmp_path)
 def test_prompt_jsonl_loader_rejects_source_or_token_length_drift(tmp_path) -> None:
     prompt_source = tmp_path / "frozen-prompts.jsonl"
     prompt_source.write_text('{"id":"audit-0","prompt":"ACGT"}\n', encoding="utf-8")
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tokenizer_path.write_text("{}\n", encoding="utf-8")
+    tokenizer = SnapshotBoundTokenizer.from_path(TOKENIZER_JSON)
     base = WorkloadManifest.from_path(DATA)
 
     with pytest.raises(ValueError, match="prompt source SHA256"):
         base.with_prompt_jsonl(
             prompt_source,
-            tokenize=lambda prompt: tuple(map(ord, prompt)),
-            tokenizer_path=tokenizer_path,
+            tokenizer=tokenizer,
             expected_sha256="0" * 64,
             expected_prompt_tokens=4,
         )
@@ -189,10 +228,29 @@ def test_prompt_jsonl_loader_rejects_source_or_token_length_drift(tmp_path) -> N
     with pytest.raises(ValueError, match="expected 5 prompt tokens"):
         base.with_prompt_jsonl(
             prompt_source,
-            tokenize=lambda prompt: tuple(map(ord, prompt)),
-            tokenizer_path=tokenizer_path,
+            tokenizer=tokenizer,
             expected_sha256=source_sha256,
             expected_prompt_tokens=5,
+        )
+
+
+def test_workload_and_prompt_admission_reject_duplicate_json_keys(tmp_path) -> None:
+    manifest_path = tmp_path / "duplicate-manifest.json"
+    manifest_payload = DATA.read_text(encoding="utf-8")
+    manifest_path.write_text(
+        manifest_payload.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate key 'schema_version'"):
+        WorkloadManifest.from_path(manifest_path)
+
+    prompt_source = tmp_path / "duplicate-prompts.jsonl"
+    prompt_source.write_text('{"id":"audit-0","id":"foreign","prompt":"ACGT"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate key 'id'"):
+        WorkloadManifest.from_path(DATA).with_prompt_jsonl(
+            prompt_source,
+            tokenizer=SnapshotBoundTokenizer.from_path(TOKENIZER_JSON),
+            expected_sha256=hashlib.sha256(prompt_source.read_bytes()).hexdigest(),
         )
 
 
@@ -264,6 +322,63 @@ def test_sample_aggregation_marks_single_token_inter_token_latency_undefined() -
     aggregate = aggregate_samples([sample])
 
     assert aggregate["inter_token_latency_s"] is None
+
+
+def test_unmonitored_speed_sample_retains_explicit_missing_memory_aggregate() -> None:
+    sample = BenchmarkSample(
+        sample_index=0,
+        generation_s=1.0,
+        request_count=2,
+        prompt_tokens=24,
+        generated_tokens=6,
+        ttft_s=(0.1, 0.1),
+        inter_token_latency_s=(0.01, 0.01),
+        output_lengths=(3, 3),
+        peak_device_memory_bytes=(),
+    )
+
+    aggregate = aggregate_samples([sample])
+
+    if sample.peak_device_memory_bytes != () or aggregate["peak_device_memory_bytes"] is not None:
+        raise AssertionError("unmonitored speed sample fabricated peak-memory evidence")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_type"),
+    (
+        ("generation_s", True, TypeError),
+        ("generation_s", math.nan, ValueError),
+        ("generation_s", math.inf, ValueError),
+        ("request_count", True, TypeError),
+        ("prompt_tokens", 1.0, TypeError),
+        ("ttft_s", [0.1], TypeError),
+        ("ttft_s", (0.1, True), TypeError),
+        ("ttft_s", (0.1, math.nan), ValueError),
+        ("inter_token_latency_s", (math.inf,), ValueError),
+        ("output_lengths", (1.0,), TypeError),
+        ("peak_device_memory_bytes", (True,), TypeError),
+    ),
+)
+def test_benchmark_sample_rejects_numeric_aliases_and_nonfinite_timings(
+    field,
+    value,
+    error_type,
+) -> None:
+    values = {
+        "sample_index": 0,
+        "generation_s": 1.0,
+        "request_count": 1,
+        "prompt_tokens": 1,
+        "generated_tokens": 1,
+        "ttft_s": (0.1,),
+        "inter_token_latency_s": (),
+        "output_lengths": (1,),
+        "peak_device_memory_bytes": (1_000,),
+    }
+    values[field] = value
+
+    with pytest.raises(error_type):
+        BenchmarkSample(**values)
 
 
 def test_generation_validation_requires_exact_ids_lengths_prompts_and_finite_logprobs() -> None:
@@ -485,7 +600,7 @@ def test_sampling_params_match_gdpo_and_force_exact_lengths_without_detokenizati
         "max_tokens": 25_000,
         "min_tokens": 25_000,
         "logprobs": 0,
-        "stop_token_ids": None,
+        "stop_token_ids": [],
         "ignore_eos": True,
         "detokenize": False,
     }

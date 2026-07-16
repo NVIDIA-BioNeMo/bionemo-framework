@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
+import math
 import os
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from pathlib import Path
 from typing import Any, Literal
+
+from bionemo.evo2.vllm.artifact_io import read_json_snapshot
 
 
 Topology = Literal["tp2", "dp2"]
@@ -52,6 +53,27 @@ class Evo2VllmProfile:
 
     def __post_init__(self) -> None:
         """Validate settings before an engine can consume them."""
+        if type(self.topology) is not str:
+            raise TypeError("topology must be a built-in string")
+        for field in (
+            "max_model_len",
+            "max_num_batched_tokens",
+            "max_concurrent_partial_prefills",
+            "long_prefill_chunk_tokens",
+            "optimization_level",
+            "global_wave_size",
+        ):
+            if type(getattr(self, field)) is not int:
+                raise TypeError(f"{field} must be a built-in integer")
+        if self.max_num_seqs is not None and type(self.max_num_seqs) is not int:
+            raise TypeError("max_num_seqs must be a built-in integer or None")
+        for field in ("async_scheduling", "proof", "shared_prefix_state_reuse"):
+            if type(getattr(self, field)) is not bool:
+                raise TypeError(f"{field} must be a built-in bool")
+        if type(self.gpu_memory_utilization) is not float or not math.isfinite(self.gpu_memory_utilization):
+            raise TypeError("gpu_memory_utilization must be a finite built-in float")
+        if type(self.performance_mode) is not str:
+            raise TypeError("performance_mode must be a built-in string")
         if self.topology not in ("tp2", "dp2"):
             raise ValueError(f"unsupported topology: {self.topology}")
         if (
@@ -467,8 +489,10 @@ def context_length_preflight(
 
     checkpoint = Path(model).resolve()
     config_path = checkpoint / "config.json"
-    config_payload = config_path.read_bytes()
-    config_data = json.loads(config_payload)
+    config_snapshot = read_json_snapshot(config_path, label="checkpoint config")
+    config_data = config_snapshot.value
+    if not isinstance(config_data, dict):
+        raise ValueError("checkpoint config must be a JSON object")
     declared = config_data.get("max_position_embeddings")
     if isinstance(declared, bool) or not isinstance(declared, int) or declared <= 0:
         raise ValueError("checkpoint config must declare a positive integer max_position_embeddings")
@@ -507,7 +531,7 @@ def context_length_preflight(
     return {
         "schema_version": 1,
         "checkpoint_config_path": str(config_path),
-        "checkpoint_config_sha256": hashlib.sha256(config_payload).hexdigest(),
+        "checkpoint_config_sha256": config_snapshot.sha256,
         "checkpoint_declared_max_position_embeddings": declared,
         "requested_max_model_len": profile.max_model_len,
         "resolved_max_model_len": int(engine_config.model_config.max_model_len),
