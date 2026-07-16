@@ -1,0 +1,230 @@
+{
+  "asset": {
+    "converter_sha256": "2be6738d2287edf7230cdda12e38c501b65115940f5784bcc89ae5cf0948eee8",
+    "converter_version": "1",
+    "doi": "10.64898/2026.06.12.731871",
+    "license": "CC-BY-4.0",
+    "slug": "black-2026-design-efficiency",
+    "source_sha256": "dcdd5c410b08205d1d8207bb6d2e45f93ae930aa9a076ab24042f142449ba172",
+    "sources": [
+      {
+        "role": "article-html",
+        "sha256": "dcdd5c410b08205d1d8207bb6d2e45f93ae930aa9a076ab24042f142449ba172",
+        "size": 265727,
+        "url": "https://www.biorxiv.org/content/10.64898/2026.06.12.731871v1.full"
+      },
+      {
+        "output": "figures/figure-01.jpg",
+        "role": "figure",
+        "sha256": "3d9ba13211eea691f0ff4468b34db39bcf8b29e89be6dd1236f3e426f62de5b1",
+        "size": 87777,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/F1.large.jpg"
+      },
+      {
+        "output": "figures/figure-02.jpg",
+        "role": "figure",
+        "sha256": "a6defcb48806dc162e6e8c165ebd6f672018ac463cdd0f49ff0b75a379fd228f",
+        "size": 126869,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/F2.large.jpg"
+      },
+      {
+        "output": "figures/figure-03.jpg",
+        "role": "figure",
+        "sha256": "041bfc21d0867743a32ef7fa3b95b788d9ef3d9024ac192ff9661c683ac31160",
+        "size": 156552,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/F3.large.jpg"
+      },
+      {
+        "output": "equations/equation-01.gif",
+        "role": "equation",
+        "sha256": "dc62bdba9267b0f226e0e1370d2c4f2d9875b2fb65c3672e9f3135d2ebe03951",
+        "size": 4059,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-4.gif"
+      },
+      {
+        "output": "equations/equation-02.gif",
+        "role": "equation",
+        "sha256": "265f71e5da7f4ff9c8da4d7e262a4e41d9cf9212f0b26ec04918ad781e83a563",
+        "size": 4685,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-5.gif"
+      },
+      {
+        "output": "equations/equation-03.gif",
+        "role": "equation",
+        "sha256": "64f996831220a4ab1bf889cd4be7b1809c9ccb4e3a7270325ee46296bd9b00e9",
+        "size": 8679,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-6.gif"
+      },
+      {
+        "output": "equations/equation-04.gif",
+        "role": "equation",
+        "sha256": "22d77d96cbb835a25faf5abe1c7f0c78fcafcec4406f4954225e3298636db77d",
+        "size": 6647,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-7.gif"
+      },
+      {
+        "output": "equations/equation-05.gif",
+        "role": "equation",
+        "sha256": "9a566cb134e3e69ee16e12cfb74a2eb4810c9bd0f3e8739478e24fa1330f8428",
+        "size": 5579,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-8.gif"
+      },
+      {
+        "output": "equations/equation-06.gif",
+        "role": "equation",
+        "sha256": "2ffe4bab5e735aecc5e18bf7fa645c6f4bd5be727e1314cb1787e67e60f682aa",
+        "size": 3555,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-9.gif"
+      },
+      {
+        "output": "equations/equation-07.gif",
+        "role": "equation",
+        "sha256": "72384cb7a878d35a235889cf0fc066ecf70ebb0bdba75822e611745e70271d4b",
+        "size": 5195,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-10.gif"
+      },
+      {
+        "output": "equations/equation-08.gif",
+        "role": "equation",
+        "sha256": "910d14decfe555f5568c4c2f82943a31d1c7162e94c853b279c727ddf3fd8082",
+        "size": 5237,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-11.gif"
+      },
+      {
+        "output": "equations/equation-09.gif",
+        "role": "equation",
+        "sha256": "315f43a4e5442eddf85612c1e8dcf15ba79d0aa38af9b2fcb5e7923b8a6504a3",
+        "size": 4083,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-12.gif"
+      },
+      {
+        "output": "equations/equation-10.gif",
+        "role": "equation",
+        "sha256": "59db7504d9aca15e7acabf746ff9246ca7b8f915278c637e2baa0f71af25e8fa",
+        "size": 5599,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-13.gif"
+      },
+      {
+        "output": "equations/equation-11.gif",
+        "role": "equation",
+        "sha256": "84089f7b235cb9a9d65595884c2770590d9b60f3e8ff6f8d8d7f56651fd1b806",
+        "size": 4965,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-14.gif"
+      },
+      {
+        "output": "equations/equation-12.gif",
+        "role": "equation",
+        "sha256": "446bad396ffce6159ff90cd30a1e66b67217b135d712edece9141e9970d06d46",
+        "size": 4475,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-15.gif"
+      },
+      {
+        "output": "equations/equation-13.gif",
+        "role": "equation",
+        "sha256": "4eb8b2f411b8d6d472c696b39f1382bbfbdfe5973ffce69f83adf6bc74555327",
+        "size": 7428,
+        "url": "https://www.biorxiv.org/content/biorxiv/early/2026/06/19/2026.06.12.731871/embed/graphic-16.gif"
+      }
+    ],
+    "title": "Quantifying evolutionary novelty and design efficiency in generative genome design",
+    "version": "v1"
+  },
+  "files": [
+    {
+      "path": "ATTRIBUTION.md",
+      "sha256": "4fc568988e501eee71741f9f9f50078eddef18a9ad719693dcd7da224a784c7d",
+      "size": 585
+    },
+    {
+      "path": "NO_SUPPLEMENT.md",
+      "sha256": "144b35ec6a842582c6f394f2689b6716cd1ac5c08fe959ab63591a8ecb369741",
+      "size": 126
+    },
+    {
+      "path": "equations/equation-01.gif",
+      "sha256": "dc62bdba9267b0f226e0e1370d2c4f2d9875b2fb65c3672e9f3135d2ebe03951",
+      "size": 4059
+    },
+    {
+      "path": "equations/equation-02.gif",
+      "sha256": "265f71e5da7f4ff9c8da4d7e262a4e41d9cf9212f0b26ec04918ad781e83a563",
+      "size": 4685
+    },
+    {
+      "path": "equations/equation-03.gif",
+      "sha256": "64f996831220a4ab1bf889cd4be7b1809c9ccb4e3a7270325ee46296bd9b00e9",
+      "size": 8679
+    },
+    {
+      "path": "equations/equation-04.gif",
+      "sha256": "22d77d96cbb835a25faf5abe1c7f0c78fcafcec4406f4954225e3298636db77d",
+      "size": 6647
+    },
+    {
+      "path": "equations/equation-05.gif",
+      "sha256": "9a566cb134e3e69ee16e12cfb74a2eb4810c9bd0f3e8739478e24fa1330f8428",
+      "size": 5579
+    },
+    {
+      "path": "equations/equation-06.gif",
+      "sha256": "2ffe4bab5e735aecc5e18bf7fa645c6f4bd5be727e1314cb1787e67e60f682aa",
+      "size": 3555
+    },
+    {
+      "path": "equations/equation-07.gif",
+      "sha256": "72384cb7a878d35a235889cf0fc066ecf70ebb0bdba75822e611745e70271d4b",
+      "size": 5195
+    },
+    {
+      "path": "equations/equation-08.gif",
+      "sha256": "910d14decfe555f5568c4c2f82943a31d1c7162e94c853b279c727ddf3fd8082",
+      "size": 5237
+    },
+    {
+      "path": "equations/equation-09.gif",
+      "sha256": "315f43a4e5442eddf85612c1e8dcf15ba79d0aa38af9b2fcb5e7923b8a6504a3",
+      "size": 4083
+    },
+    {
+      "path": "equations/equation-10.gif",
+      "sha256": "59db7504d9aca15e7acabf746ff9246ca7b8f915278c637e2baa0f71af25e8fa",
+      "size": 5599
+    },
+    {
+      "path": "equations/equation-11.gif",
+      "sha256": "84089f7b235cb9a9d65595884c2770590d9b60f3e8ff6f8d8d7f56651fd1b806",
+      "size": 4965
+    },
+    {
+      "path": "equations/equation-12.gif",
+      "sha256": "446bad396ffce6159ff90cd30a1e66b67217b135d712edece9141e9970d06d46",
+      "size": 4475
+    },
+    {
+      "path": "equations/equation-13.gif",
+      "sha256": "4eb8b2f411b8d6d472c696b39f1382bbfbdfe5973ffce69f83adf6bc74555327",
+      "size": 7428
+    },
+    {
+      "path": "figures/figure-01.jpg",
+      "sha256": "3d9ba13211eea691f0ff4468b34db39bcf8b29e89be6dd1236f3e426f62de5b1",
+      "size": 87777
+    },
+    {
+      "path": "figures/figure-02.jpg",
+      "sha256": "a6defcb48806dc162e6e8c165ebd6f672018ac463cdd0f49ff0b75a379fd228f",
+      "size": 126869
+    },
+    {
+      "path": "figures/figure-03.jpg",
+      "sha256": "041bfc21d0867743a32ef7fa3b95b788d9ef3d9024ac192ff9661c683ac31160",
+      "size": 156552
+    },
+    {
+      "path": "paper.md",
+      "sha256": "6ef8c2d58a3eeb5a33b023b73bbc9b98ff067d31cf580465bacd8e8137504bb9",
+      "size": 65287
+    }
+  ],
+  "schema_version": 1
+}

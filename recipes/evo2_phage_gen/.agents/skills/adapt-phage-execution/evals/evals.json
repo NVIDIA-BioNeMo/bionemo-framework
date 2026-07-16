@@ -1,0 +1,47 @@
+{
+  "skill_name": "adapt-phage-execution",
+  "evals": [
+    {
+      "id": "adapt-phage-execution-001-local-preflight",
+      "prompt": "Adapt an Evo 2 phage SFT and RL workflow to the GPU node this agent is running on. The data cache, checkpoints, temporary files, logs, and final results may use different mounts. Optimize the configuration for this machine without changing the biological workload.",
+      "expected_output": "An evidence-based local execution profile and ordered preflight scripts that verify paths and hardware before tuning utilization.",
+      "assertions": [
+        "The response discovers CPU/RAM, GPU model/count/free memory/current occupancy, runtime, and target-length workload rather than merely checking CUDA visibility.",
+        "The response measures free bytes and relevant capacity for every input, cache, temporary, checkpoint, log, and result path, classifies shared versus local and durable versus ephemeral storage, and identifies write or sync ownership.",
+        "The response performs reversible write probes for every directory that must be writable and records unresolved permissions without exposing credentials.",
+        "The response maximizes stable GPU memory and compute utilization with a safety margin using representative target-length probes, while preserving full-genome context and the approved effective token batch.",
+        "The response writes ENVIRONMENT.yaml, EXECUTION_PLAN.md, ACTIONS.yaml, and ordered launch/monitor/stop/resume scripts instead of leaving commands only in chat."
+      ],
+      "expected_skill": "adapt-phage-execution",
+      "expected_script": null
+    },
+    {
+      "id": "adapt-phage-execution-002-slurm-rate-limit",
+      "prompt": "Create a one-tick monitor for an active Slurm phage RL job. It may be called repeatedly by a goal loop with no real delay, and the cluster administrators do not want broad scheduler polling.",
+      "expected_output": "A due-gated monitor contract that minimizes scheduler and filesystem load while observing early risk more closely.",
+      "assertions": [
+        "The response reads persisted due times before any scheduler, filesystem, process, or telemetry query and exits successfully when no source is due.",
+        "The response uses targeted job queries, avoids repeated cluster-wide sinfo and monitoring-only srun allocations, and independently rate-limits scheduler, disk, logs, W&B, and cloud APIs.",
+        "The response permits modestly closer observation through launch, first steps, first validation, and first verified checkpoint while respecting a scheduler floor and site policy.",
+        "The response backs off to minutes or validation cadence with jitter after the first healthy checkpoint and resets only on meaningful state changes or alerts.",
+        "The response uses known files, mtimes, and incremental offsets instead of repeated recursive directory scans."
+      ],
+      "expected_skill": "adapt-phage-execution",
+      "expected_script": null
+    },
+    {
+      "id": "adapt-phage-execution-003-lepton-contract",
+      "prompt": "Prepare a launch, monitor, cancel, and resume handoff for this phage recipe on cloud Lepton. From the recipe working directory, the repository's Lepton documentation is under ../../ci/lepton, but endpoint, image, mounts, authentication, and durable-output ownership have not been confirmed.",
+      "expected_output": "A conservative Lepton execution contract that discovers current interfaces and leaves unverified infrastructure fields unresolved.",
+      "assertions": [
+        "The response inspects ../../ci/lepton/README.md, ../../ci/lepton/requirements.txt, current launcher help, and recipe environment scripts instead of copying a site-specific command.",
+        "The response builds the recipe with its .ci_build.sh before sourcing the current .ci_test_env.sh and resolving entry points.",
+        "The response records revision and image identity plus endpoint, auth mechanism, node group/resources, mounts, egress, secret references, telemetry, and durable-output owner as verified values or explicit unknowns.",
+        "The response emits project-owned submit/status/log/cancel/resume wrappers and does not claim an untested Lepton variant will work.",
+        "The response leaves object-store synchronization disabled until destination, credentials, owner, cost, retention, and restore behavior are approved."
+      ],
+      "expected_skill": "adapt-phage-execution",
+      "expected_script": null
+    }
+  ]
+}

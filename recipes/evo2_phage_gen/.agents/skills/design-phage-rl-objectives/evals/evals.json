@@ -1,0 +1,49 @@
+{
+  "skill_name": "design-phage-rl-objectives",
+  "evals": [
+    {
+      "id": "design-phage-rl-objectives-001-jumbo-essentiality",
+      "prompt": "For a newly selected jumbo bacteriophage, find current direct genome-wide experimental evidence that can inform an essential-gene constraint, then propose how it should enter RL and final QC without assuming it transfers perfectly to our target.",
+      "expected_output": "A current, primary-evidence essentiality proposal with explicit transfer limits, partial credit, missing-data handling, and hard-filter calibration.",
+      "assertions": [
+        "The response identifies a recent primary genome-wide perturbation or equivalent direct functional study in a jumbo bacteriophage and reports the exact phage, prokaryotic host, experimental method, conditions, and operational definition of fitness or essentiality.",
+        "The response cites resolvable current sources and records access/version information without depending on a hard-coded title or identifier from this eval.",
+        "The response distinguishes directly measured genes from unknown, condition-specific, conserved, expressed, predicted, or transferred genes and does not label unknown genes dispensable.",
+        "The response proposes a clipped 0-to-1 online score with named baseline and target, monotonic partial credit, support requirements, and fail-closed missing data.",
+        "The response makes a hard final constraint only for evidence justified at the selected target and condition, or otherwise proposes calibration and a softer proxy.",
+        "The response explains how the new essentiality term interacts with viability, synteny, topology/packaging, bootability, intended directional change, diversity, and final QC."
+      ],
+      "expected_skill": "design-phage-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "design-phage-rl-objectives-002-portfolio-interactions",
+      "prompt": "Design rewards for a bacterial phage where we want lower similarity to the reference, preserved core-gene identity, strong synteny, realistic length, predicted bootability, and diversity. Each proposed metric looks reasonable alone. Analyze the combined objective before approving it.",
+      "expected_output": "An objective portfolio with explicit individual exploit analysis and joint counterfactual analysis showing whether the aggregate points toward the user's actual goal.",
+      "assertions": [
+        "The response maps the user's desired endpoint into viability preservation, bootability enrichment, intended directional change, and diversity before selecting metrics.",
+        "The response brainstorms how each component can be maximized without achieving its biological intent, including denominator shrinkage, missing/default values, deletions, truncation, duplication, support manipulation, and proxy failure where applicable.",
+        "The response analyzes the metrics jointly for correlation, double counting, scale or weight dominance, incompatible gradients, boundary optima, OR-branch dominance, and A-plus-B trajectories that converge on an unintended C instead of desired D.",
+        "The response uses concrete counterexample designs, baseline/reference simulations, ablations, or Pareto analysis to decide whether another guardrail, metric, hard filter, or weight calibration is needed.",
+        "The response accepts ordinary tension among objectives but does not approve an aggregate whose easiest high-score region violates the stated endpoint.",
+        "The response retains separate component telemetry and final hard-QC alignment rather than relying only on a scalar aggregate."
+      ],
+      "expected_skill": "design-phage-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "design-phage-rl-objectives-003-or-branch",
+      "prompt": "A design is acceptable if it preserves either module A or an experimentally supported alternative module B; all other QC requirements remain mandatory. Specify online rewards and final filter logic.",
+      "expected_output": "A nested hard all/any contract with an aligned OR reward, child telemetry, and branch-dominance controls.",
+      "assertions": [
+        "The response represents the mandatory filters as hard all and the two acceptable modules as one nested hard any branch.",
+        "The response normally uses one max-style online reward for the OR branch while preserving A and B child scores and pass flags.",
+        "The response defines every child and aggregate in 0-to-1 range with baseline, target, partial credit, and fail-closed behavior.",
+        "The response predeclares branch-overlap and dominance reporting and recognizes that one branch may be preferentially optimized.",
+        "The response keeps 1/cluster_size diversity at 99% unless a justified tested alternative is supplied."
+      ],
+      "expected_skill": "design-phage-rl-objectives",
+      "expected_script": null
+    }
+  ]
+}
