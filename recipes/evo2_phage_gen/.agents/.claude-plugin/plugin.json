@@ -1,0 +1,8 @@
+{
+  "name": "evo2-phage-gen",
+  "description": "Recipe-local skills for reproducible Evo 2 prokaryotic phage design workflows.",
+  "version": "0.1.0",
+  "author": {
+    "name": "BioNeMo Recipes contributors"
+  }
+}
