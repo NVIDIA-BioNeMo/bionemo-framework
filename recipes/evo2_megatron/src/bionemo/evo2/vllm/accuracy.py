@@ -216,6 +216,8 @@ def _validate_engine_physical_shape(
     ):
         raise AssertionError("identity CUDA graph replay did not use the required physical request shape")
     if require_exact_decode_dimension:
+        if len(full_observations) != 499:
+            raise AssertionError("mixed identity requires exactly 499 FULL decode graph replays")
         for observation in full_observations:
             dimensions = observation.get("request_dimensions")
             if (

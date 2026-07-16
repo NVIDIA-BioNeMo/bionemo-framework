@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -355,10 +356,14 @@ def _iteration_stats(
     computed: int = 0,
     cached_tokens: int = 0,
     total: int = 0,
+    num_generation_tokens: int = 0,
+    first_token_events: int = 0,
 ):
     return SimpleNamespace(
         num_preempted_reqs=preempted,
         prompt_token_stats=SimpleNamespace(computed=computed, cached_tokens=cached_tokens, total=total),
+        num_generation_tokens=num_generation_tokens,
+        time_to_first_tokens_iter=[0.0] * first_token_events,
     )
 
 
@@ -367,12 +372,12 @@ def test_cudagraph_recorder_persists_phase_and_runtime_mode_without_log_resets()
     recorder.start_phase("steady-0")
     recorder.record(
         _scheduler_stats(unpadded=768, padded=768, mode="CUDAGraphMode.PIECEWISE"),
-        None,
+        _iteration_stats(computed=768, total=768, num_generation_tokens=4, first_token_events=4),
         engine_idx=0,
     )
     recorder.record(
         _scheduler_stats(unpadded=96, padded=96, mode="CUDAGraphMode.FULL"),
-        None,
+        _iteration_stats(num_generation_tokens=96),
         engine_idx=0,
     )
     recorder.record(None, None, engine_idx=0)
@@ -385,6 +390,15 @@ def test_cudagraph_recorder_persists_phase_and_runtime_mode_without_log_resets()
             "num_padded_tokens": 768,
             "num_paddings": 0,
             "runtime_mode": "CUDAGraphMode.PIECEWISE",
+            "request_dimensions": {
+                "schema_version": 1,
+                "source": "iteration-stats-bound-to-cudagraph-dispatch",
+                "prefill_req_count": None,
+                "decode_req_count": None,
+                "token_count": 768,
+                "prompt_token_count": 768,
+                "first_token_event_count": 4,
+            },
         },
         {
             "phase": "steady-0",
@@ -393,6 +407,15 @@ def test_cudagraph_recorder_persists_phase_and_runtime_mode_without_log_resets()
             "num_padded_tokens": 96,
             "num_paddings": 0,
             "runtime_mode": "CUDAGraphMode.FULL",
+            "request_dimensions": {
+                "schema_version": 1,
+                "source": "iteration-stats-bound-to-cudagraph-dispatch",
+                "prefill_req_count": 0,
+                "decode_req_count": 96,
+                "token_count": 96,
+                "prompt_token_count": 0,
+                "first_token_event_count": 0,
+            },
         },
     ]
 
@@ -3100,11 +3123,16 @@ def test_parser_and_loader_build_one_physical_interleaved_mixed_identity_batch(t
             "96",
             "--max-num-seqs",
             "96",
+            "--warmups",
+            "0",
+            "--repetitions",
+            "1",
             "--request-id-prefix",
             "mixed",
             "--prompt-tokenizer-json",
             str(TOKENIZER_JSON),
             "--mixed-canonical-identity",
+            "--mixed-same-engine-qualification",
             "--canonical-prompts-csv",
             str(PROMPTS_CSV),
             "--output",
@@ -3130,6 +3158,290 @@ def test_parser_and_loader_build_one_physical_interleaved_mixed_identity_batch(t
         raise AssertionError("mixed CLI contract overlapped homogeneous mode or reordered cases")
     if mixed["schedule"]["global_request_shapes"] != [96] or mixed["schedule"]["engine_request_shapes"] != [[96]]:
         raise AssertionError("mixed CLI did not bind one physical TP2 B96 call")
+
+    stage_specs = runner.mixed_same_engine_stage_specs(parsed, manifest, profile)
+    if stage_specs is None or [spec["stage"] for spec in stage_specs] != ["mixed-b4", "mixed-b96"]:
+        raise AssertionError("mixed B96 qualification did not retain the ordered two-stage lifecycle")
+    if [len(spec["manifest"].requests) for spec in stage_specs] != [4, 96]:
+        raise AssertionError("capacity-96 engine did not retain actual B4 and B96 stage call shapes")
+    if [spec["schedule"].global_wave_size for spec in stage_specs] != [4, 96]:
+        raise AssertionError("mixed stage call shapes were incorrectly coupled to engine capacity")
+    if [spec["execution_records"][0].call_index for spec in stage_specs] != [0, 1]:
+        raise AssertionError("mixed stages did not advance the physical semantic call")
+    if [spec["execution_records"][0].global_request_index for spec in stage_specs] != [0, 4]:
+        raise AssertionError("mixed stages did not retain disjoint caller-owned global ranges")
+    b4_seeds = {record.seed for record in stage_specs[0]["execution_records"]}
+    b96_seeds = {record.seed for record in stage_specs[1]["execution_records"]}
+    if b4_seeds & b96_seeds:
+        raise AssertionError("mixed B4 and B96 stages reused request seeds")
+    phase_coordinates = contract["measurement"]["phase_coordinates"]
+    if [row["phase"] for row in phase_coordinates] != ["mixed-b4", "mixed-b96"]:
+        raise AssertionError("mixed benchmark contract described phases other than actual B4 then B96")
+    if [row["global_call_index_start"] for row in phase_coordinates] != [0, 1]:
+        raise AssertionError("mixed benchmark contract did not bind actual advancing calls")
+    if [row["global_request_index_start"] for row in phase_coordinates] != [0, 4]:
+        raise AssertionError("mixed benchmark contract did not bind actual disjoint request ranges")
+    if contract["seed_stream"] != mixed["admission_bundle"]:
+        raise AssertionError("mixed benchmark seed authority drifted from the actual stage admission")
+
+
+def test_tp2_mixed_qualification_constructs_one_capacity96_engine_for_b4_then_b96(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manifest_path = tmp_path / "base.json"
+    manifest_path.write_text(json.dumps(_canonical_base_manifest().to_dict()), encoding="utf-8")
+    output = tmp_path / "mixed-same-engine.json"
+    args = runner.build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--manifest",
+            str(manifest_path),
+            "--topology",
+            "tp2",
+            "--max-model-len",
+            "6144",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.92",
+            "--request-count",
+            "96",
+            "--global-wave-size",
+            "96",
+            "--max-num-seqs",
+            "96",
+            "--warmups",
+            "0",
+            "--repetitions",
+            "1",
+            "--request-id-prefix",
+            "mixed",
+            "--prompt-tokenizer-json",
+            str(TOKENIZER_JSON),
+            "--mixed-canonical-identity",
+            "--mixed-same-engine-qualification",
+            "--canonical-prompts-csv",
+            str(PROMPTS_CSV),
+            "--output",
+            str(output),
+        ]
+    )
+    manifest = runner.load_source_manifest(args)
+    runner.reserve_output_namespace(output)
+
+    engine_instances = []
+    stage_calls = []
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.llm_engine = SimpleNamespace(
+                logger_manager=SimpleNamespace(stat_loggers=[]),
+                vllm_config=object(),
+            )
+            engine_instances.append(self)
+
+    class FakeMemoryMonitor:
+        peak_device_memory_bytes = (10, 11)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_phase(**kwargs):
+        stage_manifest = kwargs["manifest"]
+        execution_records = kwargs["execution_records"]
+        stage_calls.append(kwargs)
+        request_count = len(stage_manifest.requests)
+        sample = runner.BenchmarkSample(
+            sample_index=kwargs["sample_index"],
+            generation_s=1.0,
+            request_count=request_count,
+            prompt_tokens=sum(len(request.prompt_token_ids) for request in stage_manifest.requests),
+            generated_tokens=request_count * 500,
+            ttft_s=(0.1,) * request_count,
+            inter_token_latency_s=(0.001,) * request_count,
+            output_lengths=(500,) * request_count,
+            peak_device_memory_bytes=(20, 21),
+        )
+        return runner.GenerationPhaseResult(
+            phase=kwargs["phase"],
+            sample=sample,
+            generation_call_s=(1.0,),
+            wave_proofs=(
+                {
+                    "wave_index": 0,
+                    "start": 0,
+                    "stop": request_count,
+                    "request_count": request_count,
+                    "generation_s": 1.0,
+                    "full_decode_proof": {"passed": True},
+                },
+            ),
+            observations=(),
+            output_summaries=(),
+            request_executions=execution_records,
+            full_output_artifact={"stage": kwargs["phase"]},
+            full_decode_proof={"passed": True},
+            worker_proof=(),
+            shared_prefix_state_reuse=None,
+            proof_collected=kwargs["collect_proof"],
+            prefix_cache_reset=False,
+        )
+
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(LLM=FakeLLM, SamplingParams=SimpleNamespace))
+    monkeypatch.setattr(runner, "context_length_preflight", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner, "gpu_hardware_provenance", lambda: {"devices": []})
+    monkeypatch.setattr(runner, "checkpoint_provenance", lambda *_args: {})
+    monkeypatch.setattr(runner, "source_provenance", lambda **_kwargs: {})
+    monkeypatch.setattr(runner, "vllm_installation_provenance", lambda: {})
+    monkeypatch.setattr(sampler_module, "sampler_installation_provenance", lambda **_kwargs: {})
+    monkeypatch.setattr(runner, "runtime_attestation_contract", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        runner.Evo2VllmProfile,
+        "engine_kwargs",
+        lambda self, **_kwargs: {"max_num_seqs": self.resolved_max_num_seqs},
+    )
+    monkeypatch.setattr(runner, "manifest_output_decoder", lambda _manifest: lambda ids: bytes(ids).decode())
+    monkeypatch.setattr(runner, "make_nvml_memory_reader", lambda: None)
+    monkeypatch.setattr(runner, "PeakMemoryMonitor", lambda _reader: FakeMemoryMonitor())
+    monkeypatch.setattr(runner, "resolved_config_snapshot", lambda _config: {"cache": {"block_size": 16}})
+    monkeypatch.setattr(runner, "validate_resolved_profile", lambda *_args: None)
+    monkeypatch.setattr(runner, "run_generation_phase", fake_phase)
+    monkeypatch.setattr(
+        runner,
+        "gpu_memory_headroom_evidence",
+        lambda *_args, **_kwargs: {"passed": True},
+    )
+    monkeypatch.setattr(runner, "runtime_versions", lambda: {})
+
+    def validate_mixed_phases(**kwargs):
+        phases = kwargs["phase_artifacts"]
+        if [phase["phase"] for phase in phases] != ["mixed-b4", "mixed-b96"]:
+            raise AssertionError("mixed scorer did not receive the exact ordered stage results")
+        if kwargs["collect_physical_proof"] is not True:
+            raise AssertionError("mixed same-engine path did not retain supported route metrics")
+        return phases, {"same_engine_b4_then_b96_qualified": True, "passed": True}
+
+    monkeypatch.setattr(runner, "mixed_canonical_identity_phase_artifacts", validate_mixed_phases)
+
+    artifact = runner.run_tp2_benchmark(args, manifest)
+
+    if len(engine_instances) != 1:
+        raise AssertionError("mixed B4/B96 qualification constructed more than one vLLM engine")
+    if [call["phase"] for call in stage_calls] != ["mixed-b4", "mixed-b96"]:
+        raise AssertionError("mixed B4/B96 qualification executed the wrong stage order")
+    if [len(call["manifest"].requests) for call in stage_calls] != [4, 96]:
+        raise AssertionError("mixed B4/B96 qualification used the wrong actual call shapes")
+    if [call["global_wave_size"] for call in stage_calls] != [4, 96]:
+        raise AssertionError("mixed B4/B96 stage shapes remained coupled to engine capacity")
+    if [call["scheduler_max_num_seqs"] for call in stage_calls] != [96, 96]:
+        raise AssertionError("mixed stages did not share one capacity-96 scheduler")
+    if any(call["llm"] is not engine_instances[0] for call in stage_calls):
+        raise AssertionError("mixed stages did not execute through the same vLLM engine object")
+    if [call["execution_records"][0].call_index for call in stage_calls] != [0, 1]:
+        raise AssertionError("mixed stages did not execute their admitted advancing calls")
+    if [call["execution_records"][0].global_request_index for call in stage_calls] != [0, 4]:
+        raise AssertionError("mixed stages did not execute their admitted global ranges")
+    if engine_instances[0].kwargs.get("max_num_seqs") != 96:
+        raise AssertionError("mixed engine was not constructed at capacity 96")
+    if engine_instances[0].kwargs.get("cudagraph_metrics") is not True:
+        raise AssertionError("mixed qualification did not enable supported CUDA-graph metrics")
+    if "worker_extension_cls" in engine_instances[0].kwargs:
+        raise AssertionError("mixed qualification installed a proof-only worker extension")
+    if artifact["mixed_canonical_identity"]["same_engine_b4_then_b96_qualified"] is not True:
+        raise AssertionError("mixed same-engine result was not propagated into the root artifact")
+
+
+def test_mixed_same_engine_scorer_requires_and_accepts_b4_then_b96_outputs_and_route(tmp_path) -> None:
+    cases = load_canonical_7b_identity_cases(PROMPTS_CSV)
+    tokenizer = SnapshotBoundTokenizer.from_path(TOKENIZER_JSON)
+    manifest = runner.build_mixed_canonical_identity_manifest(
+        _canonical_base_manifest(),
+        cases=cases,
+        prompts_csv=PROMPTS_CSV,
+        tokenizer=tokenizer,
+        request_count=96,
+        request_id_prefix="mixed-b96",
+    )
+    args = SimpleNamespace(
+        mixed_canonical_identity=True,
+        mixed_same_engine_qualification=True,
+        canonical_prompts_csv=PROMPTS_CSV,
+        prompt_tokenizer_json=TOKENIZER_JSON,
+        request_id_prefix="mixed",
+        warmups=0,
+        repetitions=1,
+        generation_round=0,
+        proof=False,
+    )
+    profile = runner.Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=6144,
+        max_num_batched_tokens=16384,
+        gpu_memory_utilization=0.92,
+        global_wave_size=96,
+        max_num_seqs=96,
+    )
+    stage_specs = runner.mixed_same_engine_stage_specs(args, manifest, profile)
+    phases = []
+    for spec in stage_specs:
+        stage_manifest = spec["manifest"]
+        records = tuple(
+            GenerationRecord(
+                request_id=request.request_id,
+                prompt_token_ids=request.prompt_token_ids,
+                output_token_ids=tuple(cases[index % 4].target.encode("ascii")),
+                output_logprobs=(-0.1,) * 500,
+                requested_max_tokens=500,
+                finish_reason="length",
+                stop_reason=None,
+                stopped_on_eos=False,
+            )
+            for index, request in enumerate(stage_manifest.requests)
+        )
+        phase = _runner_identity_phase(spec["schedule"], phase_name=spec["stage"])
+        phase["request_executions"] = [record.to_dict() for record in spec["execution_records"]]
+        phase["full_output_artifact"] = runner.write_full_generation_records_artifact(
+            tmp_path / f"{spec['stage']}.outputs.jsonl.gz",
+            records=records,
+            execution_records=spec["execution_records"],
+            decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+        )
+        phases.append(phase)
+
+    retained, summary = runner.mixed_canonical_identity_phase_artifacts(
+        args=args,
+        manifest=manifest,
+        profile=profile,
+        phase_artifacts=phases,
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+        collect_physical_proof=True,
+    )
+
+    if [phase["phase"] for phase in retained] != ["mixed-b4", "mixed-b96"]:
+        raise AssertionError("mixed scorer reordered the admitted stage artifacts")
+    if summary["same_engine_b4_then_b96_qualified"] is not True:
+        raise AssertionError("mixed scorer did not qualify exact B4 then B96 evidence")
+    if summary["physical_schedule_attested"] is not True:
+        raise AssertionError("mixed scorer did not attest both supported physical route metrics")
+    if [phase["request_count"] for phase in summary["phases"]] != [4, 96]:
+        raise AssertionError("mixed scorer did not retain both exact stage output inventories")
+    with pytest.raises(AssertionError, match="exact ordered B4 then B96"):
+        runner.mixed_canonical_identity_phase_artifacts(
+            args=args,
+            manifest=manifest,
+            profile=profile,
+            phase_artifacts=[phases[0], phases[0], phases[1]],
+            decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+            collect_physical_proof=True,
+        )
 
 
 def test_loader_builds_one_executable_common_prefix_identity_case(tmp_path) -> None:
@@ -3234,14 +3546,31 @@ def _runner_identity_phase(schedule, *, phase_name="identity"):
         wave_phase = f"{phase_name}.wave-{wave_index:03d}"
         stop = start + global_shape
         if schedule.topology == "tp2":
-            observations.append(
+            replay_count = 499 if schedule.mixed_case_batching else 1
+            observations.extend(
                 {
                     "phase": wave_phase,
                     "runtime_mode": "CUDAGraphMode.FULL",
                     "num_unpadded_tokens": global_shape,
                     "num_padded_tokens": global_shape,
                     "num_paddings": 0,
+                    **(
+                        {
+                            "request_dimensions": {
+                                "schema_version": 1,
+                                "source": "iteration-stats-bound-to-cudagraph-dispatch",
+                                "prefill_req_count": 0,
+                                "decode_req_count": global_shape,
+                                "token_count": global_shape,
+                                "prompt_token_count": 0,
+                                "first_token_event_count": 0,
+                            }
+                        }
+                        if schedule.mixed_case_batching
+                        else {}
+                    ),
                 }
+                for _ in range(replay_count)
             )
             waves.append(
                 {
@@ -4692,7 +5021,7 @@ def test_generation_phase_result_serializes_every_cuda_observation_losslessly() 
     )
     result = runner.GenerationPhaseResult(
         phase="steady-0",
-        sample=SimpleNamespace(to_dict=lambda: {}),
+        sample=SimpleNamespace(generation_s=1.0, to_dict=lambda: {}),
         generation_call_s=(1.0,),
         wave_proofs=({"wave_index": 0, "request_count": 2, "generation_s": 1.0},),
         observations=observations,

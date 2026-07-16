@@ -701,6 +701,11 @@ def build_benchmark_contract(
     mixed_identity = getattr(args, "mixed_canonical_identity", False)
     if type(mixed_identity) is not bool:
         raise TypeError("mixed canonical identity flag must be a built-in boolean")
+    mixed_same_engine = getattr(args, "mixed_same_engine_qualification", False)
+    if type(mixed_same_engine) is not bool:
+        raise TypeError("mixed same-engine qualification flag must be a built-in boolean")
+    if mixed_same_engine and not mixed_identity:
+        raise ValueError("mixed same-engine qualification requires mixed canonical identity")
     if sum(
         (
             getattr(args, "canonical_identity_case", None) is not None,
@@ -715,13 +720,37 @@ def build_benchmark_contract(
     identity_context = canonical_identity_context(args, manifest, profile)
     common_identity_context = common_prefix_identity_context(args, manifest, profile)
     mixed_identity_context_value = mixed_canonical_identity_context(args, manifest, profile)
-    phase_coordinates = benchmark_phase_coordinates(
-        manifest,
-        profile,
-        generation_round_start=generation_round,
-        warmups=args.warmups,
-        repetitions=args.repetitions,
-    )
+    if mixed_same_engine:
+        stage_specs = mixed_same_engine_stage_specs(args, manifest, profile)
+        if stage_specs is None or mixed_identity_context_value is None:
+            raise AssertionError("mixed same-engine qualification did not resolve its exact stages")
+        mixed_contract = mixed_identity_context_value[2]
+        admission_bundle = mixed_contract["admission_bundle"]
+        phase_coordinates = tuple(
+            {
+                "phase": spec["stage"],
+                "sample_index": sample_index,
+                "generation_round": spec["execution_records"][0].generation_round,
+                "global_call_index_start": spec["execution_records"][0].call_index,
+                "global_request_index_start": spec["execution_records"][0].global_request_index,
+                "physical_calls_per_round": 1,
+                "semantic_request_count": len(spec["manifest"].requests),
+                "manifest_sha256": spec["manifest"].sha256,
+            }
+            for sample_index, spec in enumerate(stage_specs)
+        )
+        seed_stream = admission_bundle
+        measurement_protocol = "mixed-b4-then-b96-single-engine"
+    else:
+        phase_coordinates = benchmark_phase_coordinates(
+            manifest,
+            profile,
+            generation_round_start=generation_round,
+            warmups=args.warmups,
+            repetitions=args.repetitions,
+        )
+        seed_stream = caller_coordinates.seed_stream_contract()
+        measurement_protocol = "cold-warm-steady"
     mbs1_enabled = bool(getattr(args, "mbs1_exact1k_audit", False))
     if mbs1_enabled and not bool(getattr(args, "exact_progress_gate", False)):
         raise ValueError("MBS=1 exact-1k audit requires --exact-progress-gate")
@@ -733,12 +762,14 @@ def build_benchmark_contract(
         "load_format": args.load_format,
         "manifest_sha256": manifest.sha256,
         "profile": profile_contract,
-        "seed_stream": caller_coordinates.seed_stream_contract(),
+        "seed_stream": seed_stream,
         "measurement": {
+            "protocol": measurement_protocol,
             "warmups": int(args.warmups),
             "repetitions": int(args.repetitions),
             "phase_coordinates": list(phase_coordinates),
         },
+        "mixed_same_engine_qualification": mixed_same_engine,
         "canonical_identity": None if identity_context is None else identity_context[2],
         "common_prefix_identity": None if common_identity_context is None else common_identity_context[3],
         "mixed_canonical_identity": (
@@ -798,7 +829,7 @@ def mixed_canonical_identity_context(
     args: Any,
     manifest: WorkloadManifest,
     profile: Evo2VllmProfile,
-) -> tuple[tuple[Any, ...], Any, dict[str, Any]] | None:
+) -> tuple[tuple[Any, ...], Any, dict[str, Any], dict[str, WorkloadManifest]] | None:
     """Resolve one active mixed stage plus the caller-owned B4/B96 contract."""
     if getattr(args, "mixed_canonical_identity", False) is not True:
         return None
@@ -839,7 +870,70 @@ def mixed_canonical_identity_context(
         prompts_csv=prompts_csv,
         tokenizer_path=tokenizer_path,
     )
-    return cases, schedule, contract
+    return cases, schedule, contract, stage_manifests
+
+
+def mixed_same_engine_stage_specs(
+    args: Any,
+    manifest: WorkloadManifest,
+    profile: Evo2VllmProfile,
+) -> tuple[dict[str, Any], ...] | None:
+    """Resolve exact B4 then B96 calls for one capacity-96 engine."""
+    enabled = getattr(args, "mixed_same_engine_qualification", False)
+    if type(enabled) is not bool:
+        raise TypeError("mixed same-engine qualification flag must be a built-in boolean")
+    if not enabled:
+        return None
+    context = mixed_canonical_identity_context(args, manifest, profile)
+    if context is None:
+        raise ValueError("mixed same-engine qualification requires mixed canonical identity")
+    if profile.topology != "tp2":
+        raise ValueError("mixed same-engine qualification currently requires TP2")
+    if len(manifest.requests) != 96:
+        raise ValueError("mixed same-engine qualification requires the B96 source manifest")
+    if profile.global_wave_size != 96 or profile.resolved_max_num_seqs != 96:
+        raise ValueError("mixed same-engine qualification requires one capacity-96 engine")
+    if args.warmups != 0 or args.repetitions != 1:
+        raise ValueError("mixed same-engine qualification executes exactly B4 then B96 without repeated phases")
+    if args.generation_round != 0:
+        raise ValueError("mixed same-engine qualification owns semantic calls 0 and 1")
+    if args.proof:
+        raise ValueError("mixed same-engine qualification must not install proof-only worker hooks")
+
+    _cases, _active_schedule, contract, stage_manifests = context
+    attempts = contract["admission_bundle"]["attempts"]
+    specs = []
+    for attempt in attempts:
+        stage = attempt["stage"]
+        stage_manifest = stage_manifests[stage]
+        request_count = attempt["request_count"]
+        stage_prefix = stage_manifest.requests[0].request_id.rsplit("-case", 1)[0]
+        schedule = build_mixed_identity_schedule(
+            topology=profile.topology,
+            request_count=request_count,
+            global_wave_size=request_count,
+            request_id_prefix=stage_prefix,
+        )
+        execution_records = tuple(
+            RequestExecutionRecord(**coordinate) for coordinate in attempt["execution_coordinates"]
+        )
+        if stage_manifest.sha256 != attempt["manifest_sha256"]:
+            raise AssertionError("mixed stage manifest drifted from caller admission")
+        if tuple(request.request_id for request in stage_manifest.requests) != schedule.request_ids:
+            raise AssertionError("mixed stage manifest drifted from its physical schedule")
+        if tuple(record.request_id for record in execution_records) != schedule.request_ids:
+            raise AssertionError("mixed stage execution records drifted from caller admission")
+        specs.append(
+            {
+                "stage": stage,
+                "manifest": stage_manifest,
+                "schedule": schedule,
+                "execution_records": execution_records,
+            }
+        )
+    if [spec["stage"] for spec in specs] != ["mixed-b4", "mixed-b96"]:
+        raise AssertionError("mixed same-engine stages are not ordered B4 then B96")
+    return tuple(specs)
 
 
 def common_prefix_identity_context(
@@ -972,9 +1066,71 @@ def mixed_canonical_identity_phase_artifacts(
         return phase_artifacts, None
     if decode_output_token_ids is None:
         raise AssertionError("mixed canonical identity requires decoded raw output retention")
+    cases, _schedule, contract, _stage_manifests = context
+    same_engine_specs = mixed_same_engine_stage_specs(args, manifest, profile)
+    if same_engine_specs is not None:
+        if not collect_physical_proof:
+            raise AssertionError("mixed same-engine qualification requires supported runtime route metrics")
+        expected_phases = [spec["stage"] for spec in same_engine_specs]
+        if [phase.get("phase") for phase in phase_artifacts] != expected_phases:
+            raise AssertionError("mixed same-engine phases are not exact ordered B4 then B96")
+        summaries = []
+        for phase, spec in zip(phase_artifacts, same_engine_specs, strict=True):
+            stage_manifest = spec["manifest"]
+            expected_request_ids = tuple(request.request_id for request in stage_manifest.requests)
+            expected_prompts = tuple(request.prompt_token_ids for request in stage_manifest.requests)
+            expected_cases = tuple(cases[index % 4] for index in range(len(stage_manifest.requests)))
+            expected_executions = tuple(record.to_dict() for record in spec["execution_records"])
+            outputs = validate_mixed_canonical_identity_output_artifact(
+                phase["full_output_artifact"],
+                cases_by_request=expected_cases,
+                expected_request_ids=expected_request_ids,
+                expected_prompt_token_ids=expected_prompts,
+                expected_execution_coordinates=expected_executions,
+                decode_output_token_ids=decode_output_token_ids,
+            )
+            physical = validate_mixed_identity_phase_evidence(
+                phase,
+                schedule=spec["schedule"],
+                expected_execution_coordinates=expected_executions,
+            )
+            evidence = {
+                "schema_version": 1,
+                "stage": spec["stage"],
+                "manifest_sha256": stage_manifest.sha256,
+                "outputs": outputs,
+                "physical_schedule": physical,
+                "physical_schedule_attested_by_linked_proof": False,
+                "supported_vllm_runtime_metrics": True,
+                "proof_only_runtime_hooks_installed": False,
+                "same_engine_b4_then_b96_qualified": True,
+                "passed": True,
+            }
+            phase["mixed_canonical_identity_evidence"] = evidence
+            summaries.append(
+                {
+                    "phase": spec["stage"],
+                    "manifest_sha256": stage_manifest.sha256,
+                    "request_count": outputs["request_count"],
+                    "minimum_observed_identity_percent": outputs["minimum_observed_identity_percent"],
+                    "physical_schedule_proven": True,
+                    "passed": True,
+                }
+            )
+        return phase_artifacts, {
+            "schema_version": 1,
+            "contract": contract,
+            "phases": summaries,
+            "exploratory_output_correctness_passed": True,
+            "same_engine_b4_then_b96_qualified": True,
+            "physical_schedule_attested": True,
+            "supported_vllm_runtime_metrics": True,
+            "proof_only_runtime_hooks_installed": False,
+            "timing_admissible_for_speed_ranking": False,
+            "passed": True,
+        }
     if collect_physical_proof:
-        raise AssertionError("mixed qualification requires the dual-stage same-engine proof runner")
-    cases, _schedule, contract = context
+        raise AssertionError("single-stage mixed runs cannot qualify physical B4-then-B96 execution")
     coordinates_by_phase = {
         row["phase"]: row
         for row in benchmark_phase_coordinates(
@@ -6422,6 +6578,8 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         raise ValueError("run_tp2_benchmark requires topology=tp2")
     require_output_namespace_reservation(args.output)
     profile = profile_from_args(args, manifest)
+    mixed_stage_specs = mixed_same_engine_stage_specs(args, manifest, profile)
+    mixed_same_engine = mixed_stage_specs is not None
     caller_coordinates = CallerCoordinateContract.from_inputs(
         manifest,
         profile,
@@ -6429,6 +6587,15 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
     )
     benchmark_mode = benchmark_mode_from_args(args)
     instrumentation = benchmark_instrumentation_contract(benchmark_mode)
+    if mixed_same_engine:
+        instrumentation = {
+            **instrumentation,
+            "scheduler_callbacks_during_generation": True,
+            "supported_vllm_stat_logger": True,
+            "peak_memory_polling_during_generation": True,
+            "proof_only_worker_extension": False,
+            "timing_admissible_for_speed_ranking": False,
+        }
     preflight_begin = time.perf_counter()
     preflight = context_length_preflight(
         profile,
@@ -6483,17 +6650,19 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         seed=manifest.seed,
         load_format=args.load_format,
     )
+    if mixed_same_engine:
+        engine_kwargs["cudagraph_metrics"] = True
     decoder_begin = time.perf_counter()
     output_decoder = manifest_output_decoder(manifest)
     output_decoder_setup_s = time.perf_counter() - decoder_begin
     memory_reader = make_nvml_memory_reader()
-    recorder = CUDAGraphProofRecorder() if profile.proof else None
+    recorder = CUDAGraphProofRecorder() if profile.proof or mixed_same_engine else None
 
     init_begin = time.perf_counter()
     with PeakMemoryMonitor(memory_reader) as init_memory:
         llm = LLM(**engine_kwargs)
     engine_init_s = time.perf_counter() - init_begin
-    if profile.proof:
+    if recorder is not None:
         _attach_cudagraph_recorder(llm, recorder)
     resolved = resolved_config_snapshot(llm.llm_engine.vllm_config)
     validate_resolved_profile(profile, resolved)
@@ -6501,14 +6670,18 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
 
     common_identity = common_prefix_identity_context(args, manifest, profile)
     serial_reference_result = None
-    phase_coordinates = benchmark_phase_coordinates(
-        manifest,
-        profile,
-        generation_round_start=args.generation_round,
-        warmups=args.warmups,
-        repetitions=args.repetitions,
+    phase_coordinates = (
+        ()
+        if mixed_same_engine
+        else benchmark_phase_coordinates(
+            manifest,
+            profile,
+            generation_round_start=args.generation_round,
+            warmups=args.warmups,
+            repetitions=args.repetitions,
+        )
     )
-    call_index_start = phase_coordinates[0]["global_call_index_start"]
+    call_index_start = 0 if mixed_same_engine else phase_coordinates[0]["global_call_index_start"]
     if common_identity is not None:
         serial_manifest = manifest.request_slice(0, 1)
         serial_executions = build_request_execution_records(
@@ -6569,34 +6742,57 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             decode_output_token_ids=output_decoder,
         )
 
-    phase_results = []
-    for phase_coordinate in phase_coordinates:
-        sample_index = phase_coordinate["sample_index"]
-        phase = phase_coordinate["phase"]
-        execution_records = build_wave_execution_records(
-            manifest,
-            global_wave_size=profile.global_wave_size,
-            generation_round=phase_coordinate["generation_round"],
-            call_index_start=phase_coordinate["global_call_index_start"],
-            global_request_index_start=phase_coordinate["global_request_index_start"],
+    if mixed_same_engine:
+        phase_runs = tuple(
+            {
+                "phase": spec["stage"],
+                "sample_index": sample_index,
+                "manifest": spec["manifest"],
+                "global_wave_size": spec["schedule"].global_wave_size,
+                "execution_records": spec["execution_records"],
+            }
+            for sample_index, spec in enumerate(mixed_stage_specs)
         )
+    else:
+        phase_runs = tuple(
+            {
+                "phase": coordinate["phase"],
+                "sample_index": coordinate["sample_index"],
+                "manifest": manifest,
+                "global_wave_size": profile.global_wave_size,
+                "execution_records": build_wave_execution_records(
+                    manifest,
+                    global_wave_size=profile.global_wave_size,
+                    generation_round=coordinate["generation_round"],
+                    call_index_start=coordinate["global_call_index_start"],
+                    global_request_index_start=coordinate["global_request_index_start"],
+                ),
+            }
+            for coordinate in phase_coordinates
+        )
+
+    phase_results = []
+    for phase_run in phase_runs:
+        phase = phase_run["phase"]
+        phase_manifest = phase_run["manifest"]
+        execution_records = phase_run["execution_records"]
         sampling_params = build_request_sampling_params(
-            manifest,
+            phase_manifest,
             sampling_params_factory=SamplingParams,
             execution_records=execution_records,
         )
         result = run_generation_phase(
             llm=llm,
-            manifest=manifest,
+            manifest=phase_manifest,
             sampling_params=sampling_params,
             phase=phase,
-            sample_index=sample_index,
+            sample_index=phase_run["sample_index"],
             recorder=recorder,
             memory_monitor_factory=lambda: PeakMemoryMonitor(memory_reader),
             execution_records=execution_records,
             full_output_path=phase_output_artifact_path(args.output, phase=phase),
             namespace_output_path=args.output,
-            collect_proof=profile.proof,
+            collect_proof=profile.proof or mixed_same_engine,
             reset_worker_proof=(lambda: _reset_worker_proof(llm)) if profile.proof else None,
             snapshot_worker_proof=(lambda: _snapshot_worker_proof(llm)) if profile.proof else None,
             require_rank_local_evidence=profile.proof,
@@ -6621,7 +6817,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             ),
             require_shared_prefix_state_reuse=profile.shared_prefix_state_reuse,
             prefix_cache_block_size=int(resolved["cache"]["block_size"]),
-            global_wave_size=profile.global_wave_size,
+            global_wave_size=phase_run["global_wave_size"],
             scheduler_max_num_seqs=profile.resolved_max_num_seqs,
             decode_output_token_ids=output_decoder,
         )
@@ -6631,7 +6827,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
                     list(result.observations),
                     phase=wave_proof["full_decode_proof"]["phase"],
                     batch_size=wave_proof["request_count"],
-                    max_new_tokens=manifest.max_new_tokens,
+                    max_new_tokens=phase_manifest.max_new_tokens,
                 )
         phase_results.append(result)
 
@@ -6653,6 +6849,16 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
             gpu_identity,
             peak_device_memory_bytes=peak_device_memory,
         )
+    elif mixed_same_engine:
+        memory_samples = [
+            init_memory.peak_device_memory_bytes,
+            *(result.sample.peak_device_memory_bytes for result in phase_results),
+        ]
+        peak_device_memory = tuple(max(values) for values in zip(*memory_samples, strict=True))
+        memory_headroom = gpu_memory_headroom_evidence(
+            gpu_identity,
+            peak_device_memory_bytes=peak_device_memory,
+        )
     else:
         if linked_proof is not None:
             if not isinstance(linked_proof.get("gpu_memory_headroom"), dict):
@@ -6664,7 +6870,11 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
                 peak_device_memory_bytes=init_memory.peak_device_memory_bytes,
             )
 
-    steady_results = [result for result in phase_results if result.phase.startswith("steady-")]
+    steady_results = (
+        [phase_results[-1]]
+        if mixed_same_engine
+        else [result for result in phase_results if result.phase.startswith("steady-")]
+    )
     phase_artifacts, exact_progress = attach_exact_generation_progress_evidence(
         [result.to_dict() for result in phase_results],
         manifest=manifest,
@@ -6698,7 +6908,7 @@ def run_tp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, Any]:
         profile=profile,
         phase_artifacts=phase_artifacts,
         decode_output_token_ids=output_decoder,
-        collect_physical_proof=profile.proof,
+        collect_physical_proof=profile.proof or mixed_same_engine,
     )
     phase_artifacts, common_prefix_identity = common_prefix_identity_phase_artifacts(
         args=args,

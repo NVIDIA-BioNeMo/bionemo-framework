@@ -476,8 +476,9 @@ def _physical_phase(schedule, *, phase_name="identity", execution_coordinates=No
     ):
         wave_phase = f"{phase_name}.wave-{wave_index:03d}"
         stop = start + global_shape
+        decode_replay_count = 499 if schedule.mixed_case_batching else 1
         if schedule.topology == "tp2":
-            observations.append(
+            observations.extend(
                 {
                     "phase": wave_phase,
                     "runtime_mode": "CUDAGraphMode.FULL",
@@ -494,6 +495,7 @@ def _physical_phase(schedule, *, phase_name="identity", execution_coordinates=No
                         "first_token_event_count": 0,
                     },
                 }
+                for _ in range(decode_replay_count)
             )
             waves.append(
                 {
@@ -535,6 +537,7 @@ def _physical_phase(schedule, *, phase_name="identity", execution_coordinates=No
                             "first_token_event_count": 0,
                         },
                     }
+                    for _ in range(decode_replay_count)
                 ]
                 engines.append(
                     {
@@ -642,9 +645,19 @@ def test_mixed_identity_phase_evidence_requires_exact_singleton_decode_dimension
         raise AssertionError("mixed physical evidence was not admitted as real mixed batching")
 
     if topology == "tp2":
-        dimensions = phase["cudagraph_observations_retained"][0]["request_dimensions"]
+        observations = phase["cudagraph_observations_retained"]
     else:
-        dimensions = phase["waves"][0]["engines"][0]["cudagraph_observations"][0]["request_dimensions"]
+        observations = phase["waves"][0]["engines"][0]["cudagraph_observations"]
+    removed = observations.pop()
+    with pytest.raises(AssertionError, match="exactly 499"):
+        validate_mixed_identity_phase_evidence(
+            phase,
+            schedule=schedule,
+            expected_execution_coordinates=attempt["execution_coordinates"],
+        )
+    observations.append(removed)
+
+    dimensions = observations[0]["request_dimensions"]
     dimensions["decode_req_count"] = wrong_decode_dimension
     dimensions["token_count"] = wrong_decode_dimension
     with pytest.raises(AssertionError, match="singleton decode dimension"):
@@ -706,7 +719,7 @@ def test_dp2_serial_identity_phase_requires_unused_replica_to_remain_inactive() 
     evidence = validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)
 
     assert evidence["engine_request_shapes"] == [[1]]
-    inactive = phase["wave_proofs"][0]["inactive_engines"][0]
+    inactive = phase["waves"][0]["inactive_engines"][0]
     inactive["scheduler_observations"] = [{"phase": "identity.wave-000"}]
     with pytest.raises(AssertionError, match="inactive"):
         validate_homogeneous_identity_phase_evidence(phase, schedule=schedule)

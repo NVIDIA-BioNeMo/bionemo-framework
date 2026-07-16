@@ -816,6 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--canonical-identity-case", type=int, choices=range(4))
     parser.add_argument("--common-prefix-identity-case", type=int, choices=range(4))
     parser.add_argument("--mixed-canonical-identity", action="store_true")
+    parser.add_argument("--mixed-same-engine-qualification", action="store_true")
     parser.add_argument("--canonical-prompts-csv", type=Path)
     parser.add_argument("--load-format", choices=("safetensors", "dummy"), default="safetensors")
     parser.add_argument("--optimization-level", type=int, choices=(2, 3), default=2)
