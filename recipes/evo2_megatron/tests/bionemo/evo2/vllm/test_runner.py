@@ -5211,6 +5211,54 @@ def test_generation_phase_skips_post_generation_evidence_after_namespace_ownersh
     assert marker.read_text(encoding="utf-8") == foreign_payload
 
 
+def test_generation_phase_registers_its_sidecar_with_the_output_namespace(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(3)
+    output = tmp_path / "result.json"
+    marker = runner.reserve_output_namespace(output)
+    sidecar = runner.phase_output_artifact_path(output, phase="steady-0")
+    execution_records = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+
+    class FakeLLM:
+        def generate(self, prompts, sampling_params, *, use_tqdm):
+            return _fake_outputs(manifest)
+
+    result = run_generation_phase(
+        llm=FakeLLM(),
+        manifest=manifest,
+        sampling_params=build_request_sampling_params(
+            manifest,
+            sampling_params_factory=SimpleNamespace,
+            execution_records=execution_records,
+        ),
+        phase="steady-0",
+        sample_index=0,
+        recorder=CUDAGraphProofRecorder(),
+        memory_monitor_factory=lambda: PeakMemoryMonitor(lambda: (1_000, 2_000)),
+        execution_records=execution_records,
+        full_output_path=sidecar,
+        namespace_output_path=output,
+        collect_proof=False,
+        clock=iter((10.0, 11.0)).__next__,
+    )
+    runner.write_json_artifact(
+        output,
+        {"phase": result.phase},
+        ownership_validator=lambda: runner.require_output_namespace_reservation(output),
+    )
+
+    runner.complete_output_namespace(marker, output_path=output)
+
+    if marker.exists() or not output.is_file() or not sidecar.is_file():
+        raise AssertionError("generation phase publications did not complete as one owned namespace")
+
+
 def test_speed_generation_avoids_proof_callbacks_and_memory_polling(tmp_path) -> None:
     manifest = _shared_prefix_manifest().with_max_new_tokens(3)
     execution_records = runner.build_request_execution_records(

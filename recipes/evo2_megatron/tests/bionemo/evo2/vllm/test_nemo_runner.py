@@ -2964,7 +2964,7 @@ def test_production_nemo_phase_proves_exact_dp_ownership_and_persists_full_outpu
     assert [worker["clone_count"] for worker in later_reuse["worker_state_clones"]] == [2, 2]
 
 
-def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
+def test_nemo_speed_phase_registers_sidecar_and_skips_proof_rpcs(tmp_path) -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 4).with_max_new_tokens(1)
     profile = Evo2VllmProfile(
         topology="dp2",
@@ -2975,6 +2975,9 @@ def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
         global_wave_size=4,
         max_num_seqs=2,
     )
+    output = tmp_path / "nemo-speed.json"
+    marker = runner.reserve_output_namespace(output)
+    sidecar = runner.phase_output_artifact_path(output, phase="steady-0")
 
     class ForbiddenWorkerGroup:
         def run_all_workers_single_data(self, *args, **kwargs):
@@ -3049,7 +3052,8 @@ def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
             global_request_index_start=0,
             request_envelope_namespace="test/contract",
         ),
-        full_output_path=tmp_path / "nemo-speed.outputs.jsonl.gz",
+        full_output_path=sidecar,
+        namespace_output_path=output,
         memory_monitor_factory=lambda: pytest.fail("speed lane started peak-memory polling"),
         ray_get=lambda futures: pytest.fail(f"speed lane resolved proof futures: {futures!r}"),
         clock=lambda: next(times),
@@ -3073,6 +3077,16 @@ def test_nemo_speed_phase_skips_proof_rpcs_and_memory_polling(tmp_path) -> None:
     _require(
         result.full_output_artifact["generated_token_count"] == 4,
         "speed lane output accounting is incomplete",
+    )
+    runner.write_json_artifact(
+        output,
+        {"phase": result.phase},
+        ownership_validator=lambda: runner.require_output_namespace_reservation(output),
+    )
+    runner.complete_output_namespace(marker, output_path=output)
+    _require(
+        not marker.exists() and output.is_file() and sidecar.is_file(),
+        "NeMo generation publications did not complete as one owned namespace",
     )
 
 

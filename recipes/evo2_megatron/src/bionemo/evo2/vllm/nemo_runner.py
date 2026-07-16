@@ -2292,9 +2292,10 @@ def run_nemo_generation_phase(
 ) -> NemoGenerationPhaseResult:
     """Run exact NeMo-RL waves with per-engine graph, route, seed, and ownership proof."""
 
-    def require_namespace_ownership() -> None:
-        if namespace_output_path is not None:
-            require_output_namespace_reservation(namespace_output_path)
+    def require_namespace_ownership() -> Path | None:
+        if namespace_output_path is None:
+            return None
+        return require_output_namespace_reservation(namespace_output_path)
 
     require_namespace_ownership()
     if not phase:
