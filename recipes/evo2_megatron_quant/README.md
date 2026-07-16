@@ -50,10 +50,10 @@ evo2_megatron_quant/
 │   ├── compressed_linear.py   # INT8Linear (real int8 weight storage)
 │   └── compress_model.py      # walk model, swap Linear -> INT8Linear
 ├── tests/
-│   ├── test_compressed_linear_roundtrip.py   # L0 sanity: CPU-only, no checkpoint
-│   └── test_single_model.py                  # PTQ harness demo (GPU + NGC, manual)
+│   └── test_compressed_linear_roundtrip.py   # L0 sanity: CPU-only, no checkpoint
 ├── scripts/
 │   ├── download_models.sh
+│   ├── run_single_model.py                   # ModelOpt PTQ harness runner (GPU + NGC)
 │   └── benchmark_real_quant.py               # INT8 memory + quality benchmark (GPU)
 ├── configs/quant_methods.yaml
 ├── docker/start_container.sh
@@ -69,6 +69,9 @@ pytest tests/test_compressed_linear_roundtrip.py -v
 
 # Real INT8 weight compression benchmark (inside the BioNeMo container, GPU + NGC):
 python scripts/benchmark_real_quant.py --precisions int8
+
+# ModelOpt PTQ harness on one model (GPU + NGC):
+python scripts/run_single_model.py --model esm2 --quant INT8_DEFAULT_CFG
 ```
 
 Programmatic use:
@@ -91,8 +94,12 @@ stats = compress_model(evo2_model, precision="int8")   # swaps Linear -> INT8Lin
 
 ## Tests
 
-`tests/test_compressed_linear_roundtrip.py` is the CPU-only L0 gate: it
-round-trips INT8 on tiny random layers and asserts near-lossless reconstruction,
-no systematic weight bias, and a real reduction in the stored buffer size.
-`test_single_model.py` and the benchmark require a GPU and NGC checkpoints and
-are meant to be run manually, not in fast CI.
+`tests/` holds only the CPU-only L0 gate,
+`tests/test_compressed_linear_roundtrip.py`: it round-trips INT8 on tiny random
+layers and asserts near-lossless reconstruction, no systematic weight bias, and a
+real reduction in the stored buffer size. It needs neither a GPU nor a
+checkpoint, so it runs in normal CI.
+
+The GPU runners live under `scripts/` (`run_single_model.py`,
+`benchmark_real_quant.py`) — they require a CUDA device and NGC checkpoints and
+are meant to be run manually, so they are deliberately not pytest tests.

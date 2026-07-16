@@ -113,7 +113,7 @@ try:
     attention_mask = torch.ones_like(input_ids)
 
     # BF16 baseline
-    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         # Warmup
         warmup_out = model(input_ids=input_ids[:, :256], position_ids=position_ids[:, :256],
                            attention_mask=attention_mask[:, :256])
@@ -139,7 +139,7 @@ try:
     result["params_compressed"] = stats["params_compressed"]
 
     # Compressed inference
-    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         t0 = time.perf_counter()
         q_out = model(input_ids=input_ids, position_ids=position_ids,
                       attention_mask=attention_mask)
@@ -184,7 +184,7 @@ try:
                 pos = torch.arange(slen, device="cuda").unsqueeze(0)
                 mask = torch.ones_like(ids)
 
-                with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     probe_out = model(input_ids=ids, position_ids=pos, attention_mask=mask)
                     torch.cuda.synchronize()
 
@@ -259,8 +259,18 @@ def run_test(precision, method_name, eval_seq_len, max_seqlen_search, port, outp
     elapsed = time.time() - t0
 
     if os.path.exists(output_file):
-        with open(output_file) as f:
-            result = json.load(f)
+        try:
+            with open(output_file) as f:
+                result = json.load(f)
+        except json.JSONDecodeError as e:
+            # A worker killed mid-write leaves truncated JSON. Treat it as a
+            # crash for this config instead of letting the exception escape and
+            # abort the whole sweep before any CSV is written.
+            return {
+                "method": method_name, "precision": precision,
+                "status": "CRASH", "error": f"Truncated/invalid result JSON: {e}",
+                "wall_time_s": elapsed,
+            }
         result["wall_time_s"] = elapsed
         return result
     return {

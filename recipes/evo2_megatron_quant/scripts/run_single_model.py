@@ -14,22 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Test a single BioNeMo model with one or more quantization methods.
+"""Run the ModelOpt PTQ harness on a single BioNeMo model.
+
+This is a manual GPU runner (needs a CUDA device and an NGC checkpoint), not a
+pytest test — the CPU-only L0 test lives in
+tests/test_compressed_linear_roundtrip.py.
 
 Loads the model once, gets a BF16 baseline, then quantizes in-place and
 compares quality metrics. For each quant method, reloads a fresh model
-to ensure clean state.
+to ensure clean state. Exits non-zero if any method FAILs or ERRORs.
 
 Usage:
     # Single method
-    python tests/test_single_model.py --model esm2 --quant INT8_DEFAULT_CFG
+    python scripts/run_single_model.py --model esm2 --quant INT8_DEFAULT_CFG
 
     # Multiple methods
-    python tests/test_single_model.py --model esm2 \
+    python scripts/run_single_model.py --model esm2 \
         --quant INT8_DEFAULT_CFG,INT8_SMOOTHQUANT_CFG
 
     # Evo2 with all-MLP quantization
-    python tests/test_single_model.py --model evo2 \
+    python scripts/run_single_model.py --model evo2 \
         --quant INT8_DEFAULT_CFG --all-mlp
 """
 
@@ -153,7 +157,9 @@ def main():
     )
     args = parser.parse_args()
 
-    methods = args.quant.split(",")
+    methods = [m.strip() for m in args.quant.split(",") if m.strip()]
+    if not methods:
+        parser.error("--quant did not contain any method names")
     adapter = get_adapter(args.model)
 
     print(f"\n{'=' * 80}")

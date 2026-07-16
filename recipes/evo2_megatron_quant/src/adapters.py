@@ -268,7 +268,7 @@ class ESM2Adapter(ModelAdapter):
         return enc["input_ids"].cuda(), enc["attention_mask"].cuda()
 
     def run_forward(self, model, input_ids, attention_mask):
-        with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             output = model(input_ids=input_ids, attention_mask=attention_mask)
         return self.extract_logits(output)
 
@@ -346,7 +346,7 @@ class GeneformerAdapter(ModelAdapter):
         return input_ids, torch.ones_like(input_ids).cuda()
 
     def run_forward(self, model, input_ids, attention_mask):
-        with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             output = model(input_ids=input_ids, attention_mask=attention_mask)
         return self.extract_logits(output)
 
@@ -433,7 +433,7 @@ class Evo2Adapter(ModelAdapter):
         return input_ids, (input_ids != 0).long().cuda()
 
     def run_forward(self, model, input_ids, attention_mask):
-        with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             position_ids = (
                 torch.arange(input_ids.shape[1], device=input_ids.device)
                 .unsqueeze(0).expand_as(input_ids)

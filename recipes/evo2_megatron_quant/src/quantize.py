@@ -109,9 +109,10 @@ def get_quant_config(
 
     Args:
         method_name: Either a ModelOpt constant name (e.g., "FP8_DEFAULT_CFG")
-                     or a friendly name (e.g., "fp8").
+                     or a friendly name (e.g., "fp8"). Surrounding whitespace
+                     is ignored.
         enable_all_mlp: If True, removes the 'default: enable=False' entry
-                        from the config ot quantize ALL MLP layers
+                        from the config to quantize ALL MLP layers
                         (relevant for Evo2's Hyena layers).
 
     Returns:
@@ -120,26 +121,47 @@ def get_quant_config(
     Raises:
         ValueError: If the method name is not recognized.
     """
-    # Resolve friendly name if provided
+    # Normalize, then resolve a friendly name if one was given.
+    method_name = method_name.strip()
     resolved = FRIENDLY_NAMES.get(method_name, method_name)
+
+    # Only whitelisted configs may reach ModelOpt: getattr() on an arbitrary
+    # string could otherwise return an unrelated mtq attribute.
+    if resolved not in ALL_QUANT_METHODS:
+        raise ValueError(
+            f"Unknown quantization method: '{method_name}'. "
+            f"Available: {ALL_QUANT_METHODS}"
+        )
 
     cfg = getattr(mtq, resolved, None)
     if cfg is None:
         raise ValueError(
-            f"Unknown quantization method: '{method_name}'. "
+            f"'{resolved}' is not available in this ModelOpt build. "
             f"Available: {ALL_QUANT_METHODS}"
         )
 
     cfg = copy.deepcopy(cfg)
 
     if enable_all_mlp:
-        # By default, ModelOpt has 'default: {enable: False}' which prevents
-        # quantizing modules not explicitly matched by wildcard patterns.
-        # Removing it enables quantization for all MLP layers (QuantMLP),
-        # including Hyena layers' TE ColumnParallelLinear / RowParallelLinear.
-        quant_cfg = cfg.get("quant_cfg", {})
-        if "default" in quant_cfg:
+        # ModelOpt configs carry a 'default: {enable: False}' entry that stops
+        # modules not matched by an explicit wildcard from being quantized.
+        # Dropping it lets all MLP layers be quantized, including the Hyena
+        # layers' TE ColumnParallelLinear / RowParallelLinear.
+        #
+        # This assumes quant_cfg is a mapping. If a ModelOpt version uses a
+        # different layout we fail loudly rather than silently doing nothing:
+        # a silent no-op would report "all-MLP" numbers for a default-scope run.
+        quant_cfg = cfg.get("quant_cfg")
+        if isinstance(quant_cfg, dict) and "default" in quant_cfg:
             del quant_cfg["default"]
+        else:
+            raise RuntimeError(
+                f"enable_all_mlp: no 'default' entry found in quant_cfg "
+                f"(type={type(quant_cfg).__name__}) for '{resolved}'. This "
+                "ModelOpt version likely uses a different config layout, so "
+                "--all-mlp would have no effect; refusing to report misleading "
+                "all-MLP results."
+            )
 
     return cfg
 
@@ -180,7 +202,7 @@ def build_calibration_loop(
         """Drive model through calibration data for quantizer statistics."""
         failures = 0
         for kwargs in calib_batches:
-            with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 try:
                     model(**kwargs)
                 except Exception as e:
