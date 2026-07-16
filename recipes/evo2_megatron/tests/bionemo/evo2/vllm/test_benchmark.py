@@ -488,6 +488,30 @@ def test_benchmark_cli_requires_reproducible_profile_inputs(tmp_path) -> None:
     assert args.linked_proof_artifact == tmp_path / "proof.json"
 
 
+def test_benchmark_cli_accepts_memory_utilization_required_for_two_gib_headroom(tmp_path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--backend",
+            "vllm",
+            "--checkpoint",
+            "/checkpoint",
+            "--manifest",
+            str(DATA),
+            "--topology",
+            "tp2",
+            "--max-num-batched-tokens",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.91",
+            "--output",
+            str(tmp_path / "result.json"),
+        ]
+    )
+
+    if args.gpu_memory_utilization != 0.91:
+        raise AssertionError("the requested 0.91 memory utilization must survive CLI admission exactly")
+
+
 def _fake_vllm_outputs(manifest: WorkloadManifest):
     outputs = []
     for index, request in enumerate(manifest.requests):

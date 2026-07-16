@@ -804,7 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--topology", choices=("tp2", "dp2"), required=True)
     parser.add_argument("--max-num-batched-tokens", type=int, choices=(16_384, 32_768), required=True)
-    parser.add_argument("--gpu-memory-utilization", type=float, choices=(0.92, 0.95, 0.97), required=True)
+    parser.add_argument("--gpu-memory-utilization", type=float, choices=(0.91, 0.92, 0.95, 0.97), required=True)
     parser.add_argument("--max-model-len", type=int)
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--request-count", type=int)
