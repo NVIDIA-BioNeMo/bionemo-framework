@@ -612,6 +612,25 @@ def test_benchmark_sample_uses_vllm_request_metrics_without_engine_timing_inflat
     assert sample.to_dict()["batch_decode_s"] == pytest.approx(0.2)
 
 
+def test_benchmark_sample_serializes_retained_output_lengths_as_json_list() -> None:
+    sample = BenchmarkSample(
+        sample_index=0,
+        generation_s=1.0,
+        request_count=2,
+        prompt_tokens=8,
+        generated_tokens=1_000,
+        ttft_s=(0.1, 0.2),
+        inter_token_latency_s=(0.01, 0.01),
+        output_lengths=(500, 500),
+        peak_device_memory_bytes=(1_000, 1_000),
+    )
+
+    output_lengths = sample.to_dict()["output_lengths"]
+
+    if type(output_lengths) is not list or output_lengths != [500, 500]:
+        raise AssertionError("retained exact output lengths must use the live JSON-list phase schema")
+
+
 def test_sampling_params_match_gdpo_and_force_exact_lengths_without_detokenization() -> None:
     manifest = WorkloadManifest.from_path(DATA).request_slice(0, 2).with_max_new_tokens(25_000)
 

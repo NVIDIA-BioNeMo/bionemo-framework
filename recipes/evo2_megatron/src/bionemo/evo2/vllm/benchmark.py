@@ -514,6 +514,7 @@ class BenchmarkSample:
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe sample including derived throughput."""
         result = asdict(self)
+        result["output_lengths"] = list(self.output_lengths)
         result["generated_tokens_per_s"] = self.generated_tokens_per_s
         result["requests_per_s"] = self.requests_per_s
         result["batch_prefill_s"] = self.batch_prefill_s
