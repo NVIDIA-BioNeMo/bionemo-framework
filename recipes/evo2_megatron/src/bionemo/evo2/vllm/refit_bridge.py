@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,8 @@ _ARCHITECTURE_FIELDS = (
     ("num_hidden_layers", "num_layers"),
     ("num_attention_heads", "num_attention_heads"),
 )
+
+_STATIC_REFIT_BUFFER_PATTERN = re.compile(r"^decoder\.layers\.\d+\.self_attention\.rotary_emb\.inv_freq$")
 
 
 class Evo2RefitBridge(MegatronModelBridge):
@@ -126,9 +129,18 @@ class Evo2RefitBridge(MegatronModelBridge):
             raise ValueError(f"Evo2 refit architecture mismatch: {', '.join(mismatches)}")
 
     @property
-    def expected_weight_names(self) -> frozenset[str]:
-        """Return the immutable generation-checkpoint tensor inventory."""
+    def indexed_weight_names(self) -> frozenset[str]:
+        """Return every tensor name retained by the generation checkpoint."""
         return frozenset(spec.name for spec in self._layout.tensors)
+
+    @property
+    def expected_weight_names(self) -> frozenset[str]:
+        """Return tensors that must be streamed from the live MCore policy."""
+        return frozenset(
+            name
+            for name in self.indexed_weight_names
+            if _STATIC_REFIT_BUFFER_PATTERN.fullmatch(name) is None
+        )
 
     def mapping_registry(self) -> MegatronMappingRegistry:
         """Map identical names while gathering each tensor on its MCore TP axis."""

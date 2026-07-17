@@ -90,6 +90,23 @@ def test_evo2_refit_bridge_rejects_unknown_indexed_weight(tmp_path) -> None:
         Evo2RefitBridge.from_pretrained(tmp_path, transformer_config=_transformer_config())
 
 
+def test_evo2_refit_bridge_excludes_config_derived_rotary_buffers(tmp_path) -> None:
+    parameter_name = "decoder.final_norm.weight"
+    rotary_buffer_name = "decoder.layers.0.self_attention.rotary_emb.inv_freq"
+    _write_checkpoint(tmp_path, (parameter_name, rotary_buffer_name))
+
+    bridge = Evo2RefitBridge.from_pretrained(
+        tmp_path,
+        transformer_config=_transformer_config(),
+    )
+
+    _require(
+        bridge.indexed_weight_names == frozenset((parameter_name, rotary_buffer_name)),
+        "indexed checkpoint inventory drifted",
+    )
+    _require(bridge.expected_weight_names == frozenset((parameter_name,)), "static RoPE buffer entered refit")
+
+
 def test_evo2_refit_bridge_rejects_generation_export_architecture_mismatch(tmp_path) -> None:
     _write_checkpoint(tmp_path, ("decoder.final_norm.weight",))
 
