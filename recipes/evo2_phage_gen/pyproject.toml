@@ -178,7 +178,7 @@ causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = 
 nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v1.1.4.post6" }
 
 # nvidia-resiliency-ext is intentionally left to Megatron-Bridge so the transitive pin stays consistent.
-# .ci_build.sh repairs upstream package discovery and applies the recipe-owned Evo2 patch series.
+# .ci_build.sh retains the exact recursive source, applies the recipe patches, and builds its locked vLLM actor env.
 nemo-rl = { git = "https://github.com/NVIDIA-NeMo/RL.git", rev = "a2957f41c3860d5928832be0689b548813c6904a" }
 
 # Megatron Bundle. MCore is sourced from the same Megatron-Bridge release tag.

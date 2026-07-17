@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+export EVO2_PHAGE_NEMO_RL_SOURCE_DIR="$SCRIPT_DIR/.venv/nemo-rl-source"
+export NEMO_RL_VENV_DIR="$SCRIPT_DIR/.venv/nemo-rl-venvs"
 
 # FIXME: Fix for "No such file or directory: /workspace/TransformerEngine"
 #  Remove once bug has been addressed in the nvidia/pytorch container.
@@ -24,9 +26,8 @@ uv pip install -r build_requirements.txt --no-build-isolation
 # 5. Install the recipe with all remaining dependencies, including test extras
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
 
-# 6. Upstream NeMo-RL's current pyproject only packages the top-level nemo_rl module.
-# Reinstall the pinned checkout with complete package discovery, then apply and verify this recipe's Evo2 patch.
-evo2_phage_patch_nemo_rl --repair-install --force-reinstall --verify-runtime
+# 6. Retain the exact recursive NeMo-RL source, apply the recipe patches, and build its locked vLLM actor environment.
+evo2_phage_patch_nemo_rl --repair-install --force-reinstall --prepare-vllm-actor-env --verify-runtime
 
 # 7. CI starts from the base devcontainer image, so keep native verifier tools
 # recipe-local instead of requiring apt/conda or a custom image. Installing into

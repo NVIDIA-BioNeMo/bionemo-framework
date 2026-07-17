@@ -21,15 +21,28 @@ import argparse
 import hashlib
 import importlib
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
 from pathlib import Path
 
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
+EVO2_VLLM_WORKER = "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
+DEFAULT_NEMO_RL_SOURCE_DIR = RECIPE_ROOT / ".venv" / "nemo-rl-source"
+DEFAULT_NEMO_RL_VENV_DIR = RECIPE_ROOT / ".venv" / "nemo-rl-venvs"
+PINNED_NEMO_RL_PYPROJECT_SHA256 = "e12030d7494eeb6b63c17882fdebeec977d07a08a82bf8d848a1692f89baea1b"
+PINNED_NEMO_RL_UV_LOCK_SHA256 = "472f9e1bd8e6f4a8a54468a3946fbe721d4560fbaee3cb0085a94952660644ff"
+PINNED_NEMO_RL_SUBMODULES = {
+    Path("3rdparty/Automodel-workspace/Automodel"): "24b47e856263d313b942f0ed666c63fff83306b4",
+    Path("3rdparty/Gym-workspace/Gym"): "d67ad6611cfe21dbaeb301c59e59df32ce22ec50",
+    Path("3rdparty/Megatron-Bridge-workspace/Megatron-Bridge"): "554c7b9324225aa863eee52e8b8fdde7abced2b1",
+    Path(
+        "3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/3rdparty/Megatron-LM"
+    ): "002255075c3728fded9a2e435677840b08560d55",
+}
 DEFAULT_PATCHES = (
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-policy.patch",
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch",
@@ -156,16 +169,6 @@ def _is_complete_nemo_rl_install() -> bool:
     return True
 
 
-def _uv_cache_dir() -> Path | None:
-    """Return uv's cache dir when uv is available."""
-    result = subprocess.run(
-        ["uv", "cache", "dir"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
-    )
-    if result.returncode != 0:
-        return None
-    return Path(result.stdout.strip()).expanduser()
-
-
 def _git_head(path: Path) -> str | None:
     """Return the Git HEAD for ``path`` when it is a Git checkout."""
     result = subprocess.run(
@@ -180,87 +183,174 @@ def _git_head(path: Path) -> str | None:
     return result.stdout.strip()
 
 
-def _git_worktree_is_clean(path: Path) -> bool:
-    """Return whether ``path`` is a Git checkout with no tracked or untracked changes."""
-    result = subprocess.run(
-        ["git", "-C", str(path), "status", "--porcelain"],
+def _clone_nemo_rl_source(git_url: str, revision: str, destination: Path) -> Path:
+    """Clone the pinned NeMo-RL source when it is not already in uv's cache."""
+    subprocess.run(["git", "clone", "--filter=blob:none", git_url, str(destination)], check=True)
+    subprocess.run(["git", "-C", str(destination), "checkout", revision], check=True)
+    subprocess.run(["git", "-C", str(destination), "submodule", "update", "--init", "--recursive"], check=True)
+    return destination
+
+
+def _nemo_rl_source_dir() -> Path:
+    """Return the recipe-owned persistent checkout for the pinned NeMo-RL source."""
+    return Path(os.environ.get("EVO2_PHAGE_NEMO_RL_SOURCE_DIR", DEFAULT_NEMO_RL_SOURCE_DIR)).expanduser()
+
+
+def vllm_actor_python_executable() -> Path:
+    """Return the canonical Python executable for Evo2 vLLM actors."""
+    actor_root = Path(os.environ.get("NEMO_RL_VENV_DIR", DEFAULT_NEMO_RL_VENV_DIR)).expanduser()
+    return actor_root / EVO2_VLLM_WORKER / "bin" / "python"
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash one source-authority file without rewriting it."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _pinned_nemo_rl_source_is_complete(source_root: Path, revision: str) -> bool:
+    """Validate the retained source revision, lockfiles, and recursive workspace pins."""
+    pyproject = source_root / "pyproject.toml"
+    lockfile = source_root / "uv.lock"
+    if not pyproject.is_file() or not lockfile.is_file() or _git_head(source_root) != revision:
+        return False
+    if _sha256_file(pyproject) != PINNED_NEMO_RL_PYPROJECT_SHA256:
+        return False
+    if _sha256_file(lockfile) != PINNED_NEMO_RL_UV_LOCK_SHA256:
+        return False
+    status = subprocess.run(
+        ["git", "-C", str(source_root), "submodule", "status", "--recursive"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
-    return result.returncode == 0 and result.stdout.strip() == ""
+    if status.returncode != 0:
+        return False
+    observed: dict[Path, str] = {}
+    for line in status.stdout.splitlines():
+        if not line.startswith(" "):
+            return False
+        fields = line.strip().split()
+        if len(fields) < 2:
+            return False
+        observed[Path(fields[1])] = fields[0]
+    return observed == PINNED_NEMO_RL_SUBMODULES
 
 
-def _looks_like_nemo_rl_source(path: Path) -> bool:
-    """Check for files that identify a full NeMo-RL source checkout."""
-    return (path / "pyproject.toml").exists() and (path / "nemo_rl" / "algorithms" / "grpo.py").exists()
-
-
-def _find_cached_nemo_rl_source(revision: str) -> Path | None:
-    """Find the pinned NeMo-RL checkout in uv's git cache, if present."""
-    cache_dir = _uv_cache_dir()
-    if cache_dir is None:
-        return None
-    checkouts_dir = cache_dir / "git-v0" / "checkouts"
-    if not checkouts_dir.exists():
-        return None
-    for pyproject_path in checkouts_dir.rglob("pyproject.toml"):
-        candidate = pyproject_path.parent
-        if (
-            _looks_like_nemo_rl_source(candidate)
-            and _git_head(candidate) == revision
-            and _git_worktree_is_clean(candidate)
-        ):
-            return candidate
-    return None
-
-
-def _clone_nemo_rl_source(git_url: str, revision: str, destination: Path) -> Path:
-    """Clone the pinned NeMo-RL source when it is not already in uv's cache."""
-    subprocess.run(["git", "clone", "--filter=blob:none", git_url, str(destination)], check=True)
-    subprocess.run(["git", "-C", str(destination), "checkout", revision], check=True)
-    return destination
-
-
-def _copy_minimal_nemo_rl_source(source_root: Path, destination: Path) -> Path:
-    """Copy only files needed to build the NeMo-RL Python package."""
-    destination.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_root / "nemo_rl", destination / "nemo_rl")
-    for filename in ["pyproject.toml", "README.md", "LICENSE"]:
-        source_file = source_root / filename
-        if source_file.exists():
-            shutil.copy2(source_file, destination / filename)
-    return destination
-
-
-def _patch_nemo_rl_packaging_metadata(source_root: Path) -> None:
-    """Patch upstream packaging metadata so setuptools includes all ``nemo_rl`` subpackages."""
-    pyproject_path = source_root / "pyproject.toml"
-    text = pyproject_path.read_text()
-    text = text.replace('packages = ["nemo_rl"]', 'packages = { find = { include = ["nemo_rl*"] } }')
-    text = text.replace('requires-python = ">=3.13.13,<3.14"', 'requires-python = ">=3.10"')
-    pyproject_path.write_text(text)
+def _ensure_pinned_nemo_rl_source(*, force_reinstall: bool) -> Path:
+    """Create or validate the persistent exact NeMo-RL source checkout."""
+    git_url, revision = _nemo_rl_source_pin()
+    source_root = _nemo_rl_source_dir()
+    if force_reinstall and source_root.exists():
+        shutil.rmtree(source_root)
+    if not source_root.exists():
+        source_root.parent.mkdir(parents=True, exist_ok=True)
+        _clone_nemo_rl_source(git_url, revision, source_root)
+    if not _pinned_nemo_rl_source_is_complete(source_root, revision):
+        raise RuntimeError(
+            f"Retained NeMo-RL source does not match pinned revision, lockfiles, and submodules: {source_root}"
+        )
+    return source_root
 
 
 def repair_nemo_rl_install(*, force_reinstall: bool = False) -> str:
-    """Reinstall the pinned NeMo-RL checkout with complete package discovery."""
+    """Install the retained exact NeMo-RL checkout into the main training environment."""
+    source_root = _ensure_pinned_nemo_rl_source(force_reinstall=force_reinstall)
     if not force_reinstall and _is_complete_nemo_rl_install():
-        return "nemo-rl install already contains required modules"
+        return f"nemo-rl install already contains required modules from {source_root}"
 
-    git_url, revision = _nemo_rl_source_pin()
-    source_root = _find_cached_nemo_rl_source(revision)
-    with tempfile.TemporaryDirectory(prefix="evo2-phage-nemo-rl-") as temp_dir:
-        temp_path = Path(temp_dir)
-        if source_root is None:
-            source_root = _clone_nemo_rl_source(git_url, revision, temp_path / "source")
-        build_root = _copy_minimal_nemo_rl_source(source_root, temp_path / "build")
-        _patch_nemo_rl_packaging_metadata(build_root)
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(build_root)],
-            check=True,
-        )
-    return f"reinstalled nemo-rl from {revision} with complete package discovery"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--force-reinstall",
+            "--ignore-requires-python",
+            "--no-build-isolation",
+            "-e",
+            str(source_root),
+        ],
+        check=True,
+    )
+    return f"reinstalled editable nemo-rl from retained source {source_root}"
+
+
+def _verify_vllm_actor_environment(python_path: Path) -> None:
+    """Verify the isolated actor runtime and Evo2 plugin before Ray can launch it."""
+    probe = """
+import importlib.metadata
+import importlib.util
+import sys
+
+import torch
+import vllm
+
+if sys.version_info[:3] != (3, 13, 13):
+    raise RuntimeError(f"unexpected actor Python: {sys.version}")
+if torch.__version__.split("+", 1)[0] != "2.11.0":
+    raise RuntimeError(f"unexpected actor Torch: {torch.__version__}")
+if vllm.__version__ != "0.20.0":
+    raise RuntimeError(f"unexpected actor vLLM: {vllm.__version__}")
+if not hasattr(torch, "_opaque_base"):
+    raise RuntimeError("actor Torch lacks torch._opaque_base")
+if importlib.util.find_spec("deep_ep") is not None:
+    raise RuntimeError("dense Evo2 actor environment unexpectedly installed deep_ep")
+plugins = [entry for entry in importlib.metadata.entry_points(group="vllm.general_plugins") if entry.name == "evo2"]
+if len(plugins) != 1 or plugins[0].value != "bionemo.evo2.vllm.plugin:register":
+    raise RuntimeError(f"unexpected Evo2 vLLM plugin entry points: {plugins}")
+from bionemo.evo2.vllm.nemo_generation_worker import Evo2NemoRlGenerationWorker  # noqa: F401
+"""
+    subprocess.run([str(python_path), "-c", probe], check=True)
+
+
+def prepare_vllm_actor_environment(*, force_rebuild: bool = False) -> Path:
+    """Build the locked isolated NeMo-RL vLLM actor environment."""
+    source_root = _ensure_pinned_nemo_rl_source(force_reinstall=False)
+    actor_python = vllm_actor_python_executable()
+    actor_environment = actor_python.parents[1]
+    actor_environment.parent.mkdir(parents=True, exist_ok=True)
+
+    venv_args = ["uv", "venv"]
+    venv_args.append("--clear" if force_rebuild else "--allow-existing")
+    venv_args.append(str(actor_environment))
+    subprocess.run(venv_args, cwd=source_root, check=True)
+
+    sync_environment = os.environ.copy()
+    sync_environment["UV_PROJECT_ENVIRONMENT"] = str(actor_environment)
+    subprocess.run(
+        [
+            "uv",
+            "sync",
+            "--locked",
+            "--extra",
+            "vllm",
+            "--no-install-package",
+            "deep-ep",
+            "--directory",
+            str(source_root),
+        ],
+        cwd=source_root,
+        env=sync_environment,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(actor_python),
+            "--no-deps",
+            "--no-build-isolation",
+            "-e",
+            str(RECIPE_ROOT),
+        ],
+        check=True,
+    )
+    _verify_vllm_actor_environment(actor_python)
+    return actor_python
 
 
 def _apply_nemo_rl_patch_file(patch_path: Path, *, source_root: Path, check_only: bool) -> str:
@@ -320,6 +410,11 @@ def main() -> None:
         help="Force a fresh reinstall even if the current nemo-rl package looks complete.",
     )
     parser.add_argument(
+        "--prepare-vllm-actor-env",
+        action="store_true",
+        help="Build and verify the locked isolated vLLM actor environment.",
+    )
+    parser.add_argument(
         "--verify-runtime",
         action="store_true",
         help="Verify the importable nemo-rl runtime is reverse-patch-equivalent to the requested patch or series.",
@@ -332,6 +427,10 @@ def main() -> None:
             if module_name == "nemo_rl" or module_name.startswith("nemo_rl."):
                 sys.modules.pop(module_name)
     print(apply_nemo_rl_patch(args.patch, check_only=args.check))
+    if args.prepare_vllm_actor_env:
+        print(
+            f"prepared vLLM actor environment at {prepare_vllm_actor_environment(force_rebuild=args.force_reinstall)}"
+        )
     if args.verify_runtime:
         assert_nemo_rl_patch_runtime(args.patch)
         print(f"verified patched nemo-rl runtime with patch SHA256 {patch_sha256(args.patch)}")

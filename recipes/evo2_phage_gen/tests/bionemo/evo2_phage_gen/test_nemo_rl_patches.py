@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import subprocess
 import types
 from pathlib import Path
@@ -39,10 +38,7 @@ def test_patched_nemo_rl_prompt_digest_matches_portable_vector() -> None:
         generation_prompt_token_ids_sha256,
     )
 
-    expected_hex = (
-        "67656e65726174696f6e2e70726f6d70745f746f6b656e5f6964732e763100"
-        "0000000000000001000000000000002b"
-    )
+    expected_hex = "67656e65726174696f6e2e70726f6d70745f746f6b656e5f6964732e7631000000000000000001000000000000002b"
     expected_sha256 = "8fcfb284618fdd1c28d8a7022eee50831e44986fac86e48b396800bf5ba2c93b"
 
     _require(generation_prompt_token_ids_bytes([43]).hex() == expected_hex, "prompt digest bytes drifted")
@@ -155,42 +151,6 @@ def test_apply_nemo_rl_patch_applies_default_series_in_order(tmp_path: Path, mon
     )
 
 
-def test_patch_nemo_rl_packaging_metadata_includes_subpackages(tmp_path: Path) -> None:
-    """The repair helper should make upstream NeMo-RL package all submodules."""
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(
-        "\n".join(
-            [
-                "[tool.setuptools]",
-                'packages = ["nemo_rl"]',
-                "",
-                "[project]",
-                'requires-python = ">=3.13.13,<3.14"',
-            ]
-        )
-    )
-
-    nemo_rl_patches._patch_nemo_rl_packaging_metadata(tmp_path)
-
-    patched = pyproject.read_text()
-    assert 'packages = { find = { include = ["nemo_rl*"] } }' in patched
-    assert 'requires-python = ">=3.10"' in patched
-
-
-def test_find_cached_nemo_rl_source_rejects_dirty_checkout(tmp_path: Path, monkeypatch) -> None:
-    """Repair installs must not reuse uv checkouts that already contain local patch drift."""
-    checkout = tmp_path / "cache" / "git-v0" / "checkouts" / "repo" / "rev"
-    (checkout / "nemo_rl" / "algorithms").mkdir(parents=True)
-    (checkout / "nemo_rl" / "algorithms" / "grpo.py").write_text("")
-    (checkout / "pyproject.toml").write_text("")
-
-    monkeypatch.setattr(nemo_rl_patches, "_uv_cache_dir", lambda: tmp_path / "cache")
-    monkeypatch.setattr(nemo_rl_patches, "_git_head", lambda path: "abc123")
-    monkeypatch.setattr(nemo_rl_patches, "_git_worktree_is_clean", lambda path: False)
-
-    assert nemo_rl_patches._find_cached_nemo_rl_source("abc123") is None
-
-
 def test_run_patch_uses_real_batch_dry_run(tmp_path: Path) -> None:
     """The maintained check path should use a real noninteractive patch dry-run."""
     source_file = tmp_path / "nemo_rl" / "example.py"
@@ -281,19 +241,16 @@ def test_vllm_patch_excludes_request_timing_telemetry() -> None:
     )
 
 
-def test_maintained_patches_apply_to_pinned_nemo_rl_source(tmp_path: Path) -> None:
-    """The maintained series should apply in order against the pinned clean source."""
-    _, revision = nemo_rl_patches._nemo_rl_source_pin()
-    source_root = nemo_rl_patches._find_cached_nemo_rl_source(revision)
-    if source_root is None:
-        pytest.skip("Pinned NeMo-RL source is not present in the uv git cache")
+def test_maintained_patches_are_applied_to_pinned_nemo_rl_source() -> None:
+    """The retained source should contain every maintained patch in declared order."""
+    source_root = nemo_rl_patches._nemo_rl_source_dir()
+    if not source_root.exists():
+        pytest.skip("Recipe-owned pinned NeMo-RL source has not been built")
 
-    build_root = tmp_path / "nemo-rl-source"
-    shutil.copytree(source_root / "nemo_rl", build_root / "nemo_rl")
     for patch_path in nemo_rl_patches.DEFAULT_PATCHES:
         result = nemo_rl_patches._run_patch(
-            ["--batch", "-p1", "-i", str(patch_path)],
-            cwd=build_root,
+            ["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_path)],
+            cwd=source_root,
         )
         _require(result.returncode == 0, result.stdout)
 
@@ -361,9 +318,7 @@ def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypat
         _uses_colocated_megatron_generation=object(),
     )
     modules = {
-        "nemo_rl.models.generation.interfaces": types.SimpleNamespace(
-            generation_prompt_token_ids_sha256=object()
-        ),
+        "nemo_rl.models.generation.interfaces": types.SimpleNamespace(generation_prompt_token_ids_sha256=object()),
         "nemo_rl.models.megatron.setup": megatron_setup,
         "nemo_rl.models.generation.vllm.config": types.SimpleNamespace(VllmActorExecutionConfig=object()),
         "nemo_rl.models.generation.vllm.vllm_generation": types.SimpleNamespace(_request_seeds_for_dp_stream=object()),

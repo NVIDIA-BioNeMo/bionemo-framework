@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import pprint
 from pathlib import Path
 
@@ -30,6 +29,18 @@ PAPER_RL_PROMPT_FILENAMES = {
     "phage_prompts_paper_useful_rl.jsonl",
     "phage_prompts_paper_useful_rl_validation_prompt10.jsonl",
 }
+VLLM_ACTOR_FQNS = (
+    "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker",
+    "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker",
+    "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker",
+    "nemo_rl.algorithms.async_utils.AsyncTrajectoryCollector",
+    "nemo_rl.algorithms.async_utils.ReplayBuffer",
+    "nemo_rl.experience.sync_rollout_actor.SyncRolloutActor",
+)
+SYSTEM_ACTOR_FQNS = (
+    "bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment",
+    "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker",
+)
 
 
 def _parse_args(default_config: str, default_algorithm: str) -> tuple[argparse.Namespace, list[str]]:
@@ -116,8 +127,9 @@ def _register_recipe_extensions() -> None:
     from nemo_rl.data.processors import PROCESSOR_REGISTRY, register_processor
     from nemo_rl.distributed.ray_actor_environment_registry import ACTOR_ENVIRONMENT_REGISTRY
     from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
-    from nemo_rl.environments.utils import register_env
+    from nemo_rl.environments.utils import ENV_REGISTRY, register_env
 
+    from bionemo.evo2_phage_gen.nemo_rl_patches import vllm_actor_python_executable
     from bionemo.evo2_phage_gen.nemo_rl_processors import phage_prompt_data_processor
 
     processor_name = "phage_prompt_data_processor"
@@ -127,16 +139,24 @@ def _register_recipe_extensions() -> None:
         raise ValueError(f"Dataset processor {processor_name} is already registered to a different function")
     else:
         register_processor(processor_name, phage_prompt_data_processor)
-    register_env("phage_qc", "bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment")
-    ACTOR_ENVIRONMENT_REGISTRY["bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"] = PY_EXECUTABLES.SYSTEM
-    ACTOR_ENVIRONMENT_REGISTRY[
-        "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
-    ] = PY_EXECUTABLES.SYSTEM
+    env_name = "phage_qc"
+    env_actor_fqn = "bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"
+    registered_env = ENV_REGISTRY.get(env_name)
+    if registered_env is None:
+        register_env(env_name, env_actor_fqn)
+    elif registered_env.get("actor_class_fqn") != env_actor_fqn:
+        raise ValueError(f"Environment {env_name} is already registered to a different actor")
+    actor_python = vllm_actor_python_executable()
+    if not actor_python.is_file():
+        raise RuntimeError(f"Pinned vLLM actor environment is missing: {actor_python}")
+    for actor_fqn in SYSTEM_ACTOR_FQNS:
+        ACTOR_ENVIRONMENT_REGISTRY[actor_fqn] = PY_EXECUTABLES.SYSTEM
+    for actor_fqn in VLLM_ACTOR_FQNS:
+        ACTOR_ENVIRONMENT_REGISTRY[actor_fqn] = str(actor_python)
 
 
 def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algorithm: str = "config") -> None:
     """Run GRPO or GDPO with recipe-local Evo2 phage extensions."""
-    os.environ.setdefault("NEMO_RL_PY_EXECUTABLES_SYSTEM", "1")
     try:
         from nemo_rl.algorithms.grpo import MasterConfig, async_grpo_train, setup
         from nemo_rl.algorithms.utils import get_tokenizer
