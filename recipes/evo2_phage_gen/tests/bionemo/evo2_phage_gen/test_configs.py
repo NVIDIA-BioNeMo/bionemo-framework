@@ -451,6 +451,7 @@ def test_vllm_tp2_one_step_smoke_uses_capacity_bounded_mixed_batching():
     generation = policy["generation"]
     vllm_kwargs = generation["vllm_kwargs"]
 
+    objective_names = [item["name"] for item in config["env"]["phage_qc"].get("gdpo_objectives", ())]
     checks = {
         "P": grpo["num_prompts_per_step"] == 8,
         "K": grpo["num_generations_per_prompt"] == 2,
@@ -467,6 +468,15 @@ def test_vllm_tp2_one_step_smoke_uses_capacity_bounded_mixed_batching():
         "MP executor": vllm_kwargs["distributed_executor_backend"] == "mp",
         "async scheduling": vllm_kwargs["async_scheduling"] is True,
         "exact capture": 16 in vllm_kwargs["compilation_config"]["cudagraph_capture_sizes"],
+        "enabled local reward objectives": objective_names
+        == [
+            "valid_nt_chars",
+            "genome_length",
+            "gc_content",
+            "nt_homopolymer",
+            "dustmask_end",
+            "nucleotide_pass",
+        ],
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:

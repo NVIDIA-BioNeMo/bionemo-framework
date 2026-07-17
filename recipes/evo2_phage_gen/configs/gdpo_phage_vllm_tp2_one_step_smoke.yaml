@@ -117,6 +117,19 @@ data:
 env:
   phage_qc:
     dustmask_filter: false
+    gdpo_objectives:
+      - name: "valid_nt_chars"
+        columns: ["reward_valid_nt_chars"]
+      - name: "genome_length"
+        columns: ["reward_genome_length"]
+      - name: "gc_content"
+        columns: ["reward_gc_content"]
+      - name: "nt_homopolymer"
+        columns: ["reward_nt_homopolymer"]
+      - name: "dustmask_end"
+        columns: ["reward_dustmask_end"]
+      - name: "nucleotide_pass"
+        columns: ["reward_nucleotide_pass"]
     external_qc:
       enabled: false
     mmseqs_cluster_diversity:
