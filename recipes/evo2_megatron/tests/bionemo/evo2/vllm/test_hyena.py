@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 from itertools import pairwise
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -349,6 +350,75 @@ def _run(
     with set_forward_context({mixer.prefix: metadata}, vllm_config, num_tokens=hidden_states.shape[0]):
         mixer(hidden_states, output)
     return output
+
+
+@pytest.mark.parametrize("symbol", ["S", "D", "H"])
+def test_mix_segment_routes_final_operator_into_caller_output(monkeypatch, symbol: str) -> None:
+    mixer = object.__new__(Evo2HyenaMixer)
+    torch.nn.Module.__init__(mixer)
+    mixer.operator_type = symbol
+    mixer.local_hidden_size = 2
+    mixer.operator_group_size = 1
+    mixer.operator_state_size = 2
+    mixer.hyena_proj_conv = SimpleNamespace(short_conv_weight=torch.ones((6, 3)))
+    if symbol == "S":
+        mixer.mixer = SimpleNamespace(
+            short_conv=SimpleNamespace(short_conv_weight=torch.ones((2, 1, 3))),
+            conv_bias=torch.zeros(2),
+        )
+    elif symbol == "D":
+        mixer.mixer = SimpleNamespace(
+            conv_bias=torch.zeros(2),
+            filter=SimpleNamespace(effective_filter=torch.ones((2, 3))),
+        )
+    else:
+        mixer.mixer = SimpleNamespace(
+            conv_bias=torch.zeros(2),
+            filter=SimpleNamespace(modal_decay=torch.ones((2, 2)), R=torch.ones((2, 2))),
+        )
+
+    projected_states = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]])
+    output = torch.full((2, 2), torch.nan)
+    final_output_buffers = []
+
+    def fake_fir(x, *args, out=None, **kwargs):
+        if x.shape[1] == 6:
+            if out is not None:
+                raise AssertionError("projection FIR unexpectedly received the mixed output buffer")
+            return x
+        final_output_buffers.append(out)
+        if out is None:
+            raise AssertionError("operator FIR did not receive the mixed output buffer")
+        out.copy_(x + 1.0)
+        return out
+
+    def fake_iir(recurrent_input, gate, *args, out=None, **kwargs):
+        final_output_buffers.append(out)
+        if out is None:
+            raise AssertionError("operator IIR did not receive the mixed output buffer")
+        out.copy_(gate * (recurrent_input + 1.0))
+        return out
+
+    monkeypatch.setattr(evo2_hyena, "packed_causal_fir", fake_fir)
+    monkeypatch.setattr(evo2_hyena, "packed_modal_iir", fake_iir)
+
+    actual = mixer._mix_segment(
+        projected_states,
+        torch.tensor([0, 1, 2]),
+        torch.tensor([1, 2]),
+        torch.tensor([True, True]),
+        torch.empty(0),
+        torch.empty(0),
+        max_query_len=1,
+        out=output,
+    )
+
+    if actual is not output:
+        raise AssertionError("Hyena mix segment did not return the caller-owned output buffer")
+    if final_output_buffers != [output]:
+        raise AssertionError("Hyena final operator did not receive exactly the caller-owned output buffer")
+    if not torch.isfinite(output).all():
+        raise AssertionError("Hyena caller-owned output buffer was not fully initialized")
 
 
 @CUDA_REQUIRED

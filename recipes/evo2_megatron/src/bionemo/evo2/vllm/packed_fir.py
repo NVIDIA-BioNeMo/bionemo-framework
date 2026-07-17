@@ -210,6 +210,22 @@ def _validate_metadata(
     return starts, slots
 
 
+def _prepare_output_buffer(x: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
+    if out is None:
+        return torch.empty_like(x)
+    if not isinstance(out, torch.Tensor):
+        raise TypeError("out must be a torch.Tensor")
+    if out.shape != x.shape:
+        raise ValueError("out must have the same shape as x")
+    if out.dtype != x.dtype:
+        raise ValueError("out must have the same dtype as x")
+    if out.device != x.device:
+        raise ValueError("out must be on the same device as x")
+    if not out.is_contiguous():
+        raise ValueError("out must be contiguous")
+    return out
+
+
 def packed_fir_reference(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -222,6 +238,7 @@ def packed_fir_reference(
     group_size: int = 1,
     gated_bias: bool = False,
     flip_filter: bool = False,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Evaluate independent FIR segments and update their terminal states.
 
@@ -249,7 +266,7 @@ def packed_fir_reference(
     channel_bias = (
         None if bias is None else _expand_channels(bias, channels=channels, group_size=group_size, name="bias").float()
     )
-    output = torch.empty_like(x)
+    output = _prepare_output_buffer(x, out)
 
     for request_index, (start, end) in enumerate(pairwise(starts)):
         slot = slots[request_index]
@@ -643,6 +660,7 @@ def packed_causal_fir(
     gated_bias: bool = False,
     flip_filter: bool = False,
     max_query_len: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run segmented FIR kernels over packed prefill or decode requests of any positive length."""
     num_requests = _validate_shapes(
@@ -657,6 +675,7 @@ def packed_causal_fir(
     )
     if isinstance(max_query_len, bool) or not isinstance(max_query_len, int) or max_query_len < 1:
         raise ValueError("max_query_len must be a positive integer")
+    output = _prepare_output_buffer(x, out)
     if not x.is_cuda:
         return packed_fir_reference(
             x,
@@ -669,6 +688,7 @@ def packed_causal_fir(
             group_size=group_size,
             gated_bias=gated_bias,
             flip_filter=flip_filter,
+            out=output,
         )
 
     taps = weight.shape[1]
@@ -686,7 +706,7 @@ def packed_causal_fir(
         taps=taps,
     )
     if production_path == "equal_length_conv":
-        return _packed_equal_length_causal_fir(
+        result = _packed_equal_length_causal_fir(
             x,
             weight,
             bias,
@@ -700,8 +720,11 @@ def packed_causal_fir(
             gated_bias=gated_bias,
             flip_filter=flip_filter,
         )
+        if out is None:
+            return result
+        output.copy_(result)
+        return output
 
-    output = torch.empty_like(x)
     bias_tensor = x if bias is None else bias
     if max_query_len <= 32:
         block_channels = 32 if taps >= 128 else 128

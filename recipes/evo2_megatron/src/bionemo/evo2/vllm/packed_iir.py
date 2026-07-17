@@ -118,6 +118,22 @@ def _validate_metadata(
     return starts, slots
 
 
+def _prepare_output_buffer(recurrent_input: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
+    if out is None:
+        return torch.empty_like(recurrent_input)
+    if not isinstance(out, torch.Tensor):
+        raise TypeError("out must be a torch.Tensor")
+    if out.shape != recurrent_input.shape:
+        raise ValueError("out must have the same shape as recurrent_input")
+    if out.dtype != recurrent_input.dtype:
+        raise ValueError("out must have the same dtype as recurrent_input")
+    if out.device != recurrent_input.device:
+        raise ValueError("out must be on the same device as recurrent_input")
+    if not out.is_contiguous():
+        raise ValueError("out must be contiguous")
+    return out
+
+
 def packed_iir_reference(
     recurrent_input: torch.Tensor,
     gate: torch.Tensor,
@@ -130,6 +146,7 @@ def packed_iir_reference(
     has_initial_state: torch.Tensor,
     *,
     state_size: int = 16,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Evaluate independent HCL recurrences and update their terminal states.
 
@@ -157,7 +174,7 @@ def packed_iir_reference(
     decay = decay.float()
     residues = residues.float()
     diagonal = diagonal.float()
-    output = torch.empty_like(recurrent_input)
+    output = _prepare_output_buffer(recurrent_input, out)
 
     for request_index, (start, end) in enumerate(pairwise(starts)):
         slot = slots[request_index]
@@ -385,6 +402,7 @@ def packed_modal_iir(
     *,
     state_size: int = 16,
     max_query_len: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run one segmented modal-recurrence kernel over packed prefill or decode requests."""
     num_requests = _validate_shapes(
@@ -403,6 +421,7 @@ def packed_modal_iir(
         raise ValueError("max_query_len must be a positive integer")
     if state_size > 32:
         raise ValueError("the direct HCL kernel supports state_size up to 32")
+    output = _prepare_output_buffer(recurrent_input, out)
     if not recurrent_input.is_cuda:
         return packed_iir_reference(
             recurrent_input,
@@ -415,9 +434,9 @@ def packed_modal_iir(
             state_indices,
             has_initial_state,
             state_size=state_size,
+            out=output,
         )
 
-    output = torch.empty_like(recurrent_input)
     block_channels = 32
     block_state = 1 << (state_size - 1).bit_length()
     grid = (num_requests, triton.cdiv(recurrent_input.shape[1], block_channels))

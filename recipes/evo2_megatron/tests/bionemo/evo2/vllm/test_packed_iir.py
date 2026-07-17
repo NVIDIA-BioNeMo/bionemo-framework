@@ -72,6 +72,54 @@ def _scalar_oracle(
     return expected_output, expected_cache
 
 
+def test_packed_modal_iir_writes_into_caller_output_buffer():
+    generator = torch.Generator().manual_seed(7104)
+    recurrent_input = torch.randn((2, 4), generator=generator)
+    gate = torch.randn((2, 4), generator=generator)
+    decay = torch.rand((4, 2), generator=generator)
+    residues = torch.randn((4, 2), generator=generator)
+    diagonal = torch.randn((4,), generator=generator)
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int64)
+    state_indices = torch.tensor([1, 2], dtype=torch.int64)
+    has_initial_state = torch.tensor([False, False])
+    initial_cache = torch.randn((3, 4, 2), generator=generator)
+    expected_cache = initial_cache.clone()
+    actual_cache = initial_cache.clone()
+    expected = packed_iir_reference(
+        recurrent_input,
+        gate,
+        decay,
+        residues,
+        diagonal,
+        expected_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        state_size=2,
+    )
+    output = torch.full_like(recurrent_input, torch.nan)
+
+    actual = packed_modal_iir(
+        recurrent_input,
+        gate,
+        decay,
+        residues,
+        diagonal,
+        actual_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        state_size=2,
+        max_query_len=1,
+        out=output,
+    )
+
+    if actual is not output:
+        raise AssertionError("packed IIR did not return the caller-owned output buffer")
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual_cache, expected_cache, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("populated_state", [False, True])
 def test_packed_iir_matches_independent_scalar_oracle(populated_state):
     generator = torch.Generator().manual_seed(7100 + populated_state)

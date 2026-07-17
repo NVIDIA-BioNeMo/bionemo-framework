@@ -323,6 +323,7 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
         operator_state: torch.Tensor,
         *,
         max_query_len: int,
+        out: torch.Tensor,
     ) -> torch.Tensor:
         projected_states = packed_causal_fir(
             projected_states,
@@ -353,8 +354,9 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 group_size=self.operator_group_size,
                 gated_bias=True,
                 max_query_len=max_query_len,
+                out=out,
             )
-            return x1 * filtered
+            return torch.mul(x1, filtered, out=out)
         if self.operator_type == "D":
             filtered = packed_causal_fir(
                 drive,
@@ -368,8 +370,9 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 gated_bias=True,
                 flip_filter=True,
                 max_query_len=max_query_len,
+                out=out,
             )
-            return x1 * filtered
+            return torch.mul(x1, filtered, out=out)
 
         decay = self.mixer.filter.modal_decay
         residues = self.mixer.filter.R
@@ -388,6 +391,7 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
             has_initial_state,
             state_size=self.operator_state_size,
             max_query_len=max_query_len,
+            out=out,
         )
 
     def forward_impl(
@@ -441,7 +445,7 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 metadata.state_indices_tensor_d,
                 kind="decode",
             )
-            mixed[:num_decode_tokens] = self._mix_segment(
+            self._mix_segment(
                 projected_states[:num_decode_tokens],
                 self._decode_query_start_loc[: num_decode_tokens + 1],
                 decode_state_indices,
@@ -449,6 +453,7 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 projection_state,
                 operator_state,
                 max_query_len=1,
+                out=mixed[:num_decode_tokens],
             )
 
         if num_prefill_tokens:
@@ -466,7 +471,7 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 forward_context,
                 metadata.query_start_loc_p,
             )
-            mixed[num_decode_tokens:num_actual_tokens] = self._mix_segment(
+            self._mix_segment(
                 projected_states[num_decode_tokens:num_actual_tokens],
                 metadata.query_start_loc_p,
                 prefill_state_indices,
@@ -474,6 +479,7 @@ class Evo2HyenaMixer(MambaBase, PluggableLayer):
                 projection_state,
                 operator_state,
                 max_query_len=max_query_len,
+                out=mixed[num_decode_tokens:num_actual_tokens],
             )
 
         output[:num_actual_tokens] = cast(torch.Tensor, self.dense(mixed))

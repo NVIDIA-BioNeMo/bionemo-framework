@@ -107,6 +107,45 @@ def test_production_fir_uses_grouped_convolution_only_for_proven_equal_long_128_
     )
 
 
+def test_packed_causal_fir_writes_into_caller_output_buffer():
+    generator = torch.Generator().manual_seed(1704)
+    x = torch.randn((2, 4), generator=generator)
+    weight = torch.randn((4, 3), generator=generator)
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int64)
+    state_indices = torch.tensor([1, 2], dtype=torch.int64)
+    has_initial_state = torch.tensor([False, False])
+    initial_cache = torch.randn((3, 4, 2), generator=generator)
+    expected_cache = initial_cache.clone()
+    actual_cache = initial_cache.clone()
+    expected = packed_fir_reference(
+        x,
+        weight,
+        None,
+        expected_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+    )
+    output = torch.full_like(x, torch.nan)
+
+    actual = packed_causal_fir(
+        x,
+        weight,
+        None,
+        actual_cache,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        max_query_len=1,
+        out=output,
+    )
+
+    if actual is not output:
+        raise AssertionError("packed FIR did not return the caller-owned output buffer")
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual_cache, expected_cache, rtol=0, atol=0)
+
+
 def _scalar_oracle(
     x,
     weight,
