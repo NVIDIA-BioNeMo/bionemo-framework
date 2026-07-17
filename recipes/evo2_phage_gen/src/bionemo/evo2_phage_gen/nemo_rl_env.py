@@ -523,7 +523,12 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 objective_scores = gdpo_objective_scores_from_scored(scored, self.gdpo_objectives)
                 gdpo_objectives_s = time.perf_counter() - phase_start
                 self._last_gdpo_objective_scores = objective_scores
-                rewards = torch.tensor(objective_scores.to_numpy(dtype=float), dtype=torch.float32).cpu()
+                rewards = {
+                    f"reward/{name}": torch.tensor(
+                        objective_scores[name].to_numpy(dtype=float), dtype=torch.float32
+                    ).cpu()
+                    for name in objective_scores.columns
+                }
             else:
                 gdpo_objectives_s = 0.0
                 self._last_gdpo_objective_scores = pd.DataFrame()
@@ -556,7 +561,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 metadata=returned_metadata,
                 next_stop_strings=[None] * len(message_log_batch),
                 rewards=rewards,
-                terminateds=torch.ones(rewards.shape[0], dtype=torch.bool).cpu(),
+                terminateds=torch.ones(len(message_log_batch), dtype=torch.bool).cpu(),
                 answers=scored["sequence"].tolist(),
             )
 

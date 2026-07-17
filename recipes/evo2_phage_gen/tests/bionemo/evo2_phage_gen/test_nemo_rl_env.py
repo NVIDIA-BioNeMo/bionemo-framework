@@ -96,6 +96,61 @@ def test_gdpo_objective_scores_reject_missing_columns():
         )
 
 
+def test_phage_qc_environment_gdpo_returns_named_reward_components(monkeypatch):
+    """The NeMo-RL GDPO rollout contract requires one named vector per objective."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    scored = pd.DataFrame(
+        {
+            "sequence": ["ACGT", "TGCA"],
+            "reward": [0.75, 0.25],
+            "reward_valid_nt_chars": [1.0, 0.0],
+            "reward_genome_length": [0.5, 0.5],
+            "reward_external_tropism": [0.25, 0.75],
+        }
+    )
+    monkeypatch.setattr(
+        nemo_rl_env,
+        "score_message_logs",
+        lambda *_args, **_kwargs: scored.copy(),
+    )
+    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
+    env = env_cls(
+        {
+            "reward_output_mode": "gdpo",
+            "gdpo_objectives": [
+                {
+                    "name": "feasibility",
+                    "columns": ["reward_valid_nt_chars", "reward_genome_length"],
+                },
+                {"name": "function", "columns": ["reward_external_tropism"]},
+            ],
+        }
+    )
+
+    output = env_cls.step(
+        env,
+        [
+            [{"role": "assistant", "content": "ACGT"}],
+            [{"role": "assistant", "content": "TGCA"}],
+        ],
+        [{}, {}],
+    )
+
+    assert isinstance(output.rewards, dict)
+    assert list(output.rewards) == ["reward/feasibility", "reward/function"]
+    torch.testing.assert_close(
+        output.rewards["reward/feasibility"],
+        torch.tensor([0.75, 0.25]),
+    )
+    torch.testing.assert_close(
+        output.rewards["reward/function"],
+        torch.tensor([0.25, 0.75]),
+    )
+    torch.testing.assert_close(output.terminateds, torch.tensor([True, True]))
+
+
 def test_phage_qc_metrics_from_scored_flattens_reward_components():
     """Scalar QC metrics should be suitable for TensorBoard and W&B logging."""
     scored = pd.DataFrame(
