@@ -46,6 +46,7 @@ policy:
     mcore_generation_config: null
     evo2_collect_proof: false
     generation_worker_cls: "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
+    refit_bridge_cls: "bionemo.evo2.vllm.refit_bridge.Evo2RefitBridge"
     vllm_cfg:
       tensor_parallel_size: 2
       pipeline_parallel_size: 1

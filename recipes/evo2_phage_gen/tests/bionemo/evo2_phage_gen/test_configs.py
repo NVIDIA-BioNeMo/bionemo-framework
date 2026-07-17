@@ -462,6 +462,8 @@ def test_vllm_tp2_one_step_smoke_uses_capacity_bounded_mixed_batching():
         "mixed validation": grpo["val_batch_size"] == 16
         and config["data"]["validation"]["data_path"].endswith("mixed_8x12.jsonl"),
         "no inherited MCore generation": generation["mcore_generation_config"] is None,
+        "explicit Evo2 refit bridge": generation["refit_bridge_cls"]
+        == "bionemo.evo2.vllm.refit_bridge.Evo2RefitBridge",
         "MP executor": vllm_kwargs["distributed_executor_backend"] == "mp",
         "async scheduling": vllm_kwargs["async_scheduling"] is True,
         "exact capture": 16 in vllm_kwargs["compilation_config"]["cudagraph_capture_sizes"],

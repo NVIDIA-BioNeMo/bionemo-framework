@@ -347,6 +347,7 @@ def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypat
         _apply_target_allowlist_prefixes=object(),
         NoRefitMegatronBridge=object(),
         _uses_colocated_megatron_generation=object(),
+        _select_megatron_bridge=object(),
     )
     modules = {
         "nemo_rl.models.generation.interfaces": types.SimpleNamespace(generation_prompt_token_ids_sha256=object()),

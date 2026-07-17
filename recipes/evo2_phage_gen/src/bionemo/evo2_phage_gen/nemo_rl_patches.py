@@ -61,6 +61,7 @@ EXPECTED_PATCHED_SYMBOLS = [
     ("nemo_rl.models.megatron.setup", "_apply_target_allowlist_prefixes"),
     ("nemo_rl.models.megatron.setup", "NoRefitMegatronBridge"),
     ("nemo_rl.models.megatron.setup", "_uses_colocated_megatron_generation"),
+    ("nemo_rl.models.megatron.setup", "_select_megatron_bridge"),
     ("nemo_rl.models.generation.vllm.config", "VllmActorExecutionConfig"),
     ("nemo_rl.models.generation.vllm.vllm_generation", "_request_seeds_for_dp_stream"),
 ]

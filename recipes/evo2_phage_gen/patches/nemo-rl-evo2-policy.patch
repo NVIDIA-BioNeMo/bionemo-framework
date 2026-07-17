@@ -1,8 +1,13 @@
 diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
-index a88cd3341..957d28db3 100644
+index a88cd334..ffac538c 100644
 --- a/nemo_rl/models/megatron/setup.py
 +++ b/nemo_rl/models/megatron/setup.py
-@@ -153,6 +153,40 @@ from nemo_rl.models.value.config import ValueConfig
+@@ -15,3 +15,4 @@
++import importlib
+ import hashlib
+ import json
+ import os
+@@ -153,6 +154,77 @@ from nemo_rl.models.value.config import ValueConfig
  TokenizerType = TypeVar("TokenizerType", bound=PreTrainedTokenizerBase)
  
  
@@ -40,10 +45,47 @@ index a88cd3341..957d28db3 100644
 +    return generation.get("backend") == "megatron" and colocated is not False
 +
 +
++def _select_megatron_bridge(config: PolicyConfig, hf_model_name: str, model):
++    """Select the default bridge or one explicit recipe-owned vLLM refit bridge."""
++    generation = config.get("generation") or {}
++    bridge_path = generation.get("refit_bridge_cls")
++    if bridge_path is not None and generation.get("backend") != "vllm":
++        raise ValueError("refit_bridge_cls is supported only for vLLM generation")
++    if _uses_colocated_megatron_generation(config):
++        return NoRefitMegatronBridge(transformer_config=getattr(model, "config", None))
++    if bridge_path is None:
++        return AutoBridge.from_hf_pretrained(hf_model_name, trust_remote_code=True)
++    if type(bridge_path) is not str:
++        raise TypeError("refit_bridge_cls must be a built-in qualified string")
++    if not bridge_path or bridge_path.strip() != bridge_path:
++        raise ValueError("refit_bridge_cls must be a non-empty qualified string")
++    module_name, separator, class_name = bridge_path.rpartition(".")
++    if not separator or not module_name or not class_name:
++        raise ValueError("refit_bridge_cls must be a qualified module.Class string")
++
++    module = importlib.import_module(module_name)
++    bridge_cls = getattr(module, class_name, None)
++    if not isinstance(bridge_cls, type):
++        raise TypeError(f"refit_bridge_cls does not resolve to a class: {bridge_path}")
++    factory = getattr(bridge_cls, "from_pretrained", None)
++    if not callable(factory):
++        raise TypeError(f"refit_bridge_cls has no callable from_pretrained: {bridge_path}")
++    bridge = factory(
++        hf_model_name,
++        transformer_config=getattr(model, "config", None),
++    )
++    for method_name in ("get_conversion_tasks", "export_hf_weights"):
++        if not callable(getattr(bridge, method_name, None)):
++            raise TypeError(f"refit bridge is missing required method {method_name}: {bridge_path}")
++    if not hasattr(bridge, "transformer_config"):
++        raise TypeError(f"refit bridge is missing transformer_config: {bridge_path}")
++    return bridge
++
++
  def destroy_parallel_state():
      """Safely destroy parallel state and reset async call tracking.
  
-@@ -517,7 +551,7 @@ def setup_model_config(
+@@ -517,7 +589,7 @@ def setup_model_config(
              )
  
          _patch_hf_config_double_instantiation()
@@ -52,7 +94,7 @@ index a88cd3341..957d28db3 100644
          try:
              cfg_from_pretrained = ConfigContainer.from_yaml(
                  pretrained_run_config, mode=InstantiationMode.STRICT
-@@ -1044,6 +1078,8 @@ def _create_megatron_config(
+@@ -1044,6 +1116,8 @@ def _create_megatron_config(
          "overlap_param_gather": overlap_param_gather,
          "reuse_grad_buf_for_mxfp8_param_ag": reuse_grad_buf_for_mxfp8_param_ag,
      }
@@ -61,7 +103,7 @@ index a88cd3341..957d28db3 100644
  
      # Fused linear logprobs run the decoder but read output_layer.weight directly
      # instead of calling output_layer.forward(). Megatron's distributed-optimizer
-@@ -1103,7 +1139,7 @@ def _create_megatron_config(
+@@ -1103,7 +1177,7 @@ def _create_megatron_config(
          dataset=None,
          tokenizer=TokenizerConfig(
              tokenizer_type="HuggingFaceTokenizer",
@@ -70,7 +112,7 @@ index a88cd3341..957d28db3 100644
          ),
      )
  
-@@ -1677,9 +1713,11 @@ def finalize_megatron_setup(
+@@ -1677,9 +1751,11 @@ def finalize_megatron_setup(
          pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
      )
  
@@ -83,17 +125,14 @@ index a88cd3341..957d28db3 100644
          hf_tokenizer_kwargs={
              "trust_remote_code": True,
              "use_fast": True,
-@@ -1694,9 +1732,10 @@ def finalize_megatron_setup(
+@@ -1694,9 +1770,7 @@ def finalize_megatron_setup(
      )
  
      dp_size = worker_sharding_annotations.get_axis_size("data_parallel")
 -    megatron_bridge = AutoBridge.from_hf_pretrained(
 -        hf_model_name, trust_remote_code=True
 -    )
-+    if _uses_colocated_megatron_generation(config):
-+        megatron_bridge = NoRefitMegatronBridge(transformer_config=getattr(model, "config", None))
-+    else:
-+        megatron_bridge = AutoBridge.from_hf_pretrained(hf_model_name, trust_remote_code=True)
++    megatron_bridge = _select_megatron_bridge(config, hf_model_name, model)
  
      should_disable_forward_pre_hook = (
          config["megatron_cfg"]["optimizer"]["use_distributed_optimizer"]

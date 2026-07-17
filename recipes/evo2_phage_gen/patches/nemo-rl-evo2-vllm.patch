@@ -150,7 +150,7 @@ index 025707c70..96d19b8d4 100644
          torch.Tensor
      ]  # Whether each sequence was truncated and hit max_tokens without stop token
 diff --git a/nemo_rl/models/generation/vllm/config.py b/nemo_rl/models/generation/vllm/config.py
-index 44eb5d5d8..704444f3b 100644
+index 44eb5d5d..70d06391 100644
 --- a/nemo_rl/models/generation/vllm/config.py
 +++ b/nemo_rl/models/generation/vllm/config.py
 @@ -12,6 +12,7 @@
@@ -161,18 +161,19 @@ index 44eb5d5d8..704444f3b 100644
  from typing import Any, Literal, NotRequired, TypedDict
  
  from nemo_rl.models.generation.interfaces import GenerationConfig
-@@ -55,6 +56,10 @@ class VllmSpecificArgs(TypedDict):
+@@ -55,6 +56,11 @@ class VllmSpecificArgs(TypedDict):
  class VllmConfig(GenerationConfig):
      vllm_cfg: VllmSpecificArgs
      vllm_kwargs: NotRequired[dict[str, Any]]
 +    request_seed: NotRequired[int]
 +    generation_worker_cls: NotRequired[str]
++    refit_bridge_cls: NotRequired[str]
 +    num_logprobs: NotRequired[int]
 +    allowed_token_ids: NotRequired[list[int] | None]
  
      # quantization config
      quant_cfg: NotRequired[str | None]
-@@ -63,3 +68,67 @@ class VllmConfig(GenerationConfig):
+@@ -63,3 +69,67 @@ class VllmConfig(GenerationConfig):
      # modules. This is intended for ModelOpt NVFP4 rollout experiments.
      real_quant: NotRequired[bool]
      real_quant_ignore: NotRequired[list[str]]
