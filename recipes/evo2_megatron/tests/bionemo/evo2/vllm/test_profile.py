@@ -227,8 +227,21 @@ def test_tp2_dp2_profile_maps_to_two_ray_tp2_nemo_rl_engines() -> None:
     if nemo_rl["vllm_kwargs"]["async_scheduling"] is not False:
         raise AssertionError("combined Ray topology must keep async scheduling disabled")
 
-    with pytest.raises(ValueError, match="two-GPU TP2 profile"):
-        replace(profile, distributed_executor_backend="mp")
+    mp_profile = replace(
+        profile,
+        distributed_executor_backend="mp",
+        async_scheduling=True,
+    )
+    mp_kwargs = mp_profile.engine_kwargs(model="/checkpoint")
+    mp_nemo_rl = mp_profile.nemo_rl_generation_config(load_format="safetensors")
+    if mp_kwargs.get("distributed_executor_backend") != "mp":
+        raise AssertionError("combined topology did not retain the MP executor")
+    if mp_kwargs["async_scheduling"] is not True:
+        raise AssertionError("combined MP topology did not retain async scheduling")
+    if mp_nemo_rl["vllm_kwargs"].get("distributed_executor_backend") != "mp":
+        raise AssertionError("combined topology did not reach the NeMo-RL MP executor")
+    if mp_nemo_rl["vllm_kwargs"]["async_scheduling"] is not True:
+        raise AssertionError("combined NeMo-RL topology lost async scheduling")
     with pytest.raises(ValueError, match="TP2 Ray"):
         replace(profile, async_scheduling=True)
 

@@ -102,8 +102,8 @@ class Evo2VllmProfile:
             raise ValueError(f"unsupported topology: {self.topology}")
         if self.distributed_executor_backend not in ("ray", "mp"):
             raise ValueError(f"unsupported distributed_executor_backend: {self.distributed_executor_backend}")
-        if self.topology != "tp2" and self.distributed_executor_backend != "ray":
-            raise ValueError("distributed_executor_backend is caller-selectable only for the two-GPU TP2 profile")
+        if self.tensor_parallel_size != 2 and self.distributed_executor_backend != "ray":
+            raise ValueError("the MP distributed executor requires TP2")
         if (
             isinstance(self.global_wave_size, bool)
             or not isinstance(self.global_wave_size, int)
