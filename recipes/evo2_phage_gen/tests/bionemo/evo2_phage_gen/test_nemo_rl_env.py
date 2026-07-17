@@ -296,6 +296,32 @@ def test_phage_qc_metrics_deduplicates_full_qc_passes_by_mmseqs_cluster():
     assert "binary_full_qc_pass_cluster_deduplication_fraction" not in metrics
 
 
+def test_binary_core_pass_requires_synteny_aai_and_required_genes_when_weighted():
+    """Headline pass logging must include every configured final paper gate."""
+    scored = pd.DataFrame(
+        {
+            "reward_valid_nt_chars": [1.0],
+            "reward_external_synteny": [0.5],
+            "reward_external_average_protein_identity": [1.0],
+            "reward_external_required_genes": [1.0],
+            "reward": [0.875],
+        }
+    )
+    weights = RewardWeights(
+        valid_nt_chars=1.0,
+        synteny=1.0,
+        average_protein_identity=1.0,
+        required_genes=1.0,
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, weights)
+
+    if metrics["binary_core_pass_count"] != 0:
+        raise AssertionError("synteny failure was treated as optional in headline pass logging")
+    if metrics["binary_core_pass_rate"] != 0.0:
+        raise AssertionError("headline pass rate ignored a configured final filter")
+
+
 def test_phage_qc_metrics_tolerates_legacy_metadata_without_mmseqs_cluster_id():
     """Partially preserved MMseqs metadata should not crash metric aggregation."""
     scored = pd.DataFrame(
@@ -332,6 +358,28 @@ def test_phage_qc_metrics_groups_training_metrics_by_prompt_prefix_length():
     assert metrics["by_prompt_nt_length/10/num_sequences"] == 1
     assert metrics["by_prompt_nt_length/10/reward_mean"] == 0.5
     assert metrics["by_prompt_nt_length/10/binary_core_pass_rate"] == 1.0
+
+
+def test_phage_qc_metrics_reports_fixed_equal_weight_mixed_length_aggregate():
+    """The primary 4..11 validation aggregate weights strata, not row counts."""
+    prompt_lengths = [4, 4, 5, 6, 7, 8, 9, 10, 11]
+    scores = [0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    scored = pd.DataFrame(
+        {
+            "prompt_nt_length": prompt_lengths,
+            "reward_valid_nt_chars": scores,
+            "reward": scores,
+        }
+    )
+
+    metrics = phage_qc_metrics_from_scored(scored, RewardWeights(valid_nt_chars=1.0))
+
+    if metrics["mixed_prompt_equal_weight/num_length_strata"] != 8:
+        raise AssertionError("mixed validation did not include all eight length strata")
+    if metrics["mixed_prompt_equal_weight/reward_mean"] != 0.875:
+        raise AssertionError("mixed reward aggregate was row-weighted instead of stratum-weighted")
+    if metrics["mixed_prompt_equal_weight/binary_core_pass_rate"] != 0.875:
+        raise AssertionError("mixed pass aggregate was row-weighted instead of stratum-weighted")
 
 
 def test_scored_records_exclude_full_sequence_from_rollout_metadata():

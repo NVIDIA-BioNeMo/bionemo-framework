@@ -28,6 +28,11 @@ import pytest
 from bionemo.evo2_phage_gen import nemo_rl_patches
 
 
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
 def test_apply_nemo_rl_patch_applies_against_installed_package_root(tmp_path: Path, monkeypatch) -> None:
     """The patch command should run from site-packages, not require a source checkout path."""
     source_root = tmp_path / "site-packages"
@@ -79,6 +84,41 @@ def test_apply_nemo_rl_patch_reports_already_applied(tmp_path: Path, monkeypatch
     result = nemo_rl_patches.apply_nemo_rl_patch(patch_file)
 
     assert result == f"patch already applied to {source_root}"
+
+
+def test_apply_nemo_rl_patch_applies_default_series_in_order(tmp_path: Path, monkeypatch) -> None:
+    """The default CLI path should apply both maintained patches in declared order."""
+    source_root = tmp_path / "site-packages"
+    package_dir = source_root / "nemo_rl"
+    package_dir.mkdir(parents=True)
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("")
+    patch_paths = (tmp_path / "policy.patch", tmp_path / "vllm.patch")
+    for path in patch_paths:
+        path.write_text(f"diff --git a/{path.stem} b/{path.stem}\n")
+    spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+    monkeypatch.setattr(nemo_rl_patches, "DEFAULT_PATCHES", patch_paths)
+
+    def fake_run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        _require(cwd == source_root, "patch series used the wrong source root")
+        calls.append(args)
+        return subprocess.CompletedProcess(["patch", *args], 0, stdout="ok")
+
+    monkeypatch.setattr(nemo_rl_patches, "_run_patch", fake_run_patch)
+
+    result = nemo_rl_patches.apply_nemo_rl_patch()
+
+    _require(
+        result == f"patch applied to {source_root}\npatch applied to {source_root}",
+        "default series result drifted",
+    )
+    _require(
+        [Path(args[-1]).name for args in calls] == ["policy.patch", "policy.patch", "vllm.patch", "vllm.patch"],
+        "default patch order drifted",
+    )
 
 
 def test_patch_nemo_rl_packaging_metadata_includes_subpackages(tmp_path: Path) -> None:
@@ -190,8 +230,25 @@ def test_patch_sha256_reports_patch_content_hash(tmp_path: Path) -> None:
     )
 
 
-def test_maintained_patch_applies_to_pinned_nemo_rl_source(tmp_path: Path) -> None:
-    """The actual maintained patch should apply against the pinned clean NeMo-RL source."""
+def test_vllm_patch_excludes_request_timing_telemetry() -> None:
+    """Stable phase timers, not optional vLLM request metrics, own timing evidence."""
+    patch_text = (nemo_rl_patches.RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch").read_text()
+
+    forbidden = (
+        "generation_first_token_latency_s",
+        "generation_decode_s",
+        "vLLM request timing metrics are missing or inconsistent",
+        "metrics.first_token_latency",
+        "metrics.last_token_ts",
+    )
+    _require(
+        all(value not in patch_text for value in forbidden),
+        "diagnostic request timing telemetry entered the dependency patch",
+    )
+
+
+def test_maintained_patches_apply_to_pinned_nemo_rl_source(tmp_path: Path) -> None:
+    """The maintained series should apply in order against the pinned clean source."""
     _, revision = nemo_rl_patches._nemo_rl_source_pin()
     source_root = nemo_rl_patches._find_cached_nemo_rl_source(revision)
     if source_root is None:
@@ -199,20 +256,40 @@ def test_maintained_patch_applies_to_pinned_nemo_rl_source(tmp_path: Path) -> No
 
     build_root = tmp_path / "nemo-rl-source"
     shutil.copytree(source_root / "nemo_rl", build_root / "nemo_rl")
-    result = nemo_rl_patches._run_patch(
-        ["--batch", "--dry-run", "-p1", "-i", str(nemo_rl_patches.DEFAULT_PATCH)],
-        cwd=build_root,
+    for patch_path in nemo_rl_patches.DEFAULT_PATCHES:
+        result = nemo_rl_patches._run_patch(
+            ["--batch", "-p1", "-i", str(patch_path)],
+            cwd=build_root,
+        )
+        _require(result.returncode == 0, result.stdout)
+
+
+def test_maintained_patch_inventory_is_narrow_and_does_not_patch_vllm_core() -> None:
+    """Only recipe-required NeMo-RL seams belong in the dependency patches."""
+    paths = set()
+    for patch_path in nemo_rl_patches.DEFAULT_PATCHES:
+        for line in patch_path.read_text().splitlines():
+            if line.startswith("diff --git a/"):
+                paths.add(line.split()[2].removeprefix("a/"))
+
+    _require(
+        paths
+        == {
+            "nemo_rl/distributed/worker_groups.py",
+            "nemo_rl/models/generation/interfaces.py",
+            "nemo_rl/models/generation/vllm/config.py",
+            "nemo_rl/models/generation/vllm/vllm_generation.py",
+            "nemo_rl/models/generation/vllm/vllm_worker.py",
+            "nemo_rl/models/megatron/setup.py",
+            "nemo_rl/models/policy/lm_policy.py",
+            "nemo_rl/models/policy/workers/megatron_policy_worker.py",
+        },
+        f"dependency patch inventory drifted: {sorted(paths)}",
     )
-
-    assert result.returncode == 0, result.stdout
-
-
-def test_maintained_patch_calls_adapter_generate_worker() -> None:
-    """The NeMo worker patch should use the Evo2 adapter's worker-side entry point."""
-    patch_text = nemo_rl_patches.DEFAULT_PATCH.read_text()
-
-    assert 'getattr(adapter, "generate_worker", None)' in patch_text
-    assert "return generate_worker(self, data=data, greedy=greedy)" in patch_text
+    _require(
+        all(not path.startswith("vllm/") for path in paths),
+        "the recipe patch must not modify upstream vLLM core",
+    )
 
 
 def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Path, monkeypatch) -> None:
@@ -244,24 +321,15 @@ def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Pat
 
 def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypatch) -> None:
     """Startup should accept a runtime with all expected patched symbols."""
-    rollouts = types.SimpleNamespace(collect_environment_metrics=object())
-    megatron_generation = types.SimpleNamespace(_load_generation_adapter=object())
-    generation_mixin_cls = type(
-        "MegatronGenerationMixin",
-        (),
-        {"_load_generation_adapter": object(), "generate_with_adapter": object()},
-    )
-    megatron_worker = types.SimpleNamespace(MegatronGenerationMixin=generation_mixin_cls)
     megatron_setup = types.SimpleNamespace(
         _apply_target_allowlist_prefixes=object(),
         NoRefitMegatronBridge=object(),
         _uses_colocated_megatron_generation=object(),
     )
     modules = {
-        "nemo_rl.experience.rollouts": rollouts,
-        "nemo_rl.models.generation.megatron.megatron_generation": megatron_generation,
-        "nemo_rl.models.generation.megatron.megatron_worker": megatron_worker,
         "nemo_rl.models.megatron.setup": megatron_setup,
+        "nemo_rl.models.generation.vllm.config": types.SimpleNamespace(VllmActorExecutionConfig=object()),
+        "nemo_rl.models.generation.vllm.vllm_generation": types.SimpleNamespace(_request_seeds_for_dp_stream=object()),
     }
 
     monkeypatch.setattr(nemo_rl_patches.importlib, "import_module", lambda name: modules[name])

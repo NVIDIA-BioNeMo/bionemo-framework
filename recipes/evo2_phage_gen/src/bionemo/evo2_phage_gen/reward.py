@@ -100,18 +100,16 @@ REWARD_COMPONENTS: tuple[RewardComponent, ...] = (
     RewardComponent("nucleotide_pass", "nucleotide_pass", "reward_nucleotide_pass"),
     RewardComponent("protein_hit_count", "protein_hit_count", "reward_external_protein_hit_count"),
     RewardComponent("tropism", "tropism", "reward_external_tropism"),
-    RewardComponent("synteny", "synteny", "reward_external_synteny", required_for_binary_pass=False),
+    RewardComponent("synteny", "synteny", "reward_external_synteny"),
     RewardComponent(
         "average_protein_identity",
         "average_protein_identity",
         "reward_external_average_protein_identity",
-        required_for_binary_pass=False,
     ),
     RewardComponent(
         "required_genes",
         "required_genes",
         "reward_external_required_genes",
-        required_for_binary_pass=False,
     ),
     RewardComponent(
         "mmseqs_cluster_diversity",
@@ -494,7 +492,9 @@ def binary_core_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd
         return pd.Series(False, index=scored_df.index)
     pass_mask = pd.Series(True, index=scored_df.index)
     for component in active_components:
-        pass_mask &= scored_df[component.score_column].astype(float) >= 1.0
+        pass_column = f"{component.score_column}_pass"
+        decision_column = pass_column if pass_column in scored_df else component.score_column
+        pass_mask &= pd.to_numeric(scored_df[decision_column], errors="coerce").fillna(0.0) >= 1.0
     return pass_mask
 
 

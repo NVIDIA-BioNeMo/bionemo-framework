@@ -420,3 +420,31 @@ def test_grpo_batched_no_cg_diagnostic_disables_cuda_graphs():
     assert mcore_generation_config["cuda_graph_impl"] == "none"
     assert mcore_generation_config["inference_cuda_graph_scope"] == "none"
     assert mcore_generation_config["use_cuda_graphs_for_non_decode_steps"] is False
+
+
+def test_vllm_tp2_one_step_smoke_uses_capacity_bounded_mixed_batching():
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_vllm_tp2_one_step_smoke.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    grpo = config["grpo"]
+    policy = config["policy"]
+    generation = policy["generation"]
+    vllm_kwargs = generation["vllm_kwargs"]
+
+    checks = {
+        "P": grpo["num_prompts_per_step"] == 8,
+        "K": grpo["num_generations_per_prompt"] == 2,
+        "GBS": policy["train_global_batch_size"] == 16,
+        "full local train MBS": policy["train_micro_batch_size"] == 16,
+        "full local logprob batch": policy["logprob_batch_size"] == 16,
+        "mixed train bank": policy["generation_batch_size"] == 16
+        and config["data"]["train"]["data_path"].endswith("mixed_8.jsonl"),
+        "mixed validation": grpo["val_batch_size"] == 16
+        and config["data"]["validation"]["data_path"].endswith("mixed_8x12.jsonl"),
+        "no inherited MCore generation": generation["mcore_generation_config"] is None,
+        "MP executor": vllm_kwargs["distributed_executor_backend"] == "mp",
+        "async scheduling": vllm_kwargs["async_scheduling"] is True,
+        "exact capture": 16 in vllm_kwargs["compilation_config"]["cudagraph_capture_sizes"],
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise AssertionError(f"mixed vLLM smoke config drifted: {failed}")

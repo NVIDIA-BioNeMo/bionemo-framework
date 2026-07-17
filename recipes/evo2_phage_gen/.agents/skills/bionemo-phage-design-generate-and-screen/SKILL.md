@@ -21,13 +21,28 @@ For an order target, follow [adaptive rollout planning](references/rollout-contr
 
 ## Execute deterministically
 
-1. Freeze checkpoint, prompt manifest, sampling, seeds, objective/filter versions, tools/models, and source/config hashes. Use stable design IDs.
-2. Validate, then canonicalize circular rotations/reverse complements for circular genomes; use biologically appropriate strand equivalence for linear genomes.
-3. Exact-deduplicate before expensive tools and preserve raw-to-representative mapping.
-4. Run approved nested hard all/any tree. Mandatory missing/failure fails closed. Record waterfalls, OR overlap, and dominance.
-5. Cluster hard-QC passers with MMseqs2 at 99% identity, coverage 0.8, cov_mode=0 unless an approved versioned alternative exists.
-6. Rank only passing representatives with predeclared scores; ranking never overrides hard QC or uniqueness.
-7. Produce [the reporting contract](references/reporting-contract.md), including accumulation/saturation and final-order manifest.
+1. On the execution host, build/source the recipe environment and verify the
+   selected RL checkpoint plus its MBridge inventory.
+2. Export that exact selected policy to a fresh vLLM safetensors directory with
+   `python -m bionemo.evo2.vllm.export`. Hash and retain `config.json`,
+   `model.safetensors.index.json`, `manifest.json`, and all shards. Never
+   generate from a stale base-policy export.
+3. Discover assigned GPUs and capacity-test a supported profile. The measured
+   two-H100 reference is TP2 MP+async O2/balanced with compilation mode 3,
+   exact-batch `FULL_AND_PIECEWISE` graphs, and public processed chosen
+   logprobs. On larger systems test the TP needed for model/context fit and
+   throughput, including TP4/TP8 where supported, then use remaining devices as
+   disjoint DP engine groups. Recompute local wave/capture sizes, partition
+   prompts and seeds, and prove that no engine groups share a CUDA device.
+4. Freeze checkpoint/export, prompt manifest, sampling, seeds, objective/filter versions, tools/models, and source/config hashes. Use stable design IDs.
+5. Require exact requested output length, finite aligned chosen logprobs,
+   allowed DNA alphabet/no EOS, and unique advancing request seeds before QC.
+6. Validate, then canonicalize circular rotations/reverse complements for circular genomes; use biologically appropriate strand equivalence for linear genomes.
+7. Exact-deduplicate before expensive tools and preserve raw-to-representative mapping.
+8. Run approved nested hard all/any tree. Mandatory missing/failure fails closed. Record waterfalls, OR overlap, and dominance.
+9. Cluster hard-QC passers with MMseqs2 at 99% identity, coverage 0.8, cov_mode=0 unless an approved versioned alternative exists.
+10. Rank only passing representatives with predeclared scores; ranking never overrides hard QC or uniqueness.
+11. Produce [the reporting contract](references/reporting-contract.md), including accumulation/saturation and final-order manifest.
 
 ## Alignment
 

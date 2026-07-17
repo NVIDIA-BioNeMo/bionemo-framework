@@ -1,0 +1,8 @@
+{"messages":[{"role":"user","content":"+~GAGT"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_04","length_stratum":4}
+{"messages":[{"role":"user","content":"+~GAGTT"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_05","length_stratum":5}
+{"messages":[{"role":"user","content":"+~GAGTTT"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_06","length_stratum":6}
+{"messages":[{"role":"user","content":"+~GAGTTTT"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_07","length_stratum":7}
+{"messages":[{"role":"user","content":"+~GAGTTTTA"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_08","length_stratum":8}
+{"messages":[{"role":"user","content":"+~GAGTTTTAT"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_09","length_stratum":9}
+{"messages":[{"role":"user","content":"+~GAGTTTTATC"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_10","length_stratum":10}
+{"messages":[{"role":"user","content":"+~GAGTTTTATCG"},{"role":"assistant","content":""}],"prompt_id":"phix174_length_11","length_stratum":11}

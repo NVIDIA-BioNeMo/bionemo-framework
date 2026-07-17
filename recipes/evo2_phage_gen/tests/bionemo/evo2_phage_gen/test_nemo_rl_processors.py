@@ -30,6 +30,11 @@ class _Tokenizer:
         return {"input_ids": torch.tensor([[ord(char) for char in text]], dtype=torch.long)}
 
 
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
 def test_phage_prompt_data_processor_tokenizes_openai_user_message_without_chat_template():
     datum = {
         "task_name": "phage",
@@ -56,3 +61,26 @@ def test_phage_prompt_data_processor_tokenizes_openai_user_message_without_chat_
         "prompt_prefix": "ACGT",
         "prompt_index": 3,
     }
+
+
+def test_phage_prompt_data_processor_preserves_mixed_prompt_identity() -> None:
+    datum = {
+        "messages": [
+            {"role": "user", "content": "+~GAGTTTTA"},
+            {"role": "assistant", "content": ""},
+        ],
+        "prompt_id": "phix174_length_08",
+        "length_stratum": 8,
+        "rollout_ordinal": 5,
+        "order_index": 44,
+        "validation_seed": 86,
+    }
+
+    output = phage_prompt_data_processor(datum, SimpleNamespace(prompt=None), _Tokenizer(), max_seq_length=32, idx=44)
+
+    extra = output["extra_env_info"]
+    _require(extra["prompt_id"] == "phix174_length_08", "prompt ID was dropped")
+    _require(extra["length_stratum"] == 8, "length stratum was dropped")
+    _require(extra["rollout_ordinal"] == 5, "rollout ordinal was dropped")
+    _require(extra["order_index"] == 44, "manifest order was dropped")
+    _require(extra["validation_seed"] == 86, "validation seed was dropped")

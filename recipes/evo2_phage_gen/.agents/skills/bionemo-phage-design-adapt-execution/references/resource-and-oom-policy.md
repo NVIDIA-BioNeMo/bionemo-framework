@@ -18,6 +18,15 @@ Pad batches to the configured length and mask pad tokens from loss. Report the l
 
 Probe representative target-length examples separately for SFT, RL training, and RL generation; their memory ceilings differ. Capture hardware, model, precision, topology, sequence length, peak memory, and exact OOM before changing config.
 
+For RL, keep prompt grouping independent from training chunks. If
+`P*K=GBS`, generation receives the local `GBS/DP` mixed rollout batch and
+advantages are normalized after all K rewards for each prompt are assembled.
+`policy.train_micro_batch_size` is the classic physical forward/backward
+chunk; start by testing the full local batch, then sweep the largest stable
+divisor and accumulate `local_batch/MBS` chunks. Capacity-test
+`policy.logprob_batch_size` separately. MBS1 is valid only when measured
+capacity requires it, never because one microbatch is assumed to mean one prompt.
+
 1. Start with data parallelism only when the model and target length fit.
 2. Maximize a stable microbatch size on target-length data, leaving safety margin.
 3. On OOM, reduce microbatch size first and increase gradient accumulation to preserve the approved global sequence/token batch and optimizer-step semantics.

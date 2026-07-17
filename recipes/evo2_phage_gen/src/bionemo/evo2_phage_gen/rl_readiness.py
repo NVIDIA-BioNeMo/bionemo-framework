@@ -133,7 +133,9 @@ def _runtime_checks() -> list[RLReadinessCheck]:
             name="nemo_rl_install",
             ok=nemo_rl_importable,
             required=True,
-            detail="nemo_rl is installed in the active environment" if nemo_rl_importable else "nemo_rl not importable",
+            detail="nemo_rl is installed in the active environment"
+            if nemo_rl_importable
+            else "nemo_rl not importable",
         ),
         _module_check("nemo_rl", "nemo_rl", required=True),
         _module_check("ray", "ray", required=True),
@@ -292,10 +294,13 @@ def _config_checks(
 
     model_name = str(_nested_get(config, ("policy", "model_name"), ""))
     needs_adapter = model_name.startswith("bionemo/evo2")
-    patch_path = RECIPE_ROOT / "patches" / "nemo-rl-evo2-mbridge-grpo.patch"
+    patch_paths = (
+        RECIPE_ROOT / "patches" / "nemo-rl-evo2-policy.patch",
+        RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch",
+    )
     allowlist_prefixes = set(_nested_get(config, ("policy", "megatron_cfg", "target_allowlist_prefixes"), []) or [])
     required_prefixes = {"bionemo.evo2.", "bionemo.common."}
-    patch_ok = patch_path.exists()
+    patch_ok = all(path.exists() for path in patch_paths)
     allowlist_ok = required_prefixes.issubset(allowlist_prefixes)
     adapter_ok = (not needs_adapter) or (patch_ok and allowlist_ok)
     checks.append(
@@ -304,7 +309,8 @@ def _config_checks(
             ok=adapter_ok,
             required=require_evo2_adapter,
             detail=(
-                f"patch={patch_path}, target_allowlist_prefixes={sorted(allowlist_prefixes)}"
+                f"patches={[str(path) for path in patch_paths]}, "
+                f"target_allowlist_prefixes={sorted(allowlist_prefixes)}"
                 if adapter_ok
                 else "NeMo-RL Evo2/MBridge source patch or BioNeMo target allowlist prefixes are missing"
             ),

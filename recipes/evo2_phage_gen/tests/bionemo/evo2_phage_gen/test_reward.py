@@ -402,8 +402,8 @@ def test_spike_identity_score_plateaus_at_paper_threshold():
     assert _spike_identity_score(95.0, measured_hit=True) == 1.0
 
 
-def test_soft_preference_components_do_not_gate_binary_pass():
-    """Global pass should not reject known-viable-like designs for soft novelty preferences."""
+def test_required_final_components_gate_binary_pass_without_explicit_decisions():
+    """Required final filters should fail closed when only shaped scores are available."""
     df = pd.DataFrame(
         {
             "reward_valid_nt_chars": [1.0],
@@ -417,7 +417,7 @@ def test_soft_preference_components_do_not_gate_binary_pass():
         RewardWeights(valid_nt_chars=1.0, synteny=1.0, average_protein_identity=1.0),
     )
 
-    assert scored["reward_binary_core_pass"].tolist() == [1.0]
+    assert scored["reward_binary_core_pass"].tolist() == [0.0]
 
 
 def test_score_fasta_writes_reward_csv(tmp_path):

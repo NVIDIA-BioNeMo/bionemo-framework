@@ -1,3 +1,6 @@
 *
 !.gitignore
 !phage_prompts.jsonl
+!phage_prompts_paper_useful_rl_mixed_8.jsonl
+!phage_prompts_paper_useful_rl_validation_mixed_8x12.jsonl
+!phage_prompts_paper_useful_rl_validation_prompt10_96.jsonl

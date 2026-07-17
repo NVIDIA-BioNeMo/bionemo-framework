@@ -68,6 +68,102 @@ The historical RL shape used one node with 2× H100 80 GB GPUs. Other hardware m
 source .ci_test_env.sh
 ```
 
+### vLLM inference with the qualified performance profile
+
+Export the selected RL MBridge checkpoint before generation. Do not point vLLM
+at a stale pre-RL export:
+
+```bash
+RL_CHECKPOINT=/path/to/selected-step/policy/weights/iter_0000000
+VLLM_EXPORT="$PWD/results/selected-step-vllm"
+
+python -m bionemo.evo2.vllm.export \
+  "$RL_CHECKPOINT" "$VLLM_EXPORT" \
+  --max-shard-size 2GiB
+
+sha256sum \
+  "$VLLM_EXPORT/config.json" \
+  "$VLLM_EXPORT/model.safetensors.index.json" \
+  "$VLLM_EXPORT/manifest.json"
+```
+
+The export manifest records the source checkpoint inventory and generated
+config/index hashes. Use a fresh output directory for every selected policy.
+Supply `--config /path/to/verified/config-or-export` only when the checkpoint
+does not contain sufficient model config, and record that extra authority.
+
+The optimized Evo2 vLLM path is selected through the benchmark profile rather
+than independent private vLLM patches. This example reproduces the measured
+two-H100 reference profile: O2/balanced runtime selection, Inductor compilation mode 3,
+`FULL_AND_PIECEWISE` CUDA graphs including the exact B96 capture size,
+the multiprocess executor, and async scheduling:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1
+export VLLM_PLUGINS=evo2
+export PYTHONPATH="$PWD/src:$PWD/../evo2_megatron/src"
+
+python -m bionemo.evo2.vllm.benchmark \
+  --backend vllm \
+  --checkpoint /path/to/evo2-vllm-export \
+  --manifest /path/to/workload-manifest.json \
+  --topology tp2 \
+  --max-model-len 6016 \
+  --max-new-tokens 5988 \
+  --request-count 96 \
+  --global-wave-size 96 \
+  --max-num-seqs 96 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.91 \
+  --optimization-level 2 \
+  --performance-mode balanced \
+  --distributed-executor-backend mp \
+  --async-scheduling \
+  --output results/evo2-vllm-b96.json
+```
+
+For this reference command, the resolved artifact must report TP2, executor
+`mp`, async scheduling enabled, compilation mode 3, `FULL_AND_PIECEWISE`, and
+capture size 96. Omit
+`--async-scheduling` only for an explicit sync comparison. Use
+`python -m ...`; running a module file by path can let the local `profile.py`
+shadow Python's standard-library module.
+
+On a system other than the qualified two-H100 node, first discover assigned GPU
+count/topology/free memory and run a small correctness/capacity probe. Use every
+assigned GPU through a supported topology. TP2 is the measured reference, not a
+maximum: TP4 or TP8 may be used when model/context memory or the tested hardware
+favors a wider tensor-parallel engine. Use remaining GPUs as disjoint DP engine
+groups when that improves throughput, with disjoint prompt/seed partitions and
+no CUDA-device overlap. Recompute local wave size and include every actual local
+batch shape in the CUDA-graph capture list. Preserve the same output/logprob/QC
+gates when comparing topologies; choose the fastest end-to-end configuration
+with memory headroom rather than assuming that higher TP is always faster.
+
+### Mixed RL batching contract
+
+The production mixed workload uses eight prompt-length strata and twelve
+stochastic generations per prompt: `P=8`, `K=12`, and
+`train_global_batch_size=P*K=96`. The local vLLM generation request contains
+`GBS/DP` rows: 96 for DP1, or 48 for each DP2 engine. The DP2 validation
+manifest assigns six rollouts from every length stratum to each rank.
+
+`policy.train_micro_batch_size` is only the MCore forward/backward chunk size;
+it is not a prompt count and does not define advantage groups. Capacity-test the
+full local training batch first, then use the largest stable divisor of the local
+batch and accumulate the remaining chunks. Capacity-test
+`policy.logprob_batch_size` independently. Assemble all K rewards for a prompt
+before within-prompt advantage normalization, including when its rollouts span
+DP ranks.
+
+The primary frozen validation bank is
+`data/phage_prompts_paper_useful_rl_validation_mixed_8x12.jsonl`
+(SHA256 `fa9bc74d3784333a5daf29f2c1149dbd7baa302907723ca449aec4bd5e1b8a6b`).
+Report every length stratum plus the fixed equal-weight aggregate. The
+`validation_prompt10_96` bank remains a historical single-length control.
+The one-step `gdpo_phage_vllm_tp2_one_step_smoke.yaml` uses P8xK2/GBS16 and is
+explicitly capacity-bounded; it is not the production batch contract.
+
 ### 2. Prepare external QC and Arc
 
 ```bash

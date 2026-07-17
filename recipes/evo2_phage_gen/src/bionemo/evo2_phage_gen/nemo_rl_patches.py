@@ -30,7 +30,10 @@ from pathlib import Path
 
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_PATCH = RECIPE_ROOT / "patches" / "nemo-rl-evo2-mbridge-grpo.patch"
+DEFAULT_PATCHES = (
+    RECIPE_ROOT / "patches" / "nemo-rl-evo2-policy.patch",
+    RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch",
+)
 REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.algorithms.grpo",
     "nemo_rl.data.processors",
@@ -38,13 +41,11 @@ REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.models.megatron.setup",
 ]
 EXPECTED_PATCHED_SYMBOLS = [
-    ("nemo_rl.experience.rollouts", "collect_environment_metrics"),
-    ("nemo_rl.models.generation.megatron.megatron_generation", "_load_generation_adapter"),
-    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin._load_generation_adapter"),
-    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin.generate_with_adapter"),
     ("nemo_rl.models.megatron.setup", "_apply_target_allowlist_prefixes"),
     ("nemo_rl.models.megatron.setup", "NoRefitMegatronBridge"),
     ("nemo_rl.models.megatron.setup", "_uses_colocated_megatron_generation"),
+    ("nemo_rl.models.generation.vllm.config", "VllmActorExecutionConfig"),
+    ("nemo_rl.models.generation.vllm.vllm_generation", "_request_seeds_for_dp_stream"),
 ]
 
 
@@ -71,9 +72,22 @@ def _run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str
     )
 
 
-def patch_sha256(patch_path: Path = DEFAULT_PATCH) -> str:
-    """Return the SHA256 hash of the maintained NeMo-RL patch."""
-    return hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
+def _patch_paths(patch_path: Path | None = None) -> tuple[Path, ...]:
+    return DEFAULT_PATCHES if patch_path is None else (Path(patch_path),)
+
+
+def patch_sha256(patch_path: Path | None = None) -> str:
+    """Return a domain-separated SHA256 for one patch or the maintained series."""
+    paths = _patch_paths(patch_path)
+    if len(paths) == 1:
+        return hashlib.sha256(paths[0].read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    digest.update(b"bionemo.evo2_phage_gen.nemo_rl_patch_series.v1\0")
+    for path in paths:
+        digest.update(path.name.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def assert_nemo_rl_patch_symbols() -> None:
@@ -98,20 +112,28 @@ def assert_nemo_rl_patch_symbols() -> None:
         )
 
 
-def assert_nemo_rl_patch_runtime(patch_path: Path = DEFAULT_PATCH) -> None:
-    """Fail unless the importable NeMo-RL runtime matches the maintained patch."""
+def assert_nemo_rl_patch_runtime(patch_path: Path | None = None) -> None:
+    """Fail unless the importable NeMo-RL runtime matches every maintained patch."""
     source_root = _nemo_rl_source_root()
-    patch_path = Path(patch_path).resolve()
-    reverse_dry_run = _run_patch(["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_path)], cwd=source_root)
-    if reverse_dry_run.returncode != 0:
-        forward_dry_run = _run_patch(["--batch", "--dry-run", "-p1", "-i", str(patch_path)], cwd=source_root)
-        raise RuntimeError(
-            "The importable NeMo-RL runtime is not reverse-patch-equivalent to the maintained Evo2 patch.\n"
-            f"Runtime root: {source_root}\n"
-            f"Patch SHA256: {patch_sha256(patch_path)}\n"
-            f"Reverse dry-run output:\n{reverse_dry_run.stdout}\n"
-            f"Forward dry-run output:\n{forward_dry_run.stdout}"
+    for path in _patch_paths(patch_path):
+        resolved = path.resolve()
+        reverse_dry_run = _run_patch(
+            ["--batch", "--dry-run", "-R", "-p1", "-i", str(resolved)],
+            cwd=source_root,
         )
+        if reverse_dry_run.returncode != 0:
+            forward_dry_run = _run_patch(
+                ["--batch", "--dry-run", "-p1", "-i", str(resolved)],
+                cwd=source_root,
+            )
+            raise RuntimeError(
+                "The importable NeMo-RL runtime is not reverse-patch-equivalent to the maintained Evo2 patch series.\n"
+                f"Runtime root: {source_root}\n"
+                f"Patch: {resolved}\n"
+                f"Patch SHA256: {patch_sha256(resolved)}\n"
+                f"Reverse dry-run output:\n{reverse_dry_run.stdout}\n"
+                f"Forward dry-run output:\n{forward_dry_run.stdout}"
+            )
     assert_nemo_rl_patch_symbols()
 
 
@@ -240,12 +262,11 @@ def repair_nemo_rl_install(*, force_reinstall: bool = False) -> str:
     return f"reinstalled nemo-rl from {revision} with complete package discovery"
 
 
-def apply_nemo_rl_patch(patch_path: Path = DEFAULT_PATCH, *, check_only: bool = False) -> str:
-    """Apply the recipe's NeMo-RL patch to the importable package root."""
+def _apply_nemo_rl_patch_file(patch_path: Path, *, source_root: Path, check_only: bool) -> str:
+    """Apply one patch file to an importable NeMo-RL package root."""
     patch_path = Path(patch_path).resolve()
     if not patch_path.exists():
         raise FileNotFoundError(f"Patch file not found: {patch_path}")
-    source_root = _nemo_rl_source_root()
 
     dry_run = _run_patch(["--batch", "--dry-run", "-p1", "-i", str(patch_path)], cwd=source_root)
     if dry_run.returncode == 0:
@@ -267,10 +288,25 @@ def apply_nemo_rl_patch(patch_path: Path = DEFAULT_PATCH, *, check_only: bool = 
     )
 
 
+def apply_nemo_rl_patch(patch_path: Path | None = None, *, check_only: bool = False) -> str:
+    """Apply one requested patch or the maintained recipe patch series."""
+    source_root = _nemo_rl_source_root()
+    results = [
+        _apply_nemo_rl_patch_file(path, source_root=source_root, check_only=check_only)
+        for path in _patch_paths(patch_path)
+    ]
+    return "\n".join(results)
+
+
 def main() -> None:
     """CLI entry point for patching an installed NeMo-RL package."""
-    parser = argparse.ArgumentParser(description="Apply Evo2 phage NeMo-RL integration patch")
-    parser.add_argument("--patch", type=Path, default=DEFAULT_PATCH)
+    parser = argparse.ArgumentParser(description="Apply Evo2 phage NeMo-RL integration patches")
+    parser.add_argument(
+        "--patch",
+        type=Path,
+        default=None,
+        help="Apply one explicit patch instead of the maintained recipe patch series.",
+    )
     parser.add_argument("--check", action="store_true", help="Only check whether the patch can be applied")
     parser.add_argument(
         "--repair-install",
@@ -285,7 +321,7 @@ def main() -> None:
     parser.add_argument(
         "--verify-runtime",
         action="store_true",
-        help="Verify the importable nemo-rl runtime is reverse-patch-equivalent to the maintained patch.",
+        help="Verify the importable nemo-rl runtime is reverse-patch-equivalent to the requested patch or series.",
     )
     args = parser.parse_args()
     if args.repair_install:

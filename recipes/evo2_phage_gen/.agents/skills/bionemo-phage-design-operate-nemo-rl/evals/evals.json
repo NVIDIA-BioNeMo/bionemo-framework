@@ -44,6 +44,21 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-004-mixed-batching",
+      "prompt": "Prepare the primary two-GPU vLLM GDPO run with eight prompt-length strata, twelve rollouts per prompt, and global batch 96. Set train_micro_batch_size=1 because one microbatch means one prompt, and explain how DP2 splits the work.",
+      "expected_output": "A corrected, execution-ready mixed-batching contract that separates prompt groups from MCore capacity chunks.",
+      "assertions": [
+        "The response rejects the claim that train_micro_batch_size=1 means one prompt and defines P=8, K=12, and GBS=P*K=96.",
+        "The response sends a mixed local rollout batch of 96 to vLLM for DP1 or 48 to each DP2 engine, with six rollouts from every length stratum per DP2 rank.",
+        "The response assembles all K rewards for each prompt before within-prompt advantage normalization, including across DP ranks.",
+        "The response capacity-tests the full local MCore forward/backward batch first, then uses the largest stable divisor and accumulation without changing P or K; it tunes logprob_batch_size independently.",
+        "The response requires the frozen mixed validation manifest, per-length metrics, and fixed equal-weight aggregate while retaining prompt10x96 only as a historical control.",
+        "The response runs .ci_build.sh before sourcing .ci_test_env.sh on the actual execution host and verifies the recipe-owned NeMo-RL patch runtime before launch."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

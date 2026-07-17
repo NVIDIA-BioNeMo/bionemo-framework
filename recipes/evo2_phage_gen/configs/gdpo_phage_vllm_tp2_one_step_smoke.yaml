@@ -1,0 +1,128 @@
+# Capacity-bounded end-to-end TP2 policy + TP2 vLLM GDPO smoke.
+# P=8 prompt-length strata, K=2 stochastic rollouts, GBS=16.
+defaults: "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
+
+checkpointing:
+  enabled: false
+  checkpoint_dir: "/data/jstjohn/evo2-vllm-lab/artifacts/gdpo-tp2-one-step/checkpoints"
+  pretrained_checkpoint:
+    path: "/data/jstjohn/bionemo-recipes/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge"
+    format: "megatron_bridge"
+
+grpo:
+  max_num_epochs: 1
+  max_num_steps: 1
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 2
+  val_batch_size: 16
+  max_val_samples: 16
+  val_at_start: false
+  val_at_end: true
+  seq_logprob_error_threshold: 1.5
+
+policy:
+  model_name: "/data/jstjohn/evo2-vllm-lab/artifacts/evo2_7b_1m_vllm_rope128"
+  tokenizer:
+    name: "/data/jstjohn/bionemo-recipes/recipes/evo2_megatron/tokenizers/nucleotide_fast_tokenizer_512"
+    chat_template_kwargs: null
+  train_global_batch_size: 16
+  # MBS is only the MCore fwd/bwd chunk. Start at the full local batch; if this
+  # OOMs, sweep stable divisors of 16 without changing P, K, or rollout grouping.
+  train_micro_batch_size: 16
+  generation_batch_size: 16
+  logprob_batch_size: 16
+  max_total_sequence_length: 1024
+  generation:
+    backend: "vllm"
+    max_new_tokens: 128
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 4
+    request_seed: 42
+    ignore_eos: true
+    allowed_token_ids: [65, 67, 71, 78, 84]
+    num_logprobs: 0
+    generation_batch_size: 16
+    mcore_generation_config: null
+    evo2_collect_proof: false
+    generation_worker_cls: "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
+    vllm_cfg:
+      tensor_parallel_size: 2
+      pipeline_parallel_size: 1
+      expert_parallel_size: 1
+      gpu_memory_utilization: 0.91
+      max_model_len: 1024
+      skip_tokenizer_init: true
+      async_engine: false
+      load_format: "dummy"
+      precision: "bfloat16"
+      kv_cache_dtype: "auto"
+      enforce_eager: false
+      enable_prefix_caching: false
+    vllm_kwargs:
+      distributed_executor_backend: "mp"
+      async_scheduling: true
+      model_impl: "vllm"
+      optimization_level: 2
+      performance_mode: "balanced"
+      max_num_seqs: 16
+      max_num_batched_tokens: 4096
+      enable_chunked_prefill: true
+      max_num_partial_prefills: 1
+      max_long_partial_prefills: 1
+      long_prefill_token_threshold: 0
+      mamba_cache_mode: "none"
+      mamba_cache_dtype: "float32"
+      mamba_ssm_cache_dtype: "float32"
+      cudagraph_metrics: false
+      worker_extension_cls: "bionemo.evo2.vllm.nemo_worker.Evo2NemoRlVllmWorkerExtension"
+      compilation_config:
+        mode: 3
+        backend: "inductor"
+        cudagraph_mode: "FULL_AND_PIECEWISE"
+        cudagraph_num_of_warmups: 1
+        cudagraph_capture_sizes: [1, 2, 4, 8, 16]
+        compile_sizes: [16]
+        splitting_ops:
+          - "vllm::unified_attention_with_output"
+          - "vllm::unified_mla_attention_with_output"
+          - "vllm::mamba_mixer2"
+          - "vllm::mamba_mixer"
+          - "vllm::short_conv"
+          - "vllm::linear_attention"
+          - "vllm::plamo2_mamba_mixer"
+          - "vllm::gdn_attention_core"
+          - "vllm::gdn_attention_core_xpu"
+          - "vllm::olmo_hybrid_gdn_full_forward"
+          - "vllm::kda_attention"
+          - "vllm::sparse_attn_indexer"
+          - "vllm::rocm_aiter_sparse_attn_indexer"
+          - "vllm::deepseek_v4_attention"
+          - "vllm::unified_kv_cache_update"
+          - "vllm::unified_mla_kv_cache_update"
+          - "bionemo_evo2::hyena_mixer"
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+
+data:
+  train:
+    data_path: "data/phage_prompts_paper_useful_rl_mixed_8.jsonl"
+  validation:
+    data_path: "data/phage_prompts_paper_useful_rl_validation_mixed_8x12.jsonl"
+
+env:
+  phage_qc:
+    dustmask_filter: false
+    external_qc:
+      enabled: false
+    mmseqs_cluster_diversity:
+      enabled: false
+
+logger:
+  log_dir: "/data/jstjohn/evo2-vllm-lab/artifacts/gdpo-tp2-one-step/logs"
+  wandb_enabled: false
+  tensorboard_enabled: true
+  monitor_gpus: true

@@ -1,0 +1,1082 @@
+diff --git a/nemo_rl/distributed/worker_groups.py b/nemo_rl/distributed/worker_groups.py
+index 3798a5606..225aea780 100644
+--- a/nemo_rl/distributed/worker_groups.py
++++ b/nemo_rl/distributed/worker_groups.py
+@@ -334,6 +334,7 @@ class RayWorkerGroup:
+         bundle_indices_list: Optional[list[tuple[int, list[int]]]] = None,
+         sharding_annotations: Optional[NamedSharding] = None,
+         env_vars: dict[str, str] = {},
++        fixed_group_gpu_ids: Optional[list[tuple[int, ...]]] = None,
+     ):
+         """Initialize a group of distributed Ray workers.
+ 
+@@ -410,9 +411,22 @@ class RayWorkerGroup:
+         self._create_workers_from_bundle_indices(
+             remote_worker_builder,
+             bundle_indices_list,
++            fixed_group_gpu_ids=fixed_group_gpu_ids,
+             env_vars=env_vars,
+         )
+ 
++    @staticmethod
++    def _fixed_group_cuda_visible_devices(gpu_ids: tuple[int, ...]) -> str:
++        if type(gpu_ids) is not tuple or len(gpu_ids) != 2:
++            raise ValueError("fixed MP actor assignment must contain exactly two GPUs")
++        if any(type(gpu_id) is not int or gpu_id < 0 for gpu_id in gpu_ids):
++            raise TypeError(
++                "fixed MP actor GPU IDs must be nonnegative built-in integers"
++            )
++        if len(set(gpu_ids)) != len(gpu_ids):
++            raise ValueError("fixed MP actor GPU IDs must be unique")
++        return ",".join(str(gpu_id) for gpu_id in gpu_ids)
++
+     def get_dp_leader_worker_idx(self, dp_shard_idx: int) -> int:
+         """Returns the index of the primary worker for a given data parallel shard."""
+         if not 0 <= dp_shard_idx < len(self.dp_leader_worker_indices):
+@@ -426,6 +440,7 @@ class RayWorkerGroup:
+         self,
+         remote_worker_builder: RayWorkerBuilder,
+         bundle_indices_list: list[tuple[int, list[int]]],
++        fixed_group_gpu_ids: Optional[list[tuple[int, ...]]] = None,
+         env_vars: dict[str, str] = {},
+     ) -> None:
+         """Create workers based on explicit bundle indices for tied worker groups.
+@@ -440,6 +455,12 @@ class RayWorkerGroup:
+         self.master_address, self.master_port = (
+             self.cluster.get_master_address_and_port()
+         )
++        if fixed_group_gpu_ids is not None and len(fixed_group_gpu_ids) != len(
++            bundle_indices_list
++        ):
++            raise ValueError(
++                "fixed MP actor GPU assignments must match the tied worker groups"
++            )
+ 
+         # Update env_vars with the current environment variables
+         for k, v in os.environ.items():
+@@ -509,6 +530,11 @@ class RayWorkerGroup:
+ 
+         for group_idx, (pg_idx, local_bundle_indices) in enumerate(bundle_indices_list):
+             current_group = []
++            fixed_cuda_visible_devices = None
++            if fixed_group_gpu_ids is not None:
++                fixed_cuda_visible_devices = self._fixed_group_cuda_visible_devices(
++                    fixed_group_gpu_ids[group_idx]
++                )
+ 
+             if len(placement_groups) == 1:
+                 pg = placement_groups[0]
+@@ -532,6 +558,8 @@ class RayWorkerGroup:
+                         "AVAILABLE_PORT_LIST": str(available_ports),
+                     }
+                 )
++                if fixed_cuda_visible_devices is not None:
++                    worker_env_vars["CUDA_VISIBLE_DEVICES"] = fixed_cuda_visible_devices
+                 # Remove Ray-specific environment variables, let the worker itself set them.
+                 worker_env_vars.pop("RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES", None)
+                 worker_env_vars.pop("RAY_CLIENT_MODE", None)
+diff --git a/nemo_rl/models/generation/interfaces.py b/nemo_rl/models/generation/interfaces.py
+index 025707c70..3d19ac77f 100644
+--- a/nemo_rl/models/generation/interfaces.py
++++ b/nemo_rl/models/generation/interfaces.py
+@@ -20,6 +20,15 @@ import torch
+ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+ 
+ 
++GENERATION_REQUEST_METADATA_KEYS = (
++    "generation_request_seeds",
++    "generation_global_request_indices",
++    "generation_rounds",
++    "generation_call_indices",
++    "generation_dp_ranks",
++)
++
++
+ def verify_right_padding(
+     data: Union[
+         BatchedDataDict["GenerationDatumSpec"], BatchedDataDict["GenerationOutputSpec"]
+@@ -167,6 +176,11 @@ class GenerationDatumSpec(TypedDict):
+     input_ids: torch.Tensor
+     input_lengths: torch.Tensor
+     stop_strings: NotRequired[list[str]]
++    generation_request_seeds: NotRequired[torch.Tensor]
++    generation_global_request_indices: NotRequired[torch.Tensor]
++    generation_rounds: NotRequired[torch.Tensor]
++    generation_call_indices: NotRequired[torch.Tensor]
++    generation_dp_ranks: NotRequired[torch.Tensor]
+     __extra__: Any
+ 
+ 
+@@ -222,6 +236,11 @@ class GenerationOutputSpec(TypedDict):
+     r3_routed_experts_missing_routes: NotRequired[torch.Tensor]
+     r3_routed_experts_expected_routes: NotRequired[torch.Tensor]
+     r3_routed_experts_actual_routes: NotRequired[torch.Tensor]
++    generation_request_seeds: NotRequired[torch.Tensor]
++    generation_global_request_indices: NotRequired[torch.Tensor]
++    generation_rounds: NotRequired[torch.Tensor]
++    generation_call_indices: NotRequired[torch.Tensor]
++    generation_dp_ranks: NotRequired[torch.Tensor]
+     truncated: NotRequired[
+         torch.Tensor
+     ]  # Whether each sequence was truncated and hit max_tokens without stop token
+diff --git a/nemo_rl/models/generation/vllm/config.py b/nemo_rl/models/generation/vllm/config.py
+index 44eb5d5d8..704444f3b 100644
+--- a/nemo_rl/models/generation/vllm/config.py
++++ b/nemo_rl/models/generation/vllm/config.py
+@@ -12,6 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++from dataclasses import dataclass
+ from typing import Any, Literal, NotRequired, TypedDict
+ 
+ from nemo_rl.models.generation.interfaces import GenerationConfig
+@@ -55,6 +56,10 @@ class VllmSpecificArgs(TypedDict):
+ class VllmConfig(GenerationConfig):
+     vllm_cfg: VllmSpecificArgs
+     vllm_kwargs: NotRequired[dict[str, Any]]
++    request_seed: NotRequired[int]
++    generation_worker_cls: NotRequired[str]
++    num_logprobs: NotRequired[int]
++    allowed_token_ids: NotRequired[list[int] | None]
+ 
+     # quantization config
+     quant_cfg: NotRequired[str | None]
+@@ -63,3 +68,67 @@ class VllmConfig(GenerationConfig):
+     # modules. This is intended for ModelOpt NVFP4 rollout experiments.
+     real_quant: NotRequired[bool]
+     real_quant_ignore: NotRequired[list[str]]
++
++
++@dataclass(frozen=True, slots=True)
++class VllmActorExecutionConfig:
++    """Immutable opt-in contract for the vLLM executor inside a NeMo-RL actor."""
++
++    requested_backend: str | None
++    resolved_backend: Literal["ray", "mp"]
++    async_scheduling: bool
++    fixed_gpu_count: int
++
++    @classmethod
++    def from_config(cls, config: VllmConfig) -> "VllmActorExecutionConfig":
++        vllm_kwargs = config.get("vllm_kwargs", {})
++        if not isinstance(vllm_kwargs, dict):
++            raise TypeError("vllm_kwargs must be a dictionary")
++
++        requested_backend = vllm_kwargs.get("distributed_executor_backend")
++        requested_mp = requested_backend == "mp"
++        raw_async_scheduling = vllm_kwargs.get("async_scheduling", False)
++        if requested_mp and type(requested_backend) is not str:
++            raise TypeError("distributed_executor_backend must be a built-in string")
++        if requested_mp and type(raw_async_scheduling) is not bool:
++            raise TypeError("async_scheduling must be a built-in bool for MP actors")
++        if not requested_mp:
++            return cls(
++                requested_backend=(
++                    requested_backend if type(requested_backend) is str else None
++                ),
++                resolved_backend="ray",
++                async_scheduling=(
++                    raw_async_scheduling
++                    if type(raw_async_scheduling) is bool
++                    else False
++                ),
++                fixed_gpu_count=0,
++            )
++
++        vllm_cfg = config.get("vllm_cfg")
++        if not isinstance(vllm_cfg, dict):
++            raise ValueError("TP2 MP actor requires vllm_cfg")
++        if vllm_cfg.get("tensor_parallel_size") != 2:
++            raise ValueError("TP2 MP actor requires tensor_parallel_size=2")
++        if vllm_cfg.get("pipeline_parallel_size") != 1:
++            raise ValueError("TP2 MP actor requires PP1")
++        if vllm_cfg.get("expert_parallel_size") != 1:
++            raise ValueError("TP2 MP actor does not support expert parallelism")
++        if raw_async_scheduling is not True:
++            raise ValueError("TP2 MP actor requires async_scheduling=true")
++        if vllm_cfg.get("async_engine") is not False:
++            raise ValueError("TP2 MP actor requires the outer sync NeMo-RL worker")
++        colocated = config.get("colocated")
++        if (
++            not isinstance(colocated, dict)
++            or type(colocated.get("enabled")) is not bool
++        ):
++            raise ValueError("TP2 MP actor requires an explicit colocation mode")
++
++        return cls(
++            requested_backend="mp",
++            resolved_backend="mp",
++            async_scheduling=True,
++            fixed_gpu_count=2,
++        )
+diff --git a/nemo_rl/models/generation/vllm/vllm_generation.py b/nemo_rl/models/generation/vllm/vllm_generation.py
+index d68bf512b..148022670 100644
+--- a/nemo_rl/models/generation/vllm/vllm_generation.py
++++ b/nemo_rl/models/generation/vllm/vllm_generation.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ import asyncio
++import copy
+ import logging
+ import os
+ import warnings
+@@ -26,18 +27,24 @@ from typing import (
+ 
+ import numpy as np
+ import ray
++import torch
+ from ray.util.placement_group import PlacementGroup
+ 
+ from nemo_rl.distributed.batched_data_dict import BatchedDataDict, SlicedDataDict
+ from nemo_rl.distributed.named_sharding import NamedSharding
+-from nemo_rl.distributed.virtual_cluster import NVLINK_DOMAIN_UNKNOWN, RayVirtualCluster
++from nemo_rl.distributed.virtual_cluster import (
++    NVLINK_DOMAIN_UNKNOWN,
++    RayVirtualCluster,
++    get_reordered_bundle,
++)
+ from nemo_rl.distributed.worker_groups import RayWorkerBuilder, RayWorkerGroup
+ from nemo_rl.models.generation.interfaces import (
++    GENERATION_REQUEST_METADATA_KEYS,
+     GenerationDatumSpec,
+     GenerationInterface,
+     GenerationOutputSpec,
+ )
+-from nemo_rl.models.generation.vllm.config import VllmConfig
++from nemo_rl.models.generation.vllm.config import VllmActorExecutionConfig, VllmConfig
+ from nemo_rl.models.generation.vllm.utils import (
+     aggregate_spec_decode_counters,
+     compute_spec_decode_metrics,
+@@ -46,6 +53,44 @@ from nemo_rl.models.generation.vllm.utils import (
+ 
+ logger = logging.getLogger(__name__)
+ 
++_REQUEST_SEED_ROUND_STRIDE = 1_000_003
++_REQUEST_SEED_MODULUS = 2**31
++
++
++def _request_seeds_for_dp_stream(
++    *,
++    base_seed: int,
++    call_index: int,
++    dp_rank: int,
++    dp_size: int,
++    request_count: int,
++) -> torch.Tensor:
++    """Derive one collision-free local request sequence from a physical DP stream."""
++    if min(base_seed, call_index, dp_rank, request_count) < 0 or dp_size <= 0:
++        raise ValueError("seed coordinates must be nonnegative")
++    if dp_rank >= dp_size:
++        raise ValueError("dp_rank must be smaller than dp_size")
++    if request_count > _REQUEST_SEED_ROUND_STRIDE:
++        raise ValueError("request count exceeds the collision-free stream stride")
++    stream_seed = (
++        base_seed + (call_index * dp_size + dp_rank) * _REQUEST_SEED_ROUND_STRIDE
++    ) % _REQUEST_SEED_MODULUS
++    return (
++        stream_seed + torch.arange(request_count, dtype=torch.int64)
++    ) % _REQUEST_SEED_MODULUS
++
++
++def _configured_generation_worker_cls(config: VllmConfig) -> str:
++    """Resolve an optional recipe-owned outer generation worker class."""
++    configured = config.get("generation_worker_cls")
++    if configured:
++        return configured
++    if config["vllm_cfg"]["async_engine"]:
++        return (
++            "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
++        )
++    return "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker"
++
+ 
+ class VllmGeneration(GenerationInterface):
+     @staticmethod
+@@ -99,39 +144,54 @@ class VllmGeneration(GenerationInterface):
+             workers_per_node: Workers per node override
+             defer_model_load: If True, defer model loading for overlapped init
+         """
+-        # Store config
+-        self.cfg = config
++        admitted_execution = VllmActorExecutionConfig.from_config(config)
++        self.cfg = copy.deepcopy(config)
++        constructed_execution = VllmActorExecutionConfig.from_config(self.cfg)
++        if constructed_execution != admitted_execution:
++            raise RuntimeError("vLLM actor execution config changed during construction")
++        self._actor_execution_config = constructed_execution
+         self._defer_model_load = defer_model_load
+         self.tp_size = self.cfg["vllm_cfg"]["tensor_parallel_size"]
+         self.pp_size = self.cfg["vllm_cfg"]["pipeline_parallel_size"]
+         self.ep_size = self.cfg["vllm_cfg"]["expert_parallel_size"]
+         self.model_parallel_size = self.tp_size * self.pp_size
+ 
+-        assert cluster.world_size() % self.model_parallel_size == 0, (
+-            "World size must be a multiple of model parallel size. "
+-            f"Got world size {cluster.world_size()} and model parallel size (TP * PP) {self.model_parallel_size}."
+-        )
++        if self._actor_execution_config.resolved_backend == "mp" and (
++            cluster.world_size() != 2
++            or not cluster.use_gpus
++            or cluster.max_colocated_worker_groups not in (1, 2)
++            or cluster.num_gpus_per_node < 2
++        ):
++            raise ValueError("TP2 MP actor requires one two-GPU replica group")
++
++        if cluster.world_size() % self.model_parallel_size != 0:
++            raise ValueError(
++                "World size must be a multiple of model parallel size. "
++                f"Got world size {cluster.world_size()} and model parallel size (TP * PP) {self.model_parallel_size}."
++            )
+         self.dp_size = cluster.world_size() // self.model_parallel_size
+         self.vllm_dp_size = self.ep_size // self.tp_size
+ 
+-        if self.pp_size > 1:
+-            assert self.cfg["vllm_cfg"]["async_engine"], (
++        if self.pp_size > 1 and not self.cfg["vllm_cfg"]["async_engine"]:
++            raise ValueError(
+                 "When pipeline_parallel_size > 1, async_engine must be set to True in the vLLM configuration. "
+                 "You can enable it by adding `policy.generation.vllm_cfg.async_engine=true` to your command."
+             )
+ 
+         if self.ep_size > 1:
+-            assert self.ep_size % self.tp_size == 0, (
+-                "When EP > 1, EP must be a multiple of TP since vLLM's EP = DP * TP. "
+-                "Please update your configuration to set expert_parallel_size to a multiple of tensor_parallel_size."
+-            )
++            if self.ep_size % self.tp_size != 0:
++                raise ValueError(
++                    "When EP > 1, EP must be a multiple of TP since vLLM's EP = DP * TP. "
++                    "Please update your configuration to set expert_parallel_size to a multiple of tensor_parallel_size."
++                )
+             if self.ep_size != self.tp_size:
+                 # vLLM's EP = DP * TP, so here we need to use DP inside vLLM.
+-                assert not self.cfg["vllm_cfg"]["async_engine"], (
+-                    "vLLM async_engine has some issues when using DP inside vLLM. "
+-                    "Please update your configuration to set `policy.generation.vllm_cfg.async_engine=false`. "
+-                    "See https://github.com/NVIDIA-NeMo/RL/issues/1101 for more details."
+-                )
++                if self.cfg["vllm_cfg"]["async_engine"]:
++                    raise ValueError(
++                        "vLLM async_engine has some issues when using DP inside vLLM. "
++                        "Please update your configuration to set `policy.generation.vllm_cfg.async_engine=false`. "
++                        "See https://github.com/NVIDIA-NeMo/RL/issues/1101 for more details."
++                    )
+ 
+         # Validate sampling parameters early to avoid resource allocation with unsupported configs.
+         top_k: int | None = self.cfg["top_k"]
+@@ -154,12 +214,13 @@ class VllmGeneration(GenerationInterface):
+         if "model_name" not in self.cfg:
+             missing_keys.append("model_name")
+ 
+-        assert not missing_keys, (
+-            f"VLLM Configuration Error: Missing required keys in VllmConfig.\n"
+-            f"Missing keys: {', '.join(missing_keys)}\n"
+-            f"Provided keys: {', '.join(self.cfg.keys())}\n"
+-            f"Please update your configuration to include all required VLLM parameters."
+-        )
++        if missing_keys:
++            raise ValueError(
++                f"VLLM Configuration Error: Missing required keys in VllmConfig.\n"
++                f"Missing keys: {', '.join(missing_keys)}\n"
++                f"Provided keys: {', '.join(self.cfg.keys())}\n"
++                "Please update your configuration to include all required VLLM parameters."
++            )
+ 
+         self.sharding_annotations = NamedSharding(
+             layout=np.arange(cluster.world_size()).reshape(
+@@ -185,12 +246,7 @@ class VllmGeneration(GenerationInterface):
+         )
+ 
+         # Create worker builder for VllmGenerationWorker
+-        if self.cfg["vllm_cfg"]["async_engine"]:
+-            worker_cls = "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
+-        else:
+-            worker_cls = (
+-                "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker"
+-            )
++        worker_cls = _configured_generation_worker_cls(self.cfg)
+         worker_cls = resolve_generation_worker_cls(worker_cls, self.cfg)
+         if self.cfg["vllm_cfg"]["async_engine"]:
+             worker_builder = RayWorkerBuilder(
+@@ -228,6 +284,11 @@ class VllmGeneration(GenerationInterface):
+         if self.model_parallel_size > 1:
+             # For parallelism, create node-aware worker groups
+             node_bundle_indices = self._get_tied_worker_bundle_indices(cluster)
++            fixed_group_gpu_ids = None
++            if self._actor_execution_config.resolved_backend == "mp":
++                fixed_group_gpu_ids = self._resolve_mp_actor_group_gpu_ids(
++                    cluster, node_bundle_indices
++                )
+ 
+             self.worker_group = RayWorkerGroup(
+                 cluster,
+@@ -235,6 +296,7 @@ class VllmGeneration(GenerationInterface):
+                 name_prefix=name_prefix,
+                 bundle_indices_list=node_bundle_indices,
+                 sharding_annotations=self.sharding_annotations,
++                fixed_group_gpu_ids=fixed_group_gpu_ids,
+                 env_vars=env_vars,
+             )
+         else:
+@@ -249,12 +311,15 @@ class VllmGeneration(GenerationInterface):
+             )
+ 
+         # Number of data parallel groups is the number of tied worker groups
+-        assert self.dp_size == self.worker_group.dp_size, (
+-            f"Data parallel size mismatch. Expected {self.dp_size}, got {self.worker_group.dp_size}"
+-        )
++        if self.dp_size != self.worker_group.dp_size:
++            raise RuntimeError(
++                f"Data parallel size mismatch. Expected {self.dp_size}, got {self.worker_group.dp_size}"
++            )
+ 
+         # Used to track the round-robin selection of worker groups for generate_async
+         self.current_generate_dp_shard_idx = 0
++        self._generation_call_index = 0
++        self._next_global_request_index = 0
+ 
+         if defer_model_load:
+             # Workers only reserved ports — collect URLs immediately and defer
+@@ -273,6 +338,52 @@ class VllmGeneration(GenerationInterface):
+ 
+         self._step_metrics_snapshot: dict[str | tuple[str, int], float] | None = None
+ 
++    @staticmethod
++    def _resolve_mp_actor_group_gpu_ids(
++        cluster: RayVirtualCluster,
++        bundle_indices_list: list[tuple[int, list[int]]],
++    ) -> list[tuple[int, ...]]:
++        placement_groups = cluster.get_placement_groups()
++        if len(bundle_indices_list) != 1:
++            raise ValueError("TP2 MP actor requires exactly one tied worker group")
++
++        group_gpu_ids: list[tuple[int, ...]] = []
++        for pg_idx, bundle_indices in bundle_indices_list:
++            if not 0 <= pg_idx < len(placement_groups):
++                raise ValueError("TP2 MP actor placement-group index is invalid")
++            if type(bundle_indices) is not list or len(bundle_indices) != 2:
++                raise ValueError("TP2 MP actor requires exactly two placement bundles")
++            reordered_indices, reordered_gpu_ids, _ = get_reordered_bundle(
++                placement_groups[pg_idx]
++            )
++            gpu_id_by_bundle = dict(zip(reordered_indices, reordered_gpu_ids))
++            try:
++                raw_gpu_ids = tuple(
++                    gpu_id_by_bundle[index] for index in bundle_indices
++                )
++            except KeyError as error:
++                raise ValueError(
++                    "TP2 MP actor placement bundle has no physical GPU assignment"
++                ) from error
++            gpu_ids = []
++            for raw_gpu_id in raw_gpu_ids:
++                if type(raw_gpu_id) is int and raw_gpu_id >= 0:
++                    gpu_id = raw_gpu_id
++                elif (
++                    type(raw_gpu_id) is str
++                    and raw_gpu_id.isascii()
++                    and raw_gpu_id.isdecimal()
++                    and str(int(raw_gpu_id)) == raw_gpu_id
++                ):
++                    gpu_id = int(raw_gpu_id)
++                else:
++                    raise TypeError("Ray returned a noncanonical physical GPU ID")
++                gpu_ids.append(gpu_id)
++            if len(set(gpu_ids)) != 2:
++                raise ValueError("TP2 MP actor physical GPU assignments must be unique")
++            group_gpu_ids.append(tuple(gpu_ids))
++        return group_gpu_ids
++
+     def _get_tied_worker_bundle_indices(
+         self, cluster: RayVirtualCluster
+     ) -> list[tuple[int, list[int]]]:
+@@ -364,9 +475,8 @@ class VllmGeneration(GenerationInterface):
+                     if not node_bundles:
+                         raise ValueError("Placement group contains no bundles")
+                     counts = [len(b) for b in node_bundles.values()]
+-                    assert len(set(counts)) == 1, (
+-                        "All nodes must have identical bundle counts"
+-                    )
++                    if len(set(counts)) != 1:
++                        raise ValueError("All nodes must have identical bundle counts")
+                     sorted_nodes = sorted(node_bundles)
+                     flat = []
+                     for nid in sorted_nodes:
+@@ -621,21 +731,83 @@ class VllmGeneration(GenerationInterface):
+         return futures
+ 
+     def generate(
+-        self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
++        self,
++        data: BatchedDataDict[GenerationDatumSpec],
++        greedy: bool = False,
++        *,
++        generation_round: int | None = None,
++        call_index: int | None = None,
++        global_request_offset: int | None = None,
+     ) -> BatchedDataDict[GenerationOutputSpec]:
+         """Generate a batch of data using vLLM."""
+-        assert isinstance(data, BatchedDataDict), (
+-            f"data must be a BatchedDataDict, got type: {type(data)}"
++        if not isinstance(data, BatchedDataDict):
++            raise TypeError(f"data must be a BatchedDataDict, got type: {type(data)}")
++        if "input_ids" not in data or "input_lengths" not in data:
++            raise ValueError(
++                "input_ids and input_lengths are required in data for vLLM generation"
++            )
++
++        request_count = len(data["input_ids"])
++        explicit_coordinates = (generation_round, call_index, global_request_offset)
++        provided_coordinates = tuple(
++            value is not None for value in explicit_coordinates
++        )
++        if any(provided_coordinates) and not all(provided_coordinates):
++            raise ValueError(
++                "generation_round, call_index, and global_request_offset must be provided together"
++            )
++        if all(provided_coordinates):
++            for name, value in zip(
++                ("generation_round", "call_index", "global_request_offset"),
++                explicit_coordinates,
++                strict=True,
++            ):
++                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++                    raise ValueError(f"{name} must be a nonnegative integer")
++        else:
++            generation_round = self._generation_call_index
++            call_index = self._generation_call_index
++            global_request_offset = self._next_global_request_index
++            self._generation_call_index += 1
++            self._next_global_request_index += request_count
++        if (
++            generation_round is None
++            or call_index is None
++            or global_request_offset is None
++        ):
++            raise RuntimeError("generation coordinates were not resolved")
++        base_seed = int(self.cfg.get("request_seed", 0))
++        if base_seed < 0:
++            raise ValueError("request_seed must be nonnegative")
++        global_indices = torch.arange(
++            global_request_offset,
++            global_request_offset + request_count,
++            dtype=torch.int64,
+         )
+-        assert "input_ids" in data and "input_lengths" in data, (
+-            "input_ids and input_lengths are required in data for vLLM generation"
++        stamped_data = BatchedDataDict(dict(data.data))
++        stamped_data["generation_global_request_indices"] = global_indices
++        stamped_data["generation_rounds"] = torch.full(
++            (request_count,), generation_round, dtype=torch.int64
++        )
++        stamped_data["generation_call_indices"] = torch.full(
++            (request_count,), call_index, dtype=torch.int64
+         )
+-
+         # Shard the data across the tied worker groups
+         dp_size = self.sharding_annotations.get_axis_size("data_parallel")
+-        sharded_data: list[SlicedDataDict] = data.shard_by_batch_size(
++        sharded_data: list[SlicedDataDict] = stamped_data.shard_by_batch_size(
+             dp_size, allow_uneven_shards=True
+         )
++        for dp_rank, shard in enumerate(sharded_data):
++            shard["generation_request_seeds"] = _request_seeds_for_dp_stream(
++                base_seed=base_seed,
++                call_index=call_index,
++                dp_rank=dp_rank,
++                dp_size=dp_size,
++                request_count=len(shard["input_ids"]),
++            )
++            shard["generation_dp_ranks"] = torch.full(
++                (len(shard["input_ids"]),), dp_rank, dtype=torch.int64
++            )
+         future_bundle = self.worker_group.run_all_workers_sharded_data(
+             "generate",
+             data=sharded_data,
+@@ -665,6 +837,11 @@ class VllmGeneration(GenerationInterface):
+             raise ValueError(
+                 f"Missing required keys for GenerationOutputSpec: {missing_keys}"
+             )
++        missing_metadata = [
++            key for key in GENERATION_REQUEST_METADATA_KEYS if key not in combined
++        ]
++        if missing_metadata:
++            raise ValueError(f"Missing generation request metadata: {missing_metadata}")
+ 
+         return combined
+ 
+@@ -672,9 +849,8 @@ class VllmGeneration(GenerationInterface):
+         self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
+     ) -> BatchedDataDict[GenerationOutputSpec]:
+         """Generate text responses using vLLM."""
+-        assert isinstance(data, BatchedDataDict), (
+-            f"data must be a BatchedDataDict, got type: {type(data)}"
+-        )
++        if not isinstance(data, BatchedDataDict):
++            raise TypeError(f"data must be a BatchedDataDict, got type: {type(data)}")
+ 
+         # Check if async engine is enabled
+         if self.cfg["vllm_cfg"]["async_engine"]:
+@@ -737,20 +913,20 @@ class VllmGeneration(GenerationInterface):
+                 f"{method_name} can only be used when async_engine is enabled in vLLM config."
+             )
+ 
+-        assert isinstance(data, BatchedDataDict), (
+-            f"data must be a BatchedDataDict, got type: {type(data)}"
+-        )
++        if not isinstance(data, BatchedDataDict):
++            raise TypeError(f"data must be a BatchedDataDict, got type: {type(data)}")
+ 
+         # Validate input data and handle empty case
+         if not data_validation_fn(data):
+             return
+ 
+         # VllmAsyncGenerationWorker.generate_async: one sample per call.
+-        assert data.size == 1, (
+-            f"{method_name} is restricted to handle only single samples, "
+-            f"but received batch_size={data.size}. Please handle batching "
+-            f"outside this method."
+-        )
++        if data.size != 1:
++            raise ValueError(
++                f"{method_name} is restricted to handle only single samples, "
++                f"but received batch_size={data.size}. Please handle batching "
++                "outside this method."
++            )
+ 
+         # Determine the leader worker for the current data parallel shard
+         leader_worker_idx = self.worker_group.get_dp_leader_worker_idx(
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker.py b/nemo_rl/models/generation/vllm/vllm_worker.py
+index a2a59292c..174effe77 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker.py
+@@ -30,11 +30,12 @@ from nemo_rl.distributed.virtual_cluster import (
+ )
+ from nemo_rl.distributed.worker_group_utils import get_nsight_config_if_pattern_matches
+ from nemo_rl.models.generation.interfaces import (
++    GENERATION_REQUEST_METADATA_KEYS,
+     GenerationDatumSpec,
+     GenerationOutputSpec,
+     verify_right_padding,
+ )
+-from nemo_rl.models.generation.vllm.config import VllmConfig
++from nemo_rl.models.generation.vllm.config import VllmActorExecutionConfig, VllmConfig
+ from nemo_rl.models.generation.vllm.patches import _apply_vllm_patches
+ from nemo_rl.models.generation.vllm.utils import (
+     format_prompt_for_vllm_generation,
+@@ -47,6 +48,15 @@ from nemo_rl.utils.nvml import log_gpu_memory_diagnostics
+ 
+ logger = logging.getLogger(__name__)
+ 
++_DEFAULT_WORKER_EXTENSION_CLS = (
++    "nemo_rl.models.generation.vllm.vllm_backend.VllmInternalWorkerExtension"
++)
++
++
++def _pop_worker_extension_cls(vllm_kwargs: dict[str, Any]) -> str:
++    """Consume an optional recipe-composed internal vLLM worker extension."""
++    return str(vllm_kwargs.pop("worker_extension_cls", _DEFAULT_WORKER_EXTENSION_CLS))
++
+ 
+ def _resolve_enable_prefix_caching(vllm_cfg: dict[str, Any]) -> bool:
+     enable_prefix_caching = vllm_cfg.get("enable_prefix_caching", None)
+@@ -199,6 +209,7 @@ class BaseVllmGenerationWorker:
+                 _load_model() later to perform the heavy model loading. This
+                 enables overlapping vLLM model loading with NeMo Gym init.
+         """
++        admitted_execution = VllmActorExecutionConfig.from_config(config)
+         from nemo_rl.distributed.numa_utils import bind_to_gpu_numa
+ 
+         # Only bind single-GPU workers to their GPU's NUMA node.
+@@ -215,6 +226,15 @@ class BaseVllmGenerationWorker:
+         self._init_config(
+             config, bundle_indices, fraction_of_gpus, seed, extra_env_vars
+         )
++        constructed_execution = VllmActorExecutionConfig.from_config(self.cfg)
++        if constructed_execution != admitted_execution:
++            raise RuntimeError("vLLM worker actor execution config changed during construction")
++        self._actor_execution_config = constructed_execution
++        if (
++            self._actor_execution_config.resolved_backend != "mp"
++            and self.tensor_parallel_size * self.pipeline_parallel_size > 1
++        ):
++            _apply_vllm_patches(self.py_executable, extra_env_vars=extra_env_vars)
+ 
+         if not self.is_model_owner:
+             return
+@@ -246,8 +266,6 @@ class BaseVllmGenerationWorker:
+         # Store the Python executable being used by this worker
+         self.py_executable = sys.executable
+ 
+-        _apply_vllm_patches(self.py_executable, extra_env_vars=extra_env_vars)
+-
+         # Skip model loading if we're not the model owner
+         if not self.is_model_owner:
+             self.llm = None
+@@ -261,6 +279,36 @@ class BaseVllmGenerationWorker:
+         self.rank = 0
+         self.world_size = 1
+ 
++    def _configure_mp_parallel_executor(
++        self,
++        vllm_kwargs: dict[str, Any],
++        *,
++        bundle_indices: list[int],
++        model_parallel_size: int,
++    ) -> None:
++        if model_parallel_size != 2 or bundle_indices != [0, 1]:
++            raise ValueError("TP2 MP actor requires placement bundles [0, 1]")
++        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
++        if cuda_visible_devices is None:
++            raise ValueError("TP2 MP actor requires fixed CUDA_VISIBLE_DEVICES")
++        cuda_devices = cuda_visible_devices.split(",")
++        if (
++            len(cuda_devices) != 2
++            or any(not device for device in cuda_devices)
++            or len(set(cuda_devices)) != 2
++        ):
++            raise ValueError(
++                "TP2 MP actor CUDA_VISIBLE_DEVICES must contain two unique devices"
++            )
++        if (
++            vllm_kwargs.get("distributed_executor_backend") != "mp"
++            or vllm_kwargs.get("async_scheduling") is not True
++        ):
++            raise RuntimeError("TP2 MP actor kwargs differ from the admitted config")
++        os.environ.pop("VLLM_RAY_PER_WORKER_GPUS", None)
++        os.environ.pop("VLLM_RAY_BUNDLE_INDICES", None)
++        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
++
+     def _load_model(self, bundle_indices, seed):
+         """Perform the heavy model loading and engine creation.
+ 
+@@ -286,28 +334,41 @@ class BaseVllmGenerationWorker:
+                 "please run at least once with the environment variable NRL_FORCE_REBUILD_VENVS=true set to force the rebuild of the environment."
+             )
+         vllm_kwargs: dict[str, Any] = copy.deepcopy(self.cfg.get("vllm_kwargs", {}))
++        worker_extension_cls = _pop_worker_extension_cls(vllm_kwargs)
++        num_logprobs = int(self.cfg.get("num_logprobs", 0))
++        if num_logprobs < 0:
++            raise ValueError("num_logprobs must be nonnegative")
++        if num_logprobs:
++            configured_max_logprobs = int(vllm_kwargs.get("max_logprobs", num_logprobs))
++            if configured_max_logprobs < num_logprobs:
++                raise ValueError(
++                    "vllm max_logprobs must cover every requested num_logprobs"
++                )
++            vllm_kwargs["max_logprobs"] = configured_max_logprobs
+ 
+         # Calculate total parallel size (TP * PP)
+         model_parallel_size = self.tensor_parallel_size * self.pipeline_parallel_size
+ 
+         # Special handling for parallel case (either TP or PP or both)
+         if model_parallel_size > 1:
+-            # Configure vLLM for tensor/pipeline parallelism within Ray
+-            # Reset CUDA_VISIBLE_DEVICES to allow vLLM to manage GPU assignment
+-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+-            os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(
+-                self.fraction_of_gpus / model_parallel_size
+-            )
+-
+-            # Set bundle indices for parallel workers
+-            bundle_indices_str = ",".join(map(str, bundle_indices))
+-            os.environ["VLLM_RAY_BUNDLE_INDICES"] = bundle_indices_str
+-            print(
+-                f"VLLM_RAY_BUNDLE_INDICES environment variable set to: {os.environ.get('VLLM_RAY_BUNDLE_INDICES')}"
+-            )
+-
+-            # Use Ray for distributed execution in parallel mode
+-            vllm_kwargs["distributed_executor_backend"] = "ray"
++            if self._actor_execution_config.resolved_backend == "mp":
++                self._configure_mp_parallel_executor(
++                    vllm_kwargs,
++                    bundle_indices=bundle_indices,
++                    model_parallel_size=model_parallel_size,
++                )
++            else:
++                # Preserve the existing Ray executor path.
++                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
++                os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(
++                    self.fraction_of_gpus / model_parallel_size
++                )
++                bundle_indices_str = ",".join(map(str, bundle_indices))
++                os.environ["VLLM_RAY_BUNDLE_INDICES"] = bundle_indices_str
++                print(
++                    f"VLLM_RAY_BUNDLE_INDICES environment variable set to: {os.environ.get('VLLM_RAY_BUNDLE_INDICES')}"
++                )
++                vllm_kwargs["distributed_executor_backend"] = "ray"
+         else:
+             # For non-parallel mode, explicitly set executor to None to avoid Ray issues
+             vllm_kwargs["distributed_executor_backend"] = None
+@@ -383,9 +444,10 @@ class BaseVllmGenerationWorker:
+         hf_config = AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
+         if "GptOssForCausalLM" in getattr(hf_config, "architectures", []):
+             if "quantization_config" in hf_config:
+-                assert load_format == "dummy", (
+-                    "Loading quantized GPT-OSS models is currently only supported with load_format='dummy'."
+-                )
++                if load_format != "dummy":
++                    raise ValueError(
++                        "Loading quantized GPT-OSS models is currently only supported with load_format='dummy'."
++                    )
+                 # disable quantization
+                 vllm_kwargs["hf_overrides"]["quantization_config"] = {}
+         elif any(
+@@ -426,11 +488,12 @@ class BaseVllmGenerationWorker:
+             # ZMQ (load_format='dummy'). Clear the auto-detected quantization_config
+             # so vLLM allocates bf16 buffers instead of building Fp8Config.
+             if hasattr(hf_config, "quantization_config"):
+-                assert load_format == "dummy", (
+-                    "Loading FP8-quantized Mistral3 in vLLM is only supported "
+-                    "with load_format='dummy' (NeMo-RL refits bf16 weights via "
+-                    "ZMQ). Got load_format=%r." % load_format
+-                )
++                if load_format != "dummy":
++                    raise ValueError(
++                        "Loading FP8-quantized Mistral3 in vLLM is only supported "
++                        "with load_format='dummy' (NeMo-RL refits bf16 weights via "
++                        "ZMQ). Got load_format=%r." % load_format
++                    )
+                 # NeMo-RL refits bf16 weights, so we intentionally clear any fp8
+                 # quantization here -- including the quantization="fp8" that
+                 # init_fp8 set above when precision == "fp8". Warn so a
+@@ -467,7 +530,7 @@ class BaseVllmGenerationWorker:
+             enforce_eager=self.cfg["vllm_cfg"]["enforce_eager"],
+             max_model_len=self.cfg["vllm_cfg"]["max_model_len"],
+             trust_remote_code=True,
+-            worker_extension_cls="nemo_rl.models.generation.vllm.vllm_backend.VllmInternalWorkerExtension",
++            worker_extension_cls=worker_extension_cls,
+             enable_sleep_mode=True,
+             # Set disable_log_stats=False so that self.llm.get_metrics() works.
+             disable_log_stats=False,
+@@ -513,6 +576,7 @@ class BaseVllmGenerationWorker:
+         greedy: bool,
+         stop_strings,
+         max_new_tokens: Optional[int] = None,
++        request_seeds: Optional[list[int]] = None,
+     ):
+         top_k_cfg = self.cfg["top_k"]
+         top_k_val = 1 if greedy else (top_k_cfg if top_k_cfg is not None else -1)
+@@ -523,7 +587,7 @@ class BaseVllmGenerationWorker:
+             max_new_tokens if max_new_tokens is not None else self.cfg["max_new_tokens"]
+         )
+ 
+-        return self.SamplingParams(
++        kwargs = dict(
+             temperature=temperature,
+             top_p=self.cfg["top_p"],
+             top_k=top_k_val,
+@@ -534,6 +598,26 @@ class BaseVllmGenerationWorker:
+             include_stop_str_in_output=True,
+             ignore_eos=self.cfg.get("ignore_eos", False),
+         )
++        if "allowed_token_ids" in self.cfg:
++            allowed_token_ids = self.cfg["allowed_token_ids"]
++            if allowed_token_ids is not None:
++                if (
++                    type(allowed_token_ids) is not list
++                    or not allowed_token_ids
++                    or any(
++                        type(token_id) is not int or token_id < 0
++                        for token_id in allowed_token_ids
++                    )
++                    or len(set(allowed_token_ids)) != len(allowed_token_ids)
++                ):
++                    raise TypeError(
++                        "allowed_token_ids must be None or a nonempty list of unique "
++                        "nonnegative built-in integers"
++                    )
++                kwargs["allowed_token_ids"] = list(allowed_token_ids)
++        if request_seeds is None:
++            return self.SamplingParams(**kwargs)
++        return [self.SamplingParams(**kwargs, seed=int(seed)) for seed in request_seeds]
+ 
+     def start_gpu_profiling(self) -> None:
+         """Start GPU profiling."""
+@@ -682,9 +766,16 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+         input_lengths = data["input_lengths"]
+         batch_stop_strings: list[list[str]] = data.get("stop_strings", [])
+         stop_strings = self._merge_stop_strings(batch_stop_strings)
++        request_seed_tensor = data.get("generation_request_seeds")
++        request_seeds = (
++            None if request_seed_tensor is None else request_seed_tensor.tolist()
++        )
++        if request_seeds is not None and len(request_seeds) != len(input_ids):
++            raise ValueError("generation_request_seeds must align with every request")
+         sampling_params = self._build_sampling_params(
+             greedy=greedy,
+             stop_strings=stop_strings,
++            request_seeds=request_seeds,
+         )
+ 
+         # verify inputs have correct padding
+@@ -697,9 +788,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+         prompts = format_prompt_for_vllm_generation(data)
+ 
+         # Generate outputs
+-        assert self.llm is not None, (
+-            "Attempting to generate with either an uninitialized vLLM or non-model-owner"
+-        )
++        if self.llm is None:
++            raise RuntimeError(
++                "Attempting to generate with either an uninitialized vLLM or non-model-owner"
++            )
+         use_tqdm = self.cfg["vllm_cfg"].get("use_tqdm", True)
+         outputs = self.llm.generate(prompts, sampling_params, use_tqdm=use_tqdm)
+ 
+@@ -745,17 +837,15 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+             output_ids_list.append(full_output)
+             full_logprobs = torch.zeros(total_length, dtype=torch.float32)
+             if hasattr(generation, "logprobs") and generation.logprobs:
+-                try:
+-                    for idx, logprob_dict in enumerate(generation.logprobs):
+-                        if logprob_dict:
+-                            position = sequence_length + idx
+-                            full_logprobs[position] = next(iter(logprob_dict.items()))[
+-                                1
+-                            ].logprob
+-                except Exception:
+-                    import traceback
+-
+-                    traceback.print_exc()
++                for idx, (token_id, logprob_dict) in enumerate(
++                    zip(generated_tokens, generation.logprobs, strict=True)
++                ):
++                    if logprob_dict is None or token_id not in logprob_dict:
++                        raise RuntimeError(
++                            "vLLM logprob evidence omitted the chosen token"
++                        )
++                    position = sequence_length + idx
++                    full_logprobs[position] = float(logprob_dict[token_id].logprob)
+ 
+             logprobs_list.append(full_logprobs)
+ 
+@@ -783,14 +873,14 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+ 
+             generation_lengths.append(len(generated_tokens))
+             unpadded_sequence_lengths.append(response_length)
+-
+             # Check if response was truncated (hit max_tokens length limit)
+             is_truncated = generation.finish_reason == "length"
+             truncated_list.append(is_truncated)
+ 
+-            assert response_length <= self.llm.llm_engine.model_config.max_model_len, (
+-                f"response_length={response_length} > max_model_len={self.llm.llm_engine.model_config.max_model_len}, which should not happen. Please check this behavior in isolation by running `uv run --extra vllm tools/model_diagnostics/1.max_model_len_respected.py {self.llm.llm_engine.model_config.model}` and raise this issue with the vllm team."
+-            )
++            if response_length > self.llm.llm_engine.model_config.max_model_len:
++                raise RuntimeError(
++                    f"response_length={response_length} > max_model_len={self.llm.llm_engine.model_config.max_model_len}, which should not happen. Please check this behavior in isolation by running `uv run --extra vllm tools/model_diagnostics/1.max_model_len_respected.py {self.llm.llm_engine.model_config.model}` and raise this issue with the vllm team."
++                )
+ 
+         # Create return data conforming to GenerationOutputSpec
+         output_ids = torch.stack(output_ids_list)
+@@ -838,6 +928,9 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+             return_data["r3_routed_experts_actual_routes"] = torch.tensor(
+                 r3_actual_routes, dtype=torch.long
+             )
++        for key in GENERATION_REQUEST_METADATA_KEYS:
++            if key in data:
++                return_data[key] = data[key].clone()
+ 
+         return return_data
+ 
+@@ -891,9 +984,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+         )
+ 
+         # Generate outputs
+-        assert self.llm is not None, (
+-            "Attempting to generate with either an uninitialized vLLM or non-model-owner"
+-        )
++        if self.llm is None:
++            raise RuntimeError(
++                "Attempting to generate with either an uninitialized vLLM or non-model-owner"
++            )
+         use_tqdm = self.cfg["vllm_cfg"].get("use_tqdm", True)
+         outputs = self.llm.generate(data["prompts"], sampling_params, use_tqdm=use_tqdm)
+         texts = [output.outputs[0].text for output in outputs]
+@@ -906,9 +1000,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+ 
+     def report_device_id(self) -> list[str]:
+         """Report device ID from the vLLM worker."""
+-        assert self.llm is not None, (
+-            "Attempting to report device id with either an uninitialized vLLM or non-model-owner"
+-        )
++        if self.llm is None:
++            raise RuntimeError(
++                "Attempting to report device id with either an uninitialized vLLM or non-model-owner"
++            )
+ 
+         if self.cfg["vllm_cfg"]["async_engine"]:
+             raise RuntimeError(
+@@ -928,9 +1023,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+     def update_weights_via_ipc_zmq(self) -> bool:
+         """Update weights from IPC handles via ZMQ socket."""
+         try:
+-            assert self.llm is not None, (
+-                "Attempting to update weights with either an uninitialized vLLM or non-model-owner"
+-            )
++            if self.llm is None:
++                raise RuntimeError(
++                    "Attempting to update weights with either an uninitialized vLLM or non-model-owner"
++                )
+ 
+             if self.cfg["vllm_cfg"]["async_engine"]:
+                 raise RuntimeError(
+@@ -960,9 +1056,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+     def update_weights_from_collective(self) -> bool:
+         """Update the model weights from collective communication."""
+         try:
+-            assert self.llm is not None, (
+-                "Attempting to update weights with either an uninitialized vLLM or non-model-owner"
+-            )
++            if self.llm is None:
++                raise RuntimeError(
++                    "Attempting to update weights with either an uninitialized vLLM or non-model-owner"
++                )
+ 
+             if self.cfg["vllm_cfg"]["async_engine"]:
+                 raise RuntimeError(
+@@ -989,9 +1086,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+ 
+     def reset_prefix_cache(self):
+         """Reset the prefix cache of vLLM engine."""
+-        assert self.llm is not None, (
+-            "Attempting to reset prefix cache with either an uninitialized vLLM or non-model-owner"
+-        )
++        if self.llm is None:
++            raise RuntimeError(
++                "Attempting to reset prefix cache with either an uninitialized vLLM or non-model-owner"
++            )
+ 
+         if self.cfg["vllm_cfg"]["async_engine"]:
+             raise RuntimeError(
+@@ -1004,9 +1102,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+ 
+     def sleep(self):
+         """Put the vLLM engine to sleep."""
+-        assert self.llm is not None, (
+-            "Attempting to sleep with either an uninitialized vLLM or non-model-owner"
+-        )
++        if self.llm is None:
++            raise RuntimeError(
++                "Attempting to sleep with either an uninitialized vLLM or non-model-owner"
++            )
+ 
+         if self.cfg["vllm_cfg"]["async_engine"]:
+             raise RuntimeError(
+@@ -1032,9 +1131,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+ 
+     def wake_up(self, **kwargs):
+         """Wake up the vLLM engine."""
+-        assert self.llm is not None, (
+-            "Attempting to wake up with either an uninitialized vLLM or non-model-owner"
+-        )
++        if self.llm is None:
++            raise RuntimeError(
++                "Attempting to wake up with either an uninitialized vLLM or non-model-owner"
++            )
+ 
+         if self.cfg["vllm_cfg"]["async_engine"]:
+             raise RuntimeError(

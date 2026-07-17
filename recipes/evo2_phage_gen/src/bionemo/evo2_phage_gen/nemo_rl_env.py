@@ -355,7 +355,8 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
 
     if "prompt_nt_length" in scored:
         prompt_lengths = pd.to_numeric(scored["prompt_nt_length"], errors="coerce")
-        for prompt_length in sorted(prompt_lengths.dropna().astype(int).unique()):
+        observed_prompt_lengths = sorted(prompt_lengths.dropna().astype(int).unique())
+        for prompt_length in observed_prompt_lengths:
             prompt_mask = prompt_lengths == prompt_length
             prompt_scored = scored.loc[prompt_mask]
             prefix = f"by_prompt_nt_length/{prompt_length}"
@@ -370,6 +371,22 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
                     score_values = pd.to_numeric(prompt_scored[component.score_column], errors="coerce")
                     metrics[f"{prefix}/{component.name}_score_mean"] = float(score_values.mean())
                     metrics[f"{prefix}/{component.name}_pass_rate"] = float((score_values >= 1.0).mean())
+        if observed_prompt_lengths == list(range(4, 12)):
+            metrics["mixed_prompt_equal_weight/num_length_strata"] = 8
+            suffixes = ["reward_mean", "binary_core_pass_rate"]
+            suffixes.extend(
+                suffix
+                for component in REWARD_COMPONENTS
+                for suffix in (f"{component.name}_score_mean", f"{component.name}_pass_rate")
+            )
+            for suffix in suffixes:
+                values = [
+                    metrics[f"by_prompt_nt_length/{prompt_length}/{suffix}"]
+                    for prompt_length in observed_prompt_lengths
+                    if f"by_prompt_nt_length/{prompt_length}/{suffix}" in metrics
+                ]
+                if len(values) == 8:
+                    metrics[f"mixed_prompt_equal_weight/{suffix}"] = float(sum(values) / 8)
     return metrics
 
 

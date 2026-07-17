@@ -64,15 +64,25 @@ def phage_prompt_data_processor(
         token_ids = token_ids[: min(4, max_seq_length)]
         loss_multiplier = 0.0
 
+    extra_env_info = {
+        "prompt": prompt,
+        "prompt_nt_length": len(prompt_nucleotides),
+        "prompt_prefix": prompt,
+        "prompt_index": idx,
+    }
+    for key in ("prompt_id", "length_stratum", "rollout_ordinal", "order_index", "validation_seed"):
+        if key not in datum_dict:
+            continue
+        value = datum_dict[key]
+        expected_type = str if key == "prompt_id" else int
+        if type(value) is not expected_type:
+            raise TypeError(f"{key} must be an exact {expected_type.__name__}")
+        extra_env_info[key] = value
+
     output: DatumSpec = {
         "message_log": [{"role": "user", "content": prompt, "token_ids": token_ids}],
         "length": length,
-        "extra_env_info": {
-            "prompt": prompt,
-            "prompt_nt_length": len(prompt_nucleotides),
-            "prompt_prefix": prompt,
-            "prompt_index": idx,
-        },
+        "extra_env_info": extra_env_info,
         "loss_multiplier": loss_multiplier,
         "idx": idx,
     }

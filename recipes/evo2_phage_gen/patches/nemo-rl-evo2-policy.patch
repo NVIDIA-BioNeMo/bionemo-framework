@@ -1,0 +1,130 @@
+diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
+index a88cd3341..957d28db3 100644
+--- a/nemo_rl/models/megatron/setup.py
++++ b/nemo_rl/models/megatron/setup.py
+@@ -153,6 +153,40 @@ from nemo_rl.models.value.config import ValueConfig
+ TokenizerType = TypeVar("TokenizerType", bound=PreTrainedTokenizerBase)
+ 
+ 
++def _apply_target_allowlist_prefixes(config: PolicyConfig) -> None:
++    """Allow extra Megatron config ``_target_`` prefixes requested by policy config."""
++    prefixes = config["megatron_cfg"].get("target_allowlist_prefixes", [])
++    if not prefixes:
++        return
++
++    from megatron.training.config.instantiate_utils import target_allowlist
++
++    for prefix in prefixes:
++        target_allowlist.add_prefix(prefix)
++
++
++class NoRefitMegatronBridge:
++    """Bridge placeholder for colocated Megatron generation paths that do not refit."""
++
++    def __init__(self, transformer_config: Any | None = None):
++        self.transformer_config = transformer_config
++
++    def get_conversion_tasks(self, *_args, **_kwargs):
++        return []
++
++    def export_hf_weights(self, *_args, **_kwargs):
++        raise NotImplementedError(
++            "Colocated Megatron generation reuses the training policy and does not export Hugging Face weights."
++        )
++
++
++def _uses_colocated_megatron_generation(config: PolicyConfig) -> bool:
++    """Return whether policy generation is Megatron and colocated with training."""
++    generation = config.get("generation") or {}
++    colocated = (generation.get("colocated") or {}).get("enabled", True)
++    return generation.get("backend") == "megatron" and colocated is not False
++
++
+ def destroy_parallel_state():
+     """Safely destroy parallel state and reset async call tracking.
+ 
+@@ -517,7 +551,7 @@ def setup_model_config(
+             )
+ 
+         _patch_hf_config_double_instantiation()
+-
++        _apply_target_allowlist_prefixes(config)
+         try:
+             cfg_from_pretrained = ConfigContainer.from_yaml(
+                 pretrained_run_config, mode=InstantiationMode.STRICT
+@@ -1044,6 +1078,8 @@ def _create_megatron_config(
+         "overlap_param_gather": overlap_param_gather,
+         "reuse_grad_buf_for_mxfp8_param_ag": reuse_grad_buf_for_mxfp8_param_ag,
+     }
++    tokenizer_cfg = config.get("tokenizer") or {}
++    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
+ 
+     # Fused linear logprobs run the decoder but read output_layer.weight directly
+     # instead of calling output_layer.forward(). Megatron's distributed-optimizer
+@@ -1103,7 +1139,7 @@ def _create_megatron_config(
+         dataset=None,
+         tokenizer=TokenizerConfig(
+             tokenizer_type="HuggingFaceTokenizer",
+-            tokenizer_model=hf_model_name,
++            tokenizer_model=tokenizer_model,
+         ),
+     )
+ 
+@@ -1677,9 +1713,11 @@ def finalize_megatron_setup(
+         pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
+     )
+ 
++    tokenizer_cfg = config.get("tokenizer") or {}
++    tokenizer_model = tokenizer_cfg.get("name") or hf_model_name
+     tokenizer_config = TokenizerConfig(
+         tokenizer_type="HuggingFaceTokenizer",
+-        tokenizer_model=hf_model_name,
++        tokenizer_model=tokenizer_model,
+         hf_tokenizer_kwargs={
+             "trust_remote_code": True,
+             "use_fast": True,
+@@ -1694,9 +1732,10 @@ def finalize_megatron_setup(
+     )
+ 
+     dp_size = worker_sharding_annotations.get_axis_size("data_parallel")
+-    megatron_bridge = AutoBridge.from_hf_pretrained(
+-        hf_model_name, trust_remote_code=True
+-    )
++    if _uses_colocated_megatron_generation(config):
++        megatron_bridge = NoRefitMegatronBridge(transformer_config=getattr(model, "config", None))
++    else:
++        megatron_bridge = AutoBridge.from_hf_pretrained(hf_model_name, trust_remote_code=True)
+ 
+     should_disable_forward_pre_hook = (
+         config["megatron_cfg"]["optimizer"]["use_distributed_optimizer"]
+diff --git a/nemo_rl/models/policy/lm_policy.py b/nemo_rl/models/policy/lm_policy.py
+index 397b4e086..322bd5683 100644
+--- a/nemo_rl/models/policy/lm_policy.py
++++ b/nemo_rl/models/policy/lm_policy.py
+@@ -325,7 +325,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
+             self.flops_tracker = FLOPTracker.from_config(
+                 config["model_name"], get_default_hf_config(config["model_name"])
+             )
+-        except ValueError as e:
++        except (OSError, ValueError) as e:
+             self.flops_tracker = None
+             print(f"FLOPS tracker not supported for model {config['model_name']}: {e}")
+ 
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index cbf9ce1bf..922e935f3 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -1716,6 +1716,13 @@ class MegatronPolicyWorkerImpl(
+     @wrap_with_nvtx_name("megatron_policy_worker/prepare_refit_info")
+     def prepare_refit_info(self) -> None:
+         """Prepare state dict metadata for weight refitting and IPC streaming."""
++        generation = self.cfg.get("generation") or {}
++        colocated = (generation.get("colocated") or {}).get("enabled", True)
++        if generation.get("backend") == "megatron" and colocated is not False:
++            self.refit_param_info_mcore = []
++            self.refit_conversion_tasks = []
++            return {}
++
+         self.refit_param_info_mcore = self._calculate_refit_param_info()
+ 
+         # Collect tensor metadata for refit / hf side info
