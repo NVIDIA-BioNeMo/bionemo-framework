@@ -23,7 +23,11 @@ from bionemo.evo2_phage_gen.rl_readiness import check_rl_readiness
 
 
 def _write_minimal_config(
-    tmp_path: Path, *, include_adapter: bool = False, colocated_generation: bool | None = None
+    tmp_path: Path,
+    *,
+    include_adapter: bool = False,
+    colocated_generation: bool | None = None,
+    generation_backend: str = "megatron",
 ) -> Path:
     """Create a minimal GRPO config and all required referenced paths."""
     defaults = tmp_path / "defaults.yaml"
@@ -57,7 +61,7 @@ def _write_minimal_config(
                 "enabled": True,
                 "target_allowlist_prefixes": ["bionemo.evo2.", "bionemo.common."],
             },
-            "generation": {"backend": "megatron"},
+            "generation": {"backend": generation_backend},
         },
         "data": {"train": {"data_path": str(prompt_data), "env_name": "phage_qc"}},
         "env": {"phage_qc": {}},
@@ -117,6 +121,21 @@ def test_rl_readiness_passes_when_adapter_path_is_configured(tmp_path):
     missing_required = [check for check in checks if check.required and not check.ok]
 
     assert missing_required == []
+
+
+def test_rl_readiness_accepts_vllm_generation_backend(tmp_path):
+    """The production checker must accept the recipe's supported vLLM rollout backend."""
+    config_path = _write_minimal_config(
+        tmp_path,
+        include_adapter=True,
+        generation_backend="vllm",
+    )
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    backend_check = {check.name: check for check in checks}["generation_backend"]
+
+    if not backend_check.ok:
+        raise AssertionError(backend_check.detail)
 
 
 def test_rl_readiness_resolves_inherited_config_values(tmp_path):

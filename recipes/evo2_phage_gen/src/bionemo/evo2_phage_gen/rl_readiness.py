@@ -278,7 +278,7 @@ def _config_checks(
     checks.append(
         RLReadinessCheck(
             name="generation_backend",
-            ok=generation_backend == "megatron",
+            ok=generation_backend in {"megatron", "vllm"},
             required=True,
             detail=f"policy.generation.backend={generation_backend!r}",
         )
