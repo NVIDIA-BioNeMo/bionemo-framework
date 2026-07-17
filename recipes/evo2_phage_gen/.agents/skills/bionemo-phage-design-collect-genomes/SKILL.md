@@ -27,6 +27,8 @@ If the available tools cannot range-fetch and decompress a candidate, emit the e
 - Record retrieval query/API request, source URL/record, timestamp, source-provided checksum, local checksum, license, tool version, and exclusions.
 - Report total records, valid records, unique sequence hashes, taxonomic/host coverage, lengths, ambiguous bases, and rejection reasons. Do not hide duplicates; SFT preparation performs the definitive exact deduplication and cluster split.
 
+Every response, including a read-only research answer, must include a concise provenance block with the exact retrieval query or API request, access date, article and repository versions, license, supplied source checksum, planned local checksum, eligibility rules, and exclusions. Do not defer those fields only to future artifacts.
+
 Aim for at least 15,000 usable unique genomes. Explain any shortfall. If the validated unique count is 10,000 or fewer, stop before SFT and obtain explicit acceptance with a warning about coverage and overfitting risk. Never inflate counts with rotations, versions, or exact duplicates.
 
 ## Handoff

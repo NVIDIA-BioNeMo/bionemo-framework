@@ -6,7 +6,7 @@
       "prompt": "For a newly selected jumbo bacteriophage, find current direct genome-wide experimental evidence that can inform an essential-gene constraint, then propose how it should enter RL and final QC without assuming it transfers perfectly to our target.",
       "expected_output": "A current, primary-evidence essentiality proposal with explicit transfer limits, partial credit, missing-data handling, and hard-filter calibration.",
       "assertions": [
-        "The response identifies a recent primary genome-wide perturbation or equivalent direct functional study in a jumbo bacteriophage and reports the exact phage, prokaryotic host, experimental method, conditions, and operational definition of fitness or essentiality.",
+        "The response identifies a recent primary genome-wide perturbation or equivalent direct functional study in a jumbo bacteriophage and reports the exact phage, host, experimental method, conditions, and operational definition of fitness or essentiality.",
         "The response cites resolvable current sources and records access/version information without depending on a hard-coded title or identifier from this eval.",
         "The response distinguishes directly measured genes from unknown, condition-specific, conserved, expressed, predicted, or transferred genes and does not label unknown genes dispensable.",
         "The response proposes a clipped 0-to-1 online score with named baseline and target, monotonic partial credit, support requirements, and fail-closed missing data.",

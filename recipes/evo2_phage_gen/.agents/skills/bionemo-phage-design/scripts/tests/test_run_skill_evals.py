@@ -173,8 +173,26 @@ def _write_fake_claude(root: Path, mode: str = "pass") -> Path:
                     failures.append("generation used the source repository")
                 if list(cwd.glob("skills/*/evals/evals.json")):
                     failures.append("eval answer key is visible")
+                if list(cwd.glob("skills/*/assets/VALIDATION.md")):
+                    failures.append("prior validation audit is visible")
+                if list(cwd.glob("skills/*/scripts/tests/*")):
+                    failures.append("eval audit tests are visible")
+                if (cwd / "tmp_RUNLOG.md").exists():
+                    failures.append("ignored run history is visible")
+                if (cwd / "tmp_TRACKED.md").exists():
+                    failures.append("tracked temporary history is visible")
+                if list(cwd.rglob("*.egg-info")):
+                    failures.append("generated package metadata is visible")
+                if (cwd / "external-runtime-link").is_symlink():
+                    failures.append("external symlink escaped the staged workspace")
+                if not (cwd / "internal-runtime-link").is_symlink():
+                    failures.append("safe tracked symlink is missing")
                 if not (cwd / "skills" / "alpha" / "SKILL.md").is_file():
                     failures.append("selected skill is missing")
+                elif "dirty tracked marker" not in (
+                    cwd / "skills" / "alpha" / "SKILL.md"
+                ).read_text(encoding="utf-8"):
+                    failures.append("tracked working-tree edit is missing")
                 if "EVALUATION RESPONSE CONTRACT" not in prompt:
                     failures.append("concise response contract is missing")
                 if failures:
@@ -328,6 +346,65 @@ def _init_git_repo(root: Path) -> str:
     ).stdout.strip()
 
 
+def _prepare_live_claude_repo(root: Path) -> str:
+    (root / ".gitignore").write_text(
+        "results/\ntmp_*.md\n*.egg-info/\n",
+        encoding="utf-8",
+    )
+    (root / "tracked-runtime.txt").write_text("tracked runtime\n", encoding="utf-8")
+    (root / "internal-runtime-link").symlink_to("tracked-runtime.txt")
+    (root / "external-runtime-link").symlink_to("/etc/hosts")
+    tracked_tmp = root / "tmp_TRACKED.md"
+    tracked_tmp.write_text("tracked prior history\n", encoding="utf-8")
+    tracked_egg = root / "src" / "tracked.egg-info" / "PKG-INFO"
+    tracked_egg.parent.mkdir(parents=True)
+    tracked_egg.write_text("tracked generated metadata\n", encoding="utf-8")
+    audit_test = root / "skills" / "alpha" / "scripts" / "tests" / "test_eval_audit.py"
+    audit_test.parent.mkdir(parents=True)
+    audit_test.write_text("answer-adjacent audit\n", encoding="utf-8")
+    nested_tmp_answer = root / "nested" / "tmp_CASE" / "answer.md"
+    nested_tmp_answer.parent.mkdir(parents=True)
+    nested_tmp_answer.write_text("tracked generated answer\n", encoding="utf-8")
+    nested_result_grade = root / "nested" / "results" / "grade.json"
+    nested_result_grade.parent.mkdir(parents=True)
+    nested_result_grade.write_text("{}\n", encoding="utf-8")
+    _init_git_repo(root)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "add",
+            "-f",
+            tracked_tmp.relative_to(root).as_posix(),
+            tracked_egg.relative_to(root).as_posix(),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Eval Test",
+            "-c",
+            "user.email=eval@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "tracked generated fixtures",
+        ],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+
 class EvalRunnerTests(unittest.TestCase):
     def _run(self, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -407,14 +484,13 @@ class EvalRunnerTests(unittest.TestCase):
         ]
         prohibited_markers = (
             "## safety boundary",
-            "eukaryotic-host-boundary",
-            "human-cell entry",
-            "safe prokaryotic goals",
-            "invoke the controller's safety boundary",
-            "refuse direct or proxy eukaryotic",
+            "## biological safety policy",
+            "custom biological policy",
+            "prokaryotic-only policy",
         )
         for path in active_instruction_paths:
             text = path.read_text(encoding="utf-8").lower()
+            self.assertNotIn("385", text, str(path))
             for marker in prohibited_markers:
                 self.assertNotIn(marker, text, str(path))
 
@@ -469,6 +545,75 @@ class EvalRunnerTests(unittest.TestCase):
         text = skill_path.read_text(encoding="utf-8").lower()
         self.assertIn("bounded validation command", text)
         self.assertIn("unverified", text)
+
+    def test_collection_read_only_response_keeps_query_and_access_provenance(self) -> None:
+        skill_path = RECIPE_SKILL_ROOT / "bionemo-phage-design-collect-genomes" / "SKILL.md"
+        text = skill_path.read_text(encoding="utf-8").lower()
+        self.assertIn("every response", text)
+        self.assertIn("exact retrieval query", text)
+        self.assertIn("access date", text)
+
+    def test_sft_due_monitoring_reports_health_without_forcing_not_due_polling(self) -> None:
+        skill_path = RECIPE_SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "SKILL.md"
+        text = skill_path.read_text(encoding="utf-8").lower()
+        self.assertIn("every substantive or due monitoring decision", text)
+        for metric in (
+            "train and validation loss",
+            "learning rate",
+            "gradient norm",
+            "throughput",
+            "gpu utilization and memory",
+            "checkpoint integrity",
+            "free space",
+        ):
+            self.assertIn(metric, text)
+        self.assertIn("not-due", text)
+        self.assertIn("last-observed timestamp and staleness", text)
+        self.assertIn("without querying", text)
+
+    def test_rl_relaunch_requires_independent_prior_job_terminal_check(self) -> None:
+        skill_path = RECIPE_SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "SKILL.md"
+        text = skill_path.read_text(encoding="utf-8").lower()
+        self.assertIn("before any resume or relaunch", text)
+        self.assertIn("prior process/job is absent or terminal", text)
+        self.assertIn("never duplicate a live submission", text)
+
+    def test_rl_objective_audit_states_telemetry_contract_before_code(self) -> None:
+        skill_path = (
+            RECIPE_SKILL_ROOT
+            / "bionemo-phage-design-implement-rl-objectives"
+            / "SKILL.md"
+        )
+        text = skill_path.read_text(encoding="utf-8").lower()
+        self.assertIn("even when the audit stops before code", text)
+        self.assertIn("raw numerator/denominator/support", text)
+        self.assertIn("compares online scoring with final qc", text)
+        self.assertIn("recipe-local src/ and tests/", text)
+        self.assertIn(
+            "installed-runtime name/order/dtype/device/shape/reduction checks",
+            text,
+        )
+        self.assertIn("tiny deterministic rl smoke", text)
+        self.assertIn(
+            "reward calculation, logging, checkpoint writing, and restart metadata",
+            text,
+        )
+
+    def test_research_packet_requires_complete_objective_portfolio_rows(self) -> None:
+        skill_path = (
+            RECIPE_SKILL_ROOT
+            / "bionemo-phage-design-research-evidence"
+            / "SKILL.md"
+        )
+        text = skill_path.read_text(encoding="utf-8").lower()
+        self.assertIn("portfolio coverage checklist", text)
+        self.assertIn("topology/packaging", text)
+        self.assertIn("desired and undesired directional changes", text)
+        self.assertIn(
+            "each axis a decision-table row or mark it unresolved/not applicable",
+            text,
+        )
+        self.assertIn("material interactions across the portfolio", text)
 
     def test_validate_accepts_bionemo_compatible_suite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -621,6 +766,7 @@ class EvalRunnerTests(unittest.TestCase):
             )
             self.assertEqual(2, completed.returncode)
             self.assertIn("--allow-external-skill-upload", completed.stderr)
+            self.assertIn("staged recipe files it reads", completed.stderr)
 
     def test_claude_dry_run_uses_local_plugin_and_read_only_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -674,6 +820,7 @@ class EvalRunnerTests(unittest.TestCase):
             _write_suite(skill_root)
             _write_claude_plugin_manifest(skill_root)
             fake = _write_fake_claude(root)
+            _prepare_live_claude_repo(root)
             results = root / "results"
             completed = self._run(
                 "--harness", "claude", "--skill-root", str(skill_root),
@@ -740,6 +887,51 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertTrue(isolation["enabled"])
         self.assertTrue(isolation["answer_keys_excluded"])
         self.assertEqual(str(source_root), isolation["source_root"])
+        self.assertEqual("git-tracked-working-tree-allowlist", isolation["method"])
+        manifest = {entry["path"]: entry for entry in isolation["content_manifest"]}
+        self.assertIn("skills/alpha/SKILL.md", manifest)
+        self.assertIn("internal-runtime-link", manifest)
+        self.assertNotIn("external-runtime-link", manifest)
+        self.assertNotIn("tmp_RUNLOG.md", manifest)
+        self.assertNotIn("tmp_TRACKED.md", manifest)
+        self.assertNotIn("skills/alpha/assets/VALIDATION.md", manifest)
+        self.assertNotIn(
+            "skills/alpha/scripts/tests/test_eval_audit.py",
+            manifest,
+        )
+        self.assertNotIn("nested/tmp_CASE/answer.md", manifest)
+        self.assertNotIn("nested/results/grade.json", manifest)
+        self.assertFalse(any(".egg-info" in path for path in manifest))
+        self.assertTrue(isolation["untracked_paths_excluded"])
+        self.assertIn("**/tmp_*/**", isolation["generated_path_patterns_excluded"])
+        self.assertIn("**/results/**", isolation["generated_path_patterns_excluded"])
+        self.assertEqual(
+            [
+                ".claude-plugin/plugin.json",
+                "skills/alpha/SKILL.md",
+            ],
+            isolation["required_paths"],
+        )
+        self.assertEqual(
+            ["external-runtime-link"],
+            [entry["path"] for entry in isolation["excluded_symlinks"]],
+        )
+
+    def test_claude_live_run_requires_a_git_tracked_source_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_root = root / "skills"
+            _write_suite(skill_root)
+            _write_claude_plugin_manifest(skill_root)
+            fake = _write_fake_claude(root)
+            completed = self._run(
+                "--harness", "claude", "--skill-root", str(skill_root),
+                "--repo-root", str(root), "--claude", str(fake),
+                "--case", "alpha-001", "--results-dir", str(root / "results"),
+                "--allow-external-skill-upload", "--run",
+            )
+            self.assertEqual(2, completed.returncode)
+            self.assertIn("Git-tracked", completed.stderr)
 
     def test_claude_structured_transport_failure_is_runner_classified_skip(self) -> None:
         completed, case_dir = self._run_fake_claude("transport")
@@ -909,7 +1101,21 @@ class EvalRunnerTests(unittest.TestCase):
         skill_root = root / "skills"
         _write_suite(skill_root)
         _write_claude_plugin_manifest(skill_root)
+        validation = skill_root / "alpha" / "assets" / "VALIDATION.md"
+        validation.parent.mkdir()
+        validation.write_text("prior evaluation outcome\n", encoding="utf-8")
         fake = _write_fake_claude(root, mode)
+        _prepare_live_claude_repo(root)
+        if mode == "answer-key-isolation":
+            (root / "tmp_RUNLOG.md").write_text("prior result\n", encoding="utf-8")
+            egg_info = root / "src" / "alpha.egg-info"
+            egg_info.mkdir(parents=True)
+            (egg_info / "PKG-INFO").write_text("generated\n", encoding="utf-8")
+            skill = skill_root / "alpha" / "SKILL.md"
+            skill.write_text(
+                skill.read_text(encoding="utf-8") + "\ndirty tracked marker\n",
+                encoding="utf-8",
+            )
         results = root / "results"
         completed = self._run(
             "--harness", "claude", "--skill-root", str(skill_root),

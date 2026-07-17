@@ -24,6 +24,7 @@ Run the approved RL contract through bionemo-phage-design-adapt-execution. Selec
 
 ## Baselines and restarts
 
+- Before any resume or relaunch, independently verify through executor state and attempt markers that the prior process/job is absent or terminal; never duplicate a live submission.
 - Fresh RL initializes policy and KL reference from selected non-RL SFT.
 - Exact resume restores optimizer/scheduler/RNG and retains original KL reference and prompt/validation manifests.
 - A weights-only restart remains KL-anchored to selected SFT and is a new attempt.

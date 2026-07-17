@@ -1,6 +1,6 @@
 # Evo 2 Phage Design
 
-This recipe fine-tunes Evo 2 for prokaryotic phage genomes, runs GDPO, and screens generated designs. The result below is the current computational PhiX174 case study; it is not evidence of wet-lab bootability or viability.
+This recipe fine-tunes Evo 2 for phage genomes, runs GDPO, and screens generated designs. The result below is the current computational PhiX174 case study; it is not evidence of wet-lab bootability or viability.
 
 ## Current result: PhiX174 RL case study
 
@@ -204,6 +204,7 @@ There is not yet a checked-in canonical launcher for the complete paper SFT run,
 
 - [Generative design of novel bacteriophages with genome language models](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full)
 - [Checked paper, supplement, and figure assets](.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/)
+- [Skill validation record](.agents/skills/bionemo-phage-design/assets/VALIDATION.md)
 - [Historical result evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)
 - [Recipe commands and dependency pins](pyproject.toml)

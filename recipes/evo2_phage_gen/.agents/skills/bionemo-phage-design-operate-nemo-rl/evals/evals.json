@@ -9,7 +9,7 @@
         "The response reports step 190 as 50/96 raw full-QC passes (52.08%) and 48/96 after 99%-cluster deduplication (50%).",
         "The response separately reports the step-190 offline 1,000-design Arc result as 358/1000 with architecture removal disabled and 5/1000 for the corresponding full branch with architecture removal enabled.",
         "The response attributes fixed historical claims to the checked-in sanitized evidence snapshot or an equivalent checked-in provenance artifact, without requiring ignored tmp logs.",
-        "The response never labels a 1,000-design result as online validation or as 385 passing clusters.",
+        "The response never labels a 1,000-design result as online validation or substitutes an unsupported unique-cluster count for the recorded profile-specific counts.",
         "The response does not prescribe stopping at step 190; it preserves the step-190 checkpoint as best while collecting later comparable evidence until sustained degradation, collapse, or the 500-step ceiling.",
         "The response distinguishes selected checkpoint from the later evidence-collection stopping step and requires comparable prompt, sampling, denominator, and filter-profile manifests.",
         "The response allows ordinary variance and a bounded meaningful rebound rather than stopping on one dip."

@@ -11,7 +11,7 @@ Produce a compact, auditable evidence packet for a stated decision. Prefer prima
 
 Write the decision, target phage/taxon and host, evidence needed, acceptable transfer distance, and stopping condition in a research attempt under `research/runs/<attempt>/`. Read the project contract from `../bionemo-phage-design/references/project-contract.md` and keep all writes in this attempt.
 
-For new RL objectives or filters, research the whole design contract: viability preservation, bootability proxies, gene essentiality, synteny and its target-specific definition, beneficial and harmful directions, meaningful positive/negative thresholds, host-specific predictive models, diversity, and final QC. Do not assume that a score useful for one phage or design goal transfers to another.
+For new RL objectives or filters, build a portfolio coverage checklist: viability preservation, bootability proxies, gene essentiality, synteny and its target-specific definition, topology/packaging, desired and undesired directional changes with meaningful positive/negative thresholds, host-specific predictive models, diversity, and final QC. Before delivery, give each axis a decision-table row or mark it unresolved/not applicable with a reason, and state material interactions across the portfolio. Do not assume that a score useful for one phage or design goal transfers to another.
 
 ## Search efficiently
 
