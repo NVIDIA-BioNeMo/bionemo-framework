@@ -72,6 +72,46 @@ def test_tp2_profile_pins_optimized_vllm_020_settings() -> None:
     assert "bionemo_evo2::hyena_mixer" in compilation["splitting_ops"]
 
 
+def test_tp2_multiproc_executor_is_persisted_and_allows_explicit_async() -> None:
+    profile = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=6_144,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.91,
+        distributed_executor_backend="mp",
+    )
+
+    kwargs = profile.engine_kwargs(model="/checkpoint")
+    if kwargs["distributed_executor_backend"] != "mp":
+        raise AssertionError("TP2 multiprocess executor did not reach vLLM EngineArgs")
+    resolved = profile.expected_resolved_config()
+    if resolved["parallel"]["distributed_executor_backend"] != "mp":
+        raise AssertionError("TP2 multiprocess executor is absent from the retained resolved contract")
+    validate_resolved_profile(profile, resolved)
+
+    invalid = json.loads(json.dumps(resolved))
+    invalid["parallel"]["distributed_executor_backend"] = "ray"
+    with pytest.raises(AssertionError, match="executor backend"):
+        validate_resolved_profile(profile, invalid)
+
+    async_profile = replace(profile, async_scheduling=True)
+    async_kwargs = async_profile.engine_kwargs(model="/checkpoint")
+    if async_kwargs["distributed_executor_backend"] != "mp" or async_kwargs["async_scheduling"] is not True:
+        raise AssertionError("TP2 async scheduling must remain bound to the multiprocess executor")
+
+
+def test_tp2_ray_executor_still_rejects_async_scheduling() -> None:
+    profile = Evo2VllmProfile(
+        topology="tp2",
+        max_model_len=6_144,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.91,
+    )
+
+    with pytest.raises(ValueError, match="TP2 Ray"):
+        replace(profile, async_scheduling=True)
+
+
 def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> None:
     profile = Evo2VllmProfile(
         topology="dp2",
@@ -322,6 +362,7 @@ def test_profile_rejects_unsupported_or_misleading_settings() -> None:
         ("max_concurrent_partial_prefills", 1.0),
         ("long_prefill_chunk_tokens", 0.0),
         ("optimization_level", 2.0),
+        ("distributed_executor_backend", 1),
         ("shared_prefix_state_reuse", 0),
         ("global_wave_size", 96.0),
         ("max_num_seqs", 96.0),

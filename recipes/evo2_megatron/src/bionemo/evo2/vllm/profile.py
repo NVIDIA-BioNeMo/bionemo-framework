@@ -17,6 +17,7 @@ from bionemo.evo2.vllm.artifact_io import read_json_snapshot
 
 Topology = Literal["tp2", "dp2"]
 PerformanceMode = Literal["balanced", "throughput"]
+DistributedExecutorBackend = Literal["ray", "mp"]
 
 _GLOBAL_BATCH_SIZE = 96
 _PREFIX_CACHE_BLOCK_SIZE = 16
@@ -67,6 +68,7 @@ class Evo2VllmProfile:
     long_prefill_chunk_tokens: int = 0
     optimization_level: int = 2
     performance_mode: PerformanceMode = "balanced"
+    distributed_executor_backend: DistributedExecutorBackend = "ray"
     shared_prefix_state_reuse: bool = False
     global_wave_size: int = _GLOBAL_BATCH_SIZE
     max_num_seqs: int | None = None
@@ -94,8 +96,14 @@ class Evo2VllmProfile:
             raise TypeError("gpu_memory_utilization must be a finite built-in float")
         if type(self.performance_mode) is not str:
             raise TypeError("performance_mode must be a built-in string")
+        if type(self.distributed_executor_backend) is not str:
+            raise TypeError("distributed_executor_backend must be a built-in string")
         if self.topology not in ("tp2", "dp2"):
             raise ValueError(f"unsupported topology: {self.topology}")
+        if self.distributed_executor_backend not in ("ray", "mp"):
+            raise ValueError(f"unsupported distributed_executor_backend: {self.distributed_executor_backend}")
+        if self.topology != "tp2" and self.distributed_executor_backend != "ray":
+            raise ValueError("distributed_executor_backend is caller-selectable only for TP2")
         if (
             isinstance(self.global_wave_size, bool)
             or not isinstance(self.global_wave_size, int)
@@ -114,8 +122,8 @@ class Evo2VllmProfile:
             raise ValueError("max_num_batched_tokens must cover one decode token per active request")
         if not 0 < self.gpu_memory_utilization < 1:
             raise ValueError("gpu_memory_utilization must be between zero and one")
-        if self.topology == "tp2" and self.async_scheduling:
-            raise ValueError("TP2 Ray does not support async scheduling in vLLM 0.20")
+        if self.topology == "tp2" and self.async_scheduling and self.distributed_executor_backend != "mp":
+            raise ValueError("TP2 Ray does not support async scheduling in vLLM 0.20; select mp explicitly")
         if self.max_concurrent_partial_prefills < 1:
             raise ValueError("max_concurrent_partial_prefills must be positive")
         if self.max_concurrent_partial_prefills > 1 and self.long_prefill_chunk_tokens <= 0:
@@ -229,7 +237,7 @@ class Evo2VllmProfile:
         if self.proof:
             kwargs["worker_extension_cls"] = "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension"
         if self.topology == "tp2":
-            kwargs["distributed_executor_backend"] = "ray"
+            kwargs["distributed_executor_backend"] = self.distributed_executor_backend
         return kwargs
 
     def nemo_rl_generation_config(
@@ -309,6 +317,7 @@ class Evo2VllmProfile:
             "parallel": {
                 "tensor_parallel_size": self.tensor_parallel_size,
                 "pipeline_parallel_size": 1,
+                "distributed_executor_backend": self.distributed_executor_backend if self.topology == "tp2" else "uni",
             },
             "scheduler": {
                 "max_num_seqs": self.resolved_max_num_seqs,
@@ -392,6 +401,7 @@ def resolved_config_snapshot(vllm_config: Any) -> dict[str, Any]:
         "parallel": {
             "tensor_parallel_size": parallel.tensor_parallel_size,
             "pipeline_parallel_size": parallel.pipeline_parallel_size,
+            "distributed_executor_backend": parallel.distributed_executor_backend,
         },
         "scheduler": {
             "max_num_seqs": scheduler.max_num_seqs,
@@ -442,6 +452,11 @@ def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]
     require(
         resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size,
         "tensor_parallel_size drifted",
+    )
+    expected_executor_backend = profile.distributed_executor_backend if profile.topology == "tp2" else "uni"
+    require(
+        resolved["parallel"]["distributed_executor_backend"] == expected_executor_backend,
+        "distributed executor backend drifted",
     )
     require(resolved["scheduler"]["max_num_seqs"] == profile.resolved_max_num_seqs, "max_num_seqs drifted")
     require(

@@ -841,6 +841,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--load-format", choices=("safetensors", "dummy"), default="safetensors")
     parser.add_argument("--optimization-level", type=int, choices=(2, 3), default=2)
     parser.add_argument("--performance-mode", choices=("balanced", "throughput"), default="balanced")
+    parser.add_argument("--distributed-executor-backend", choices=("ray", "mp"), default="ray")
     parser.add_argument("--generation-round", type=int, default=0)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--repetitions", type=int, default=5)

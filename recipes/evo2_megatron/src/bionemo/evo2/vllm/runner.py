@@ -6532,6 +6532,7 @@ def profile_from_args(args: Any, manifest: WorkloadManifest) -> Evo2VllmProfile:
         long_prefill_chunk_tokens=args.long_prefill_chunk_tokens,
         optimization_level=args.optimization_level,
         performance_mode=args.performance_mode,
+        distributed_executor_backend=args.distributed_executor_backend,
         shared_prefix_state_reuse=getattr(args, "shared_prefix_state_reuse", False),
         global_wave_size=getattr(args, "global_wave_size", 96),
         max_num_seqs=getattr(args, "max_num_seqs", None),
