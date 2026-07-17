@@ -239,6 +239,35 @@ for module_name in (
         raise AssertionError(f"normal worker import isolation failed:\n{result.stdout}\n{result.stderr}")
 
 
+def test_normal_nemo_generation_worker_import_does_not_load_proof_modules() -> None:
+    code = """
+import sys
+from bionemo.evo2.vllm.nemo_generation_worker import Evo2NemoRlGenerationWorkerImpl
+
+if Evo2NemoRlGenerationWorkerImpl.__module__ != "bionemo.evo2.vllm.nemo_generation_worker":
+    raise RuntimeError("normal generation worker resolved from an unexpected module")
+for module_name in (
+    "bionemo.evo2.vllm.runner",
+    "bionemo.evo2.vllm.sampler",
+    "bionemo.evo2.vllm.worker",
+    "bionemo.evo2.vllm.nemo_proof_worker",
+):
+    if module_name in sys.modules:
+        raise RuntimeError(f"normal generation worker imported proof-only module: {module_name}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=os.environ.copy(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"normal generation worker import isolation failed:\n{result.stdout}\n{result.stderr}"
+        )
+
+
 def test_nemo_proof_worker_extension_composes_refit_and_evo2_proof_controls() -> None:
     if not issubclass(Evo2NemoRlProofVllmWorkerExtension, VllmInternalWorkerExtension):
         raise AssertionError("proof worker must retain the supported refit adapter")

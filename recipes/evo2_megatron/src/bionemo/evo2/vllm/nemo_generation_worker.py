@@ -29,14 +29,13 @@ from bionemo.evo2.vllm.artifact_io import (
     publish_reserved_bytes,
     validate_file_publication_plan,
 )
-from bionemo.evo2.vllm.profile import resolved_config_snapshot
 from bionemo.evo2.vllm.nemo_publication_schema import (
     NEMO_RANK_EXECUTION_OCCURRENCE_SCHEMA_VERSION,
     NEMO_RANK_PUBLICATION_OUTCOME_SCHEMA_VERSION,
     NEMO_RANK_PUBLICATION_SCHEMA_VERSION,
     NEMO_RANK_SIDECAR_ROW_SCHEMA_VERSION,
 )
-from bionemo.evo2.vllm.runner import CUDAGraphProofRecorder, summarize_cudagraph_observations
+from bionemo.evo2.vllm.profile import resolved_config_snapshot
 
 
 _RANK_PUBLICATION_FIELDS = {
@@ -533,6 +532,8 @@ class Evo2NemoRlGenerationWorkerImpl(VllmGenerationWorkerImpl):
 
     def _attach_evo2_proof_recorder(self) -> None:
         """Attach one persistent scheduler recorder to the outer vLLM engine."""
+        from bionemo.evo2.vllm.runner import CUDAGraphProofRecorder
+
         if not getattr(self, "_evo2_proof_enabled", False):
             raise RuntimeError("Evo2 proof collection is disabled for this generation worker")
         manager = self.llm.llm_engine.logger_manager
@@ -568,6 +569,8 @@ class Evo2NemoRlGenerationWorkerImpl(VllmGenerationWorkerImpl):
 
     def snapshot_evo2_proof_phase(self, phase: str) -> dict[str, Any]:
         """Return untruncated outer graph events plus inner route/compile/memory state."""
+        from bionemo.evo2.vllm.runner import summarize_cudagraph_observations
+
         if not getattr(self, "_evo2_proof_enabled", False):
             raise RuntimeError("Evo2 proof collection is disabled for this generation worker")
         if phase != self._evo2_proof_phase:
