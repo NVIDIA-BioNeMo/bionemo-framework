@@ -274,6 +274,10 @@ def repair_nemo_rl_install(*, force_reinstall: bool = False) -> str:
         ],
         check=True,
     )
+    source_path = str(source_root)
+    if source_path not in sys.path:
+        sys.path.insert(0, source_path)
+    importlib.invalidate_caches()
     return f"reinstalled editable nemo-rl from retained source {source_root}"
 
 

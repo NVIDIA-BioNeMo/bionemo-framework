@@ -214,6 +214,37 @@ def test_apply_nemo_rl_patch_is_forward_only_and_idempotent(tmp_path: Path, monk
     assert source_file.read_text() == "new\n"
 
 
+def test_repair_install_exposes_new_editable_source_in_current_process(tmp_path: Path, monkeypatch) -> None:
+    """The patch CLI must see an editable install created after interpreter startup."""
+    source_root = tmp_path / "nemo-rl-source"
+    (source_root / "nemo_rl").mkdir(parents=True)
+    subprocess_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        nemo_rl_patches,
+        "_ensure_pinned_nemo_rl_source",
+        lambda *, force_reinstall: source_root,
+    )
+    monkeypatch.setattr(nemo_rl_patches, "_is_complete_nemo_rl_install", lambda: False)
+    monkeypatch.setattr(
+        nemo_rl_patches.sys,
+        "path",
+        [entry for entry in nemo_rl_patches.sys.path if entry != str(source_root)],
+    )
+
+    def fake_run(args: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        subprocess_calls.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(nemo_rl_patches.subprocess, "run", fake_run)
+
+    result = nemo_rl_patches.repair_nemo_rl_install(force_reinstall=True)
+
+    _require(result == f"reinstalled editable nemo-rl from retained source {source_root}", "result drifted")
+    _require(subprocess_calls and subprocess_calls[0][-1] == str(source_root), "pip used the wrong source")
+    _require(nemo_rl_patches.sys.path[0] == str(source_root), "new editable source remained invisible")
+
+
 def test_patch_sha256_reports_patch_content_hash(tmp_path: Path) -> None:
     """The launcher should be able to log the exact maintained patch content."""
     patch_file = tmp_path / "patch.diff"
