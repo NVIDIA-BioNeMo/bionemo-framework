@@ -122,6 +122,15 @@ def _select_grpo_trainer(master_config, algorithm: str):
     return grpo_train
 
 
+def _unpack_grpo_setup_result(setup_result: tuple[object, ...]) -> tuple[object, ...]:
+    """Validate the pinned NeMo-RL setup return contract before unpacking it."""
+    if type(setup_result) is not tuple:
+        raise TypeError(f"Pinned NeMo-RL setup must return a tuple, got {type(setup_result).__name__}")
+    if len(setup_result) != 13:
+        raise RuntimeError(f"Pinned NeMo-RL setup must return exactly 13 values, got {len(setup_result)}")
+    return setup_result
+
+
 def _register_recipe_extensions() -> None:
     """Register recipe-specific NeMo-RL processors and environments."""
     from nemo_rl.data.processors import PROCESSOR_REGISTRY, register_processor
@@ -234,7 +243,11 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
         checkpointer,
         grpo_state,
         master_config,
-    ) = setup(config, tokenizer, dataset, val_dataset, policy_factory=policy_factory)
+        teacher_worker_groups,
+        alias_to_group_alias,
+    ) = _unpack_grpo_setup_result(
+        setup(config, tokenizer, dataset, val_dataset, policy_factory=policy_factory)
+    )
 
     if "async_grpo" in config.grpo and config.grpo["async_grpo"]["enabled"]:
         async_config = config.grpo["async_grpo"]
@@ -253,6 +266,8 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
             grpo_save_state=grpo_state,
             master_config=master_config,
             max_trajectory_age_steps=async_config["max_trajectory_age_steps"],
+            teacher_worker_groups=teacher_worker_groups,
+            alias_to_group_alias=alias_to_group_alias,
         )
     else:
         trainer = _select_grpo_trainer(master_config, algorithm)

@@ -3,12 +3,23 @@
 
 """Tests for the recipe-owned NeMo-RL launcher extensions."""
 
-from bionemo.evo2_phage_gen.run_phage_grpo import _register_recipe_extensions
+from bionemo.evo2_phage_gen.run_phage_grpo import (
+    _register_recipe_extensions,
+    _unpack_grpo_setup_result,
+)
 
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def test_unpack_grpo_setup_result_accepts_pinned_thirteen_value_contract() -> None:
+    expected = tuple(object() for _ in range(13))
+
+    actual = _unpack_grpo_setup_result(expected)
+
+    _require(actual == expected, "launcher did not preserve the pinned setup result order")
 
 
 def test_register_recipe_extensions_registers_evo2_vllm_worker(tmp_path, monkeypatch) -> None:
