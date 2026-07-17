@@ -196,6 +196,43 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
     )
 
 
+def test_tp2_dp2_profile_maps_to_two_ray_tp2_nemo_rl_engines() -> None:
+    profile = Evo2VllmProfile(
+        topology="tp2dp2",
+        max_model_len=6_144,
+        max_num_batched_tokens=16_384,
+        gpu_memory_utilization=0.91,
+        global_wave_size=96,
+        max_num_seqs=48,
+    )
+
+    kwargs = profile.engine_kwargs(model="/checkpoint")
+    nemo_rl = profile.nemo_rl_generation_config(load_format="safetensors")
+    if profile.tensor_parallel_size != 2 or profile.replica_count != 2:
+        raise AssertionError("combined topology must own two TP2 replicas")
+    if profile.per_engine_batch_size != 48:
+        raise AssertionError("combined topology must route 48 requests per TP2 replica")
+    if kwargs.get("distributed_executor_backend") != "ray":
+        raise AssertionError("combined topology must explicitly retain the Ray executor")
+    if kwargs["tensor_parallel_size"] != 2 or kwargs["max_num_seqs"] != 48:
+        raise AssertionError("combined topology standalone engine geometry drifted")
+    if kwargs["compilation_config"]["cudagraph_capture_sizes"][-1] != 48:
+        raise AssertionError("combined topology must capture its local B48 decode shape")
+    if nemo_rl["generation_batch_size"] != 96:
+        raise AssertionError("combined topology lost the global B96 rollout contract")
+    if nemo_rl["vllm_cfg"]["tensor_parallel_size"] != 2:
+        raise AssertionError("combined topology did not reach the NeMo-RL TP contract")
+    if nemo_rl["vllm_kwargs"].get("distributed_executor_backend") != "ray":
+        raise AssertionError("combined topology did not reach the NeMo-RL Ray executor")
+    if nemo_rl["vllm_kwargs"]["async_scheduling"] is not False:
+        raise AssertionError("combined Ray topology must keep async scheduling disabled")
+
+    with pytest.raises(ValueError, match="two-GPU TP2 profile"):
+        replace(profile, distributed_executor_backend="mp")
+    with pytest.raises(ValueError, match="TP2 Ray"):
+        replace(profile, async_scheduling=True)
+
+
 def test_capacity_profile_exposes_global_wave_and_scheduler_ceiling() -> None:
     profile = Evo2VllmProfile(
         topology="tp2",

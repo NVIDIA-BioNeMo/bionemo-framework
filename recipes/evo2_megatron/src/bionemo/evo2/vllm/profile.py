@@ -15,7 +15,7 @@ from typing import Any, Literal
 from bionemo.evo2.vllm.artifact_io import read_json_snapshot
 
 
-Topology = Literal["tp2", "dp2"]
+Topology = Literal["tp2", "dp2", "tp2dp2"]
 PerformanceMode = Literal["balanced", "throughput"]
 DistributedExecutorBackend = Literal["ray", "mp"]
 
@@ -98,12 +98,12 @@ class Evo2VllmProfile:
             raise TypeError("performance_mode must be a built-in string")
         if type(self.distributed_executor_backend) is not str:
             raise TypeError("distributed_executor_backend must be a built-in string")
-        if self.topology not in ("tp2", "dp2"):
+        if self.topology not in ("tp2", "dp2", "tp2dp2"):
             raise ValueError(f"unsupported topology: {self.topology}")
         if self.distributed_executor_backend not in ("ray", "mp"):
             raise ValueError(f"unsupported distributed_executor_backend: {self.distributed_executor_backend}")
         if self.topology != "tp2" and self.distributed_executor_backend != "ray":
-            raise ValueError("distributed_executor_backend is caller-selectable only for TP2")
+            raise ValueError("distributed_executor_backend is caller-selectable only for the two-GPU TP2 profile")
         if (
             isinstance(self.global_wave_size, bool)
             or not isinstance(self.global_wave_size, int)
@@ -122,7 +122,7 @@ class Evo2VllmProfile:
             raise ValueError("max_num_batched_tokens must cover one decode token per active request")
         if not 0 < self.gpu_memory_utilization < 1:
             raise ValueError("gpu_memory_utilization must be between zero and one")
-        if self.topology == "tp2" and self.async_scheduling and self.distributed_executor_backend != "mp":
+        if self.tensor_parallel_size > 1 and self.async_scheduling and self.distributed_executor_backend != "mp":
             raise ValueError("TP2 Ray does not support async scheduling in vLLM 0.20; select mp explicitly")
         if self.max_concurrent_partial_prefills < 1:
             raise ValueError("max_concurrent_partial_prefills must be positive")
@@ -155,7 +155,7 @@ class Evo2VllmProfile:
     @property
     def tensor_parallel_size(self) -> int:
         """Return the model tensor-parallel width per engine."""
-        return 2 if self.topology == "tp2" else 1
+        return 1 if self.topology == "dp2" else 2
 
     @property
     def per_engine_batch_size(self) -> int:
@@ -175,7 +175,7 @@ class Evo2VllmProfile:
     @property
     def cudagraph_capture_sizes(self) -> tuple[int, ...]:
         """Return explicit decode graph sizes through the real batch size."""
-        defaults = _TP2_CAPTURE_SIZES if self.topology == "tp2" else _DP2_CAPTURE_SIZES
+        defaults = _TP2_CAPTURE_SIZES if self.tensor_parallel_size > 1 else _DP2_CAPTURE_SIZES
         sizes = {size for size in defaults if size <= self.resolved_max_num_seqs}
         sizes.add(self.per_engine_batch_size)
         sizes.add(self.resolved_max_num_seqs)
@@ -236,7 +236,7 @@ class Evo2VllmProfile:
             kwargs["mamba_block_size"] = _PREFIX_CACHE_BLOCK_SIZE
         if self.proof:
             kwargs["worker_extension_cls"] = "bionemo.evo2.vllm.worker.Evo2VllmWorkerExtension"
-        if self.topology == "tp2":
+        if self.tensor_parallel_size > 1:
             kwargs["distributed_executor_backend"] = self.distributed_executor_backend
         return kwargs
 
@@ -322,7 +322,9 @@ class Evo2VllmProfile:
             "parallel": {
                 "tensor_parallel_size": self.tensor_parallel_size,
                 "pipeline_parallel_size": 1,
-                "distributed_executor_backend": self.distributed_executor_backend if self.topology == "tp2" else "uni",
+                "distributed_executor_backend": (
+                    self.distributed_executor_backend if self.tensor_parallel_size > 1 else "uni"
+                ),
             },
             "scheduler": {
                 "max_num_seqs": self.resolved_max_num_seqs,
@@ -458,7 +460,7 @@ def validate_resolved_profile(profile: Evo2VllmProfile, resolved: dict[str, Any]
         resolved["parallel"]["tensor_parallel_size"] == profile.tensor_parallel_size,
         "tensor_parallel_size drifted",
     )
-    expected_executor_backend = profile.distributed_executor_backend if profile.topology == "tp2" else "uni"
+    expected_executor_backend = profile.distributed_executor_backend if profile.tensor_parallel_size > 1 else "uni"
     require(
         resolved["parallel"]["distributed_executor_backend"] == expected_executor_backend,
         "distributed executor backend drifted",
