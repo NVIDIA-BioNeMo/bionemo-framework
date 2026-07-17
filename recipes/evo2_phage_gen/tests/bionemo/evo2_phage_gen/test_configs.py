@@ -30,13 +30,16 @@ RECIPE_ROOT = Path(__file__).parents[3]
 def test_main_recipe_environment_installs_qualified_vllm_and_plugin() -> None:
     """A clean recipe build must support direct Evo2 vLLM inference and RL actors."""
     config = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
-    dependencies = config["project"]["dependencies"]
+    dependencies = config["project"]["optional-dependencies"]["vllm"]
     plugins = config["project"]["entry-points"]["vllm.general_plugins"]
+    build_script = (RECIPE_ROOT / ".ci_build.sh").read_text()
 
     if "vllm==0.20.0" not in dependencies:
-        raise AssertionError("the main recipe environment must pin official vLLM 0.20.0")
+        raise AssertionError("the recipe must expose an exact official vLLM 0.20.0 extra")
     if plugins != {"evo2": "bionemo.evo2.vllm.plugin:register"}:
         raise AssertionError(f"unexpected vLLM plugin entry points: {plugins!r}")
+    if "uv pip install --no-deps 'vllm==0.20.0'" not in build_script:
+        raise AssertionError("ci_build must install the qualified vLLM wheel into the main environment")
 
 
 def test_ci_build_pins_supported_python_runtime() -> None:
