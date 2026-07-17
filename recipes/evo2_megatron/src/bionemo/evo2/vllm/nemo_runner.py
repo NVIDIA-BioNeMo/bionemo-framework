@@ -2703,14 +2703,14 @@ def run_nemo_dp2_benchmark(args: Any, manifest: WorkloadManifest) -> dict[str, A
     }
     benchmark_contract_digest = benchmark_contract_sha256(benchmark_contract)
     linked_proof = (
-        None
-        if benchmark_mode == "proof"
-        else validate_linked_proof_artifact(
+        validate_linked_proof_artifact(
             args.linked_proof_artifact,
             expected_contract=benchmark_contract,
             caller_coordinates=caller_coordinates,
             require_memory_headroom=True,
         )
+        if benchmark_mode == "speed" and args.linked_proof_artifact is not None
+        else None
     )
     provenance_s = clock() - provenance_begin
 

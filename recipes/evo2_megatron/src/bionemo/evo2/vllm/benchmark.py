@@ -589,15 +589,15 @@ def sampling_params_kwargs(manifest: WorkloadManifest) -> dict[str, Any]:
     }
 
 
-_DNA_OUTPUT_TOKEN_IDS = frozenset((65, 67, 71, 84))
+_DNA_OUTPUT_TOKEN_IDS = frozenset((65, 67, 71, 78, 84))
 
 
 def validate_dna_output_token_ids(token_ids: Sequence[int], *, request_id: str) -> None:
-    """Require raw Evo2 completion token IDs to encode only A, C, G, or T."""
+    """Require raw Evo2 completion token IDs to encode only A, C, G, N, or T."""
     for position, token_id in enumerate(token_ids):
         if type(token_id) is not int or token_id not in _DNA_OUTPUT_TOKEN_IDS:
             raise AssertionError(
-                f"request {request_id} output token {position} must be a raw A/C/G/T token ID"
+                f"request {request_id} output token {position} must be a raw A/C/G/N/T token ID"
             )
 
 

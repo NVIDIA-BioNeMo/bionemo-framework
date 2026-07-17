@@ -598,7 +598,7 @@ def test_vllm_output_admission_rejects_eos_and_non_dna_token_ids(adapter, invali
         {token_id: SimpleNamespace(logprob=-0.1)} for token_id in completion.token_ids
     ]
 
-    with pytest.raises(AssertionError, match="A/C/G/T"):
+    with pytest.raises(AssertionError, match="A/C/G/N/T"):
         adapter(manifest, outputs)
 
 
@@ -662,7 +662,7 @@ def test_sampling_params_match_gdpo_and_force_exact_lengths_without_detokenizati
         "stop_token_ids": [],
         "ignore_eos": True,
         "detokenize": False,
-        "allowed_token_ids": [65, 67, 71, 84],
+        "allowed_token_ids": [65, 67, 71, 78, 84],
     }
     if kwargs != expected:
         raise AssertionError(f"exact Evo2 sampling contract drifted: {kwargs!r}")

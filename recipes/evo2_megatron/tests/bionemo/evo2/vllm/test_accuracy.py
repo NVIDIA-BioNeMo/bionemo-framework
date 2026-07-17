@@ -978,7 +978,7 @@ def test_mixed_canonical_output_rejects_caller_admission_drift(tmp_path, mutatio
         )
 
 
-def test_canonical_identity_artifact_rejects_non_acgt_or_token_byte_alias(tmp_path) -> None:
+def test_canonical_identity_artifact_accepts_n_but_rejects_non_dna_or_token_byte_alias(tmp_path) -> None:
     case = load_canonical_7b_identity_cases(PROMPTS_CSV)[0]
     manifest = build_canonical_identity_manifest(
         _base_manifest(),
@@ -996,32 +996,39 @@ def test_canonical_identity_artifact_rejects_non_acgt_or_token_byte_alias(tmp_pa
         generation_round=0,
         call_index=0,
     )
-    invalid_record = replace(_identity_records(manifest, case.target)[0], output_token_ids=(ord("N"),) * 500)
-    invalid_artifact = write_full_generation_records_artifact(
-        tmp_path / "identity-invalid-base.outputs.jsonl.gz",
-        records=(invalid_record,),
+    output_with_n = "N" + case.target[1:]
+    accepted_artifact = write_full_generation_records_artifact(
+        tmp_path / "identity-allowed-n.outputs.jsonl.gz",
+        records=_identity_records(manifest, output_with_n),
         execution_records=executions,
         decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
     )
-    with pytest.raises(AssertionError, match="ACGT"):
-        validate_canonical_identity_output_artifact(
-            invalid_artifact,
-            case=case,
-            expected_request_ids=(manifest.requests[0].request_id,),
+    accepted = validate_canonical_identity_output_artifact(
+        accepted_artifact,
+        case=case,
+        expected_request_ids=(manifest.requests[0].request_id,),
+        decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
+    )
+    if accepted["minimum_observed_identity_percent"] != 99.8:
+        raise AssertionError("one valid N must be retained and scored against the unchanged 500-base target")
+
+    invalid_record = replace(
+        _identity_records(manifest, case.target)[0],
+        output_token_ids=(ord("X"),) * 500,
+    )
+    with pytest.raises(AssertionError, match="A/C/G/N/T"):
+        write_full_generation_records_artifact(
+            tmp_path / "identity-invalid-base.outputs.jsonl.gz",
+            records=(invalid_record,),
+            execution_records=executions,
             decode_output_token_ids=lambda token_ids: bytes(token_ids).decode("ascii"),
         )
 
     aliased_record = replace(_identity_records(manifest, case.target)[0], output_token_ids=(ord("A"),) * 500)
-    aliased_artifact = write_full_generation_records_artifact(
-        tmp_path / "identity-token-alias.outputs.jsonl.gz",
-        records=(aliased_record,),
-        execution_records=executions,
-        decode_output_token_ids=lambda token_ids: "C" * len(token_ids),
-    )
-    with pytest.raises(AssertionError, match="token IDs.*bytes"):
-        validate_canonical_identity_output_artifact(
-            aliased_artifact,
-            case=case,
-            expected_request_ids=(manifest.requests[0].request_id,),
+    with pytest.raises(AssertionError, match="token IDs"):
+        write_full_generation_records_artifact(
+            tmp_path / "identity-token-alias.outputs.jsonl.gz",
+            records=(aliased_record,),
+            execution_records=executions,
             decode_output_token_ids=lambda token_ids: "C" * len(token_ids),
         )

@@ -1766,7 +1766,7 @@ def test_full_output_writer_rejects_decoded_non_dna_or_token_id_mismatch(tmp_pat
     records = records_from_vllm_outputs(manifest, _fake_outputs(manifest))
     output_path = tmp_path / "invalid-dna.outputs.jsonl.gz"
 
-    with pytest.raises(AssertionError, match="decoded output must exactly match A/C/G/T token IDs"):
+    with pytest.raises(AssertionError, match="decoded output must exactly match A/C/G/N/T token IDs"):
         runner.write_full_generation_records_artifact(
             output_path,
             records=records,

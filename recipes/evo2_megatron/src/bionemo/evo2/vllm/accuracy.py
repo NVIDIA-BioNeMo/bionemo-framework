@@ -455,7 +455,7 @@ def _validate_canonical_identity_output_rows(
 
     retained = []
     total_bytes = 0
-    allowed_token_ids = {ord("A"), ord("C"), ord("G"), ord("T")}
+    allowed_token_ids = {ord("A"), ord("C"), ord("G"), ord("N"), ord("T")}
     for row_index, (row, case) in enumerate(zip(rows, expected_cases, strict=True)):
         if type(case) is not CanonicalIdentityCase:
             raise TypeError("canonical identity cases must be exact CanonicalIdentityCase values")
@@ -480,7 +480,7 @@ def _validate_canonical_identity_output_rows(
         ):
             raise AssertionError(f"request {request_id} lacks an exact finite 500-token completion")
         if any(token_id not in allowed_token_ids for token_id in token_ids):
-            raise AssertionError(f"request {request_id} canonical identity output must contain exactly 500 ACGT bases")
+            raise AssertionError(f"request {request_id} canonical identity output must contain exactly 500 ACGTN bases")
         if expected_prompts is not None:
             prompt_token_ids = row.get("prompt_token_ids")
             if type(prompt_token_ids) is not list or tuple(prompt_token_ids) != expected_prompts[row_index]:
@@ -521,8 +521,8 @@ def _validate_canonical_identity_output_rows(
             output_text = raw_bytes.decode("ascii")
         except UnicodeDecodeError as error:
             raise AssertionError(f"request {request_id} output is not ASCII nucleotide text") from error
-        if any(base not in "ACGT" for base in output_text):
-            raise AssertionError(f"request {request_id} canonical identity output must contain exactly 500 ACGT bases")
+        if any(base not in "ACGTN" for base in output_text):
+            raise AssertionError(f"request {request_id} canonical identity output must contain exactly 500 ACGTN bases")
         matches = sum(observed == expected for observed, expected in zip(output_text, case.target, strict=True))
         identity_percent = 100.0 * matches / 500
         if matches < case.minimum_matches:

@@ -4120,10 +4120,10 @@ def write_full_generation_records_artifact(
                             decoded_bytes = decoded.encode("ascii")
                         except UnicodeEncodeError as error:
                             raise AssertionError(
-                                "decoded output must exactly match A/C/G/T token IDs"
+                                "decoded output must exactly match A/C/G/N/T token IDs"
                             ) from error
                         if decoded_bytes != bytes(generation.output_token_ids):
-                            raise AssertionError("decoded output must exactly match A/C/G/T token IDs")
+                            raise AssertionError("decoded output must exactly match A/C/G/N/T token IDs")
                         row.update(
                             {
                                 "output_text_utf8_base64": base64.b64encode(decoded_bytes).decode("ascii"),
