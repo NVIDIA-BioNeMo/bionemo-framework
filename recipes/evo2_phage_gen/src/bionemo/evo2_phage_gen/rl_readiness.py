@@ -77,6 +77,39 @@ def _config_relative_path(config_path: Path, path_like: str | Path | None) -> Pa
     return path if path.is_absolute() else config_path.parent / path
 
 
+def _merge_config_mappings(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge one recipe config overlay onto its inherited defaults."""
+    merged = dict(base)
+    for key, value in override.items():
+        inherited = merged.get(key)
+        if isinstance(inherited, dict) and isinstance(value, dict):
+            merged[key] = _merge_config_mappings(inherited, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_config_with_defaults(config_path: Path, *, ancestors: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Load the recipe's string-valued defaults chain using NeMo-RL overlay semantics."""
+    resolved_path = config_path.resolve()
+    if resolved_path in ancestors:
+        chain = " -> ".join(str(path) for path in (*ancestors, resolved_path))
+        raise ValueError(f"config defaults contain a cycle: {chain}")
+    config = yaml.safe_load(resolved_path.read_text())
+    if not isinstance(config, dict):
+        raise TypeError(f"config is not a mapping: {resolved_path}")
+    defaults = config.get("defaults")
+    if defaults is None:
+        return config
+    if not isinstance(defaults, str) or not defaults:
+        raise TypeError("recipe config defaults must be a non-empty string")
+    defaults_path = _config_relative_path(resolved_path, defaults)
+    if defaults_path is None or not defaults_path.exists():
+        return config
+    inherited = _load_config_with_defaults(defaults_path, ancestors=(*ancestors, resolved_path))
+    return _merge_config_mappings(inherited, config)
+
+
 def _module_check(name: str, module_name: str, *, required: bool) -> RLReadinessCheck:
     """Create a Python import-spec readiness check without importing the module."""
     try:
@@ -207,9 +240,10 @@ def _config_checks(
     if not config_path.exists():
         return checks
 
-    config = yaml.safe_load(config_path.read_text())
-    if not isinstance(config, dict):
-        checks.append(RLReadinessCheck("grpo_config_parse", ok=False, required=True, detail="config is not a mapping"))
+    try:
+        config = _load_config_with_defaults(config_path)
+    except (TypeError, ValueError) as error:
+        checks.append(RLReadinessCheck("grpo_config_parse", ok=False, required=True, detail=str(error)))
         return checks
 
     checks.extend(
