@@ -55,6 +55,18 @@ def test_patched_nemo_rl_prompt_digest_matches_portable_vector() -> None:
             generation_prompt_token_ids_sha256(invalid)
 
 
+def test_production_evo2_generation_worker_imports_with_maintained_patch() -> None:
+    """The recipe worker must depend only on symbols shipped by the maintained patch."""
+    from nemo_rl.models.generation.vllm.vllm_worker import VllmGenerationWorkerImpl
+
+    from bionemo.evo2.vllm.nemo_generation_worker import Evo2NemoRlGenerationWorkerImpl
+
+    _require(
+        issubclass(Evo2NemoRlGenerationWorkerImpl, VllmGenerationWorkerImpl),
+        "the production Evo2 worker must remain a thin NeMo-RL vLLM worker subclass",
+    )
+
+
 def test_apply_nemo_rl_patch_applies_against_installed_package_root(tmp_path: Path, monkeypatch) -> None:
     """The patch command should run from site-packages, not require a source checkout path."""
     source_root = tmp_path / "site-packages"
