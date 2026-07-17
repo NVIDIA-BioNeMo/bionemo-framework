@@ -24,11 +24,6 @@ uv pip install -r build_requirements.txt --no-build-isolation
 # 5. Install the recipe with all remaining dependencies, including test extras
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
 
-# vLLM telemetry extras conflict with the Megatron resiliency protobuf pin in
-# a single resolver transaction. The qualified container already supplies that
-# runtime stack, so install only the exact official wheel into the main venv.
-uv pip install --no-deps 'vllm==0.20.0'
-
 # 6. Upstream NeMo-RL's current pyproject only packages the top-level nemo_rl module.
 # Reinstall the pinned checkout with complete package discovery, then apply and verify this recipe's Evo2 patch.
 evo2_phage_patch_nemo_rl --repair-install --force-reinstall --verify-runtime
