@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-Apache2
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,6 +20,15 @@ from bionemo.evo2.vllm.refit_bridge import Evo2RefitBridge
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def _transformer_config(*, ffn_hidden_size: int = 16) -> SimpleNamespace:
+    return SimpleNamespace(
+        hidden_size=8,
+        ffn_hidden_size=ffn_hidden_size,
+        num_layers=1,
+        num_attention_heads=2,
+    )
 
 
 def _write_checkpoint(tmp_path, names: tuple[str, ...]) -> None:
@@ -50,7 +60,7 @@ def test_evo2_refit_bridge_uses_exact_same_name_tp_mappings(tmp_path) -> None:
         "decoder.final_norm.weight",
     )
     _write_checkpoint(tmp_path, names)
-    transformer_config = object()
+    transformer_config = _transformer_config()
 
     bridge = Evo2RefitBridge.from_pretrained(
         tmp_path,
@@ -77,13 +87,26 @@ def test_evo2_refit_bridge_rejects_unknown_indexed_weight(tmp_path) -> None:
     _write_checkpoint(tmp_path, ("decoder.layers.0.foreign.weight",))
 
     with pytest.raises(ValueError, match="unsupported Evo2 refit weights"):
-        Evo2RefitBridge.from_pretrained(tmp_path, transformer_config=object())
+        Evo2RefitBridge.from_pretrained(tmp_path, transformer_config=_transformer_config())
+
+
+def test_evo2_refit_bridge_rejects_generation_export_architecture_mismatch(tmp_path) -> None:
+    _write_checkpoint(tmp_path, ("decoder.final_norm.weight",))
+
+    with pytest.raises(
+        ValueError,
+        match=r"intermediate_size=16.*ffn_hidden_size=11008",
+    ):
+        Evo2RefitBridge.from_pretrained(
+            tmp_path,
+            transformer_config=_transformer_config(ffn_hidden_size=11008),
+        )
 
 
 def test_evo2_refit_bridge_rejects_duplicate_or_incomplete_stream(monkeypatch, tmp_path) -> None:
     names = ("decoder.final_norm.weight", "embedding.word_embeddings.weight")
     _write_checkpoint(tmp_path, names)
-    bridge = Evo2RefitBridge.from_pretrained(tmp_path, transformer_config=object())
+    bridge = Evo2RefitBridge.from_pretrained(tmp_path, transformer_config=_transformer_config())
 
     monkeypatch.setattr(
         bridge,

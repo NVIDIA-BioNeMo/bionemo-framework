@@ -52,6 +52,13 @@ _REPLICATED_PATTERNS = (
     "decoder.layers.*.self_attention.linear_qkv.layer_norm_weight",
 )
 
+_ARCHITECTURE_FIELDS = (
+    ("hidden_size", "hidden_size"),
+    ("intermediate_size", "ffn_hidden_size"),
+    ("num_hidden_layers", "num_layers"),
+    ("num_attention_heads", "num_attention_heads"),
+)
+
 
 class Evo2RefitBridge(MegatronModelBridge):
     """Gather live Evo2 MCore tensors into the exact indexed vLLM names."""
@@ -77,6 +84,7 @@ class Evo2RefitBridge(MegatronModelBridge):
         """Load only config and indexed metadata; no HF model is constructed."""
         root = Path(checkpoint).expanduser().resolve()
         config = Evo2Config.from_pretrained(root, local_files_only=True)
+        cls._require_compatible_architecture(config, transformer_config)
         layout = indexed_safetensors_layout(root)
         bridge = cls(
             config=config,
@@ -92,6 +100,30 @@ class Evo2RefitBridge(MegatronModelBridge):
         if unsupported:
             raise ValueError(f"unsupported Evo2 refit weights in indexed checkpoint: {unsupported}")
         return bridge
+
+    @staticmethod
+    def _require_compatible_architecture(config: Evo2Config, transformer_config: Any) -> None:
+        mismatches = []
+        for generation_field, training_field in _ARCHITECTURE_FIELDS:
+            generation_value = getattr(config, generation_field, None)
+            training_value = getattr(transformer_config, training_field, None)
+            if type(generation_value) is not int:
+                raise ValueError(
+                    f"Evo2 generation config {generation_field} must be an exact integer; "
+                    f"got {generation_value!r}"
+                )
+            if type(training_value) is not int:
+                raise ValueError(
+                    f"Evo2 training config {training_field} must be an exact integer; "
+                    f"got {training_value!r}"
+                )
+            if generation_value != training_value:
+                mismatches.append(
+                    f"{generation_field}={generation_value} does not match "
+                    f"{training_field}={training_value}"
+                )
+        if mismatches:
+            raise ValueError(f"Evo2 refit architecture mismatch: {', '.join(mismatches)}")
 
     @property
     def expected_weight_names(self) -> frozenset[str]:
