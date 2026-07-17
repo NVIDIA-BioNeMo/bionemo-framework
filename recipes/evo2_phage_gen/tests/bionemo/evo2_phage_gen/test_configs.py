@@ -45,8 +45,9 @@ def test_main_recipe_environment_installs_qualified_vllm_and_plugin() -> None:
 def test_ci_build_pins_supported_python_runtime() -> None:
     """The NVIDIA Megatron dependency stack currently publishes through CPython 3.12."""
     build_script = (RECIPE_ROOT / ".ci_build.sh").read_text()
-    if "uv venv --clear --python 3.12 --system-site-packages" not in build_script:
-        raise AssertionError("ci_build must pin CPython 3.12 instead of using the host default")
+    expected = "uv venv --clear --python /usr/bin/python3.12 --system-site-packages"
+    if expected not in build_script:
+        raise AssertionError("ci_build must pin the container CPython 3.12 runtime")
 
 
 def test_arc_genome_design_filtering_local_config_is_safe_by_default():
