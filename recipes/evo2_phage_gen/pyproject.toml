@@ -27,6 +27,7 @@ dependencies = [
     # current BioNeMo/Megatron-Bridge Python/Torch stack while still installing
     # NeMo-RL from a pinned source commit.
     "nemo-rl",
+    "vllm==0.20.0",
     "ray[default]>=2.49.2,<2.56",
     "colored==2.2.3",
     "datasets>=2.20.0",
@@ -86,6 +87,9 @@ dependencies = [
 test = [
     "pytest>=8.0",
 ]
+
+[project.entry-points."vllm.general_plugins"]
+evo2 = "bionemo.evo2.vllm.plugin:register"
 
 [project.scripts]
 torchrun = "torch.distributed.run:main"

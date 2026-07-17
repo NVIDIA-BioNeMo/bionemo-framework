@@ -16,6 +16,7 @@
 """Tests for recipe configuration files."""
 
 import json
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -24,6 +25,18 @@ from bionemo.evo2_phage_gen.generation import ensure_paper_useful_rl_prompt_file
 
 
 RECIPE_ROOT = Path(__file__).parents[3]
+
+
+def test_main_recipe_environment_installs_qualified_vllm_and_plugin() -> None:
+    """A clean recipe build must support direct Evo2 vLLM inference and RL actors."""
+    config = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
+    dependencies = config["project"]["dependencies"]
+    plugins = config["project"]["entry-points"]["vllm.general_plugins"]
+
+    if "vllm==0.20.0" not in dependencies:
+        raise AssertionError("the main recipe environment must pin official vLLM 0.20.0")
+    if plugins != {"evo2": "bionemo.evo2.vllm.plugin:register"}:
+        raise AssertionError(f"unexpected vLLM plugin entry points: {plugins!r}")
 
 
 def test_arc_genome_design_filtering_local_config_is_safe_by_default():
