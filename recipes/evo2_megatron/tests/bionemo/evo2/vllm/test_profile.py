@@ -4,6 +4,9 @@
 import ast
 import inspect
 import json
+import os
+import subprocess
+import sys
 import textwrap
 from dataclasses import replace
 
@@ -22,6 +25,38 @@ from bionemo.evo2.vllm.profile import (
     resolved_config_snapshot,
     validate_resolved_profile,
 )
+
+
+def test_profile_runtime_guard_does_not_load_sampler_proof_module() -> None:
+    code = """
+import sys
+from bionemo.evo2.vllm.profile import Evo2VllmProfile
+
+profile = Evo2VllmProfile(
+    topology="tp2",
+    max_model_len=6144,
+    max_num_batched_tokens=16384,
+    gpu_memory_utilization=0.91,
+    distributed_executor_backend="mp",
+    async_scheduling=True,
+)
+kwargs = profile.engine_kwargs(model="/checkpoint")
+if kwargs["logprobs_mode"] != "processed_logprobs":
+    raise RuntimeError("normal profile lost processed selected-logprob semantics")
+if "bionemo.evo2.vllm.sampler" in sys.modules:
+    raise RuntimeError("normal profile imported sampler proof machinery")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=os.environ.copy(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"normal profile sampler isolation failed:\n{result.stdout}\n{result.stderr}"
+        )
 
 
 def test_tp2_profile_pins_optimized_vllm_020_settings() -> None:

@@ -189,7 +189,7 @@ class Evo2VllmProfile:
         load_format: str = "safetensors",
     ) -> dict[str, Any]:
         """Return kwargs accepted directly by ``vllm.LLM``."""
-        from bionemo.evo2.vllm.sampler import sampler_runtime_environment_contract
+        from bionemo.evo2.vllm.sampler_runtime import sampler_runtime_environment_contract
 
         sampler_runtime_environment_contract()
         kwargs = {

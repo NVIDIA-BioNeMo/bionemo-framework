@@ -15,7 +15,14 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from bionemo.evo2.vllm import sampler_runtime as _sampler_runtime
 
+
+_V1_MODEL_RUNNER_MODULE = _sampler_runtime.V1_MODEL_RUNNER_MODULE
+_TOPK_SAMPLER_MODULE = _sampler_runtime.TOPK_SAMPLER_MODULE
+_NATIVE_ROUTE = _sampler_runtime.NATIVE_ROUTE
+_NEMO_VLLM_ACTOR_FQN = _sampler_runtime.NEMO_VLLM_ACTOR_FQN
+sampler_runtime_environment_contract = _sampler_runtime.sampler_runtime_environment_contract
 _EXPECTED_DISTRIBUTIONS = {
     "vllm": "0.20.0",
     "flashinfer-python": "0.6.8.post1",
@@ -28,13 +35,9 @@ _EXPECTED_SOURCE_SHA256 = {
     "flashinfer/sampling.py": "be613d99da8a3cd591cddb4b6ec2c04641c57808d86ce7742f7ba74d4a2ae172",
     "flashinfer/data/include/flashinfer/sampling.cuh": "386259bda23ff1a80630f1f7b1e5bd377c726aa89a8a67755af80939b322a1e4",
 }
-_V1_MODEL_RUNNER_MODULE = "vllm.v1.worker.gpu_model_runner"
-_TOPK_SAMPLER_MODULE = "vllm.v1.sample.ops.topk_topp_sampler"
-_NATIVE_ROUTE = f"{_TOPK_SAMPLER_MODULE}.TopKTopPSampler.forward_native"
 _REQUEST_IDS = ("request-0", "request-1", "request-2", "request-3")
 _REQUEST_SEEDS = (11, 1_000_014, 2_000_017, 3_000_020)
 _STEPS = 8
-_NEMO_VLLM_ACTOR_FQN = "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
 
 
 def _sha256_file(path: Path) -> str:
@@ -43,29 +46,6 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def sampler_runtime_environment_contract(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """Pin the vLLM sampler switches whose alternatives lack accepted seed proof."""
-    values = os.environ if environ is None else environ
-    flashinfer_flag = values.get("VLLM_USE_FLASHINFER_SAMPLER")
-    v2_flag = values.get("VLLM_USE_V2_MODEL_RUNNER")
-    if flashinfer_flag not in (None, "0"):
-        raise RuntimeError("FlashInfer sampling must remain disabled for per-request seeded Evo2 generation")
-    if v2_flag not in (None, "0"):
-        raise RuntimeError("vLLM V2 model runner is not covered by the accepted Evo2 sampler proof")
-    return {
-        "schema_version": 1,
-        "vllm_model_runner": _V1_MODEL_RUNNER_MODULE,
-        "logprobs_mode": "processed_logprobs",
-        "selected_route": _NATIVE_ROUTE,
-        "one_generator_per_active_row": True,
-        "flashinfer_sampling_allowed": False,
-        "environment": {
-            "VLLM_USE_FLASHINFER_SAMPLER": flashinfer_flag,
-            "VLLM_USE_V2_MODEL_RUNNER": v2_flag,
-        },
-    }
 
 
 def _launcher_selection_provenance(invoked_python: Path) -> dict[str, Any]:
