@@ -15,8 +15,9 @@
 
 """Tests for ``bionemo.evo2_phage_gen.rl_readiness``."""
 
-import yaml
 from pathlib import Path
+
+import yaml
 
 from bionemo.evo2_phage_gen.rl_readiness import check_rl_readiness
 
@@ -113,6 +114,25 @@ def test_rl_readiness_passes_when_adapter_path_is_configured(tmp_path):
 
     checks = check_rl_readiness(config_path, expected_gpus=2)
     missing_required = [check for check in checks if check.required and not check.ok]
+
+    assert missing_required == []
+
+
+def test_rl_readiness_resolves_inherited_config_values(tmp_path):
+    """Readiness should validate the same inherited config that NeMo-RL launches."""
+    base_config = _write_minimal_config(tmp_path, include_adapter=True)
+    overlay_config = tmp_path / "overlay.yaml"
+    overlay_config.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": base_config.name,
+                "policy": {"generation": {"temperature": 1.0}},
+            }
+        )
+    )
+
+    checks = check_rl_readiness(overlay_config, expected_gpus=2)
+    missing_required = [check.name for check in checks if check.required and not check.ok]
 
     assert missing_required == []
 
