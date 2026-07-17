@@ -114,6 +114,10 @@ from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_c
 logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# Detailed phase evidence requires synchronized CUDA boundaries and allocator resets. Keep it
+# opt-in so ordinary inference retains only its existing low-overhead batch and total timers.
+_CUDA_PHASE_EVIDENCE_ENABLED = os.environ.get("EVO2_EXACT_PHASE_EVIDENCE") == "1"
+
 
 @dataclass(frozen=True)
 class _CudaPhaseStats:
@@ -132,6 +136,8 @@ def _begin_cuda_phase(
     boundary_time_s: Optional[float] = None,
 ) -> float:
     """Start a CUDA phase, optionally reusing the preceding phase's synchronized boundary."""
+    if not _CUDA_PHASE_EVIDENCE_ENABLED:
+        return time.perf_counter()
     if not already_synchronized:
         torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
@@ -140,6 +146,8 @@ def _begin_cuda_phase(
 
 def _finish_cuda_phase(started_at_s: float) -> _CudaPhaseStats:
     """Finish a CUDA phase at one synchronized boundary and capture allocator peaks."""
+    if not _CUDA_PHASE_EVIDENCE_ENABLED:
+        return _CudaPhaseStats()
     torch.cuda.synchronize()
     ended_at_s = time.perf_counter()
     return _CudaPhaseStats(
@@ -1035,7 +1043,7 @@ def _sampled_token_action(
 ) -> tuple[bool, bool]:
     """Return whether to append a sampled token and stop its request."""
     is_eos = token_id in stop_token_ids
-    return (not is_eos or ignore_eos, is_eos and not ignore_eos)
+    return (not is_eos, is_eos and not ignore_eos)
 
 
 def _trim_native_text_stop_markers(text: str) -> str:

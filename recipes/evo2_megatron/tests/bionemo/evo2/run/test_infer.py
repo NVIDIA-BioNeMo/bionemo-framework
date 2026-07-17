@@ -105,8 +105,8 @@ def test_native_stop_token_ids_resolves_eos_text_token():
     assert _native_stop_token_ids(_FakeTokenizer()) == {0}
 
 
-def test_sampled_eos_is_retained_when_ignore_eos_is_enabled():
-    assert _sampled_token_action(0, {0}, ignore_eos=True) == (True, False)
+def test_sampled_eos_is_omitted_without_stopping_when_ignore_eos_is_enabled():
+    assert _sampled_token_action(0, {0}, ignore_eos=True) == (False, False)
 
 
 def test_sampled_eos_stops_and_is_omitted_by_default():
