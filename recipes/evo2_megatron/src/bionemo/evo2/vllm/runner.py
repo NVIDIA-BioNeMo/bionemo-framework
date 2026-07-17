@@ -72,6 +72,7 @@ from bionemo.evo2.vllm.benchmark import (
     sampling_params_kwargs,
     summarize_vllm_outputs,
     validate_compilation_proof,
+    validate_dna_output_token_ids,
 )
 from bionemo.evo2.vllm.profile import (
     Evo2VllmProfile,
@@ -4093,6 +4094,10 @@ def write_full_generation_records_artifact(
                         ownership_validator()
                     if execution.request_id != generation.request_id:
                         raise AssertionError("execution and generation request IDs must align")
+                    validate_dna_output_token_ids(
+                        generation.output_token_ids,
+                        request_id=generation.request_id,
+                    )
                     row = {
                         **execution.to_dict(),
                         "prompt_token_ids": list(generation.prompt_token_ids),
@@ -4111,7 +4116,14 @@ def write_full_generation_records_artifact(
                         decoded = decode_output_token_ids(generation.output_token_ids)
                         if not isinstance(decoded, str):
                             raise TypeError("output token decoder must return text")
-                        decoded_bytes = decoded.encode("utf-8")
+                        try:
+                            decoded_bytes = decoded.encode("ascii")
+                        except UnicodeEncodeError as error:
+                            raise AssertionError(
+                                "decoded output must exactly match A/C/G/T token IDs"
+                            ) from error
+                        if decoded_bytes != bytes(generation.output_token_ids):
+                            raise AssertionError("decoded output must exactly match A/C/G/T token IDs")
                         row.update(
                             {
                                 "output_text_utf8_base64": base64.b64encode(decoded_bytes).decode("ascii"),

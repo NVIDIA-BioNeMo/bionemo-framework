@@ -588,6 +588,18 @@ def sampling_params_kwargs(manifest: WorkloadManifest) -> dict[str, Any]:
     }
 
 
+_DNA_OUTPUT_TOKEN_IDS = frozenset((65, 67, 71, 84))
+
+
+def validate_dna_output_token_ids(token_ids: Sequence[int], *, request_id: str) -> None:
+    """Require raw Evo2 completion token IDs to encode only A, C, G, or T."""
+    for position, token_id in enumerate(token_ids):
+        if type(token_id) is not int or token_id not in _DNA_OUTPUT_TOKEN_IDS:
+            raise AssertionError(
+                f"request {request_id} output token {position} must be a raw A/C/G/T token ID"
+            )
+
+
 def records_from_vllm_outputs(
     manifest: WorkloadManifest,
     outputs: Sequence[Any],
@@ -605,6 +617,7 @@ def records_from_vllm_outputs(
             raise AssertionError(f"request {request.request_id} prompt tokens changed or were reordered")
 
         completion = output.outputs[0]
+        validate_dna_output_token_ids(completion.token_ids, request_id=request.request_id)
         output_token_ids = tuple(int(token_id) for token_id in completion.token_ids)
         if completion.logprobs is None or len(completion.logprobs) != len(output_token_ids):
             raise AssertionError(f"request {request.request_id} is missing chosen-token logprobs")
@@ -649,6 +662,7 @@ def summarize_vllm_outputs(
 
         completion = output.outputs[0]
         output_token_ids = completion.token_ids
+        validate_dna_output_token_ids(output_token_ids, request_id=request.request_id)
         if len(output_token_ids) != manifest.max_new_tokens:
             raise AssertionError(
                 f"request {request.request_id} must generate exactly {manifest.max_new_tokens} tokens"
@@ -791,6 +805,7 @@ def validate_generation_records(
             raise AssertionError(f"request {request.request_id} did not finish at the exact max-token limit")
         if record.stopped_on_eos:
             raise AssertionError(f"request {request.request_id} stopped on EOS during exact-length generation")
+        validate_dna_output_token_ids(record.output_token_ids, request_id=request.request_id)
         if len(record.output_logprobs) != len(record.output_token_ids):
             raise AssertionError(f"request {request.request_id} token/logprob lengths differ")
         if not all(math.isfinite(value) for value in record.output_logprobs):

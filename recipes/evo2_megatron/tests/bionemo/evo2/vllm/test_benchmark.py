@@ -514,8 +514,9 @@ def test_benchmark_cli_accepts_memory_utilization_required_for_two_gib_headroom(
 
 def _fake_vllm_outputs(manifest: WorkloadManifest):
     outputs = []
+    dna_token_ids = (65, 67, 71, 84)
     for index, request in enumerate(manifest.requests):
-        token_ids = (65 + index, 67 + index, 71 + index)
+        token_ids = tuple(dna_token_ids[(index + position) % len(dna_token_ids)] for position in range(3))
         logprobs = [
             {token_id: SimpleNamespace(logprob=-0.1 * (position + 1))} for position, token_id in enumerate(token_ids)
         ]
@@ -584,6 +585,21 @@ def test_vllm_output_adapter_rejects_reordered_or_missing_logprob_outputs() -> N
     outputs[0].outputs[0].logprobs[1] = {}
     with pytest.raises(AssertionError, match="chosen-token logprob"):
         records_from_vllm_outputs(manifest, outputs)
+
+
+@pytest.mark.parametrize("invalid_token_id", (0, 66))
+@pytest.mark.parametrize("adapter", (records_from_vllm_outputs, summarize_vllm_outputs))
+def test_vllm_output_admission_rejects_eos_and_non_dna_token_ids(adapter, invalid_token_id: int) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1).with_max_new_tokens(3)
+    outputs = _fake_vllm_outputs(manifest)
+    completion = outputs[0].outputs[0]
+    completion.token_ids = (65, invalid_token_id, 71)
+    completion.logprobs = [
+        {token_id: SimpleNamespace(logprob=-0.1)} for token_id in completion.token_ids
+    ]
+
+    with pytest.raises(AssertionError, match="A/C/G/T"):
+        adapter(manifest, outputs)
 
 
 def test_benchmark_sample_uses_vllm_request_metrics_without_engine_timing_inflation() -> None:

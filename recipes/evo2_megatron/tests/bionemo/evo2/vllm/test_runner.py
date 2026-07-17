@@ -1705,7 +1705,7 @@ def test_full_output_artifact_round_trips_every_token_logprob_and_seed(tmp_path)
     assert rows[0]["stopped_on_eos"] is False
     assert rows[0]["output_token_ids"] == [65, 67, 71]
     assert rows[0]["chosen_token_logprobs"] == pytest.approx([-0.1, -0.1, -0.1])
-    assert rows[1]["output_token_ids"] == [66, 68, 72]
+    assert rows[1]["output_token_ids"] == [67, 71, 84]
     publication_receipt = metadata["publication_receipt"]
     assert publication_receipt["final_path"] == str(output_path.resolve())
     assert publication_receipt["sha256"] == hashlib.sha256(output_path.read_bytes()).hexdigest()
@@ -1750,6 +1750,30 @@ def test_backend_neutral_full_output_artifact_accepts_generation_records(tmp_pat
     assert rows[0]["output_token_ids"] == [65, 67, 71]
     assert rows[0]["chosen_token_logprobs"] == pytest.approx([-0.1, -0.1, -0.1])
     assert metadata["generated_token_count"] == 6
+
+
+def test_full_output_writer_rejects_decoded_non_dna_or_token_id_mismatch(tmp_path) -> None:
+    manifest = WorkloadManifest.from_path(DATA).request_slice(0, 1).with_max_new_tokens(3)
+    execution_records = runner.build_request_execution_records(
+        manifest,
+        global_request_offset=0,
+        dp_rank=0,
+        dp_size=1,
+        generation_round=0,
+        call_index=0,
+    )
+    records = records_from_vllm_outputs(manifest, _fake_outputs(manifest))
+    output_path = tmp_path / "invalid-dna.outputs.jsonl.gz"
+
+    with pytest.raises(AssertionError, match="decoded output must exactly match A/C/G/T token IDs"):
+        runner.write_full_generation_records_artifact(
+            output_path,
+            records=records,
+            execution_records=execution_records,
+            decode_output_token_ids=lambda _token_ids: "ACN",
+        )
+
+    assert not output_path.exists()
 
 
 def test_full_output_writer_never_overwrites_foreign_sidecar_created_before_publish(tmp_path) -> None:
@@ -3886,8 +3910,9 @@ def test_prepare_workload_rejects_synthetic_prompt_or_id_rewrites_for_frozen_sou
 
 def _fake_outputs(manifest: WorkloadManifest):
     outputs = []
+    dna_token_ids = (65, 67, 71, 84)
     for index, request in enumerate(manifest.requests):
-        token_ids = (65 + index, 67 + index, 71 + index)
+        token_ids = tuple(dna_token_ids[(index + position) % len(dna_token_ids)] for position in range(3))
         completion = SimpleNamespace(
             token_ids=token_ids,
             logprobs=[{token_id: SimpleNamespace(logprob=-0.1)} for token_id in token_ids],
