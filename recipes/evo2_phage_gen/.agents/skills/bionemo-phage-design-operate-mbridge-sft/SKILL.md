@@ -26,9 +26,8 @@ Use local TensorBoard by default. Enable W&B only after the user confirms entity
 
 ## Monitor and decide
 
-Follow references/sft-operation.md for validation comparability, sampling uncertainty, phase-aware due gating, patience, sustained-degradation evidence, and bounded rebound observation. Observe both on-disk artifacts and configured telemetry: train and validation loss, learning rate, gradient norm, throughput, GPU utilization and memory, failures, checkpoint integrity, and free space. Promote each new lowest comparable validation-loss checkpoint as best.
+Follow references/sft-operation.md for validation comparability, sampling uncertainty, phase-aware due gating, patience, sustained-degradation evidence, and bounded rebound observation. Every substantive or due monitoring decision, even for a narrow stopping question, must include a compact health snapshot from both on-disk artifacts and configured telemetry: train and validation loss, learning rate, gradient norm, throughput, GPU utilization and memory, failures, checkpoint integrity, and free space. A timerless not-due response returns without querying and reports the last-observed timestamp and staleness plus next_check_at. Promote each new lowest comparable validation-loss checkpoint as best.
 
 Do not early-stop on one blip or on incomparable validation events. Stop at the 12,000-step ceiling or after the monitoring contract establishes sustained overfitting beyond its bounded recovery window. Stop immediately for NaN or Inf, corrupt checkpoint or data, critical disk pressure, or unrecoverable resource failure. Treat OOM as a diagnosis and relaunch decision under the central resource policy rather than as permission to truncate genomes.
 
 Preserve best and latest checkpoints and distinguish selected step from stopping step. Resume only a verified exact training state; changed data, config, topology-incompatible state, or weights-only recovery is a new attempt. Finish OUTPUTS.yaml, SUMMARY.md, and RUNLOG.md with checkpoint evidence and hashes suitable for downstream RL lineage.
-

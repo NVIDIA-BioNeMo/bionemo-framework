@@ -105,9 +105,19 @@ EVALUATION_WORKSPACE_EXCLUDED_TOP_LEVEL = {
 }
 EVALUATION_WORKSPACE_EXCLUDED_NAMES = {
     "__pycache__",
+    "VALIDATION.md",
     "evals",
     "evals.json",
 }
+EVALUATION_WORKSPACE_GENERATED_PATTERNS = (
+    "*.egg-info",
+    "*.dist-info",
+    "**/results/**",
+    "**/tmp/**",
+    "**/tmp_*",
+    "**/tmp_*/**",
+    "*/scripts/tests/*",
+)
 
 
 class EvalError(RuntimeError):
@@ -161,55 +171,213 @@ def _generation_prompt(case: EvalCase, *, harness: str, plugin_name: str | None)
     return f"/{plugin_name}:{case.skill_name}\n\n{prompt}"
 
 
-def _evaluation_workspace_ignore(source_root: Path):
-    def ignore(current: str, names: list[str]) -> set[str]:
-        current_path = Path(current)
-        relative = current_path.relative_to(source_root)
-        excluded = set(EVALUATION_WORKSPACE_EXCLUDED_NAMES.intersection(names))
-        if relative == Path("."):
-            excluded.update(EVALUATION_WORKSPACE_EXCLUDED_TOP_LEVEL.intersection(names))
-        return excluded
+def _evaluation_workspace_exclusion(relative: Path) -> str | None:
+    if relative.parts and relative.parts[0] in EVALUATION_WORKSPACE_EXCLUDED_TOP_LEVEL:
+        return "excluded-top-level"
+    if any(part in EVALUATION_WORKSPACE_EXCLUDED_NAMES for part in relative.parts):
+        return "excluded-name"
+    if "results" in relative.parts:
+        return "excluded-results"
+    if any(part == "tmp" or part.startswith("tmp_") for part in relative.parts):
+        return "excluded-generated-name"
+    if any(
+        part.endswith((".egg-info", ".dist-info"))
+        for part in relative.parts
+    ):
+        return "excluded-generated-metadata"
+    if any(
+        left == "scripts" and right == "tests"
+        for left, right in zip(relative.parts, relative.parts[1:], strict=False)
+    ):
+        return "excluded-audit-tests"
+    return None
 
-    return ignore
 
-
-def _stage_evaluation_workspace(source_root: Path, working_directory: Path) -> dict[str, Any]:
-    shutil.copytree(
-        source_root,
-        working_directory,
-        symlinks=True,
-        ignore=_evaluation_workspace_ignore(source_root),
-    )
-    leaked_answer_keys = sorted(
-        path.relative_to(working_directory).as_posix()
-        for path in working_directory.rglob("evals.json")
-    )
-    if leaked_answer_keys:
+def _git_tracked_evaluation_paths(source_root: Path) -> tuple[Path, list[Path]]:
+    top = _run_capture(["git", "-C", str(source_root), "rev-parse", "--show-toplevel"])
+    if top.returncode != 0:
+        reason = (top.stderr or "not a Git worktree").strip().splitlines()[0]
         raise EvalError(
-            "sanitized evaluation workspace retained answer keys: "
-            + ", ".join(leaked_answer_keys)
+            "live Claude evaluation requires a Git-tracked source workspace: "
+            + reason
         )
-    manifest_rows: list[str] = []
-    regular_files = 0
-    symlinks = 0
+    worktree = Path(top.stdout.strip()).resolve()
+    listed = _run_capture(
+        ["git", "-C", str(source_root), "ls-files", "-z", "--cached", "--", "."]
+    )
+    if listed.returncode != 0:
+        reason = (listed.stderr or "git ls-files failed").strip().splitlines()[0]
+        raise EvalError(f"cannot enumerate Git-tracked evaluation files: {reason}")
+    relative_paths: list[Path] = []
+    for raw in listed.stdout.split("\0"):
+        if not raw:
+            continue
+        relative = Path(raw)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise EvalError(f"unsafe Git-tracked evaluation path: {raw!r}")
+        relative_paths.append(relative)
+    return worktree, sorted(set(relative_paths), key=lambda path: path.as_posix())
+
+
+def _stage_evaluation_workspace(
+    source_root: Path,
+    working_directory: Path,
+    *,
+    required_paths: Sequence[Path] = (),
+) -> dict[str, Any]:
+    source_root = source_root.resolve()
+    worktree, tracked_paths = _git_tracked_evaluation_paths(source_root)
+    working_directory.mkdir(parents=True)
+    excluded_tracked_paths: list[dict[str, str]] = []
+    excluded_symlinks: list[dict[str, str]] = []
+    deleted_tracked_paths: list[str] = []
+    unsupported_tracked_paths: list[str] = []
+    tracked_symlinks: list[tuple[Path, Path]] = []
+
+    for relative in tracked_paths:
+        exclusion = _evaluation_workspace_exclusion(relative)
+        if exclusion:
+            excluded_tracked_paths.append(
+                {"path": relative.as_posix(), "reason": exclusion}
+            )
+            continue
+        source = source_root / relative
+        if source.is_symlink():
+            tracked_symlinks.append((relative, source))
+            continue
+        if source.is_file():
+            destination = working_directory / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination, follow_symlinks=False)
+            continue
+        if not os.path.lexists(source):
+            deleted_tracked_paths.append(relative.as_posix())
+        else:
+            unsupported_tracked_paths.append(relative.as_posix())
+
+    staged_root = working_directory.resolve()
+    for relative, source in tracked_symlinks:
+        target = os.readlink(source)
+        if Path(target).is_absolute():
+            excluded_symlinks.append(
+                {
+                    "path": relative.as_posix(),
+                    "target": target,
+                    "reason": "absolute-target",
+                }
+            )
+            continue
+        resolved_source_target = (source.parent / target).resolve(strict=False)
+        try:
+            target_relative = resolved_source_target.relative_to(source_root)
+        except ValueError:
+            excluded_symlinks.append(
+                {
+                    "path": relative.as_posix(),
+                    "target": target,
+                    "reason": "target-outside-source-root",
+                }
+            )
+            continue
+        staged_target = working_directory / target_relative
+        if not staged_target.exists():
+            excluded_symlinks.append(
+                {
+                    "path": relative.as_posix(),
+                    "target": target,
+                    "reason": "target-not-staged",
+                }
+            )
+            continue
+        destination = working_directory / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(target, target_is_directory=resolved_source_target.is_dir())
+        try:
+            destination.resolve(strict=True).relative_to(staged_root)
+        except (FileNotFoundError, ValueError) as exc:
+            destination.unlink(missing_ok=True)
+            raise EvalError(
+                f"staged symlink escapes or is unresolved: {relative.as_posix()}"
+            ) from exc
+
+    normalized_required: list[str] = []
+    for required in required_paths:
+        relative = Path(required)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise EvalError(f"unsafe required evaluation path: {required}")
+        normalized_required.append(relative.as_posix())
+        if not (working_directory / relative).is_file():
+            raise EvalError(
+                "required evaluation runtime path is not present in the Git-tracked "
+                f"workspace: {relative.as_posix()}; add it to the Git index first"
+            )
+    normalized_required = sorted(set(normalized_required))
+
+    content_manifest: list[dict[str, Any]] = []
     for path in sorted(working_directory.rglob("*")):
         relative = path.relative_to(working_directory).as_posix()
         if path.is_symlink():
-            symlinks += 1
-            manifest_rows.append(f"L\t{relative}\t{os.readlink(path)}")
+            resolved = path.resolve(strict=True).relative_to(staged_root).as_posix()
+            content_manifest.append(
+                {
+                    "path": relative,
+                    "type": "symlink",
+                    "target": os.readlink(path),
+                    "resolved_target": resolved,
+                    "source": "git-tracked-working-tree",
+                }
+            )
         elif path.is_file():
-            regular_files += 1
-            manifest_rows.append(f"F\t{relative}\t{_sha256_file(path)}")
+            content_manifest.append(
+                {
+                    "path": relative,
+                    "type": "file",
+                    "bytes": path.stat().st_size,
+                    "sha256": _sha256_file(path),
+                    "source": "git-tracked-working-tree",
+                }
+            )
+
+    leaked_excluded_paths = sorted(
+        entry["path"]
+        for entry in content_manifest
+        if _evaluation_workspace_exclusion(Path(entry["path"])) is not None
+    )
+    if leaked_excluded_paths:
+        raise EvalError(
+            "sanitized evaluation workspace retained excluded paths: "
+            + ", ".join(leaked_excluded_paths)
+        )
+    manifest_rows = [
+        json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        for entry in content_manifest
+    ]
     return {
         "enabled": True,
-        "method": "temporary-copy-with-eval-and-generated-path-exclusions",
+        "method": "git-tracked-working-tree-allowlist",
         "source_root": str(source_root),
+        "source_git_worktree": str(worktree),
         "working_directory": str(working_directory),
         "excluded_top_level": sorted(EVALUATION_WORKSPACE_EXCLUDED_TOP_LEVEL),
         "excluded_names": sorted(EVALUATION_WORKSPACE_EXCLUDED_NAMES),
         "answer_keys_excluded": True,
-        "regular_file_count": regular_files,
-        "symlink_count": symlinks,
+        "untracked_paths_excluded": True,
+        "generated_path_patterns_excluded": list(
+            EVALUATION_WORKSPACE_GENERATED_PATTERNS
+        ),
+        "tracked_path_count": len(tracked_paths),
+        "excluded_tracked_paths": excluded_tracked_paths,
+        "excluded_symlinks": excluded_symlinks,
+        "deleted_tracked_paths": deleted_tracked_paths,
+        "unsupported_tracked_paths": unsupported_tracked_paths,
+        "required_paths": normalized_required,
+        "regular_file_count": sum(
+            entry["type"] == "file" for entry in content_manifest
+        ),
+        "symlink_count": sum(
+            entry["type"] == "symlink" for entry in content_manifest
+        ),
+        "content_manifest": content_manifest,
         "content_manifest_sha256": _sha256_text("\n".join(manifest_rows)),
         "ephemeral": True,
     }
@@ -1305,7 +1473,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-external-skill-upload",
         action="store_true",
-        help="acknowledge that live Claude evals transmit recipe skill text and prompts to Anthropic",
+        help=(
+            "acknowledge that live Claude evals may transmit recipe skill text, "
+            "prompts, and staged recipe files they read to Anthropic"
+        ),
     )
     parser.add_argument("--sandbox", choices=("read-only", "workspace-write"), default="read-only")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
@@ -1363,7 +1534,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             plugin_root, plugin_name, plugin_manifest = _claude_plugin(skill_root)
             if args.run and not args.allow_external_skill_upload:
                 raise EvalError(
-                    "live Claude evals send recipe-local skill text and eval prompts to Anthropic; "
+                    "live Claude evals may send recipe-local skill text, eval prompts, "
+                    "and staged recipe files it reads to Anthropic; "
                     "rerun with --allow-external-skill-upload after confirming that transfer is allowed"
                 )
         if args.max_budget_usd is not None and args.max_budget_usd <= 0:
@@ -1388,8 +1560,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 working_directory = (
                     Path(evaluation_workspace_handle.name) / repo_root.name
                 )
+                required_runtime_paths = {
+                    plugin_relative / ".claude-plugin" / "plugin.json",
+                    *(
+                        plugin_relative / "skills" / case.skill_name / "SKILL.md"
+                        for case in selected
+                    ),
+                }
                 evaluation_workspace = _stage_evaluation_workspace(
-                    repo_root, working_directory
+                    repo_root,
+                    working_directory,
+                    required_paths=sorted(
+                        required_runtime_paths,
+                        key=lambda path: path.as_posix(),
+                    ),
                 )
                 execution_plugin_root = working_directory / plugin_relative
                 staged_manifest = execution_plugin_root / ".claude-plugin" / "plugin.json"

@@ -32,5 +32,5 @@ C1 lines 17–24 sets a 500-step ceiling, validation every 10 steps, and 96 vali
 
 - Keep the 96-design online validation and the offline 1,000-design Arc branches separate in every report.
 - Step 190 is the documented selected checkpoint for this case, not a generic early-stop step. The run was observed through step 250 under a configured 500-step ceiling so later comparable evidence could inform selection.
-- Never relabel either offline result as `385`, extrapolate it as a universal rollout yield, or treat the smoke-memory values as final-run telemetry.
+- Never substitute an unsupported unique-cluster count for either offline result, extrapolate either as a universal rollout yield, or treat the smoke-memory values as final-run telemetry.
 - For a new run, archive the actual immutable manifests, resolved config, checkpoint hash, and metric artifacts in its result directory; this historical snapshot is contextual evidence only.
