@@ -15,7 +15,10 @@ Run the approved RL contract through bionemo-phage-design-adapt-execution. Selec
    `source .ci_test_env.sh`, then verify the resolved entrypoint, imports, and
    recipe-owned NeMo-RL patch runtime. Do not treat an environment built in a
    different checkout, container, or host as execution readiness.
-4. Verify RL_OBJECTIVES.yaml, fixed validation-generation manifest, filter profile, policy/KL identities, runtime contract, hardware/disk, and execution plan. Resolve commands with [command resolution](references/command-resolution.md) and record them through [action traceability](references/action-traceability.md).
+4. Verify RL_OBJECTIVES.yaml, fixed validation-generation manifest, filter
+   profile, policy/KL identities, runtime contract, hardware/disk, and execution
+   plan. For vLLM follow [the vLLM GDPO contract](references/vllm-gdpo-contract.md).
+   Resolve commands with [command resolution](references/command-resolution.md) and record them through [action traceability](references/action-traceability.md).
 5. Predeclare primary metric, tie breakers, uncertainty/minimum change, comparable-event rules, validation cadence, maximum 500 steps, patience/rebound/collapse rules, and restart semantics.
 6. Resolve prompt and batch geometry explicitly: `P=num_prompts_per_step`,
    `K=num_generations_per_prompt`, and `GBS=P*K`. For the primary mixed run

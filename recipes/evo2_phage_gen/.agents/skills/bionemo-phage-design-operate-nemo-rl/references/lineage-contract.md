@@ -29,3 +29,11 @@ Record objective/filter hashes; policy initialization and KL reference independe
 
 Exact resume may not alter KL reference, prompt derivation, or fixed validation manifest. A weights-only restart may initialize recorded weights but remains anchored to selected non-RL SFT. A stagewise run is a new experiment, not a resume.
 
+## Runtime lineage
+
+Record generation backend; vLLM official version/tag or wheel URL/hash; BioNeMo plugin/model,
+exported model/config and tokenizer hashes; NeMo-RL revision; recipe-owned dependency patch
+paths/hashes and preflight result; TP/DP resource groups; prompt-group and local-batch geometry;
+request/global-index/seed procedure version; selected-logprob mode; and MCore-to-vLLM
+export/conversion/refit procedure version. A backend, patch, prompt mixture, seed formula, or refit
+change creates a new comparable-attempt boundary.

@@ -68,6 +68,20 @@ The historical RL shape used one node with 2× H100 80 GB GPUs. Other hardware m
 source .ci_test_env.sh
 ```
 
+The build creates two deliberate environments. The activated main environment
+uses the container's BioNeMo/Megatron Python and Torch stack for training. It
+also retains the exact recursive NeMo-RL source and creates a locked isolated
+vLLM actor environment under `$NEMO_RL_VENV_DIR`. Resolve its interpreter with:
+
+```bash
+VLLM_PYTHON="$(python -c 'from bionemo.evo2_phage_gen.nemo_rl_patches import vllm_actor_python_executable; print(vllm_actor_python_executable())')"
+test -x "$VLLM_PYTHON"
+```
+
+No `PYTHONPATH` override is required after this clean build. On older container
+Torch builds that lack `torch._opaque_base`, use the isolated actor interpreter
+for vLLM; do not patch upstream vLLM core.
+
 ### vLLM inference with the qualified performance profile
 
 Export the selected RL MBridge checkpoint before generation. Do not point vLLM
@@ -101,9 +115,8 @@ the multiprocess executor, and async scheduling:
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 export VLLM_PLUGINS=evo2
-export PYTHONPATH="$PWD/src:$PWD/../evo2_megatron/src"
 
-python -m bionemo.evo2.vllm.benchmark \
+"$VLLM_PYTHON" -m bionemo.evo2.vllm.benchmark \
   --backend vllm \
   --checkpoint /path/to/evo2-vllm-export \
   --manifest /path/to/workload-manifest.json \
@@ -126,8 +139,8 @@ For this reference command, the resolved artifact must report TP2, executor
 `mp`, async scheduling enabled, compilation mode 3, `FULL_AND_PIECEWISE`, and
 capture size 96. Omit
 `--async-scheduling` only for an explicit sync comparison. Use
-`python -m ...`; running a module file by path can let the local `profile.py`
-shadow Python's standard-library module.
+`"$VLLM_PYTHON" -m ...`; running a module file by path can let the local
+`profile.py` shadow Python's standard-library module.
 
 On a system other than the qualified two-H100 node, first discover assigned GPU
 count/topology/free memory and run a small correctness/capacity probe. Use every
@@ -163,6 +176,23 @@ Report every length stratum plus the fixed equal-weight aggregate. The
 `validation_prompt10_96` bank remains a historical single-length control.
 The one-step `gdpo_phage_vllm_tp2_one_step_smoke.yaml` uses P8xK2/GBS16 and is
 explicitly capacity-bounded; it is not the production batch contract.
+
+Run that bounded end-to-end smoke through the production launcher before
+scaling to P8xK12/GBS96:
+
+```bash
+evo2_phage_run_gdpo --config configs/gdpo_phage_vllm_tp2_one_step_smoke.yaml \
+  checkpointing.pretrained_checkpoint.path=/path/to/mbridge-checkpoint \
+  policy.model_name=/path/to/fresh-vllm-export \
+  policy.tokenizer.name="$PWD/../evo2_megatron/tokenizers/nucleotide_fast_tokenizer_512" \
+  checkpointing.checkpoint_dir="$PWD/results/vllm-gdpo-smoke/checkpoints" \
+  logger.log_dir="$PWD/results/vllm-gdpo-smoke/logs"
+```
+
+The launcher keeps policy/reference workers in the main environment and routes
+only the vLLM generation actors to the pinned actor interpreter. For production,
+set P8xK12/GBS96, use local generation batch `GBS/DP`, and capacity-test MBS and
+logprob batch size independently without changing prompt groups.
 
 ### 2. Prepare external QC and Arc
 

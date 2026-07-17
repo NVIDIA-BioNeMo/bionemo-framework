@@ -59,6 +59,23 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-005-vllm-two-gpu-gdpo",
+      "prompt": "Prepare and verify a real Evo2 NeMo-RL GDPO run on two H100s using the vLLM rollout backend. Use eight prompt-length strata, 96 total stochastic rollouts, validation, and at least one optimizer step. Exercise TP=2/DP=1 and TP=1/DP=2, and decide whether vLLM improves the complete RL step rather than generation alone.",
+      "expected_output": "A provenance-checked, numerically gated, topology-aware mixed-prompt vLLM GDPO launch and comparison contract.",
+      "assertions": [
+        "The response runs .ci_build.sh before sourcing .ci_test_env.sh on the execution host, verifies the pinned NeMo-RL source and isolated official-vLLM actor environment, and uses no PYTHONPATH workaround or upstream vLLM-core patch.",
+        "The response defines P=8, K=12, GBS=96, and local generation batch GBS/DP; it treats train_micro_batch_size and logprob_batch_size as independent capacity-tested MCore chunks rather than prompt-group semantics.",
+        "The response preserves prompt IDs, length strata, rollout ordinals, global request indices, generation calls, DP ranks, and seeds; assembles all K rewards before within-prompt advantages; and reports every validation stratum plus the frozen equal-weight aggregate.",
+        "The response requires actual TP=2/DP=1 and TP=1/DP=2 runs on two GPUs with disjoint DP streams, then separately proves TP>1 with DP>1 resource composition fails closed when four GPUs are unavailable.",
+        "The response gates exact ACGTN length/no-EOS output, finite aligned chosen rollout logprobs, unchanged sequence-logprob threshold, rollout-versus-policy delta and ratio diagnostics, finite rewards/advantages/loss/gradients, and an optimizer-step or parameter change.",
+        "The response proves post-optimizer MCore-to-vLLM export/conversion/refit and synchronization before the next rollout or validation boundary.",
+        "The response compares matched end-to-end train and validation steps, including rollout, reward/QC, policy and reference forward, backward/optimizer, conversion/refit/sync, barriers, peak memory, and outer total time.",
+        "The response exports the selected MBridge policy to a fresh safetensors directory for final generation, hashes its authority files, and runs the qualified all-knobs profile through the resolved actor interpreter while adapting TP/DP and capture sizes to assigned GPUs."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

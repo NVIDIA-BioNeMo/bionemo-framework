@@ -2,7 +2,7 @@
 
 Material RL actions must exist as files, not only chat or shell history. Name executable steps in order and by intent, such as `010-preflight.sh`, `020-launch-rl.sh`, and `030-monitor-once.sh`, or the execution adapter's scheduler equivalent. An optional guarded run-all script is acceptable only after individual steps are stable and idempotence/resume behavior is understood.
 
-For every action record exact script and resolved-config hashes, executor/host, scheduler or cloud job ID and URL when present, start/end time, exit status, stdout/stderr paths, and output hashes. Link each action to append-only `RUNLOG.md` and `monitor/events.jsonl` entries. Never leave the only runnable command in chat.
+For every action record exact script and resolved-config hashes, executor/host, scheduler or cloud job ID and URL when present, start/end time, exit status, stdout/stderr paths, and output hashes. For vLLM also record official package provenance, plugin/model and NeMo-RL revisions, dependency patch hashes, prompt-group geometry, per-rank request/seed ranges, refit evidence, numerical audit, and component/total timing artifact paths. Link each action to append-only `RUNLOG.md` and `monitor/events.jsonl` entries. Never leave the only runnable command in chat.
 
 The concise RL `SUMMARY.md` and `OUTPUTS.yaml` must expose:
 

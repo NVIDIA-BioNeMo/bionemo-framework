@@ -4,7 +4,7 @@
 
 Name one primary validation metric and exact filter-profile hash before launch. For the replication case, use the count/rate of full-QC passers after 99%-identity cluster deduplication; tie break by raw full-QC passers, total diversity, then stability. New goals require target-specific metrics from the approved objective contract.
 
-Pin a validation-generation manifest containing prompt IDs, source-genome and prompt-manifest hashes, prompt-length strata, seeds, temperature and all sampling parameters, sample counts, canonicalization, filter/tool versions, and QC denominator. Prefer paired fixed-seed comparisons. If composition changes, compare within strata and reweight to the frozen target mix; an unadjusted aggregate decline is diagnostic and does not consume patience.
+Pin a validation-generation manifest containing prompt IDs, source-genome and prompt-manifest hashes, prompt-length strata, rollout ordinals, seeds, temperature and all sampling parameters, sample counts, canonicalization, filter/tool versions, and QC denominator. Prefer paired fixed-seed comparisons. Report every length stratum and a predeclared reweighted aggregate. If composition changes, compare within strata and reweight to the frozen target mix; an unadjusted aggregate decline is diagnostic and does not consume patience.
 
 Report sampling uncertainty appropriate to the metric, such as paired bootstrap intervals for the fixed bank and Wilson intervals for simple pass-rate diagnostics. Predeclare a practical minimum change. A decline must exceed ordinary sampling/data variance as well as the percentage rule below.
 
@@ -42,6 +42,13 @@ Do not confuse observation cadence with validation cadence. A cheap log-health c
 ## Monitor state
 
 Keep monitor/state.json current and append monitor/events.jsonl. Each validation event includes step/time, checkpoint hash, primary and tie-break values, uncertainty, validation-manifest hash, prompt strata, exact denominator/filter profile, reward components, hard-filter waterfall, OR branches, diversity, KL/entropy, lengths/invalids, system health, data source, comparability flag/reason, and best/stop decision.
+
+For vLLM attempts also retain rollout-versus-policy logprob deltas and ratios, finite
+reward/advantage/loss/gradient checks, optimizer-step/parameter-change evidence, per-DP
+request/global-index/seed ranges, post-update export/conversion/refit/sync evidence, and rollout,
+reward/QC, policy/reference forward, backward, optimizer, refit/sync, barrier, validation, peak
+memory, and total-step timings. A missing or stale refit, overlapping DP stream, or non-finite
+numeric gate is a health failure, not a comparable validation event.
 
 If continuous automation is unavailable, emit a repeatable one-tick script and handoff stating next_check_at. Never invent a nonexistent CLI.
 

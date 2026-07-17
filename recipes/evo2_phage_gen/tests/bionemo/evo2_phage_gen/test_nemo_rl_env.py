@@ -300,11 +300,11 @@ def test_binary_core_pass_requires_synteny_aai_and_required_genes_when_weighted(
     """Headline pass logging must include every configured final paper gate."""
     scored = pd.DataFrame(
         {
-            "reward_valid_nt_chars": [1.0],
-            "reward_external_synteny": [0.5],
-            "reward_external_average_protein_identity": [1.0],
-            "reward_external_required_genes": [1.0],
-            "reward": [0.875],
+            "reward_valid_nt_chars": [1.0, 1.0, 1.0],
+            "reward_external_synteny": [0.5, 1.0, 1.0],
+            "reward_external_average_protein_identity": [1.0, 0.5, 1.0],
+            "reward_external_required_genes": [1.0, 1.0, 0.5],
+            "reward": [0.875, 0.875, 0.875],
         }
     )
     weights = RewardWeights(
@@ -317,7 +317,7 @@ def test_binary_core_pass_requires_synteny_aai_and_required_genes_when_weighted(
     metrics = phage_qc_metrics_from_scored(scored, weights)
 
     if metrics["binary_core_pass_count"] != 0:
-        raise AssertionError("synteny failure was treated as optional in headline pass logging")
+        raise AssertionError("a configured synteny, AAI, or required-gene failure was treated as optional")
     if metrics["binary_core_pass_rate"] != 0.0:
         raise AssertionError("headline pass rate ignored a configured final filter")
 
