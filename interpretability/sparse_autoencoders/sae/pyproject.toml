@@ -15,7 +15,7 @@ keywords = ["machine learning", "interpretability", "sparse autoencoders"]
 
 # Minimal dependencies - domain-agnostic
 dependencies = [
-    "torch>=2.0",
+    "torch>=2.13.0",
     "numpy>=1.20",
     "tqdm>=4.60",
     "pyarrow>=23.0.0",
