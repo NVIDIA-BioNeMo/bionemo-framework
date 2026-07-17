@@ -1561,6 +1561,7 @@ def test_request_sampling_params_consume_persisted_stream_seeds() -> None:
         ("logprobs", None),
         ("ignore_eos", False),
         ("detokenize", True),
+        ("allowed_token_ids", [0, 65, 67, 71]),
         ("seed", 7),
     ),
 )

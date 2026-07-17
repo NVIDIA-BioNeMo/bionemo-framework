@@ -652,7 +652,7 @@ def test_sampling_params_match_gdpo_and_force_exact_lengths_without_detokenizati
 
     kwargs = sampling_params_kwargs(manifest)
 
-    assert kwargs == {
+    expected = {
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 4,
@@ -662,7 +662,10 @@ def test_sampling_params_match_gdpo_and_force_exact_lengths_without_detokenizati
         "stop_token_ids": [],
         "ignore_eos": True,
         "detokenize": False,
+        "allowed_token_ids": [65, 67, 71, 84],
     }
+    if kwargs != expected:
+        raise AssertionError(f"exact Evo2 sampling contract drifted: {kwargs!r}")
 
 
 def test_sampling_params_translate_mcore_top_k_one_to_vllm_true_greedy() -> None:

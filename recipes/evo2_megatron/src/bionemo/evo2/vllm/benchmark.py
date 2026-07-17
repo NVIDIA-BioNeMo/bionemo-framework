@@ -585,6 +585,7 @@ def sampling_params_kwargs(manifest: WorkloadManifest) -> dict[str, Any]:
         "stop_token_ids": list(manifest.stop_token_ids),
         "ignore_eos": manifest.ignore_eos,
         "detokenize": False,
+        "allowed_token_ids": sorted(_DNA_OUTPUT_TOKEN_IDS),
     }
 
 
