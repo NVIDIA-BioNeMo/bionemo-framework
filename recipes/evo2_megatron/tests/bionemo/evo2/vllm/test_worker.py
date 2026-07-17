@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,6 +16,7 @@ from bionemo.evo2.vllm import nemo_generation_worker as nemo_generation_worker_m
 from bionemo.evo2.vllm import plugin as plugin_module
 from bionemo.evo2.vllm import runner
 from bionemo.evo2.vllm.nemo_generation_worker import Evo2NemoRlGenerationWorkerImpl
+from bionemo.evo2.vllm.nemo_proof_worker import Evo2NemoRlProofVllmWorkerExtension
 from bionemo.evo2.vllm.nemo_worker import Evo2NemoRlVllmWorkerExtension
 from bionemo.evo2.vllm.worker import Evo2VllmWorkerExtension
 
@@ -203,9 +207,43 @@ def test_named_worker_extension_reset_aborts_active_rank_local_epoch(monkeypatch
     assert delegated == [(worker, False)]
 
 
-def test_nemo_worker_extension_composes_refit_and_evo2_proof_controls() -> None:
-    assert issubclass(Evo2NemoRlVllmWorkerExtension, VllmInternalWorkerExtension)
-    assert issubclass(Evo2NemoRlVllmWorkerExtension, Evo2VllmWorkerExtension)
+def test_nemo_worker_extension_excludes_proof_controls_from_normal_actor() -> None:
+    if not issubclass(Evo2NemoRlVllmWorkerExtension, VllmInternalWorkerExtension):
+        raise AssertionError("normal Evo2 NeMo worker must retain the supported refit adapter")
+    if issubclass(Evo2NemoRlVllmWorkerExtension, Evo2VllmWorkerExtension):
+        raise AssertionError("proof-disabled actor must not load the Evo2 proof extension")
+
+
+def test_normal_nemo_worker_import_does_not_load_proof_modules() -> None:
+    code = """
+import sys
+from bionemo.evo2.vllm.nemo_worker import Evo2NemoRlVllmWorkerExtension
+
+if Evo2NemoRlVllmWorkerExtension.__module__ != "bionemo.evo2.vllm.nemo_worker":
+    raise RuntimeError("normal worker resolved from an unexpected module")
+for module_name in (
+    "bionemo.evo2.vllm.worker",
+    "bionemo.evo2.vllm.nemo_proof_worker",
+):
+    if module_name in sys.modules:
+        raise RuntimeError(f"normal worker imported proof-only module: {module_name}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=os.environ.copy(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"normal worker import isolation failed:\n{result.stdout}\n{result.stderr}")
+
+
+def test_nemo_proof_worker_extension_composes_refit_and_evo2_proof_controls() -> None:
+    if not issubclass(Evo2NemoRlProofVllmWorkerExtension, VllmInternalWorkerExtension):
+        raise AssertionError("proof worker must retain the supported refit adapter")
+    if not issubclass(Evo2NemoRlProofVllmWorkerExtension, Evo2VllmWorkerExtension):
+        raise AssertionError("proof worker must expose the opt-in Evo2 proof controls")
 
 
 def test_nemo_worker_extension_records_actual_incremental_refit_chunks(monkeypatch) -> None:
@@ -224,7 +262,7 @@ def test_nemo_worker_extension_records_actual_incremental_refit_chunks(monkeypat
         _complete=False,
         _consumed=True,
     )
-    worker = object.__new__(Evo2NemoRlVllmWorkerExtension)
+    worker = object.__new__(Evo2NemoRlProofVllmWorkerExtension)
     worker.model_runner = SimpleNamespace(model=SimpleNamespace(_weight_loader=loader))
 
     assert worker.reset_evo2_refit_proof_state("refit-1") == {"phase": "refit-1"}

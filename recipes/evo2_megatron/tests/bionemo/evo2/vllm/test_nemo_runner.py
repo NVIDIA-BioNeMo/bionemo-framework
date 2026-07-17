@@ -2329,7 +2329,7 @@ def test_nemo_dp2_config_owns_two_exact_48_request_engines() -> None:
     assert config["vllm_kwargs"]["max_num_seqs"] == 48
     assert config["vllm_kwargs"]["cudagraph_metrics"] is True
     assert config["generation_worker_cls"].endswith("Evo2NemoRlGenerationWorker")
-    assert config["vllm_kwargs"]["worker_extension_cls"].endswith("Evo2NemoRlVllmWorkerExtension")
+    assert config["vllm_kwargs"]["worker_extension_cls"].endswith("Evo2NemoRlProofVllmWorkerExtension")
 
 
 def test_nemo_generation_input_right_pads_mixed_prompts_without_semantic_padding() -> None:

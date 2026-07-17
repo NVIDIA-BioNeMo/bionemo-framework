@@ -191,6 +191,9 @@ def test_dp2_profile_maps_to_two_independent_48_request_nemo_rl_engines() -> Non
         request_seed=29,
     )
     assert proof_config["evo2_collect_proof"] is True
+    assert proof_config["vllm_kwargs"]["worker_extension_cls"] == (
+        "bionemo.evo2.vllm.nemo_proof_worker.Evo2NemoRlProofVllmWorkerExtension"
+    )
 
 
 def test_capacity_profile_exposes_global_wave_and_scheduler_ceiling() -> None:

@@ -255,6 +255,11 @@ class Evo2VllmProfile:
         )
 
         generation_worker_cls = "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
+        worker_extension_cls = (
+            "bionemo.evo2.vllm.nemo_proof_worker.Evo2NemoRlProofVllmWorkerExtension"
+            if self.proof
+            else "bionemo.evo2.vllm.nemo_worker.Evo2NemoRlVllmWorkerExtension"
+        )
         ACTOR_ENVIRONMENT_REGISTRY[generation_worker_cls] = VLLM_EXECUTABLE
         engine_kwargs = self.engine_kwargs(model="unused-by-nemo-rl", load_format=load_format)
         for key in (
@@ -298,7 +303,7 @@ class Evo2VllmProfile:
             },
             "vllm_kwargs": {
                 **engine_kwargs,
-                "worker_extension_cls": ("bionemo.evo2.vllm.nemo_worker.Evo2NemoRlVllmWorkerExtension"),
+                "worker_extension_cls": worker_extension_cls,
             },
         }
 

@@ -158,6 +158,9 @@ def _local_generation_output(manifest, envelope) -> BatchedDataDict:
             "generation_flattened_call_indices": torch.tensor(
                 [0, 0], dtype=torch.long
             ),
+            "generation_global_call_index_starts": torch.tensor(
+                [0, 0], dtype=torch.long
+            ),
             "generation_dp_ranks": torch.tensor([0, 0], dtype=torch.long),
             "generation_original_batch_ordinals": torch.tensor(
                 [0, 1], dtype=torch.long
