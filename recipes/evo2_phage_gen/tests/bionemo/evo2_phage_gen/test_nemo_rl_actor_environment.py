@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import inspect
+import sys
 import subprocess
 from pathlib import Path
 
@@ -88,7 +89,7 @@ def test_repair_install_retains_exact_source_and_uses_editable_main_install(tmp_
     _require(result.endswith(str(source_root)), "repair receipt omitted the retained source path")
 
 
-def test_prepare_vllm_actor_environment_uses_locked_vllm_extra_without_deep_ep(tmp_path: Path, monkeypatch) -> None:
+def test_prepare_vllm_actor_environment_uses_coordinator_python_and_exact_locked_vllm_projection(tmp_path: Path, monkeypatch) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()
     actor_root = tmp_path / "actor-venvs"
@@ -116,28 +117,61 @@ def test_prepare_vllm_actor_environment_uses_locked_vllm_extra_without_deep_ep(t
     expected_python = actor_root / EVO2_VLLM_WORKER / "bin" / "python"
     _require(actor_python == expected_python, "actor environment used a noncanonical path")
     commands = [command for command, _env in calls]
+    expected_environment = expected_python.parents[1]
     _require(
-        ["uv", "venv", "--clear", str(expected_python.parents[1])] in commands,
-        f"actor venv was not rebuilt explicitly: {commands}",
+        ["uv", "venv", "--clear", "--seed", "--python", sys.executable, str(expected_environment)] in commands,
+        f"actor venv did not use the coordinator interpreter: {commands}",
     )
-    sync = next((command for command in commands if command[:2] == ["uv", "sync"]), None)
-    _require(sync is not None, "actor environment omitted uv sync")
+    export = next((command for command in commands if command[:2] == ["uv", "export"]), None)
+    _require(export is not None, "actor environment omitted the exact lock projection")
     for required in (
         "--locked",
         "--extra",
         "vllm",
-        "--no-install-package",
+        "--no-dev",
+        "--no-emit-workspace",
+        "--no-emit-package",
         "deep-ep",
-        "--directory",
-        str(source_root),
+        "deep-gemm",
+        "--no-hashes",
     ):
-        _require(required in sync, f"locked vLLM actor sync omitted {required}")
-    sync_env = next(env for command, env in calls if command is sync)
-    _require(sync_env is not None, "actor sync omitted its isolated environment")
+        _require(required in export, f"locked vLLM dependency export omitted {required}")
+    _require(export.count("--no-emit-package") == 2, "actor projection did not exclude both unused GPU packages")
+    requirements_path = expected_environment / ".nemo-rl-vllm-lock.txt"
     _require(
-        sync_env.get("UV_PROJECT_ENVIRONMENT") == str(expected_python.parents[1]), "actor sync targeted the wrong venv"
+        export[-2:] == ["--output-file", str(requirements_path)],
+        "locked dependency export used a noncanonical receipt path",
     )
-    recipe_install = next((command for command in commands if command[:3] == ["uv", "pip", "install"]), None)
+    dependency_install = next(
+        (command for command in commands if command[:3] == ["uv", "pip", "install"] and "--requirements" in command),
+        None,
+    )
+    _require(dependency_install is not None, "actor environment omitted locked dependency installation")
+    for required in ("--python", str(expected_python), "--requirements", str(requirements_path), "--no-deps"):
+        _require(required in dependency_install, f"locked dependency install omitted {required}")
+    for option, expected in (
+        ("--default-index", nemo_rl_patches.PYPI_INDEX),
+        ("--index-strategy", "unsafe-best-match"),
+    ):
+        position = dependency_install.index(option)
+        _require(dependency_install[position + 1] == expected, f"actor dependency install used the wrong {option}")
+    index_positions = [index for index, value in enumerate(dependency_install) if value == "--index"]
+    _require(
+        [dependency_install[index + 1] for index in index_positions]
+        == [nemo_rl_patches.PYTORCH_CU130_INDEX, nemo_rl_patches.FLASHINFER_CU130_INDEX],
+        "actor dependency install drifted from the pinned CUDA indexes",
+    )
+    source_install = next(
+        (command for command in commands if command[:4] == [str(expected_python), "-m", "pip", "install"]),
+        None,
+    )
+    _require(source_install is not None, "actor environment omitted pinned NeMo-RL source installation")
+    for required in ("--ignore-requires-python", "--no-deps", "--no-build-isolation", "-e", str(source_root)):
+        _require(required in source_install, f"pinned NeMo-RL source install omitted {required}")
+    recipe_install = next(
+        (command for command in commands if command[:3] == ["uv", "pip", "install"] and str(recipe_root) in command),
+        None,
+    )
     _require(recipe_install is not None, "actor environment omitted the Evo2 plugin install")
     for required in ("--python", str(expected_python), "--no-deps", "--no-build-isolation", "-e", str(recipe_root)):
         _require(required in recipe_install, f"actor plugin install omitted {required}")
@@ -225,7 +259,8 @@ def test_actor_runtime_probe_pins_supported_torch_vllm_and_plugin(monkeypatch) -
 
     _require(len(calls) == 1 and calls[0][:2] == [str(actor_python), "-c"], "runtime probe command drifted")
     probe = calls[0][2]
-    for expected in ("(3, 13, 13)", '"2.11.0"', '"0.20.0"', "_opaque_base", "deep_ep", "evo2"):
+    expected_minor = repr(sys.version_info[:2])
+    for expected in (expected_minor, '"2.11.0"', '"0.20.0"', '"2.55.1"', "_opaque_base", "deep_ep", "evo2"):
         _require(expected in probe, f"runtime probe omitted {expected}")
 
 

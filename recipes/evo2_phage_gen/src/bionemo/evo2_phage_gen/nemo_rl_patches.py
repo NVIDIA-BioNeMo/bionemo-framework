@@ -33,6 +33,9 @@ RECIPE_ROOT = Path(__file__).resolve().parents[3]
 EVO2_VLLM_WORKER = "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
 DEFAULT_NEMO_RL_SOURCE_DIR = RECIPE_ROOT / ".venv" / "nemo-rl-source"
 DEFAULT_NEMO_RL_VENV_DIR = RECIPE_ROOT / ".venv" / "nemo-rl-venvs"
+PYPI_INDEX = "https://pypi.org/simple"
+PYTORCH_CU130_INDEX = "https://download.pytorch.org/whl/cu130"
+FLASHINFER_CU130_INDEX = "https://flashinfer.ai/whl/cu130"
 PINNED_NEMO_RL_PYPROJECT_SHA256 = "e12030d7494eeb6b63c17882fdebeec977d07a08a82bf8d848a1692f89baea1b"
 PINNED_NEMO_RL_UV_LOCK_SHA256 = "472f9e1bd8e6f4a8a54468a3946fbe721d4560fbaee3cb0085a94952660644ff"
 PINNED_NEMO_RL_SUBMODULES = {
@@ -288,15 +291,18 @@ import importlib.metadata
 import importlib.util
 import sys
 
+import ray
 import torch
 import vllm
 
-if sys.version_info[:3] != (3, 13, 13):
+if sys.version_info[:2] != __EXPECTED_PYTHON_MINOR__:
     raise RuntimeError(f"unexpected actor Python: {sys.version}")
 if torch.__version__.split("+", 1)[0] != "2.11.0":
     raise RuntimeError(f"unexpected actor Torch: {torch.__version__}")
 if vllm.__version__ != "0.20.0":
     raise RuntimeError(f"unexpected actor vLLM: {vllm.__version__}")
+if ray.__version__ != "2.55.1":
+    raise RuntimeError(f"unexpected actor Ray: {ray.__version__}")
 if not hasattr(torch, "_opaque_base"):
     raise RuntimeError("actor Torch lacks torch._opaque_base")
 if importlib.util.find_spec("deep_ep") is not None:
@@ -306,7 +312,7 @@ if len(plugins) != 1 or plugins[0].value != "bionemo.evo2.vllm.plugin:register":
     raise RuntimeError(f"unexpected Evo2 vLLM plugin entry points: {plugins}")
 from bionemo.evo2.vllm.nemo_generation_worker import Evo2NemoRlGenerationWorker  # noqa: F401
 """
-    subprocess.run([str(python_path), "-c", probe], check=True)
+    subprocess.run([str(python_path), "-c", probe.replace("__EXPECTED_PYTHON_MINOR__", repr(sys.version_info[:2]))], check=True)
 
 
 def prepare_vllm_actor_environment(*, force_rebuild: bool = False) -> Path:
@@ -318,25 +324,65 @@ def prepare_vllm_actor_environment(*, force_rebuild: bool = False) -> Path:
 
     venv_args = ["uv", "venv"]
     venv_args.append("--clear" if force_rebuild else "--allow-existing")
+    venv_args.extend(["--seed", "--python", sys.executable])
     venv_args.append(str(actor_environment))
     subprocess.run(venv_args, cwd=source_root, check=True)
 
-    sync_environment = os.environ.copy()
-    sync_environment["UV_PROJECT_ENVIRONMENT"] = str(actor_environment)
+    requirements_path = actor_environment / ".nemo-rl-vllm-lock.txt"
     subprocess.run(
         [
             "uv",
-            "sync",
+            "export",
             "--locked",
             "--extra",
             "vllm",
-            "--no-install-package",
+            "--no-dev",
+            "--no-emit-workspace",
+            "--no-emit-package",
             "deep-ep",
-            "--directory",
-            str(source_root),
+            "--no-emit-package",
+            "deep-gemm",
+            "--no-hashes",
+            "--output-file",
+            str(requirements_path),
         ],
         cwd=source_root,
-        env=sync_environment,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(actor_python),
+            "--requirements",
+            str(requirements_path),
+            "--no-deps",
+            "--default-index",
+            PYPI_INDEX,
+            "--index",
+            PYTORCH_CU130_INDEX,
+            "--index",
+            FLASHINFER_CU130_INDEX,
+            "--index-strategy",
+            "unsafe-best-match",
+        ],
+        cwd=source_root,
+        check=True,
+    )
+    subprocess.run(
+        [
+            str(actor_python),
+            "-m",
+            "pip",
+            "install",
+            "--ignore-requires-python",
+            "--no-deps",
+            "--no-build-isolation",
+            "-e",
+            str(source_root),
+        ],
         check=True,
     )
     subprocess.run(
