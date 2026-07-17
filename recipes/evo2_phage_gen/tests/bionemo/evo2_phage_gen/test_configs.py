@@ -39,6 +39,13 @@ def test_main_recipe_environment_installs_qualified_vllm_and_plugin() -> None:
         raise AssertionError(f"unexpected vLLM plugin entry points: {plugins!r}")
 
 
+def test_ci_build_pins_supported_python_runtime() -> None:
+    """The NVIDIA Megatron dependency stack currently publishes through CPython 3.12."""
+    build_script = (RECIPE_ROOT / ".ci_build.sh").read_text()
+    if "uv venv --clear --python 3.12 --system-site-packages" not in build_script:
+        raise AssertionError("ci_build must pin CPython 3.12 instead of using the host default")
+
+
 def test_arc_genome_design_filtering_local_config_is_safe_by_default():
     """The Arc pipeline config should parse and avoid external tools by default."""
     config_path = RECIPE_ROOT / "configs" / "arc_genome_design_filtering_local.yaml"

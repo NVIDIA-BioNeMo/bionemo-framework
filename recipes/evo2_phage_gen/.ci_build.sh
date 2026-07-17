@@ -9,7 +9,7 @@ cd "$SCRIPT_DIR"
 rm -f /usr/local/lib/python*/dist-packages/transformer_engine-*.dist-info/direct_url.json
 export UV_LOCK_TIMEOUT=900  # increase to 15 minutes (900 seconds), adjust as needed
 export UV_LINK_MODE=copy
-uv venv --clear --system-site-packages
+uv venv --clear --python 3.12 --system-site-packages
 
 # 2. Activate the environment
 source .venv/bin/activate
