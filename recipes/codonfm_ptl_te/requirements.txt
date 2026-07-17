@@ -231,7 +231,7 @@ Send2Trash==1.8.3
 sentry-sdk==2.39.0
 session-info2==0.2.2
 setuptools==79.0.1
-sh==2.2.2
+sh==2.2.4
 shellingham==1.5.4
 six==1.16.0
 smmap==5.0.2
