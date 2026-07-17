@@ -33,6 +33,28 @@ def _require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def test_patched_nemo_rl_prompt_digest_matches_portable_vector() -> None:
+    from nemo_rl.models.generation.interfaces import (
+        generation_prompt_token_ids_bytes,
+        generation_prompt_token_ids_sha256,
+    )
+
+    expected_hex = (
+        "67656e65726174696f6e2e70726f6d70745f746f6b656e5f6964732e763100"
+        "0000000000000001000000000000002b"
+    )
+    expected_sha256 = "8fcfb284618fdd1c28d8a7022eee50831e44986fac86e48b396800bf5ba2c93b"
+
+    _require(generation_prompt_token_ids_bytes([43]).hex() == expected_hex, "prompt digest bytes drifted")
+    _require(
+        generation_prompt_token_ids_sha256([43]) == expected_sha256,
+        "prompt digest SHA256 drifted",
+    )
+    for invalid in ([True], [-1], [2**63], type("ListSubclass", (list,), {})([43])):
+        with pytest.raises((TypeError, ValueError), match="prompt token IDs"):
+            generation_prompt_token_ids_sha256(invalid)
+
+
 def test_apply_nemo_rl_patch_applies_against_installed_package_root(tmp_path: Path, monkeypatch) -> None:
     """The patch command should run from site-packages, not require a source checkout path."""
     source_root = tmp_path / "site-packages"
@@ -327,6 +349,9 @@ def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypat
         _uses_colocated_megatron_generation=object(),
     )
     modules = {
+        "nemo_rl.models.generation.interfaces": types.SimpleNamespace(
+            generation_prompt_token_ids_sha256=object()
+        ),
         "nemo_rl.models.megatron.setup": megatron_setup,
         "nemo_rl.models.generation.vllm.config": types.SimpleNamespace(VllmActorExecutionConfig=object()),
         "nemo_rl.models.generation.vllm.vllm_generation": types.SimpleNamespace(_request_seeds_for_dp_stream=object()),

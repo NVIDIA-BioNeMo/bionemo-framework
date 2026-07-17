@@ -76,10 +76,20 @@ index 3798a5606..225aea780 100644
                  worker_env_vars.pop("RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES", None)
                  worker_env_vars.pop("RAY_CLIENT_MODE", None)
 diff --git a/nemo_rl/models/generation/interfaces.py b/nemo_rl/models/generation/interfaces.py
-index 025707c70..3d19ac77f 100644
+index 025707c70..96d19b8d4 100644
 --- a/nemo_rl/models/generation/interfaces.py
 +++ b/nemo_rl/models/generation/interfaces.py
-@@ -20,6 +20,15 @@ import torch
+@@ -12,7 +12,8 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ from abc import ABC, abstractmethod
+-from typing import Any, NotRequired, TypedDict, Union
++import hashlib
++from typing import Any, NotRequired, Sequence, TypedDict, Union
+
+ import ray
+ import torch
+@@ -20,6 +21,35 @@ import torch
  from nemo_rl.distributed.batched_data_dict import BatchedDataDict
  
  
@@ -90,12 +100,32 @@ index 025707c70..3d19ac77f 100644
 +    "generation_call_indices",
 +    "generation_dp_ranks",
 +)
++_GENERATION_PROMPT_TOKEN_IDS_DOMAIN = b"generation.prompt_token_ids.v1\0"
++_GENERATION_PROMPT_TOKEN_ID_MAX = 2**63 - 1
++
++
++def generation_prompt_token_ids_bytes(token_ids: Sequence[int]) -> bytes:
++    """Encode one prompt as unambiguous, versioned, fixed-width token bytes."""
++    if type(token_ids) not in (list, tuple) or any(type(token_id) is not int for token_id in token_ids):
++        raise TypeError("prompt token IDs must be a list or tuple of built-in integers")
++    if any(not 0 <= token_id <= _GENERATION_PROMPT_TOKEN_ID_MAX for token_id in token_ids):
++        raise ValueError("prompt token IDs must be nonnegative signed-int64 values")
++    return (
++        _GENERATION_PROMPT_TOKEN_IDS_DOMAIN
++        + len(token_ids).to_bytes(8, "big")
++        + b"".join(token_id.to_bytes(8, "big") for token_id in token_ids)
++    )
++
++
++def generation_prompt_token_ids_sha256(token_ids: Sequence[int]) -> str:
++    """Hash one exact unpadded prompt token sequence."""
++    return hashlib.sha256(generation_prompt_token_ids_bytes(token_ids)).hexdigest()
 +
 +
  def verify_right_padding(
      data: Union[
          BatchedDataDict["GenerationDatumSpec"], BatchedDataDict["GenerationOutputSpec"]
-@@ -167,6 +176,11 @@ class GenerationDatumSpec(TypedDict):
+@@ -167,6 +197,11 @@ class GenerationDatumSpec(TypedDict):
      input_ids: torch.Tensor
      input_lengths: torch.Tensor
      stop_strings: NotRequired[list[str]]
@@ -107,7 +137,7 @@ index 025707c70..3d19ac77f 100644
      __extra__: Any
  
  
-@@ -222,6 +236,11 @@ class GenerationOutputSpec(TypedDict):
+@@ -222,6 +257,11 @@ class GenerationOutputSpec(TypedDict):
      r3_routed_experts_missing_routes: NotRequired[torch.Tensor]
      r3_routed_experts_expected_routes: NotRequired[torch.Tensor]
      r3_routed_experts_actual_routes: NotRequired[torch.Tensor]

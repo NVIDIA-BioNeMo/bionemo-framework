@@ -41,6 +41,7 @@ REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.models.megatron.setup",
 ]
 EXPECTED_PATCHED_SYMBOLS = [
+    ("nemo_rl.models.generation.interfaces", "generation_prompt_token_ids_sha256"),
     ("nemo_rl.models.megatron.setup", "_apply_target_allowlist_prefixes"),
     ("nemo_rl.models.megatron.setup", "NoRefitMegatronBridge"),
     ("nemo_rl.models.megatron.setup", "_uses_colocated_megatron_generation"),
