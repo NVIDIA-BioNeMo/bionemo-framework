@@ -129,6 +129,9 @@ def _register_recipe_extensions() -> None:
         register_processor(processor_name, phage_prompt_data_processor)
     register_env("phage_qc", "bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment")
     ACTOR_ENVIRONMENT_REGISTRY["bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"] = PY_EXECUTABLES.SYSTEM
+    ACTOR_ENVIRONMENT_REGISTRY[
+        "bionemo.evo2.vllm.nemo_generation_worker.Evo2NemoRlGenerationWorker"
+    ] = PY_EXECUTABLES.SYSTEM
 
 
 def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algorithm: str = "config") -> None:
