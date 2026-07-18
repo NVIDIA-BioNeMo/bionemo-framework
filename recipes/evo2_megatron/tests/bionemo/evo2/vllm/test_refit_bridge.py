@@ -14,7 +14,10 @@ from megatron.bridge.models.conversion.param_mapping import (
 from safetensors.torch import save_file
 
 from bionemo.evo2.vllm.config import Evo2Config
-from bionemo.evo2.vllm.refit_bridge import Evo2RefitBridge
+from bionemo.evo2.vllm.refit_bridge import (
+    Evo2RefitBridge,
+    _reconstruct_fused_gated_mlp,
+)
 
 
 def _require(condition: bool, message: str) -> None:
@@ -37,6 +40,7 @@ def _write_checkpoint(tmp_path, names: tuple[str, ...]) -> None:
         intermediate_size=16,
         num_hidden_layers=1,
         num_attention_heads=2,
+        gated_linear_unit=True,
         max_position_embeddings=128,
         hybrid_override_pattern="S",
         num_groups_hyena=8,
@@ -58,6 +62,7 @@ def test_evo2_refit_bridge_uses_exact_same_name_tp_mappings(tmp_path) -> None:
         "decoder.layers.0.mixer.dense.weight",
         "decoder.layers.0.mixer.dense.bias",
         "decoder.final_norm.weight",
+        "decoder.layers.0.mlp.linear_fc1.weight",
     )
     _write_checkpoint(tmp_path, names)
     transformer_config = _transformer_config()
@@ -79,8 +84,31 @@ def test_evo2_refit_bridge_uses_exact_same_name_tp_mappings(tmp_path) -> None:
         mapping = registry.megatron_to_hf_lookup(name)
         _require(type(mapping) is expected_type, f"wrong mapping class for {name}")
         _require(mapping.hf_param == name, f"refit renamed {name}")
+    fused_mapping = registry.megatron_to_hf_lookup(names[5])
+    _require(
+        type(fused_mapping).__name__ == "_FusedGatedMLPExportMapping",
+        "fused gated MLP used a plain column gather",
+    )
+    _require(
+        fused_mapping.hf_param == names[5],
+        "fused gated MLP refit renamed the tensor",
+    )
     _require(bridge.transformer_config is transformer_config, "training model config was not retained")
     _require(bridge.expected_weight_names == frozenset(names), "indexed weight inventory drifted")
+
+
+def test_evo2_refit_bridge_reconstructs_fused_gated_mlp_across_tp_shards() -> None:
+    gate_rank0 = torch.tensor([[1.0], [2.0]])
+    gate_rank1 = torch.tensor([[3.0], [4.0]])
+    up_rank0 = torch.tensor([[11.0], [12.0]])
+    up_rank1 = torch.tensor([[13.0], [14.0]])
+
+    actual = _reconstruct_fused_gated_mlp(
+        (torch.cat((gate_rank0, up_rank0)), torch.cat((gate_rank1, up_rank1)))
+    )
+    expected = torch.cat((gate_rank0, gate_rank1, up_rank0, up_rank1))
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_evo2_refit_bridge_rejects_unknown_indexed_weight(tmp_path) -> None:

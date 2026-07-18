@@ -34,7 +34,6 @@ _COLUMN_PARALLEL_PATTERNS = (
     "decoder.layers.*.mixer.mixer.filter.h",
     "decoder.layers.*.mixer.mixer.filter.p",
     "decoder.layers.*.mixer.mixer.short_conv.short_conv_weight",
-    "decoder.layers.*.mlp.linear_fc1.weight",
     "decoder.layers.*.self_attention.linear_qkv.weight",
 )
 
@@ -61,6 +60,45 @@ _ARCHITECTURE_FIELDS = (
 )
 
 _STATIC_REFIT_BUFFER_PATTERN = re.compile(r"^decoder\.layers\.\d+\.self_attention\.rotary_emb\.inv_freq$")
+
+
+def _reconstruct_fused_gated_mlp(shards: Iterable[torch.Tensor]) -> torch.Tensor:
+    """Rebuild global ``[gate; up]`` rows from TP-local ``[gate_i; up_i]`` shards."""
+    local_shards = tuple(shards)
+    if not local_shards:
+        raise ValueError("fused gated MLP reconstruction requires at least one TP shard")
+    trailing_shape = local_shards[0].shape[1:]
+    gate_parts = []
+    up_parts = []
+    for shard in local_shards:
+        if shard.ndim < 1 or shard.shape[0] % 2:
+            raise ValueError("each fused gated MLP TP shard must have an even output dimension")
+        if shard.shape[1:] != trailing_shape:
+            raise ValueError("fused gated MLP TP shards have inconsistent trailing dimensions")
+        gate, up = torch.chunk(shard, 2, dim=0)
+        gate_parts.append(gate)
+        up_parts.append(up)
+    return torch.cat((*gate_parts, *up_parts), dim=0).contiguous()
+
+
+class _FusedGatedMLPExportMapping(ColumnParallelMapping):
+    """Export a fused MCore GLU tensor without interleaving TP-rank halves."""
+
+    def megatron_to_hf(
+        self,
+        megatron_weights: torch.Tensor | None,
+        megatron_module: Any | None,
+    ) -> dict[str, torch.Tensor]:
+        packed = super().megatron_to_hf(megatron_weights, megatron_module)
+        if not packed or self.tp_size == 1:
+            return packed
+
+        name = str(self.hf_param)
+        full_weight = packed[name]
+        if full_weight.shape[0] % self.tp_size:
+            raise ValueError("fused gated MLP output dimension is not divisible by TP size")
+        rank_shards = torch.chunk(full_weight, self.tp_size, dim=0)
+        return {name: _reconstruct_fused_gated_mlp(rank_shards)}
 
 
 class Evo2RefitBridge(MegatronModelBridge):
@@ -147,6 +185,16 @@ class Evo2RefitBridge(MegatronModelBridge):
         mappings = []
         for pattern in _COLUMN_PARALLEL_PATTERNS:
             mappings.append(ColumnParallelMapping(megatron_param=pattern, hf_param=pattern))
+        fused_mlp_pattern = "decoder.layers.*.mlp.linear_fc1.weight"
+        if self._config.gated_linear_unit:
+            mappings.append(
+                _FusedGatedMLPExportMapping(
+                    megatron_param=fused_mlp_pattern,
+                    hf_param=fused_mlp_pattern,
+                )
+            )
+        else:
+            mappings.append(ColumnParallelMapping(megatron_param=fused_mlp_pattern, hf_param=fused_mlp_pattern))
         for pattern in _ROW_PARALLEL_PATTERNS:
             mappings.append(RowParallelMapping(megatron_param=pattern, hf_param=pattern))
         for pattern in _REPLICATED_PATTERNS:
