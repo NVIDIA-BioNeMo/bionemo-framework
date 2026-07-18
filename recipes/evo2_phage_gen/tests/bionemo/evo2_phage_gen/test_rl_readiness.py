@@ -97,6 +97,7 @@ def test_rl_readiness_reports_recipe_evo2_adapter_patch(tmp_path):
     assert by_name["evo2_policy_adapter"].required
     assert "nemo-rl-evo2-policy.patch" in by_name["evo2_policy_adapter"].detail
     assert "nemo-rl-evo2-vllm.patch" in by_name["evo2_policy_adapter"].detail
+    assert "nemo-rl-evo2-rollout-metrics.patch" in by_name["evo2_policy_adapter"].detail
 
 
 def test_rl_readiness_allows_template_gap_to_be_optional(tmp_path):

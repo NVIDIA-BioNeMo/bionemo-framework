@@ -331,6 +331,7 @@ def _config_checks(
     patch_paths = (
         RECIPE_ROOT / "patches" / "nemo-rl-evo2-policy.patch",
         RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch",
+        RECIPE_ROOT / "patches" / "nemo-rl-evo2-rollout-metrics.patch",
     )
     allowlist_prefixes = set(_nested_get(config, ("policy", "megatron_cfg", "target_allowlist_prefixes"), []) or [])
     required_prefixes = {"bionemo.evo2.", "bionemo.common."}

@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -49,6 +50,7 @@ PINNED_NEMO_RL_SUBMODULES = {
 DEFAULT_PATCHES = (
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-policy.patch",
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch",
+    RECIPE_ROOT / "patches" / "nemo-rl-evo2-rollout-metrics.patch",
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-sampling.patch",
 )
 REQUIRED_NEMO_RL_MODULES = [
@@ -66,6 +68,7 @@ EXPECTED_PATCHED_SYMBOLS = [
     ("nemo_rl.models.megatron.setup", "_select_megatron_bridge"),
     ("nemo_rl.models.generation.vllm.config", "VllmActorExecutionConfig"),
     ("nemo_rl.models.generation.vllm.vllm_generation", "_request_seeds_for_dp_stream"),
+    ("nemo_rl.experience.rollouts", "collect_environment_metrics"),
 ]
 
 
@@ -94,6 +97,58 @@ def _run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str
 
 def _patch_paths(patch_path: Path | None = None) -> tuple[Path, ...]:
     return DEFAULT_PATCHES if patch_path is None else (Path(patch_path),)
+
+
+def _patch_target_paths(patch_paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Return validated relative paths named by a unified patch series."""
+    targets: set[Path] = set()
+    for patch_path in patch_paths:
+        for line in patch_path.read_text(encoding="utf-8").splitlines():
+            if not line.startswith(("--- ", "+++ ")):
+                continue
+            raw_path = line[4:].split(maxsplit=1)[0]
+            if raw_path == "/dev/null":
+                continue
+            if not raw_path.startswith(("a/", "b/")):
+                raise ValueError(f"unsupported patch target path: {raw_path!r}")
+            relative_path = Path(raw_path[2:])
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                raise ValueError(f"unsafe patch target path: {raw_path!r}")
+            targets.add(relative_path)
+    return tuple(sorted(targets, key=lambda path: path.as_posix()))
+
+
+def _probe_patch_series(
+    patch_paths: tuple[Path, ...],
+    *,
+    source_root: Path,
+    reverse: bool,
+) -> tuple[bool, str]:
+    """Apply a series to copied target files without mutating the source root."""
+    target_paths = _patch_target_paths(patch_paths)
+    if not target_paths:
+        return False, "patch series contains no target files"
+
+    with tempfile.TemporaryDirectory(prefix="evo2-nemo-rl-patch-probe-") as temp_dir:
+        probe_root = Path(temp_dir)
+        for relative_path in target_paths:
+            source_path = source_root / relative_path
+            if not source_path.is_file():
+                return False, f"patch target is not a regular file: {source_path}"
+            probe_path = probe_root / relative_path
+            probe_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, probe_path)
+
+        ordered_paths = tuple(reversed(patch_paths)) if reverse else patch_paths
+        for patch_path in ordered_paths:
+            args = ["--batch"]
+            if reverse:
+                args.append("-R")
+            args.extend(("-p1", "-i", str(patch_path.resolve())))
+            result = _run_patch(args, cwd=probe_root)
+            if result.returncode != 0:
+                return False, f"{patch_path.name}:\n{result.stdout}"
+    return True, ""
 
 
 def patch_sha256(patch_path: Path | None = None) -> str:
@@ -135,7 +190,30 @@ def assert_nemo_rl_patch_symbols() -> None:
 def assert_nemo_rl_patch_runtime(patch_path: Path | None = None) -> None:
     """Fail unless the importable NeMo-RL runtime matches every maintained patch."""
     source_root = _nemo_rl_source_root()
-    for path in _patch_paths(patch_path):
+    patch_paths = _patch_paths(patch_path)
+    if len(patch_paths) > 1:
+        matches, reverse_output = _probe_patch_series(
+            patch_paths,
+            source_root=source_root,
+            reverse=True,
+        )
+        if not matches:
+            _, forward_output = _probe_patch_series(
+                patch_paths,
+                source_root=source_root,
+                reverse=False,
+            )
+            raise RuntimeError(
+                "The importable NeMo-RL runtime is not reverse-patch-equivalent to the maintained Evo2 patch series.\n"
+                f"Runtime root: {source_root}\n"
+                f"Patch SHA256: {patch_sha256()}\n"
+                f"Reverse probe output:\n{reverse_output}\n"
+                f"Forward probe output:\n{forward_output}"
+            )
+        assert_nemo_rl_patch_symbols()
+        return
+
+    for path in patch_paths:
         resolved = path.resolve()
         reverse_dry_run = _run_patch(
             ["--batch", "--dry-run", "-R", "-p1", "-i", str(resolved)],
@@ -435,9 +513,47 @@ def _apply_nemo_rl_patch_file(patch_path: Path, *, source_root: Path, check_only
 def apply_nemo_rl_patch(patch_path: Path | None = None, *, check_only: bool = False) -> str:
     """Apply one requested patch or the maintained recipe patch series."""
     source_root = _nemo_rl_source_root()
+    patch_paths = _patch_paths(patch_path)
+    if len(patch_paths) > 1:
+        already_applied, _ = _probe_patch_series(
+            patch_paths,
+            source_root=source_root,
+            reverse=True,
+        )
+        if already_applied:
+            return "\n".join(
+                f"patch already applied to {source_root}" for _ in patch_paths
+            )
+
+        can_apply, probe_output = _probe_patch_series(
+            patch_paths,
+            source_root=source_root,
+            reverse=False,
+        )
+        if can_apply:
+            if check_only:
+                return "\n".join(
+                    f"patch can apply cleanly to {source_root}" for _ in patch_paths
+                )
+            results = []
+            for path in patch_paths:
+                applied = _run_patch(
+                    ["--batch", "-p1", "-i", str(path.resolve())],
+                    cwd=source_root,
+                )
+                if applied.returncode != 0:
+                    raise RuntimeError(applied.stdout)
+                results.append(f"patch applied to {source_root}")
+            return "\n".join(results)
+        if check_only:
+            raise RuntimeError(
+                "Maintained patch series cannot apply cleanly and is not already applied.\n"
+                f"Forward probe output:\n{probe_output}"
+            )
+
     results = [
         _apply_nemo_rl_patch_file(path, source_root=source_root, check_only=check_only)
-        for path in _patch_paths(patch_path)
+        for path in patch_paths
     ]
     return "\n".join(results)
 

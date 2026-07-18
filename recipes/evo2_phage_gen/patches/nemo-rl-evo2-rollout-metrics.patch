@@ -1,0 +1,200 @@
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 266533c5..8b7fe155 100644
+--- a/nemo_rl/algorithms/grpo.py
+@@ -2676,6 +2676,9 @@ def grpo_train(
+                             policy_generation.get_logger_metrics()
+                         )
+ 
++                    rollout_metrics, rollout_timing_metrics = (
++                        split_environment_timing_metrics(rollout_metrics)
++                    )
+                     metrics_logging_data["mean_gen_tokens_per_sample"] = (
+                         rollout_metrics["mean_gen_tokens_per_sample"]
+                     )
+@@ -3289,6 +3292,7 @@ def grpo_train(
+             del flat_messages
+ 
+             timing_metrics: dict[str, float] = timer.get_timing_metrics(reduction_op="sum")  # type: ignore
++            timing_metrics.update(rollout_timing_metrics)
+             # track example with high token mult prob error above 1.05
+             if metrics["token_mult_prob_error"] > 1.05:
+                 logger.log_plot_token_mult_prob_error(
+@@ -3367,9 +3371,7 @@ def grpo_train(
+             print(f"  • Total step time: {total_time:.2f}s", flush=True)
+ 
+             # Display all other timing metrics
+-            for k, v in sorted(
+-                timing_metrics.items(), key=lambda item: item[1], reverse=True
+-            ):
++            for k, v in _iter_display_timing_metrics(timing_metrics):
+                 if k != "total_step_time":
+                     percent = (v / total_time * 100) if total_time > 0 else 0
+                     print(f"  • {k}: {v:.2f}s ({percent:.1f}%)", flush=True)
+@@ -3437,6 +3439,34 @@ def grpo_train(
+     checkpointer.shutdown()
+ 
+ 
++ENV_TIMING_METRIC_PREFIX = "__timing__/"
++
++
++def split_environment_timing_metrics(
++    metrics: dict[str, Any],
++) -> tuple[dict[str, Any], dict[str, float]]:
++    """Move environment phase timings out of ordinary rollout metrics."""
++    regular_metrics: dict[str, Any] = {}
++    timing_metrics: dict[str, float] = {}
++    for key, value in metrics.items():
++        if isinstance(key, str) and key.startswith(ENV_TIMING_METRIC_PREFIX):
++            timing_metrics[key[len(ENV_TIMING_METRIC_PREFIX) :]] = float(value)
++        else:
++            regular_metrics[key] = value
++    return regular_metrics, timing_metrics
++
++
++def _iter_display_timing_metrics(timing_metrics: dict[str, float]):
++    """Exclude absolute timestamps from the elapsed-time console summary."""
++    return (
++        (key, value)
++        for key, value in sorted(
++            timing_metrics.items(), key=lambda item: item[1], reverse=True
++        )
++        if not key.endswith("_unix_s")
++    )
++
++
+ def validate(
+     policy_generation: GenerationInterface,
+     val_dataloader: Optional[StatefulDataLoader],
+@@ -3462,6 +3492,8 @@ def validate(
+         total_lengths = []
+         all_message_logs = []  # Collect all message logs
+         all_rollout_log_fields: dict[str, list[Any]] = {}
++        validation_rollout_metrics: list[dict[str, Any]] = []
++        additional_timing_metrics_to_report: dict[str, float] = {}
+ 
+         max_batches = (
+             master_config.grpo["max_val_samples"]
+@@ -3471,7 +3503,6 @@ def validate(
+             if batch_idx >= max_batches:
+                 break
+ 
+-            additional_metrics_to_report = dict()
+             # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
+             # Use async rollouts when enabled by config/backend defaults.
+             # We cascade NeMo-Gym first since NeMo-Gym also uses async rollouts.
+@@ -3492,7 +3523,6 @@ def validate(
+                 )
+                 val_batch = nemo_gym_rollout_result.final_batch
+                 gen_metrics = nemo_gym_rollout_result.rollout_metrics
+-                additional_metrics_to_report = gen_metrics
+             elif _should_use_async_rollouts(master_config):
+                 val_batch, gen_metrics = run_async_multi_turn_rollout(
+                     policy_generation,
+@@ -3514,6 +3544,7 @@ def validate(
+                     greedy=False,
+                 )
+ 
++            validation_rollout_metrics.append(gen_metrics)
+             if "extra_env_info" in val_batch:
+                 batch_rollout_fields = _rollout_log_fields(
+                     val_batch["message_log"],
+@@ -3546,6 +3577,21 @@ def validate(
+             sum(total_lengths) / len(total_lengths) if len(total_lengths) > 0 else 0.0
+         )
+ 
++        if not validation_rollout_metrics:
++            additional_metrics_to_report: dict[str, Any] = {}
++        elif len(validation_rollout_metrics) == 1:
++            additional_metrics_to_report = validation_rollout_metrics[0]
++        else:
++            grouped_validation_metrics: dict[str, list[Any]] = {}
++            for batch_metrics in validation_rollout_metrics:
++                for key, value in batch_metrics.items():
++                    grouped_validation_metrics.setdefault(key, []).append(value)
++            additional_metrics_to_report = aggregate_rollout_metrics(
++                grouped_validation_metrics
++            )
++        additional_metrics_to_report, additional_timing_metrics_to_report = (
++            split_environment_timing_metrics(additional_metrics_to_report)
++        )
+         val_metrics = {
+             "accuracy": accuracy,
+             "avg_length": avg_length,
+@@ -3569,6 +3615,7 @@ def validate(
+ 
+     # Get timing metrics
+     timing_metrics = timer.get_timing_metrics(reduction_op="sum")
++    timing_metrics.update(additional_timing_metrics_to_report)
+     validation_time = timing_metrics.get("total_validation_time", 0)
+ 
+     # Print summary of validation results
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index bf657b1f..dc7ef296 100644
+--- a/nemo_rl/experience/rollouts.py
+@@ -643,6 +643,41 @@ def calculate_rewards(
+     )
+ 
+ 
++def collect_environment_metrics(
++    batch: BatchedDataDict[DatumSpec],
++    task_to_env: dict[str, EnvironmentInterface],
++) -> dict[str, Any]:
++    """Collect optional scalar metrics from each environment's task-local rows."""
++    if not task_to_env:
++        return {}
++
++    task_names = batch["task_name"]
++    futures = []
++    future_task_names = []
++    for task_name, env in task_to_env.items():
++        metric_method = getattr(env, "global_post_process_and_metrics", None)
++        if metric_method is None:
++            continue
++        indices = [
++            index
++            for index, batch_task_name in enumerate(task_names)
++            if batch_task_name == task_name
++        ]
++        if not indices:
++            continue
++        selected_batch = batch.select_indices(torch.tensor(indices, dtype=torch.long))
++        futures.append(metric_method.remote(selected_batch))  # type: ignore[attr-defined]
++        future_task_names.append(task_name)
++
++    metrics: dict[str, Any] = {}
++    for task_name, result in zip(future_task_names, ray.get(futures), strict=True):
++        _, env_metrics = result
++        for key, value in env_metrics.items():
++            metric_key = key if key not in metrics else f"{task_name}/{key}"
++            metrics[metric_key] = value
++    return metrics
++
++
+ def run_multi_turn_rollout(
+     policy_generation: GenerationInterface,
+     input_batch: BatchedDataDict[DatumSpec],
+@@ -788,6 +823,8 @@ def run_multi_turn_rollout(
+         truncation_mask = torch.zeros_like(env_output.terminateds, dtype=torch.bool)
+         for i, global_idx in enumerate(active_indices.tolist()):
+             env_obs_content = env_output.observations[i]["content"]
++            if env_output.metadata[i] is not None:
++                current_batch["extra_env_info"][global_idx] = env_output.metadata[i]
+             # Tokenize the raw content from the environment
+             # TODO @sahilj: handle if we want these subsequent messages to have a chat template
+             tokenized_obs = tokenizer(
+@@ -893,6 +930,7 @@ def run_multi_turn_rollout(
+             sample_env_token_counts.float().mean().item()
+         ),
+     }
++    rollout_metrics.update(collect_environment_metrics(current_batch, task_to_env))
+     return current_batch, rollout_metrics
+ 
+ 
+@@ -1374,6 +1412,7 @@ def run_async_multi_turn_rollout(
+         rollout_metrics["histogram/total_tokens_length"] = [
+             t for m in all_sample_metrics for t in m["turn_total_tokens"]
+         ]
++        rollout_metrics.update(collect_environment_metrics(final_batch, task_to_env))
+ 
+        return final_batch, rollout_metrics
+ 

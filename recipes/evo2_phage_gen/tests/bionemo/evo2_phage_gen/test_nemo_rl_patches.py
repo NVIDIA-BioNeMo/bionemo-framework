@@ -540,6 +540,7 @@ def test_default_nemo_rl_patch_series_is_ordered() -> None:
         == (
             "nemo-rl-evo2-policy.patch",
             "nemo-rl-evo2-vllm.patch",
+            "nemo-rl-evo2-rollout-metrics.patch",
             "nemo-rl-evo2-sampling.patch",
         ),
         "maintained NeMo-RL patch order drifted",
@@ -553,7 +554,12 @@ def test_apply_nemo_rl_patch_applies_default_series_in_order(tmp_path: Path, mon
     package_dir.mkdir(parents=True)
     init_file = package_dir / "__init__.py"
     init_file.write_text("")
-    patch_paths = (tmp_path / "policy.patch", tmp_path / "vllm.patch", tmp_path / "sampling.patch")
+    patch_paths = (
+        tmp_path / "policy.patch",
+        tmp_path / "vllm.patch",
+        tmp_path / "rollout-metrics.patch",
+        tmp_path / "sampling.patch",
+    )
     for path in patch_paths:
         path.write_text(f"diff --git a/{path.stem} b/{path.stem}\n")
     spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
@@ -576,6 +582,7 @@ def test_apply_nemo_rl_patch_applies_default_series_in_order(tmp_path: Path, mon
         == (
             f"patch applied to {source_root}\n"
             f"patch applied to {source_root}\n"
+            f"patch applied to {source_root}\n"
             f"patch applied to {source_root}"
         ),
         "default series result drifted",
@@ -587,6 +594,8 @@ def test_apply_nemo_rl_patch_applies_default_series_in_order(tmp_path: Path, mon
             "policy.patch",
             "vllm.patch",
             "vllm.patch",
+            "rollout-metrics.patch",
+            "rollout-metrics.patch",
             "sampling.patch",
             "sampling.patch",
         ],
@@ -655,6 +664,76 @@ def test_apply_nemo_rl_patch_is_forward_only_and_idempotent(tmp_path: Path, monk
     assert first_result == f"patch applied to {source_root}"
     assert second_result == f"patch already applied to {source_root}"
     assert source_file.read_text() == "new\n"
+
+
+def test_apply_nemo_rl_patch_recognizes_overlapping_series_in_reverse_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Later patches may edit earlier files without breaking series idempotence."""
+    source_root = tmp_path / "site-packages"
+    package_dir = source_root / "nemo_rl"
+    package_dir.mkdir(parents=True)
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("")
+    source_file = package_dir / "example.py"
+    source_file.write_text("old\n")
+    first_patch = tmp_path / "first.patch"
+    first_patch.write_text(
+        "\n".join(
+            [
+                "diff --git a/nemo_rl/example.py b/nemo_rl/example.py",
+                "--- a/nemo_rl/example.py",
+                "+++ b/nemo_rl/example.py",
+                "@@ -1 +1 @@",
+                "-old",
+                "+middle",
+                "",
+            ]
+        )
+    )
+    second_patch = tmp_path / "second.patch"
+    second_patch.write_text(
+        "\n".join(
+            [
+                "diff --git a/nemo_rl/example.py b/nemo_rl/example.py",
+                "--- a/nemo_rl/example.py",
+                "+++ b/nemo_rl/example.py",
+                "@@ -1 +1 @@",
+                "-middle",
+                "+final",
+                "",
+            ]
+        )
+    )
+    spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
+    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+    monkeypatch.setattr(nemo_rl_patches, "DEFAULT_PATCHES", (first_patch, second_patch))
+    monkeypatch.setattr(nemo_rl_patches, "assert_nemo_rl_patch_symbols", lambda: None)
+
+    check_result = nemo_rl_patches.apply_nemo_rl_patch(check_only=True)
+    _require(
+        check_result
+        == f"patch can apply cleanly to {source_root}\npatch can apply cleanly to {source_root}",
+        "overlapping series did not preflight in forward order",
+    )
+    _require(source_file.read_text() == "old\n", "forward preflight mutated the installed source")
+
+    first_result = nemo_rl_patches.apply_nemo_rl_patch()
+    second_result = nemo_rl_patches.apply_nemo_rl_patch()
+
+    _require(
+        first_result
+        == f"patch applied to {source_root}\npatch applied to {source_root}",
+        "overlapping series did not apply in forward order",
+    )
+    _require(
+        second_result
+        == f"patch already applied to {source_root}\npatch already applied to {source_root}",
+        "overlapping series was not recognized in reverse order",
+    )
+    nemo_rl_patches.assert_nemo_rl_patch_runtime()
+    _require(source_file.read_text() == "final\n", "idempotence check mutated the installed source")
 
 
 def test_repair_install_exposes_new_editable_source_in_current_process(tmp_path: Path, monkeypatch) -> None:
@@ -800,12 +879,15 @@ def test_maintained_patches_are_applied_to_pinned_nemo_rl_source() -> None:
     if not source_root.exists():
         pytest.skip("Recipe-owned pinned NeMo-RL source has not been built")
 
-    for patch_path in nemo_rl_patches.DEFAULT_PATCHES:
-        result = nemo_rl_patches._run_patch(
-            ["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_path)],
-            cwd=source_root,
-        )
-        _require(result.returncode == 0, result.stdout)
+    result = nemo_rl_patches.apply_nemo_rl_patch(check_only=True)
+    _require(
+        result
+        == "\n".join(
+            f"patch already applied to {source_root}"
+            for _ in nemo_rl_patches.DEFAULT_PATCHES
+        ),
+        f"maintained series is not applied in declared order: {result}",
+    )
 
 
 def test_maintained_patch_inventory_is_narrow_and_does_not_patch_vllm_core() -> None:
@@ -879,6 +961,7 @@ def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypat
         "nemo_rl.algorithms.logits_sampling_utils": types.SimpleNamespace(
             _canonical_allowed_token_ids=object()
         ),
+        "nemo_rl.experience.rollouts": types.SimpleNamespace(collect_environment_metrics=object()),
         "nemo_rl.models.generation.interfaces": types.SimpleNamespace(generation_prompt_token_ids_sha256=object()),
         "nemo_rl.models.megatron.setup": megatron_setup,
         "nemo_rl.models.generation.vllm.config": types.SimpleNamespace(VllmActorExecutionConfig=object()),
