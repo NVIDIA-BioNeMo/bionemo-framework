@@ -298,6 +298,41 @@ def test_vllm_patch_excludes_request_timing_telemetry() -> None:
     )
 
 
+def test_patched_vllm_worker_normalizes_top_k_one_to_true_greedy() -> None:
+    """The public RL adapter must use the same true-greedy policy as inference."""
+    from nemo_rl.models.generation.vllm.vllm_worker import BaseVllmGenerationWorker
+
+    worker = object.__new__(BaseVllmGenerationWorker)
+    worker.cfg = {
+        "top_k": 1,
+        "top_p": 0.75,
+        "temperature": 1.0,
+        "max_new_tokens": 500,
+        "num_logprobs": 0,
+        "stop_token_ids": None,
+        "ignore_eos": True,
+        "allowed_token_ids": [65, 67, 71, 78, 84],
+    }
+    worker.SamplingParams = lambda **kwargs: kwargs
+
+    sampling_params = worker._build_sampling_params(
+        greedy=False,
+        stop_strings=None,
+        request_seeds=[42, 43],
+    )
+
+    _require(len(sampling_params) == 2, "one SamplingParams row was not built per request")
+    for expected_seed, params in zip((42, 43), sampling_params, strict=True):
+        _require(params["temperature"] == 0.0, "top_k=1 did not select true greedy temperature")
+        _require(params["top_p"] == 1.0, "greedy policy retained stochastic top-p filtering")
+        _require(params["top_k"] == 0, "top_k=1 retained the top-k sampler route")
+        _require(params["seed"] == expected_seed, "request seed propagation changed")
+        _require(
+            params["allowed_token_ids"] == [65, 67, 71, 78, 84],
+            "greedy normalization changed the allowed DNA support",
+        )
+
+
 def test_patched_nemo_rl_training_logprobs_apply_allowed_support_before_top_k() -> None:
     from nemo_rl.algorithms.logits_sampling_utils import TrainingSamplingParams, apply_top_k_top_p
 

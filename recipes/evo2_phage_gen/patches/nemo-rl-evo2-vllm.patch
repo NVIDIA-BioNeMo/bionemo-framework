@@ -882,24 +882,36 @@ index a2a59292c..174effe77 100644
              enable_sleep_mode=True,
              # Set disable_log_stats=False so that self.llm.get_metrics() works.
              disable_log_stats=False,
-@@ -513,6 +576,7 @@ class BaseVllmGenerationWorker:
+@@ -513,19 +576,22 @@ class BaseVllmGenerationWorker:
          greedy: bool,
          stop_strings,
          max_new_tokens: Optional[int] = None,
 +        request_seeds: Optional[list[int]] = None,
      ):
          top_k_cfg = self.cfg["top_k"]
-         top_k_val = 1 if greedy else (top_k_cfg if top_k_cfg is not None else -1)
-@@ -523,7 +587,7 @@ class BaseVllmGenerationWorker:
+-        top_k_val = 1 if greedy else (top_k_cfg if top_k_cfg is not None else -1)
++        effective_greedy = greedy or top_k_cfg == 1 or self.cfg["temperature"] == 0.0
++        top_k_val = 0 if effective_greedy else (top_k_cfg if top_k_cfg is not None else -1)
+-
++
+-        temperature = 0.0 if greedy else self.cfg["temperature"]
++        temperature = 0.0 if effective_greedy else self.cfg["temperature"]
++        top_p = 1.0 if effective_greedy else self.cfg["top_p"]
+-
++
+         max_tokens = (
              max_new_tokens if max_new_tokens is not None else self.cfg["max_new_tokens"]
          )
  
 -        return self.SamplingParams(
 +        kwargs = dict(
              temperature=temperature,
-             top_p=self.cfg["top_p"],
+-            top_p=self.cfg["top_p"],
++            top_p=top_p,
              top_k=top_k_val,
-@@ -534,6 +598,26 @@ class BaseVllmGenerationWorker:
+             max_tokens=max_tokens,
+             logprobs=0,
+@@ -534,6 +600,26 @@ class BaseVllmGenerationWorker:
              include_stop_str_in_output=True,
              ignore_eos=self.cfg.get("ignore_eos", False),
          )
@@ -926,7 +938,7 @@ index a2a59292c..174effe77 100644
  
      def start_gpu_profiling(self) -> None:
          """Start GPU profiling."""
-@@ -682,9 +766,16 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -682,9 +768,16 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
          input_lengths = data["input_lengths"]
          batch_stop_strings: list[list[str]] = data.get("stop_strings", [])
          stop_strings = self._merge_stop_strings(batch_stop_strings)
@@ -943,7 +955,7 @@ index a2a59292c..174effe77 100644
          )
  
          # verify inputs have correct padding
-@@ -697,9 +788,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -697,9 +790,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
          prompts = format_prompt_for_vllm_generation(data)
  
          # Generate outputs
@@ -957,7 +969,7 @@ index a2a59292c..174effe77 100644
          use_tqdm = self.cfg["vllm_cfg"].get("use_tqdm", True)
          outputs = self.llm.generate(prompts, sampling_params, use_tqdm=use_tqdm)
  
-@@ -745,17 +837,15 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -745,17 +839,15 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
              output_ids_list.append(full_output)
              full_logprobs = torch.zeros(total_length, dtype=torch.float32)
              if hasattr(generation, "logprobs") and generation.logprobs:
@@ -984,7 +996,7 @@ index a2a59292c..174effe77 100644
  
              logprobs_list.append(full_logprobs)
  
-@@ -783,14 +873,14 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -783,14 +875,14 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
  
              generation_lengths.append(len(generated_tokens))
              unpadded_sequence_lengths.append(response_length)
@@ -1003,7 +1015,7 @@ index a2a59292c..174effe77 100644
  
          # Create return data conforming to GenerationOutputSpec
          output_ids = torch.stack(output_ids_list)
-@@ -838,6 +928,9 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -838,6 +930,9 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
              return_data["r3_routed_experts_actual_routes"] = torch.tensor(
                  r3_actual_routes, dtype=torch.long
              )
@@ -1013,7 +1025,7 @@ index a2a59292c..174effe77 100644
  
          return return_data
  
-@@ -891,9 +984,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -891,9 +986,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
          )
  
          # Generate outputs
@@ -1027,7 +1039,7 @@ index a2a59292c..174effe77 100644
          use_tqdm = self.cfg["vllm_cfg"].get("use_tqdm", True)
          outputs = self.llm.generate(data["prompts"], sampling_params, use_tqdm=use_tqdm)
          texts = [output.outputs[0].text for output in outputs]
-@@ -906,9 +1000,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -906,9 +1002,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
  
      def report_device_id(self) -> list[str]:
          """Report device ID from the vLLM worker."""
@@ -1041,7 +1053,7 @@ index a2a59292c..174effe77 100644
  
          if self.cfg["vllm_cfg"]["async_engine"]:
              raise RuntimeError(
-@@ -928,9 +1023,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -928,9 +1025,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
      def update_weights_via_ipc_zmq(self) -> bool:
          """Update weights from IPC handles via ZMQ socket."""
          try:
@@ -1055,7 +1067,7 @@ index a2a59292c..174effe77 100644
  
              if self.cfg["vllm_cfg"]["async_engine"]:
                  raise RuntimeError(
-@@ -960,9 +1056,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -960,9 +1058,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
      def update_weights_from_collective(self) -> bool:
          """Update the model weights from collective communication."""
          try:
@@ -1069,7 +1081,7 @@ index a2a59292c..174effe77 100644
  
              if self.cfg["vllm_cfg"]["async_engine"]:
                  raise RuntimeError(
-@@ -989,9 +1086,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -989,9 +1088,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
  
      def reset_prefix_cache(self):
          """Reset the prefix cache of vLLM engine."""
@@ -1083,7 +1095,7 @@ index a2a59292c..174effe77 100644
  
          if self.cfg["vllm_cfg"]["async_engine"]:
              raise RuntimeError(
-@@ -1004,9 +1102,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -1004,9 +1104,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
  
      def sleep(self):
          """Put the vLLM engine to sleep."""
@@ -1097,7 +1109,7 @@ index a2a59292c..174effe77 100644
  
          if self.cfg["vllm_cfg"]["async_engine"]:
              raise RuntimeError(
-@@ -1032,9 +1131,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
+@@ -1032,9 +1133,10 @@ class VllmGenerationWorkerImpl(BaseVllmGenerationWorker):
  
      def wake_up(self, **kwargs):
          """Wake up the vLLM engine."""
