@@ -49,6 +49,7 @@ PINNED_NEMO_RL_SUBMODULES = {
 DEFAULT_PATCHES = (
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-policy.patch",
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch",
+    RECIPE_ROOT / "patches" / "nemo-rl-evo2-sampling.patch",
 )
 REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.algorithms.grpo",
@@ -57,6 +58,7 @@ REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.models.megatron.setup",
 ]
 EXPECTED_PATCHED_SYMBOLS = [
+    ("nemo_rl.algorithms.logits_sampling_utils", "_canonical_allowed_token_ids"),
     ("nemo_rl.models.generation.interfaces", "generation_prompt_token_ids_sha256"),
     ("nemo_rl.models.megatron.setup", "_apply_target_allowlist_prefixes"),
     ("nemo_rl.models.megatron.setup", "NoRefitMegatronBridge"),

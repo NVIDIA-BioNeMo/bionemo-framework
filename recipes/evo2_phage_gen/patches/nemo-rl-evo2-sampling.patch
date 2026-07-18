@@ -1,0 +1,375 @@
+diff --git a/nemo_rl/algorithms/logits_sampling_utils.py b/nemo_rl/algorithms/logits_sampling_utils.py
+index d9045159..06ace0fb 100644
+--- a/nemo_rl/algorithms/logits_sampling_utils.py
++++ b/nemo_rl/algorithms/logits_sampling_utils.py
+@@ -26,6 +26,28 @@ import torch
+ TOP_K_TOP_P_CHUNK_SIZE: int = 256
+ 
+ 
++def _canonical_allowed_token_ids(
++    allowed_token_ids: list[int] | tuple[int, ...] | None,
++) -> tuple[int, ...] | None:
++    if allowed_token_ids is None:
++        return None
++    if type(allowed_token_ids) not in (list, tuple):
++        raise TypeError("allowed_token_ids must be an exact list or tuple of integers")
++    if not allowed_token_ids:
++        raise ValueError("allowed_token_ids must not be empty")
++
++    canonical = []
++    for token_id in allowed_token_ids:
++        if type(token_id) is not int:
++            raise TypeError("allowed_token_ids must contain exact built-in integers")
++        if token_id < 0:
++            raise ValueError("allowed_token_ids must be non-negative")
++        canonical.append(token_id)
++    if len(canonical) != len(set(canonical)):
++        raise ValueError("allowed_token_ids must not contain duplicates")
++    return tuple(canonical)
++
++
+ @dataclass
+ class TrainingSamplingParams:
+     """Training-specific sampling parameters to match generation parameters.
+@@ -37,11 +59,16 @@ class TrainingSamplingParams:
+         top_k: Top-k filtering parameter (None or -1 to disable)
+         top_p: Top-p filtering parameter (1.0 to disable)
+         temperature: Temperature for scaling logits (default: 1.0)
++        allowed_token_ids: Optional immutable vocabulary support applied before top-k/top-p.
+     """
+ 
+     top_k: int | None = None
+     top_p: float = 1.0
+     temperature: float = 1.0
++    allowed_token_ids: tuple[int, ...] | list[int] | None = None
++
++    def __post_init__(self) -> None:
++        self.allowed_token_ids = _canonical_allowed_token_ids(self.allowed_token_ids)
+ 
+ 
+ def _need_top_k_filtering(top_k: int | None) -> bool:
+@@ -57,13 +84,13 @@ def _need_top_p_filtering(top_p: float | None) -> bool:
+ def need_top_k_or_top_p_filtering(
+     sampling_params: Optional[TrainingSamplingParams],
+ ) -> bool:
+-    """Check if top-k or top-p filtering is needed."""
++    """Check if any generation-time sampling support filtering is needed."""
+     if sampling_params is None:
+         return False
+ 
+     top_k = sampling_params.top_k
+     top_p = sampling_params.top_p
+-    return _need_top_k_filtering(top_k) or _need_top_p_filtering(top_p)
++    return sampling_params.allowed_token_ids is not None or _need_top_k_filtering(top_k) or _need_top_p_filtering(top_p)
+ 
+ 
+ @torch.no_grad()
+@@ -256,6 +283,7 @@ def apply_top_k_top_p(
+     top_k: int | None,
+     top_p: float,
+     chunk_size: int | None = TOP_K_TOP_P_CHUNK_SIZE,
++    allowed_token_ids: list[int] | tuple[int, ...] | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor | None]:
+     """Apply top-k and top-p masks to the logits with proper gradient handling.
+ 
+@@ -274,12 +302,48 @@ def apply_top_k_top_p(
+         top_k: Top-k sampling parameter. Set to -1 to consider all tokens.
+         top_p: Top-p (nucleus) sampling parameter. Must be in (0, 1]. Set to 1 to consider all tokens.
+         chunk_size: Number of tokens to process per chunk. Defaults to TOP_K_TOP_P_CHUNK_SIZE.
++        allowed_token_ids: Optional exact vocabulary support to apply before top-k/top-p.
+ 
+     Returns:
+         filtered_logits: Filtered logits tensor with the same shape as input logits.
+         keep_mask: Mask tensor with the same shape as input logits, where 1 (True) indicates tokens to be
+             kept, 0 (False) indicates tokens to be masked.
+     """
++    canonical_allowed_ids = _canonical_allowed_token_ids(allowed_token_ids)
++    allowed_keep_mask = None
++    if canonical_allowed_ids is not None:
++        vocab_size = logits.shape[-1]
++        if any(token_id >= vocab_size for token_id in canonical_allowed_ids):
++            raise ValueError(f"allowed_token_ids must be smaller than the logits vocabulary size {vocab_size}")
++        allowed_index = torch.tensor(
++            canonical_allowed_ids,
++            device=logits.device,
++            dtype=torch.long,
++        )
++        vocab_keep_mask = torch.zeros(
++            vocab_size,
++            device=logits.device,
++            dtype=torch.bool,
++        )
++        vocab_keep_mask[allowed_index] = True
++        mask_shape = (1,) * (logits.ndim - 1) + (vocab_size,)
++        allowed_keep_mask = vocab_keep_mask.view(mask_shape).expand_as(logits)
++        logits = logits.masked_fill(~allowed_keep_mask, -float("inf"))
++
+     if not _need_top_k_filtering(top_k) and not _need_top_p_filtering(top_p):
+-        return logits, None
+-    return _ApplyTopKTopP.apply(logits, top_k, top_p, chunk_size)
++        return logits, allowed_keep_mask
++
++    filtered_logits, sampling_keep_mask = _ApplyTopKTopP.apply(
++        logits,
++        top_k,
++        top_p,
++        chunk_size,
++    )
++    if allowed_keep_mask is None:
++        return filtered_logits, sampling_keep_mask
++    if sampling_keep_mask is None:
++        return filtered_logits, allowed_keep_mask
++    return filtered_logits, torch.logical_and(
++        allowed_keep_mask,
++        sampling_keep_mask,
++    )
+diff --git a/nemo_rl/distributed/model_utils.py b/nemo_rl/distributed/model_utils.py
+index badeb8a1..aafddf6c 100644
+--- a/nemo_rl/distributed/model_utils.py
++++ b/nemo_rl/distributed/model_utils.py
+@@ -390,6 +390,7 @@ class DistributedLogprobWithSampling(torch.autograd.Function):
+         top_k: int | None,
+         top_p: float,
+         inference_only: bool = False,
++        allowed_token_ids: tuple[int, ...] | None = None,
+     ) -> torch.Tensor:
+         """Forward pass for sampling-based logprob computation.
+ 
+@@ -400,6 +401,7 @@ class DistributedLogprobWithSampling(torch.autograd.Function):
+             top_k: Top-k filtering parameter (None or -1 to disable)
+             top_p: Top-p filtering parameter (1.0 to disable)
+             inference_only: If True, don't save tensors for backward
++            allowed_token_ids: Optional vocabulary support applied before top-k/top-p
+ 
+         Returns:
+             Log probabilities [B, S]
+@@ -432,7 +434,10 @@ class DistributedLogprobWithSampling(torch.autograd.Function):
+ 
+         # Apply top-k and top-p filtering locally (returns keep_mask for gradient)
+         logits, keep_mask = apply_top_k_top_p(
+-            seq_parallel_logits, top_k=top_k, top_p=top_p
++            seq_parallel_logits,
++            top_k=top_k,
++            top_p=top_p,
++            allowed_token_ids=allowed_token_ids,
+         )
+ 
+         # Compute log softmax
+@@ -470,7 +475,7 @@ class DistributedLogprobWithSampling(torch.autograd.Function):
+     def backward(
+         ctx: Any,
+         *grad_outputs: torch.Tensor,
+-    ) -> tuple[torch.Tensor, None, None, None, None, None]:
++    ) -> tuple[torch.Tensor | None, ...]:
+         """Backward pass for sampling-based logprob computation."""
+         grad_output = grad_outputs[0]  # [B, S]
+         softmax_output, target_local, keep_mask = ctx.saved_tensors
+@@ -501,7 +506,16 @@ class DistributedLogprobWithSampling(torch.autograd.Function):
+         grad_vocab_parallel = all_to_all_sq2vp(grad_logits_local, tp_group)
+         grad_vocab_parallel = grad_vocab_parallel.view(B, S, V // world_size)
+ 
+-        return grad_vocab_parallel, None, None, None, None, None
++        gradients = (
++            grad_vocab_parallel,
++            None,
++            None,
++            None,
++            None,
++            None,
++            None,
++        )
++        return gradients[: len(ctx.needs_input_grad)]
+ 
+ 
+ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+@@ -520,6 +534,7 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+         top_p: float,
+         chunk_size: int,
+         inference_only: bool = False,
++        allowed_token_ids: tuple[int, ...] | None = None,
+     ) -> torch.Tensor:
+         """Forward pass with chunked processing.
+ 
+@@ -531,6 +546,7 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+             top_p: Top-p filtering parameter (1.0 to disable)
+             chunk_size: Chunk size for memory efficiency (in sequence dimension)
+             inference_only: If True, don't save tensors for backward
++            allowed_token_ids: Optional vocabulary support applied before top-k/top-p
+ 
+         Returns:
+             Log probabilities [B, S]
+@@ -589,7 +605,10 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+ 
+             # Apply top-k and top-p filtering locally
+             logits_chunk, _ = apply_top_k_top_p(
+-                seq_parallel_logits_chunk, top_k=top_k, top_p=top_p
++                seq_parallel_logits_chunk,
++                top_k=top_k,
++                top_p=top_p,
++                allowed_token_ids=allowed_token_ids,
+             )
+ 
+             # Compute log softmax
+@@ -623,6 +642,7 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+             ctx.tp_group = tp_group
+             ctx.top_k = top_k
+             ctx.top_p = top_p
++            ctx.allowed_token_ids = allowed_token_ids
+             ctx.chunk_size = chunk_size
+ 
+         return token_logprobs
+@@ -631,7 +651,7 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+     def backward(
+         ctx: Any,
+         *grad_outputs: torch.Tensor,
+-    ) -> tuple[torch.Tensor, None, None, None, None, None, None]:
++    ) -> tuple[torch.Tensor | None, ...]:
+         """Backward pass with chunked rematerialization."""
+         grad_output = grad_outputs[0]  # [B, S]
+         (vocab_parallel_logits,) = ctx.saved_tensors
+@@ -639,6 +659,7 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+         tp_group = ctx.tp_group
+         top_k = ctx.top_k
+         top_p = ctx.top_p
++        allowed_token_ids = ctx.allowed_token_ids
+         chunk_size = ctx.chunk_size
+ 
+         world_size = torch.distributed.get_world_size(tp_group)
+@@ -678,7 +699,10 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+ 
+             # Rematerialize filtering
+             logits_chunk, keep_mask = apply_top_k_top_p(
+-                seq_parallel_logits_chunk, top_k=top_k, top_p=top_p
++                seq_parallel_logits_chunk,
++                top_k=top_k,
++                top_p=top_p,
++                allowed_token_ids=allowed_token_ids,
+             )
+ 
+             # Rematerialize softmax
+@@ -710,7 +734,17 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+         grad_vocab_parallel = torch.cat(all_grad_chunks, dim=0)
+         grad_vocab_parallel = grad_vocab_parallel.view(B, S, V_local)
+ 
+-        return grad_vocab_parallel, None, None, None, None, None, None
++        gradients = (
++            grad_vocab_parallel,
++            None,
++            None,
++            None,
++            None,
++            None,
++            None,
++            None,
++        )
++        return gradients[: len(ctx.needs_input_grad)]
+ 
+ 
+ class ChunkedDistributedGatherLogprob(torch.autograd.Function):
+@@ -897,6 +931,7 @@ def dtensor_from_parallel_logits_to_logprobs(
+                 sampling_params.top_p,
+                 chunk_size,
+                 inference_only,
++                sampling_params.allowed_token_ids,
+             ).contiguous()
+         else:
+             logprobs: torch.Tensor = DistributedLogprobWithSampling.apply(  # type: ignore
+@@ -906,6 +941,7 @@ def dtensor_from_parallel_logits_to_logprobs(
+                 sampling_params.top_k,
+                 sampling_params.top_p,
+                 inference_only,
++                sampling_params.allowed_token_ids,
+             ).contiguous()
+     else:
+         if chunk_size is not None:
+@@ -993,6 +1029,7 @@ def from_parallel_logits_to_logprobs(
+                 sampling_params.top_p,
+                 chunk_size,
+                 inference_only,
++                sampling_params.allowed_token_ids,
+             ).contiguous()
+         else:
+             logprobs: torch.Tensor = DistributedLogprobWithSampling.apply(  # type: ignore
+@@ -1002,6 +1039,7 @@ def from_parallel_logits_to_logprobs(
+                 sampling_params.top_k,
+                 sampling_params.top_p,
+                 inference_only,
++                sampling_params.allowed_token_ids,
+             ).contiguous()
+     else:
+         if chunk_size is not None:
+@@ -1115,6 +1153,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
+                 sampling_params.top_p,
+                 chunk_size,
+                 inference_only,
++                sampling_params.allowed_token_ids,
+             ).contiguous()
+         else:
+             probs: torch.Tensor = DistributedLogprobWithSampling.apply(  # type: ignore
+@@ -1124,6 +1163,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
+                 sampling_params.top_k,
+                 sampling_params.top_p,
+                 inference_only,
++                sampling_params.allowed_token_ids,
+             ).contiguous()
+     else:
+         if chunk_size is not None:
+@@ -1629,6 +1669,11 @@ def get_next_token_logprobs_from_logits(
+             next_token_logits_wo_last,
+             top_k=sampling_params.top_k if sampling_params is not None else None,
+             top_p=sampling_params.top_p if sampling_params is not None else 1.0,
++            allowed_token_ids=(
++                sampling_params.allowed_token_ids
++                if sampling_params is not None
++                else None
++            ),
+         )
+         # Compute logprobs
+         next_token_logprobs = torch.nn.functional.log_softmax(
+diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
+--- a/nemo_rl/models/megatron/setup.py
++++ b/nemo_rl/models/megatron/setup.py
+@@ -306,6 +306,7 @@ def validate_and_set_config(
+             top_k=generation_cfg["top_k"],
+             top_p=generation_cfg["top_p"],
+             temperature=generation_cfg["temperature"],
++            allowed_token_ids=generation_cfg.get("allowed_token_ids"),
+         )
+ 
+     # Explicitly set NCCL_CUMEM_ENABLE to 1 to avoid the P2P initialization error for PyNCCLCommunicator.
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -1557,8 +1557,9 @@ class MegatronPolicyWorker(PolicyWorker):
+         """Context manager that temporarily swaps the reference model and active model.
+ 
+         On entry: Moves model to CPU, moves reference_model to CUDA. Swaps the references.
+-                  Also disables top-k/top-p filtering since the reference policy's distribution
+-                  is different from the current policy, making filtered logprobs incompatible.
++                  Also disables weight-dependent top-k/top-p filtering since the reference policy's
++                  distribution is different from the current policy, while retaining any fixed
++                  allowed-token support used to sample the actions.
+         On exit: Restores original references and re-flips cuda/cpu, restores sampling_params.
+         """
+         ## disable overlap param gather when swapping weights
+@@ -1588,16 +1589,15 @@ class MegatronPolicyWorker(PolicyWorker):
+                 torch.cuda.empty_cache()
+ 
+-            # Temporarily disable top-k/top-p filtering for reference policy logprobs.
+-            # The reference policy has different weights, so its top-k/top-p set is
+-            # inherently different from the current policy. Using filtered logprobs
+-            # would cause -inf mismatches that cannot be resolved by masking.
+-            # Note: We keep temperature scaling since it was applied to prev_logprobs.
++            # Disable weight-dependent top-k/top-p for the reference policy, whose
++            # retained set differs from the current policy. The fixed allowed-token
++            # support and temperature still define the sampled action distribution.
+             saved_sampling_params = self.sampling_params
+             if saved_sampling_params is not None:
+                 self.sampling_params = TrainingSamplingParams(
+                     top_k=None,
+                     top_p=1.0,
+                     temperature=saved_sampling_params.temperature,
++                    allowed_token_ids=saved_sampling_params.allowed_token_ids,
+                 )
+             else:
+                 self.sampling_params = None

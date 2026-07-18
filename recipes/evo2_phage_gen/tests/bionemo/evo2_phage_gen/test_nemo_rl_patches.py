@@ -23,6 +23,7 @@ import types
 from pathlib import Path
 
 import pytest
+import torch
 
 from bionemo.evo2_phage_gen import nemo_rl_patches
 
@@ -116,14 +117,26 @@ def test_apply_nemo_rl_patch_reports_already_applied(tmp_path: Path, monkeypatch
     assert result == f"patch already applied to {source_root}"
 
 
+def test_default_nemo_rl_patch_series_is_ordered() -> None:
+    _require(
+        tuple(path.name for path in nemo_rl_patches.DEFAULT_PATCHES)
+        == (
+            "nemo-rl-evo2-policy.patch",
+            "nemo-rl-evo2-vllm.patch",
+            "nemo-rl-evo2-sampling.patch",
+        ),
+        "maintained NeMo-RL patch order drifted",
+    )
+
+
 def test_apply_nemo_rl_patch_applies_default_series_in_order(tmp_path: Path, monkeypatch) -> None:
-    """The default CLI path should apply both maintained patches in declared order."""
+    """The default CLI path should apply every maintained patch in declared order."""
     source_root = tmp_path / "site-packages"
     package_dir = source_root / "nemo_rl"
     package_dir.mkdir(parents=True)
     init_file = package_dir / "__init__.py"
     init_file.write_text("")
-    patch_paths = (tmp_path / "policy.patch", tmp_path / "vllm.patch")
+    patch_paths = (tmp_path / "policy.patch", tmp_path / "vllm.patch", tmp_path / "sampling.patch")
     for path in patch_paths:
         path.write_text(f"diff --git a/{path.stem} b/{path.stem}\n")
     spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
@@ -142,11 +155,24 @@ def test_apply_nemo_rl_patch_applies_default_series_in_order(tmp_path: Path, mon
     result = nemo_rl_patches.apply_nemo_rl_patch()
 
     _require(
-        result == f"patch applied to {source_root}\npatch applied to {source_root}",
+        result
+        == (
+            f"patch applied to {source_root}\n"
+            f"patch applied to {source_root}\n"
+            f"patch applied to {source_root}"
+        ),
         "default series result drifted",
     )
     _require(
-        [Path(args[-1]).name for args in calls] == ["policy.patch", "policy.patch", "vllm.patch", "vllm.patch"],
+        [Path(args[-1]).name for args in calls]
+        == [
+            "policy.patch",
+            "policy.patch",
+            "vllm.patch",
+            "vllm.patch",
+            "sampling.patch",
+            "sampling.patch",
+        ],
         "default patch order drifted",
     )
 
@@ -272,6 +298,50 @@ def test_vllm_patch_excludes_request_timing_telemetry() -> None:
     )
 
 
+def test_patched_nemo_rl_training_logprobs_apply_allowed_support_before_top_k() -> None:
+    from nemo_rl.algorithms.logits_sampling_utils import TrainingSamplingParams, apply_top_k_top_p
+
+    params = TrainingSamplingParams(top_k=2, top_p=1.0, allowed_token_ids=[1, 3, 5])
+    logits = torch.tensor(
+        [[[100.0, 4.0, 99.0, 6.0, 98.0, 2.0]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    filtered, keep_mask = apply_top_k_top_p(
+        logits,
+        top_k=params.top_k,
+        top_p=params.top_p,
+        allowed_token_ids=params.allowed_token_ids,
+    )
+
+    expected_keep = torch.tensor([[[False, True, False, True, False, False]]])
+    _require(keep_mask is not None, "allowed support returned no gradient mask")
+    torch.testing.assert_close(keep_mask, expected_keep)
+    _require(
+        torch.equal(torch.isfinite(filtered), expected_keep),
+        "top-k was not evaluated within the generation-time allowed support",
+    )
+    torch.log_softmax(filtered, dim=-1)[..., 1].sum().backward()
+    _require(logits.grad is not None, "chosen logprob produced no gradient")
+    _require(
+        torch.equal(logits.grad.ne(0), expected_keep),
+        "forbidden or filtered logits received a gradient",
+    )
+
+
+def test_sampling_patch_excludes_upstream_vllm_and_diagnostic_telemetry() -> None:
+    patch_text = (nemo_rl_patches.RECIPE_ROOT / "patches" / "nemo-rl-evo2-sampling.patch").read_text()
+
+    _require("diff --git a/vllm/" not in patch_text, "sampling parity patch modified upstream vLLM")
+    for required in (
+        'allowed_token_ids=generation_cfg.get("allowed_token_ids")',
+        "allowed_token_ids=saved_sampling_params.allowed_token_ids",
+    ):
+        _require(required in patch_text, f"sampling policy propagation is missing: {required}")
+    for forbidden in ("generation_first_token_latency_s", "generation_decode_s", "proof", "telemetry"):
+        _require(forbidden not in patch_text, f"diagnostic field entered sampling patch: {forbidden}")
+
+
 def test_maintained_patches_are_applied_to_pinned_nemo_rl_source() -> None:
     """The retained source should contain every maintained patch in declared order."""
     source_root = nemo_rl_patches._nemo_rl_source_dir()
@@ -298,6 +368,8 @@ def test_maintained_patch_inventory_is_narrow_and_does_not_patch_vllm_core() -> 
         paths
         == {
             "nemo_rl/distributed/worker_groups.py",
+            "nemo_rl/algorithms/logits_sampling_utils.py",
+            "nemo_rl/distributed/model_utils.py",
             "nemo_rl/models/generation/interfaces.py",
             "nemo_rl/models/generation/vllm/config.py",
             "nemo_rl/models/generation/vllm/vllm_generation.py",
@@ -350,6 +422,9 @@ def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypat
         _select_megatron_bridge=object(),
     )
     modules = {
+        "nemo_rl.algorithms.logits_sampling_utils": types.SimpleNamespace(
+            _canonical_allowed_token_ids=object()
+        ),
         "nemo_rl.models.generation.interfaces": types.SimpleNamespace(generation_prompt_token_ids_sha256=object()),
         "nemo_rl.models.megatron.setup": megatron_setup,
         "nemo_rl.models.generation.vllm.config": types.SimpleNamespace(VllmActorExecutionConfig=object()),
