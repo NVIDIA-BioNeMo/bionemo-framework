@@ -587,3 +587,47 @@ def test_vllm_tp1_dp2_full_profile_uses_two_mixed_local_b48_streams():
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
         raise AssertionError(f"TP1/DP2 mixed vLLM config drifted: {failed}")
+
+
+def test_vllm_tp1_dp2_matched_qc_profile_restores_all_production_objectives():
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_vllm_tp1dp2_p8k12_full_qc.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    env_config = config["env"]["phage_qc"]
+    external_qc = env_config["external_qc"]
+    mmseqs = env_config["mmseqs_cluster_diversity"]
+
+    objective_names = [objective["name"] for objective in env_config["gdpo_objectives"]]
+    checks = {
+        "inherits qualified TP1/DP2 P8K12 route": config["defaults"]
+        == "gdpo_phage_vllm_tp1dp2_p8k12_full.yaml",
+        "all production objectives": objective_names
+        == [
+            "valid_nt_chars",
+            "genome_length",
+            "gc_content",
+            "nt_homopolymer",
+            "dustmask_end",
+            "nucleotide_pass",
+            "protein_hit_count",
+            "tropism",
+            "required_genes",
+            "synteny",
+            "average_protein_identity",
+            "mmseqs_cluster_diversity",
+        ],
+        "external QC enabled fail closed": external_qc["enabled"] is True
+        and external_qc["fail_on_error"] is True,
+        "final paper filters required": external_qc["enable_synteny"] is True
+        and external_qc["synteny_mode"] == "full"
+        and external_qc["enable_average_protein_identity"] is True
+        and external_qc["enable_required_genes"] is True,
+        "MMseqs diversity enabled": mmseqs["enabled"] is True,
+        "dustmask enabled": env_config["dustmask_filter"] is True,
+        "separate matched-QC namespaces": "full_qc" in config["checkpointing"]["checkpoint_dir"]
+        and "full_qc" in config["logger"]["log_dir"]
+        and "full_qc" in external_qc["work_dir"]
+        and "full_qc" in mmseqs["work_dir"],
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise AssertionError(f"matched full-QC vLLM config drifted: {failed}")
