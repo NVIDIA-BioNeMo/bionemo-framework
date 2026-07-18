@@ -228,7 +228,10 @@ def test_patched_rollout_carries_semantic_prompt_groups_to_generation(monkeypatc
         request_count = batch.size
         return types.SimpleNamespace(
             observations=[{"role": "environment", "content": ""}] * request_count,
-            metadata=[None] * request_count,
+            metadata=[
+                {"prompt_id": prompt_group, "terminal_metric": index}
+                for index, prompt_group in enumerate(expected_prompt_groups)
+            ],
             next_stop_strings=[None] * request_count,
             rewards=torch.ones(request_count, dtype=torch.float32),
             terminateds=torch.ones(request_count, dtype=torch.bool),
@@ -261,7 +264,7 @@ def test_patched_rollout_carries_semantic_prompt_groups_to_generation(monkeypatc
         }
     )
 
-    rollouts.run_multi_turn_rollout(
+    final_batch, _ = rollouts.run_multi_turn_rollout(
         policy_generation=object(),
         input_batch=input_batch,
         tokenizer=Tokenizer(),
@@ -274,6 +277,128 @@ def test_patched_rollout_carries_semantic_prompt_groups_to_generation(monkeypatc
         captured_prompt_groups == [expected_prompt_groups],
         "semantic prompt groups did not reach the production generation input",
     )
+    _require(
+        final_batch["extra_env_info"]
+        == [
+            {"prompt_id": prompt_group, "terminal_metric": index}
+            for index, prompt_group in enumerate(expected_prompt_groups)
+        ],
+        "terminal environment metadata was dropped before rollout finalization",
+    )
+
+
+def test_patched_rollout_collects_task_local_environment_metrics(
+    monkeypatch,
+) -> None:
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+    from nemo_rl.experience import rollouts
+
+    selected_prompt_ids: list[list[str]] = []
+
+    class RemoteMetrics:
+        def remote(self, batch):
+            selected_prompt_ids.append(
+                [item["prompt_id"] for item in batch["extra_env_info"]]
+            )
+            return batch, {
+                "phage_qc/synteny_pass_rate": 0.25,
+                "__timing__/env_step/total_s": 12.5,
+            }
+
+    env = types.SimpleNamespace(global_post_process_and_metrics=RemoteMetrics())
+    monkeypatch.setattr(rollouts.ray, "get", lambda futures: futures)
+    batch = BatchedDataDict(
+        {
+            "task_name": ["phage_qc", "other", "phage_qc"],
+            "extra_env_info": [
+                {"prompt_id": "prompt-4"},
+                {"prompt_id": "other"},
+                {"prompt_id": "prompt-5"},
+            ],
+            "total_reward": torch.tensor([1.0, 2.0, 3.0]),
+        }
+    )
+
+    metrics = rollouts.collect_environment_metrics(batch, {"phage_qc": env})
+
+    _require(
+        selected_prompt_ids == [["prompt-4", "prompt-5"]],
+        "environment metrics were not computed from the task-local rows",
+    )
+    _require(
+        metrics
+        == {
+            "phage_qc/synteny_pass_rate": 0.25,
+            "__timing__/env_step/total_s": 12.5,
+        },
+        "environment scalar metrics drifted",
+    )
+
+
+def test_patched_validation_logs_environment_metrics_and_splits_phase_timing(
+    monkeypatch,
+) -> None:
+    from nemo_rl.algorithms import grpo
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+
+    val_batch = BatchedDataDict(
+        {
+            "message_log": [
+                [{"role": "user", "content": "+~AAAA"}],
+                [{"role": "user", "content": "+~CCCCC"}],
+            ],
+            "total_reward": torch.tensor([1.0, 3.0]),
+        }
+    )
+
+    def fake_rollout(*_args, **_kwargs):
+        return val_batch, {
+            "mean_gen_tokens_per_sample": 5_988.0,
+            "phage_qc/synteny_pass_rate": 0.5,
+            "phage_qc/average_protein_identity_pass_rate": 0.25,
+            "phage_qc/required_genes_pass_rate": 0.75,
+            "__timing__/env_step/total_s": 17.0,
+        }
+
+    master_config = types.SimpleNamespace(
+        grpo={
+            "val_period": 1,
+            "max_val_samples": 2,
+            "val_batch_size": 2,
+            "max_rollout_turns": 1,
+        },
+        policy={"max_total_sequence_length": 6_016},
+        logger={"num_val_samples_to_print": 0},
+    )
+    monkeypatch.setattr(grpo, "_should_use_nemo_gym", lambda _config: False)
+    monkeypatch.setattr(grpo, "_should_use_async_rollouts", lambda _config: False)
+    monkeypatch.setattr(grpo, "run_multi_turn_rollout", fake_rollout)
+    monkeypatch.setattr(grpo, "print_message_log_samples", lambda *_args, **_kwargs: None)
+
+    metrics, timings = grpo.validate(
+        policy_generation=object(),
+        val_dataloader=[val_batch],
+        tokenizer=object(),
+        val_task_to_env={},
+        step=1,
+        master_config=master_config,
+        logger=None,
+    )
+
+    _require(metrics["phage_qc/synteny_pass_rate"] == 0.5, "synteny validation metric was dropped")
+    _require(
+        metrics["phage_qc/average_protein_identity_pass_rate"] == 0.25,
+        "AAI validation metric was dropped",
+    )
+    _require(
+        metrics["phage_qc/required_genes_pass_rate"] == 0.75,
+        "required-gene validation metric was dropped",
+    )
+    _require(
+        "__timing__/env_step/total_s" not in metrics,
+        "environment timing leaked into ordinary validation metrics",
+    )
+    _require(timings["env_step/total_s"] == 17.0, "environment phase timing was dropped")
 
 
 def test_patched_grpo_logs_prompt_rollout_identity_and_exact_generation_evidence() -> (
