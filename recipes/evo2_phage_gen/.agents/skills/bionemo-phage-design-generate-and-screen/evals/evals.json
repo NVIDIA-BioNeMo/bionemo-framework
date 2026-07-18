@@ -37,7 +37,9 @@
       "assertions": [
         "The response builds and sources the recipe environment on the actual execution host and verifies Python, package/plugin, vLLM, entry-point, and CUDA visibility before generation.",
         "The response exports the exact selected post-RL MBridge checkpoint to a fresh vLLM safetensors directory and records the source inventory plus config, index, manifest, and shard hashes; it never silently reuses a base-policy export.",
+        "The response gives executable ./ci_build.sh and .ci_test_env.sh setup followed by public evo2_export_mbridge_to_vllm and infer_evo2 commands that bind --model, --rl-checkpoint, --rl-tokenizer-json, and the frozen --prompt-file.",
         "The response identifies TP2 MP+async O2/balanced, compilation mode 3, and exact-batch FULL_AND_PIECEWISE graphs as the measured two-H100 reference while permitting a correctness- and capacity-qualified higher TP or disjoint DP engine groups on larger allocations.",
+        "The generation command uses adaptive --tensor-parallel-size auto plus the qualified --optimization-level 2, --performance-mode balanced, and --async-scheduling defaults, while capacity-testing physical batch and capture sizes for the assigned system.",
         "The response uses every assigned GPU without device overlap, binds real local wave sizes into capture configuration, and gives disjoint request and seed partitions to multiple engine groups.",
         "The response requires exact output lengths, allowed DNA symbols with no EOS, finite aligned chosen logprobs, and unique advancing request seeds before canonicalization, deduplication, hard QC, clustering, and ranking.",
         "The response saves executable export and generation commands, resolved config, source and runtime hashes, raw rows, rejection reasons, QC waterfall, unique passing representatives, and final summary."

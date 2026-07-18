@@ -437,12 +437,17 @@ rather than silently producing asymmetric behaviour.
 
 ### Running inference on a LoRA checkpoint
 
-A LoRA training checkpoint contains only adapter tensors — the base model weights
-are not duplicated. Point `--ckpt-dir` at the LoRA `iter_*` directory as usual:
+A LoRA training checkpoint contains only adapter tensors; it is not a complete
+vLLM model export. Do not pass an adapter-only MBridge checkpoint directly to
+`infer_evo2`.
+
+For a compatibility generation run, use the explicit MCore command. It loads
+the dense base checkpoint recorded by the adapter checkpoint and then applies
+the LoRA tensors:
 
 ```bash
 torchrun --nproc_per_node 1 --no-python \
-  infer_evo2 \
+  infer_evo2_mcore \
   --ckpt-dir </path/to/lora_run/checkpoints/> \
   --prompt "ATCGATCGATCGATCG" \
   --max-new-tokens 200
@@ -456,7 +461,7 @@ torchrun --nproc_per_node 1 --no-python \
   --output-dir ./predictions
 ```
 
-When `infer_evo2` / `predict_evo2` detect a `peft` section in the checkpoint's
+When `infer_evo2_mcore` / `predict_evo2` detect a `peft` section in the checkpoint's
 `run_config.yaml`, they:
 
 1. load dense base weights from `checkpoint.pretrained_checkpoint` (the same
@@ -468,6 +473,36 @@ When `infer_evo2` / `predict_evo2` detect a `peft` section in the checkpoint's
 No merge step is required. The base checkpoint referenced by
 `pretrained_checkpoint` must still exist on disk at the path recorded in
 `run_config.yaml`.
+
+For the qualified vLLM path, first materialize a complete dense MBridge
+checkpoint with a separately tested LoRA-merge workflow. This repository does
+not currently ship that merge operation. Once a dense checkpoint exists, use
+the normal export and optimized inference contract:
+
+```bash
+DENSE_CHECKPOINT=/path/to/merged-dense/iter_0000000
+VLLM_EXPORT=/path/to/fresh-vllm-export
+TOKENIZER_JSON=/path/to/tokenizer.json
+
+evo2_export_mbridge_to_vllm \
+  "$DENSE_CHECKPOINT" \
+  "$VLLM_EXPORT" \
+  --max-shard-size 2GiB
+
+infer_evo2 \
+  --model "$VLLM_EXPORT" \
+  --rl-checkpoint "$DENSE_CHECKPOINT" \
+  --rl-tokenizer-json "$TOKENIZER_JSON" \
+  --prompt "ATCGATCGATCGATCG" \
+  --max-new-tokens 200 \
+  --tensor-parallel-size auto \
+  --batch-size 1 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.91 \
+  --optimization-level 2 \
+  --performance-mode balanced \
+  --async-scheduling
+```
 
 ## Exporting to Vortex format
 

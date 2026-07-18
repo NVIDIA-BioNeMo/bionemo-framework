@@ -46,6 +46,14 @@ def _write_json(path: Path, value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _notebook_source(path: Path) -> str:
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    return "\n".join(
+        "".join(cell.get("source", ()))
+        for cell in notebook["cells"]
+    )
+
+
 def _export_root(tmp_path: Path) -> Path:
     root = tmp_path / "model"
     root.mkdir()
@@ -143,6 +151,82 @@ def test_evo2_readme_documents_qualified_vllm_inference_and_rl_load_parity() -> 
         "torchrun --nproc_per_node 1 --no-python" not in section,
         "public infer_evo2 documentation still uses the legacy MCore torchrun path",
     )
+
+
+def test_evo2_readme_does_not_send_adapter_only_lora_checkpoints_to_vllm() -> None:
+    readme = (EVO2_RECIPE / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Running inference on a LoRA checkpoint", maxsplit=1)[1].split(
+        "## Exporting to Vortex format",
+        maxsplit=1,
+    )[0]
+    _require("infer_evo2_mcore" in section, "adapter-only LoRA inference lacks an explicit compatibility path")
+    _require(
+        "evo2_export_mbridge_to_vllm" in section,
+        "LoRA documentation does not explain the dense-checkpoint vLLM export path",
+    )
+    _require(
+        "--rl-checkpoint" in section and "--rl-tokenizer-json" in section,
+        "LoRA dense-export guidance does not bind vLLM back to its checkpoint and tokenizer",
+    )
+    _require(
+        "infer_evo2 --ckpt-dir" not in section,
+        "adapter-only MBridge checkpoints are still routed directly to vLLM",
+    )
+
+
+def test_checked_in_inference_notebooks_use_fresh_exports_and_qualified_defaults() -> None:
+    phage_walkthrough = _notebook_source(PHAGE_RECIPE / "examples/replication_walkthrough.ipynb")
+    fine_tuning = _notebook_source(EVO2_RECIPE / "examples/fine-tuning-tutorial.ipynb")
+
+    for label, text in (("phage walkthrough", phage_walkthrough), ("fine-tuning tutorial", fine_tuning)):
+        missing = [
+            value
+            for value in (
+                "evo2_export_mbridge_to_vllm",
+                "infer_evo2",
+                "--model",
+                "--tensor-parallel-size auto",
+                "--optimization-level 2",
+                "--performance-mode balanced",
+                "--async-scheduling",
+            )
+            if value not in text
+        ]
+        _require(not missing, f"{label} is missing qualified vLLM inference settings: {missing}")
+        _require("infer_evo2 --ckpt-dir" not in text, f"{label} still passes MBridge weights directly to vLLM")
+        _require("--max-batch-size" not in text, f"{label} still uses the removed MCore batch flag")
+
+    _require(
+        "Megatron/MCore CUDA graph inference generated" not in phage_walkthrough,
+        "phage walkthrough still labels its primary inference result as MCore",
+    )
+
+
+def test_generate_and_screen_skill_has_an_executable_selected_policy_vllm_path() -> None:
+    skill = (
+        PHAGE_RECIPE
+        / ".agents"
+        / "skills"
+        / "bionemo-phage-design-generate-and-screen"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    required = (
+        "./.ci_build.sh",
+        "source .ci_test_env.sh",
+        "evo2_export_mbridge_to_vllm",
+        "infer_evo2",
+        "--model",
+        "--rl-checkpoint",
+        "--rl-tokenizer-json",
+        "--prompt-file",
+        "--tensor-parallel-size auto",
+        "--batch-size 96",
+        "--optimization-level 2",
+        "--performance-mode balanced",
+        "--async-scheduling",
+    )
+    missing = [value for value in required if value not in skill]
+    _require(not missing, f"generate-and-screen skill lacks executable vLLM guidance: {missing}")
 
 
 def test_inference_reexecs_into_the_locked_recipe_vllm_environment(monkeypatch, tmp_path) -> None:
