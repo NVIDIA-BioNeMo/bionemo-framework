@@ -558,3 +558,32 @@ def test_vllm_tp2_full_profile_uses_p8_k12_gbs96_independent_of_mcore_batches():
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
         raise AssertionError(f"full mixed vLLM config drifted: {failed}")
+
+
+def test_vllm_tp1_dp2_full_profile_uses_two_mixed_local_b48_streams():
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_vllm_tp1dp2_p8k12_full.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    policy = config["policy"]
+    generation = policy["generation"]
+    vllm_config = generation["vllm_cfg"]
+    vllm_kwargs = generation["vllm_kwargs"]
+    compilation = vllm_kwargs["compilation_config"]
+
+    checks = {
+        "inherits P8K12 GBS96": config["defaults"]
+        == "gdpo_phage_vllm_tp2_p8k12_full.yaml",
+        "policy TP1 implies DP2": policy["megatron_cfg"]["tensor_model_parallel_size"]
+        == 1,
+        "one vLLM engine per DP rank": vllm_config["tensor_parallel_size"] == 1
+        and vllm_kwargs["distributed_executor_backend"] is None,
+        "async scheduler retained": vllm_kwargs["async_scheduling"] is True,
+        "local B48 wave": vllm_kwargs["max_num_seqs"] == 48,
+        "exact local compile and graph shape": compilation["compile_sizes"] == [48]
+        and 48 in compilation["cudagraph_capture_sizes"],
+        "separate output namespace": "tp1dp2"
+        in config["checkpointing"]["checkpoint_dir"]
+        and "tp1dp2" in config["logger"]["log_dir"],
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise AssertionError(f"TP1/DP2 mixed vLLM config drifted: {failed}")

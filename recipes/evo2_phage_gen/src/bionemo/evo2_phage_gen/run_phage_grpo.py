@@ -138,6 +138,25 @@ def _validate_vllm_load_parity(config) -> dict[str, object] | None:
     return evidence
 
 
+def _bind_vllm_prompt_group_sharding(config) -> None:
+    """Bind vLLM's DP shard unit to the caller-owned rollout-group size K."""
+    generation = config.policy.get("generation") or {}
+    if generation.get("backend") != "vllm":
+        return
+    rollouts_per_prompt = config.grpo.get("num_generations_per_prompt")
+    if type(rollouts_per_prompt) is not int or rollouts_per_prompt <= 0:
+        raise TypeError(
+            "grpo.num_generations_per_prompt must be a positive built-in integer"
+        )
+    retained = generation.get("dp_shard_batch_size")
+    if retained is not None and retained != rollouts_per_prompt:
+        raise ValueError(
+            "policy.generation.dp_shard_batch_size must equal "
+            "grpo.num_generations_per_prompt"
+        )
+    generation["dp_shard_batch_size"] = rollouts_per_prompt
+
+
 def _select_grpo_trainer(master_config, algorithm: str):
     dp_cfg = master_config.data_plane or {}
     if dp_cfg.get("enabled", False):
@@ -227,6 +246,7 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
     print(f"Using RL algorithm frontend: {algorithm.upper()}")
 
     config = MasterConfig(**OmegaConf.to_container(config, resolve=True))
+    _bind_vllm_prompt_group_sharding(config)
     print("Applied CLI overrides")
     print("Final config:")
     pprint.pprint(config)

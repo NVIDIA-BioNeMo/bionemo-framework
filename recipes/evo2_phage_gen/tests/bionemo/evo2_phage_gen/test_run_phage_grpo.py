@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from bionemo.evo2.vllm import load_parity
 from bionemo.evo2_phage_gen import run_phage_grpo
 from bionemo.evo2_phage_gen.run_phage_grpo import (
+    _bind_vllm_prompt_group_sharding,
     _register_recipe_extensions,
     _unpack_grpo_setup_result,
     _validate_vllm_load_parity,
@@ -103,11 +104,45 @@ def test_launcher_preserves_non_vllm_generation_without_parity_lookup(monkeypatc
     _require(_validate_vllm_load_parity(config) is None, "non-vLLM generation gained parity side effects")
 
 
+def test_launcher_binds_vllm_dp_sharding_to_rollouts_per_prompt() -> None:
+    config = SimpleNamespace(
+        grpo={"num_generations_per_prompt": 12},
+        policy={"generation": {"backend": "vllm"}},
+    )
+
+    _bind_vllm_prompt_group_sharding(config)
+
+    _require(
+        config.policy["generation"]["dp_shard_batch_size"] == 12,
+        "vLLM DP sharding was not bound to K",
+    )
+
+    config.policy["generation"]["dp_shard_batch_size"] = 6
+    try:
+        _bind_vllm_prompt_group_sharding(config)
+    except ValueError as error:
+        _require(
+            "num_generations_per_prompt" in str(error),
+            "mismatch error lost its authority",
+        )
+    else:
+        raise AssertionError("a conflicting vLLM prompt-group shard size was accepted")
+
+
 def test_launcher_validates_vllm_load_parity_before_ray_initialization() -> None:
     source = inspect.getsource(run_phage_grpo.main)
     parity_position = source.find("_validate_vllm_load_parity(config)")
     ray_position = source.find("    init_ray()")
 
-    _require(parity_position >= 0, "production launcher does not call the load-parity preflight")
-    _require(ray_position >= 0, "production launcher no longer exposes the Ray initialization boundary")
-    _require(parity_position < ray_position, "load parity runs after Ray can allocate resources")
+    _require(
+        parity_position >= 0,
+        "production launcher does not call the load-parity preflight",
+    )
+    _require(
+        ray_position >= 0,
+        "production launcher no longer exposes the Ray initialization boundary",
+    )
+    _require(
+        parity_position < ray_position,
+        "load parity runs after Ray can allocate resources",
+    )

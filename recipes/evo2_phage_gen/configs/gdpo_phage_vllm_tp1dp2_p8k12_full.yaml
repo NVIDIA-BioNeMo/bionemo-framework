@@ -1,0 +1,26 @@
+# Full-length mixed-rollout Evo2 GDPO profile for two TP1/DP2 replicas.
+# The launcher binds each contiguous K=12 prompt group to grouped DP sharding,
+# so each local B48 wave receives six rollouts from every one of the P=8 strata.
+defaults: "gdpo_phage_vllm_tp2_p8k12_full.yaml"
+
+checkpointing:
+  checkpoint_dir: "data/checkpoints/phage_gdpo_vllm_tp1dp2_p8k12_full"
+
+policy:
+  megatron_cfg:
+    tensor_model_parallel_size: 1
+  generation:
+    vllm_cfg:
+      tensor_parallel_size: 1
+    vllm_kwargs:
+      # A single-GPU vLLM engine uses its supported in-process executor. The
+      # outer NeMo-RL worker group supplies two independent DP actors.
+      distributed_executor_backend: null
+      async_scheduling: true
+      max_num_seqs: 48
+      compilation_config:
+        cudagraph_capture_sizes: [1, 2, 4, 8, 16, 24, 32, 48]
+        compile_sizes: [48]
+
+logger:
+  log_dir: "data/checkpoints/phage_gdpo_vllm_tp1dp2_p8k12_full/logs"

@@ -64,7 +64,184 @@ def test_production_evo2_generation_worker_imports_with_maintained_patch() -> No
     )
 
 
-def test_apply_nemo_rl_patch_applies_against_installed_package_root(tmp_path: Path, monkeypatch) -> None:
+def test_patched_vllm_dp2_shards_every_prompt_group_and_restores_caller_order() -> None:
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+    from nemo_rl.models.generation.vllm.vllm_generation import (
+        _restore_generation_caller_order,
+        _shard_generation_batch_by_prompt_group,
+    )
+
+    prompt_ids = torch.arange(8, dtype=torch.int64).repeat_interleave(12)
+    caller_indices = torch.arange(1_000, 1_096, dtype=torch.int64)
+    batch = BatchedDataDict(
+        {
+            "input_ids": prompt_ids.unsqueeze(1),
+            "input_lengths": torch.ones(96, dtype=torch.int64),
+            "generation_global_request_indices": caller_indices,
+        }
+    )
+
+    shards = _shard_generation_batch_by_prompt_group(
+        batch,
+        dp_size=2,
+        prompt_group_size=12,
+    )
+
+    _require([shard.size for shard in shards] == [48, 48], "DP2 shard sizes drifted")
+    for rank, shard in enumerate(shards):
+        observed = torch.bincount(shard["input_ids"][:, 0], minlength=8).tolist()
+        _require(observed == [6] * 8, f"DP rank {rank} lost a prompt group: {observed}")
+
+    rank_major = BatchedDataDict.from_batches(shards)
+    restored = _restore_generation_caller_order(
+        rank_major,
+        expected_global_request_indices=caller_indices,
+    )
+    _require(
+        restored["generation_global_request_indices"].tolist()
+        == caller_indices.tolist(),
+        "rank-major results were not restored to caller order",
+    )
+    _require(
+        restored["input_ids"][:, 0].tolist() == prompt_ids.tolist(),
+        "prompt rows detached from caller request identities",
+    )
+
+    duplicate = BatchedDataDict(dict(rank_major.data))
+    duplicate["generation_global_request_indices"] = rank_major[
+        "generation_global_request_indices"
+    ].clone()
+    duplicate["generation_global_request_indices"][0] = duplicate[
+        "generation_global_request_indices"
+    ][1]
+    with pytest.raises(ValueError, match="caller request inventory"):
+        _restore_generation_caller_order(
+            duplicate,
+            expected_global_request_indices=caller_indices,
+        )
+
+
+def test_patched_rollout_retains_generation_coordinates_on_assistant_message() -> None:
+    from nemo_rl.experience.rollouts import _attach_generation_request_metadata
+    from nemo_rl.models.generation.interfaces import GENERATION_REQUEST_METADATA_KEYS
+
+    outputs = {
+        key: torch.tensor([value, value + 1], dtype=torch.int64)
+        for key, value in zip(
+            GENERATION_REQUEST_METADATA_KEYS,
+            (42, 1_000, 7, 9, 0),
+            strict=True,
+        )
+    }
+    assistant_message: dict[str, object] = {"role": "assistant", "content": "AC"}
+
+    _attach_generation_request_metadata(
+        assistant_message,
+        outputs,
+        row_index=1,
+        request_count=2,
+    )
+
+    _require(
+        {key: assistant_message[key] for key in GENERATION_REQUEST_METADATA_KEYS}
+        == {
+            key: int(outputs[key][1].item()) for key in GENERATION_REQUEST_METADATA_KEYS
+        },
+        "assistant generation coordinates drifted",
+    )
+
+    partial = dict(outputs)
+    partial.pop(GENERATION_REQUEST_METADATA_KEYS[-1])
+    with pytest.raises(RuntimeError, match="incomplete generation request metadata"):
+        _attach_generation_request_metadata(
+            {"role": "assistant", "content": "AC"},
+            partial,
+            row_index=0,
+            request_count=2,
+        )
+
+
+def test_patched_grpo_logs_prompt_rollout_identity_and_exact_generation_evidence() -> (
+    None
+):
+    from nemo_rl.algorithms.grpo import (
+        _rollout_log_fields,
+        _stamp_repeated_rollout_ordinals,
+    )
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+    from nemo_rl.models.generation.interfaces import GENERATION_REQUEST_METADATA_KEYS
+
+    repeated = BatchedDataDict(
+        {
+            "extra_env_info": [
+                {"prompt_id": f"prompt-{prompt}", "length_stratum": prompt + 4}
+                for prompt in range(2)
+                for _ in range(3)
+            ]
+        }
+    )
+    _stamp_repeated_rollout_ordinals(repeated, num_generations_per_prompt=3)
+
+    message_logs = []
+    for row_index in range(6):
+        generated = {
+            "role": "assistant",
+            "content": "AC",
+            "token_ids": torch.tensor([65, 67], dtype=torch.int64),
+            "generation_logprobs": torch.tensor([-0.25, -0.5], dtype=torch.float32),
+        }
+        for key, value in zip(
+            GENERATION_REQUEST_METADATA_KEYS,
+            (42 + row_index, 1_000 + row_index, 7, 9, row_index // 3),
+            strict=True,
+        ):
+            generated[key] = value
+        message_logs.append(
+            [
+                {
+                    "role": "user",
+                    "content": "+~A",
+                    "token_ids": torch.tensor([43, 126, 65]),
+                },
+                generated,
+            ]
+        )
+
+    fields = _rollout_log_fields(
+        message_logs,
+        repeated["extra_env_info"],
+        include_output_evidence=True,
+    )
+
+    _require(
+        fields["prompt_id"] == ["prompt-0"] * 3 + ["prompt-1"] * 3, "prompt IDs drifted"
+    )
+    _require(fields["length_stratum"] == [4] * 3 + [5] * 3, "length strata drifted")
+    _require(
+        fields["rollout_ordinal"] == [0, 1, 2, 0, 1, 2], "rollout ordinals drifted"
+    )
+    _require(
+        fields["generation_request_seeds"] == [[seed] for seed in range(42, 48)],
+        "request seeds drifted",
+    )
+    _require(fields["generated_token_ids"] == [[[65, 67]]] * 6, "generated IDs drifted")
+    _require(
+        fields["generated_chosen_logprobs"] == [[[-0.25, -0.5]]] * 6,
+        "chosen logprob evidence drifted",
+    )
+
+    message_logs[0][1]["generation_logprobs"][1] = float("nan")
+    with pytest.raises(ValueError, match="finite and token-aligned"):
+        _rollout_log_fields(
+            message_logs,
+            repeated["extra_env_info"],
+            include_output_evidence=True,
+        )
+
+
+def test_apply_nemo_rl_patch_applies_against_installed_package_root(
+    tmp_path: Path, monkeypatch
+) -> None:
     """The patch command should run from site-packages, not require a source checkout path."""
     source_root = tmp_path / "site-packages"
     package_dir = source_root / "nemo_rl"
@@ -404,7 +581,9 @@ def test_maintained_patch_inventory_is_narrow_and_does_not_patch_vllm_core() -> 
         == {
             "nemo_rl/distributed/worker_groups.py",
             "nemo_rl/algorithms/logits_sampling_utils.py",
+            "nemo_rl/algorithms/grpo.py",
             "nemo_rl/distributed/model_utils.py",
+            "nemo_rl/experience/rollouts.py",
             "nemo_rl/models/generation/interfaces.py",
             "nemo_rl/models/generation/vllm/config.py",
             "nemo_rl/models/generation/vllm/vllm_generation.py",
