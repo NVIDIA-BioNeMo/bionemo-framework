@@ -159,7 +159,7 @@ for temp in ${TEMPERATURES}; do
     printf '\n[%s] START prompt_len=%s temp=%s out=%s\n' "${started_at}" "${prompt_len}" "${temp}" "${out}" | tee -a "${RUNNER_LOG}"
 
     set +e
-    infer_evo2 \
+    env -u VLLM_EXPORT -u VLLM_EXPORT_CONFIG -u VLLM_MAX_SHARD_SIZE infer_evo2 \
       --model "${VLLM_EXPORT}" \
       --tokenizer-json "${TOKENIZER_JSON}" \
       --rl-checkpoint "${CKPT_DIR}" \

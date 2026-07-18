@@ -51,6 +51,10 @@ def test_paper_hpo_generation_uses_qualified_public_vllm_path():
         'TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-auto}"' in source,
         "TP must adapt to visible GPUs",
     )
+    _require(
+        "env -u VLLM_EXPORT -u VLLM_EXPORT_CONFIG -u VLLM_MAX_SHARD_SIZE" in source,
+        "wrapper-only export settings must not leak into vLLM's environment namespace",
+    )
     _require("torchrun" not in source, "the final sweep must not invoke the legacy MCore torchrun path")
     _require("recipes/evo2_megatron/src/bionemo/evo2/run/infer.py" not in source, "legacy inference path remains")
 
