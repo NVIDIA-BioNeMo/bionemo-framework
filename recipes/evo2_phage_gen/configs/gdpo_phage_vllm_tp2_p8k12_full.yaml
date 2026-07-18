@@ -1,0 +1,74 @@
+# Full-length mixed-rollout Evo2 GDPO profile for one TP2 vLLM/policy replica.
+# P and K define rollout semantics. MBS and logprob_batch_size are independent
+# MCore capacity knobs and must never be used to encode prompt grouping.
+defaults: "gdpo_phage_vllm_tp2_one_step_smoke.yaml"
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "data/checkpoints/phage_gdpo_vllm_tp2_p8k12_full"
+  save_period: 10
+  pretrained_checkpoint:
+    path: "data/checkpoints/evo2_7b_microviridae_mbridge"
+    format: "megatron_bridge"
+
+grpo:
+  max_num_epochs: 1
+  max_num_steps: 500
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 12
+  val_period: 10
+  val_batch_size: 96
+  max_val_samples: 96
+  val_at_start: false
+  val_at_end: true
+  seq_logprob_error_threshold: 1.5
+
+policy:
+  model_name: "data/checkpoints/evo2_7b_microviridae_vllm_corrected"
+  train_global_batch_size: 96
+  # Known-safe full-sequence starting point. Capacity-sweep divisors of the
+  # local GBS independently after correctness; P=8 and K=12 remain unchanged.
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  generation_batch_size: 96
+  max_total_sequence_length: 6016
+  generation:
+    max_new_tokens: 5988
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 4
+    request_seed: 42
+    ignore_eos: true
+    allowed_token_ids: [65, 67, 71, 78, 84]
+    num_logprobs: 0
+    generation_batch_size: 96
+    vllm_cfg:
+      tensor_parallel_size: 2
+      gpu_memory_utilization: 0.91
+      max_model_len: 6016
+    vllm_kwargs:
+      distributed_executor_backend: "mp"
+      async_scheduling: true
+      optimization_level: 2
+      performance_mode: "balanced"
+      max_num_seqs: 96
+      max_num_batched_tokens: 16384
+      compilation_config:
+        mode: 3
+        backend: "inductor"
+        cudagraph_mode: "FULL_AND_PIECEWISE"
+        cudagraph_num_of_warmups: 1
+        cudagraph_capture_sizes: [1, 2, 4, 8, 16, 32, 48, 64, 96]
+        compile_sizes: [96]
+
+data:
+  train:
+    data_path: "data/phage_prompts_paper_useful_rl_mixed_8.jsonl"
+  validation:
+    data_path: "data/phage_prompts_paper_useful_rl_validation_mixed_8x12.jsonl"
+
+logger:
+  log_dir: "data/checkpoints/phage_gdpo_vllm_tp2_p8k12_full/logs"
+  wandb_enabled: false
+  tensorboard_enabled: true
+  monitor_gpus: true

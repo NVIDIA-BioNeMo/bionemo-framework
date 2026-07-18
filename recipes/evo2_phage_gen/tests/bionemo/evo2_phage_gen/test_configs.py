@@ -481,3 +481,50 @@ def test_vllm_tp2_one_step_smoke_uses_capacity_bounded_mixed_batching():
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
         raise AssertionError(f"mixed vLLM smoke config drifted: {failed}")
+
+
+def test_vllm_tp2_full_profile_uses_p8_k12_gbs96_independent_of_mcore_batches():
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_vllm_tp2_p8k12_full.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    grpo = config["grpo"]
+    policy = config["policy"]
+    generation = policy["generation"]
+    vllm_config = generation["vllm_cfg"]
+    vllm_kwargs = generation["vllm_kwargs"]
+    compilation = vllm_kwargs["compilation_config"]
+
+    checks = {
+        "P": grpo["num_prompts_per_step"] == 8,
+        "K": grpo["num_generations_per_prompt"] == 12,
+        "P*K=GBS": grpo["num_prompts_per_step"] * grpo["num_generations_per_prompt"]
+        == policy["train_global_batch_size"]
+        == 96,
+        "MBS is a physical MCore chunk": policy["train_micro_batch_size"] == 1,
+        "logprob batch is independently capacity bounded": policy["logprob_batch_size"] == 1,
+        "one mixed local vLLM wave": policy["generation_batch_size"]
+        == generation["generation_batch_size"]
+        == vllm_kwargs["max_num_seqs"]
+        == 96,
+        "exact full output": generation["max_new_tokens"] == 5988
+        and policy["max_total_sequence_length"] == vllm_config["max_model_len"] == 6016,
+        "ACGTN constraint": generation["allowed_token_ids"] == [65, 67, 71, 78, 84],
+        "chosen-token logprobs only": generation["num_logprobs"] == 0,
+        "TP2 MP async": vllm_config["tensor_parallel_size"] == 2
+        and vllm_kwargs["distributed_executor_backend"] == "mp"
+        and vllm_kwargs["async_scheduling"] is True,
+        "qualified compile route": vllm_kwargs["optimization_level"] == 2
+        and vllm_kwargs["performance_mode"] == "balanced"
+        and compilation["mode"] == 3
+        and compilation["cudagraph_mode"] == "FULL_AND_PIECEWISE",
+        "exact B96 compile and capture": compilation["compile_sizes"] == [96]
+        and 96 in compilation["cudagraph_capture_sizes"],
+        "mixed train bank": config["data"]["train"]["data_path"].endswith("mixed_8.jsonl"),
+        "frozen mixed validation": config["data"]["validation"]["data_path"].endswith("mixed_8x12.jsonl")
+        and grpo["val_batch_size"] == grpo["max_val_samples"] == 96,
+        "correct checkpoint lineage": "evo2_7b_microviridae_mbridge"
+        in config["checkpointing"]["pretrained_checkpoint"]["path"]
+        and "evo2_7b_microviridae_vllm_corrected" in policy["model_name"],
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise AssertionError(f"full mixed vLLM config drifted: {failed}")
