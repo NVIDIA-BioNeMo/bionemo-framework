@@ -319,7 +319,7 @@ index 70ca1074..894642a4 100644
      GenerationConfig,
      GenerationDatumSpec,
      GenerationInterface,
-@@ -59,6 +60,33 @@ from nemo_rl.utils.timer import Timer
+@@ -59,6 +60,51 @@ from nemo_rl.utils.timer import Timer
  TokenizerType = PreTrainedTokenizerBase
 
 
@@ -350,6 +350,24 @@ index 70ca1074..894642a4 100644
 +        assistant_message[key] = int(values[row_index].item())
 +
 +
++def _generation_prompt_group_ids(batch: BatchedDataDict) -> list[str] | None:
++    """Return complete caller-owned prompt identities when the batch provides them."""
++    extra_env_info = batch.get("extra_env_info")
++    if extra_env_info is None:
++        return None
++    if type(extra_env_info) is not list or len(extra_env_info) != batch.size:
++        raise TypeError("extra_env_info must contain one row per generation request")
++    present = [isinstance(info, dict) and "prompt_id" in info for info in extra_env_info]
++    if not any(present):
++        return None
++    if not all(present):
++        raise RuntimeError("generation prompt group identity is incomplete")
++    prompt_group_ids = [info["prompt_id"] for info in extra_env_info]
++    if any(type(prompt_group_id) is not str or not prompt_group_id for prompt_group_id in prompt_group_ids):
++        raise TypeError("generation prompt group IDs must be nonempty built-in strings")
++    return prompt_group_ids
++
++
  def _add_r3_fallback_metrics(
      gen_metrics: dict[str, float | int],
      generation_outputs: BatchedDataDict,
@@ -378,6 +396,16 @@ index 70ca1074..894642a4 100644
              if prefix_length != int(input_length.item()):
                  raise RuntimeError(
                      "message_log token length does not match generation input_length "
+@@ -673,6 +721,9 @@ def run_multi_turn_rollout(
+                 "stop_strings": active_stop_strings,
+             }
+         )
++        prompt_group_ids = _generation_prompt_group_ids(active_batch)
++        if prompt_group_ids is not None:
++            generation_input_data["generation_prompt_group_ids"] = prompt_group_ids
+         # add the multimodal data to the generation input data
+         multimodal_data = active_flat_messages.get_multimodal_dict(as_tensors=False)
+         generation_input_data.update(multimodal_data)
 diff --git a/nemo_rl/models/generation/interfaces.py b/nemo_rl/models/generation/interfaces.py
 index 025707c7..96d19b8d 100644
 --- a/nemo_rl/models/generation/interfaces.py
@@ -428,10 +456,11 @@ index 025707c7..96d19b8d 100644
  def verify_right_padding(
      data: Union[
          BatchedDataDict["GenerationDatumSpec"], BatchedDataDict["GenerationOutputSpec"]
-@@ -167,6 +197,11 @@ class GenerationDatumSpec(TypedDict):
+@@ -167,6 +197,12 @@ class GenerationDatumSpec(TypedDict):
      input_ids: torch.Tensor
      input_lengths: torch.Tensor
      stop_strings: NotRequired[list[str]]
++    generation_prompt_group_ids: NotRequired[list[str]]
 +    generation_request_seeds: NotRequired[torch.Tensor]
 +    generation_global_request_indices: NotRequired[torch.Tensor]
 +    generation_rounds: NotRequired[torch.Tensor]
@@ -584,7 +613,7 @@ index d68bf512..8a2e31b5 100644
  from nemo_rl.models.generation.vllm.utils import (
      aggregate_spec_decode_counters,
      compute_spec_decode_metrics,
-@@ -46,6 +53,95 @@ from nemo_rl.models.generation.vllm.utils import (
+@@ -46,6 +53,113 @@ from nemo_rl.models.generation.vllm.utils import (
 
  logger = logging.getLogger(__name__)
 
@@ -621,7 +650,7 @@ index d68bf512..8a2e31b5 100644
 +    dp_size: int,
 +    prompt_group_size: int,
 +) -> list[SlicedDataDict]:
-+    """Split every contiguous prompt rollout group evenly across DP ranks."""
++    """Split every caller-owned prompt rollout group evenly across DP ranks."""
 +    if type(dp_size) is not int or dp_size <= 0:
 +        raise TypeError("generation DP size must be a positive built-in integer")
 +    if type(prompt_group_size) is not int or prompt_group_size <= 0:
@@ -631,14 +660,32 @@ index d68bf512..8a2e31b5 100644
 +        raise ValueError("generation batch must contain complete prompt groups")
 +    if prompt_group_size % dp_size != 0:
 +        raise ValueError("each prompt rollout group must divide evenly across DP ranks")
-+    shards = data.shard_by_batch_size(
-+        dp_size,
-+        batch_size=prompt_group_size,
-+        allow_uneven_shards=False,
-+    )
-+    if not isinstance(shards, list):
-+        raise RuntimeError("prompt-group sharding returned an unexpected result")
-+    return shards
++    prompt_group_ids = data.get("generation_prompt_group_ids")
++    if (
++        type(prompt_group_ids) is not list
++        or len(prompt_group_ids) != request_count
++        or any(type(prompt_group_id) is not str or not prompt_group_id for prompt_group_id in prompt_group_ids)
++    ):
++        raise TypeError(
++            "generation_prompt_group_ids must contain one nonempty built-in string per request"
++        )
++
++    indices_by_group: dict[str, list[int]] = {}
++    for row_index, prompt_group_id in enumerate(prompt_group_ids):
++        indices_by_group.setdefault(prompt_group_id, []).append(row_index)
++    if any(len(indices) != prompt_group_size for indices in indices_by_group.values()):
++        raise ValueError("generation batch must contain complete semantic prompt groups")
++
++    rows_per_rank = prompt_group_size // dp_size
++    indices_by_rank: list[list[int]] = [[] for _ in range(dp_size)]
++    for group_indices in indices_by_group.values():
++        for dp_rank in range(dp_size):
++            start = dp_rank * rows_per_rank
++            indices_by_rank[dp_rank].extend(group_indices[start : start + rows_per_rank])
++    return [
++        SlicedDataDict(data.select_indices(indices).data)
++        for indices in indices_by_rank
++    ]
 +
 +
 +def _restore_generation_caller_order(

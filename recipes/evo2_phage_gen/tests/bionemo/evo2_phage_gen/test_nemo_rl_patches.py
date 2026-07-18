@@ -71,12 +71,15 @@ def test_patched_vllm_dp2_shards_every_prompt_group_and_restores_caller_order() 
         _shard_generation_batch_by_prompt_group,
     )
 
-    prompt_ids = torch.arange(8, dtype=torch.int64).repeat_interleave(12)
+    prompt_ids = torch.arange(8, dtype=torch.int64).repeat(12)
     caller_indices = torch.arange(1_000, 1_096, dtype=torch.int64)
     batch = BatchedDataDict(
         {
             "input_ids": prompt_ids.unsqueeze(1),
             "input_lengths": torch.ones(96, dtype=torch.int64),
+            "generation_prompt_group_ids": [
+                f"prompt-{prompt_id}" for prompt_id in prompt_ids.tolist()
+            ],
             "generation_global_request_indices": caller_indices,
         }
     )
@@ -121,6 +124,43 @@ def test_patched_vllm_dp2_shards_every_prompt_group_and_restores_caller_order() 
         )
 
 
+def test_patched_vllm_dp2_rejects_unsealed_prompt_groups() -> None:
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+    from nemo_rl.models.generation.vllm.vllm_generation import (
+        _shard_generation_batch_by_prompt_group,
+    )
+
+    base = {
+        "input_ids": torch.arange(24, dtype=torch.int64).unsqueeze(1),
+        "input_lengths": torch.ones(24, dtype=torch.int64),
+        "generation_global_request_indices": torch.arange(24, dtype=torch.int64),
+    }
+    with pytest.raises(TypeError, match="generation_prompt_group_ids"):
+        _shard_generation_batch_by_prompt_group(
+            BatchedDataDict(base),
+            dp_size=2,
+            prompt_group_size=12,
+        )
+
+    invalid_type = dict(base)
+    invalid_type["generation_prompt_group_ids"] = ["prompt-a"] * 23 + [1]
+    with pytest.raises(TypeError, match="generation_prompt_group_ids"):
+        _shard_generation_batch_by_prompt_group(
+            BatchedDataDict(invalid_type),
+            dp_size=2,
+            prompt_group_size=12,
+        )
+
+    incomplete = dict(base)
+    incomplete["generation_prompt_group_ids"] = ["prompt-a"] * 13 + ["prompt-b"] * 11
+    with pytest.raises(ValueError, match="complete semantic prompt groups"):
+        _shard_generation_batch_by_prompt_group(
+            BatchedDataDict(incomplete),
+            dp_size=2,
+            prompt_group_size=12,
+        )
+
+
 def test_patched_rollout_retains_generation_coordinates_on_assistant_message() -> None:
     from nemo_rl.experience.rollouts import _attach_generation_request_metadata
     from nemo_rl.models.generation.interfaces import GENERATION_REQUEST_METADATA_KEYS
@@ -159,6 +199,81 @@ def test_patched_rollout_retains_generation_coordinates_on_assistant_message() -
             row_index=0,
             request_count=2,
         )
+
+
+def test_patched_rollout_carries_semantic_prompt_groups_to_generation(monkeypatch) -> None:
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+    from nemo_rl.experience import rollouts
+
+    expected_prompt_groups = ["prompt-4", "prompt-5", "prompt-4", "prompt-5"]
+    captured_prompt_groups: list[list[str]] = []
+
+    def fake_generate_responses(
+        policy_generation,
+        generation_input_data,
+        batch,
+        tokenizer,
+        input_lengths,
+        include_logprobs=True,
+        greedy=False,
+    ):
+        captured_prompt_groups.append(generation_input_data["generation_prompt_group_ids"])
+        generated_ids = [torch.tensor([65], dtype=torch.int64) for _ in input_lengths]
+        return batch, generated_ids, {
+            "mean_generation_length": 1.0,
+            "total_generated_tokens": len(generated_ids),
+        }
+
+    def fake_calculate_rewards(batch, task_to_env):
+        request_count = batch.size
+        return types.SimpleNamespace(
+            observations=[{"role": "environment", "content": ""}] * request_count,
+            metadata=[None] * request_count,
+            next_stop_strings=[None] * request_count,
+            rewards=torch.ones(request_count, dtype=torch.float32),
+            terminateds=torch.ones(request_count, dtype=torch.bool),
+            answers=[None] * request_count,
+        )
+
+    class Tokenizer:
+        pad_token_id = 0
+
+        def __call__(self, text, return_tensors, add_special_tokens):
+            return types.SimpleNamespace(input_ids=torch.empty((1, 0), dtype=torch.int64))
+
+    monkeypatch.setattr(rollouts, "generate_responses", fake_generate_responses)
+    monkeypatch.setattr(rollouts, "calculate_rewards", fake_calculate_rewards)
+    input_batch = BatchedDataDict(
+        {
+            "message_log": [
+                [
+                    {
+                        "role": "user",
+                        "content": prompt_group,
+                        "token_ids": torch.tensor([65], dtype=torch.int64),
+                    }
+                ]
+                for prompt_group in expected_prompt_groups
+            ],
+            "extra_env_info": [
+                {"prompt_id": prompt_group} for prompt_group in expected_prompt_groups
+            ],
+        }
+    )
+
+    rollouts.run_multi_turn_rollout(
+        policy_generation=object(),
+        input_batch=input_batch,
+        tokenizer=Tokenizer(),
+        task_to_env={},
+        max_seq_len=32,
+        max_rollout_turns=1,
+    )
+
+    _require(
+        captured_prompt_groups == [expected_prompt_groups],
+        "semantic prompt groups did not reach the production generation input",
+    )
 
 
 def test_patched_grpo_logs_prompt_rollout_identity_and_exact_generation_evidence() -> (
