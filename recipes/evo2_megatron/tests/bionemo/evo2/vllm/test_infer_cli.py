@@ -20,6 +20,7 @@ from bionemo.evo2.vllm.infer import (
     load_export_identity,
     load_prompt_requests,
     records_from_public_outputs,
+    resolve_tokenizer_json,
     resolve_tensor_parallel_size,
     require_vllm_runtime,
 )
@@ -281,6 +282,24 @@ def test_load_prompt_requests_uses_one_strict_jsonl_snapshot(tmp_path) -> None:
     path.write_text('{"id":"a","prompt":"AC","prompt":"GT"}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate key"):
         load_prompt_requests(prompt=None, prompt_file=path)
+
+
+def test_resolve_tokenizer_json_uses_explicit_or_export_nested_tokenizer(tmp_path) -> None:
+    export_root = tmp_path / "export"
+    nested = export_root / "tokenizer" / "tokenizer.json"
+    nested.parent.mkdir(parents=True)
+    nested.write_text('{"version":"1.0"}\n', encoding="utf-8")
+
+    _require(
+        resolve_tokenizer_json(export_root=export_root, tokenizer_json=None) == nested,
+        "inference did not resolve the tokenizer packaged by the exporter",
+    )
+    _require(
+        resolve_tokenizer_json(export_root=export_root, tokenizer_json=nested.parent) == nested,
+        "explicit tokenizer directory did not resolve tokenizer.json",
+    )
+    with pytest.raises(FileNotFoundError, match="tokenizer.json"):
+        resolve_tokenizer_json(export_root=tmp_path / "missing-export", tokenizer_json=None)
 
 
 def test_sampling_params_preserve_exact_length_chosen_logprobs_and_unique_seeds() -> None:

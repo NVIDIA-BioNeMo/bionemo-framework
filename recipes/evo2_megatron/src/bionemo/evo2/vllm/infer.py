@@ -308,6 +308,30 @@ def load_prompt_requests(*, prompt: str | None, prompt_file: str | Path | None) 
     return tuple(requests)
 
 
+def resolve_tokenizer_json(
+    *,
+    export_root: str | Path,
+    tokenizer_json: str | Path | None,
+) -> Path:
+    """Resolve an explicit tokenizer or the tokenizer packaged by the exporter."""
+    root = Path(export_root).expanduser().resolve()
+    if tokenizer_json is not None:
+        candidate = Path(tokenizer_json).expanduser()
+        if candidate.is_dir():
+            candidate = candidate / "tokenizer.json"
+        candidate = candidate.resolve()
+        if not candidate.is_file():
+            raise FileNotFoundError(f"tokenizer.json does not exist: {candidate}")
+        return candidate
+    candidates = (root / "tokenizer.json", root / "tokenizer" / "tokenizer.json")
+    existing = tuple(candidate for candidate in candidates if candidate.is_file())
+    if not existing:
+        raise FileNotFoundError(f"export does not contain tokenizer.json under {root}")
+    if len(existing) != 1:
+        raise RuntimeError(f"export contains ambiguous tokenizer.json files: {existing}")
+    return existing[0]
+
+
 def build_sampling_params_kwargs(
     *,
     max_new_tokens: int,
@@ -450,7 +474,10 @@ def run_inference(
             f"tensor_parallel_size={tensor_parallel_size} must divide "
             f"{identity.tensor_parallel_divisor} attention heads"
         )
-    tokenizer_path = Path(tokenizer_json) if tokenizer_json is not None else identity.root / "tokenizer.json"
+    tokenizer_path = resolve_tokenizer_json(
+        export_root=identity.root,
+        tokenizer_json=tokenizer_json,
+    )
     tokenizer = SnapshotBoundTokenizer.from_path(tokenizer_path)
     prompt_ids = tuple(tokenizer.encode(request.prompt) for request in requests)
     required_model_len = max(len(token_ids) for token_ids in prompt_ids) + max_new_tokens
@@ -619,6 +646,7 @@ __all__ = [
     "load_prompt_requests",
     "main",
     "records_from_public_outputs",
+    "resolve_tokenizer_json",
     "require_vllm_runtime",
     "resolve_tensor_parallel_size",
     "run_inference",

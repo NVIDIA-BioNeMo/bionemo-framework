@@ -109,6 +109,35 @@ def _ensure_prompt_data_files(config) -> None:
         print(f"  {path}")
 
 
+def _validate_vllm_load_parity(config) -> dict[str, object] | None:
+    """Bind the RL policy checkpoint to the standalone vLLM export before Ray starts."""
+    generation = config.policy.get("generation") or {}
+    if generation.get("backend") != "vllm":
+        return None
+    checkpoint = _config_path(config.checkpointing["pretrained_checkpoint"].get("path"))
+    export = _config_path(config.policy.get("model_name"))
+    tokenizer_config = config.policy.get("tokenizer") or {}
+    tokenizer = _config_path(tokenizer_config.get("name"))
+    if checkpoint is None or export is None or tokenizer is None:
+        raise RuntimeError("vLLM RL requires explicit checkpoint, export, and tokenizer paths")
+
+    from bionemo.evo2.vllm import load_parity
+
+    evidence = load_parity.validate_rl_inference_load_parity(
+        checkpoint=checkpoint,
+        export=export,
+        rl_tokenizer=tokenizer,
+    )
+    print(
+        "Validated RL/standalone vLLM load parity: "
+        f"manifest={evidence['export_manifest_sha256']}, "
+        f"run_config={evidence['source_run_config_sha256']}, "
+        f"tensors={evidence['tensor_count']}, "
+        f"tokenizer={evidence['tokenizer_semantic_sha256']}"
+    )
+    return evidence
+
+
 def _select_grpo_trainer(master_config, algorithm: str):
     dp_cfg = master_config.data_plane or {}
     if dp_cfg.get("enabled", False):
@@ -201,6 +230,7 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
     print("Applied CLI overrides")
     print("Final config:")
     pprint.pprint(config)
+    _validate_vllm_load_parity(config)
 
     config.logger["log_dir"] = get_next_experiment_dir(config.logger["log_dir"])
     print(f"Using log directory: {config.logger['log_dir']}")
@@ -209,7 +239,8 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
 
     init_ray()
     tokenizer = get_tokenizer(config.policy["tokenizer"])
-    assert config.policy["generation"] is not None, "A generation config is required for GRPO/GDPO"
+    if config.policy["generation"] is None:
+        raise RuntimeError("A generation config is required for GRPO/GDPO")
     has_refit_draft_weights = bool(config.policy["draft"]["enabled"])
     megatron_cfg = config.policy.get("megatron_cfg") or {}
     trains_mtp = bool(megatron_cfg.get("mtp_num_layers"))
