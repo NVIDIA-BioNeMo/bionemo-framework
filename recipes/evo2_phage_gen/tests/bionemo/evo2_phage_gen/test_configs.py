@@ -462,6 +462,12 @@ def test_vllm_tp2_one_step_smoke_uses_capacity_bounded_mixed_batching():
         and config["data"]["train"]["data_path"].endswith("mixed_8.jsonl"),
         "mixed validation": grpo["val_batch_size"] == 16
         and config["data"]["validation"]["data_path"].endswith("mixed_8x12.jsonl"),
+        "recipe-relative Microviridae checkpoint": config["checkpointing"]["pretrained_checkpoint"]["path"]
+        == "data/checkpoints/evo2_7b_microviridae_mbridge",
+        "matching recipe-relative vLLM export": policy["model_name"]
+        == "data/checkpoints/evo2_7b_microviridae_vllm_corrected",
+        "recipe-relative tokenizer": policy["tokenizer"]["name"]
+        == "../evo2_megatron/tokenizers/nucleotide_fast_tokenizer_512",
         "no inherited MCore generation": generation["mcore_generation_config"] is None,
         "explicit Evo2 refit bridge": generation["refit_bridge_cls"]
         == "bionemo.evo2.vllm.refit_bridge.Evo2RefitBridge",

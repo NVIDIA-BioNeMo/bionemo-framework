@@ -6,7 +6,7 @@ checkpointing:
   enabled: false
   checkpoint_dir: "/data/jstjohn/evo2-vllm-lab/artifacts/gdpo-tp2-one-step/checkpoints"
   pretrained_checkpoint:
-    path: "/data/jstjohn/bionemo-recipes/recipes/evo2_phage_gen/data/checkpoints/evo2_7b_microviridae_mbridge"
+    path: "data/checkpoints/evo2_7b_microviridae_mbridge"
     format: "megatron_bridge"
 
 grpo:
@@ -21,9 +21,9 @@ grpo:
   seq_logprob_error_threshold: 1.5
 
 policy:
-  model_name: "/data/jstjohn/evo2-vllm-lab/artifacts/evo2_7b_1m_vllm_rope128"
+  model_name: "data/checkpoints/evo2_7b_microviridae_vllm_corrected"
   tokenizer:
-    name: "/data/jstjohn/bionemo-recipes/recipes/evo2_megatron/tokenizers/nucleotide_fast_tokenizer_512"
+    name: "../evo2_megatron/tokenizers/nucleotide_fast_tokenizer_512"
     chat_template_kwargs: null
   train_global_batch_size: 16
   # MBS is only the MCore fwd/bwd chunk. Start at the full local batch; if this
