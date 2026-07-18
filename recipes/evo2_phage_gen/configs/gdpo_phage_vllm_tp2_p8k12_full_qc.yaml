@@ -1,0 +1,64 @@
+# Full production-QC comparison for the qualified TP2/DP1 mixed vLLM route.
+# P=8, K=12, GBS=96, exact-5988 generation, and the resolved model route are
+# inherited unchanged while every baseline reward/QC stage is enabled.
+defaults: "gdpo_phage_vllm_tp2_p8k12_full.yaml"
+
+checkpointing:
+  checkpoint_dir: "data/checkpoints/phage_gdpo_vllm_tp2_p8k12_full_qc"
+
+env:
+  phage_qc:
+    dustmask_filter: true
+    gdpo_objectives:
+      - name: "valid_nt_chars"
+        columns: ["reward_valid_nt_chars"]
+      - name: "genome_length"
+        columns: ["reward_genome_length"]
+      - name: "gc_content"
+        columns: ["reward_gc_content"]
+      - name: "nt_homopolymer"
+        columns: ["reward_nt_homopolymer"]
+      - name: "dustmask_end"
+        columns: ["reward_dustmask_end"]
+      - name: "nucleotide_pass"
+        columns: ["reward_nucleotide_pass"]
+      - name: "protein_hit_count"
+        columns: ["reward_external_protein_hit_count"]
+      - name: "tropism"
+        columns: ["reward_external_tropism"]
+      - name: "required_genes"
+        columns: ["reward_external_required_genes"]
+      - name: "synteny"
+        columns: ["reward_external_synteny"]
+      - name: "average_protein_identity"
+        columns: ["reward_external_average_protein_identity"]
+      - name: "mmseqs_cluster_diversity"
+        columns: ["reward_mmseqs_cluster_diversity"]
+    external_qc:
+      enabled: true
+      work_dir: "data/checkpoints/phage_gdpo_vllm_tp2_p8k12_full_qc_external_qc"
+      fail_on_error: true
+      timeout_seconds: 1800
+      enable_protein_hit_count: true
+      enable_tropism: true
+      enable_synteny: true
+      synteny_mode: "full"
+      enable_average_protein_identity: true
+      enable_required_genes: true
+      required_genes_evidence_target: 9.0
+      lovis4u_parallel_jobs: 12
+      lovis4u_collect_pdfs: false
+    mmseqs_cluster_diversity:
+      enabled: true
+      work_dir: "data/checkpoints/phage_gdpo_vllm_tp2_p8k12_full_qc_mmseqs_cluster_diversity"
+      keep_artifacts: false
+      min_seq_id: 0.99
+      coverage: 0.0
+      cov_mode: 0
+      seq_id_mode: 0
+      cluster_mode: 0
+      threads: 16
+      verbosity: 0
+
+logger:
+  log_dir: "data/checkpoints/phage_gdpo_vllm_tp2_p8k12_full_qc/logs"
