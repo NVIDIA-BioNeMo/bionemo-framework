@@ -51,12 +51,47 @@ class InferenceRequest:
 
     request_id: str
     prompt: str
+    prompt_id: str | None = None
+    length_stratum: int | None = None
+    rollout_ordinal: int | None = None
+    order_index: int | None = None
+    validation_seed: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.request_id) is not str or not self.request_id:
             raise TypeError("request_id must be a nonempty built-in string")
         if type(self.prompt) is not str:
             raise TypeError("prompt must be a built-in string")
+        coordinates = (
+            self.prompt_id,
+            self.length_stratum,
+            self.rollout_ordinal,
+            self.order_index,
+            self.validation_seed,
+        )
+        if all(value is None for value in coordinates):
+            return
+        if type(self.prompt_id) is not str or not self.prompt_id:
+            raise TypeError("prompt_id must be a nonempty built-in string")
+        for label, value in (
+            ("length_stratum", self.length_stratum),
+            ("rollout_ordinal", self.rollout_ordinal),
+            ("order_index", self.order_index),
+            ("validation_seed", self.validation_seed),
+        ):
+            if type(value) is not int or value < 0:
+                raise TypeError(f"{label} must be a nonnegative built-in integer")
+
+    def rollout_coordinates(self) -> dict[str, str | int]:
+        """Return recipe prompt-group coordinates without adding null legacy fields."""
+        if self.prompt_id is None:
+            return {}
+        return {
+            "prompt_id": self.prompt_id,
+            "length_stratum": self.length_stratum,
+            "rollout_ordinal": self.rollout_ordinal,
+            "order_index": self.order_index,
+        }
 
 
 @dataclass(frozen=True)
@@ -299,9 +334,40 @@ def load_prompt_requests(*, prompt: str | None, prompt_file: str | Path | None) 
     for index, value in enumerate(snapshot.values):
         if type(value) is not dict:
             raise TypeError(f"prompt JSONL row {index} must be an object")
-        request_id = value.get("id", str(index))
-        request_prompt = value.get("prompt")
-        requests.append(InferenceRequest(request_id=request_id, prompt=request_prompt))
+        if "prompt" in value:
+            request_id = value.get("id", str(index))
+            requests.append(InferenceRequest(request_id=request_id, prompt=value["prompt"]))
+            continue
+        messages = value.get("messages")
+        if (
+            type(messages) is not list
+            or len(messages) != 2
+            or type(messages[0]) is not dict
+            or type(messages[1]) is not dict
+            or set(messages[0]) != {"role", "content"}
+            or set(messages[1]) != {"role", "content"}
+            or messages[0].get("role") != "user"
+            or type(messages[0].get("content")) is not str
+            or messages[1] != {"role": "assistant", "content": ""}
+        ):
+            raise TypeError(
+                f"prompt JSONL row {index} must contain a flat prompt or one user and empty assistant message"
+            )
+        prompt_id = value.get("prompt_id")
+        rollout_ordinal = value.get("rollout_ordinal")
+        if type(prompt_id) is not str or not prompt_id or type(rollout_ordinal) is not int:
+            raise TypeError(f"prompt JSONL row {index} has invalid prompt_id or rollout_ordinal")
+        requests.append(
+            InferenceRequest(
+                request_id=f"{prompt_id}-rollout-{rollout_ordinal:04d}",
+                prompt=messages[0]["content"],
+                prompt_id=prompt_id,
+                length_stratum=value.get("length_stratum"),
+                rollout_ordinal=rollout_ordinal,
+                order_index=value.get("order_index"),
+                validation_seed=value.get("validation_seed"),
+            )
+        )
     request_ids = [request.request_id for request in requests]
     if len(set(request_ids)) != len(request_ids):
         raise ValueError("prompt JSONL request IDs must be unique")
@@ -433,6 +499,7 @@ def records_from_public_outputs(
                 "prompt_token_ids": list(expected_prompt_tuple),
                 "token_ids": list(output_token_ids),
                 "logprobs": {"completion_logprobs": chosen_logprobs},
+                **request.rollout_coordinates(),
             }
         )
     return tuple(records)
@@ -493,6 +560,13 @@ def run_inference(
     rl_tokenizer_json: str | Path | None = None,
 ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
     """Run ordered public vLLM generation and return strict rows plus provenance."""
+    _require_builtin_int(base_seed, label="base_seed", minimum=0)
+    request_seeds = tuple(
+        request.validation_seed if request.validation_seed is not None else base_seed + index
+        for index, request in enumerate(requests)
+    )
+    if len(set(request_seeds)) != len(request_seeds):
+        raise ValueError("inference request seeds must be unique")
     rl_load_parity = validate_optional_rl_load_parity(
         checkpoint=rl_checkpoint,
         export=model,
@@ -546,7 +620,7 @@ def run_inference(
         wave_end = min(wave_start + resolved_batch_size, len(requests))
         wave_requests = tuple(requests[wave_start:wave_end])
         wave_prompt_ids = prompt_ids[wave_start:wave_end]
-        wave_seeds = tuple(base_seed + index for index in range(wave_start, wave_end))
+        wave_seeds = request_seeds[wave_start:wave_end]
         sampling_params = [
             SamplingParams(
                 **build_sampling_params_kwargs(
@@ -584,7 +658,7 @@ def run_inference(
         "tokenizer": tokenizer_provenance,
         "request_count": len(requests),
         "batch_size": resolved_batch_size,
-        "request_seeds": [base_seed + index for index in range(len(requests))],
+        "request_seeds": list(request_seeds),
         "engine_kwargs": engine_kwargs,
         "engine_init_wall_seconds": initialized - started,
         "generation_wall_seconds": completed - initialized,

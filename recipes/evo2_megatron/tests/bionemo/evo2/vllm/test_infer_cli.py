@@ -298,6 +298,7 @@ def test_optional_rl_load_parity_requires_both_checkpoint_and_tokenizer(monkeypa
 
 def test_run_inference_validates_rl_load_parity_before_engine_construction(monkeypatch, tmp_path) -> None:
     order: list[str] = []
+    sampling_kwargs: list[dict] = []
     parity_evidence = {"schema_version": 1, "checkpoint_iteration": "/checkpoint/iter_0000001"}
 
     def _validate_parity(**kwargs):
@@ -314,6 +315,7 @@ def test_run_inference_validates_rl_load_parity_before_engine_construction(monke
     class FakeSamplingParams:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            sampling_kwargs.append(kwargs)
 
     class FakeLLM:
         def __init__(self, **_kwargs):
@@ -340,7 +342,17 @@ def test_run_inference_validates_rl_load_parity_before_engine_construction(monke
     records, manifest = run_inference(
         model=root,
         tokenizer_json=TOKENIZER_JSON,
-        requests=(InferenceRequest("request", "AC"),),
+        requests=(
+            InferenceRequest(
+                "request",
+                "AC",
+                prompt_id="prompt-4",
+                length_stratum=4,
+                rollout_ordinal=7,
+                order_index=11,
+                validation_seed=1042,
+            ),
+        ),
         max_new_tokens=4,
         temperature=1.0,
         top_p=1.0,
@@ -360,6 +372,13 @@ def test_run_inference_validates_rl_load_parity_before_engine_construction(monke
 
     _require(order == ["parity", "engine"], "engine construction preceded RL/export load parity")
     _require(records[0]["completion"] == "ACGT", "public inference output changed")
+    _require(sampling_kwargs[0]["seed"] == 1042, "caller-owned validation seed was replaced")
+    _require(manifest["request_seeds"] == [1042], "run manifest omitted the caller-owned validation seed")
+    _require(
+        {key: records[0][key] for key in ("prompt_id", "length_stratum", "rollout_ordinal", "order_index")}
+        == {"prompt_id": "prompt-4", "length_stratum": 4, "rollout_ordinal": 7, "order_index": 11},
+        "public output omitted mixed rollout coordinates",
+    )
     _require(manifest["rl_load_parity"] == parity_evidence, "run manifest omitted load parity evidence")
 
 
@@ -480,6 +499,46 @@ def test_load_prompt_requests_uses_one_strict_jsonl_snapshot(tmp_path) -> None:
         load_prompt_requests(prompt=None, prompt_file=path)
 
 
+def test_load_prompt_requests_preserves_mixed_rl_manifest_coordinates(tmp_path) -> None:
+    path = tmp_path / "mixed-prompts.jsonl"
+    path.write_text(
+        '{"messages":[{"role":"user","content":"+~GAGT"},{"role":"assistant","content":""}],'
+        '"prompt_id":"phix174_length_04","length_stratum":4,"rollout_ordinal":0,'
+        '"order_index":0,"validation_seed":42}\n'
+        '{"messages":[{"role":"user","content":"+~GAGTT"},{"role":"assistant","content":""}],'
+        '"prompt_id":"phix174_length_05","length_stratum":5,"rollout_ordinal":0,'
+        '"order_index":1,"validation_seed":43}\n',
+        encoding="utf-8",
+    )
+
+    requests = load_prompt_requests(prompt=None, prompt_file=path)
+
+    _require(
+        requests
+        == (
+            InferenceRequest(
+                request_id="phix174_length_04-rollout-0000",
+                prompt="+~GAGT",
+                prompt_id="phix174_length_04",
+                length_stratum=4,
+                rollout_ordinal=0,
+                order_index=0,
+                validation_seed=42,
+            ),
+            InferenceRequest(
+                request_id="phix174_length_05-rollout-0000",
+                prompt="+~GAGTT",
+                prompt_id="phix174_length_05",
+                length_stratum=5,
+                rollout_ordinal=0,
+                order_index=1,
+                validation_seed=43,
+            ),
+        ),
+        "mixed RL prompt coordinates changed",
+    )
+
+
 def test_resolve_tokenizer_json_uses_explicit_or_export_nested_tokenizer(tmp_path) -> None:
     export_root = tmp_path / "export"
     nested = export_root / "tokenizer" / "tokenizer.json"
@@ -567,6 +626,7 @@ def test_public_outputs_preserve_legacy_jsonl_and_strict_generation_evidence() -
     _require(records[0]["engine_request_id"] != records[1]["engine_request_id"], "engine IDs are not unique")
     _require(records[0]["token_ids"] == [65, 67, 71, 84], "raw output IDs changed")
     _require(records[0]["logprobs"]["completion_logprobs"] == [-0.1, -0.2, -0.3, -0.4], "chosen logprobs changed")
+    _require("prompt_id" not in records[0], "legacy flat output gained null rollout coordinates")
 
 
 @pytest.mark.parametrize(

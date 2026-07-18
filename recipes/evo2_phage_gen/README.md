@@ -136,7 +136,12 @@ RL_TOKENIZER_JSON="$PWD/../evo2_megatron/tokenizers/nucleotide_fast_tokenizer_51
 Use `--prompt-file` for a caller-owned JSONL prompt bank. `auto` uses all
 visible assigned GPUs and selects the multiprocess executor when TP is greater
 than one. The CLI derives the required context length unless
-`--max-model-len` is supplied explicitly.
+`--max-model-len` is supplied explicitly. Prompt files may use either the
+flat `{\"id\": ..., \"prompt\": ...}` inference schema or the recipe's
+`messages`/`prompt_id`/`length_stratum`/`rollout_ordinal` schema. The latter
+preserves those grouping coordinates in every output row and uses each
+caller-owned `validation_seed`; the checked-in P8/K12 validation manifest can
+therefore be passed directly without a conversion script.
 
 The optimized Evo2 vLLM path is selected through the benchmark profile rather
 than independent private vLLM patches. This example reproduces the measured
