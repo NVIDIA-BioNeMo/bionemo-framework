@@ -12,7 +12,7 @@ import math
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -24,6 +24,7 @@ from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
 
 _CAPTURE_SIZES = (1, 2, 4, 8, 16, 24, 32, 40, 48, 64, 80, 96)
 _DNA_OUTPUT_TOKEN_IDS = (65, 67, 71, 78, 84)
+_GENERATION_SEED_STRIDE = 1_000_003
 _VLLM_020_SPLITTING_OPS = (
     "vllm::unified_attention_with_output",
     "vllm::unified_mla_attention_with_output",
@@ -62,25 +63,26 @@ class InferenceRequest:
             raise TypeError("request_id must be a nonempty built-in string")
         if type(self.prompt) is not str:
             raise TypeError("prompt must be a built-in string")
-        coordinates = (
+        rollout_coordinates = (
             self.prompt_id,
             self.length_stratum,
             self.rollout_ordinal,
             self.order_index,
-            self.validation_seed,
         )
-        if all(value is None for value in coordinates):
-            return
-        if type(self.prompt_id) is not str or not self.prompt_id:
-            raise TypeError("prompt_id must be a nonempty built-in string")
-        for label, value in (
-            ("length_stratum", self.length_stratum),
-            ("rollout_ordinal", self.rollout_ordinal),
-            ("order_index", self.order_index),
-            ("validation_seed", self.validation_seed),
+        if any(value is not None for value in rollout_coordinates):
+            if type(self.prompt_id) is not str or not self.prompt_id:
+                raise TypeError("prompt_id must be a nonempty built-in string")
+            for label, value in (
+                ("length_stratum", self.length_stratum),
+                ("rollout_ordinal", self.rollout_ordinal),
+                ("order_index", self.order_index),
+            ):
+                if type(value) is not int or value < 0:
+                    raise TypeError(f"{label} must be a nonnegative built-in integer")
+        if self.validation_seed is not None and (
+            type(self.validation_seed) is not int or self.validation_seed < 0
         ):
-            if type(value) is not int or value < 0:
-                raise TypeError(f"{label} must be a nonnegative built-in integer")
+            raise TypeError("validation_seed must be a nonnegative built-in integer")
 
     def rollout_coordinates(self) -> dict[str, str | int]:
         """Return recipe prompt-group coordinates without adding null legacy fields."""
@@ -374,6 +376,62 @@ def load_prompt_requests(*, prompt: str | None, prompt_file: str | Path | None) 
     return tuple(requests)
 
 
+def repeat_inference_requests(
+    requests: Sequence[InferenceRequest],
+    *,
+    repetitions: int,
+    base_seed: int,
+    generation_seed_stride: int = _GENERATION_SEED_STRIDE,
+) -> tuple[InferenceRequest, ...]:
+    """Expand requests into distinct generation calls for one persistent engine."""
+    request_tuple = tuple(requests)
+    if not request_tuple:
+        raise ValueError("inference requests must not be empty")
+    if any(type(request) is not InferenceRequest for request in request_tuple):
+        raise TypeError("requests must contain exact InferenceRequest values")
+    _require_builtin_int(repetitions, label="repetitions")
+    _require_builtin_int(base_seed, label="base_seed", minimum=0)
+    _require_builtin_int(generation_seed_stride, label="generation_seed_stride")
+
+    grouped = tuple(request.prompt_id is not None for request in request_tuple)
+    if any(grouped) and not all(grouped):
+        raise ValueError("inference requests cannot mix grouped and flat prompt schemas")
+    rollout_span = 0
+    if all(grouped):
+        rollout_span = max(request.rollout_ordinal for request in request_tuple) + 1
+
+    repeated: list[InferenceRequest] = []
+    for repetition in range(repetitions):
+        for index, request in enumerate(request_tuple):
+            if repetition == 0:
+                repeated.append(request)
+                continue
+            initial_seed = request.validation_seed
+            if initial_seed is None:
+                initial_seed = base_seed + index
+            changes: dict[str, Any] = {
+                "request_id": f"{request.request_id}-call-{repetition:04d}",
+                "validation_seed": initial_seed + repetition * generation_seed_stride,
+            }
+            if request.prompt_id is not None:
+                changes.update(
+                    rollout_ordinal=request.rollout_ordinal + repetition * rollout_span,
+                    order_index=request.order_index + repetition * len(request_tuple),
+                )
+            repeated.append(replace(request, **changes))
+
+    request_ids = tuple(request.request_id for request in repeated)
+    request_seeds = tuple(
+        request.validation_seed if request.validation_seed is not None else base_seed + index
+        for index, request in enumerate(repeated)
+    )
+    if len(set(request_ids)) != len(request_ids):
+        raise ValueError("repeated inference request IDs must be unique")
+    if len(set(request_seeds)) != len(request_seeds):
+        raise ValueError("repeated inference request seeds must be unique")
+    return tuple(repeated)
+
+
 def resolve_tokenizer_json(
     *,
     export_root: str | Path,
@@ -616,7 +674,11 @@ def run_inference(
     llm = LLM(**engine_kwargs)
     initialized = time.perf_counter()
     records: list[dict[str, Any]] = []
-    for wave_start in range(0, len(requests), resolved_batch_size):
+    physical_waves: list[dict[str, int | float]] = []
+    engine_generate_wall_seconds = 0.0
+    output_validation_wall_seconds = 0.0
+    completed = initialized
+    for wave_index, wave_start in enumerate(range(0, len(requests), resolved_batch_size)):
         wave_end = min(wave_start + resolved_batch_size, len(requests))
         wave_requests = tuple(requests[wave_start:wave_end])
         wave_prompt_ids = prompt_ids[wave_start:wave_end]
@@ -633,22 +695,39 @@ def run_inference(
             )
             for seed in wave_seeds
         ]
+        wave_started = time.perf_counter()
         outputs = llm.generate(
             [{"prompt_token_ids": list(token_ids)} for token_ids in wave_prompt_ids],
             sampling_params,
             use_tqdm=True,
         )
-        records.extend(
-            records_from_public_outputs(
-                requests=wave_requests,
-                prompt_token_ids=wave_prompt_ids,
-                request_seeds=wave_seeds,
-                outputs=outputs,
-                tokenizer=tokenizer,
-                max_new_tokens=max_new_tokens,
-            )
+        wave_generated = time.perf_counter()
+        wave_records = records_from_public_outputs(
+            requests=wave_requests,
+            prompt_token_ids=wave_prompt_ids,
+            request_seeds=wave_seeds,
+            outputs=outputs,
+            tokenizer=tokenizer,
+            max_new_tokens=max_new_tokens,
         )
-    completed = time.perf_counter()
+        records.extend(wave_records)
+        completed = time.perf_counter()
+        wave_generate_seconds = wave_generated - wave_started
+        wave_validation_seconds = completed - wave_generated
+        engine_generate_wall_seconds += wave_generate_seconds
+        output_validation_wall_seconds += wave_validation_seconds
+        physical_waves.append(
+            {
+                "wave_index": wave_index,
+                "request_start": wave_start,
+                "request_count": len(wave_requests),
+                "first_seed": wave_seeds[0],
+                "last_seed": wave_seeds[-1],
+                "engine_generate_wall_seconds": wave_generate_seconds,
+                "output_validation_wall_seconds": wave_validation_seconds,
+                "wave_wall_seconds": completed - wave_started,
+            }
+        )
     tokenizer_provenance = tokenizer.verify_source()
     manifest = {
         "schema_version": 1,
@@ -661,6 +740,9 @@ def run_inference(
         "request_seeds": list(request_seeds),
         "engine_kwargs": engine_kwargs,
         "engine_init_wall_seconds": initialized - started,
+        "engine_generate_wall_seconds": engine_generate_wall_seconds,
+        "output_validation_wall_seconds": output_validation_wall_seconds,
+        "physical_waves": physical_waves,
         "generation_wall_seconds": completed - initialized,
         "end_to_end_wall_seconds": completed - started,
     }
@@ -684,6 +766,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument("--generation-seed-stride", type=int, default=_GENERATION_SEED_STRIDE)
     parser.add_argument("--tensor-parallel-size", default="auto")
     parser.add_argument("--batch-size", "--prompt-batch-size", dest="batch_size", type=int, default=96)
     parser.add_argument("--max-model-len", "--max-seq-length", dest="max_model_len", type=int, default=None)
@@ -707,6 +791,12 @@ def main() -> None:
     args = _parser().parse_args()
     require_vllm_runtime()
     requests = load_prompt_requests(prompt=args.prompt, prompt_file=args.prompt_file)
+    requests = repeat_inference_requests(
+        requests,
+        repetitions=args.repetitions,
+        base_seed=args.seed,
+        generation_seed_stride=args.generation_seed_stride,
+    )
     tensor_parallel_size = resolve_tensor_parallel_size(args.tensor_parallel_size)
     records, manifest = run_inference(
         model=args.model,
@@ -728,6 +818,8 @@ def main() -> None:
         rl_checkpoint=args.rl_checkpoint,
         rl_tokenizer_json=args.rl_tokenizer_json,
     )
+    manifest["request_repetitions"] = args.repetitions
+    manifest["generation_seed_stride"] = args.generation_seed_stride
     output = "".join(json.dumps(record, sort_keys=True) + "\n" for record in records)
     if args.output_file is None:
         print(output, end="")
@@ -755,6 +847,7 @@ __all__ = [
     "load_prompt_requests",
     "main",
     "records_from_public_outputs",
+    "repeat_inference_requests",
     "resolve_tokenizer_json",
     "require_vllm_runtime",
     "resolve_tensor_parallel_size",

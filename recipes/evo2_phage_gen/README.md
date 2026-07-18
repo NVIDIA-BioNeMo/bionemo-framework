@@ -143,6 +143,22 @@ preserves those grouping coordinates in every output row and uses each
 caller-owned `validation_seed`; the checked-in P8/K12 validation manifest can
 therefore be passed directly without a conversion script.
 
+Use one persistent engine when comparing first-use and steady mixed inference.
+The following additions run the checked-in P8/K12 bank twice without replaying
+request identities or seeds:
+
+```bash
+  --prompt-file data/phage_prompts_paper_useful_rl_validation_mixed_8x12.jsonl \
+  --repetitions 2 \
+  --generation-seed-stride 1000003 \
+  --output-file results/evo2-vllm-p8k12-two-wave.jsonl
+```
+
+The generated manifest's `physical_waves` entries report public engine-generate
+and post-output validation time separately for each B96 wave. The second entry
+is the steady persistent-engine comparison. Every repeated row retains its
+prompt group while advancing rollout ordinal, order index, request ID, and seed.
+
 The optimized Evo2 vLLM path is selected through the benchmark profile rather
 than independent private vLLM patches. This example reproduces the measured
 two-H100 reference profile: O2/balanced runtime selection, Inductor compilation mode 3,

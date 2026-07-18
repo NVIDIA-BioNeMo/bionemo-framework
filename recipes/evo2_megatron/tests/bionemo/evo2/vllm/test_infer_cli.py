@@ -22,6 +22,7 @@ from bionemo.evo2.vllm.infer import (
     load_export_identity,
     load_prompt_requests,
     records_from_public_outputs,
+    repeat_inference_requests,
     resolve_tokenizer_json,
     resolve_tensor_parallel_size,
     require_vllm_runtime,
@@ -143,7 +144,9 @@ def test_evo2_readme_documents_qualified_vllm_inference_and_rl_load_parity() -> 
         "--optimization-level 2",
         "--performance-mode balanced",
         "--async-scheduling",
+        "--repetitions 2",
         "FULL_AND_PIECEWISE",
+        "physical_waves",
     )
     missing = [value for value in required if value not in section]
     _require(not missing, f"qualified vLLM inference README contract is incomplete: {missing}")
@@ -300,6 +303,8 @@ def test_run_inference_validates_rl_load_parity_before_engine_construction(monke
     order: list[str] = []
     sampling_kwargs: list[dict] = []
     parity_evidence = {"schema_version": 1, "checkpoint_iteration": "/checkpoint/iter_0000001"}
+    clock = iter((10.0, 20.0, 21.0, 31.0, 34.0))
+    monkeypatch.setattr(infer_module.time, "perf_counter", lambda: next(clock))
 
     def _validate_parity(**kwargs):
         order.append("parity")
@@ -380,6 +385,25 @@ def test_run_inference_validates_rl_load_parity_before_engine_construction(monke
         "public output omitted mixed rollout coordinates",
     )
     _require(manifest["rl_load_parity"] == parity_evidence, "run manifest omitted load parity evidence")
+    _require(manifest["engine_init_wall_seconds"] == 10.0, "engine initialization timing changed")
+    _require(manifest["engine_generate_wall_seconds"] == 10.0, "engine generate timing changed")
+    _require(manifest["output_validation_wall_seconds"] == 3.0, "output validation timing changed")
+    _require(
+        manifest["physical_waves"]
+        == [
+            {
+                "wave_index": 0,
+                "request_start": 0,
+                "request_count": 1,
+                "first_seed": 1042,
+                "last_seed": 1042,
+                "engine_generate_wall_seconds": 10.0,
+                "output_validation_wall_seconds": 3.0,
+                "wave_wall_seconds": 13.0,
+            }
+        ],
+        "physical wave timing evidence changed",
+    )
 
 
 @pytest.mark.parametrize(
@@ -537,6 +561,113 @@ def test_load_prompt_requests_preserves_mixed_rl_manifest_coordinates(tmp_path) 
         ),
         "mixed RL prompt coordinates changed",
     )
+
+
+def test_repeat_inference_requests_advances_mixed_coordinates_and_seeds() -> None:
+    requests = (
+        InferenceRequest(
+            request_id="prompt-4-rollout-0000",
+            prompt="+~GAGT",
+            prompt_id="prompt-4",
+            length_stratum=4,
+            rollout_ordinal=0,
+            order_index=0,
+            validation_seed=42,
+        ),
+        InferenceRequest(
+            request_id="prompt-5-rollout-0000",
+            prompt="+~GAGTT",
+            prompt_id="prompt-5",
+            length_stratum=5,
+            rollout_ordinal=0,
+            order_index=1,
+            validation_seed=43,
+        ),
+    )
+
+    repeated = repeat_inference_requests(
+        requests,
+        repetitions=2,
+        base_seed=42,
+        generation_seed_stride=1_000_003,
+    )
+
+    _require(repeated[:2] == requests, "first inference repetition changed")
+    _require(
+        [request.request_id for request in repeated[2:]]
+        == ["prompt-4-rollout-0000-call-0001", "prompt-5-rollout-0000-call-0001"],
+        "repeated request IDs changed",
+    )
+    _require([request.rollout_ordinal for request in repeated] == [0, 0, 1, 1], "rollout ordinals changed")
+    _require([request.order_index for request in repeated] == [0, 1, 2, 3], "order indices changed")
+    _require(
+        [request.validation_seed for request in repeated] == [42, 43, 1_000_045, 1_000_046],
+        "generation-call seed stride changed",
+    )
+
+
+def test_repeat_inference_requests_rejects_seed_overlap() -> None:
+    requests = (
+        InferenceRequest(request_id="first", prompt="AC", validation_seed=42),
+        InferenceRequest(request_id="second", prompt="GT", validation_seed=43),
+    )
+    with pytest.raises(ValueError, match="seeds must be unique"):
+        repeat_inference_requests(
+            requests,
+            repetitions=2,
+            base_seed=42,
+            generation_seed_stride=1,
+        )
+
+
+def test_main_runs_repetitions_through_one_public_inference_call(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+    output_path = tmp_path / "rows.jsonl"
+    manifest_path = tmp_path / "run.json"
+
+    monkeypatch.setattr(infer_module, "require_vllm_runtime", lambda: None)
+    monkeypatch.setattr(infer_module, "resolve_tensor_parallel_size", lambda _value: 1)
+
+    def _run_inference(**kwargs):
+        captured.update(kwargs)
+        return ({"id": "result"},), {"schema_version": 1}
+
+    monkeypatch.setattr(infer_module, "run_inference", _run_inference)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "infer_evo2",
+            "--model",
+            str(tmp_path / "export"),
+            "--prompt",
+            "AC",
+            "--repetitions",
+            "2",
+            "--generation-seed-stride",
+            "1000003",
+            "--output-file",
+            str(output_path),
+            "--run-manifest-file",
+            str(manifest_path),
+        ],
+    )
+
+    infer_module.main()
+
+    requests = captured["requests"]
+    _require(type(requests) is tuple and len(requests) == 2, "CLI repetitions did not reach run_inference")
+    _require(
+        [request.request_id for request in requests] == ["0", "0-call-0001"],
+        "CLI repeated request IDs changed",
+    )
+    _require(
+        [request.validation_seed for request in requests] == [None, 1_000_045],
+        "CLI repeated request seeds changed",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _require(manifest["request_repetitions"] == 2, "CLI manifest omitted request repetitions")
+    _require(manifest["generation_seed_stride"] == 1_000_003, "CLI manifest omitted the seed stride")
 
 
 def test_resolve_tokenizer_json_uses_explicit_or_export_nested_tokenizer(tmp_path) -> None:

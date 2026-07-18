@@ -118,6 +118,28 @@ shapes for the assigned system. When the active environment cannot import the
 pinned vLLM stack, `infer_evo2` re-executes through the recipe's locked actor
 environment created by `.ci_build.sh`; no `PYTHONPATH` override is required.
 
+For a persistent cold-to-warm measurement, pass the complete mixed prompt bank
+and repeat it through the same engine. Each later call gets a distinct request
+ID, rollout ordinal, order index, and caller-owned seed range:
+
+```bash
+infer_evo2 \
+  --model "$VLLM_EXPORT" \
+  --rl-checkpoint "$RL_CHECKPOINT" \
+  --rl-tokenizer-json "$TOKENIZER_JSON" \
+  --prompt-file /path/to/mixed-prompts.jsonl \
+  --max-new-tokens 5988 \
+  --batch-size 96 \
+  --repetitions 2 \
+  --generation-seed-stride 1000003 \
+  --output-file generated-two-wave.jsonl
+```
+
+The run manifest records `physical_waves` with engine-generate and output-
+validation wall time separately for every wave. Use the second wave as the
+steady persistent-engine measurement; do not relabel a separately launched,
+same-seed process as warm throughput.
+
 Key options:
 
 - `--model` / `--ckpt-dir` — fresh vLLM safetensors export (required).
@@ -129,6 +151,8 @@ Key options:
 - `--top-k` / `--top-p` — top-k and nucleus policy.
 - `--tensor-parallel-size` — integer TP or `auto` (default) for visible GPUs.
 - `--batch-size` — physical vLLM request wave and exact graph-capture size.
+- `--repetitions` — distinct request waves run by one persistent engine.
+- `--generation-seed-stride` — caller-owned seed advance between repetitions.
 - `--max-model-len` — prompt plus completion context bound (derived by default).
 
 Use `infer_evo2_mcore` only for an explicit MCore compatibility/control run on
