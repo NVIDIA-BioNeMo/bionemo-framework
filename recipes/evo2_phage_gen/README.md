@@ -106,6 +106,38 @@ config/index hashes. Use a fresh output directory for every selected policy.
 Supply `--config /path/to/verified/config-or-export` only when the checkpoint
 does not contain sufficient model config, and record that extra authority.
 
+For ordinary standalone generation, use the public inference module through
+the locked actor interpreter. The paired RL arguments make the CLI verify the
+checkpoint config/tensor inventory and tokenizer semantics against the export
+before vLLM engine construction:
+
+```bash
+RL_TOKENIZER_JSON="$PWD/../evo2_megatron/tokenizers/nucleotide_fast_tokenizer_512/tokenizer.json"
+
+"$VLLM_PYTHON" -m bionemo.evo2.vllm.infer \
+  --model "$VLLM_EXPORT" \
+  --rl-checkpoint "$RL_CHECKPOINT" \
+  --rl-tokenizer-json "$RL_TOKENIZER_JSON" \
+  --prompt "ATCGATCGATCGATCG" \
+  --max-new-tokens 5988 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --top-k 4 \
+  --tensor-parallel-size auto \
+  --batch-size 96 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.91 \
+  --optimization-level 2 \
+  --performance-mode balanced \
+  --async-scheduling \
+  --output-file results/evo2-vllm-generations.jsonl
+```
+
+Use `--prompt-file` for a caller-owned JSONL prompt bank. `auto` uses all
+visible assigned GPUs and selects the multiprocess executor when TP is greater
+than one. The CLI derives the required context length unless
+`--max-model-len` is supplied explicitly.
+
 The optimized Evo2 vLLM path is selected through the benchmark profile rather
 than independent private vLLM patches. This example reproduces the measured
 two-H100 reference profile: O2/balanced runtime selection, Inductor compilation mode 3,

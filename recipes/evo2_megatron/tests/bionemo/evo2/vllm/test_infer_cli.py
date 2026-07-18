@@ -7,12 +7,14 @@ import hashlib
 import importlib.util
 import json
 import os
+import sys
 import tomllib
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import bionemo.evo2.vllm.infer as infer_module
 from bionemo.evo2.vllm.infer import (
     InferenceRequest,
     build_engine_kwargs,
@@ -23,6 +25,7 @@ from bionemo.evo2.vllm.infer import (
     resolve_tokenizer_json,
     resolve_tensor_parallel_size,
     require_vllm_runtime,
+    run_inference,
 )
 from bionemo.evo2.vllm.tokenizer_io import SnapshotBoundTokenizer
 
@@ -118,6 +121,30 @@ def test_evo2_packages_publish_vllm_inference_and_explicit_mcore_compatibility_c
         )
 
 
+def test_evo2_readme_documents_qualified_vllm_inference_and_rl_load_parity() -> None:
+    readme = (EVO2_RECIPE / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Autoregressive generation (`infer_evo2`)", maxsplit=1)[1].split(
+        "### Batch sequence scoring", maxsplit=1
+    )[0]
+    required = (
+        "evo2_export_mbridge_to_vllm",
+        "infer_evo2",
+        "--rl-checkpoint",
+        "--rl-tokenizer-json",
+        "--tensor-parallel-size auto",
+        "--optimization-level 2",
+        "--performance-mode balanced",
+        "--async-scheduling",
+        "FULL_AND_PIECEWISE",
+    )
+    missing = [value for value in required if value not in section]
+    _require(not missing, f"qualified vLLM inference README contract is incomplete: {missing}")
+    _require(
+        "torchrun --nproc_per_node 1 --no-python" not in section,
+        "public infer_evo2 documentation still uses the legacy MCore torchrun path",
+    )
+
+
 def test_inference_reexecs_into_the_locked_recipe_vllm_environment(monkeypatch, tmp_path) -> None:
     actor_root = tmp_path / "actor-venvs"
     actor_python = (
@@ -165,6 +192,91 @@ def test_inference_keeps_an_already_capable_environment(monkeypatch) -> None:
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name == "vllm" else None)
     monkeypatch.setattr(os, "execve", lambda *_args: pytest.fail("capable environment was replaced"))
     require_vllm_runtime(argv=("--help",))
+
+
+def test_optional_rl_load_parity_requires_both_checkpoint_and_tokenizer(monkeypatch) -> None:
+    validator = getattr(infer_module, "validate_optional_rl_load_parity", None)
+    _require(callable(validator), "optional RL load parity gate is missing")
+
+    monkeypatch.setattr(
+        "bionemo.evo2.vllm.load_parity.validate_rl_inference_load_parity",
+        lambda **_kwargs: pytest.fail("parity validator ran without complete caller authority"),
+    )
+    _require(
+        validator(checkpoint=None, export="/export", tokenizer_json=None) is None,
+        "disabled parity gate returned evidence",
+    )
+    with pytest.raises(ValueError, match="provided together"):
+        validator(checkpoint="/checkpoint", export="/export", tokenizer_json=None)
+    with pytest.raises(ValueError, match="provided together"):
+        validator(checkpoint=None, export="/export", tokenizer_json="/tokenizer.json")
+
+
+def test_run_inference_validates_rl_load_parity_before_engine_construction(monkeypatch, tmp_path) -> None:
+    order: list[str] = []
+    parity_evidence = {"schema_version": 1, "checkpoint_iteration": "/checkpoint/iter_0000001"}
+
+    def _validate_parity(**kwargs):
+        order.append("parity")
+        _require(kwargs["checkpoint"] == "/checkpoint", "RL checkpoint authority changed")
+        _require(kwargs["export"] == tmp_path / "model", "export authority changed")
+        _require(kwargs["tokenizer_json"] == TOKENIZER_JSON, "RL tokenizer authority changed")
+        return parity_evidence
+
+    monkeypatch.setattr(infer_module, "validate_optional_rl_load_parity", _validate_parity, raising=False)
+
+    fake_vllm = ModuleType("vllm")
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeLLM:
+        def __init__(self, **_kwargs):
+            order.append("engine")
+
+        def generate(self, prompts, _sampling_params, *, use_tqdm):
+            _require(use_tqdm is True, "public generate progress setting changed")
+            return [
+                _fake_output(
+                    request_id=f"engine-{index}",
+                    prompt_token_ids=tuple(prompt["prompt_token_ids"]),
+                    output_token_ids=(65, 67, 71, 84),
+                    logprobs=(-0.1, -0.2, -0.3, -0.4),
+                )
+                for index, prompt in enumerate(prompts)
+            ]
+
+    fake_vllm.LLM = FakeLLM
+    fake_vllm.SamplingParams = FakeSamplingParams
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+
+    root = _export_root(tmp_path)
+    (root / "tokenizer.json").write_bytes(TOKENIZER_JSON.read_bytes())
+    records, manifest = run_inference(
+        model=root,
+        tokenizer_json=TOKENIZER_JSON,
+        requests=(InferenceRequest("request", "AC"),),
+        max_new_tokens=4,
+        temperature=1.0,
+        top_p=1.0,
+        top_k=4,
+        base_seed=42,
+        tensor_parallel_size=1,
+        batch_size=1,
+        max_model_len=6,
+        max_num_batched_tokens=16,
+        gpu_memory_utilization=0.91,
+        optimization_level=2,
+        performance_mode="balanced",
+        async_scheduling=True,
+        rl_checkpoint="/checkpoint",
+        rl_tokenizer_json=TOKENIZER_JSON,
+    )
+
+    _require(order == ["parity", "engine"], "engine construction preceded RL/export load parity")
+    _require(records[0]["completion"] == "ACGT", "public inference output changed")
+    _require(manifest["rl_load_parity"] == parity_evidence, "run manifest omitted load parity evidence")
 
 
 @pytest.mark.parametrize(

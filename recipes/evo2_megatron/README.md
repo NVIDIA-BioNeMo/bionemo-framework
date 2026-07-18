@@ -73,35 +73,66 @@ torchrun --nproc-per-node 2 --no-python \
 > CUDA kernels (`b2b_causal_conv1d` for proj+mixer fusion in prefill,
 > `fft_causal_conv1d` / `causal_conv1d` inside `engine.parallel_fir`). It
 > applies to training, batch prediction (`predict_evo2`), and the prefill
-> phase of autoregressive inference (`infer_evo2`); per-token decode is
+> phase of MCore autoregressive inference (`infer_evo2_mcore`); per-token decode is
 > already in optimal recurrent form and is unaffected.
 
 ### Autoregressive generation (`infer_evo2`)
 
-Generate DNA sequences from a prompt using an MBridge checkpoint:
+`infer_evo2` is the public vLLM path. Export the exact MBridge checkpoint first,
+then bind inference back to that checkpoint and its tokenizer so the CLI rejects
+a stale or semantically different export before constructing the engine:
 
 ```bash
-torchrun --nproc_per_node 1 --no-python \
-  infer_evo2 \
-  --ckpt-dir /path/to/mbridge/checkpoint \
+RL_CHECKPOINT=/path/to/policy/weights/iter_0000000
+TOKENIZER_JSON=/path/to/nucleotide_fast_tokenizer_512/tokenizer.json
+VLLM_EXPORT=/path/to/fresh-vllm-export
+
+evo2_export_mbridge_to_vllm \
+  "$RL_CHECKPOINT" "$VLLM_EXPORT" \
+  --max-shard-size 2GiB
+
+infer_evo2 \
+  --model "$VLLM_EXPORT" \
+  --rl-checkpoint "$RL_CHECKPOINT" \
+  --rl-tokenizer-json "$TOKENIZER_JSON" \
   --prompt "ATCGATCGATCGATCG" \
   --max-new-tokens 200 \
   --temperature 1.0 \
-  --output-file generated.txt
+  --top-p 1.0 \
+  --top-k 4 \
+  --tensor-parallel-size auto \
+  --batch-size 96 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.91 \
+  --optimization-level 2 \
+  --performance-mode balanced \
+  --async-scheduling \
+  --output-file generated.jsonl
 ```
 
-Options:
+The qualified defaults use Inductor compilation mode 3 and exact-batch
+`FULL_AND_PIECEWISE` CUDA graphs. `auto` uses every visible GPU; TP greater than
+one selects vLLM's multiprocess executor. Treat TP2 as the measured two-H100
+reference rather than a universal setting: size TP, batch capacity, and capture
+shapes for the assigned system. When the active environment cannot import the
+pinned vLLM stack, `infer_evo2` re-executes through the recipe's locked actor
+environment created by `.ci_build.sh`; no `PYTHONPATH` override is required.
 
-- `--ckpt-dir` — path to MBridge checkpoint directory (required).
+Key options:
+
+- `--model` / `--ckpt-dir` — fresh vLLM safetensors export (required).
+- `--rl-checkpoint` and `--rl-tokenizer-json` — optional paired authority that
+  proves the standalone export matches the RL checkpoint before engine startup.
 - `--prompt` / `--prompt-file` — input sequence (inline or from file).
 - `--max-new-tokens` — number of tokens to generate (default: 100).
 - `--temperature` — sampling temperature (default: 1.0).
-- `--top-k` / `--top-p` — top-k or nucleus sampling (0 = disabled).
-- `--tensor-parallel-size` — tensor parallelism for large models (default: 1).
-- `--max-seq-length` — maximum sequence length (default: 8192).
-- `--use-subquadratic-ops` — use fused subquadratic-ops kernels for prefill
-  (b2b causal conv, FFT/causal conv1d in `parallel_fir`). Recommended when
-  processing many prompts in one process.
+- `--top-k` / `--top-p` — top-k and nucleus policy.
+- `--tensor-parallel-size` — integer TP or `auto` (default) for visible GPUs.
+- `--batch-size` — physical vLLM request wave and exact graph-capture size.
+- `--max-model-len` — prompt plus completion context bound (derived by default).
+
+Use `infer_evo2_mcore` only for an explicit MCore compatibility/control run on
+an MBridge checkpoint; it is not the default standalone inference backend.
 
 ### Batch sequence scoring (`predict_evo2`)
 

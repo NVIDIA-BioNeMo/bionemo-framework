@@ -448,6 +448,29 @@ def _ensure_evo2_plugin() -> None:
         raise RuntimeError("VLLM_PLUGINS must include the installed 'evo2' entry-point name")
 
 
+def validate_optional_rl_load_parity(
+    *,
+    checkpoint: str | Path | None,
+    export: str | Path,
+    tokenizer_json: str | Path | None,
+) -> dict[str, Any] | None:
+    """Bind standalone inference to an RL checkpoint when caller authority is provided."""
+    if (checkpoint is None) != (tokenizer_json is None):
+        raise ValueError("RL checkpoint and tokenizer must be provided together")
+    if checkpoint is None:
+        return None
+    if tokenizer_json is None:
+        raise RuntimeError("RL tokenizer authority is unexpectedly missing")
+
+    from bionemo.evo2.vllm.load_parity import validate_rl_inference_load_parity
+
+    return validate_rl_inference_load_parity(
+        checkpoint=checkpoint,
+        export=export,
+        rl_tokenizer=tokenizer_json,
+    )
+
+
 def run_inference(
     *,
     model: str | Path,
@@ -466,8 +489,15 @@ def run_inference(
     optimization_level: int,
     performance_mode: str,
     async_scheduling: bool,
+    rl_checkpoint: str | Path | None = None,
+    rl_tokenizer_json: str | Path | None = None,
 ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
     """Run ordered public vLLM generation and return strict rows plus provenance."""
+    rl_load_parity = validate_optional_rl_load_parity(
+        checkpoint=rl_checkpoint,
+        export=model,
+        tokenizer_json=rl_tokenizer_json,
+    )
     identity = load_export_identity(model)
     if identity.tensor_parallel_divisor % tensor_parallel_size:
         raise ValueError(
@@ -550,6 +580,7 @@ def run_inference(
         "schema_version": 1,
         "backend": "vllm",
         "export": identity.to_dict(),
+        "rl_load_parity": rl_load_parity,
         "tokenizer": tokenizer_provenance,
         "request_count": len(requests),
         "batch_size": resolved_batch_size,
@@ -572,6 +603,8 @@ def _parser() -> argparse.ArgumentParser:
     prompt_group.add_argument("--prompt")
     prompt_group.add_argument("--prompt-file", type=Path)
     parser.add_argument("--tokenizer-json", type=Path, default=None)
+    parser.add_argument("--rl-checkpoint", type=Path, default=None)
+    parser.add_argument("--rl-tokenizer-json", type=Path, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=100)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=1.0)
@@ -618,6 +651,8 @@ def main() -> None:
         optimization_level=args.optimization_level,
         performance_mode=args.performance_mode,
         async_scheduling=args.async_scheduling,
+        rl_checkpoint=args.rl_checkpoint,
+        rl_tokenizer_json=args.rl_tokenizer_json,
     )
     output = "".join(json.dumps(record, sort_keys=True) + "\n" for record in records)
     if args.output_file is None:
@@ -650,4 +685,5 @@ __all__ = [
     "require_vllm_runtime",
     "resolve_tensor_parallel_size",
     "run_inference",
+    "validate_optional_rl_load_parity",
 ]

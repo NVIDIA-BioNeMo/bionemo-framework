@@ -39,6 +39,30 @@ def test_recipe_declares_qualified_vllm_extra_and_plugin() -> None:
         raise AssertionError(f"unexpected vLLM plugin entry points: {plugins!r}")
 
 
+def test_readme_and_operator_skill_document_public_vllm_inference_load_parity() -> None:
+    """Friends and operators should use the same qualified standalone inference path."""
+    sources = {
+        "README": (RECIPE_ROOT / "README.md").read_text(),
+        "operator contract": (
+            RECIPE_ROOT
+            / ".agents/skills/bionemo-phage-design-operate-nemo-rl/references/vllm-gdpo-contract.md"
+        ).read_text(),
+    }
+    required = (
+        "bionemo.evo2.vllm.infer",
+        "--rl-checkpoint",
+        "--rl-tokenizer-json",
+        "--tensor-parallel-size auto",
+        "--optimization-level 2",
+        "--performance-mode balanced",
+        "--async-scheduling",
+    )
+    for label, source in sources.items():
+        missing = [value for value in required if value not in source]
+        if missing:
+            raise AssertionError(f"{label} omits the qualified public inference contract: {missing}")
+
+
 def test_ci_build_pins_supported_python_runtime() -> None:
     """The NVIDIA Megatron dependency stack currently publishes through CPython 3.12."""
     build_script = (RECIPE_ROOT / ".ci_build.sh").read_text()

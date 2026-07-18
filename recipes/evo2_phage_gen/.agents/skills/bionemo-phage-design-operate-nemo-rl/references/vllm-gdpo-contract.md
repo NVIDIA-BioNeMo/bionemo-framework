@@ -70,6 +70,29 @@ not a universal maximum: test wider TP and disjoint DP engine groups when more
 GPUs are assigned, recompute local batch/capture sizes, and retain the same
 correctness gates.
 
+Use the public inference path and independently retained RL authority for final
+generation/filtering:
+
+```bash
+"$VLLM_PYTHON" -m bionemo.evo2.vllm.infer \
+  --model /path/to/fresh-vllm-export \
+  --rl-checkpoint /path/to/policy/weights/iter_0000000 \
+  --rl-tokenizer-json /path/to/tokenizer.json \
+  --prompt-file /path/to/frozen-prompts.jsonl \
+  --max-new-tokens 5988 \
+  --temperature 1.0 --top-p 1.0 --top-k 4 \
+  --tensor-parallel-size auto \
+  --batch-size 96 --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.91 \
+  --optimization-level 2 --performance-mode balanced \
+  --async-scheduling \
+  --output-file /path/to/final-generations.jsonl
+```
+
+The run manifest must retain the successful RL/export load-parity record. Size
+the physical batch and exact graph capture to the assigned topology; do not pin
+TP2 when a different tested TP uses the available GPUs more effectively.
+
 ## Provenance and patches
 
 Freeze the official vLLM version and source tag or wheel hash, BioNeMo Evo2
