@@ -54,7 +54,8 @@ evo2 = "bionemo.evo2.vllm.plugin:register"
 
 [project.scripts]
 torchrun = "torch.distributed.run:main"
-infer_evo2 = "bionemo.evo2.run.infer:main"
+infer_evo2 = "bionemo.evo2.vllm.infer:main"
+infer_evo2_mcore = "bionemo.evo2.run.infer:main"
 train_evo2 = "bionemo.evo2.run.train:main"
 predict_evo2 = "bionemo.evo2.run.predict:main"
 preprocess_evo2 = "bionemo.evo2.data.preprocess:main"
