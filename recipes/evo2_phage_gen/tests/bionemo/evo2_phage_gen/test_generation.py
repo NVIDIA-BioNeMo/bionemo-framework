@@ -16,6 +16,7 @@
 """Tests for ``bionemo.evo2_phage_gen.generation``."""
 
 import json
+from pathlib import Path
 
 from bionemo.evo2_phage_gen.generation import (
     ensure_paper_useful_rl_prompt_files,
@@ -23,6 +24,35 @@ from bionemo.evo2_phage_gen.generation import (
     phix174_prompts,
     write_prompt_sweep_jsonl,
 )
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def test_paper_hpo_generation_uses_qualified_public_vllm_path():
+    """The final sweep must export the selected policy and use public vLLM inference."""
+    recipe_dir = Path(__file__).resolve().parents[3]
+    source = (recipe_dir / "scripts" / "run_paper_hpo_generation.sh").read_text()
+
+    for required in (
+        "evo2_export_mbridge_to_vllm",
+        "infer_evo2",
+        "VLLM_PLUGINS=evo2",
+        '--rl-checkpoint "${CKPT_DIR}"',
+        '--tensor-parallel-size "${TENSOR_PARALLEL_SIZE}"',
+        '--optimization-level "${OPTIMIZATION_LEVEL}"',
+        '--performance-mode "${PERFORMANCE_MODE}"',
+        "--async-scheduling",
+    ):
+        _require(required in source, f"missing qualified vLLM sweep setting: {required}")
+    _require(
+        'TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-auto}"' in source,
+        "TP must adapt to visible GPUs",
+    )
+    _require("torchrun" not in source, "the final sweep must not invoke the legacy MCore torchrun path")
+    _require("recipes/evo2_megatron/src/bionemo/evo2/run/infer.py" not in source, "legacy inference path remains")
 
 
 def test_phix174_prompts_use_reference_prefixes():

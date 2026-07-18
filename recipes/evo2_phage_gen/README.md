@@ -328,16 +328,35 @@ ROLLOUT_ROOT="$RESULT_ROOT/rollout-step190-n1000"
 
 RUN_ROOT="$ROLLOUT_ROOT" \
 CKPT_DIR="$SELECTED_CHECKPOINT" \
+VLLM_EXPORT="$ROLLOUT_ROOT/vllm-export" \
 PROMPT_LENGTHS="10" \
 TEMPERATURES="1.0" \
 NUM_PROMPTS=1000 \
 TARGET_LENGTH=6000 \
 TOP_K=4 TOP_P=1.0 SEED=7 \
-NPROC_PER_NODE=2 TENSOR_PARALLEL_SIZE=2 PROMPT_BATCH_SIZE=64 \
+TENSOR_PARALLEL_SIZE=auto PROMPT_BATCH_SIZE=96 \
   scripts/run_paper_hpo_generation.sh
 ```
 
-Exact numeric reproduction is source-revision-sensitive; the current inference code includes the persistent-RNG correction used by this command.
+The wrapper exports the selected MBridge policy to safetensors once with
+`evo2_export_mbridge_to_vllm`, then runs `infer_evo2` through the isolated
+NeMo-RL/vLLM environment created by `.ci_build.sh`. It binds the export back to
+the selected RL checkpoint and tokenizer, records their hashes, and requires
+exact-length ACGTN output with aligned chosen-token logprobs. No `PYTHONPATH`
+or direct `torchrun` invocation is needed after sourcing `.ci_test_env.sh`.
+
+`TENSOR_PARALLEL_SIZE=auto` uses all visible GPUs whose count divides the
+model's attention-head count; set an explicit value when sharing a node. The
+qualified defaults are O2/balanced, compilation mode 3,
+`FULL_AND_PIECEWISE` CUDA graphs including the exact physical batch size,
+multiprocess execution for multi-GPU TP, and async scheduling. Override
+`OPTIMIZATION_LEVEL`, `PERFORMANCE_MODE`, `PROMPT_BATCH_SIZE`,
+`MAX_NUM_BATCHED_TOKENS`, or `GPU_MEMORY_UTILIZATION` only after a matched
+accuracy and capacity check on the target system.
+
+Exact numeric reproduction is source-revision-sensitive. Request seeds remain
+unique within each generated cell; using the same base seed across HPO cells is
+intentional matched-policy comparison rather than a production RL seed stream.
 
 ### 7. Apply the target filter profile
 
