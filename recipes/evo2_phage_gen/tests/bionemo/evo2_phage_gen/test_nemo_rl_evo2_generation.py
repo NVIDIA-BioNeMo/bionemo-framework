@@ -18,11 +18,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
-from nemo_rl.models.generation.megatron.megatron_generation import (
-    MegatronGeneration,
-    _adapter_requires_all_workers,
-    _load_generation_adapter,
-)
+from nemo_rl.models.generation.megatron import megatron_generation
 
 import bionemo.evo2_phage_gen.nemo_rl_evo2_generation as evo2_generation
 from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
@@ -31,6 +27,23 @@ from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
     _PromptTokenProxy,
     should_use_evo2_native_batched_generation,
 )
+
+
+if not all(
+    hasattr(megatron_generation, name)
+    for name in (
+        "_adapter_requires_all_workers",
+        "_load_generation_adapter",
+    )
+):
+    pytest.skip(
+        "pinned NeMo-RL removed the legacy recipe-local Megatron adapter API",
+        allow_module_level=True,
+    )
+
+MegatronGeneration = megatron_generation.MegatronGeneration
+_adapter_requires_all_workers = megatron_generation._adapter_requires_all_workers
+_load_generation_adapter = megatron_generation._load_generation_adapter
 
 
 class _Tokenizer:

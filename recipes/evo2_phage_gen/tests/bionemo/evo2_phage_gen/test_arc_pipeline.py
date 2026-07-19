@@ -260,7 +260,7 @@ def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_miss
 
 
 def test_patched_arc_mmseqs_protein_search_fails_closed(tmp_path, monkeypatch):
-    """Failed MMseqs protein searches should produce an empty hit table for online reward scoring."""
+    """Failed MMseqs protein searches must stop online reward scoring."""
     module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_mmseqs_test")
 
     query_fasta = tmp_path / "query.fasta"
@@ -274,16 +274,17 @@ def test_patched_arc_mmseqs_protein_search_fails_closed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module.subprocess, "run", fail_mmseqs)
 
-    hits = module.run_mmseqs_search_proteins(
-        query_fasta=str(query_fasta),
-        mmseqs_db=str(mmseqs_db),
-        results_dir=str(tmp_path / "mmseqs_results"),
-        output_csv=str(output_csv),
-        descriptive_prefix="protein_database",
-    )
+    with pytest.raises(module.subprocess.CalledProcessError):
+        module.run_mmseqs_search_proteins(
+            query_fasta=str(query_fasta),
+            mmseqs_db=str(mmseqs_db),
+            results_dir=str(tmp_path / "mmseqs_results"),
+            output_csv=str(output_csv),
+            descriptive_prefix="protein_database",
+        )
 
-    assert hits.empty
-    assert output_csv.exists()
+    if output_csv.exists():
+        raise AssertionError("failed MMseqs search published an output table")
 
 
 def test_patched_arc_mmseqs_protein_search_allows_successful_empty_hits(tmp_path, monkeypatch):

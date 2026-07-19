@@ -22,7 +22,7 @@ from bionemo.evo2_phage_gen.run_phage_grpo import main as run_phage_rl
 
 def main() -> None:
     """Run GDPO with the recipe GDPO config by default."""
-    run_phage_rl(default_config="configs/gdpo_phage_megatron.yaml", default_algorithm="gdpo")
+    run_phage_rl(default_config="configs/gdpo_phage_vllm_tp2_p8k12_full_qc.yaml", default_algorithm="gdpo")
 
 
 if __name__ == "__main__":

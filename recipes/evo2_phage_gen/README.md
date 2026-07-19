@@ -292,9 +292,18 @@ evo2_convert_vortex_to_mbridge \
   --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 \
   --seq-length 10240 \
   --mixed-precision-recipe bf16_mixed
+
+VLLM_SFT_EXPORT="$PWD/data/checkpoints/evo2_7b_microviridae_vllm"
+python -m bionemo.evo2.vllm.export \
+  data/checkpoints/evo2_7b_microviridae_mbridge \
+  "$VLLM_SFT_EXPORT" \
+  --max-shard-size 2GiB
 ```
 
-The explicit filename is required because the hosted file does not match the converter's inferred default name.
+The explicit filename is required because the hosted file does not match the
+converter's inferred default name. The vLLM export is derived from that exact
+Microviridae MBridge checkpoint and records the resolved 7b-8k model config;
+use a fresh export directory rather than reusing a pre-RL or 7b-1m export.
 
 ### 4. Create the training and validation prompts
 
@@ -315,11 +324,15 @@ The second command creates the 96-row validation file referenced by the historic
 ```bash
 RESULT_ROOT="$PWD/results/phix174-gdpo-replication"
 RL_ROOT="$RESULT_ROOT/rl"
+VLLM_SFT_EXPORT="$PWD/data/checkpoints/evo2_7b_microviridae_vllm"
+RL_TOKENIZER_DIR="$PWD/../evo2_megatron/tokenizers/nucleotide_fast_tokenizer_512"
 mkdir -p "$RL_ROOT"
 
-evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml \
+evo2_phage_run_gdpo --config configs/gdpo_phage_vllm_tp2_p8k12_full_qc.yaml \
   checkpointing.pretrained_checkpoint.path=data/checkpoints/evo2_7b_microviridae_mbridge \
   checkpointing.checkpoint_dir="$RL_ROOT/checkpoints" \
+  policy.model_name="$VLLM_SFT_EXPORT" \
+  policy.tokenizer.name="$RL_TOKENIZER_DIR" \
   env.phage_qc.external_qc.work_dir="$RL_ROOT/external_qc" \
   env.phage_qc.mmseqs_cluster_diversity.work_dir="$RL_ROOT/mmseqs_cluster_diversity" \
   logger.log_dir="$RL_ROOT/logs" \
@@ -327,7 +340,17 @@ evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml \
   logger.tensorboard_enabled=true
 ```
 
-The overrides replace project-specific checkpoint, output, and W&B settings in the checked-in historical config. Validation runs every 10 steps with a 500-step ceiling. Select the best checkpoint from sustained full-QC and diversity evidence; do not stop at step 190 merely because it was best in the recorded run.
+This is the qualified TP2/DP1 P8/K12/GBS96 mixed-length vLLM route with full
+QC, exact-5,988 stochastic rollouts, O2/balanced compilation mode 3,
+`FULL_AND_PIECEWISE` CUDA graphs, the multiprocess executor, and async
+scheduling. The MBridge checkpoint remains the trainable policy authority; the
+fresh export initializes the colocated vLLM rollout engine, which is refit after
+each optimizer update. Use
+`configs/gdpo_phage_vllm_tp1dp2_p8k12_full_qc.yaml` for the qualified DP2
+shape, or qualify another non-overlapping TP/DP grouping before scaling beyond
+two GPUs. Validation runs every 10 steps with a 500-step ceiling. Select the
+best checkpoint from sustained full-QC and diversity evidence; do not stop at
+step 190 merely because it was best in the recorded run.
 
 ### 6. Generate the 1,000-design rollout
 

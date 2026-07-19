@@ -63,6 +63,36 @@ def test_readme_and_operator_skill_document_public_vllm_inference_load_parity() 
             raise AssertionError(f"{label} omits the qualified public inference contract: {missing}")
 
 
+def test_readme_primary_gdpo_workflow_uses_qualified_vllm_route() -> None:
+    """The reproduction workflow must not revive the retired Megatron adapter."""
+    readme = (RECIPE_ROOT / "README.md").read_text()
+    run_section = readme.split("### 5. Run GDPO", maxsplit=1)[1].split(
+        "### 6. Generate the 1,000-design rollout",
+        maxsplit=1,
+    )[0]
+    conversion_section = readme.split(
+        "### 3. Convert the released Microviridae SFT checkpoint",
+        maxsplit=1,
+    )[1].split("### 4. Create the training and validation prompts", maxsplit=1)[0]
+
+    required_conversion = (
+        "python -m bionemo.evo2.vllm.export",
+        "VLLM_SFT_EXPORT=",
+    )
+    required_run = (
+        "gdpo_phage_vllm_tp2_p8k12_full_qc.yaml",
+        "gdpo_phage_vllm_tp1dp2_p8k12_full_qc.yaml",
+        'policy.model_name="$VLLM_SFT_EXPORT"',
+        "policy.tokenizer.name=",
+    )
+    missing = [value for value in required_conversion if value not in conversion_section]
+    missing.extend(value for value in required_run if value not in run_section)
+    if missing:
+        raise AssertionError(f"primary GDPO workflow omits qualified vLLM steps: {missing}")
+    if "gdpo_phage_megatron.yaml" in run_section:
+        raise AssertionError("primary GDPO workflow still invokes the retired Megatron adapter config")
+
+
 def test_ci_build_pins_supported_python_runtime() -> None:
     """The NVIDIA Megatron dependency stack currently publishes through CPython 3.12."""
     build_script = (RECIPE_ROOT / ".ci_build.sh").read_text()

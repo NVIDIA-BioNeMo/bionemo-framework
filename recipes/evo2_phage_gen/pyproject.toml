@@ -137,6 +137,9 @@ version = { file = "VERSION" }
 [tool.setuptools.package-data]
 "bionemo.common.data" = ["resources/*.yaml"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 # ------------------------------------------------------------------
 # UV Configuration
 # ------------------------------------------------------------------

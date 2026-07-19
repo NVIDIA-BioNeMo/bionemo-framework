@@ -7,7 +7,7 @@ import inspect
 from types import SimpleNamespace
 
 from bionemo.evo2.vllm import load_parity
-from bionemo.evo2_phage_gen import run_phage_grpo
+from bionemo.evo2_phage_gen import run_phage_gdpo, run_phage_grpo
 from bionemo.evo2_phage_gen.run_phage_grpo import (
     _bind_vllm_prompt_group_sharding,
     _register_recipe_extensions,
@@ -27,6 +27,26 @@ def test_unpack_grpo_setup_result_accepts_pinned_thirteen_value_contract() -> No
     actual = _unpack_grpo_setup_result(expected)
 
     _require(actual == expected, "launcher did not preserve the pinned setup result order")
+
+
+def test_gdpo_entrypoint_defaults_to_qualified_vllm_config(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(run_phage_gdpo, "run_phage_rl", _capture)
+
+    run_phage_gdpo.main()
+
+    _require(
+        captured
+        == {
+            "default_config": "configs/gdpo_phage_vllm_tp2_p8k12_full_qc.yaml",
+            "default_algorithm": "gdpo",
+        },
+        f"GDPO entrypoint did not preserve the qualified vLLM default: {captured!r}",
+    )
 
 
 def test_register_recipe_extensions_registers_evo2_vllm_worker(tmp_path, monkeypatch) -> None:
