@@ -13,7 +13,7 @@ The selected checkpoint was GDPO step 190. Training was monitored through at lea
 | Independent 1,000-design Arc rollout from step 190 | Filters 1–6, 8, and 9; filter 7 disabled | 358/1,000 (35.80%) |
 | Diagnostic branch from the same offline rollout | Filter 7 also enabled | 5/1,000 (0.50%) |
 
-The target profile intentionally disables architecture-removal filter 7 and retains total-gene logic. The 96-design online validation and 1,000-design offline rollout use different pipelines and clustering contracts; their rates must not be combined.
+The target profile intentionally disables architecture-removal filter 7 and retains total-gene logic. AAI (filter 8), synteny (filter 9), and the required-gene list are all required final-pass filters and must be logged that way. The 96-design online validation and 1,000-design offline rollout use different pipelines and clustering contracts; their rates must not be combined.
 
 Target-profile offline waterfall:
 
@@ -34,7 +34,20 @@ The checked evidence and source hashes are in [historical-evidence.md](.agents/s
 
 ## Agent-run end-to-end result
 
-Not recorded yet. This section will be replaced with the first complete run performed through the recipe-local agent workflow, including its target, SFT lineage, selected RL checkpoint, rollout size, and final QC result.
+The recipe-local vLLM path completed the production mixed P8/K12/GBS96 workload
+on two H100 80 GB GPUs with full external QC, three optimizer steps, post-update
+MCore-to-vLLM refit, and final validation. TP2/DP1 train-only step time was
+385.83 seconds median, 24.60% below the matched 511.7-second native baseline;
+the step containing validation was 590.48 seconds, 29.73% below the matched
+840.3-second baseline. The TP1/DP2 run also completed and had a 327.87-second
+train-only median.
+
+The frozen mixed TP2 accuracy gate passed all four unequal-length B4 cases and
+all 96 interleaved B96 occurrences at their unchanged 500-base floors. The
+persistent standalone P8/K12 exact-5,988 inference run passed 192/192 exact
+length, A/C/G/T/N, no-EOS, chosen-logprob, request-ID, and seed checks. The
+full timing, numerical audit, revisions, and retained artifact hashes are in
+[the vLLM qualification record](.agents/skills/bionemo-phage-design-operate-nemo-rl/references/vllm-qualified-results.md).
 
 ## Run the workflow with an agent
 

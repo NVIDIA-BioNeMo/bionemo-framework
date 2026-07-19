@@ -1,0 +1,110 @@
+# Evo2 vLLM qualification record
+
+This is the retained two-H100 qualification record for the recipe-owned Evo2
+vLLM integration. It is computational evidence, not a biological viability
+claim. Re-run the same gates after changing the model export, tokenizer,
+dependency lock, recipe patches, runtime profile, topology, or batch geometry.
+
+## Runtime and workload
+
+- Production GDPO workload: eight prompt-length strata (4 through 11), twelve
+  stochastic rollouts per stratum, `P=8`, `K=12`, `GBS=96`, exact 5,988-token
+  completions, full external QC, and frozen mixed validation.
+- TP2/DP1 generation route: official vLLM, MP executor, async scheduling,
+  O2/balanced, compilation mode 3, `FULL_AND_PIECEWISE` CUDA graphs with exact
+  B96 capture, processed chosen-token logprobs, and no upstream vLLM patch.
+- Source revision for the accepted TP2/DP1 run:
+  `c0b057d63f23d31d73f3aa5bfd825984fd5529da`.
+- Source revision for the accepted TP1/DP2 and mixed-accuracy runs:
+  `45089b2619e0252765311bef0580cd77a74be804`.
+- The accepted TP2/DP1 run validated RL/standalone load parity for 330 tensors,
+  the exported config and manifest, and tokenizer SHA256
+  `52ccdc9c776e79a6c005d6b55d271e1dfaba55e60b52fe9bb2d1fec22d407504`.
+
+## GDPO timing
+
+The matched native comparison is the recovered early production TP2/DP1
+series: 511.7 seconds for a train-only step, 840.3 seconds for a step with
+validation and checkpoint time removed, 369.7 seconds for generation plus
+nested reward/QC, 37.2 seconds for policy plus reference logprobs, and 66.2
+seconds for policy training.
+
+| Measurement | vLLM TP2/DP1 | Matched native | Difference |
+| --- | ---: | ---: | ---: |
+| Train-only step, three-step median | 385.83 s | 511.7 s | 24.60% lower |
+| Step 3 including final validation | 590.48 s | 840.3 s | 29.73% lower |
+| Generation plus nested reward/QC, median | 238.15 s | 369.7 s | 35.58% lower |
+| Policy plus reference logprobs, median | 29.81 s | 37.2 s | 19.87% lower |
+| Policy training, median | 53.20 s | 66.2 s | 19.64% lower |
+
+TP2/DP1 train step totals were 318.86, 385.83, and 386.43 seconds; the last
+value excludes its 204.05-second final validation. Model generation waves were
+80.72, 133.27, and 106.72 seconds, with final validation generation at 80.63
+seconds. Every optimizer step completed conversion/refit/synchronization before
+the next rollout or final validation.
+
+The independent TP1/DP2 run completed the same P8/K12/GBS96 contract with two
+48-row streams. Its train-only totals were 321.73, 327.87, and 360.65 seconds,
+for a 327.87-second median (35.93% below the matched native TP2/DP1 median).
+Its step containing validation was 578.85 seconds (31.11% below the matched
+native value). These topology results are both functional evidence; they are
+not a same-topology speed comparison.
+
+## Numerical and biological-output gates
+
+The TP2/DP1 audit reopened 384 rows: three train waves and one validation wave,
+96 rows each. All 2,299,392 completion tokens were exact-length A/C/G/T/N with
+no EOS; token IDs decoded to the retained text; chosen rollout and policy
+logprobs were finite and aligned. All 384 request IDs, global indices, and seeds
+were unique. Generation calls advanced from 0 through 3 with disjoint seed
+ranges. Rewards, advantages, losses, gradients, optimizer state, and post-refit
+validation were finite.
+
+For rollout versus training-policy logprobs, absolute token delta had mean
+0.02401, p95 0.13860, and max 5.49229. The configured multiplicative sequence
+error had mean 1.03076, p95 1.07897, and max 1.10170; zero rows exceeded the
+unchanged 1.5 threshold. Token importance ratios had mean 1.01046 and p95
+1.06242; 3.496% were outside the PPO clip interval `[0.8, 1.2]`.
+
+The canonical mixed TP2 identity gate passed unequal-prefix B4 with match
+counts `[490, 475, 390, 428]` and all 96 interleaved B96 occurrences against
+unchanged per-case floors `[440, 404, 361, 381]`. Every occurrence contained
+exactly 500 DNA tokens and aligned finite chosen logprobs.
+
+The standalone persistent P8/K12 inference control passed 192/192 exact-5,988
+rows. Its steady generation wall was 107.959 seconds, or 5,324.68 completion
+tokens/second. This standalone number is a retained control; GDPO comparisons
+use the complete outer step, including reward/QC, training, and refit.
+
+## Required final filters
+
+The target final-pass waterfall requires AAI (filter 8), the required-gene
+list, and synteny/total-gene logic (filter 9). None is optional in final-pass
+logging. Architecture-removal filter 7 remains intentionally disabled for this
+target profile. Report both raw and 99%-identity-deduplicated denominators and
+do not combine the online validation and offline rollout contracts.
+
+## Retained evidence
+
+Machine-local artifact roots are under `/data/jstjohn/evo2-vllm-lab/artifacts`:
+
+- `gdpo-tp2dp1-p8k12-exact6k-fullqc-c0b057d6-a2/run.log`:
+  `35f0eb57ca5e654b0885e4e5c63e99487566db429838d5e975b4529c5b86ca30`.
+- TP2 train row SHA256 values by step:
+  `2aed7992e149227730bd45d939708919919feb42c86fdfa06cd6326c93cfb174`,
+  `1c4d7050d27acc0e2bf25fdc9f15b8a617d93f30fb1a87eb5a10345931968765`,
+  and `3f7012b79f0bf15d63876c465e4b8109b4f1ffed6dc8b74b3b89cd865b10b05c`.
+- TP2 validation rows:
+  `b44f3549d1e76aa633d66955635358a4e5ccc8133d42853b713a841490a65dfa`.
+- `gdpo-tp1dp2-p8k12-exact6k-fullqc-45089b26-a2/run.log`:
+  `75ccbbaf6f45494af934a16e10b09791330f16d0263e1bdf33a701412a34dde2`.
+- `final-tp2-mixed-b4-b96-45089b26-mp-async-a1.json`:
+  `d4690e2b136e693e0e649f3e5b35a686c99d997b07ac15446f2e5e7c65f130f4`.
+- Persistent inference manifest, rows, and log:
+  `75560cf608d9efb49dd0ecace20ce1785f64908e407b7a62df2b92320c19b1b9`,
+  `c55ccfa5d7758f82b962bd9b2ea469bd71a8ccc1d9ac1fe447dbeda9ad198fbe`,
+  and `ca09e52ca15fd6fc949ac765bed041408e907ab83de092527b26167459b8b5d3`.
+
+These hashes bind the retained lab evidence. A portable release should copy the
+selected artifacts into its declared result root or artifact store rather than
+assuming these machine-local paths exist.

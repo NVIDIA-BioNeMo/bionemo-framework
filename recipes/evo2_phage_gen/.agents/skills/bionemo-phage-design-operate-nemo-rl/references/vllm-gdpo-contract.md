@@ -2,6 +2,9 @@
 
 Use this contract when vLLM generates NeMo-RL rollouts. Keep the current
 backend as a matched control until complete train and validation steps pass.
+The measured two-H100 baseline is recorded in
+[vllm-qualified-results.md](vllm-qualified-results.md); a new run must reproduce
+its applicable gates rather than inheriting its status.
 
 ## Build and runtime environments
 

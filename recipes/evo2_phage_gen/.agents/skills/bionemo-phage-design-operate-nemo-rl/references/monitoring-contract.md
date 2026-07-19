@@ -43,6 +43,12 @@ Do not confuse observation cadence with validation cadence. A cheap log-health c
 
 Keep monitor/state.json current and append monitor/events.jsonl. Each validation event includes step/time, checkpoint hash, primary and tie-break values, uncertainty, validation-manifest hash, prompt strata, exact denominator/filter profile, reward components, hard-filter waterfall, OR branches, diversity, KL/entropy, lengths/invalids, system health, data source, comparability flag/reason, and best/stop decision.
 
+For the PhiX174 target profile, record AAI (filter 8), the required-gene list,
+and synteny/total-gene logic (filter 9) as required final-pass filters. Do not
+label any of those three optional in summaries or pass-rate telemetry. Filter 7
+remains a separately reported disabled diagnostic unless the attempt explicitly
+declares a different target profile.
+
 For vLLM attempts also retain rollout-versus-policy logprob deltas and ratios, finite
 reward/advantage/loss/gradient checks, optimizer-step/parameter-change evidence, per-DP
 request/global-index/seed ranges, post-update export/conversion/refit/sync evidence, and rollout,
@@ -51,4 +57,3 @@ memory, and total-step timings. A missing or stale refit, overlapping DP stream,
 numeric gate is a health failure, not a comparable validation event.
 
 If continuous automation is unavailable, emit a repeatable one-tick script and handoff stating next_check_at. Never invent a nonexistent CLI.
-
