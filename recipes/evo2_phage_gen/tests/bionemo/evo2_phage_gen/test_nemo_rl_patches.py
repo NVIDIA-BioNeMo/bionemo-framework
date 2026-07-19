@@ -542,6 +542,7 @@ def test_default_nemo_rl_patch_series_is_ordered() -> None:
             "nemo-rl-evo2-vllm.patch",
             "nemo-rl-evo2-rollout-metrics.patch",
             "nemo-rl-evo2-sampling.patch",
+            "nemo-rl-vllm-v1-env.patch",
         ),
         "maintained NeMo-RL patch order drifted",
     )
@@ -792,6 +793,16 @@ def test_vllm_patch_excludes_request_timing_telemetry() -> None:
         all(value not in patch_text for value in forbidden),
         "diagnostic request timing telemetry entered the dependency patch",
     )
+
+
+def test_patched_vllm_worker_does_not_export_retired_v1_switch() -> None:
+    """vLLM 0.20 is V1-only and rejects the removed VLLM_USE_V1 setting."""
+    import inspect
+
+    from nemo_rl.models.generation.vllm.vllm_worker import BaseVllmGenerationWorker
+
+    load_model_source = inspect.getsource(BaseVllmGenerationWorker._load_model)
+    _require("VLLM_USE_V1" not in load_model_source, "worker exports retired VLLM_USE_V1")
 
 
 def test_patched_vllm_worker_normalizes_top_k_one_to_true_greedy() -> None:

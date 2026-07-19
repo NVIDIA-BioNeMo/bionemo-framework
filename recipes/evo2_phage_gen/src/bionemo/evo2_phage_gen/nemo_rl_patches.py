@@ -52,6 +52,7 @@ DEFAULT_PATCHES = (
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-vllm.patch",
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-rollout-metrics.patch",
     RECIPE_ROOT / "patches" / "nemo-rl-evo2-sampling.patch",
+    RECIPE_ROOT / "patches" / "nemo-rl-vllm-v1-env.patch",
 )
 REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.algorithms.grpo",

@@ -1,0 +1,19 @@
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker.py b/nemo_rl/models/generation/vllm/vllm_worker.py
+index ba681752..9fee003a 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker.py
+@@ -42,6 +42,5 @@ from nemo_rl.models.generation.vllm.utils import (
+ )
+ from nemo_rl.models.huggingface.common import ModelFlag
+-from nemo_rl.models.policy.utils import is_vllm_v1_engine_enabled
+ from nemo_rl.utils.nsys import wrap_with_nvtx_name
+ from nemo_rl.utils.nvml import log_gpu_memory_diagnostics
+ 
+@@ -374,7 +373,6 @@ class BaseVllmGenerationWorker:
+             # For non-parallel mode, explicitly set executor to None to avoid Ray issues
+             vllm_kwargs["distributed_executor_backend"] = None
+ 
+-        os.environ["VLLM_USE_V1"] = "1" if is_vllm_v1_engine_enabled() else "0"
+         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+ 
+         # We should use vLLM DP if ep_size > tp_size since EP_SIZE = DP_SIZE * TP_SIZE in vLLM.
