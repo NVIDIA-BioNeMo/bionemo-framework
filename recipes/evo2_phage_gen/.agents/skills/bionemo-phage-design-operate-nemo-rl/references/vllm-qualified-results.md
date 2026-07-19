@@ -17,6 +17,8 @@ dependency lock, recipe patches, runtime profile, topology, or batch geometry.
   `c0b057d63f23d31d73f3aa5bfd825984fd5529da`.
 - Source revision for the accepted TP1/DP2 and mixed-accuracy runs:
   `45089b2619e0252765311bef0580cd77a74be804`.
+- Source revision for the final clean mixed-accuracy and public-inference
+  reruns: `5f4969151ca68aa0d4ed2445420796de7e9173d4`.
 - The accepted TP2/DP1 run validated RL/standalone load parity for 330 tensors,
   the exported config and manifest, and tokenizer SHA256
   `52ccdc9c776e79a6c005d6b55d271e1dfaba55e60b52fe9bb2d1fec22d407504`.
@@ -66,15 +68,23 @@ error had mean 1.03076, p95 1.07897, and max 1.10170; zero rows exceeded the
 unchanged 1.5 threshold. Token importance ratios had mean 1.01046 and p95
 1.06242; 3.496% were outside the PPO clip interval `[0.8, 1.2]`.
 
-The canonical mixed TP2 identity gate passed unequal-prefix B4 with match
-counts `[490, 475, 390, 428]` and all 96 interleaved B96 occurrences against
-unchanged per-case floors `[440, 404, 361, 381]`. Every occurrence contained
-exactly 500 DNA tokens and aligned finite chosen logprobs.
+The final clean canonical mixed TP2 identity gate passed unequal-prefix B4
+with match counts `[490, 475, 390, 428]`. All 96 interleaved B96 occurrences
+passed unchanged per-case floors `[440, 404, 361, 381]`; observed per-case
+minimum match counts were `[486, 475, 390, 395]`. Every occurrence contained
+exactly 500 DNA tokens and aligned finite chosen logprobs. The B96 generation
+call completed 48,000 tokens in 16.450 seconds. This short accuracy workload
+is not the long-generation throughput authority.
 
-The standalone persistent P8/K12 inference control passed 192/192 exact-5,988
-rows. Its steady generation wall was 107.959 seconds, or 5,324.68 completion
-tokens/second. This standalone number is a retained control; GDPO comparisons
-use the complete outer step, including reward/QC, training, and refit.
+The final public `infer_evo2` persistent P8/K12 control passed 192/192
+exact-5,988 rows. Its steady generation wall was 82.602 seconds, or 6,959.22
+completion tokens/second. That is 21.18% above the matched native warm
+5,742.8-token/second reference and within 0.18% of the accepted direct actor
+control. The run used the same TP2 MP+async O2/balanced exact-B96 graph route
+as GDPO and independently bound the exported model to the retained RL
+checkpoint and tokenizer. This standalone number remains a control; GDPO
+comparisons use the complete outer step, including reward/QC, training, and
+refit.
 
 ## Required final filters
 
@@ -98,12 +108,15 @@ Machine-local artifact roots are under `/data/jstjohn/evo2-vllm-lab/artifacts`:
   `b44f3549d1e76aa633d66955635358a4e5ccc8133d42853b713a841490a65dfa`.
 - `gdpo-tp1dp2-p8k12-exact6k-fullqc-45089b26-a2/run.log`:
   `75ccbbaf6f45494af934a16e10b09791330f16d0263e1bdf33a701412a34dde2`.
-- `final-tp2-mixed-b4-b96-45089b26-mp-async-a1.json`:
-  `d4690e2b136e693e0e649f3e5b35a686c99d997b07ac15446f2e5e7c65f130f4`.
-- Persistent inference manifest, rows, and log:
-  `75560cf608d9efb49dd0ecace20ce1785f64908e407b7a62df2b92320c19b1b9`,
-  `c55ccfa5d7758f82b962bd9b2ea469bd71a8ccc1d9ac1fe447dbeda9ad198fbe`,
-  and `ca09e52ca15fd6fc949ac765bed041408e907ab83de092527b26167459b8b5d3`.
+- `final-tp2-mixed-b4-b96-5f496915-mp-async-a1.json`:
+  `d164d2d5ef1876b99ebb873fc25d0f837c6647f75af92e385442ec7fbcb66296`.
+- Final mixed B4 and B96 full-output sidecars:
+  `5abded06393f3b2ec09358b2675c4638aa5136608f7fed4e8ef2a095235f90f7`
+  and `5fa25eaa2e9fef729ad142a8b411ca2d964c85de2cf196667d3460dba1064be2`.
+- Final public-inference manifest, rows, and log:
+  `fcf9e69ab755e2740b33afa2115f3756051b07b7273860a25d5649f2256ee5c3`,
+  `23461abd3c3c858544739b43baaa8da6ffb8793369d1d267acbcf337d6567cbf`,
+  and `fa55f1f4ed60496d4004709f02430ef2e67ae30348444f8324c21a679e49c6a8`.
 
 These hashes bind the retained lab evidence. A portable release should copy the
 selected artifacts into its declared result root or artifact store rather than
