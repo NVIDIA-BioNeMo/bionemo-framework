@@ -172,7 +172,7 @@ patsy==1.0.1
 peft==0.17.1
 pexpect==4.9.0
 pfzy==0.3.4
-pillow==11.3.0
+pillow==12.3.0
 platformdirs==4.3.8
 pluggy==1.6.0
 polars
