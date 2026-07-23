@@ -61,6 +61,70 @@ GROUPS = [
     ((8, 1), "FSDP2-only\n(dp8, ep1)"),
 ]
 
+# Single-group three-bar comparison (HF baseline vs native-TE BF16 vs native-TE MXFP8), 8×B200.
+# Values are tokens/s/GPU; the left PFLOP/s/GPU axis is an exact linear rescale.
+HF_COMPARISON = [
+    ("HF Baseline\n(BF16)", 3933.13, "#BDBDBD"),
+    ("Native TE\n(BF16)", 4213.0, "#636363"),
+    ("Native TE\n(MXFP8)", 6183.0, "#76B900"),
+]
+HF_COMPARISON_OUT = HERE / "mixtral_8x7b_B200_hf_comparison.png"
+HF_COMPARISON_TITLE = "Mixtral-8x7B training throughput — 8×B200"
+HF_COMPARISON_SUBTITLE = (
+    "Pretrained weights, THD packing, wikitext, token_mb=4096, max_seq=4096, FSDP2-only (dp8, ep1). "
+    "MFU vs dense B200 peaks (fp8 4.5, bf16 2.25 PFLOP/s)."
+)
+
+# Single-group three-bar comparison, 8×B300 (dp4, ep2). tokens/s/GPU, steady state.
+# HF baseline: real pretrained checkpoint + real text, grouped_mm experts + torch.compile (sdpa).
+HF_COMPARISON_B300 = [
+    ("HF Baseline\n(BF16)", 964.0, "#BDBDBD"),
+    ("Native TE\n(BF16)", 4770.0, "#636363"),
+    ("Native TE\n(MXFP8)", 10577.0, "#76B900"),
+]
+HF_COMPARISON_B300_OUT = HERE / "mixtral_8x7b_B300_hf_comparison.png"
+HF_COMPARISON_B300_TITLE = "Mixtral-8x7B training throughput — 8×B300"
+HF_COMPARISON_B300_SUBTITLE = (
+    "Random init, THD packing, wikitext, token_mb=16384, max_seq=8192, EP+FSDP2 (dp4, ep2). "
+    "MFU vs dense B300 peaks (fp8 5.0, bf16 2.5 PFLOP/s)."
+)
+
+
+def plot_hf_comparison(comparison, out: Path, title: str, subtitle: str, fig_width: float, fig_height: float):
+    """Render a single-group three-bar chart comparing HF baseline to native-TE BF16 and MXFP8."""
+    labels = [label for label, _, _ in comparison]
+    tokens = [tok for _, tok, _ in comparison]
+    colors = [color for _, _, color in comparison]
+    pflops = [tok / TOKENS_PER_PFLOP for tok in tokens]
+    x = range(len(HF_COMPARISON))
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=200)
+    bars = ax.bar(list(x), pflops, 0.6, color=colors, edgecolor="white")
+    ax.bar_label(
+        bars,
+        labels=[f"{p:.3f}\n{t:,.0f} tok/s" for p, t in zip(pflops, tokens)],
+        padding=3,
+        fontsize=10,
+        color="#333333",
+    )
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, fontsize=10)
+    ax.set_ylabel("PFLOP/s/GPU  (6 · N_active)", fontsize=11)
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+    ax.set_ylim(0, max(pflops) * 1.22)
+
+    secax = ax.secondary_yaxis("right", functions=(lambda p: p * TOKENS_PER_PFLOP, lambda t: t / TOKENS_PER_PFLOP))
+    secax.set_ylabel("tokens/s/GPU", fontsize=11)
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.text(0.5, -0.02, subtitle, ha="center", fontsize=8, color="#666666")
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    print(f"wrote {out}")
+
 
 def load(csv_path: Path):
     """Load PFLOP/s/GPU per (dp, ep, precision) from the results CSV."""
@@ -80,7 +144,31 @@ def main():
     parser.add_argument("--subtitle", default=DEFAULT_SUBTITLE)
     parser.add_argument("--fig-width", type=float, default=9.0)
     parser.add_argument("--fig-height", type=float, default=5.4)
+    parser.add_argument(
+        "--hf-comparison",
+        action="store_true",
+        help="Render the single-group HF-baseline vs BF16 vs MXFP8 chart for 8×B200.",
+    )
+    parser.add_argument(
+        "--hf-comparison-b300",
+        action="store_true",
+        help="Render the single-group HF-baseline vs BF16 vs MXFP8 chart for 8×B300 (dp4, ep2).",
+    )
     args = parser.parse_args()
+
+    if args.hf_comparison:
+        out = args.out if args.out != DEFAULT_OUT else HF_COMPARISON_OUT
+        title = args.title if args.title != DEFAULT_TITLE else HF_COMPARISON_TITLE
+        subtitle = args.subtitle if args.subtitle != DEFAULT_SUBTITLE else HF_COMPARISON_SUBTITLE
+        plot_hf_comparison(HF_COMPARISON, out, title, subtitle, args.fig_width, args.fig_height)
+        return
+
+    if args.hf_comparison_b300:
+        out = args.out if args.out != DEFAULT_OUT else HF_COMPARISON_B300_OUT
+        title = args.title if args.title != DEFAULT_TITLE else HF_COMPARISON_B300_TITLE
+        subtitle = args.subtitle if args.subtitle != DEFAULT_SUBTITLE else HF_COMPARISON_B300_SUBTITLE
+        plot_hf_comparison(HF_COMPARISON_B300, out, title, subtitle, args.fig_width, args.fig_height)
+        return
 
     data = load(args.csv)
     x = range(len(GROUPS))
