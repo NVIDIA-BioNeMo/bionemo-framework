@@ -7,7 +7,7 @@ import FeatureList from './FeatureList'
 import EmbeddingView from './EmbeddingView'
 import Histogram from './Histogram'
 import { styles } from './styles'
-import { userLabel, useUserLabels } from './components'
+import { userLabel, useUserLabels, primeServerRenames } from './components'
 
 // Theme is owned by the Dashboard shell (one global Sun/Moon toggle); it sets the document `dark`
 // class and passes `dark` down. The atlas previously had its OWN toggle + class effect here — removed,
@@ -68,6 +68,10 @@ export default function App({ title = "Evo 2 SAE Feature Explorer", subtitle = "
   }, [])
 
   // Intersection Observer for infinite scroll pagination
+  // Prime server-side renames once on boot, so persisted renames show for every viewer (not just the
+  // browser that made them) — including in the static-parquet atlas cards, which don't hit /features.
+  useEffect(() => { primeServerRenames() }, [])
+
   useEffect(() => {
     const sentinel = endOfListRef.current
     const scrollContainer = featureListRef.current

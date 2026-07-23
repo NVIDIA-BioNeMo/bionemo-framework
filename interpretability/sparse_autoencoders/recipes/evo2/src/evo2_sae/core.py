@@ -36,6 +36,7 @@ encode, feature labels, and the decode-only feature-clamp hook.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -242,8 +243,19 @@ class Evo2SAE:
         # same hidden size is undetectable here (the SAE checkpoint records no training layer).
         self._check_dim(self._sae_input_dim, self._model_hidden_size(), self.layer)
         self.labels, self.peaks, self.feature_extra = self._load_feature_meta()
+        # Server-side renames: the parquet labels are the immutable base; user renames are overlaid
+        # from a JSON sidecar (durable across restarts/redeploys, shared across browsers). See set_label.
+        self._base_labels = dict(self.labels)
+        self.renames = self._load_renames()
+        self.labels.update(self.renames)
         self.ready = True
-        logger.info("Evo2SAE ready: layer=%d n_features=%d n_labels=%d", self.layer, self.n_features, len(self.labels))
+        logger.info(
+            "Evo2SAE ready: layer=%d n_features=%d n_labels=%d n_renames=%d",
+            self.layer,
+            self.n_features,
+            len(self.labels),
+            len(self.renames),
+        )
         return self
 
     def _ensure_engine(self):
@@ -314,6 +326,62 @@ class Evo2SAE:
         self._sae_input_dim = int(cfg["input_dim"])  # must equal the model hidden size (checked in load)
         logger.info("SAE loaded: TopKSAE input_dim=%d n_features=%d", cfg["input_dim"], cfg["hidden_dim"])
         return sae, int(cfg["hidden_dim"])
+
+    def _renames_path(self) -> Path:
+        """Path where user renames are persisted.
+
+        ``FEATURE_RENAMES`` overrides; else a sidecar next to the annotations parquet (so it lands on
+        the same mounted/persistent volume); else the CWD.
+        """
+        env = os.getenv("FEATURE_RENAMES")
+        if env:
+            return Path(env)
+        if self.feature_annotations:
+            return Path(self.feature_annotations).with_name("feature_renames.json")
+        return Path("feature_renames.json")
+
+    def _load_renames(self) -> dict:
+        """Load persisted {feature_id: label} overlays. Missing/corrupt file -> no renames (never fatal)."""
+        p = self._renames_path()
+        if not p.exists():
+            return {}
+        try:
+            raw = json.loads(p.read_text())
+            return {int(k): str(v) for k, v in raw.items() if str(v).strip()}
+        except Exception as e:
+            logger.warning("Could not read renames %s: %s — ignoring", p, e)
+            return {}
+
+    def _save_renames(self) -> None:
+        p = self._renames_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(json.dumps({str(k): v for k, v in sorted(self.renames.items())}, indent=0))
+            tmp.replace(p)  # atomic on POSIX — no half-written file if we crash mid-write
+        except Exception as e:
+            logger.warning("Could not write renames %s: %s", p, e)
+
+    def set_label(self, feature_id: int, label: str) -> Optional[str]:
+        """Persist a user rename: update in-memory labels + the sidecar.
+
+        A blank label reverts to the original parquet annotation. Returns the resulting label
+        (None if it became unlabeled).
+        """
+        fid = int(feature_id)
+        text = (label or "").strip()
+        if text:
+            self.renames[fid] = text
+            self.labels[fid] = text
+        else:
+            self.renames.pop(fid, None)
+            base = self._base_labels.get(fid)
+            if base is not None:
+                self.labels[fid] = base
+            else:
+                self.labels.pop(fid, None)
+        self._save_renames()
+        return self.labels.get(fid)
 
     def _load_feature_meta(self):
         """feature_id -> (labels, peaks, extra) from the annotation **parquet**.

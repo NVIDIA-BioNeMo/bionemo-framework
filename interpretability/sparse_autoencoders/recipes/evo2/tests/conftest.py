@@ -134,6 +134,8 @@ class FakeEngine:
         self.layer = 19
         self.n_features = 4
         self.labels = {0: "feat0", 1: "feat1"}
+        self._base_labels = dict(self.labels)
+        self.renames = {}  # user rename overlay (in-memory here; the real engine persists to a sidecar)
         self.peaks = {0: 0.5}
         # Curated per-feature extras (steerable/description/auroc) — feat0 is flagged steerable so tests
         # can assert these flow through /features; feat1 has none (defaults to steerable=False).
@@ -151,6 +153,22 @@ class FakeEngine:
 
     def resolve_tag(self, organism, tag):
         return tag if tag is not None else self.organism_tags.get(organism)
+
+    def set_label(self, feature_id, label):
+        """In-memory mirror of Evo2SAE.set_label (blank reverts to the base label)."""
+        fid = int(feature_id)
+        text = (label or "").strip()
+        if text:
+            self.renames[fid] = text
+            self.labels[fid] = text
+        else:
+            self.renames.pop(fid, None)
+            base = self._base_labels.get(fid)
+            if base is not None:
+                self.labels[fid] = base
+            else:
+                self.labels.pop(fid, None)
+        return self.labels.get(fid)
 
     def encode(self, full):
         codes = torch.zeros(len(full), self.n_features)

@@ -74,6 +74,13 @@ class AnnotateRequest(BaseModel):
     feature_ids: Optional[list[int]] = None
 
 
+class RenameRequest(BaseModel):
+    """Request body for /rename — persist a user-provided feature label (blank reverts to default)."""
+
+    feature_id: int
+    label: str = ""
+
+
 class FeatureClamp(BaseModel):
     """A single SAE-feature steering clamp (feature id + target strength)."""
 
@@ -208,7 +215,9 @@ async def _stream_cancellable(request: Request, work):
                 logger.info("client disconnected mid-request — aborted, GPU freed")
                 return
             except ValueError as e:
-                yield json.dumps({"__error__": {"status": 413 if "too long" in str(e) else 400, "detail": str(e)}}).encode()
+                yield json.dumps(
+                    {"__error__": {"status": 413 if "too long" in str(e) else 400, "detail": str(e)}}
+                ).encode()
                 return
             except Exception as e:  # surface a clean message, not a mid-stream 500 traceback
                 logger.exception("streamed work failed")
@@ -302,7 +311,9 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
         """
         if os.getenv("ALLOW_ENGINE_RESTART") != "1":
             raise HTTPException(403, "Engine restart is not enabled on this server.")
-        logger.warning("engine restart requested via /api/restart — exiting worker (code %d) for respawn", EXIT_RESTART)
+        logger.warning(
+            "engine restart requested via /api/restart — exiting worker (code %d) for respawn", EXIT_RESTART
+        )
         # Exit just after the 202 flushes; the supervisor's respawn loop reloads the model.
         threading.Timer(0.3, lambda: os._exit(EXIT_RESTART)).start()
         return JSONResponse({"restarting": True}, status_code=202)
@@ -329,6 +340,28 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
             )
         rows.sort(key=lambda r: r["id"])
         return rows
+
+    @api.get("/renames")
+    def renames():
+        """The user rename overlay {feature_id: label}.
+
+        The client primes its store from this on boot, so a rename made in one browser shows for
+        everyone — not just the browser that made it.
+        """
+        _require_ready()
+        return {str(fid): lab for fid, lab in engine.renames.items()}
+
+    @api.post("/rename")
+    def rename(req: RenameRequest):
+        """Persist a feature rename server-side (durable, shared across browsers).
+
+        Blank label reverts to the default annotation.
+        """
+        _require_ready()
+        if not (0 <= req.feature_id < engine.n_features):
+            raise HTTPException(400, f"feature_id {req.feature_id} out of range [0, {engine.n_features})")
+        label = engine.set_label(req.feature_id, req.label)
+        return {"feature_id": req.feature_id, "label": label}
 
     @api.post("/annotate")
     def annotate(req: AnnotateRequest):
@@ -439,6 +472,7 @@ def build_app(engine: Evo2SAE, static_dir: Optional[str] = None) -> FastAPI:
                     "species": g.get("species"),
                 }
             )
+
         # pooling + stats + base64 packing live in Evo2SAE.embed_bundle, shared with the offline
         # dashboard.py precompute so the static bundle is the same shape as this response. This is the
         # heavy part (one encode per sequence, up to MAX_GENES on the single GPU) and the longest call

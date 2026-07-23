@@ -6,7 +6,7 @@
 // dependency of another; they belong in a neutral module both panes import from.
 
 import React, { useMemo, useState, useEffect } from 'react'
-import { BACKEND, activationColor, legendGradient } from './backend'
+import { BACKEND, activationColor, legendGradient, getJSON, postJSON } from './backend'
 
 export const BASES_PER_LINE = 80
 
@@ -69,14 +69,34 @@ export function resolveFeatureId(catalog, q) {
   return hit ? hit.id : null
 }
 
-// In-UI feature renames live in localStorage (featureTitle_<id>). Overlay them so a name set
-// in the atlas also shows in the steering/inspector pickers (cross-tab carry-over, per browser).
+// Feature renames are stored SERVER-SIDE (POST /rename -> a JSON sidecar next to the annotations),
+// so they survive reloads/redeploys and are visible to every viewer. `_serverRenames` mirrors that
+// store in-process; it's primed once on boot from GET /renames (primeServerRenames). localStorage is
+// kept only as an instant, offline-friendly local overlay that wins for immediate feedback.
+const _serverRenames = new Map()
+
+// Prime the server-rename overlay on boot. Call once at app startup (see App.jsx). Idempotent.
+export async function primeServerRenames() {
+  try {
+    const data = await getJSON('/renames')
+    _serverRenames.clear()
+    for (const [k, v] of Object.entries(data || {})) _serverRenames.set(Number(k), v)
+    _labelListeners.forEach((fn) => { try { fn() } catch { /* ignore */ } })
+  } catch {
+    /* backend unreachable (atlas-only mode) — fall back to localStorage overlay */
+  }
+}
+
+// The effective label overlay: a local (this-browser) rename wins for instant feedback; otherwise the
+// server-persisted rename (shared across browsers). Returns null when neither has one.
 export function userLabel(id) {
   try {
-    return localStorage.getItem(`featureTitle_${id}`) || null
+    const local = localStorage.getItem(`featureTitle_${id}`)
+    if (local) return local
   } catch {
-    return null
+    /* private mode — fall through to the server overlay */
   }
+  return _serverRenames.get(Number(id)) || null
 }
 
 // Subscribers that re-render when any feature is renamed. Needed because tabs are now kept mounted
@@ -101,16 +121,21 @@ export function useUserLabels() {
   return tick
 }
 
-// Persist (or clear when blank) a user-provided feature title, then notify subscribers so every
-// mounted tab updates. Safe in private-mode/quota: a throwing localStorage is swallowed.
+// Persist (or clear when blank) a user-provided feature title everywhere: localStorage (instant,
+// local), the in-process server overlay (optimistic), and the backend (durable, shared). Then notify
+// subscribers so every mounted tab updates. Safe in private-mode/quota and when the backend is down.
 export function setUserLabel(id, text) {
+  const t = (text || '').trim()
   try {
-    const t = (text || '').trim()
     if (t) localStorage.setItem(`featureTitle_${id}`, t)
     else localStorage.removeItem(`featureTitle_${id}`)
   } catch {
-    /* private mode / quota exceeded — ignore */
+    /* private mode / quota exceeded — the server copy below is the durable one anyway */
   }
+  if (t) _serverRenames.set(Number(id), t)
+  else _serverRenames.delete(Number(id))
+  // Fire-and-forget: the UI already reflects it optimistically; a failure just means it isn't durable.
+  postJSON('/rename', { feature_id: Number(id), label: t }).catch(() => { /* backend down / atlas-only */ })
   _labelListeners.forEach((fn) => { try { fn() } catch { /* ignore */ } })
 }
 

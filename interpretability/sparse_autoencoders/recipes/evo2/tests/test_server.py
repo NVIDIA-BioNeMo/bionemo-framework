@@ -73,6 +73,30 @@ def test_features(client):
     assert by_id[1]["steerable"] is False and by_id[1]["description"] is None  # no extra → sensible defaults
 
 
+def test_rename_persists_and_surfaces(client, fake_engine):
+    # rename a previously-unlabeled feature -> reflected in the engine, /renames, and /features
+    r = client.post("/api/rename", json={"feature_id": 2, "label": "my motif"})
+    assert r.status_code == 200 and r.json() == {"feature_id": 2, "label": "my motif"}
+    assert fake_engine.labels[2] == "my motif"
+    assert client.get("/api/renames").json() == {"2": "my motif"}
+    by_id = {row["id"]: row["label"] for row in client.get("/api/features").json()}
+    assert by_id[2] == "my motif"
+
+
+def test_rename_blank_reverts_to_base(client, fake_engine):
+    # feature 0 has a base label; rename then blank -> back to the base, not gone
+    client.post("/api/rename", json={"feature_id": 0, "label": "renamed"})
+    assert fake_engine.labels[0] == "renamed"
+    client.post("/api/rename", json={"feature_id": 0, "label": "  "})
+    assert fake_engine.labels[0] == "feat0" and 0 not in fake_engine.renames
+    assert client.get("/api/renames").json() == {}
+
+
+def test_rename_rejects_out_of_range(client, fake_engine):
+    assert client.post("/api/rename", json={"feature_id": fake_engine.n_features, "label": "x"}).status_code == 400
+    assert client.post("/api/rename", json={"feature_id": -1, "label": "x"}).status_code == 400
+
+
 def test_annotate_returns_per_base_activations(client):
     b = client.post("/api/annotate", json={"sequence": "ACGTACGT", "organism": "None (raw DNA)"}).json()
     assert {"sequence", "features", "bases", "tag_len", "layer", "n_tokens"} <= set(b)
