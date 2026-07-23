@@ -20,7 +20,7 @@ function Tex({ expr, block = false }) {
 const BASES_PER_LINE = 80
 
 export default function GenerativeSteering() {
-  useUserLabels() // re-render when a feature is renamed in any tab
+  const labelTick = useUserLabels() // re-render + refetch the catalog when a feature is renamed in any tab
   const health = useHealth()
   const organismTags = health.info?.organism_tags
 
@@ -42,8 +42,10 @@ export default function GenerativeSteering() {
   useEffect(() => {
     if (health.status !== 'ready') return
     if (tag === null && organismTags) setTag(organismTags[organism] ?? '')
-    if (!catalog.length) getJSON('/features').then(setCatalog).catch(() => {})
-  }, [health.status, organismTags])
+    // Refetch on every rename (labelTick) too, so a feature named anywhere (incl. an arbitrary atlas
+    // feature) shows up in this picker's catalog + datalist and is searchable by its new name.
+    getJSON('/features').then(setCatalog).catch(() => {})
+  }, [health.status, organismTags, labelTick])
 
   // Clear the "Engine restarting…" note once the worker is back (BackendBanner then shows it live again).
   useEffect(() => {

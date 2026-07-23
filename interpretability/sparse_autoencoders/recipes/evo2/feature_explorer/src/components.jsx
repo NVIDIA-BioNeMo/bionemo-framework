@@ -56,17 +56,38 @@ export function Legend({ label = 'SAE activation', note }) {
 }
 
 // Resolve a picker row's text ("#123 …" or an exact label) to a feature id.
+// Resolve a rename (a typed display name) back to a feature id via the overlay stores. Covers ANY
+// feature — including ones absent from the labeled /features catalog (e.g. an arbitrary atlas feature
+// you just renamed). Checks the server overlay, then the localStorage overlay.
+function renameToId(name) {
+  for (const [id, lab] of _serverRenames) if (lab === name) return id
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith('featureTitle_') && localStorage.getItem(k) === name) {
+        return Number(k.slice('featureTitle_'.length))
+      }
+    }
+  } catch {
+    /* private mode — no localStorage overlay to scan */
+  }
+  return null
+}
+
 export function resolveFeatureId(catalog, q) {
-  // A bare numeric id resolves to ANY feature (the catalog only lists the labeled subset, but
-  // every feature 0..n_features-1 is clampable). Otherwise match an exact label from the catalog.
+  // A bare numeric id resolves to ANY feature (every feature 0..n_features-1 is clampable, even if
+  // unlabeled). Otherwise match a label — the effective (renamed) label first, then the base catalog
+  // label, then the rename overlay, so a renamed-but-uncataloged feature still resolves by its new name.
   const m = String(q).match(/#?(\d+)/)
   if (m) {
     const id = Number(m[1])
     if (Number.isInteger(id) && id >= 0) return id
   }
   const lab = String(q).trim()
-  const hit = catalog.find((f) => f.label === lab)
-  return hit ? hit.id : null
+  if (!lab) return null
+  const hit = catalog.find((f) => (userLabel(f.id) || f.label) === lab)
+  if (hit) return hit.id
+  return renameToId(lab)
 }
 
 // Feature renames are stored SERVER-SIDE (POST /rename -> a JSON sidecar next to the annotations),
@@ -134,8 +155,11 @@ export function setUserLabel(id, text) {
   }
   if (t) _serverRenames.set(Number(id), t)
   else _serverRenames.delete(Number(id))
-  // Fire-and-forget: the UI already reflects it optimistically; a failure just means it isn't durable.
-  postJSON('/rename', { feature_id: Number(id), label: t }).catch(() => { /* backend down / atlas-only */ })
+  // The UI already reflects it optimistically; on server confirm, notify again so the picker tabs
+  // refetch /features and the rename becomes searchable there (a failure just means it isn't durable).
+  postJSON('/rename', { feature_id: Number(id), label: t })
+    .then(() => { _labelListeners.forEach((fn) => { try { fn() } catch { /* ignore */ } }) })
+    .catch(() => { /* backend down / atlas-only */ })
   _labelListeners.forEach((fn) => { try { fn() } catch { /* ignore */ } })
 }
 

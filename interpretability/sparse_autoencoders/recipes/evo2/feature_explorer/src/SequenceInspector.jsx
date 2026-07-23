@@ -13,7 +13,7 @@ const DEFAULT_SEQ = 'ATGGCTGAAAAGCTGGAAGCGGCAATTGAGCAGGCTGCAGTGGCAAATCAAGCG'
 export { resolveFeatureId, userLabel } from './components'
 
 export default function SequenceInspector() {
-  useUserLabels() // re-render when a feature is renamed in any tab
+  const labelTick = useUserLabels() // re-render + refetch the catalog when a feature is renamed in any tab
   const health = useHealth()
   const organismTags = health.info?.organism_tags
   const [catalog, setCatalog] = useState([])
@@ -32,8 +32,9 @@ export default function SequenceInspector() {
   useEffect(() => {
     if (health.status !== 'ready') return
     if (tag === null && organismTags) setTag(organismTags[organism] ?? '')
-    if (!catalog.length) getJSON('/features').then(setCatalog).catch(() => {})
-  }, [health.status, organismTags])
+    // Refetch on every rename (labelTick) too, so a feature named anywhere becomes searchable here.
+    getJSON('/features').then(setCatalog).catch(() => {})
+  }, [health.status, organismTags, labelTick])
 
   // Clear the "Engine restarting…" note once the worker is back (BackendBanner then shows it live again).
   useEffect(() => {
