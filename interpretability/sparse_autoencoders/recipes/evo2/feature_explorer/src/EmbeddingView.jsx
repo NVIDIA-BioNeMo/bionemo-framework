@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import { EmbeddingViewMosaic } from 'embedding-atlas'
-import { userLabel } from './components'
+import { userLabel, useUserLabels } from './components'
 
 // Color palette for categories (D3 category10 + extended)
 const CATEGORY_COLORS = [
@@ -73,6 +73,7 @@ export default function EmbeddingView({ brush, categoryColumn, categoryColumns, 
   const viewRef = useRef(null)
   const onFeatureClickRef = useRef(onFeatureClick)
   const onViewportChangeRef = useRef(onViewportChange)
+  const labelTick = useUserLabels() // bumps on any rename — used below to refresh the tooltip label
 
   // Keep the callback refs updated
   useEffect(() => {
@@ -129,7 +130,7 @@ export default function EmbeddingView({ brush, categoryColumn, categoryColumns, 
         tooltip: null
       })
     }
-  }, [highlightedFeatureId, features, selectedCategory])
+  }, [highlightedFeatureId, features, selectedCategory, labelTick])
 
   // Update viewport when viewportState changes (skip null to let auto-fit persist)
   useEffect(() => {

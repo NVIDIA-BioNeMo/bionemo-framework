@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, forwardRef } from 'react'
 import SequenceView, { computeAlignInfo } from './SequenceView'
 import FeatureDetailPage from './FeatureDetailPage'
 import { getRegionLabel } from './utils'
-import { userLabel, setUserLabel } from './components'
+import { userLabel, setUserLabel, useUserLabels } from './components'
 
 const styles = {
   card: {
@@ -183,16 +183,20 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
   const [alignMode, setAlignMode] = useState('start')
   const scrollGroupRef = useRef([])
   const [editingTitle, setEditingTitle] = useState(false)
-  const [userTitle, setUserTitle] = useState('')
+  const [editText, setEditText] = useState('')
   const inputRef = useRef(null)
 
-  // Load user-provided title from localStorage (safe read via the shared helper)
+  // Subscribe so this card re-renders when THIS (or any) feature is renamed in another card/tab.
+  useUserLabels()
+  // Read the label LIVE on every render (don't cache in state) — that's what makes a rename made
+  // anywhere show up here instantly, instead of being trapped in one card's local state.
+  const liveLabel = userLabel(feature.feature_id)
+
+  // Seed the edit buffer from the live label whenever editing starts. Display reads `liveLabel`
+  // directly, so we deliberately don't depend on `liveLabel` here (that would clobber typing).
   useEffect(() => {
-    const stored = userLabel(feature.feature_id)
-    if (stored) {
-      setUserTitle(stored)
-    }
-  }, [feature.feature_id])
+    if (editingTitle) setEditText(liveLabel || '')
+  }, [editingTitle]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Focus input when editing starts
   useEffect(() => {
@@ -248,17 +252,15 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
   }
 
   const handleSaveTitle = () => {
-    setUserLabel(feature.feature_id, userTitle)
-    if (!userTitle.trim()) setUserTitle('')
+    setUserLabel(feature.feature_id, editText) // writes localStorage + notifies every subscribed card/tab
     setEditingTitle(false)
   }
 
   const handleCancelEdit = () => {
-    setUserTitle(userLabel(feature.feature_id) || '')
-    setEditingTitle(false)
+    setEditingTitle(false) // buffer is reseeded from liveLabel next time editing opens
   }
 
-  const displayTitle = userTitle || description
+  const displayTitle = liveLabel || description
 
   const handleTitleKeyDown = (e) => {
     if (e.key === 'Enter') {
@@ -275,8 +277,8 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
     lines.push('=== FEATURE METADATA ===')
     lines.push(`Feature ID,${feature.feature_id}`)
     lines.push(`Label,${displayTitle}`)
-    if (userTitle) {
-      lines.push(`User Title,${userTitle}`)
+    if (liveLabel) {
+      lines.push(`User Title,${liveLabel}`)
     }
     lines.push(`Activation Frequency,${(freq * 100).toFixed(2)}%`)
     lines.push(`Max Activation,${maxAct.toFixed(4)}`)
@@ -316,8 +318,8 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
               <input
                 ref={inputRef}
                 type="text"
-                value={userTitle}
-                onChange={(e) => setUserTitle(e.target.value)}
+                value={editText}
+                onChange={(e) => setEditText(e.target.value)}
                 onKeyDown={handleTitleKeyDown}
                 onClick={(e) => e.stopPropagation()}
                 style={{
@@ -360,7 +362,7 @@ const FeatureCard = forwardRef(function FeatureCard({ feature, isHighlighted, fo
             </div>
           ) : (
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-              <div style={userTitle ? styles.userTitle : styles.description}>{displayTitle}</div>
+              <div style={liveLabel ? styles.userTitle : styles.description}>{displayTitle}</div>
               <span
                 onClick={(e) => { e.stopPropagation(); setEditingTitle(true) }}
                 style={{

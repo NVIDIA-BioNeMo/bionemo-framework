@@ -85,13 +85,20 @@ export function userLabel(id) {
 const _labelListeners = new Set()
 
 // Call in any component that displays feature names, so it re-renders when a rename happens anywhere.
+// Returns a monotonically-increasing tick, usable as a useEffect dependency to re-run imperative
+// label updates (e.g. the WebGPU atlas) on a rename.
 export function useUserLabels() {
-  const [, bump] = useState(0)
+  const [tick, bump] = useState(0)
   useEffect(() => {
     const fn = () => bump((n) => n + 1)
     _labelListeners.add(fn)
-    return () => _labelListeners.delete(fn)
+    // Also react to renames from OTHER browser windows/tabs — localStorage fires a native `storage`
+    // event cross-window (the in-process _labelListeners set only covers this document).
+    const onStorage = (e) => { if (!e.key || e.key.startsWith('featureTitle_')) fn() }
+    window.addEventListener('storage', onStorage)
+    return () => { _labelListeners.delete(fn); window.removeEventListener('storage', onStorage) }
   }, [])
+  return tick
 }
 
 // Persist (or clear when blank) a user-provided feature title, then notify subscribers so every
