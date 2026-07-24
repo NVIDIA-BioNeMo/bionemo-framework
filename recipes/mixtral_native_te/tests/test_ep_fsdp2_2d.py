@@ -183,9 +183,8 @@ def _expert_master_snapshot(model: torch.nn.Module, optimizer) -> dict[str, torc
 def _run_2d_mesh_worker(tmp_dir: str) -> None:
     from checkpoint import load_checkpoint, save_checkpoint
     from distributed_config import DistributedConfig
-    from distributed_setup import all_reduce_dense_grads_over_ep
+    from distributed_setup import all_reduce_dense_grads_over_ep, clip_grad_norm_mixed
     from torch.distributed.tensor import DTensor
-    from train_fsdp2_ep import _clip_grad_norm_mixed
 
     os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "0"
     os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
@@ -212,13 +211,30 @@ def _run_2d_mesh_worker(tmp_dir: str) -> None:
     # EP+FSDP2: dense grads are FSDP-reduced over dp but only replicated over ep; average over ep.
     all_reduce_dense_grads_over_ep(model, mesh["ep"].get_group())
 
-    grad_norm = _clip_grad_norm_mixed(
+    # Build an independent reference: experts are unique across ep and sharded across dp, while
+    # dense grads are sharded across dp but duplicated across ep after the average above.
+    local_expert_sq = torch.zeros((), device=device, dtype=torch.float32)
+    local_dense_sq = torch.zeros((), device=device, dtype=torch.float32)
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+        grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+        if _is_expert_key(name):
+            local_expert_sq += grad.float().square().sum()
+        else:
+            local_dense_sq += grad.float().square().sum()
+    torch.distributed.all_reduce(local_expert_sq)
+    torch.distributed.all_reduce(local_dense_sq)
+    expected_norm = torch.sqrt(local_expert_sq + local_dense_sq / EP_SIZE)
+
+    grad_norm = clip_grad_norm_mixed(
         model,
         max_norm=1.0,
         ep_group=mesh["ep"].get_group(),
         dp_group=mesh["dp"].get_group(),
     )
     assert torch.isfinite(grad_norm), f"grad norm not finite: {grad_norm}"
+    torch.testing.assert_close(grad_norm, expected_norm)
 
     optimizer.step()
     scheduler.step()

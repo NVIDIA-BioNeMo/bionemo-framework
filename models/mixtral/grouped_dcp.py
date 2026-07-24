@@ -24,14 +24,28 @@ factorization and could not be loaded into a different layout. This module const
 global expert tensor — stack the local experts and wrap as ``DTensor(Shard(0))`` on the ``ep`` mesh —
 so the on-disk checkpoint is layout-independent and DCP can reshard it into any other ``(dp, ep)``.
 
-Supports both single ``GroupedTensor`` weights (``single_grouped_weight=True``) and discrete
-``weight{i}`` per-expert params (``fused_grouped_mlp`` / ``NVTE_GROUPED_LINEAR_SINGLE_PARAM=0``).
+The model-weight path supports both single ``GroupedTensor`` weights
+(``single_grouped_weight=True``) and discrete ``weight{i}`` per-expert params
+(``fused_grouped_mlp`` / ``NVTE_GROUPED_LINEAR_SINGLE_PARAM=0``). The optimizer-state path supports
+only the discrete representation because TE 2.16 FusedAdam fails when updating a GroupedTensor.
 
 We only need a global, reshardable representation at save/load time. For GroupedTensor /
 MXFP8Tensor weights we operate on the *dequantized* bf16 view: at save, stack local expert shards
 and wrap as ``DTensor(Shard(0))`` on the EP mesh; at load, reshard back and ``copy_`` into the
 live weights (re-quantizing MXFP8 params on copy). FusedAdam optimizer state
 (``master_param``, ``exp_avg``, ``exp_avg_sq``) is consolidated the same way for discrete experts.
+
+TE's experimental ``single_grouped_weight`` does not by itself make this module removable. It
+combines each rank's local experts into a TE ``GroupedTensor``, not an ordinary global tensor or
+DTensor. In TE 2.16, ``DTensor.from_local`` calls ``view_as`` and GroupedTensor rejects that shape
+operation; FSDP2 therefore cannot shard it over ``dp``. Pure EP model-weight DCP does work after
+dequantizing it to an ordinary tensor, but FusedAdam fails on the live GroupedTensor and
+``quantized_model_init`` does not persistently MXFP8-quantize it.
+
+This module can be retired if TE makes the grouped parameter DTensor/FSDP2/FusedAdam-compatible (and
+persistently quantizable), exposes an ordinary expert-sharded tensor instead, or PyTorch DCP gains a
+supported adapter for logical tensors assembled from tensor-subclass parameters. Today neither
+package has enough information to infer the discrete ``weight{i}``-to-global-expert mapping.
 
 Expert weights come in two representations, handled transparently by ``_full_local_expert`` /
 ``_copy_into_expert``:

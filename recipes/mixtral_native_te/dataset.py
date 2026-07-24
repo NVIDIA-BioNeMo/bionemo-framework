@@ -168,6 +168,7 @@ def create_thd_dataloader(
     max_seq_length: int = 512,
     stride: int = 128,
     buffer_size: int = 5_000,
+    tokenize_batch_size: int = 100,
     use_stateful_dataloader: bool = False,
     text_column: str = "text",
     split_samples_in_token_packing: bool = True,
@@ -182,6 +183,7 @@ def create_thd_dataloader(
         stride=stride,
         buffer_size=buffer_size,
         text_column=text_column,
+        tokenize_batch_size=tokenize_batch_size,
     )
 
     assert isinstance(tokenized_dataset, datasets.IterableDataset), "THD token packing requires a streaming dataset."

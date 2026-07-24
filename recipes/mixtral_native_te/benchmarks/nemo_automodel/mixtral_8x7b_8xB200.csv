@@ -1,0 +1,3 @@
+layout,dp,tp,precision,tokens_per_s_per_gpu,pflops_per_gpu,mfu_pct,step_time_s,mem_gb,last_loss,n_steady,elapsed_s,rc
+dp8_tp1,8,1,bf16,4284,0.3277,14.56,0.956,120.86,2.0783,30,243,0
+dp8_tp1,8,1,mxfp8,4055,0.3102,6.89,1.010,126.69,2.0834,30,254,0
