@@ -248,6 +248,9 @@ model_te.save_pretrained("/path/to/te_checkpoint")
 For native-TE training, export one memory-mappable state-dict file instead of a Hugging Face model
 directory:
 
+> **Note:** Run from the `models/mixtral` directory, or install dependencies first with
+> `pip install -r requirements.txt`.
+
 ```python
 from pathlib import Path
 

@@ -82,6 +82,8 @@ class HighPrecisionInitValues:
             if value is None:
                 continue
 
+            # This path initializes a full FP32 master for a quantized parameter. The remainder
+            # representation requires a BF16 parameter base and must not be combined with this path.
             optimizer.initialize_state(param, store_param_remainders=False)
             value = value.to(device=device)
             if isinstance(param, DTensor):

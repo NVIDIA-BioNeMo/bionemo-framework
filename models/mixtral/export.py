@@ -35,7 +35,7 @@ def _convert_hf_checkpoint(
 ):
     model_hf = AutoModelForCausalLM.from_pretrained(
         tag,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         low_cpu_mem_usage=low_cpu_mem_usage,
     )
     model_te = convert.convert_mixtral_hf_to_te(model_hf, **config_kwargs)

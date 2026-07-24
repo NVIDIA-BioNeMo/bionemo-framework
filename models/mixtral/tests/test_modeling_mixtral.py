@@ -37,7 +37,7 @@ from transformers import (
 
 from collator import DataCollatorWithFlattening
 from convert import convert_mixtral_hf_to_te, convert_mixtral_te_to_hf
-from modeling_mixtral_te import HFInferenceParams, NVMixtralConfig, NVMixtralForCausalLM
+from modeling_mixtral_te import HFInferenceParams, NVMixtralConfig, NVMixtralForCausalLM, localize_expert_state_dict
 from tests.common import BaseModelTest, TestTolerances
 
 
@@ -199,6 +199,20 @@ def test_expert_ffn_mode_config_default_and_validation():
 
     with pytest.raises(ValueError):
         NVMixtralConfig(num_local_experts=8, expert_ffn_mode="bogus")
+
+
+def test_localize_stacked_expert_state_dict():
+    state_dict = {
+        "dense.weight": torch.tensor(0),
+        "mlp.experts_gate_up_weight": torch.arange(8),
+        "mlp.experts_down_weight": torch.arange(8) + 10,
+    }
+
+    localized = localize_expert_state_dict(state_dict, ep_rank=2, num_local_experts=2)
+
+    torch.testing.assert_close(localized["mlp.experts_gate_up_weight"], torch.tensor([4, 5]))
+    torch.testing.assert_close(localized["mlp.experts_down_weight"], torch.tensor([14, 15]))
+    torch.testing.assert_close(localized["dense.weight"], state_dict["dense.weight"])
 
 
 def _fused_mxfp8_available():

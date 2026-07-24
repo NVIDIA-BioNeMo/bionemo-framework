@@ -261,13 +261,17 @@ def localize_expert_state_dict(
     ep_rank: int,
     num_local_experts: int,
 ) -> dict[str, torch.Tensor]:
-    """Select and locally renumber one EP rank's discrete experts from global model state."""
+    """Select one EP rank's stacked or discrete experts from global model state."""
     first_expert = ep_rank * num_local_experts
     last_expert = first_expert + num_local_experts
     localized = {}
+    stacked_expert_suffixes = ("experts_gate_up_weight", "experts_down_weight")
     expert_markers = (".experts_gate_up.weight", ".experts_down.weight")
 
     for key, value in state_dict.items():
+        if key.endswith(stacked_expert_suffixes):
+            localized[key] = value[first_expert:last_expert]
+            continue
         for marker in expert_markers:
             prefix, separator, suffix = key.partition(marker)
             if separator and suffix.isdigit():

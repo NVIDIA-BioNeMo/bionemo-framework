@@ -19,7 +19,11 @@ from modeling_mixtral_te import NVMixtralPreTrainedModel, localize_expert_state_
 
 
 def test_localize_expert_state_dict():
-    state_dict = {"dense.weight": torch.tensor(0)}
+    state_dict = {
+        "dense.weight": torch.tensor(0),
+        "model.layers.0.mlp.experts_gate_up_weight": torch.arange(8),
+        "model.layers.0.mlp.experts_down_weight": torch.arange(8) + 10,
+    }
     for module in ("experts_gate_up", "experts_down"):
         for expert in range(8):
             state_dict[f"model.layers.0.mlp.{module}.weight{expert}"] = torch.tensor(expert)
@@ -27,6 +31,14 @@ def test_localize_expert_state_dict():
     localized = localize_expert_state_dict(state_dict, ep_rank=2, num_local_experts=2)
 
     assert localized["dense.weight"].item() == 0
+    torch.testing.assert_close(
+        localized["model.layers.0.mlp.experts_gate_up_weight"],
+        torch.tensor([4, 5]),
+    )
+    torch.testing.assert_close(
+        localized["model.layers.0.mlp.experts_down_weight"],
+        torch.tensor([14, 15]),
+    )
     for module in ("experts_gate_up", "experts_down"):
         assert localized[f"model.layers.0.mlp.{module}.weight0"].item() == 4
         assert localized[f"model.layers.0.mlp.{module}.weight1"].item() == 5
@@ -46,7 +58,11 @@ def test_model_load_global_state_dict_localizes_experts():
             return []
 
     model = Model()
-    state_dict = {"dense.weight": torch.tensor(0)}
+    state_dict = {
+        "dense.weight": torch.tensor(0),
+        "mlp.experts_gate_up_weight": torch.arange(8),
+        "mlp.experts_down_weight": torch.arange(8) + 10,
+    }
     for expert in range(8):
         state_dict[f"mlp.experts_down.weight{expert}"] = torch.tensor(expert)
 
@@ -55,6 +71,8 @@ def test_model_load_global_state_dict_localizes_experts():
     assert result == "incompatible"
     assert model.strict is False
     assert model.loaded_state_dict["dense.weight"].item() == 0
+    torch.testing.assert_close(model.loaded_state_dict["mlp.experts_gate_up_weight"], torch.tensor([4, 5]))
+    torch.testing.assert_close(model.loaded_state_dict["mlp.experts_down_weight"], torch.tensor([14, 15]))
     assert model.loaded_state_dict["mlp.experts_down.weight0"].item() == 4
     assert model.loaded_state_dict["mlp.experts_down.weight1"].item() == 5
 

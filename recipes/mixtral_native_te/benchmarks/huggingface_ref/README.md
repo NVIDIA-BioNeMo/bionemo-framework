@@ -20,7 +20,7 @@ PIP_CONSTRAINT= pip install --no-build-isolation \
 recipes/mixtral_native_te/benchmarks/huggingface_ref/benchmark_8xB200.sh
 ```
 
-The launcher downloads the checkpoint and exact pinned DCLM revision before starting workers, then
+The launcher downloads the exact pinned Mixtral and DCLM revisions before starting workers, then
 enforces offline mode. JSON results and logs default to `/tmp/mixtral_hf_ref_8xB200`. By default it
 runs both `EP_SIZES="1 8"` and `PRECISIONS="bf16 mxfp8"`; narrow either list for a single case.
 
