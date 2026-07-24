@@ -16,6 +16,7 @@
 """Compatibility entry point for AutoModel's timed LLM benchmark recipe."""
 
 from mxfp8 import register_mxfp8_experts
+
 from nemo_automodel.recipes.llm.benchmark import BenchmarkingRecipeForNextTokenPrediction
 
 

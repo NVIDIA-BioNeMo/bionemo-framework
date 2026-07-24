@@ -31,10 +31,10 @@ Steady-state training throughput for Mixtral-8x7B on 8×B300 (DCLM-baseline, `ma
 `token_mb=4096`. Per-layout / per-precision numbers are in `benchmarks/mixtral_8x7b_8xB300.csv` and
 `benchmarks/mixtral_8x7b_8xB200.csv`.
 
-Run the complete B200 matrix with:
+Run the complete matrix on B200 or B300 with:
 
 ```bash
-./benchmarks/benchmark_8xB200.sh
+./benchmarks/benchmark_8xGPU.sh
 ```
 
 The script downloads a pinned DCLM parquet snapshot into `HF_HOME`, then streams only those local
