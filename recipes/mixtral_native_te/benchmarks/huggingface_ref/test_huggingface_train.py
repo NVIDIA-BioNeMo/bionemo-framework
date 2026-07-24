@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the Hugging Face reference benchmark training helpers."""
+
 import torch
-from train import _pad_expert_groups
+
+from .train import _pad_expert_groups
 
 
 def test_pad_expert_groups_preserves_rows_and_gradients() -> None:

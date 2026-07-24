@@ -14,8 +14,9 @@
 # limitations under the License.
 
 import torch
-from model_factory import MXFP8Linear, enable_dense_mxfp8
 from torch import nn
+
+from .model_factory import MXFP8Linear, enable_dense_mxfp8
 
 
 class TinyModel(nn.Module):

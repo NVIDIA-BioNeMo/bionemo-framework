@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the NeMo AutoModel benchmark dataset adapter."""
+
 from __future__ import annotations
 
-import dataset as benchmark_dataset
-import mxfp8
 import torch
+
+from . import dataset as benchmark_dataset
+from . import mxfp8
 
 
 class FakeTokenizer:
