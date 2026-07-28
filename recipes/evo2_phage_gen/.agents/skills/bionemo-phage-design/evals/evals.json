@@ -42,6 +42,22 @@
       ],
       "expected_skill": "bionemo-phage-design",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-004-unattended-local-replication",
+      "prompt": "Plan a paper replication locally on eight H100s. Keep the historical split sizes, but prevent cluster leakage; after approval I will be offline, so keep it progressing and use W&B if readily available.",
+      "expected_output": "A concise local execution plan that prioritizes cluster-disjoint splits, all approved GPUs, and durable bounded supervision with optional W&B.",
+      "assertions": [
+        "The response states the local execution plane and planned eight-GPU topology rather than silently reducing resources to match history.",
+        "The response assigns whole clusters across train, validation, and test; leakage prevention overrides paper-exact membership while retaining requested sizes when feasible.",
+        "The response places selected-SFT sampling calibration after objective/QC definition and before RL, with byte/token compatibility and independent calibration/validation banks.",
+        "The response says which durable supervisor or recurrence mechanism will be activated immediately after approval and reports activation success or failure.",
+        "The supervisor has bounded no-progress detection, exact-process checks, and in-scope repair/retry rather than waiting indefinitely at a failed gate.",
+        "The response prefers authenticated W&B with separate SFT and RL projects sharing a prefix, but keeps local telemetry authoritative and does not block when W&B is unavailable.",
+        "The response uses a per-stage topology matrix and prefers pure DP when it fits and improves global throughput, reserving TP for fit, measured throughput, or single-request latency."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
     }
   ]
 }

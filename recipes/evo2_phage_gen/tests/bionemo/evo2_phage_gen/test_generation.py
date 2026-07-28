@@ -34,6 +34,11 @@ def test_phix174_prompts_use_reference_prefixes():
     }
 
 
+def test_phix174_prompts_allow_marker_only_calibration_control():
+    """A zero-nucleotide calibration prompt should retain the learned marker."""
+    assert phix174_prompts(prompt_lengths=[0]) == {0: "+~"}
+
+
 def test_ensure_paper_useful_rl_prompt_files_materializes_openai_jsonl(tmp_path):
     """Paper-useful RL prompt files are deterministic PhiX174-start prompt artifacts."""
     paths = ensure_paper_useful_rl_prompt_files(tmp_path)

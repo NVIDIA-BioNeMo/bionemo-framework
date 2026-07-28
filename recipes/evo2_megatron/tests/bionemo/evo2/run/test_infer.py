@@ -90,6 +90,34 @@ def _read_jsonl_results(output_file: Path) -> list[dict]:
     return records
 
 
+@pytest.mark.parametrize(
+    ("requested_impl", "checkpoint_impl", "expected_enabled"),
+    [
+        ("local", "none", True),
+        ("none", "local", False),
+    ],
+)
+def test_configure_native_dynamic_cuda_graphs_normalizes_checkpoint_state(
+    requested_impl, checkpoint_impl, expected_enabled
+):
+    """The CLI choice must replace stale graph settings loaded from a checkpoint."""
+    provider = SimpleNamespace(
+        cuda_graph_impl=checkpoint_impl,
+        cuda_graph_scope=None,
+        inference_cuda_graph_scope="none" if requested_impl == "local" else "layer",
+    )
+
+    enabled = infer_module._configure_native_dynamic_cuda_graphs(
+        provider, rank=1, cuda_graph_impl=requested_impl
+    )
+
+    assert enabled is expected_enabled
+    assert provider.cuda_graph_impl == requested_impl
+    assert provider.inference_cuda_graph_scope is None
+    if requested_impl == "local":
+        assert provider.cuda_graph_scope == []
+
+
 def test_native_stop_token_ids_resolves_eos_text_token():
     """The Evo2 tokenizer uses token id 0 / <EOS> to mark generation end."""
 
@@ -615,6 +643,18 @@ def test_native_strict_loop_rejects_short_output(monkeypatch):
             sampled_steps=[[1]],
             stop_after_updates=1,
         )
+
+
+def test_native_strict_loop_accepts_short_output_stopped_by_eos(monkeypatch):
+    results, _context, _forward_model = _run_mock_native_generation(
+        monkeypatch,
+        sampled_steps=[[1], [0]],
+    )
+
+    assert results[0].generated_tokens == [1]
+    assert results[0].finish_reason == "stop"
+    assert results[0].stopped_on_eos is True
+    assert results[0].truncated is False
 
 
 def test_native_strict_loop_rejects_token_logprob_mismatch(monkeypatch):

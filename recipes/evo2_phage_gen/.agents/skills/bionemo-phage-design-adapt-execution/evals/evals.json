@@ -9,7 +9,9 @@
         "The response discovers CPU/RAM, GPU model/count/free memory/current occupancy, runtime, and target-length workload rather than merely checking CUDA visibility.",
         "The response measures free bytes and relevant capacity for every input, cache, temporary, checkpoint, log, and result path, classifies shared versus local and durable versus ephemeral storage, and identifies write or sync ownership.",
         "The response performs reversible write probes for every directory that must be writable and records unresolved permissions without exposing credentials.",
-        "The response maximizes stable GPU memory and compute utilization with a safety margin using representative target-length probes, while preserving full-genome context and the approved effective token batch.",
+        "The response benchmarks SFT, RL training, generation, and rollout separately at target length, maximizing global valid tokens/sec with safety margin while preserving full-genome context and the approved effective token batch.",
+        "The response inventories every concurrency layer and verifies the combined process, thread, memory, and I/O peak fits host capacity; nested tools are capped or coordinated rather than limiting only outer workers.",
+        "The response prefers pure DP or independent replicas when they fit and improve throughput; it uses TP for measured fit/throughput or single-request latency rather than as a universal default.",
         "In this read-only eval, the response provides a planned-artifacts block with exact ENVIRONMENT.yaml, EXECUTION_PLAN.md, ACTIONS.yaml, and ordered launch/monitor/stop/resume script paths and minimum contents, without claiming that it wrote them."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",

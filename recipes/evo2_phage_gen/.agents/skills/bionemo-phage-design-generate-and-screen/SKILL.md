@@ -9,19 +9,19 @@ Scale inference to the user's decision, then apply the same versioned hard-QC co
 
 ## Choose the rollout contract
 
-Ask for one control mode:
+Resolve one control mode from the brief; in unattended/batch work default to a fixed 1,000-design pilot when no mode is specified, and ask only if the resulting scale or cost is material:
 
 - target number of phages to order;
 - exact number of generations; or
 - proof of concept: 1,000 default or 10,000 extended.
 
-Confirm checkpoint/prompt lineage, topology, hard-filter profile, 99% uniqueness, budget, and whether defensible ranking exists. Obtain commands using [runtime command resolution](references/command-resolution.md) and record actions with [action traceability](references/action-traceability.md). Use ordered intent-named scripts and concise lineage/telemetry/checkpoint/QC pointers.
+Confirm checkpoint/prompt lineage, topology, hard-filter profile, 99% uniqueness, budget, and whether defensible ranking exists. Select topology through the central [resource policy](../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md). Obtain commands using [runtime command resolution](references/command-resolution.md) and record actions with [action traceability](references/action-traceability.md). Use ordered intent-named scripts and concise lineage/telemetry/checkpoint/QC pointers.
 
-For an order target, follow [adaptive rollout planning](references/rollout-contract.md): run/reuse a compatible 1,000 pilot, estimate conservative post-QC/post-cluster yield and saturation, and seek 3 times the order count with meaningful ranking or 1.25 times otherwise. Add 1,000-design batches until reserve, budget, or saturation. Ask before expensive scaling. Fixed modes generate requested count.
+For an order target, follow [adaptive rollout planning](references/rollout-contract.md): run/reuse a compatible 1,000 pilot, estimate conservative post-QC/post-cluster yield and saturation, and seek 3 times the order count with meaningful ranking or 1.25 times otherwise. Add 1,000-design batches until reserve, budget, or saturation. Stay within the approved compute/budget envelope; ask only before expanding it. Fixed modes generate requested count.
 
 ## Execute deterministically
 
-1. Freeze checkpoint, prompt manifest, sampling, seeds, objective/filter versions, tools/models, and source/config hashes. Use stable design IDs.
+1. Freeze checkpoint, rollout manifest/seeds, objective/filter versions, tools/models, and source/config hashes. Inherit the exact deployed RL prompt strata, mixture weights, and sampling values; any scientific deviation requires explicit rationale and fresh comparable calibration. Derive and behavior-test the exact runtime suite required by enabled filters. Use stable design IDs.
 2. Validate, then canonicalize circular rotations/reverse complements for circular genomes; use biologically appropriate strand equivalence for linear genomes.
 3. Exact-deduplicate before expensive tools and preserve raw-to-representative mapping.
 4. Run approved nested hard all/any tree. Mandatory missing/failure fails closed. Record waterfalls, OR overlap, and dominance.

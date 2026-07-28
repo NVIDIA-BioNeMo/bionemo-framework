@@ -4,7 +4,9 @@ This is the single source of volatile memory/parallelism guidance for SFT, RL tr
 
 ## Default utilization objective
 
-After correctness and recoverability pass, tune each stage to maximize stable GPU compute and memory utilization on representative target-length data. Record device inventory/occupancy, peak allocated and reserved memory, throughput, step-time breakdown, host pressure, and safety margin. Increase microbatch or useful concurrency until the next tested setting fails or loses throughput, then use the highest repeatably stable setting with headroom for validation, checkpointing, and data-length variance. Optimize SFT, RL training, and rollout generation separately; a setting that fills memory in one path is not evidence for another.
+After correctness and recoverability pass, tune each stage to maximize stable global valid tokens/sec on representative target-length data. Record device inventory/occupancy, peak allocated and reserved memory, throughput, step-time breakdown, host pressure, and safety margin. Prefer the least model-parallel layout, including pure DP, when it fits and is faster even with smaller per-device microbatches; add TP/PP/CP only for memory or measured throughput. Pure TP is mainly a single-request-latency choice or a fit requirement for long context, model, optimizer, policy/reference, or activation state. Use all approved devices through useful DP or concurrency. Increase microbatch or useful concurrency until the next tested setting fails or loses throughput, then use the highest repeatably stable setting with headroom for validation, checkpointing, and data-length variance. Optimize SFT, RL training, and rollout generation separately; fit or topology in one path is not evidence for another.
+
+For CPU/bioinformatics pipelines, bound aggregate process, thread, memory, and I/O demand across the full nested task tree to measured host capacity and stable end-to-end throughput; limiting only outer workers is insufficient.
 
 Utilization never outranks full-genome coverage, the approved effective token batch, numerical health, unbiased sampling, checkpoint/resume integrity, or cluster fairness. Re-probe after any model, length, precision, topology, endpoint, kernel, or software-revision change.
 
@@ -29,9 +31,11 @@ Do not solve OOM by silently shortening below the approved full-genome context o
 
 ## RL topology split
 
-Prefer DP-only generation first, then TP+DP when the model does not fit per GPU. The current conservative assumption is that CP may work for RL training steps but not inference/generation. Therefore generation/rollouts use TP+DP, while training may use TP+CP+DP only after a capability smoke proves the policy, reference, optimizer, refit, and checkpoint paths agree.
+Prefer DP-only generation when the model and context fit per GPU, otherwise use TP+DP. The current conservative assumption is that CP may work for RL training steps but not inference/generation. Training may use TP+CP+DP only after a capability smoke proves the policy, reference, optimizer, refit, and checkpoint paths agree.
 
 If current inference tests prove CP generation support, disregard the conservative restriction and record the evidence. Do not assume training and generation must share a topology; require tested checkpoint/refit transitions and keep each topology in the resolved runtime contract.
+
+Before full launch, assert the materialized and live topology: world size and TP/PP/CP/DP product, intended GPU allocation, global versus DP-local rollout batch, and unique deterministic seeds/order across DP ranks. Exercise every rank through generation, reward, logprobs, optimizer update, refit, checkpoint, and exact resume. A smaller diagnostic topology cannot silently become the full run.
 
 ## Measured and published reference points
 

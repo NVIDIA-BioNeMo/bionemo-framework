@@ -25,6 +25,13 @@ from typing import Any
 import torch
 
 
+def resume_generation_call_offset(completed_steps: int, *, val_period: int, val_at_start: bool) -> int:
+    """Count generation calls completed before resuming a checkpointed RL step."""
+    periodic_validations = completed_steps // val_period if val_period > 0 else 0
+    initial_validation = int(val_at_start and completed_steps > 0)
+    return completed_steps + periodic_validations + initial_validation
+
+
 def _evo2_batched_decode_size(cfg: dict[str, Any]) -> int:
     generation = cfg.get("generation", {}) or {}
     mcore_generation_config = generation.get("mcore_generation_config", {}) or {}
@@ -263,6 +270,7 @@ class Evo2MegatronGenerationAdapter:
         """Create an adapter from NeMo-RL generation adapter config."""
         self.config = dict(config or {})
         self.seed_stride = int(self.config.get("seed_stride", 1_000_003))
+        self.call_index_offset = int(self.config.get("call_index_offset", 0))
 
     def _distributed_rank(self, worker: Any) -> int:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -352,9 +360,7 @@ class Evo2MegatronGenerationAdapter:
             base_seed = self._shared_implicit_base_seed(torch.initial_seed() % (2**31))
         else:
             base_seed = int(configured_seed)
-        call_index = int(getattr(worker, "_evo2_generation_call_index", 0))
-        # TODO: Persist or derive this counter from trainer state. It currently resets
-        # when the worker process restarts, so resumed runs can replay the same seed sequence.
+        call_index = int(getattr(worker, "_evo2_generation_call_index", self.call_index_offset))
         setattr(worker, "_evo2_generation_call_index", call_index + 1)
         data_parallel_rank, data_parallel_size = self._data_parallel_coordinates(worker)
         if data_parallel_size < 1 or not 0 <= data_parallel_rank < data_parallel_size:

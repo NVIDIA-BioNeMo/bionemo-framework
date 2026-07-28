@@ -140,6 +140,34 @@ def test_evo2_adapter_rng_seed_advances_and_records_trace(capsys):
         assert payload == json.dumps(expected, sort_keys=True)
 
 
+def test_evo2_adapter_rng_seed_continues_from_configured_call_offset():
+    adapter = Evo2MegatronGenerationAdapter({"seed": 17, "seed_stride": 101, "call_index_offset": 2})
+    worker = SimpleNamespace(
+        rank=0,
+        data_parallel_rank=0,
+        dp_size=2,
+        cfg={"generation": {"mcore_generation_config": {}}},
+    )
+
+    assert adapter._next_seed(worker) == 421
+    assert adapter._next_seed(worker) == 623
+    assert [entry["call_index"] for entry in worker._evo2_generation_rng_trace] == [2, 3]
+    assert [entry["seed_index"] for entry in worker._evo2_generation_rng_trace] == [4, 6]
+
+
+@pytest.mark.parametrize(
+    ("completed_steps", "val_period", "val_at_start", "expected"),
+    [(0, 10, False, 0), (30, 10, False, 33), (30, 0, False, 30), (30, 10, True, 34)],
+)
+def test_evo2_resume_call_offset_counts_prior_train_and_validation_generations(
+    completed_steps, val_period, val_at_start, expected
+):
+    offset_fn = getattr(evo2_generation, "resume_generation_call_offset", None)
+
+    assert offset_fn is not None
+    assert offset_fn(completed_steps, val_period=val_period, val_at_start=val_at_start) == expected
+
+
 def test_evo2_adapter_shares_tp_seed_and_separates_dp_and_successive_calls():
     adapter = Evo2MegatronGenerationAdapter({"seed": 17, "seed_stride": 101})
     dp0_tp0 = SimpleNamespace(

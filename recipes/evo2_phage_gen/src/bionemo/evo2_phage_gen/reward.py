@@ -130,6 +130,7 @@ class ExternalQCRewardConfig:
     config_path: Path = Path("configs/arc_genome_design_filtering_local.yaml")
     pipeline_script: Path = Path("data/arc_pipeline_patched/genome_design_filtering_pipeline.py")
     work_dir: Path = Path("data/checkpoints/phage_grpo_external_qc")
+    tool_bin_dir: Path | None = None
     keep_artifacts: bool = False
     fail_on_error: bool = True
     timeout_seconds: float | None = 1800.0
@@ -176,9 +177,13 @@ def _repo_path(path: str | Path) -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
-def _external_qc_env() -> dict[str, str]:
+def _external_qc_env(external_qc: ExternalQCRewardConfig) -> dict[str, str]:
     """Build the environment for Arc external-QC subprocesses."""
-    return os.environ.copy()
+    env = os.environ.copy()
+    if external_qc.tool_bin_dir is not None:
+        tool_bin_dir = _recipe_path(external_qc.tool_bin_dir).resolve()
+        env["PATH"] = os.pathsep.join((str(tool_bin_dir), env.get("PATH", "")))
+    return env
 
 
 def _resolve_executable_path(executable: str) -> str:
@@ -613,6 +618,7 @@ def _write_external_qc_config(
     config["current_config_file"] = str(run_config_path)
     config["evo_gen_seqs_fasta_file_save_location"] = str(input_fasta)
     config["overwrite_sequence_ids"] = True
+    config["online_measurement_mode"] = True
     for key in ARC_PATH_KEYS:
         if config.get(key):
             config[key] = str(_repo_path(config[key]))
@@ -934,6 +940,7 @@ def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: di
     scored_df["synteny_stage_reached"] = 0.0
     scored_df["synteny_measurement_available"] = 0.0
     scored_df["synteny_missing_artifact"] = 0.0
+    measured = pd.Series(False, index=scored_df.index)
     metrics_path = run_dir / config.get("synteny_metrics_file_save_location", "qc6_synteny_filter_metrics.csv")
     if not metrics_path.exists():
         metrics_path = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
@@ -981,7 +988,21 @@ def _add_full_synteny_rewards(scored_df: pd.DataFrame, run_dir: Path, config: di
             scored_df["syntenic_gene_count_score"] = scored_df["synteny_pair_score"]
 
     synteny_csv = run_dir / config.get("synteny_filter_seqs_csv_file_save_location", "")
-    if synteny_csv.exists():
+    if config.get("online_measurement_mode", False):
+        pass_mask = pd.Series(
+            [
+                bool(is_measured) and (int(num_syntenic), int(total_genes)) in ARC_VALID_SYNTENY_PAIRS
+                for num_syntenic, total_genes, is_measured in zip(
+                    scored_df.get("num_syntenic_genes", pd.Series(0, index=scored_df.index)),
+                    scored_df.get("total_num_genes", pd.Series(0, index=scored_df.index)),
+                    measured,
+                    strict=False,
+                )
+            ],
+            index=scored_df.index,
+        )
+        scored_df["reward_external_synteny_pass"] = pass_mask.astype(float)
+    elif synteny_csv.exists():
         pass_mask = _as_arc_pass_mask(scored_df, _sequence_ids_from_csv(synteny_csv))
         scored_df["reward_external_synteny_pass"] = pass_mask.astype(float)
     return scored_df
@@ -1166,7 +1187,7 @@ def _add_mmseqs_hit_rewards(scored_df: pd.DataFrame, run_dir: Path, config: dict
             measured_hit = mapped_identity.notna()
             scored_df["tropism_protein_mmseqs_percent_identity"] = mapped_identity.fillna(0.0)
             scored_df["tropism_protein_measured_hit"] = measured_hit.astype(float)
-            scored_df["tropism_measurement_available"] = measured_hit.astype(float)
+            scored_df["tropism_measurement_available"] = 1.0
             scored_df["tropism_hit_present"] = measured_hit.astype(float)
             scored_df["reward_external_tropism"] = [
                 _spike_identity_score(identity, has_hit, float(lower))
@@ -1249,7 +1270,7 @@ def add_external_qc_rewards(
                     [sys.executable, str(pipeline_script), str(run_config_path)],
                     check=True,
                     cwd=str(pipeline_script.parent),
-                    env=_external_qc_env(),
+                    env=_external_qc_env(external_qc),
                     timeout=external_qc.timeout_seconds,
                 )
             finally:

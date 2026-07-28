@@ -284,12 +284,13 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["dustmask_filter"] is True
     assert env_config["weight_dustmask_end"] == 1.0
     assert env_config["external_qc"]["fail_on_error"] is True
+    assert env_config["external_qc"]["tool_bin_dir"] == "data/external/bin"
     assert env_config["external_qc"]["timeout_seconds"] == 1800
     assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 12
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
     assert mmseqs_config == {
         "enabled": True,
-        "mmseqs_bin": "mmseqs",
+            "mmseqs_bin": "data/external/bin/mmseqs",
         "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity",
         "keep_artifacts": False,
         "min_seq_id": 0.99,
@@ -363,6 +364,34 @@ def test_gdpo_tp2dp1_smoke_uses_full_96_request_collective_and_isolated_output_p
         config["logger"]["log_dir"],
     ]
     assert all("tp2dp1_dpgenfix_gdpo12_smoke" in path for path in output_paths)
+    assert config["checkpointing"]["pretrained_checkpoint"]["path"] == (
+        "data/checkpoints/evo2_7b_microviridae_mbridge"
+    )
+
+
+def test_gdpo_tp2dp4_smoke_uses_all_eight_gpus_and_local_decode_24():
+    """TP2 x DP4 should shard each 96-sample rollout into four 24-row replicas."""
+    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron_gdpo12_tp2dp4_mbs1_smoke.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    policy = config["policy"]
+    mcore_generation_config = policy["generation"]["mcore_generation_config"]
+
+    assert config["defaults"] == "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
+    assert config["cluster"] == {"gpus_per_node": 8, "num_nodes": 1}
+    assert policy["train_global_batch_size"] == 96
+    assert policy["generation_batch_size"] == 96
+    assert policy["train_micro_batch_size"] == 1
+    assert policy["logprob_batch_size"] == 1
+    assert policy["megatron_cfg"]["tensor_model_parallel_size"] == 2
+    assert mcore_generation_config["max_requests"] == 24
+    assert mcore_generation_config["prompt_batch_size"] == 24
+    output_paths = [
+        config["checkpointing"]["checkpoint_dir"],
+        config["env"]["phage_qc"]["external_qc"]["work_dir"],
+        config["env"]["phage_qc"]["mmseqs_cluster_diversity"]["work_dir"],
+        config["logger"]["log_dir"],
+    ]
+    assert all("tp2dp4_mbs1_gdpo12_smoke" in path for path in output_paths)
     assert config["checkpointing"]["pretrained_checkpoint"]["path"] == (
         "data/checkpoints/evo2_7b_microviridae_mbridge"
     )

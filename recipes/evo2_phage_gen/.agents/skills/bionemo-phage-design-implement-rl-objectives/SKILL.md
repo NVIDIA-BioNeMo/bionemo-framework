@@ -23,8 +23,9 @@ Optional engineering workflow plugins may help with planning, TDD, debugging, an
 4. Add the smallest implementation under the owning recipe src/; mirror tests under that recipe tests/. Never cross-import another recipe.
 5. Cover unit examples, exact boundaries, monotonicity/range properties, invalid/missing/support inputs, adversarial fixtures, circular/strand equivalence where relevant, and explicit all/any behavior.
 6. Run an offline fixture through online scoring and final QC. Verify alignment; document intentional proxy differences. Require the intended aggregate ordering across reference, baseline/random, desired, and adversarial designs; retain every child score and support field.
-7. Verify the pinned runtime contract with a tiny real batch, then a short RL smoke. Record GREEN commands/output, environment, source hash, and resolved config.
-8. Put generated configs/reports in the result attempt. Do not mutate shared defaults for one run.
+7. Derive the required runtime capabilities from enabled objectives, pin exact paths, and test representative positive and failure/no-signal controls. Measure each online objective independently on its intended denominator; hard-gate sequencing belongs in final QC and must not silently starve later rewards.
+8. Verify the pinned runtime contract with a tiny real batch, then a short RL smoke. Record GREEN commands/output, environment, source hash, and resolved config.
+9. Put generated configs/reports in the result attempt. Do not mutate shared defaults for one run.
 
 Use [the implementation checklist](references/implementation-contract.md) and [runtime adapter contract](references/runtime-contract.md).
 

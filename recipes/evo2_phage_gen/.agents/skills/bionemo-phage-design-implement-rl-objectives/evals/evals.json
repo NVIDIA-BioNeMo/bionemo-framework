@@ -30,6 +30,19 @@
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-003-sequential-starvation",
+      "prompt": "The final QC pipeline applies protein hits, tropism, required genes, and synteny sequentially. Reuse it unchanged for online rewards.",
+      "expected_output": "A tested online measurement path that preserves final hard filtering but prevents objective starvation.",
+      "assertions": [
+        "The response rejects sequential hard-gate survivors as the denominator for later online rewards.",
+        "The response measures each enabled objective independently on its declared eligible inputs while preserving final-QC hard-filter order.",
+        "The response derives and pins required runtime capabilities and proves them with positive and no-signal/failure controls.",
+        "The response emits stage, measurement, support, missingness, hit/pass, and reward telemetry so real zeros differ from environment faults."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
     }
   ]
 }

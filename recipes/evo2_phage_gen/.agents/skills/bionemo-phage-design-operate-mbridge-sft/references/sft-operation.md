@@ -47,14 +47,14 @@ Track best_step, lowest finite validation loss, comparable events since best, la
 
 Count patience only for complete evaluations with the same held-out split-manifest hash, sample set/denominator, loss mask and reduction, model/eval mode, tokenizer, and data preprocessing. An incomplete evaluation or changed composition is diagnostic and does not consume patience.
 
-Declare overfitting only when all hold:
+Estimate ordinary validation noise robustly after excluding isolated spikes/drops; treat those separately as health incidents. A plateau within that noise continues. Declare overfitting only when all hold:
 
 1. six comparable validation events have occurred since the best;
-2. the latest four comparable validation losses are all worse;
-3. their median is at least 1% worse than the best and exceeds measured evaluation noise; and
+2. a robust recent trend shows sustained degradation rather than extended flatness;
+3. the latest four comparable losses are worse and their median is at least 1% above the best beyond measured noise; and
 4. the robust training-loss trend over matched recent windows still decreases.
 
-A transient rise is insufficient. If the latest comparable events show a meaningful rebound—by default recovering at least half of the best-to-trough loss increase and exceeding noise—allow one predeclared confirmation extension of at most two events, never beyond 12,000 steps. A genuine new best resets patience.
+A transient rise or plateau is insufficient. If the latest comparable events show a meaningful rebound—by default recovering at least half of the best-to-trough loss increase and exceeding noise—allow one predeclared confirmation extension of at most two events, never beyond 12,000 steps. A genuine new best resets patience. Always preserve and select the lowest comparable validation-loss checkpoint.
 
 Immediate hazards terminate safely: NaN/Inf, OOM, invalid data, corrupt/incomplete checkpoint, or disk below the safety floor. A changed topology, learning rate, or batch config creates a new attempt rather than silently changing provenance.
 
@@ -63,5 +63,4 @@ Immediate hazards terminate safely: NaN/Inf, OOM, invalid data, corrupt/incomple
 An exact resume retains data/split hashes, model and optimizer state, scheduler state, RNG/data-order state when supported, topology-compatible config, and original attempt identity with an appended resume event. Otherwise start a new attempt and label it weights-only or fresh.
 
 The concise summary reports maximum steps, actual stop/reason, selected checkpoint step/path/artifact/hash, lowest validation loss, comparable events since best, trend/uncertainty evidence, base-model provenance, data/split/config hashes, hardware/effective token batch, telemetry links/logdirs, and why the checkpoint is fit for RL. Keep observations in monitor/events.jsonl and append-only RUNLOG.md.
-
 

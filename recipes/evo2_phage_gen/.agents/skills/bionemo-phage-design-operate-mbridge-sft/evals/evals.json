@@ -8,10 +8,11 @@
       "assertions": [
         "The response rejects missing split hashes or failed leakage audit and resolves current commands from pyproject, help, source, configs, tests, and README.",
         "The response records the publication reference as 12,000 iterations on 32 H100 GPUs, sample batch 32, context 10,240, and 327,680 effective tokens per optimizer step, with full-genome samples and masked padding.",
-        "The response adapts microbatch, accumulation, and supported parallelism to local hardware while aiming within 5% of 327,680 effective tokens and documenting any infeasible difference.",
+        "The response benchmarks a DP-first full-length fit and adds TP/PP/CP only when memory or measured throughput requires it, while aiming within 5% of 327,680 effective tokens and documenting any infeasible difference.",
         "The response uses a public NGC checkpoint when available, records provider/version/hash/format, and uses a public Arc conversion only as a tested fallback.",
         "The response treats 12,000 steps as a ceiling, schedules at least 30 validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint rather than the final checkpoint.",
-        "The response records local TensorBoard by default and enables W&B only after entity/project confirmation."
+        "The response records local TensorBoard by default and enables W&B only after entity/project confirmation.",
+        "The selected-checkpoint handoff includes verified training bytes/tokens, markers, orientation, tokenizer, BOS/EOS, wrappers, padding, and masking for RL sampling calibration."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null
@@ -40,6 +41,19 @@
         "The response then considers TP plus DP within local GPUs, followed by supported CP, recomputation, and sharding, rather than silently truncating genomes.",
         "The response maximizes the stable target-length microbatch and utilization with a safety margin and reruns checkpoint/resume preflight.",
         "The response creates a decision entry and new attempt if the biological workload or training semantics must change."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-mbridge-sft-004-flat-with-outlier",
+      "prompt": "SFT validation loss has been flat within variance for many comparable checks, except for one abrupt bad evaluation that recovered immediately. Decide whether to stop.",
+      "expected_output": "Continue the plateau, retain the best checkpoint, and audit the outlier separately.",
+      "assertions": [
+        "The response does not early-stop for extended flatness within robust ordinary noise.",
+        "The response excludes the abrupt outlier from the ordinary-noise estimate and treats it as separate incident evidence.",
+        "The response stops only after sustained material degradation on comparable validations or an immediate hazard.",
+        "The response always preserves and selects the lowest comparable validation-loss checkpoint."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null

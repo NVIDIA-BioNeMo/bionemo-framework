@@ -131,6 +131,27 @@ def _register_recipe_extensions() -> None:
     ACTOR_ENVIRONMENT_REGISTRY["bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"] = PY_EXECUTABLES.SYSTEM
 
 
+def _init_ray(upstream_init_ray, ray_module, *, include_dashboard: bool, num_cpus: int | None = None) -> None:
+    """Initialize Ray without letting its optional dashboard block training."""
+    if include_dashboard:
+        upstream_init_ray()
+        return
+
+    original_init = ray_module.init
+
+    def init_without_dashboard(*args, **kwargs):
+        kwargs["include_dashboard"] = False
+        if num_cpus is not None and not kwargs.get("address"):
+            kwargs.setdefault("num_cpus", num_cpus)
+        return original_init(*args, **kwargs)
+
+    ray_module.init = init_without_dashboard
+    try:
+        upstream_init_ray()
+    finally:
+        ray_module.init = original_init
+
+
 def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algorithm: str = "config") -> None:
     """Run GRPO or GDPO with recipe-local Evo2 phage extensions."""
     os.environ.setdefault("NEMO_RL_PY_EXECUTABLES_SYSTEM", "1")
@@ -138,7 +159,8 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
         from nemo_rl.algorithms.grpo import MasterConfig, async_grpo_train, setup
         from nemo_rl.algorithms.utils import get_tokenizer
         from nemo_rl.data.utils import setup_response_data
-        from nemo_rl.distributed.virtual_cluster import init_ray
+        import ray
+        from nemo_rl.distributed.virtual_cluster import init_ray as upstream_init_ray
         from nemo_rl.models.generation import configure_generation_config
         from nemo_rl.utils.config import load_config, parse_hydra_overrides, register_omegaconf_resolvers
         from nemo_rl.utils.logger import get_next_experiment_dir
@@ -175,7 +197,9 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
     if config.checkpointing["enabled"]:
         print(f"Using checkpoint directory: {config.checkpointing['checkpoint_dir']}")
 
-    init_ray()
+    include_ray_dashboard = os.environ.get("NEMO_RL_RAY_DASHBOARD", "0").lower() in {"1", "true", "yes"}
+    ray_num_cpus = int(os.environ["NEMO_RL_RAY_NUM_CPUS"]) if os.environ.get("NEMO_RL_RAY_NUM_CPUS") else None
+    _init_ray(upstream_init_ray, ray, include_dashboard=include_ray_dashboard, num_cpus=ray_num_cpus)
     tokenizer = get_tokenizer(config.policy["tokenizer"])
     assert config.policy["generation"] is not None, "A generation config is required for GRPO/GDPO"
     has_refit_draft_weights = bool(config.policy["draft"]["enabled"])

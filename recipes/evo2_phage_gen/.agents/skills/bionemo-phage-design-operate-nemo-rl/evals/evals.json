@@ -44,6 +44,46 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-004-cheat-mode-monitoring",
+      "prompt": "Aggregate RL reward is stable, but one objective rises while its measured support shrinks and most other objective contributions go flat. Continue unattended if the aggregate still looks safe.",
+      "expected_output": "A fail-closed checkpoint pause based on per-objective reward-grounding divergence and contribution masking.",
+      "assertions": [
+        "The response does not accept aggregate reward or combined policy loss as sufficient evidence of health.",
+        "The response compares every objective reward with effective loss or advantage activity, raw support, denominator, missingness, and hard-pass biological grounding.",
+        "The response detects shrinking-support reward gain and inactive or masked objectives as possible exploitation.",
+        "The response pauses at a complete checkpoint, preserves best/latest, and audits artifacts or sequences before any semantic change.",
+        "The response treats objective or weight changes as a new recorded attempt."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-005-calibrated-sampling-change",
+      "prompt": "A paused RL checkpoint used temperature 1.0 and one prefix bank. A fresh selected-SFT calibration now recommends a materially different prefix distribution and validation stratification. Resume the paused run.",
+      "expected_output": "A new SFT-anchored RL attempt that preserves the paused checkpoint as evidence but does not exact-resume incompatible sampling state.",
+      "assertions": [
+        "The response requires the calibration byte/token contract, exact training mixture, independent validation manifest, seeds, and hashes.",
+        "The response rejects exact resume because the prompt or validation distribution changed materially.",
+        "The response starts the new policy and KL reference from the selected non-RL SFT checkpoint rather than prior RL weights.",
+        "The response preserves the paused checkpoint, logs, and selection evidence as superseded lineage."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-006-flat-zero-and-plateau",
+      "prompt": "An enabled reward stays at zero while another gate has no hits. Overall RL validation is otherwise flat within noise, with one abrupt bad spike. Stop or continue?",
+      "expected_output": "An environment/denominator audit followed by continued training if the zero is measured and the robust trend is a plateau.",
+      "assertions": [
+        "The response checks stage reach, measurement availability, artifacts, exact runtime capabilities, and behavioral controls before calling the zero biological; its target-phage control requires measurable scores and objective-specific expected directions, not blanket scores of 1.",
+        "The response requires enabled objectives to remain independently observable after earlier zero or failing gates.",
+        "The response estimates ordinary variance without the abrupt spike and treats that spike separately as incident evidence.",
+        "The response continues a robust plateau and stops only for sustained material degradation or a collapse trigger while preserving the best checkpoint."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

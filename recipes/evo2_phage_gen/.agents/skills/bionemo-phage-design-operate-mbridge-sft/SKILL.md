@@ -22,7 +22,7 @@ Apply ../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy
 
 Target 327,680 effective tokens per optimizer step and choose global batch or accumulation within 5% when feasible. Document the nearest feasible value otherwise. Set at most 12,000 optimizer steps. Schedule at least 30 validation events and 30 recoverable checkpoint saves by that ceiling.
 
-Use local TensorBoard by default. Enable W&B only after the user confirms entity and project; record its run ID and URL but never keys. Keep resolved config, exact ordered scripts, logs, metrics, checkpoints, and monitor events in the attempt.
+Keep local TensorBoard authoritative. Prefer W&B when installed and authenticated, using an SFT-specific project with a shared project-family prefix; record run ID/URL, never keys. Fall back without blocking or asking when unavailable. Keep resolved config, exact ordered scripts, logs, metrics, checkpoints, and monitor events in the attempt.
 
 ## Monitor and decide
 
@@ -30,4 +30,4 @@ Follow references/sft-operation.md for validation comparability, sampling uncert
 
 Do not early-stop on one blip or on incomparable validation events. Stop at the 12,000-step ceiling or after the monitoring contract establishes sustained overfitting beyond its bounded recovery window. Stop immediately for NaN or Inf, corrupt checkpoint or data, critical disk pressure, or unrecoverable resource failure. Treat OOM as a diagnosis and relaunch decision under the central resource policy rather than as permission to truncate genomes.
 
-Preserve best and latest checkpoints and distinguish selected step from stopping step. Resume only a verified exact training state; changed data, config, topology-incompatible state, or weights-only recovery is a new attempt. Finish OUTPUTS.yaml, SUMMARY.md, and RUNLOG.md with checkpoint evidence and hashes suitable for downstream RL lineage.
+Preserve best and latest checkpoints and distinguish selected step from stopping step. Resume only a verified exact training state; changed data, config, topology-incompatible state, or weights-only recovery is a new attempt. Finish OUTPUTS.yaml, SUMMARY.md, and RUNLOG.md with checkpoint evidence, hashes, and the verified training-serialization handoff required by bionemo-phage-design-calibrate-rl-sampling.

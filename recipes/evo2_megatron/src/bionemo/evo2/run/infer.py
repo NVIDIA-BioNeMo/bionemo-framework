@@ -461,16 +461,20 @@ def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int, cud
     ``cuda_graph_impl="none"`` disables graph capture entirely (decode runs eager) -- useful for
     debugging and for tests that need an un-graphed reference to compare against.
     """
-    if cuda_graph_impl == "none":
-        if rank == 0:
-            logger.info("[evo2-native-cg] CUDA graphs disabled (cuda_graph_impl='none'); decode runs eager")
-        return False
     if not hasattr(model_provider, "cuda_graph_impl"):
         if rank == 0:
             logger.warning("[evo2-native-cg] model provider has no cuda_graph_impl; CUDA graphs disabled")
         return False
 
     model_provider.cuda_graph_impl = cuda_graph_impl
+    # A checkpoint can carry the inference scope selected by a different graph implementation.
+    # Let MCore derive the valid default for the implementation requested by this inference run.
+    model_provider.inference_cuda_graph_scope = None
+    if cuda_graph_impl == "none":
+        if rank == 0:
+            logger.info("[evo2-native-cg] CUDA graphs disabled (cuda_graph_impl='none'); decode runs eager")
+        return False
+
     model_provider.cuda_graph_scope = []
     os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
     if rank == 0:
@@ -1805,10 +1809,12 @@ def _generate_native_dynamic(
             result.memory = group_memory
             if strict_generation:
                 generated_token_count = len(result.generated_tokens or [])
-                if generated_token_count != max_new_tokens:
+                stopped_early_on_eos = bool(result.stopped_on_eos) and generated_token_count < max_new_tokens
+                if generated_token_count != max_new_tokens and not stopped_early_on_eos:
                     raise RuntimeError(
                         "Strict Evo2 generation expected exactly "
-                        f"{max_new_tokens} generated tokens for prompt {prompt_idx}, got {generated_token_count}"
+                        f"{max_new_tokens} generated tokens or an explicit EOS stop for prompt {prompt_idx}, "
+                        f"got {generated_token_count}"
                     )
                 if return_log_probs and result.generated_log_probs is None:
                     raise RuntimeError(

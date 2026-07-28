@@ -453,6 +453,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                     "pipeline_script", "data/arc_pipeline_patched/genome_design_filtering_pipeline.py"
                 ),
                 work_dir=external_qc_cfg.get("work_dir", "data/checkpoints/phage_grpo_external_qc"),
+                tool_bin_dir=external_qc_cfg.get("tool_bin_dir"),
                 keep_artifacts=bool(external_qc_cfg.get("keep_artifacts", False)),
                 fail_on_error=bool(external_qc_cfg.get("fail_on_error", True)),
                 timeout_seconds=external_qc_cfg.get("timeout_seconds", 1800.0),
@@ -575,9 +576,12 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             if not objective_scores.empty:
                 metrics["gdpo/num_objectives"] = int(objective_scores.shape[1])
                 for objective_name in objective_scores.columns:
-                    metrics[f"gdpo/{objective_name}_mean"] = float(
-                        objective_scores[objective_name].astype(float).mean()
-                    )
+                    values = objective_scores[objective_name].astype(float)
+                    metrics[f"gdpo/{objective_name}_mean"] = float(values.mean())
+                    metrics[f"gdpo/{objective_name}_std"] = float(values.std(ddof=0))
+                    metrics[f"gdpo/{objective_name}_min"] = float(values.min())
+                    metrics[f"gdpo/{objective_name}_max"] = float(values.max())
+                    metrics[f"gdpo/{objective_name}_nonzero_rate"] = float((values != 0.0).mean())
             if phage_metrics:
                 for key, value in phage_metrics.items():
                     if key.startswith(TIMING_METRIC_MARKER_PREFIX):

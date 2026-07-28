@@ -11,7 +11,8 @@
         "The response keeps the selected target and its at-least-98%-identity cluster in train by default and records any justified exception.",
         "The response independently audits validation and test against train with identical boundary semantics and requires zero leakage matches.",
         "The response sizes full-genome context to at least the greater of the target token length and collection p99 plus required tokens, reports truncation/padding/masking, and does not fall back to arbitrary 8K fragments.",
-        "The response writes explicit pre-split FASTA and manifests so downstream preprocessing cannot silently randomize the split."
+        "The response writes explicit pre-split FASTA and manifests so downstream preprocessing cannot silently randomize the split.",
+        "The response records exact marker/annotation, orientation, tokenizer, BOS/EOS, wrapper, padding, and masking serialization for downstream prompt calibration."
       ],
       "expected_skill": "bionemo-phage-design-prepare-sft",
       "expected_script": null
@@ -25,7 +26,8 @@
         "The response records the paper reference of 12,000 iterations, sample batch 32, context 10,240, and 327,680 tokens per optimizer step without treating those hardware settings as universal.",
         "The response sets 12,000 optimizer steps as a maximum rather than a target and plans at least 30 validation and recoverable checkpoint opportunities.",
         "The response uses one full phage genome per sample, pads shorter genomes to context, and excludes pad tokens from loss.",
-        "The response leaves hardware-specific microbatch, accumulation, and model parallelism to the execution and SFT operation skills."
+        "The response leaves hardware-specific microbatch, accumulation, and model parallelism to the execution and SFT operation skills.",
+        "The response exports the exact SFT training-serialization contract needed to calibrate RL prompts."
       ],
       "expected_skill": "bionemo-phage-design-prepare-sft",
       "expected_script": null

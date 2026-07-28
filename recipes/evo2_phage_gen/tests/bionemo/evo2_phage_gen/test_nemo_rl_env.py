@@ -366,6 +366,9 @@ def test_global_post_process_metrics_accepts_rollout_total_reward():
     env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
     env = object.__new__(env_cls)
     env.weights = RewardWeights(valid_nt_chars=1.0)
+    env._last_gdpo_objective_scores = pd.DataFrame(
+        {"valid_nt_chars": [1.0, 0.0], "protein_hit_count": [0.25, 0.75]}
+    )
     batch = {
         "total_reward": torch.tensor([1.0, 0.0]),
         "extra_env_info": [
@@ -393,6 +396,13 @@ def test_global_post_process_metrics_accepts_rollout_total_reward():
     assert "binary_core_pass_rate" not in metrics
     assert metrics["phage_qc/valid_nt_chars_score_mean"] == 0.5
     assert metrics["phage_qc/binary_core_pass_rate"] == 0.5
+    assert metrics["gdpo/valid_nt_chars_mean"] == 0.5
+    assert metrics["gdpo/valid_nt_chars_std"] == pytest.approx(0.5)
+    assert metrics["gdpo/valid_nt_chars_min"] == 0.0
+    assert metrics["gdpo/valid_nt_chars_max"] == 1.0
+    assert metrics["gdpo/valid_nt_chars_nonzero_rate"] == 0.5
+    assert metrics["gdpo/protein_hit_count_std"] == pytest.approx(0.25)
+    assert metrics["gdpo/protein_hit_count_nonzero_rate"] == 1.0
     assert metrics[f"{TIMING_METRIC_MARKER_PREFIX}phage_qc/reward/total_s"] == 3.0
     assert "phage_qc/__timing__/phage_qc/reward/total_s" not in metrics
 

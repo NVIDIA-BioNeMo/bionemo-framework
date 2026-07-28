@@ -252,6 +252,150 @@ PATCHED_SYNTENY_OUTPUT_COLUMNS = """    input_df["num_syntenic_genes"] = input_d
     input_df["non_syntenic_annotations"] = input_df["genome_id"].map(non_syntenic_annotations_dict).fillna("")
     input_df["missing_synteny_output"] = ~input_df["genome_id"].astype(str).isin(syntenic_counts)
 """
+ARC_ONLINE_MODE_CONFIG_ANCHOR = """    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+"""
+PATCHED_ONLINE_MODE_CONFIG = """    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+    online_measurement_mode = bool(config.get("online_measurement_mode", False))
+"""
+ARC_ONLINE_PROTEIN_FILTER = """            filtered_df = valid_protein_database_hit_count(mmseqs_results_df, seq_df, 'id_prompt', config["protein_database_hit_count"])
+"""
+PATCHED_ONLINE_PROTEIN_FILTER = """            if online_measurement_mode:
+                hit_genome_ids = mmseqs_results_df["id_prompt"].astype(str).str.rsplit("_", n=1).str[0]
+                hit_counts = hit_genome_ids.value_counts()
+                filtered_df = seq_df.copy()
+                filtered_df["protein_database_hit_count"] = (
+                    filtered_df["id_prompt"].map(hit_counts).fillna(0).astype(int)
+                )
+            else:
+                filtered_df = valid_protein_database_hit_count(
+                    mmseqs_results_df, seq_df, 'id_prompt', config["protein_database_hit_count"]
+                )
+"""
+ARC_ONLINE_TROPISM_FILTER = """            filtered_df = valid_mmseqs_pident(mmseqs_results_df, "tropism_protein", config["tropism_protein_sequence_identity_range"], filtered_df)
+"""
+PATCHED_ONLINE_TROPISM_FILTER = """            save_mmseqs_pident_metrics(
+                mmseqs_results_df,
+                "tropism_protein",
+                filtered_df,
+                f'{config["results_save_dir"]}/{config.get("tropism_protein_sequence_identity_metrics_file_save_location", "qc4_tropism_protein_sequence_identity_metrics.csv")}',
+            )
+            if not online_measurement_mode:
+                filtered_df = valid_mmseqs_pident(
+                    mmseqs_results_df,
+                    "tropism_protein",
+                    config["tropism_protein_sequence_identity_range"],
+                    filtered_df,
+                )
+"""
+ARC_REQUIRED_GENE_SIGNATURE = """    sequences_df: pd.DataFrame,
+    metrics_csv: str = None,
+) -> pd.DataFrame:
+"""
+PATCHED_REQUIRED_GENE_SIGNATURE = """    sequences_df: pd.DataFrame,
+    metrics_csv: str = None,
+    filter_results: bool = True,
+) -> pd.DataFrame:
+"""
+ARC_REQUIRED_GENE_DELETE = """        else:
+            print(f"Discarded: {gff_file}")
+            os.remove(gff_file)
+
+            gbk_file = os.path.join(input_gbk_dir, f"{genome_id}.gbk")
+            if os.path.exists(gbk_file):
+                os.remove(gbk_file)
+                print(f"Deleted: {gbk_file}")
+
+            genome_dir = os.path.join(input_gff_dir, genome_id)
+            if os.path.exists(genome_dir):
+                shutil.rmtree(genome_dir)
+                print(f"Deleted directory: {genome_dir}")
+"""
+PATCHED_REQUIRED_GENE_DELETE = """        elif filter_results:
+            print(f"Discarded: {gff_file}")
+            os.remove(gff_file)
+
+            gbk_file = os.path.join(input_gbk_dir, f"{genome_id}.gbk")
+            if os.path.exists(gbk_file):
+                os.remove(gbk_file)
+                print(f"Deleted: {gbk_file}")
+
+            genome_dir = os.path.join(input_gff_dir, genome_id)
+            if os.path.exists(genome_dir):
+                shutil.rmtree(genome_dir)
+                print(f"Deleted directory: {genome_dir}")
+"""
+ARC_REQUIRED_GENE_RETURN = """    # Filter and return DataFrame
+    filtered_df = sequences_df[sequences_df["genome_id"].isin(surviving_genome_ids)].copy()
+    return filtered_df
+"""
+PATCHED_REQUIRED_GENE_RETURN = """    # Online reward measurement retains every input for later objectives.
+    if not filter_results:
+        return sequences_df.copy()
+    filtered_df = sequences_df[sequences_df["genome_id"].isin(surviving_genome_ids)].copy()
+    return filtered_df
+"""
+ARC_REQUIRED_GENE_CALL_SUFFIX = """                                   sequences_df=filtered_df,
+                                   metrics_csv=f'{config["results_save_dir"]}/{config.get("required_genes_metrics_file_save_location", "qc6_required_genes_metrics.csv")}')
+"""
+PATCHED_REQUIRED_GENE_CALL_SUFFIX = """                                   sequences_df=filtered_df,
+                                   metrics_csv=f'{config["results_save_dir"]}/{config.get("required_genes_metrics_file_save_location", "qc6_required_genes_metrics.csv")}',
+                                   filter_results=not online_measurement_mode)
+"""
+ARC_AAI_SIGNATURE = """def valid_average_protein_percent_identity(gff_directory: str, gbk_directory: str, results_csv: str, output_csv: str, identity_range: tuple) -> None:
+"""
+PATCHED_AAI_SIGNATURE = """def valid_average_protein_percent_identity(gff_directory: str, gbk_directory: str, results_csv: str, output_csv: str, identity_range: tuple, filter_results: bool = True) -> None:
+"""
+ARC_AAI_DELETE_MARK = """            if not (min_value <= average_percent_identity <= max_value):
+                files_to_delete.append(gff_path)  # Delete GFF
+"""
+PATCHED_AAI_DELETE_MARK = """            if filter_results and not (min_value <= average_percent_identity <= max_value):
+                files_to_delete.append(gff_path)  # Delete GFF
+"""
+ARC_AAI_FILTER_RESULT = (
+    "    filtered_df = merged_df[(merged_df['average_protein_percent_identity'] >= min_value) & \n"
+    "                            (merged_df['average_protein_percent_identity'] <= max_value)]\n"
+)
+PATCHED_AAI_FILTER_RESULT = """    if filter_results:
+        filtered_df = merged_df[(merged_df['average_protein_percent_identity'] >= min_value) &
+                                (merged_df['average_protein_percent_identity'] <= max_value)]
+    else:
+        filtered_df = merged_df
+"""
+ARC_AAI_CALL_SUFFIX = """                                                   f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
+                                                   config["average_protein_sequence_identity_range"])
+"""
+PATCHED_AAI_CALL_SUFFIX = """                                                   f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
+                                                   config["average_protein_sequence_identity_range"],
+                                                   filter_results=not online_measurement_mode)
+"""
+ARC_SYNTENY_SIGNATURE = """def valid_syntenic_gene_count(input_csv: str, output_csv: str,
+                              syntenic_gene_count_range: list, total_gene_count_range: list, syntenic_total_gene_count_remove: set,
+                              gff_dir: str, gbk_dir: str, pdf_dir: str, metadata_dir: str) -> None:
+"""
+PATCHED_SYNTENY_SIGNATURE = """def valid_syntenic_gene_count(input_csv: str, output_csv: str,
+                              syntenic_gene_count_range: list, total_gene_count_range: list, syntenic_total_gene_count_remove: set,
+                              gff_dir: str, gbk_dir: str, pdf_dir: str, metadata_dir: str,
+                              filter_results: bool = True) -> None:
+"""
+ARC_SYNTENY_FILTER_RESULT = """    filtered_df = df[df[['num_syntenic_genes', 'total_num_genes']].apply(tuple, axis=1).isin(valid_combinations)]
+    removed_ids = set(df["genome_id"]) - set(filtered_df["genome_id"])
+"""
+PATCHED_SYNTENY_FILTER_RESULT = """    if filter_results:
+        filtered_df = df[df[['num_syntenic_genes', 'total_num_genes']].apply(tuple, axis=1).isin(valid_combinations)]
+        removed_ids = set(df["genome_id"]) - set(filtered_df["genome_id"])
+    else:
+        filtered_df = df
+        removed_ids = set()
+"""
+ARC_SYNTENY_CALL_SUFFIX = """                                      pdf_dir=f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}',
+                                      metadata_dir=f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}')
+"""
+PATCHED_SYNTENY_CALL_SUFFIX = """                                      pdf_dir=f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}',
+                                      metadata_dir=f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
+                                      filter_results=not online_measurement_mode)
+"""
 ARC_PIPELINE_FILES = (
     "genome_design_filtering_pipeline.py",
     "genetic_architecture.py",
@@ -360,6 +504,36 @@ def _apply_legacy_string_patches(output_dir: Path) -> None:
     visualization_path.write_text(patched_text)
 
 
+def _apply_online_measurement_patches(output_dir: Path) -> None:
+    """Keep enabled online objectives observable without changing final-QC filtering."""
+    pipeline_path = output_dir / "genome_design_filtering_pipeline.py"
+    text = pipeline_path.read_text()
+    if ARC_ONLINE_MODE_CONFIG_ANCHOR not in text and PATCHED_ONLINE_MODE_CONFIG not in text:
+        return
+    replacements = (
+        (ARC_ONLINE_MODE_CONFIG_ANCHOR, PATCHED_ONLINE_MODE_CONFIG),
+        (ARC_ONLINE_PROTEIN_FILTER, PATCHED_ONLINE_PROTEIN_FILTER),
+        (ARC_ONLINE_TROPISM_FILTER, PATCHED_ONLINE_TROPISM_FILTER),
+        (ARC_REQUIRED_GENE_SIGNATURE, PATCHED_REQUIRED_GENE_SIGNATURE),
+        (ARC_REQUIRED_GENE_DELETE, PATCHED_REQUIRED_GENE_DELETE),
+        (ARC_REQUIRED_GENE_RETURN, PATCHED_REQUIRED_GENE_RETURN),
+        (ARC_REQUIRED_GENE_CALL_SUFFIX, PATCHED_REQUIRED_GENE_CALL_SUFFIX),
+        (ARC_AAI_SIGNATURE, PATCHED_AAI_SIGNATURE),
+        (ARC_AAI_DELETE_MARK, PATCHED_AAI_DELETE_MARK),
+        (ARC_AAI_FILTER_RESULT, PATCHED_AAI_FILTER_RESULT),
+        (ARC_AAI_CALL_SUFFIX, PATCHED_AAI_CALL_SUFFIX),
+        (ARC_SYNTENY_SIGNATURE, PATCHED_SYNTENY_SIGNATURE),
+        (ARC_SYNTENY_FILTER_RESULT, PATCHED_SYNTENY_FILTER_RESULT),
+        (ARC_SYNTENY_CALL_SUFFIX, PATCHED_SYNTENY_CALL_SUFFIX),
+    )
+    missing = [replacement for anchor, replacement in replacements if anchor not in text and replacement not in text]
+    if missing:
+        raise ValueError(f"Failed to apply {len(missing)} online objective-measurement patches")
+    for anchor, replacement in replacements:
+        text = text.replace(anchor, replacement)
+    pipeline_path.write_text(text)
+
+
 def prepare_arc_pipeline_workdir(
     source_dir: Path = DEFAULT_ARC_PIPELINE_SOURCE_DIR,
     output_dir: Path = DEFAULT_ARC_PIPELINE_WORKDIR,
@@ -370,10 +544,10 @@ def prepare_arc_pipeline_workdir(
     overwrite: bool = False,
 ) -> list[Path]:
     """Copy Arc pipeline files and patch the import-time PhiX174 FASTA path."""
-    source_dir = Path(source_dir)
-    output_dir = Path(output_dir)
-    phix174_fasta = Path(phix174_fasta)
-    pipeline_patch = Path(pipeline_patch) if pipeline_patch is not None else None
+    source_dir = Path(source_dir).resolve()
+    output_dir = Path(output_dir).resolve()
+    phix174_fasta = Path(phix174_fasta).resolve()
+    pipeline_patch = Path(pipeline_patch).resolve() if pipeline_patch is not None else None
     if not source_dir.exists():
         raise FileNotFoundError(f"Arc pipeline source directory not found: {source_dir}")
     if not phix174_fasta.exists():
@@ -409,6 +583,7 @@ def prepare_arc_pipeline_workdir(
         _apply_arc_pipeline_patch(output_dir, pipeline_patch)
     else:
         _apply_legacy_string_patches(output_dir)
+    _apply_online_measurement_patches(output_dir)
     return written_paths
 
 

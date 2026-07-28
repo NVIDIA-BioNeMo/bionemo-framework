@@ -36,7 +36,7 @@ runtime:
   command_versions: {}
 telemetry:
   local: {tensorboard: true, path: null}
-  wandb: {enabled: false, entity: null, project: null, run_id: null}
+  wandb: {entity: null, project_family: null, sft: {enabled: false, project: null, run_id: null}, rl: {enabled: false, project: null, run_id: null}}
 credentials:
   mechanisms: []
 storage:
@@ -93,6 +93,8 @@ Use phase-aware cadence:
 - Reset backoff on state change, new validation/checkpoint, or health alert, but never tight-loop.
 
 For Slurm, prefer targeted squeue -j JOB_ID while active and sacct -j JOB_ID for terminal/accounting state. Do not repeatedly scan cluster-wide sinfo or allocate srun solely to monitor. Avoid recursive directory walks; use known files, mtimes, and incremental offsets. Rate-limit W&B/cloud APIs independently.
+
+Treat a failed gate, absent process, stale heartbeat, or unchanged progress marker beyond its declared bound as actionable—not as healthy waiting. Capture evidence, perform only bounded in-scope repair/retry, and then advance or write an explicit terminal state. Never leave a supervisor logically active with no worker and no scheduled action.
 
 ## Profile gates
 

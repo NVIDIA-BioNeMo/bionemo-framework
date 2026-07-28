@@ -118,6 +118,20 @@ def test_rl_readiness_passes_when_adapter_path_is_configured(tmp_path):
     assert missing_required == []
 
 
+def test_rl_readiness_accepts_specific_megatron_bridge_iteration_directory(tmp_path):
+    """A selected validation checkpoint can point directly at its iter directory."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    checkpoint_root = Path(config["checkpointing"]["pretrained_checkpoint"]["path"])
+    config["checkpointing"]["pretrained_checkpoint"]["path"] = str(checkpoint_root / "iter_0000001")
+    config_path.write_text(yaml.safe_dump(config))
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    missing_required = [check.name for check in checks if check.required and not check.ok]
+
+    assert missing_required == []
+
+
 def test_rl_readiness_resolves_inherited_config_values(tmp_path):
     """Readiness should validate the same inherited config that NeMo-RL launches."""
     base_config = _write_minimal_config(tmp_path, include_adapter=True)

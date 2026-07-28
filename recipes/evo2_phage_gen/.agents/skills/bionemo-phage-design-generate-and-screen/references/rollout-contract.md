@@ -17,7 +17,7 @@ Predeclare ranking. It must be target-relevant, defensible, nonredundant with ha
 - With meaningful ranking, target at least 3 * order_target passing clusters.
 - Without it, target at least ceil(1.25 * order_target).
 
-Project 1,000-design batches from the conservative yield. Show cost and ask before an expensive projection. Stop at reserve, budget, or demonstrated saturation. If pilot yield is zero or QC repeatedly fails, revisit generation/objectives/filters.
+Project 1,000-design batches from the conservative yield. Show cost and continue within the approved envelope; ask only before materially expanding it. Stop at reserve, budget, or demonstrated saturation. If pilot yield is zero or QC repeatedly fails, diagnose generation/objectives/filters and adapt within the approved scientific contract.
 
 ## Fixed modes
 

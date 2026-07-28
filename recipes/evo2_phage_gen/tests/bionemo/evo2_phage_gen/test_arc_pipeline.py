@@ -134,6 +134,30 @@ def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
     assert PATCHED_LOVIS4U_PARALLEL_CONFIG in visualization_text
 
 
+def test_prepare_arc_pipeline_resolves_reference_path_before_runtime_cwd_changes(tmp_path, monkeypatch):
+    """Prepared Arc imports must not depend on the launcher's later working directory."""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    for filename in ARC_PIPELINE_FILES:
+        content = "print('ok')\n"
+        if filename == "genetic_architecture.py":
+            content = f'fasta_file = "{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"\n'
+        (source_dir / filename).write_text(content)
+    phix174_fasta = tmp_path / "reference.fna"
+    phix174_fasta.write_text(">NC_001422.1\nACGT\n")
+    monkeypatch.chdir(tmp_path)
+
+    prepare_arc_pipeline_workdir(
+        Path("source"),
+        Path("prepared"),
+        phix174_fasta=Path("reference.fna"),
+        pipeline_patch=None,
+    )
+
+    prepared = (tmp_path / "prepared" / "genetic_architecture.py").read_text()
+    assert str(phix174_fasta.resolve()) in prepared
+
+
 def test_prepare_arc_pipeline_workdir_checks_pinned_arc_revision(tmp_path, monkeypatch):
     """The maintained Arc patch should only apply to the pinned Arc source revision."""
     source_dir = tmp_path / "source" / "phage_gen" / "pipelines"
@@ -177,6 +201,39 @@ def test_prepare_arc_pipeline_workdir_applies_maintained_patch(tmp_path):
     assert "missing_synteny_output" in pipeline_text
     assert "save_mmseqs_pident_metrics" in pipeline_text
     assert "metrics_df.to_csv(metrics_csv, index=False)" in pipeline_text
+    assert "online_measurement_mode" in pipeline_text
+
+
+def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_path):
+    """Online rewards should measure required genes without starving later objectives."""
+    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_measurement_test")
+    gff_dir = tmp_path / "gff"
+    gbk_dir = tmp_path / "gbk"
+    gff_dir.mkdir()
+    gbk_dir.mkdir()
+    (gff_dir / "genome_1.gff").write_text(
+        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=major capsid protein\n"
+    )
+    (gbk_dir / "genome_1.gbk").write_text("LOCUS genome_1\n")
+    sequences = pd.DataFrame(
+        {"id_prompt": ["umi1"], "genome_id": ["genome_1"], "sequence": ["ACGT"]}
+    )
+    metrics_csv = tmp_path / "required.csv"
+
+    measured = module.valid_gene_annotations(
+        input_gff_dir=str(gff_dir),
+        input_gbk_dir=str(gbk_dir),
+        required_products=("major capsid protein", "missing protein"),
+        sequences_df=sequences,
+        metrics_csv=str(metrics_csv),
+        filter_results=False,
+    )
+
+    assert measured["id_prompt"].tolist() == ["umi1"]
+    assert (gff_dir / "genome_1.gff").exists()
+    assert (gbk_dir / "genome_1.gbk").exists()
+    metrics = pd.read_csv(metrics_csv)
+    assert metrics["required_genes_matched_count"].tolist() == [1]
 
 
 def test_patched_arc_synteny_missing_lovis4u_output_fails_closed(tmp_path):

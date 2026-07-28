@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import json
+
+import pandas as pd
+import pytest
+
+from bionemo.evo2_phage_gen.calibration_scoring import (
+    load_generation_records,
+    summarize_cell,
+    validate_score_file,
+)
+
+
+def test_load_generation_records_reconstructs_marker_free_genome(tmp_path):
+    path = tmp_path / "prefix4_temp1.0.jsonl"
+    path.write_text(
+        json.dumps({"id": "a", "prompt": "+~GAGT", "completion": "ACGT"}) + "\n"
+    )
+
+    records = load_generation_records(path)
+
+    assert records.to_dict("records") == [{"id_prompt": "a", "sequence": "GAGTACGT"}]
+
+
+def test_summarize_cell_separates_measured_zero_from_missing_support():
+    scored = pd.DataFrame(
+        {
+            "reward_nucleotide_pass": [1.0, 1.0],
+            "reward_external_protein_hit_count": [0.5, 0.0],
+            "reward_external_tropism": [0.0, 0.0],
+            "reward_external_required_genes": [0.2, 0.0],
+            "reward_external_synteny": [0.1, 0.0],
+            "reward_external_average_protein_identity": [0.8, 0.0],
+            "reward_binary_full_qc_pass": [0.0, 0.0],
+            "reward_binary_full_qc_cluster_deduplicated_pass": [0.0, 0.0],
+            "external_qc_tool_succeeded": [1.0, 1.0],
+            "protein_database_hit_count_measurement_available": [1.0, 1.0],
+            "tropism_measurement_available": [1.0, 1.0],
+            "required_genes_measurement_available": [1.0, 0.0],
+            "synteny_measurement_available": [1.0, 0.0],
+            "average_protein_identity_measurement_available": [1.0, 0.0],
+            "mmseqs_cluster_num_clusters": [2, 2],
+        }
+    )
+
+    summary = summarize_cell("prefix4_temp1.0", scored)
+
+    assert summary["tropism_reward_mean"] == 0.0
+    assert summary["tropism_support_rate"] == 1.0
+    assert summary["required_genes_support_rate"] == 0.5
+    assert summary["all_external_measurements_available_rate"] == 0.5
+    assert summary["mmseqs_cluster_num_clusters"] == 2
+    assert summary["metric_environment_ok"] is True
+
+
+def test_validate_score_file_requires_complete_unique_ids(tmp_path):
+    path = tmp_path / "scores.csv"
+    pd.DataFrame({"id_prompt": ["a", "a"]}).to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_score_file(path, expected_records=2)

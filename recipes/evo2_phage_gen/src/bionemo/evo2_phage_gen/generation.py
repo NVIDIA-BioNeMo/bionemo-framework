@@ -42,8 +42,8 @@ def phix174_prompts(
     reference_start = reference_start.strip().upper()
     prompts: dict[int, str] = {}
     for prompt_len in prompt_lengths:
-        if prompt_len <= 0:
-            raise ValueError(f"Prompt length must be positive, got {prompt_len}")
+        if prompt_len < 0:
+            raise ValueError(f"Prompt length must be non-negative, got {prompt_len}")
         if prompt_len > len(reference_start):
             raise ValueError(f"Prompt length {prompt_len} exceeds reference length {len(reference_start)}")
         prompts[int(prompt_len)] = f"{prompt_prefix}{reference_start[:prompt_len]}"

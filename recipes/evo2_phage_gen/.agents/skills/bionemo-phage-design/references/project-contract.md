@@ -75,6 +75,8 @@ RUNLOG.md
 
 Use lifecycle states planned, submitted, running, succeeded, failed, stopped-early, and blocked. Write status atomically when feasible. Record physical paths and portable artifact identities; never assume another host shares a mount.
 
+Use blocked only for missing authority or an unresolved material choice. Operational gate/process failures must trigger bounded diagnosis and repair/retry, then become running, succeeded, or explicitly failed; they must not remain an indefinite apparently active wait.
+
 ## Ownership and promotion
 
 - The controller owns root indexes, stable stage pointers, and cross-stage handoffs.

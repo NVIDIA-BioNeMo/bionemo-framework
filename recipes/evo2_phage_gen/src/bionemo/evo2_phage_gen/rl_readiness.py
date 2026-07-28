@@ -232,6 +232,32 @@ def _checkpoint_run_config_checks(checkpoint_path: str | Path | None) -> list[RL
     return checks
 
 
+def _checkpoint_iteration_resolution_check(checkpoint_path: str | Path | None) -> RLReadinessCheck:
+    """Accept either a checkpoint-root tracker or a selected Bridge iteration directory."""
+    path = _recipe_path(checkpoint_path)
+    if path is None:
+        return RLReadinessCheck(
+            name="checkpoint_latest_iteration",
+            ok=False,
+            required=True,
+            detail="missing checkpoint path",
+        )
+    if (path / "run_config.yaml").exists():
+        return RLReadinessCheck(
+            name="checkpoint_latest_iteration",
+            ok=True,
+            required=True,
+            detail=f"specific Megatron Bridge iteration directory: {path}",
+        )
+    tracker = path / "latest_checkpointed_iteration.txt"
+    return RLReadinessCheck(
+        name="checkpoint_latest_iteration",
+        ok=tracker.exists(),
+        required=True,
+        detail=str(tracker),
+    )
+
+
 def _config_checks(
     config_path: Path, *, require_evo2_adapter: bool, expected_gpus: int | None
 ) -> list[RLReadinessCheck]:
@@ -265,11 +291,7 @@ def _config_checks(
     checkpoint_path = _nested_get(config, ("checkpointing", "pretrained_checkpoint", "path"))
     checks.extend(
         [
-            _path_check(
-                "checkpoint_latest_iteration",
-                _recipe_path(checkpoint_path) / "latest_checkpointed_iteration.txt" if checkpoint_path else None,
-                required=True,
-            ),
+            _checkpoint_iteration_resolution_check(checkpoint_path),
             *_checkpoint_run_config_checks(checkpoint_path),
         ]
     )

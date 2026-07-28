@@ -1,6 +1,6 @@
 # RL-to-SFT and prompt lineage contract
 
-Discover SFT candidates in active and configured external result roots. Compare compatibility, validation evidence, format, and availability. If several are plausible, explicitly ask reuse versus new.
+Unless the user requires fresh training/no reuse, discover SFT candidates in active and configured external result roots. Compare compatibility, validation evidence, format, and availability. If several are plausible, explicitly ask reuse versus new; otherwise do not search for reusable prior-run assets.
 
 Every RL request, manifest, OUTPUTS.yaml, and SUMMARY.md records:
 
@@ -28,4 +28,3 @@ Cross-project references are supported. Store portable logical identity plus loc
 Record objective/filter hashes; policy initialization and KL reference independently; resume type fresh, exact-resume, weights-only, or stagewise; optimizer/scheduler/RNG identity for exact resume; prior RL checkpoint and rationale for stagewise; and runtime/config/source/environment hashes.
 
 Exact resume may not alter KL reference, prompt derivation, or fixed validation manifest. A weights-only restart may initialize recorded weights but remains anchored to selected non-RL SFT. A stagewise run is a new experiment, not a resume.
-

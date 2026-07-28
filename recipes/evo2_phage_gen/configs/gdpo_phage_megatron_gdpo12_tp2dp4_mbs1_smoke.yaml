@@ -1,0 +1,42 @@
+# One-step true GDPO-12 smoke test for TP=2 / DP=4 on eight GPUs.
+# The fixed 96-sample rollout is sharded into 24 requests per DP replica while
+# each replica uses two tensor-parallel ranks. Training/logprob microbatches
+# remain at 1 to preserve the verified activation-memory envelope.
+
+defaults: "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 1
+
+checkpointing:
+  checkpoint_dir: "data/checkpoints/phage_gdpo_base_microviridae_tp2dp4_mbs1_gdpo12_smoke"
+  pretrained_checkpoint:
+    path: "data/checkpoints/evo2_7b_microviridae_mbridge"
+    format: "megatron_bridge"
+
+policy:
+  train_global_batch_size: 96
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  generation_batch_size: 96
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+  generation:
+    mcore_generation_config:
+      max_requests: 24
+      prompt_batch_size: 24
+
+env:
+  phage_qc:
+    external_qc:
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_tp2dp4_mbs1_gdpo12_smoke_external_qc"
+    mmseqs_cluster_diversity:
+      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_tp2dp4_mbs1_gdpo12_smoke_mmseqs_cluster_diversity"
+
+logger:
+  log_dir: "data/checkpoints/phage_gdpo_base_microviridae_tp2dp4_mbs1_gdpo12_smoke_logs"
+  wandb_enabled: true
+  wandb:
+    project: "evo2_phage_design_rl_gdpo"
+    name: "gdpo-phage-base-microviridae-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.001-tp2dp4-mbs1-gdpo12-smoke"

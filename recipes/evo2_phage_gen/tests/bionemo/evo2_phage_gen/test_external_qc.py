@@ -90,6 +90,26 @@ def test_external_qc_checker_requires_enabled_stage_inputs(tmp_path, monkeypatch
     assert "orfipy" in missing_required
 
 
+def test_external_qc_checker_uses_explicit_run_tool_directory(tmp_path, monkeypatch):
+    """Prerequisite discovery should use the same pinned tool directory as scoring."""
+    tool_bin_dir = tmp_path / "fresh-external" / "bin"
+    tool_bin_dir.mkdir(parents=True)
+    mmseqs = tool_bin_dir / "mmseqs"
+    mmseqs.write_text("#!/usr/bin/env bash\n")
+    mmseqs.chmod(0o755)
+    monkeypatch.setattr("shutil.which", lambda tool, path=None: str(mmseqs) if tool == "mmseqs" and path else None)
+
+    checks = check_arc_qc_prerequisites(
+        _write_config(tmp_path, homology_filtering=True),
+        genetic_architecture_import_fasta=_write_import_fasta(tmp_path),
+        tool_bin_dir=tool_bin_dir,
+    )
+
+    mmseqs_check = next(check for check in checks if check.name == "mmseqs")
+    assert mmseqs_check.ok
+    assert mmseqs_check.detail == str(mmseqs)
+
+
 def test_external_qc_checker_requires_lovis4u_for_visualization_stage(tmp_path, monkeypatch):
     """The exact Arc visualization/synteny stage needs LoVis4u on PATH."""
     monkeypatch.setattr("shutil.which", lambda _tool: None)

@@ -17,15 +17,14 @@ Record source FASTA and metadata hashes, target genome identity, eligibility rul
 
 1. Parse and validate stable IDs and full nucleotide sequences. Group exact biological equivalents, including circular rotations and reverse complements where topology supports that equivalence; retain provenance for every removed duplicate.
 2. Cluster the full genomes with MMseqs2 using minimum sequence identity 0.98, coverage 0.8, and coverage mode 0. Record exact command, version, parameters, input order, and output hashes.
-3. Assign entire clusters to approximately 98% train, 1% validation, and 1% test. Target at least 128 genomes in validation and test when dataset size and cluster structure permit. Use the fixed seed and balance length, GC, and taxonomy without splitting a cluster.
+3. Assign entire clusters to approximately 98% train, 1% validation, and 1% test. Target at least 128 genomes in validation and test when dataset size and cluster structure permit, unless an approved replication/user contract fixes other sizes. Use the fixed seed and balance length, GC, and taxonomy without splitting a cluster.
 4. Verify the target genome hash and its at-least-98%-identity cluster are in train. Produce explicit train, validation, and test FASTA and manifests.
 5. Run an independent final full-genome leakage audit at the same identity and coverage semantics. Require zero validation or test-to-train matches at or above the boundary; fail preparation if any remain.
 
-Do not allow the shared preprocessing command to choose or randomize the split. Pass explicit pre-split inputs downstream; the existing shared path may use nondeterministic seed or set behavior. Paper replication may preserve the exact historical split only when provenance requires it; label that run historical-split and report unmeasured or detected leakage risk.
+Do not allow the shared preprocessing command to choose or randomize the split. Pass explicit pre-split inputs downstream; the existing shared path may use nondeterministic seed or set behavior. In paper replication, preserve requested split sizes when feasible but assign whole clusters; leakage control overrides exact historical membership.
 
 ## Plan the training handoff
 
 Train on full phage genomes and derive the intended sequence length through the central resource policy. Record collection length statistics, target length, resulting context, padding and loss masking, and any user override. The paper-scale reference effective batch is 32 times 10,240, or 327,680 tokens per optimizer step; leave hardware-specific microbatch, accumulation, and model-parallel resolution to bionemo-phage-design-operate-mbridge-sft. Set a 12,000-step maximum and enough validation and recoverable checkpoint opportunities for at least 30 of each by that maximum.
 
-Write proposed SFT_PLAN.yaml and SPLIT_MANIFEST.yaml, explicit pre-split data, cluster assignments, exclusion table, leakage report, and preprocessing outputs under artifacts/. Finish the standard attempt metadata, OUTPUTS.yaml, SUMMARY.md, and RUNLOG.md. The controller verifies and promotes stable pointers; do not write them directly.
-
+Write proposed SFT_PLAN.yaml and SPLIT_MANIFEST.yaml, explicit pre-split data, cluster assignments, exclusion table, leakage report, preprocessing outputs, and the exact training serialization contract (markers/annotations, orientation, tokenizer, BOS/EOS, wrappers, masking) under artifacts/. Finish the standard attempt metadata, OUTPUTS.yaml, SUMMARY.md, and RUNLOG.md. The controller verifies and promotes stable pointers; do not write them directly.

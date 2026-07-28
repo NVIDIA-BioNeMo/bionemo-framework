@@ -131,6 +131,7 @@ env:
         columns: ["reward_mmseqs_cluster_diversity"]
     external_qc:
       enabled: true
+      tool_bin_dir: "data/external/bin"
       work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_external_qc"
       fail_on_error: true
       timeout_seconds: 1800
@@ -146,7 +147,7 @@ env:
       lovis4u_collect_pdfs: false
     mmseqs_cluster_diversity:
       enabled: true
-      mmseqs_bin: "mmseqs"
+      mmseqs_bin: "data/external/bin/mmseqs"
       work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity"
       keep_artifacts: false
       min_seq_id: 0.99
@@ -163,4 +164,3 @@ logger:
   wandb:
     project: "evo2_phage_design_rl_gdpo"
     name: "gdpo-phage-base-microviridae-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.001-batched96-stockgdpo-fullfalse-decodefix-clusterfix-gdpo12"
-

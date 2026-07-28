@@ -17,6 +17,7 @@
 
 import argparse
 import json
+import os
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -47,11 +48,6 @@ def _path_exists(path_like: str | Path) -> bool:
     return Path(path_like).exists()
 
 
-def _tool_exists(tool: str) -> bool:
-    """Return true when an executable is discoverable on PATH."""
-    return shutil.which(tool) is not None
-
-
 def _check_path(name: str, config: dict[str, Any], key: str, *, required: bool) -> QCPrerequisiteCheck:
     """Create a path-existence check from a config key."""
     value = config.get(key, "")
@@ -60,10 +56,11 @@ def _check_path(name: str, config: dict[str, Any], key: str, *, required: bool) 
     return QCPrerequisiteCheck(name=name, ok=ok, required=required, detail=detail)
 
 
-def _check_tool(name: str, tool: str, *, required: bool) -> QCPrerequisiteCheck:
+def _check_tool(name: str, tool: str, *, required: bool, search_path: str | None = None) -> QCPrerequisiteCheck:
     """Create a PATH tool check."""
-    ok = _tool_exists(tool)
-    detail = shutil.which(tool) or f"{tool} not found on PATH"
+    resolved = shutil.which(tool, path=search_path) if search_path is not None else shutil.which(tool)
+    ok = resolved is not None
+    detail = resolved or f"{tool} not found on scorer PATH"
     return QCPrerequisiteCheck(name=name, ok=ok, required=required, detail=detail)
 
 
@@ -72,9 +69,13 @@ def check_arc_qc_prerequisites(
     *,
     genetic_architecture_import_fasta: str | Path = ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA,
     checkv_db_path: str | Path = DEFAULT_CHECKV_DB,
+    tool_bin_dir: str | Path | None = None,
 ) -> list[QCPrerequisiteCheck]:
     """Check path and tool prerequisites for the local Arc pipeline config."""
     config = yaml.safe_load(Path(config_path).read_text())
+    search_path = None
+    if tool_bin_dir is not None:
+        search_path = os.pathsep.join((str(Path(tool_bin_dir).resolve()), os.environ.get("PATH", "")))
     homology_required = bool(config.get("homology_filtering"))
     reference_identity_required = homology_required and bool(config.get("reference_genome_sequence_identity_filter"))
     genetic_architecture_required = homology_required and bool(config.get("genetic_architecture_filter"))
@@ -98,12 +99,12 @@ def check_arc_qc_prerequisites(
     ]
 
     orf_required = bool(config.get("orf_filtering"))
-    checks.append(_check_tool("prodigal", "prodigal", required=orf_required))
+    checks.append(_check_tool("prodigal", "prodigal", required=orf_required, search_path=search_path))
 
     checks.extend(
         [
-            _check_tool("orfipy", "orfipy", required=homology_required),
-            _check_tool("mmseqs", "mmseqs", required=homology_required),
+            _check_tool("orfipy", "orfipy", required=homology_required, search_path=search_path),
+            _check_tool("mmseqs", "mmseqs", required=homology_required, search_path=search_path),
             _check_path(
                 "phrogs_mmseqs_db",
                 config,
@@ -126,9 +127,9 @@ def check_arc_qc_prerequisites(
     )
 
     checkv_required = homology_required and bool(config.get("checkv_filter"))
-    checks.append(_check_tool("checkv", "checkv", required=checkv_required))
-    checks.append(_check_tool("hmmsearch", "hmmsearch", required=checkv_required))
-    checks.append(_check_tool("diamond", "diamond", required=checkv_required))
+    checks.append(_check_tool("checkv", "checkv", required=checkv_required, search_path=search_path))
+    checks.append(_check_tool("hmmsearch", "hmmsearch", required=checkv_required, search_path=search_path))
+    checks.append(_check_tool("diamond", "diamond", required=checkv_required, search_path=search_path))
     checks.append(
         QCPrerequisiteCheck(
             name="checkv_database",
@@ -139,10 +140,17 @@ def check_arc_qc_prerequisites(
     )
 
     diversification_required = bool(config.get("diversification_filtering"))
-    checks.append(_check_tool("mmseqs_for_diversification", "mmseqs", required=diversification_required))
+    checks.append(
+        _check_tool(
+            "mmseqs_for_diversification",
+            "mmseqs",
+            required=diversification_required,
+            search_path=search_path,
+        )
+    )
 
     visualization_required = bool(config.get("genetic_architecture_visualization_and_synteny_filtering"))
-    checks.append(_check_tool("lovis4u", "lovis4u", required=visualization_required))
+    checks.append(_check_tool("lovis4u", "lovis4u", required=visualization_required, search_path=search_path))
     checks.extend(
         [
             _check_path(
@@ -187,6 +195,7 @@ def main() -> None:
         default=DEFAULT_CHECKV_DB,
         help="CheckV database directory exported as CHECKVDB for CheckV runs",
     )
+    parser.add_argument("--tool-bin-dir", type=Path, default=None, help="Prepend the run-specific tool directory")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     parser.add_argument("--warn-only", action="store_true", help="Report missing required checks without failing")
     args = parser.parse_args()
@@ -195,6 +204,7 @@ def main() -> None:
         args.config,
         genetic_architecture_import_fasta=args.genetic_architecture_import_fasta,
         checkv_db_path=args.checkv_db,
+        tool_bin_dir=args.tool_bin_dir,
     )
     if args.json:
         print(json.dumps([asdict(check) for check in checks], indent=2))

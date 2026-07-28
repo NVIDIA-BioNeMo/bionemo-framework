@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+
+import json
+from pathlib import Path
+
+import pytest
+
+from bionemo.evo2_phage_gen.sampling_calibration import (
+    SweepCell,
+    build_inference_command,
+    build_sweep_cells,
+    partition_gpu_groups,
+    validate_cell_output,
+    write_cell_prompts,
+)
+
+
+def test_build_sweep_cells_includes_marker_only_and_canonical_temperature() -> None:
+    cells = build_sweep_cells(prefix_lengths=[0, 4], temperatures=[0.7, 1.0])
+
+    assert [cell.key for cell in cells] == [
+        "prefix0_temp0.7",
+        "prefix4_temp0.7",
+        "prefix0_temp1.0",
+        "prefix4_temp1.0",
+    ]
+
+
+def test_partition_gpu_groups_prefers_all_available_replicas() -> None:
+    assert partition_gpu_groups(list(range(8)), tensor_parallel_size=1) == [(0,), (1,), (2,), (3,), (4,), (5,), (6,), (7,)]
+    assert partition_gpu_groups(list(range(8)), tensor_parallel_size=2) == [(0, 1), (2, 3), (4, 5), (6, 7)]
+    with pytest.raises(ValueError, match="divisible"):
+        partition_gpu_groups([0, 1, 2], tensor_parallel_size=2)
+
+
+def test_write_cell_prompts_supports_marker_only_control(tmp_path: Path) -> None:
+    path = tmp_path / "prompts.jsonl"
+    cell = SweepCell(prefix_length=0, temperature=1.0)
+
+    write_cell_prompts(path, cell=cell, reference_start="GAGT", marker="+~", num_prompts=2)
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records == [
+        {"id": "prefix0_temp1.0_0000", "prompt": "+~"},
+        {"id": "prefix0_temp1.0_0001", "prompt": "+~"},
+    ]
+
+
+def test_build_inference_command_preserves_total_target_length(tmp_path: Path) -> None:
+    command = build_inference_command(
+        infer_script=tmp_path / "infer.py",
+        checkpoint=tmp_path / "checkpoint",
+        prompt_file=tmp_path / "prompts.jsonl",
+        output_file=tmp_path / "output.jsonl",
+        cell=SweepCell(prefix_length=24, temperature=1.0),
+        target_length=6000,
+        seed=7,
+        tensor_parallel_size=1,
+        master_port=29551,
+        prompt_batch_size=16,
+        max_seq_length=10240,
+    )
+
+    assert command[command.index("--max-new-tokens") + 1] == "5976"
+    assert command[command.index("--temperature") + 1] == "1.0"
+    assert command[command.index("--tensor-parallel-size") + 1] == "1"
+    assert "--strict-generation" in command
+
+
+def test_validate_cell_output_requires_exact_prompt_ids(tmp_path: Path) -> None:
+    prompts = tmp_path / "prompts.jsonl"
+    output = tmp_path / "output.jsonl"
+    cell = SweepCell(prefix_length=4, temperature=0.9)
+    write_cell_prompts(prompts, cell=cell, reference_start="GAGT", marker="+~", num_prompts=2)
+    expected = [json.loads(line) for line in prompts.read_text().splitlines()]
+    output.write_text(
+        "".join(
+            json.dumps({"id": record["id"], "prompt": record["prompt"], "completion": "A" * 10}) + "\n"
+            for record in expected
+        )
+    )
+
+    assert validate_cell_output(output, prompts, expected_records=2) == 2
+
+    output.write_text(
+        json.dumps({"id": "wrong-1", "prompt": "+~GAGT", "completion": "AAAA"})
+        + "\n"
+        + json.dumps({"id": "wrong-2", "prompt": "+~GAGT", "completion": "AAAA"})
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="IDs"):
+        validate_cell_output(output, prompts, expected_records=2)

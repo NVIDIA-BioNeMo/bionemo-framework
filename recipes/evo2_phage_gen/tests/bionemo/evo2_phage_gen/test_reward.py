@@ -15,6 +15,7 @@
 
 """Tests for ``bionemo.evo2_phage_gen.reward``."""
 
+import os
 import random
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from bionemo.evo2_phage_gen.reward import (
     _aai_novelty_score,
     _add_average_protein_identity_rewards,
     _add_full_synteny_rewards,
+    _add_mmseqs_hit_rewards,
     _add_required_gene_rewards,
     _aggregate_reward,
     _bounded_range_score,
@@ -43,6 +45,7 @@ from bionemo.evo2_phage_gen.reward import (
     _synteny_distance_score,
     _upper_bound_ratio_score,
     _write_external_qc_config,
+    _external_qc_env,
     score_fasta,
     score_nucleotide_metrics,
 )
@@ -480,6 +483,45 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     assert run_config["lovis4u_collect_pdfs"] is False
     assert run_config["use_reference_genome"] is True
     assert run_config["reference_genome_gff_file_save_location"].endswith("reference.gff")
+    assert run_config["online_measurement_mode"] is True
+
+
+def test_external_qc_env_prepends_run_specific_tool_directory(tmp_path):
+    """External objectives must use the fresh run's tools instead of ambient PATH."""
+    tool_bin_dir = tmp_path / "fresh-external" / "bin"
+    tool_bin_dir.mkdir(parents=True)
+
+    env = _external_qc_env(ExternalQCRewardConfig(tool_bin_dir=tool_bin_dir))
+
+    assert env["PATH"].split(os.pathsep)[0] == str(tool_bin_dir.resolve())
+
+
+def test_successful_tropism_search_without_hits_is_a_measured_zero(tmp_path):
+    """A completed no-hit search is biological zero evidence, not missing telemetry."""
+    tropism_dir = tmp_path / "tropism"
+    tropism_dir.mkdir()
+    pd.DataFrame(
+        columns=[
+            "id_prompt",
+            "tropism_protein_mmseqs_target",
+            "tropism_protein_mmseqs_percent_identity",
+        ]
+    ).to_csv(tropism_dir / "mmseqs2_hits.csv", index=False)
+    scored = pd.DataFrame({"id_prompt": ["umi1"], "reward_external_tropism": [0.0]})
+
+    observed = _add_mmseqs_hit_rewards(
+        scored,
+        tmp_path,
+        {
+            "mmseqs_tropism_protein_results_dir_save_location": "tropism",
+            "tropism_protein_sequence_identity_range": [60, 100],
+        },
+    )
+
+    assert observed["tropism_stage_reached"].tolist() == [1.0]
+    assert observed["tropism_measurement_available"].tolist() == [1.0]
+    assert observed["tropism_hit_present"].tolist() == [0.0]
+    assert observed["reward_external_tropism"].tolist() == [0.0]
 
 
 def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monkeypatch):
@@ -743,6 +785,31 @@ def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):
 
     assert scored["reward_external_synteny"].tolist() == [1.0, 1.0, 0.5, 0.5, 0.25, 0.0]
     assert scored["synteny_pair_distance"].tolist() == [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+
+
+def test_online_synteny_pass_uses_metrics_not_measurement_survivor_csv(tmp_path):
+    """Measurement mode retains all rows, so hard pass must come from raw synteny pairs."""
+    pd.DataFrame(
+        {
+            "id_prompt": ["valid", "invalid"],
+            "num_syntenic_genes": [10, 0],
+            "total_num_genes": [10, 5],
+            "missing_synteny_output": [False, False],
+        }
+    ).to_csv(tmp_path / "metrics.csv", index=False)
+    pd.DataFrame({"id_prompt": ["valid", "invalid"]}).to_csv(tmp_path / "survivors.csv", index=False)
+
+    scored = _add_full_synteny_rewards(
+        pd.DataFrame({"arc_qc_id": ["valid", "invalid"], "reward_external_synteny": [0.0, 0.0]}),
+        tmp_path,
+        {
+            "online_measurement_mode": True,
+            "synteny_metrics_file_save_location": "metrics.csv",
+            "synteny_filter_seqs_csv_file_save_location": "survivors.csv",
+        },
+    )
+
+    assert scored["reward_external_synteny_pass"].tolist() == [1.0, 0.0]
 
 
 def test_full_synteny_reward_does_not_score_unmeasured_rows(tmp_path):
