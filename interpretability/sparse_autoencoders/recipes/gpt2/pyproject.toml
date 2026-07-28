@@ -34,7 +34,8 @@ gpt2-sae-serve = "gpt2_sae.server:main"
 
 # The `gpt2_sae` package (src/) holds the live inference engine, the feature-clamp steering hook, and
 # the FastAPI server + CLI. scripts/ (build_atlas, build_meta, fetch_neuronpedia, curate_steerable) are
-# standalone entry points that regenerate the bundled data. feature_explorer/ is the React dashboard.
+# standalone entry points that regenerate the bundled data in dashboard_data/. The dashboard itself is
+# reused from ../evo2/feature_explorer/dist (config-driven into text mode), not shipped here.
 [tool.setuptools.packages.find]
 where = ["src"]
 

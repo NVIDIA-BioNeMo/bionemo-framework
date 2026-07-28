@@ -4,7 +4,7 @@ import GenerativeSteering from './GenerativeSteering'
 import SequenceInspector from './SequenceInspector'
 import SequenceUMAPView, { EMBEDDINGS_URL } from './SequenceUMAPView'
 import { Sun, Moon } from 'lucide-react'
-import { useHealth } from './backend'
+import { useHealth, UI } from './backend'
 
 // Four-tab shell with graceful degradation when there's no live backend:
 //   offline:true     -> always available (reads static files only)
@@ -64,6 +64,12 @@ export default function Dashboard() {
     document.documentElement.classList.toggle('dark', dark)
   }, [dark])
 
+  // Keep the tab title in sync with the (possibly server-overridden) brand. `health` re-renders
+  // after useHealth merges the /health `ui` block into UI, so the title picks up UI.brand then.
+  useEffect(() => {
+    document.title = UI.brand
+  }, [health])
+
   // Probe for a precomputed Sequence-UMAP bundle so that tab survives without a backend.
   useEffect(() => {
     fetch(EMBEDDINGS_URL, { method: 'HEAD' })
@@ -84,7 +90,7 @@ export default function Dashboard() {
   return (
     <div style={S.shell}>
       <div style={S.tabBar}>
-        <span style={S.brand}>Evo 2 SAE Feature Explorer</span>
+        <span style={S.brand}>{UI.brand}</span>
         {TABS.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)} style={tab === t.id ? S.tabOn : S.tabOff}>
             {t.label}

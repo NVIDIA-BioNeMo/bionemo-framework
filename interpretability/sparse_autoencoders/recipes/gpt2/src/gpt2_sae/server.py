@@ -14,6 +14,7 @@ from typing import Optional
 import pyarrow.parquet as pq
 import torch
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
@@ -22,17 +23,22 @@ from transformer_lens import HookedTransformer
 
 
 REPO, HP, LAYER = "jbloom/GPT2-Small-SAEs-Reformatted", "blocks.7.hook_resid_pre", 7
-# The built dashboard + bundled data (parquets, labels) live in feature_explorer/dist/. The server
-# mounts this dir at "/" and reads the atlas/labels from it, so one process serves UI + API + data.
-# Override with GPT2_SAE_DASHBOARD to point at a dist/ built elsewhere.
+# The dashboard is the SHARED evo2 feature_explorer, config-driven into text mode via the /api/health
+# `ui` block below (so we don't ship a near-duplicate copy). SERVE_DIR mounts that built dashboard at
+# "/". Override with GPT2_SAE_DASHBOARD to point at a dist/ built elsewhere.
+# parents: [0]=gpt2_sae [1]=src [2]=gpt2 [3]=recipes -> recipes/evo2/feature_explorer/dist
 SERVE_DIR = Path(
-    os.environ.get("GPT2_SAE_DASHBOARD", Path(__file__).resolve().parents[2] / "feature_explorer" / "dist")
+    os.environ.get("GPT2_SAE_DASHBOARD", Path(__file__).resolve().parents[3] / "evo2" / "feature_explorer" / "dist")
 )
-USER_LABELS = SERVE_DIR / "user_labels.json"
+# GPT-2's OWN dashboard data (atlas parquets, labels, sequence library) — served in place of evo2's
+# via the explicit routes below, which shadow the static mount.
+# parents: [0]=gpt2_sae [1]=src [2]=gpt2 -> recipes/gpt2/dashboard_data
+DATA_DIR = Path(__file__).resolve().parents[2] / "dashboard_data"
+USER_LABELS = DATA_DIR / "user_labels.json"
 # Neuronpedia auto-interp explanations for this exact SAE (gpt2-small/7-res-jb, index-aligned
 # to our feature ids). {feature_id -> short semantic description}. Makes ~all 24576 features
 # searchable by concept in the steering/inspector pickers. See scripts/fetch_neuronpedia.py.
-NP_LABELS = SERVE_DIR / "neuronpedia_labels.json"
+NP_LABELS = DATA_DIR / "neuronpedia_labels.json"
 MAX_CLAMP = 200.0
 
 
@@ -60,7 +66,7 @@ class Engine:
             w[k].float().to(self.device) for k in ("W_enc", "W_dec", "b_enc", "b_dec")
         )
         self.n_features = self.W_enc.shape[1]
-        atlas = pq.read_table(SERVE_DIR / "features_atlas.parquet").to_pydict()
+        atlas = pq.read_table(DATA_DIR / "features_atlas.parquet").to_pydict()
         self.peaks = {int(f): float(m) for f, m in zip(atlas["feature_id"], atlas["max_activation"])}
         if NP_LABELS.exists():
             self.np_labels = {int(k): v for k, v in json.loads(NP_LABELS.read_text()).items()}
@@ -340,6 +346,9 @@ def health(response: Response):
         "device": getattr(engine, "device", "cpu"),
         "max_seq_len": engine.max_seq_len,
         "restart_enabled": False,
+        # Config the shared (evo2) dashboard for the GPT-2 build: text mode (don't strip pasted input
+        # to A/C/G/T/N) + our brand. The dashboard merges this into its UI defaults on the first poll.
+        "ui": {"textMode": True, "brand": "GPT-2 SAE Feature Explorer"},
     }
 
 
@@ -448,6 +457,33 @@ async def _no_cache(request, call_next):
     return resp
 
 
+# GPT-2's own dashboard data, served from DATA_DIR so it SHADOWS the (evo2) static mount below. The
+# shared dashboard fetches these by name at "/", so we intercept them here — before the catch-all mount
+# — and return our parquets/labels instead of evo2's. Registered on the app root, so they win over the
+# "/" StaticFiles catch-all (which is mounted last).
+_DATA_FILES = (
+    "features_atlas.parquet",
+    "feature_metadata.parquet",
+    "feature_examples.parquet",
+    "sequence_library.json",
+    "neuronpedia_labels.json",
+    "user_labels.json",
+)
+
+
+def _make_data_route(name):
+    async def _route():
+        return FileResponse(DATA_DIR / name, headers={"Cache-Control": "no-store"})
+
+    return _route
+
+
+for _name in _DATA_FILES:
+    app.get(f"/{_name}")(_make_data_route(_name))
+
+
+# The shared dashboard catch-all MUST be mounted LAST: after the /api router and the explicit data
+# routes above, so those always win.
 if SERVE_DIR.exists():
     app.mount("/", StaticFiles(directory=str(SERVE_DIR), html=True), name="dash")
 

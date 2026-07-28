@@ -8,7 +8,7 @@ explanation set, so feature N here == feature N there. This script:
   3. rewrites the `label`/`description` columns of features_atlas.parquet + feature_metadata.parquet
      so the browse UI shows semantic names (user ⭐ labels in user_labels.json win over these).
 
-Run after build_atlas.py / build_meta.py. Output dir defaults to feature_explorer/dist/.
+Run after build_atlas.py / build_meta.py. Output dir defaults to dashboard_data/.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 BUCKET = "https://neuronpedia-datasets.s3.us-east-1.amazonaws.com"
 PREFIX = "v1/gpt2-small/7-res-jb/explanations"
 N_BATCHES = 48
-OUT = Path(os.environ.get("GPT2_SAE_DATA", Path(__file__).resolve().parents[1] / "feature_explorer" / "dist"))
+OUT = Path(os.environ.get("GPT2_SAE_DATA", Path(__file__).resolve().parents[1] / "dashboard_data"))
 
 
 def fetch_labels() -> dict[int, str]:

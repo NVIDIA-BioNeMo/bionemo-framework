@@ -13,7 +13,7 @@ from transformer_lens import HookedTransformer
 
 
 # Where to write the parquets — defaults to the dashboard's bundled data dir.
-OUT = Path(os.environ.get("GPT2_SAE_DATA", Path(__file__).resolve().parents[1] / "feature_explorer" / "dist"))
+OUT = Path(os.environ.get("GPT2_SAE_DATA", Path(__file__).resolve().parents[1] / "dashboard_data"))
 OUT.mkdir(parents=True, exist_ok=True)
 
 REPO = "jbloom/GPT2-Small-SAEs-Reformatted"

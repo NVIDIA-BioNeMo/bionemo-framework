@@ -19,12 +19,15 @@ uv sync
 gpt2-sae serve            # -> http://localhost:8749
 ```
 
-The dashboard ships **prebuilt** (`feature_explorer/dist/` with the atlas parquets and 24,570 semantic
-feature labels bundled in), so `serve` is the only step needed.
+The dashboard is **reused from the evo2 recipe** (`../evo2/feature_explorer/dist`) — the same built
+explorer, flipped into text mode at runtime via the `ui` block in `/api/health`, so we don't ship a
+near-duplicate copy. GPT-2 ships only its backend (`src/gpt2_sae/`) and its own `dashboard_data/` (the
+atlas parquets + 24,570 semantic feature labels); the server serves evo2's dist and shadows its data
+files with GPT-2's. Point `GPT2_SAE_DASHBOARD` at a dist built elsewhere to override.
 
 ## Dashboard
 
-Four tabs (the same explorer used across recipes, re-skinned for text):
+Four tabs (the same explorer used across recipes, re-skinned for text via the health `ui` block):
 
 - **Feature atlas** — browse every SAE feature: firing rate, decoder-space UMAP, top-activating text
   snippets, and its label. Static — no backend needed.
@@ -48,7 +51,7 @@ gpt2-sae serve 8749                                        # dashboard + API
 
 ## Rebuilding the bundled data (optional)
 
-The parquets + labels are committed under `feature_explorer/dist/`. To regenerate them from scratch:
+The parquets + labels are committed under `dashboard_data/`. To regenerate them from scratch:
 
 ```bash
 uv sync --extra build                       # scikit-learn + umap-learn
@@ -58,8 +61,9 @@ python scripts/fetch_neuronpedia.py         # neuronpedia_labels.json + bakes la
 python scripts/curate_steerable.py          # (server running) probe -> steer-test -> user_labels.json
 ```
 
-Then rebuild the dashboard (`cd feature_explorer && npm ci && npm run build`) and re-copy the parquets
-into `dist/`.
+These scripts write to `dashboard_data/` by default (override with `GPT2_SAE_DATA`); the server picks
+them up automatically. The dashboard front-end itself is not built here — it's reused from
+`../evo2/feature_explorer` (see `recipes/evo2/scripts/launch_dashboard.py` to build that dist).
 
 ## Why TransformerLens
 
@@ -73,7 +77,10 @@ TransformerLens gives FVU ≈ 0.001. The `encode_fn` runtime must match the SAE'
 ```
 gpt2/
 ├── src/gpt2_sae/        # server.py (Engine + FastAPI), cli.py
-├── feature_explorer/    # React dashboard (source) + prebuilt dist/ (with bundled parquets + labels)
+├── dashboard_data/      # bundled data served to the dashboard: atlas parquets + labels
 ├── scripts/             # build_atlas, build_meta, fetch_neuronpedia, curate_steerable
 └── tests/
 ```
+
+The dashboard front-end is not vendored here — the server serves the shared, config-driven build from
+`../evo2/feature_explorer/dist` and shadows its data files with `dashboard_data/`.
