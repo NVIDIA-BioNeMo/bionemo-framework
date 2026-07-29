@@ -79,6 +79,67 @@ def _pad_padded_dynamic_context_tokens(z: torch.Tensor, padded_token_count: int)
     return F.pad(z, (0, padded_token_count - z.shape[-1]))
 
 
+def _reshape_dynamic_context_requests(
+    features: torch.Tensor, inference_context
+) -> tuple[torch.Tensor, tuple[int, int] | None]:
+    """Unpack MCore's flattened active requests into Hyena's batch dimension.
+
+    Dynamic inference usually presents active request tokens as one flattened stream shaped
+    ``[1, channels, total_tokens]``. Evo2's Hyena recurrences need independent state per
+    request, so the opt-in batched path reshapes same-length active requests into
+    ``[num_requests, channels, tokens_per_request]`` for each Hyena layer and later restores the
+    flattened layout for MCore attention/output layers. NeMo-RL's generation worker can also
+    call dummy/decode forwards with requests already in that Hyena-compatible batch layout.
+    """
+    if inference_context is None or not bool(getattr(inference_context, "evo2_batched_decode_enabled", False)):
+        return features, None
+
+    paused_request_count = int(getattr(inference_context, "paused_request_count", 0))
+    total_request_count = int(getattr(inference_context, "total_request_count", 0))
+    active_request_count = total_request_count - paused_request_count
+    if paused_request_count != 0 or active_request_count <= 1:
+        return features, None
+
+    request_query_lengths = inference_context.request_query_lengths[paused_request_count:total_request_count].detach()
+    first_query_length = int(request_query_lengths[0].item())
+    if first_query_length <= 0 or not bool((request_query_lengths == first_query_length).all().item()):
+        raise ValueError(
+            "Evo2 batched decode requires all active requests to have the same query length; "
+            f"got {request_query_lengths.cpu().tolist()}"
+        )
+
+    if features.shape[0] == active_request_count and features.shape[-1] == first_query_length:
+        return features, None
+
+    if features.shape[0] != 1:
+        raise ValueError(
+            "Evo2 batched decode expects flattened dynamic input with batch=1 or already batched "
+            f"input with batch={active_request_count}, got {features.shape}"
+        )
+
+    real_token_count = active_request_count * first_query_length
+    if features.shape[-1] != real_token_count:
+        raise ValueError(
+            "Evo2 batched decode expected flattened tokens to match active requests; "
+            f"tokens={features.shape[-1]}, requests={active_request_count}, query_length={first_query_length}"
+        )
+
+    unpacked = features.reshape(1, features.shape[1], active_request_count, first_query_length)
+    return unpacked.squeeze(0).permute(1, 0, 2).contiguous(), (active_request_count, first_query_length)
+
+
+def _restore_dynamic_context_requests(z: torch.Tensor, layout: tuple[int, int] | None) -> torch.Tensor:
+    """Restore ``[num_requests, channels, query_length]`` to MCore's flattened layout."""
+    if layout is None:
+        return z
+    active_request_count, query_length = layout
+    if z.shape[0] != active_request_count or z.shape[-1] != query_length:
+        raise ValueError(
+            f"Evo2 batched decode Hyena output shape changed unexpectedly; output={tuple(z.shape)}, layout={layout}"
+        )
+    return z.permute(1, 0, 2).contiguous().reshape(1, z.shape[1], active_request_count * query_length)
+
+
 try:
     from transformer_engine.common.recipe import DelayedScaling, Format
 except ImportError:
@@ -434,6 +495,7 @@ class HyenaMixer(MegatronModule):
         else:
             features = rearrange(features, "l b d -> b d l").contiguous()
         features, padded_dynamic_token_count = _slice_padded_dynamic_context_tokens(features, inference_context)
+        features, dynamic_request_layout = _reshape_dynamic_context_requests(features, inference_context)
 
         is_b2b_eligible = self.use_subquadratic_ops and self.operator_type in [
             "hyena_short_conv",
@@ -458,6 +520,7 @@ class HyenaMixer(MegatronModule):
             )
             z = self.mixer(x1, x2, v, _hyena_use_cp=_proj_use_cp, inference_context=inference_context)
 
+        z = _restore_dynamic_context_requests(z, dynamic_request_layout)
         z = _pad_padded_dynamic_context_tokens(z, padded_dynamic_token_count)
         if self.use_subquadratic_ops:
             z = subquadratic_ops_rearrange(z, bhl_to_lbh=True)

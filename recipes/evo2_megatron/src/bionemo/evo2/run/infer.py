@@ -63,12 +63,13 @@ import contextlib
 import gc
 import json
 import logging
+import math
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -101,6 +102,7 @@ from megatron.core.transformer.module import Float16Module
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import (
     bind_hyena_packed_views_to_dynamic_context,
+    bind_hyena_packed_views_to_dynamic_context_batch,
     build_evo2_mamba_inference_state_config,
     compute_evo2_paged_kv_buffer_size_gb,
     make_evo2_dynamic_inference_context_cls,
@@ -111,6 +113,63 @@ from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_c
 
 logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Detailed phase evidence requires synchronized CUDA boundaries and allocator resets. Keep it
+# opt-in so ordinary inference retains only its existing low-overhead batch and total timers.
+_CUDA_PHASE_EVIDENCE_ENABLED = os.environ.get("EVO2_EXACT_PHASE_EVIDENCE") == "1"
+
+
+@dataclass(frozen=True)
+class _CudaPhaseStats:
+    """Synchronized elapsed time and allocator peaks for one CUDA phase."""
+
+    elapsed_s: float = 0.0
+    peak_allocated_bytes: int = 0
+    peak_reserved_bytes: int = 0
+    performed: bool = False
+    _ended_at_s: float = field(default=0.0, repr=False, compare=False)
+
+
+def _begin_cuda_phase(
+    *,
+    already_synchronized: bool = False,
+    boundary_time_s: Optional[float] = None,
+) -> float:
+    """Start a CUDA phase, optionally reusing the preceding phase's synchronized boundary."""
+    if not _CUDA_PHASE_EVIDENCE_ENABLED:
+        return time.perf_counter()
+    if not already_synchronized:
+        torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    return time.perf_counter() if boundary_time_s is None else float(boundary_time_s)
+
+
+def _finish_cuda_phase(started_at_s: float) -> _CudaPhaseStats:
+    """Finish a CUDA phase at one synchronized boundary and capture allocator peaks."""
+    if not _CUDA_PHASE_EVIDENCE_ENABLED:
+        return _CudaPhaseStats()
+    torch.cuda.synchronize()
+    ended_at_s = time.perf_counter()
+    return _CudaPhaseStats(
+        elapsed_s=ended_at_s - started_at_s,
+        peak_allocated_bytes=int(torch.cuda.max_memory_allocated()),
+        peak_reserved_bytes=int(torch.cuda.max_memory_reserved()),
+        performed=True,
+        _ended_at_s=ended_at_s,
+    )
+
+
+def _record_phase_stats(
+    timings: Dict[str, Any],
+    memory: Dict[str, int],
+    phase_name: str,
+    stats: _CudaPhaseStats,
+) -> None:
+    """Attach one named phase's timing, performed flag, and memory peaks."""
+    timings[f"{phase_name}_elapsed_s"] = float(stats.elapsed_s)
+    timings[f"{phase_name}_performed"] = bool(stats.performed)
+    memory[f"{phase_name}_peak_allocated_bytes"] = int(stats.peak_allocated_bytes)
+    memory[f"{phase_name}_peak_reserved_bytes"] = int(stats.peak_reserved_bytes)
 
 
 def _register_bionemo_target_prefix() -> None:
@@ -302,10 +361,19 @@ class Evo2NativeDynamicComponents:
     # by the context-affecting generate() options so it is rebuilt only if those change.
     shared_dyn_ctx: Optional[Any] = None
     shared_dyn_ctx_key: Optional[tuple] = None
+    # Sampling RNG is intentionally persistent across generate() calls. The CLI invokes generate()
+    # once per prompt-file chunk, and reseeding each chunk would replay identical samples for
+    # repeated prompts.
+    sampling_rng: Optional[torch.Generator] = None
     # True when ``max_seq_length`` was auto-sized from prompts (vs a manual cap). In auto mode a prompt
     # that needs more than the frozen budget is a hard error (the context cannot grow); in manual mode
     # the request just stops early on overflow, as before.
     max_seq_length_is_auto: bool = False
+    # Engine setup is measured by infer(), then emitted exactly once on the first generated group.
+    engine_setup_stats: _CudaPhaseStats = field(default_factory=_CudaPhaseStats)
+    engine_setup_stats_pending: bool = False
+    # Stable generation-call counter used by serialized timing group identifiers.
+    generation_call_index: int = 0
 
 
 # =============================================================================
@@ -385,22 +453,28 @@ def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int, cud
 
     This mirrors Megatron's ``cuda_graph_impl=local`` setup, but applies it directly to the
     provider loaded from the checkpoint because this recipe does not use Megatron's global arg
-    parser. Empty ``cuda_graph_scope`` means per-layer local graph capture for every graphable
-    layer; Evo2's HyenaLayer follows the same convention as mcore's MambaLayer.
+    parser. Empty ``cuda_graph_scope`` enables local graphs for every graphable
+    layer, including Transformer attention/MLP layers and Hyena layers. The
+    enclosing HyenaStack only replays its own graph for explicit
+    ``CudaGraphScope.full_iteration`` so the default path does not nest graphs.
 
     ``cuda_graph_impl="none"`` disables graph capture entirely (decode runs eager) -- useful for
     debugging and for tests that need an un-graphed reference to compare against.
     """
-    if cuda_graph_impl == "none":
-        if rank == 0:
-            logger.info("[evo2-native-cg] CUDA graphs disabled (cuda_graph_impl='none'); decode runs eager")
-        return False
     if not hasattr(model_provider, "cuda_graph_impl"):
         if rank == 0:
             logger.warning("[evo2-native-cg] model provider has no cuda_graph_impl; CUDA graphs disabled")
         return False
 
     model_provider.cuda_graph_impl = cuda_graph_impl
+    # A checkpoint can carry the inference scope selected by a different graph implementation.
+    # Let MCore derive the valid default for the implementation requested by this inference run.
+    model_provider.inference_cuda_graph_scope = None
+    if cuda_graph_impl == "none":
+        if rank == 0:
+            logger.info("[evo2-native-cg] CUDA graphs disabled (cuda_graph_impl='none'); decode runs eager")
+        return False
+
     model_provider.cuda_graph_scope = []
     os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
     if rank == 0:
@@ -478,7 +552,8 @@ def setup_inference_engine(
             auto-sizing. The context is CUDA-graph-pinned, so the budget cannot change in place — in
             auto mode a later prompt that needs more triggers a one-time rebuild + graph re-capture at
             a larger size; a manual cap never grows (an over-long prompt then just stops early).
-        max_batch_size: Maximum batch size for inference.
+        max_batch_size: Prompt-file chunk size and Megatron setup micro-batch metadata. This does
+            not control the number of prompt-file generations or Evo2 native decode concurrency.
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
@@ -693,9 +768,13 @@ def generate(
     top_k: int = 0,
     top_p: float = 0.0,
     return_log_probs: bool = False,
+    ignore_eos: bool = False,
+    strict_generation: bool = False,
     enable_chunked_prefill: bool = False,
     inference_dynamic_batching_max_tokens: Optional[int] = None,
     inference_dynamic_batching_block_size: int = 256,
+    evo2_batched_decode_size: int = 1,
+    result_callback: Optional[Callable[[int, Any], None]] = None,
 ) -> List[Any]:
     """Generate text using the Evo2 native dynamic-inference engine.
 
@@ -710,12 +789,16 @@ def generate(
         top_k: Top-k sampling parameter (0 = disabled, 1 = greedy).
         top_p: Nucleus sampling parameter (0 = disabled).
         return_log_probs: Whether to return log probabilities.
+        ignore_eos: Omit sampled EOS tokens and continue to max_new_tokens.
+        strict_generation: Fail instead of returning short or fallback generation results.
         enable_chunked_prefill: Split prompts across multiple prefill forwards when they exceed
             ``inference_dynamic_batching_max_tokens``. Disabled by default.
         inference_dynamic_batching_max_tokens: Optional dynamic-context per-step token budget.
             When set and chunking is disabled, each prompt must fit within this value.
         inference_dynamic_batching_block_size: KV-cache block size for the dynamic context. This is
             not the prefill chunk size.
+        evo2_batched_decode_size: Number of same-length prompts to decode together in the native Evo2 path.
+        result_callback: Optional callback invoked with each prompt index and native result as it completes.
 
     Returns:
         List of :class:`_NativeDynamicResult` objects (mirroring the
@@ -734,9 +817,13 @@ def generate(
         top_k=top_k,
         top_p=top_p,
         return_log_probs=return_log_probs,
+        ignore_eos=ignore_eos,
+        strict_generation=strict_generation,
         enable_chunked_prefill=enable_chunked_prefill,
         inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
         inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
+        evo2_batched_decode_size=evo2_batched_decode_size,
+        result_callback=result_callback,
     )
 
 
@@ -751,34 +838,39 @@ class _NativeDynamicResult:
     generated_text: str
     generated_length: int
     prompt_tokens: List[int]
+    generated_tokens: Optional[List[int]] = None
     generated_log_probs: Optional[List[float]] = None
+    finish_reason: str = "length"
+    stopped_on_eos: bool = False
+    truncated: bool = False
+    timings: Optional[Dict[str, Any]] = None
+    memory: Optional[Dict[str, int]] = None
 
 
-def _sample_from_logits(
+def _sampling_log_probs_from_logits(
     last_token_logits: torch.Tensor,
     *,
     temperature: float,
     top_k: int,
     top_p: float,
-    generator: torch.Generator,
     vocab_size: Optional[int] = None,
 ) -> torch.Tensor:
-    """Sample next-token ids from logits (greedy / top-k / top-p / temperature).
+    """Return log-probs from the exact distribution used for generation sampling.
 
     Self-contained mcore-compatible sampler for the native dynamic path. Greedy
-    (``top_k == 1``) returns the argmax; otherwise this applies standard top-k / top-p
-    filtering followed by ``torch.multinomial`` with the provided RNG.
+    (``top_k == 1``) is represented as a one-token support distribution; otherwise
+    this applies standard temperature, top-k, and top-p filtering before
+    renormalization.
 
     Args:
         last_token_logits: Logits of shape ``[batch_size, vocab_size]``.
         temperature: Temperature scaling factor (applied only on the non-greedy path).
         top_k: Top-k filtering value (0 = disabled, 1 = greedy argmax).
         top_p: Top-p (nucleus) filtering value (0.0 = disabled).
-        generator: RNG used by ``torch.multinomial``.
         vocab_size: When provided, clamps sampled ids to ``[0, vocab_size - 1]``.
 
     Returns:
-        Sampled token ids of shape ``[batch_size]``.
+        Log probabilities of shape ``[batch_size, vocab_size]``.
     """
     assert isinstance(top_p, float)
     assert isinstance(top_k, int)
@@ -799,10 +891,13 @@ def _sample_from_logits(
         filter_ = filter_.scatter(1, sorted_indices, filter_)
         logits.masked_fill_(filter_, float("-Inf"))
 
-    if top_k == 1:
-        return torch.argmax(last_token_logits, dim=-1)
-
     last_token_logits = last_token_logits.clone()  # .div_/.masked_fill_ below are in-place
+    if top_k == 1:
+        argmax = torch.argmax(last_token_logits, dim=-1)
+        deterministic_logits = torch.full_like(last_token_logits, float("-Inf"))
+        deterministic_logits.scatter_(1, argmax.unsqueeze(1), 0.0)
+        return torch.log_softmax(deterministic_logits, dim=-1)
+
     if temperature != 1.0:
         last_token_logits.div_(temperature)
     if top_k > 1:
@@ -813,11 +908,187 @@ def _sample_from_logits(
     elif top_p > 0.0:
         _modify_for_top_p(last_token_logits, top_p)
 
-    probabilities = last_token_logits.softmax(dim=-1)
+    return torch.log_softmax(last_token_logits, dim=-1)
+
+
+def _sample_from_logits(
+    last_token_logits: torch.Tensor,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    generator: torch.Generator,
+    vocab_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Sample next-token ids from logits (greedy / top-k / top-p / temperature)."""
+    log_probs = _sampling_log_probs_from_logits(
+        last_token_logits,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        vocab_size=vocab_size,
+    )
+    if top_k == 1:
+        return torch.argmax(log_probs, dim=-1)
+
+    probabilities = log_probs.exp()
     sampled = torch.multinomial(probabilities, num_samples=1, generator=generator).view(-1)
     if vocab_size:
         sampled = torch.clamp(sampled, min=0, max=(vocab_size - 1))
     return sampled
+
+
+def _sample_from_log_probs(
+    log_probs: torch.Tensor,
+    *,
+    top_k: int,
+    generator: torch.Generator,
+    vocab_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Sample next-token ids from pre-filtered log-probabilities."""
+    if top_k == 1:
+        return torch.argmax(log_probs, dim=-1)
+
+    probabilities = log_probs.exp()
+    sampled = torch.multinomial(probabilities, num_samples=1, generator=generator).view(-1)
+    if vocab_size:
+        sampled = torch.clamp(sampled, min=0, max=(vocab_size - 1))
+    return sampled
+
+
+def _selected_log_probs_for_sampled_tokens(log_probs: torch.Tensor, sampled_tokens: torch.Tensor) -> list[float]:
+    """Return sampled-token log-probs with one tensor gather and one host transfer."""
+    sampled_indices = sampled_tokens.to(device=log_probs.device, dtype=torch.long).view(-1, 1)
+    return log_probs.gather(1, sampled_indices).squeeze(1).detach().cpu().tolist()
+
+
+def _sampling_rng_for_native_dynamic(nd: Evo2NativeDynamicComponents, device: torch.device) -> torch.Generator:
+    """Return the persistent sampling RNG for an inference engine.
+
+    The native CLI processes prompt files in chunks but should sample those chunks as one continuous
+    stream. Keeping the generator on ``nd`` avoids replaying the same RNG sequence when many chunks
+    contain identical prompts.
+    """
+    rng = nd.sampling_rng
+    if rng is not None:
+        try:
+            if torch.device(rng.device) == torch.device(device):
+                return rng
+        except RuntimeError:
+            pass
+
+    rng = torch.Generator(device=device)
+    rng.manual_seed(int(nd.evo2_seed))
+    nd.sampling_rng = rng
+    return rng
+
+
+def _extract_generation_logits(dyn_ctx, logits: torch.Tensor) -> torch.Tensor:
+    """Return one vocab-logit row per active generation request."""
+    if getattr(dyn_ctx, "materialize_only_last_token_logits", False):
+        assert logits.size(0) == 1, f"logits.size(0) ({tuple(logits.shape)}) != 1"
+        return logits.squeeze(0)[: dyn_ctx.num_last_token_logits].float()
+    return dyn_ctx.last_token_logits(logits).float()
+
+
+_BATCHED_DECODE_TEXT_STOP_MARKERS = ("STOP", "EOS", "EOD")
+
+
+def _native_stop_token_ids(tokenizer: Any) -> set[int]:
+    """Best-effort set of tokenizer EOD/EOS ids for fixed-shape native decode."""
+    stop_token_ids: set[int] = set()
+
+    def _add_token_id(token_id: Any) -> None:
+        if token_id is None:
+            return
+        if isinstance(token_id, (list, tuple, set)):
+            for item in token_id:
+                _add_token_id(item)
+            return
+        if hasattr(token_id, "tolist"):
+            _add_token_id(token_id.tolist())
+            return
+        if isinstance(token_id, str):
+            mapped_id = None
+            for token_lookup_owner in (tokenizer, getattr(tokenizer, "tokenizer", None)):
+                token_to_id = getattr(token_lookup_owner, "token_to_id", None)
+                if callable(token_to_id):
+                    mapped_id = token_to_id(token_id)
+                    if mapped_id is not None:
+                        break
+            if mapped_id is None and hasattr(tokenizer, "tokenize"):
+                tokenized = tokenizer.tokenize(token_id)
+                if isinstance(tokenized, int):
+                    mapped_id = tokenized
+                elif hasattr(tokenized, "tolist"):
+                    tokenized = tokenized.tolist()
+                if isinstance(tokenized, (list, tuple)) and len(tokenized) == 1:
+                    mapped_id = tokenized[0]
+            if mapped_id is not None:
+                stop_token_ids.add(int(mapped_id))
+            return
+        stop_token_ids.add(int(token_id))
+
+    for attr_name in ("eod", "eod_id", "eod_token", "eos", "eos_id", "eos_token", "eos_token_id"):
+        token_id = getattr(tokenizer, attr_name, None)
+        if token_id is None and hasattr(tokenizer, "tokenizer"):
+            token_id = getattr(tokenizer.tokenizer, attr_name, None)
+        _add_token_id(token_id)
+    for token_text in ("<EOS>", "<EOD>"):
+        _add_token_id(token_text)
+    return stop_token_ids
+
+
+def _sampled_token_action(
+    token_id: int,
+    stop_token_ids: set[int],
+    *,
+    ignore_eos: bool,
+) -> tuple[bool, bool]:
+    """Return whether to append a sampled token and stop its request."""
+    is_eos = token_id in stop_token_ids
+    return (not is_eos, is_eos and not ignore_eos)
+
+
+def _suppress_stop_token_logits(logits: torch.Tensor, stop_token_ids: set[int]) -> torch.Tensor:
+    """Exclude valid stop-token IDs before top-k/top-p filtering."""
+    valid_stop_token_ids = sorted(token_id for token_id in stop_token_ids if 0 <= token_id < logits.shape[-1])
+    if not valid_stop_token_ids:
+        return logits
+
+    filtered_logits = logits.clone()
+    filtered_logits[..., valid_stop_token_ids] = float("-inf")
+    if torch.isneginf(filtered_logits).all(dim=-1).any():
+        raise RuntimeError("Cannot ignore EOS because every tokenizer vocabulary entry is a stop token")
+    return filtered_logits
+
+
+def _trim_native_text_stop_markers(text: str) -> str:
+    """Trim generated text at whitespace or textual STOP/EOS/EOD markers."""
+    text = str(text)
+    stop_index = len(text)
+    for idx, char in enumerate(text):
+        if char.isspace():
+            stop_index = min(stop_index, idx)
+            break
+    upper_text = text.upper()
+    for marker in _BATCHED_DECODE_TEXT_STOP_MARKERS:
+        marker_index = upper_text.find(marker)
+        if marker_index != -1:
+            stop_index = min(stop_index, marker_index)
+    return text[:stop_index]
+
+
+def _native_generated_ids_hit_stop(tokenizer: Any, generated_ids: list[int], stop_token_ids: set[int]) -> bool:
+    """Return whether one generated row has reached a stop marker."""
+    if not generated_ids:
+        return False
+    if generated_ids[-1] in stop_token_ids:
+        return True
+    # Avoid detokenizing the full generated prefix on every decode step. Textual markers are short
+    # ("STOP", "EOS", "EOD") and may be split across character tokens, so a small suffix is enough.
+    suffix_text = tokenizer.detokenize(generated_ids[-8:])
+    return _trim_native_text_stop_markers(suffix_text) != suffix_text
 
 
 def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx: Any, device: torch.device) -> None:
@@ -849,14 +1120,17 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
     n_warmup_prompt_tokens = max(1, min(8, int(dyn_ctx.max_tokens)))
     try:
         with torch.inference_mode():
-            req = DynamicInferenceRequest(
-                request_id=0,
-                prompt_tokens=torch.zeros(n_warmup_prompt_tokens, dtype=torch.int64, device=device),
-                sampling_params=SamplingParams(num_tokens_to_generate=8, termination_id=-1),
-            )
-            dyn_ctx.add_request(req, prefill_chunk_length=n_warmup_prompt_tokens)
-            slot = int(dyn_ctx.mamba_metadata.request_to_mamba_state_idx[0].item())
-            bind_hyena_packed_views_to_dynamic_context(hyena_model, dyn_ctx, request_slot=slot)
+            warmup_request_count = max(1, int(getattr(dyn_ctx, "evo2_max_batched_decode_requests", 1)))
+            for request_id in range(warmup_request_count):
+                req = DynamicInferenceRequest(
+                    request_id=request_id,
+                    prompt_tokens=torch.zeros(n_warmup_prompt_tokens, dtype=torch.int64, device=device),
+                    sampling_params=SamplingParams(num_tokens_to_generate=8, termination_id=-1),
+                )
+                dyn_ctx.add_request(req, prefill_chunk_length=n_warmup_prompt_tokens)
+            slots = dyn_ctx.mamba_metadata.request_to_mamba_state_idx[:warmup_request_count]
+            bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
+            dyn_ctx.evo2_batched_decode_enabled = warmup_request_count > 1
             # One prefill forward (eager; not graphed) seeds the Hyena recurrent state, then two decode
             # forwards: the first triggers graph capture, the second replays it so any capture/replay
             # mismatch surfaces here rather than on a user prompt.
@@ -878,8 +1152,8 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
                         runtime_gather_output=True,
                     )
                 dyn_ctx.update_requests(
-                    torch.ones(1, dtype=torch.bool, device=device),
-                    torch.zeros(1, dtype=torch.int64, device=device),
+                    torch.ones(warmup_request_count, dtype=torch.bool, device=device),
+                    torch.zeros(warmup_request_count, dtype=torch.int64, device=device),
                 )
     finally:
         dyn_ctx.reset()
@@ -921,8 +1195,9 @@ def _get_or_build_shared_dynamic_context(
     block_size_tokens: int,
     max_tokens: Optional[int],
     enable_chunked_prefill: bool,
+    max_active_requests: int,
     device: torch.device,
-) -> Any:
+) -> tuple[Any, _CudaPhaseStats, _CudaPhaseStats]:
     """Return the engine's persistent dynamic context, building (and graph-warming) it on first use.
 
     A single context is reused for the whole engine lifetime so the per-layer CUDA graphs captured
@@ -942,6 +1217,7 @@ def _get_or_build_shared_dynamic_context(
         int(block_size_tokens),
         None if max_tokens is None else int(max_tokens),
         bool(enable_chunked_prefill),
+        int(max_active_requests),
     )
     cached = nd.shared_dyn_ctx
     if (
@@ -952,19 +1228,20 @@ def _get_or_build_shared_dynamic_context(
         # Reuse the persistent context (it is big enough); reset() returns it to a clean state without
         # freeing the CUDA-graph-referenced buffers (it is explicitly designed for reuse-after-capture).
         cached.reset()
-        return cached
+        return cached, _CudaPhaseStats(), _CudaPhaseStats()
 
     # First build, config change, or grow. Drop any graphs captured against the previous context
     # object so a stale graph can never be replayed against the new (larger) one.
+    context_setup_started_at_s = _begin_cuda_phase()
     if cached is not None and nd.cuda_graphs_enabled:
         _reset_layer_cuda_graphs(nd)
 
     hyena_model = nd.hyena_model
-    # max_requests is kept tp-divisible (max(tp,1)); the per-context exact rounder still decodes the
-    # single active request as ONE row. Size to the engine's full max_seq_length so the persistent
-    # context (and its constant rotary length) can serve any prompt across any batch.
+    # max_requests is kept at least tp-divisible and can be enlarged by the opt-in Evo2 batched
+    # decode path. Size to the engine's full max_seq_length so the persistent context (and its
+    # constant rotary length) can serve any prompt across any batch.
     tp = int(getattr(hyena_model.config, "tensor_model_parallel_size", 1) or 1)
-    max_requests = max(tp, 1)
+    max_requests = max(tp, int(max_active_requests), 1)
     msl = int(nd.max_seq_length)
     buf_gb = compute_evo2_paged_kv_buffer_size_gb(
         hyena_model.config,
@@ -989,13 +1266,21 @@ def _get_or_build_shared_dynamic_context(
             use_cuda_graphs_for_non_decode_steps=False,
         ),
     )
-    dyn_ctx.materialize_only_last_token_logits = False
+    dyn_ctx.materialize_only_last_token_logits = True
+    dyn_ctx.evo2_max_batched_decode_requests = int(max_active_requests)
     dyn_ctx.initialize_all_tensors()
+    context_setup_stats = _finish_cuda_phase(context_setup_started_at_s)
+    cuda_graph_capture_stats = _CudaPhaseStats()
     if nd.cuda_graphs_enabled:
+        capture_started_at_s = _begin_cuda_phase(
+            already_synchronized=True,
+            boundary_time_s=context_setup_stats._ended_at_s,
+        )
         _warmup_native_dynamic_cuda_graphs(nd, dyn_ctx, device)
+        cuda_graph_capture_stats = _finish_cuda_phase(capture_started_at_s)
     nd.shared_dyn_ctx = dyn_ctx
     nd.shared_dyn_ctx_key = ctx_key
-    return dyn_ctx
+    return dyn_ctx, context_setup_stats, cuda_graph_capture_stats
 
 
 def _generate_native_dynamic(
@@ -1007,9 +1292,13 @@ def _generate_native_dynamic(
     top_k: int,
     top_p: float,
     return_log_probs: bool,
+    ignore_eos: bool,
+    strict_generation: bool,
     enable_chunked_prefill: bool,
     inference_dynamic_batching_max_tokens: Optional[int],
     inference_dynamic_batching_block_size: int,
+    evo2_batched_decode_size: int,
+    result_callback: Optional[Callable[[int, Any], None]],
 ) -> List[_NativeDynamicResult]:
     """Drive standalone Evo2 (text→DNA) generation through the native mcore dynamic engine.
 
@@ -1045,8 +1334,7 @@ def _generate_native_dynamic(
     # (top_k>0 AND top_p>0); honor top-k first for compatibility with SamplingParams.
     eff_top_k = max(0, int(top_k))
     eff_top_p = float(top_p) if (top_p and top_p > 0 and eff_top_k == 0) else 0.0
-    sampling_rng = torch.Generator(device=device)
-    sampling_rng.manual_seed(int(nd.evo2_seed))
+    sampling_rng = _sampling_rng_for_native_dynamic(nd, device)
 
     results: List[_NativeDynamicResult] = []
     if not prompts:
@@ -1110,13 +1398,20 @@ def _generate_native_dynamic(
     # same object and shape must be presented on every later decode step regardless of prompt or batch.
     # reset() (called between prompts in the loop below, and on reuse) returns the context to a clean
     # state without freeing the graph-referenced buffers.
-    dyn_ctx = _get_or_build_shared_dynamic_context(
+    dyn_ctx, context_setup_stats, cuda_graph_capture_stats = _get_or_build_shared_dynamic_context(
         nd,
         block_size_tokens=block_size_tokens,
         max_tokens=max_tokens,
         enable_chunked_prefill=enable_chunked_prefill,
+        max_active_requests=max(1, int(evo2_batched_decode_size)),
         device=device,
     )
+    engine_setup_stats = _CudaPhaseStats()
+    if bool(getattr(nd, "engine_setup_stats_pending", False)):
+        engine_setup_stats = getattr(nd, "engine_setup_stats", _CudaPhaseStats())
+        nd.engine_setup_stats_pending = False
+    generation_call_index = int(getattr(nd, "generation_call_index", 0))
+    nd.generation_call_index = generation_call_index + 1
     if max_n_prompt > dyn_ctx.max_tokens and not enable_chunked_prefill:
         raise ValueError(
             f"Longest prompt has {max_n_prompt} tokens but the dynamic context max token budget is "
@@ -1124,13 +1419,44 @@ def _generate_native_dynamic(
             "--enable-chunked-prefill."
         )
 
-    for prompt_token_ids in tokenized_prompts:
+    def _run_single_prompt(prompt_token_ids: list[int]) -> _NativeDynamicResult:
         n_prompt = len(prompt_token_ids)
 
         generated_ids: List[int] = []
         generated_logprobs: List[float] = []
+        stop_token_ids = _native_stop_token_ids(tokenizer)
+        stopped_on_eos = False
+        timings = {
+            "prefill_elapsed_s": 0.0,
+            "decode_elapsed_s": 0.0,
+            "generation_elapsed_s": 0.0,
+        }
+        memory: Dict[str, int] = {}
+        phase_stats = {
+            "prefill": _CudaPhaseStats(),
+            "decode": _CudaPhaseStats(),
+        }
+        _record_phase_stats(timings, memory, "prefill", phase_stats["prefill"])
+        _record_phase_stats(timings, memory, "decode", phase_stats["decode"])
+        prefill_start: Optional[float] = None
+        decode_start: Optional[float] = None
+        timing_complete = False
+
+        def _complete_phase_timing() -> None:
+            nonlocal timing_complete
+            if prefill_start is None or timing_complete:
+                return
+            if decode_start is None:
+                phase_stats["prefill"] = _finish_cuda_phase(prefill_start)
+                _record_phase_stats(timings, memory, "prefill", phase_stats["prefill"])
+            else:
+                phase_stats["decode"] = _finish_cuda_phase(decode_start)
+                _record_phase_stats(timings, memory, "decode", phase_stats["decode"])
+            timings["generation_elapsed_s"] = phase_stats["prefill"].elapsed_s + phase_stats["decode"].elapsed_s
+            timing_complete = True
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
+            nonlocal stopped_on_eos
             dyn_ctx.initialize_attention_state()
             input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
             try:
@@ -1150,25 +1476,42 @@ def _generate_native_dynamic(
             # HyenaModel returns [B, S, vocab]; last_token_logits expects [1, S, H] and
             # selects the per-request final position -> [num_requests, vocab]. Sample in fp32 so
             # stochastic filters and logprobs do not depend on the model activation dtype.
-            last_logits = dyn_ctx.last_token_logits(logits).float()
-            sampled = _sample_from_logits(
-                last_logits,
+            last_logits = _extract_generation_logits(dyn_ctx, logits)
+            sampling_logits = _suppress_stop_token_logits(last_logits, stop_token_ids) if ignore_eos else last_logits
+            sampled_log_probs = _sampling_log_probs_from_logits(
+                sampling_logits,
                 temperature=float(temperature),
                 top_k=eff_top_k,
                 top_p=eff_top_p,
+                vocab_size=tokenizer.vocab_size,
+            )
+            sampled = _sample_from_log_probs(
+                sampled_log_probs,
+                top_k=eff_top_k,
                 generator=sampling_rng,
                 vocab_size=tokenizer.vocab_size,
             )
-            if count_generated:
-                next_tok_id = int(sampled[0].item())
-                generated_ids.append(next_tok_id)
-                if return_log_probs:
-                    logprob = torch.log_softmax(last_logits[0].float(), dim=-1)[next_tok_id].item()
-                    generated_logprobs.append(logprob)
-            active_after_sample = torch.tensor(
-                [not count_generated or len(generated_ids) < max_new_tokens], dtype=torch.bool, device=device
+            selected_log_probs = (
+                _selected_log_probs_for_sampled_tokens(sampled_log_probs, sampled) if return_log_probs else []
             )
-            dyn_ctx.update_requests(active_after_sample, sampled.to(dtype=torch.int64, device=device))
+            sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
+            if count_generated:
+                next_tok_id = int(sampled_cpu[0].item())
+                append_token, stop_request = _sampled_token_action(
+                    next_tok_id,
+                    stop_token_ids,
+                    ignore_eos=ignore_eos,
+                )
+                if append_token:
+                    generated_ids.append(next_tok_id)
+                    if return_log_probs:
+                        generated_logprobs.append(float(selected_log_probs[0]))
+                if stop_request:
+                    stopped_on_eos = True
+            active_after_sample = torch.tensor(
+                [not count_generated or (not stopped_on_eos and len(generated_ids) < max_new_tokens)], dtype=torch.bool
+            )
+            dyn_ctx.update_requests(active_after_sample, sampled_cpu)
             return bool(active_after_sample[0].item())
 
         try:
@@ -1207,8 +1550,16 @@ def _generate_native_dynamic(
                                 n_prompt,
                                 req.remaining_prompt_length - chunk_len,
                             )
+                        if prefill_start is None:
+                            prefill_start = _begin_cuda_phase()
                         _forward_sample_update(count_generated=not is_partial_chunk)
                         if not is_partial_chunk:
+                            phase_stats["prefill"] = _finish_cuda_phase(prefill_start)
+                            _record_phase_stats(timings, memory, "prefill", phase_stats["prefill"])
+                            decode_start = _begin_cuda_phase(
+                                already_synchronized=True,
+                                boundary_time_s=phase_stats["prefill"]._ended_at_s,
+                            )
                             req.remaining_prompt_tokens = req.remaining_prompt_tokens.new_empty(0)
                             break
                         req.remaining_prompt_tokens = req.remaining_prompt_tokens[chunk_len:]
@@ -1216,7 +1567,11 @@ def _generate_native_dynamic(
 
                     while len(generated_ids) < max_new_tokens and dyn_ctx.has_unfinished_requests():
                         _forward_sample_update(count_generated=True)
+                    _complete_phase_timing()
         except (BlockOverflowError, TokenOverflowError, MaxSequenceLengthOverflowError) as exc:
+            _complete_phase_timing()
+            if strict_generation:
+                raise
             if rank == 0:
                 logger.warning(
                     "[evo2-native] generation stopped early at %d tokens (context overflow: %s). "
@@ -1228,14 +1583,297 @@ def _generate_native_dynamic(
             dyn_ctx.reset()
 
         generated_text = tokenizer.detokenize(generated_ids) if generated_ids else ""
-        results.append(
+        return _NativeDynamicResult(
+            generated_text=generated_text,
+            generated_length=len(generated_ids),
+            prompt_tokens=prompt_token_ids,
+            generated_tokens=generated_ids,
+            generated_log_probs=generated_logprobs if return_log_probs else None,
+            finish_reason="stop" if stopped_on_eos else "length",
+            stopped_on_eos=stopped_on_eos,
+            truncated=not stopped_on_eos and len(generated_ids) >= max_new_tokens,
+            timings=timings,
+            memory=memory,
+        )
+
+    def _run_batched_prompts(prompt_token_id_batch: list[list[int]]) -> list[_NativeDynamicResult]:
+        batch_request_count = len(prompt_token_id_batch)
+        timings = {
+            "prefill_elapsed_s": 0.0,
+            "decode_elapsed_s": 0.0,
+            "generation_elapsed_s": 0.0,
+        }
+        memory: Dict[str, int] = {}
+        _record_phase_stats(timings, memory, "prefill", _CudaPhaseStats())
+        _record_phase_stats(timings, memory, "decode", _CudaPhaseStats())
+        if batch_request_count <= 1:
+            return [_run_single_prompt(prompt_token_id_batch[0])]
+        if max_new_tokens <= 0:
+            return [
+                _NativeDynamicResult(
+                    generated_text="",
+                    generated_length=0,
+                    prompt_tokens=prompt_token_ids,
+                    generated_tokens=[],
+                    generated_log_probs=[] if return_log_probs else None,
+                    finish_reason="length",
+                    stopped_on_eos=False,
+                    truncated=False,
+                    timings=timings,
+                    memory=memory,
+                )
+                for prompt_token_ids in prompt_token_id_batch
+            ]
+        if enable_chunked_prefill:
+            raise ValueError("Evo2 batched decode does not support chunked prefill")
+        prompt_lengths = {len(prompt_ids) for prompt_ids in prompt_token_id_batch}
+        if len(prompt_lengths) != 1:
+            raise ValueError(f"Evo2 batched decode requires same-length prompts, got lengths {sorted(prompt_lengths)}")
+
+        n_prompt = prompt_lengths.pop()
+        generated_ids: list[list[int]] = [[] for _ in range(batch_request_count)]
+        generated_logprobs: list[list[float]] = [[] for _ in range(batch_request_count)]
+        stop_token_ids = _native_stop_token_ids(tokenizer)
+        stopped_on_eos = [False for _ in range(batch_request_count)]
+
+        def _forward_sample_update(*, count_generated: bool) -> bool:
+            dyn_ctx.initialize_attention_state()
+            input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
+            try:
+                from megatron.core.inference.utils import InferenceMode
+
+                inference_mode_context = InferenceMode.active()
+            except ImportError:
+                inference_mode_context = contextlib.nullcontext()
+            with inference_mode_context:
+                logits = forward_model(
+                    input_ids,
+                    position_ids,
+                    None,
+                    inference_context=dyn_ctx,
+                    runtime_gather_output=True,
+                )
+            last_logits = _extract_generation_logits(dyn_ctx, logits)
+            if last_logits.shape[0] < batch_request_count:
+                raise RuntimeError(
+                    "Evo2 batched decode expected one logit row per active request; "
+                    f"got {last_logits.shape[0]} rows for {batch_request_count} requests"
+                )
+            active_logits = last_logits[:batch_request_count]
+            sampling_logits = (
+                _suppress_stop_token_logits(active_logits, stop_token_ids) if ignore_eos else active_logits
+            )
+            active_log_probs = _sampling_log_probs_from_logits(
+                sampling_logits,
+                temperature=float(temperature),
+                top_k=eff_top_k,
+                top_p=eff_top_p,
+                vocab_size=tokenizer.vocab_size,
+            )
+            sampled = _sample_from_log_probs(
+                active_log_probs,
+                top_k=eff_top_k,
+                generator=sampling_rng,
+                vocab_size=tokenizer.vocab_size,
+            )
+            selected_log_probs = (
+                _selected_log_probs_for_sampled_tokens(active_log_probs, sampled) if return_log_probs else []
+            )
+            sampled_cpu = sampled.to(dtype=torch.int64).detach().cpu()
+            sampled_ids = sampled_cpu.tolist()
+            if count_generated:
+                for request_idx, next_tok_id in enumerate(sampled_ids):
+                    if stopped_on_eos[request_idx] or len(generated_ids[request_idx]) >= max_new_tokens:
+                        continue
+                    append_token, stop_request = _sampled_token_action(
+                        next_tok_id,
+                        stop_token_ids,
+                        ignore_eos=ignore_eos,
+                    )
+                    if append_token:
+                        generated_ids[request_idx].append(next_tok_id)
+                        if return_log_probs:
+                            generated_logprobs[request_idx].append(float(selected_log_probs[request_idx]))
+                    if stop_request:
+                        stopped_on_eos[request_idx] = True
+
+            keep_group_active = (not count_generated) or any(
+                not stopped_on_eos[request_idx] and len(request_generated_ids) < max_new_tokens
+                for request_idx, request_generated_ids in enumerate(generated_ids)
+            )
+            active_after_sample = torch.full((batch_request_count,), keep_group_active, dtype=torch.bool)
+            dyn_ctx.update_requests(active_after_sample, sampled_cpu)
+            if int(getattr(dyn_ctx, "paused_request_count", 0)) != 0:
+                raise RuntimeError("Evo2 batched decode does not yet support paused dynamic requests")
+            return keep_group_active
+
+        try:
+            with torch.inference_mode():
+                for request_idx, prompt_token_ids in enumerate(prompt_token_id_batch):
+                    req = DynamicInferenceRequest(
+                        request_id=request_idx,
+                        prompt_tokens=torch.tensor(prompt_token_ids, dtype=torch.int64, device=device),
+                        sampling_params=SamplingParams(num_tokens_to_generate=max_new_tokens, termination_id=-1),
+                    )
+                    dyn_ctx.add_request(req, prefill_chunk_length=n_prompt)
+
+                slots = dyn_ctx.mamba_metadata.request_to_mamba_state_idx[:batch_request_count]
+                bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
+                dyn_ctx.evo2_batched_decode_enabled = True
+                if rank == 0:
+                    logger.info(
+                        "[evo2-native] batched prompt prefill: requests=%d, chunk=%d/%d tokens, remaining=0",
+                        batch_request_count,
+                        n_prompt,
+                        n_prompt,
+                    )
+
+                prefill_started_at_s = _begin_cuda_phase()
+                _forward_sample_update(count_generated=True)
+                prefill_stats = _finish_cuda_phase(prefill_started_at_s)
+                _record_phase_stats(timings, memory, "prefill", prefill_stats)
+                decode_started_at_s = _begin_cuda_phase(
+                    already_synchronized=True,
+                    boundary_time_s=prefill_stats._ended_at_s,
+                )
+                while any(len(request_generated_ids) < max_new_tokens for request_generated_ids in generated_ids):
+                    if not dyn_ctx.has_unfinished_requests():
+                        break
+                    _forward_sample_update(count_generated=True)
+                decode_stats = _finish_cuda_phase(decode_started_at_s)
+                _record_phase_stats(timings, memory, "decode", decode_stats)
+                timings["generation_elapsed_s"] = prefill_stats.elapsed_s + decode_stats.elapsed_s
+        finally:
+            dyn_ctx.evo2_batched_decode_enabled = False
+            dyn_ctx.reset()
+
+        return [
             _NativeDynamicResult(
-                generated_text=generated_text,
-                generated_length=len(generated_ids),
+                generated_text=tokenizer.detokenize(request_generated_ids) if request_generated_ids else "",
+                generated_length=len(request_generated_ids),
                 prompt_tokens=prompt_token_ids,
-                generated_log_probs=generated_logprobs if return_log_probs else None,
+                generated_tokens=request_generated_ids,
+                generated_log_probs=generated_logprobs[request_idx] if return_log_probs else None,
+                finish_reason="stop" if stopped_on_eos[request_idx] else "length",
+                stopped_on_eos=stopped_on_eos[request_idx],
+                truncated=not stopped_on_eos[request_idx] and len(request_generated_ids) >= max_new_tokens,
+                timings=timings,
+                memory=memory,
+            )
+            for request_idx, (prompt_token_ids, request_generated_ids) in enumerate(
+                zip(prompt_token_id_batch, generated_ids)
+            )
+        ]
+
+    batched_decode_size = max(1, int(evo2_batched_decode_size))
+    if batched_decode_size > 1 and rank == 0:
+        logger.info("[evo2-native] opt-in batched decode active: size=%d", batched_decode_size)
+
+    def _append_results(group_results: list[_NativeDynamicResult], *, prompt_offset: int) -> None:
+        group_timings = dict(group_results[0].timings or {})
+        group_memory = dict(group_results[0].memory or {})
+        setup_phase_stats = {
+            "engine_setup": engine_setup_stats if prompt_offset == 0 else _CudaPhaseStats(),
+            "context_setup": context_setup_stats if prompt_offset == 0 else _CudaPhaseStats(),
+            "cuda_graph_capture": cuda_graph_capture_stats if prompt_offset == 0 else _CudaPhaseStats(),
+        }
+        for phase_name, stats in setup_phase_stats.items():
+            _record_phase_stats(group_timings, group_memory, phase_name, stats)
+        group_memory["generation_peak_allocated_bytes"] = max(
+            int(group_memory.get("prefill_peak_allocated_bytes", 0)),
+            int(group_memory.get("decode_peak_allocated_bytes", 0)),
+        )
+        group_memory["generation_peak_reserved_bytes"] = max(
+            int(group_memory.get("prefill_peak_reserved_bytes", 0)),
+            int(group_memory.get("decode_peak_reserved_bytes", 0)),
+        )
+        group_timings.update(
+            {
+                "timing_scope": "native_generation_group",
+                "timing_group_id": (f"native-call-{generation_call_index:08d}-group-{prompt_offset:08d}"),
+                "timing_request_count": len(group_results),
+            }
+        )
+        group_timings["total_elapsed_s"] = sum(
+            float(group_timings.get(f"{phase_name}_elapsed_s", 0.0))
+            for phase_name in (
+                "engine_setup",
+                "context_setup",
+                "cuda_graph_capture",
+                "prefill",
+                "decode",
             )
         )
+        group_memory["total_peak_allocated_bytes"] = max(
+            (
+                value
+                for key, value in group_memory.items()
+                if key.endswith("_peak_allocated_bytes") and key != "total_peak_allocated_bytes"
+            ),
+            default=0,
+        )
+        group_memory["total_peak_reserved_bytes"] = max(
+            (
+                value
+                for key, value in group_memory.items()
+                if key.endswith("_peak_reserved_bytes") and key != "total_peak_reserved_bytes"
+            ),
+            default=0,
+        )
+        for local_idx, result in enumerate(group_results):
+            prompt_idx = prompt_offset + local_idx
+            result.timings = group_timings
+            result.memory = group_memory
+            if strict_generation:
+                generated_token_count = len(result.generated_tokens or [])
+                stopped_early_on_eos = bool(result.stopped_on_eos) and generated_token_count < max_new_tokens
+                if generated_token_count != max_new_tokens and not stopped_early_on_eos:
+                    raise RuntimeError(
+                        "Strict Evo2 generation expected exactly "
+                        f"{max_new_tokens} generated tokens or an explicit EOS stop for prompt {prompt_idx}, "
+                        f"got {generated_token_count}"
+                    )
+                if return_log_probs and result.generated_log_probs is None:
+                    raise RuntimeError(
+                        f"Strict Evo2 generation is missing requested chosen-token log-probs for prompt {prompt_idx}"
+                    )
+                if result.generated_log_probs is not None and len(result.generated_log_probs) != generated_token_count:
+                    raise RuntimeError(
+                        "Strict Evo2 generation returned mismatched token/log-prob lengths for "
+                        f"prompt {prompt_idx}: {generated_token_count} tokens != "
+                        f"{len(result.generated_log_probs)} log-probs"
+                    )
+                for logprob_idx, logprob in enumerate(result.generated_log_probs or []):
+                    try:
+                        is_finite = math.isfinite(float(logprob))
+                    except (TypeError, ValueError):
+                        is_finite = False
+                    if not is_finite:
+                        raise RuntimeError(
+                            "Strict Evo2 generation returned a non-finite chosen-token log-prob "
+                            f"for prompt {prompt_idx} at generated token {logprob_idx}: {logprob!r}"
+                        )
+            results.append(result)
+            if result_callback is not None:
+                result_callback(prompt_idx, result)
+
+    for group_start in range(0, len(tokenized_prompts), batched_decode_size):
+        group = tokenized_prompts[group_start : group_start + batched_decode_size]
+        if batched_decode_size <= 1 or len(group) <= 1:
+            _append_results([_run_single_prompt(group[0])], prompt_offset=group_start)
+            continue
+        try:
+            _append_results(_run_batched_prompts(group), prompt_offset=group_start)
+        except Exception as exc:
+            if strict_generation:
+                raise
+            if rank == 0:
+                logger.exception(
+                    "[evo2-native] batched decode group failed (%r); falling back to single-request decode",
+                    exc,
+                )
+            fallback_results = [_run_single_prompt(prompt_token_ids) for prompt_token_ids in group]
+            _append_results(fallback_results, prompt_offset=group_start)
 
     return results
 
@@ -1309,14 +1947,32 @@ def _result_to_jsonl_record(
     generated_text = result.generated_text or ""
     generated_length = result.generated_length or 0
     prompt_tokens_count = len(result.prompt_tokens) if result.prompt_tokens is not None else 0
+    prompt_token_ids = result.prompt_tokens if result.prompt_tokens is not None else []
+    if hasattr(prompt_token_ids, "tolist"):
+        prompt_token_ids = prompt_token_ids.tolist()
+    prompt_token_ids = [int(token_id) for token_id in prompt_token_ids]
+    completion_token_ids = getattr(result, "generated_tokens", None)
+    if completion_token_ids is None:
+        completion_token_ids = getattr(result, "generated_token_ids", None)
+    if completion_token_ids is None:
+        completion_token_ids = []
+    if hasattr(completion_token_ids, "tolist"):
+        completion_token_ids = completion_token_ids.tolist()
+    completion_token_ids = [int(token_id) for token_id in completion_token_ids]
 
-    finish_reason = "length" if generated_length >= max_new_tokens else "stop"
+    finish_reason = getattr(result, "finish_reason", None)
+    if finish_reason is None:
+        finish_reason = "length" if generated_length >= max_new_tokens else "stop"
 
     record: Dict[str, Any] = {
         "id": request_id,
         "prompt": prompt,
         "completion": generated_text,
+        "prompt_token_ids": prompt_token_ids,
+        "completion_token_ids": completion_token_ids,
         "finish_reason": finish_reason,
+        "timings": dict(getattr(result, "timings", None) or {}),
+        "memory": dict(getattr(result, "memory", None) or {}),
         "usage": {
             "prompt_tokens": prompt_tokens_count,
             "completion_tokens": generated_length,
@@ -1393,6 +2049,18 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Include per-token log probabilities in JSONL output",
     )
+    ap.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        default=False,
+        help="Omit sampled EOS tokens and generate exactly --max-new-tokens tokens",
+    )
+    ap.add_argument(
+        "--strict-generation",
+        action="store_true",
+        default=False,
+        help="Fail on context overflow, batched fallback, or incomplete generation evidence",
+    )
 
     # Parallelism arguments
     ap.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallelism")
@@ -1405,6 +2073,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Save results as JSONL (one result object per line)",
+    )
+    ap.add_argument(
+        "--stream-output",
+        action="store_true",
+        default=False,
+        help=(
+            "When --output-file is set, write and flush each JSONL result as soon as it is generated. "
+            "Strict generation writes <output-file>.partial and atomically promotes it after success."
+        ),
     )
 
     # Precision arguments
@@ -1434,12 +2111,25 @@ def parse_args() -> argparse.Namespace:
         "re-capture); set --max-seq-length to pin a fixed size and avoid regrows.",
     )
     ap.add_argument(
-        "--max-batch-size",
+        "--prompt-batch-size",
         type=int,
-        default=1,
-        help="Maximum batch size for inference. The inference engine pre-allocates GPU memory "
-        "proportional to this value (KV caches, attention masks, internal buffers). "
-        "For large models (e.g. 40b), only batch_size=1 may fit in memory.",
+        default=None,
+        help="Number of prompt-file rows to decode concurrently in the Evo2 native path. This does "
+        "not change the number of generations, which is exactly the number of prompt-file rows.",
+    )
+    ap.add_argument(
+        "--evo2-batched-decode-size",
+        dest="evo2_batched_decode_size",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    ap.add_argument(
+        "--max-batch-size",
+        dest="max_batch_size",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     ap.add_argument(
         "--use-subquadratic-ops",
@@ -1533,15 +2223,19 @@ def infer(
     top_p: float = 0.0,
     seed: Optional[int] = None,
     return_log_probs: bool = False,
+    ignore_eos: bool = False,
+    strict_generation: bool = False,
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
     output_file: Optional[Path] = None,
+    stream_output: bool = False,
     mixed_precision_recipe: Optional[str] = None,
     vortex_style_fp8: bool = False,
     max_seq_length: Optional[int] = None,
     max_seq_length_num_prompts: int = _DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS,
     max_batch_size: int = 1,
+    evo2_batched_decode_size: int = 1,
     use_subquadratic_ops: bool = False,
     cuda_graph_impl: str = "local",
     enable_chunked_prefill: bool = False,
@@ -1563,10 +2257,14 @@ def infer(
         top_p: Nucleus sampling parameter (0 = disabled).
         seed: Random seed for reproducibility.
         return_log_probs: Whether to return per-token log probabilities.
+        ignore_eos: Omit sampled EOS tokens and continue to max_new_tokens.
+        strict_generation: Fail instead of returning short or fallback generation results.
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
         output_file: Optional path to save results as JSONL.
+        stream_output: Write and flush each result as soon as it is generated. Strict generation
+            writes to ``<output_file>.partial`` and atomically promotes it after success.
         mixed_precision_recipe: Override mixed precision recipe.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
@@ -1574,8 +2272,10 @@ def infer(
             (default) auto-sizes the engine from the prompt token lengths and grows on demand.
         max_seq_length_num_prompts: When auto-sizing, size from the longest of the first N prompts
             (``<= 0`` = all). A longer later prompt grows the context on demand rather than erroring.
-        max_batch_size: Maximum batch size for inference. The inference engine pre-allocates
-            GPU memory proportional to this value. For large models, only 1 may fit.
+        max_batch_size: Prompt-file chunk size and Megatron setup micro-batch metadata. This does
+            not control the number of prompt-file generations or Evo2 native decode concurrency.
+        evo2_batched_decode_size: Opt-in number of same-length Evo2 prompts to keep active for
+            native Hyena next-token decode. ``1`` preserves the original single-request path.
         use_subquadratic_ops: Use fused subquadratic-ops kernels in the inference path.
         cuda_graph_impl: ``"local"`` (default) uses mcore per-layer decode CUDA graphs; ``"none"``
             runs decode eagerly (no graph capture) -- mainly for debugging / un-graphed reference runs.
@@ -1591,7 +2291,9 @@ def infer(
     random_seed = seed or 1234
 
     _prune_caches()
-    torch.cuda.reset_peak_memory_stats()
+    if not _CUDA_PHASE_EVIDENCE_ENABLED:
+        torch.cuda.reset_peak_memory_stats()
+    engine_setup_started_at_s = _begin_cuda_phase()
 
     components = setup_inference_engine(
         ckpt_dir=ckpt_dir,
@@ -1606,8 +2308,23 @@ def infer(
         use_subquadratic_ops=use_subquadratic_ops,
         cuda_graph_impl=cuda_graph_impl,
     )
-    mem_after_setup_gb = torch.cuda.max_memory_allocated() / (1024**3)
-    logger.info(f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB")
+    engine_setup_stats = _finish_cuda_phase(engine_setup_started_at_s)
+    if not engine_setup_stats.performed:
+        engine_setup_stats = _CudaPhaseStats(
+            elapsed_s=time.perf_counter() - engine_setup_started_at_s,
+            peak_allocated_bytes=int(torch.cuda.max_memory_allocated()),
+            peak_reserved_bytes=int(torch.cuda.max_memory_reserved()),
+            performed=False,
+        )
+    components.native_dynamic.engine_setup_stats = engine_setup_stats
+    components.native_dynamic.engine_setup_stats_pending = True
+    mem_after_setup_gb = engine_setup_stats.peak_allocated_bytes / (1024**3)
+    mem_reserved_after_setup_gb = engine_setup_stats.peak_reserved_bytes / (1024**3)
+    logger.info(
+        f"[MEMORY] After model setup: peak={mem_after_setup_gb:.3f} GB, "
+        f"reserved={mem_reserved_after_setup_gb:.3f} GB, "
+        f"engine_setup_elapsed_s={engine_setup_stats.elapsed_s:.6f}"
+    )
 
     # Auto-size the engine's sequence-length budget from the prompts unless a manual value was given.
     # Manual --max-seq-length supersedes (setup stored it; this only runs in auto mode). We size from
@@ -1626,55 +2343,107 @@ def infer(
     total_prompt_tokens = 0
     total_completion_tokens = 0
     t_generate_start = time.perf_counter()
+    is_rank_zero = int(os.environ.get("RANK", "0")) == 0
+    stream_file = None
+    streamed_record_count = 0
+    strict_stream_partial_path: Optional[Path] = None
 
-    for batch_start in range(0, len(prompts), max_batch_size):
-        batch = prompts[batch_start : batch_start + max_batch_size]
-        batch_prompts = [entry["prompt"] for entry in batch]
-        batch_idx = batch_start // max_batch_size + 1
+    if is_rank_zero and output_file is not None and stream_output:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        stream_path = output_file
+        if strict_generation:
+            strict_stream_partial_path = Path(f"{output_file}.partial")
+            stream_path = strict_stream_partial_path
+        stream_file = open(stream_path, "w")
+        logger.info("Streaming JSONL results to: %s", stream_path)
 
-        logger.info(f"Generating batch {batch_idx} ({len(batch)} prompt(s))...")
+    try:
+        for batch_start in range(0, len(prompts), max_batch_size):
+            batch = prompts[batch_start : batch_start + max_batch_size]
+            batch_prompts = [entry["prompt"] for entry in batch]
+            batch_idx = batch_start // max_batch_size + 1
 
-        t_batch_start = time.perf_counter()
-        results = generate(
-            components,
-            prompts=batch_prompts,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            return_log_probs=return_log_probs,
-            enable_chunked_prefill=enable_chunked_prefill,
-            inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
-            inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
-        )
-        t_batch_elapsed = time.perf_counter() - t_batch_start
+            logger.info(f"Generating batch {batch_idx} ({len(batch)} prompt(s))...")
 
-        batch_completion_tokens = 0
-        for entry, result in zip(batch, results):
-            record = _result_to_jsonl_record(
-                request_id=entry["id"],
-                prompt=entry["prompt"],
-                result=result,
+            def _stream_result(prompt_idx: int, result: Any) -> None:
+                nonlocal streamed_record_count
+                if stream_file is None:
+                    return
+                entry = batch[prompt_idx]
+                record = _result_to_jsonl_record(
+                    request_id=entry["id"],
+                    prompt=entry["prompt"],
+                    result=result,
+                    max_new_tokens=max_new_tokens,
+                    return_log_probs=return_log_probs,
+                )
+                stream_file.write(json.dumps(record) + "\n")
+                stream_file.flush()
+                streamed_record_count += 1
+
+            t_batch_start = time.perf_counter()
+            results = generate(
+                components,
+                prompts=batch_prompts,
                 max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
                 return_log_probs=return_log_probs,
+                ignore_eos=ignore_eos,
+                strict_generation=strict_generation,
+                enable_chunked_prefill=enable_chunked_prefill,
+                inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
+                inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
+                evo2_batched_decode_size=evo2_batched_decode_size,
+                result_callback=_stream_result if stream_file is not None else None,
             )
-            all_records.append(record)
-            batch_completion_tokens += record["usage"]["completion_tokens"]
-            total_prompt_tokens += record["usage"]["prompt_tokens"]
-            total_completion_tokens += record["usage"]["completion_tokens"]
+            t_batch_elapsed = time.perf_counter() - t_batch_start
 
-        batch_tok_per_sec = batch_completion_tokens / t_batch_elapsed if t_batch_elapsed > 0 else 0
-        logger.info(
-            f"[PERF] Batch {batch_idx}: {batch_completion_tokens} tokens in "
-            f"{t_batch_elapsed:.2f}s ({batch_tok_per_sec:.1f} completion tok/s)"
-        )
+            batch_completion_tokens = 0
+            for entry, result in zip(batch, results):
+                record = _result_to_jsonl_record(
+                    request_id=entry["id"],
+                    prompt=entry["prompt"],
+                    result=result,
+                    max_new_tokens=max_new_tokens,
+                    return_log_probs=return_log_probs,
+                )
+                all_records.append(record)
+                batch_completion_tokens += record["usage"]["completion_tokens"]
+                total_prompt_tokens += record["usage"]["prompt_tokens"]
+                total_completion_tokens += record["usage"]["completion_tokens"]
+
+            batch_tok_per_sec = batch_completion_tokens / t_batch_elapsed if t_batch_elapsed > 0 else 0
+            logger.info(
+                f"[PERF] Batch {batch_idx}: {batch_completion_tokens} tokens in "
+                f"{t_batch_elapsed:.2f}s ({batch_tok_per_sec:.1f} completion tok/s)"
+            )
+    finally:
+        if stream_file is not None:
+            stream_file.close()
+
+    if strict_stream_partial_path is not None:
+        os.replace(strict_stream_partial_path, output_file)
 
     t_generate_elapsed = time.perf_counter() - t_generate_start
     total_tok_per_sec = total_completion_tokens / t_generate_elapsed if t_generate_elapsed > 0 else 0
 
-    mem_after_generate_gb = torch.cuda.max_memory_allocated() / (1024**3)
+    mem_after_generate_bytes = max(
+        engine_setup_stats.peak_allocated_bytes,
+        int(torch.cuda.max_memory_allocated()),
+        *(int(record.get("memory", {}).get("total_peak_allocated_bytes", 0)) for record in all_records),
+    )
+    mem_reserved_after_generate_bytes = max(
+        engine_setup_stats.peak_reserved_bytes,
+        int(torch.cuda.max_memory_reserved()),
+        *(int(record.get("memory", {}).get("total_peak_reserved_bytes", 0)) for record in all_records),
+    )
+    mem_after_generate_gb = mem_after_generate_bytes / (1024**3)
+    mem_reserved_after_generate_gb = mem_reserved_after_generate_bytes / (1024**3)
     logger.info(
-        f"[MEMORY] After generation: peak={mem_after_generate_gb:.3f} GB "
+        f"[MEMORY] After generation: peak={mem_after_generate_gb:.3f} GB, "
+        f"reserved={mem_reserved_after_generate_gb:.3f} GB "
         f"(setup={mem_after_setup_gb:.3f} GB, generation delta="
         f"{mem_after_generate_gb - mem_after_setup_gb:.3f} GB)"
     )
@@ -1684,8 +2453,6 @@ def infer(
         f"({total_tok_per_sec:.1f} completion tok/s)"
     )
 
-    is_rank_zero = parallel_state.get_data_parallel_rank() == 0
-
     if is_rank_zero:
         for record in all_records:
             print(
@@ -1693,12 +2460,14 @@ def infer(
                 file=sys.stdout,
             )
 
-        if output_file is not None:
+        if output_file is not None and not stream_output:
             output_file.parent.mkdir(parents=True, exist_ok=True)
             with open(output_file, "w") as f:
                 for record in all_records:
                     f.write(json.dumps(record) + "\n")
             logger.info(f"Saved {len(all_records)} result(s) to: {output_file}")
+        elif output_file is not None and stream_output:
+            logger.info(f"Streamed {streamed_record_count} result(s) to: {output_file}")
 
     logger.info("Inference complete!")
 
@@ -1731,6 +2500,13 @@ def main() -> None:
     else:
         prompts = [{"id": "0", "prompt": args.prompt}]
 
+    prompt_batch_size = args.prompt_batch_size
+    if prompt_batch_size is None:
+        prompt_batch_size = args.evo2_batched_decode_size
+    if prompt_batch_size is None:
+        prompt_batch_size = 1
+    prompt_file_chunk_size = args.max_batch_size if args.max_batch_size is not None else prompt_batch_size
+
     infer(
         prompts=prompts,
         ckpt_dir=args.ckpt_dir,
@@ -1740,15 +2516,19 @@ def main() -> None:
         top_p=args.top_p,
         seed=args.seed,
         return_log_probs=args.return_log_probs,
+        ignore_eos=args.ignore_eos,
+        strict_generation=args.strict_generation,
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,
         context_parallel_size=args.context_parallel_size,
         output_file=args.output_file,
+        stream_output=args.stream_output,
         mixed_precision_recipe=args.mixed_precision_recipe,
         vortex_style_fp8=args.vortex_style_fp8,
         max_seq_length=max_seq_length,
         max_seq_length_num_prompts=args.max_seq_length_num_prompts,
-        max_batch_size=args.max_batch_size,
+        max_batch_size=prompt_file_chunk_size,
+        evo2_batched_decode_size=prompt_batch_size,
         use_subquadratic_ops=args.use_subquadratic_ops,
         cuda_graph_impl=args.cuda_graph_impl,
         enable_chunked_prefill=args.enable_chunked_prefill,

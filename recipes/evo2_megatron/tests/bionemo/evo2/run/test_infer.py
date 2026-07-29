@@ -34,19 +34,34 @@ The core forward pass (predict.py) and HyenaInferenceContext are tested
 in test_evo2.py which has working test_forward_manual and test_forward_ckpt_conversion.
 """
 
+import contextlib
 import copy
 import csv
 import json
+import math
 import os
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+import bionemo.evo2.run.infer as infer_module
 from bionemo.common.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
+from bionemo.evo2.run.infer import (
+    _native_stop_token_ids,
+    _NativeDynamicResult,
+    _result_to_jsonl_record,
+    _sample_from_log_probs,
+    _sampled_token_action,
+    _sampling_log_probs_from_logits,
+    _selected_log_probs_for_sampled_tokens,
+    parse_args,
+)
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge
 
@@ -73,6 +88,791 @@ def _read_jsonl_results(output_file: Path) -> list[dict]:
             if stripped:
                 records.append(json.loads(stripped))
     return records
+
+
+@pytest.mark.parametrize(
+    ("requested_impl", "checkpoint_impl", "expected_enabled"),
+    [
+        ("local", "none", True),
+        ("none", "local", False),
+    ],
+)
+def test_configure_native_dynamic_cuda_graphs_normalizes_checkpoint_state(
+    requested_impl, checkpoint_impl, expected_enabled
+):
+    """The CLI choice must replace stale graph settings loaded from a checkpoint."""
+    provider = SimpleNamespace(
+        cuda_graph_impl=checkpoint_impl,
+        cuda_graph_scope=None,
+        inference_cuda_graph_scope="none" if requested_impl == "local" else "layer",
+    )
+
+    enabled = infer_module._configure_native_dynamic_cuda_graphs(provider, rank=1, cuda_graph_impl=requested_impl)
+
+    assert enabled is expected_enabled
+    assert provider.cuda_graph_impl == requested_impl
+    assert provider.inference_cuda_graph_scope is None
+    if requested_impl == "local":
+        assert provider.cuda_graph_scope == []
+
+
+def test_native_stop_token_ids_resolves_eos_text_token():
+    """The Evo2 tokenizer uses token id 0 / <EOS> to mark generation end."""
+
+    class _FakeBackendTokenizer:
+        @staticmethod
+        def token_to_id(token: str) -> int | None:
+            return {"<EOS>": 0}.get(token)
+
+    class _FakeTokenizer:
+        eos = "<EOS>"
+        tokenizer = _FakeBackendTokenizer()
+
+    assert _native_stop_token_ids(_FakeTokenizer()) == {0}
+
+
+def test_sampled_eos_is_omitted_without_stopping_when_ignore_eos_is_enabled():
+    assert _sampled_token_action(0, {0}, ignore_eos=True) == (False, False)
+
+
+def test_sampled_eos_stops_and_is_omitted_by_default():
+    assert _sampled_token_action(0, {0}, ignore_eos=False) == (False, True)
+
+
+def test_exact_generation_cli_flags_default_false_and_enable_when_passed(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = parse_args()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["infer", "--ckpt-dir", "/tmp/ckpt", "--ignore-eos", "--strict-generation"],
+    )
+    enabled = parse_args()
+
+    assert defaults.ignore_eos is False
+    assert defaults.strict_generation is False
+    assert enabled.ignore_eos is True
+    assert enabled.strict_generation is True
+
+
+def test_result_to_jsonl_record_honors_explicit_stop_reason():
+    """EOS-stopped native results should not be reclassified as length-finished."""
+    result = _NativeDynamicResult(
+        generated_text="ACGT",
+        generated_length=4,
+        prompt_tokens=[43, 126, 71, 65, 71, 84],
+        finish_reason="stop",
+    )
+
+    record = _result_to_jsonl_record(
+        request_id="seq",
+        prompt="+~GAGT",
+        result=result,
+        max_new_tokens=4,
+    )
+
+    assert record["completion"] == "ACGT"
+    assert record["finish_reason"] == "stop"
+    assert record["usage"]["completion_tokens"] == 4
+
+
+def test_result_to_jsonl_record_serializes_complete_benchmark_evidence():
+    result = _NativeDynamicResult(
+        generated_text="AC",
+        generated_length=2,
+        prompt_tokens=[43, 126],
+        generated_tokens=[65, 67],
+        generated_log_probs=[-0.1, -0.2],
+        timings={"prefill_elapsed_s": 0.25, "decode_elapsed_s": 0.75},
+        memory={
+            "prefill_peak_allocated_bytes": 1024,
+            "prefill_peak_reserved_bytes": 2048,
+            "generation_peak_allocated_bytes": 4096,
+            "generation_peak_reserved_bytes": 8192,
+        },
+    )
+
+    record = _result_to_jsonl_record(
+        request_id="seq",
+        prompt="+~",
+        result=result,
+        max_new_tokens=2,
+        return_log_probs=True,
+    )
+
+    assert record["prompt_token_ids"] == [43, 126]
+    assert record["completion_token_ids"] == [65, 67]
+    assert record["logprobs"]["completion_logprobs"] == [-0.1, -0.2]
+    assert record["timings"]["prefill_elapsed_s"] == 0.25
+    assert record["timings"]["decode_elapsed_s"] == 0.75
+    assert record["memory"]["prefill_peak_allocated_bytes"] == 1024
+    assert record["memory"]["prefill_peak_reserved_bytes"] == 2048
+    assert record["memory"]["generation_peak_allocated_bytes"] == 4096
+    assert record["memory"]["generation_peak_reserved_bytes"] == 8192
+
+
+@pytest.mark.parametrize(
+    ("phase_evidence_enabled", "expected_synchronizations"),
+    [
+        (False, []),
+        (True, ["setup", "setup"]),
+    ],
+)
+def test_infer_reports_setup_elapsed_and_peak_memory(
+    monkeypatch, caplog, phase_evidence_enabled, expected_synchronizations
+):
+    synchronizations = []
+    gib = 1024**3
+    components = SimpleNamespace(
+        tokenizer=SimpleNamespace(tokenize=lambda text: [ord(char) for char in text]),
+        native_dynamic=SimpleNamespace(cuda_graphs_enabled=False),
+    )
+    native_result = _NativeDynamicResult(
+        generated_text="A",
+        generated_length=1,
+        prompt_tokens=[65],
+        generated_tokens=[65],
+        memory={
+            "total_peak_allocated_bytes": 4 * gib,
+            "total_peak_reserved_bytes": 5 * gib,
+        },
+    )
+
+    monkeypatch.setattr(infer_module, "_CUDA_PHASE_EVIDENCE_ENABLED", phase_evidence_enabled)
+    monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: synchronizations.append("setup"))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 2 * gib)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 3 * gib)
+    monkeypatch.setattr(infer_module, "setup_inference_engine", lambda **kwargs: components)
+    monkeypatch.setattr(infer_module, "generate", lambda *args, **kwargs: [native_result])
+    monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
+    caplog.set_level("INFO", logger=infer_module.logger.name)
+
+    records = infer_module.infer(
+        prompts=[{"id": "seq", "prompt": "A"}],
+        ckpt_dir=Path("/tmp/ckpt"),
+        max_new_tokens=1,
+        max_seq_length=16,
+    )
+
+    assert synchronizations == expected_synchronizations
+    assert "[MEMORY] After model setup: peak=2.000 GB, reserved=3.000 GB, engine_setup_elapsed_s=" in caplog.text
+    assert components.native_dynamic.engine_setup_stats.performed is phase_evidence_enabled
+    assert components.native_dynamic.engine_setup_stats.peak_allocated_bytes == 2 * gib
+    assert components.native_dynamic.engine_setup_stats.peak_reserved_bytes == 3 * gib
+    assert "[MEMORY] After generation: peak=4.000 GB, reserved=5.000 GB" in caplog.text
+    assert records[0]["completion_token_ids"] == [65]
+
+
+def test_strict_streaming_nonfinite_late_failure_leaves_only_named_partial_artifact(monkeypatch, tmp_path):
+    output_file = tmp_path / "audit.jsonl"
+    partial_file = tmp_path / "audit.jsonl.partial"
+    components = SimpleNamespace(
+        tokenizer=SimpleNamespace(tokenize=lambda text: [ord(char) for char in text]),
+        native_dynamic=SimpleNamespace(cuda_graphs_enabled=False),
+    )
+    first_result = _NativeDynamicResult(
+        generated_text="A",
+        generated_length=1,
+        prompt_tokens=[65],
+        generated_tokens=[65],
+        generated_log_probs=[-0.1],
+    )
+
+    def _fail_after_first_result(_components, *, result_callback, **_kwargs):
+        result_callback(0, first_result)
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[[1]],
+            max_new_tokens=1,
+        )
+        pytest.fail("strict native generation accepted a non-finite chosen-token log-prob")
+
+    monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 0)
+    monkeypatch.setattr(infer_module, "setup_inference_engine", lambda **kwargs: components)
+    monkeypatch.setattr(infer_module, "generate", _fail_after_first_result)
+    monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
+    monkeypatch.setattr(
+        infer_module,
+        "_selected_log_probs_for_sampled_tokens",
+        lambda _log_probs, sampled_tokens: [float("nan")] * sampled_tokens.numel(),
+    )
+
+    with pytest.raises(RuntimeError, match="non-finite chosen-token log-prob"):
+        infer_module.infer(
+            prompts=[{"id": "first", "prompt": "A"}, {"id": "second", "prompt": "C"}],
+            ckpt_dir=Path("/tmp/ckpt"),
+            max_new_tokens=1,
+            max_seq_length=16,
+            max_batch_size=2,
+            return_log_probs=True,
+            strict_generation=True,
+            output_file=output_file,
+            stream_output=True,
+        )
+
+    assert not output_file.exists()
+    assert partial_file.exists()
+    assert [record["id"] for record in _read_jsonl_results(partial_file)] == ["first"]
+
+
+def test_strict_streaming_atomically_promotes_complete_partial_artifact(monkeypatch, tmp_path):
+    output_file = tmp_path / "audit.jsonl"
+    partial_file = tmp_path / "audit.jsonl.partial"
+    components = SimpleNamespace(
+        tokenizer=SimpleNamespace(tokenize=lambda text: [ord(char) for char in text]),
+        native_dynamic=SimpleNamespace(cuda_graphs_enabled=False),
+    )
+    results = [
+        _NativeDynamicResult(
+            generated_text=token,
+            generated_length=1,
+            prompt_tokens=[ord(token)],
+            generated_tokens=[ord(token)],
+            generated_log_probs=[-0.1],
+        )
+        for token in ("A", "C")
+    ]
+    replacements = []
+    real_replace = os.replace
+
+    def _generate_all(_components, *, result_callback, **_kwargs):
+        for result_idx, result in enumerate(results):
+            result_callback(result_idx, result)
+        return results
+
+    def _record_replace(source, destination):
+        replacements.append((Path(source), Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 0)
+    monkeypatch.setattr(infer_module, "setup_inference_engine", lambda **kwargs: components)
+    monkeypatch.setattr(infer_module, "generate", _generate_all)
+    monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
+    monkeypatch.setattr(infer_module.os, "replace", _record_replace)
+
+    infer_module.infer(
+        prompts=[{"id": "first", "prompt": "A"}, {"id": "second", "prompt": "C"}],
+        ckpt_dir=Path("/tmp/ckpt"),
+        max_new_tokens=1,
+        max_seq_length=16,
+        max_batch_size=2,
+        return_log_probs=True,
+        strict_generation=True,
+        output_file=output_file,
+        stream_output=True,
+    )
+
+    assert replacements == [(partial_file, output_file)]
+    assert output_file.exists()
+    assert not partial_file.exists()
+    assert [record["id"] for record in _read_jsonl_results(output_file)] == ["first", "second"]
+
+
+def test_sampling_log_probs_use_temperature_scaled_top_k_support():
+    """Recorded generation log-probs should match the filtered distribution used to sample."""
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]], dtype=torch.float32)
+
+    log_probs = _sampling_log_probs_from_logits(logits, temperature=2.0, top_k=2, top_p=0.0)
+    expected = torch.log_softmax(torch.tensor([[2.0, 1.5]], dtype=torch.float32), dim=-1)
+
+    torch.testing.assert_close(log_probs[0, :2], expected[0])
+    assert torch.isneginf(log_probs[0, 2])
+    assert torch.isneginf(log_probs[0, 3])
+
+
+def test_sample_from_log_probs_uses_prefiltered_distribution():
+    """Native decode should sample from the log-probs it already computed."""
+    logits = torch.tensor([[1.0, 5.0, 4.0]], dtype=torch.float32)
+    log_probs = _sampling_log_probs_from_logits(logits, temperature=1.0, top_k=1, top_p=0.0)
+
+    sampled = _sample_from_log_probs(log_probs, top_k=1, generator=torch.Generator())
+
+    assert sampled.tolist() == [1]
+
+
+def test_selected_log_probs_for_sampled_tokens_gathers_batch_once():
+    """Batched decode should avoid one Python scalar sync per request."""
+    log_probs = torch.log_softmax(
+        torch.tensor([[1.0, 2.0, 3.0], [6.0, 5.0, 4.0]], dtype=torch.float32),
+        dim=-1,
+    )
+    sampled_tokens = torch.tensor([2, 0], dtype=torch.long)
+
+    selected = _selected_log_probs_for_sampled_tokens(log_probs, sampled_tokens)
+
+    assert selected == pytest.approx([log_probs[0, 2].item(), log_probs[1, 0].item()])
+
+
+class _MockLoopTokenizer:
+    vocab_size = 4
+    eos_token_id = 0
+
+    @staticmethod
+    def tokenize(text: str) -> list[int]:
+        if text in {"<EOS>", "<EOD>", "<|endoftext|>"}:
+            return [0]
+        return [3]
+
+    @staticmethod
+    def detokenize(token_ids: list[int]) -> str:
+        return "".join(str(token_id) for token_id in token_ids)
+
+
+class _MockLoopForwardModel(torch.nn.Module):
+    def __init__(self, error: Exception | None = None, events: list[str] | None = None):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(1))
+        self.error = error
+        self.events = events
+        self.calls = 0
+
+    def forward(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.events is not None:
+            self.events.append("forward")
+        if self.error is not None:
+            raise self.error
+        return torch.zeros(1)
+
+
+class _MockNativeDynamicContext:
+    def __init__(self, *, stop_after_updates: int | None = None, events: list[str] | None = None):
+        self.max_tokens = 128
+        self.max_sequence_length = 128
+        self.mamba_metadata = SimpleNamespace(request_to_mamba_state_idx=torch.arange(32))
+        self.evo2_batched_decode_enabled = False
+        self.paused_request_count = 0
+        self.chunked_prefill_request_id = -1
+        self.stop_after_updates = stop_after_updates
+        self.events = events
+        self.request_count = 0
+        self.update_count = 0
+        self.reset_count = 0
+        self.active = False
+
+    def add_request(self, _request, *, prefill_chunk_length: int):
+        assert prefill_chunk_length > 0
+        self.request_count += 1
+        self.active = True
+
+    @staticmethod
+    def initialize_attention_state():
+        return None
+
+    def current_input_and_position_ids(self):
+        shape = (max(1, self.request_count), 1)
+        return torch.zeros(shape, dtype=torch.long), torch.zeros(shape, dtype=torch.long)
+
+    def update_requests(self, active_after_sample, _sampled_tokens):
+        if self.events is not None:
+            self.events.append("update")
+        self.update_count += 1
+        self.active = bool(active_after_sample.any().item())
+        if self.stop_after_updates is not None and self.update_count >= self.stop_after_updates:
+            self.active = False
+
+    def has_unfinished_requests(self) -> bool:
+        return self.active
+
+    def reset(self):
+        self.reset_count += 1
+        self.active = False
+        self.request_count = 0
+
+
+def _run_mock_native_generation(
+    monkeypatch,
+    *,
+    sampled_steps: list[list[int]],
+    prompts: list[str] | None = None,
+    max_new_tokens: int = 3,
+    return_log_probs: bool = True,
+    ignore_eos: bool = False,
+    strict_generation: bool = True,
+    evo2_batched_decode_size: int = 1,
+    stop_after_updates: int | None = None,
+    forward_error: Exception | None = None,
+    events: list[str] | None = None,
+    perf_counter_values: list[float] | None = None,
+    peak_allocated_values: list[int] | None = None,
+    peak_reserved_values: list[int] | None = None,
+    expected_suppressed_token_ids: set[int] | None = None,
+):
+    from megatron.core.inference.utils import InferenceMode
+
+    context = _MockNativeDynamicContext(stop_after_updates=stop_after_updates, events=events)
+    forward_model = _MockLoopForwardModel(error=forward_error, events=events)
+    native_dynamic = SimpleNamespace(
+        forward_model=forward_model,
+        hyena_model=forward_model,
+        max_seq_length=128,
+        max_seq_length_is_auto=False,
+        sampling_rng=None,
+        evo2_seed=17,
+        cuda_graphs_enabled=False,
+        generation_call_index=0,
+        engine_setup_evidence=None,
+        engine_setup_evidence_pending=False,
+        last_context_evidence=None,
+    )
+    components = SimpleNamespace(tokenizer=_MockLoopTokenizer(), native_dynamic=native_dynamic)
+    sampled_step_iter = iter(sampled_steps)
+
+    def _sample_step(log_probs, **_kwargs):
+        for token_id in expected_suppressed_token_ids or set():
+            assert torch.isneginf(log_probs[:, token_id]).all()
+        sampled = next(sampled_step_iter)
+        assert len(sampled) == log_probs.shape[0]
+        return torch.tensor(sampled, dtype=torch.long)
+
+    monkeypatch.setattr(InferenceMode, "active", staticmethod(contextlib.nullcontext))
+    monkeypatch.setattr(
+        infer_module,
+        "_get_or_build_shared_dynamic_context",
+        lambda *_args, **_kwargs: (
+            context,
+            infer_module._CudaPhaseStats(),
+            infer_module._CudaPhaseStats(),
+        ),
+    )
+    monkeypatch.setattr(infer_module, "bind_hyena_packed_views_to_dynamic_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        infer_module,
+        "bind_hyena_packed_views_to_dynamic_context_batch",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        infer_module,
+        "_extract_generation_logits",
+        lambda *_args, **_kwargs: torch.zeros((context.request_count, _MockLoopTokenizer.vocab_size)),
+    )
+    monkeypatch.setattr(infer_module, "_sample_from_log_probs", _sample_step)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("sync") if events is not None else None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    allocated_iter = iter(peak_allocated_values or [])
+    reserved_iter = iter(peak_reserved_values or [])
+    monkeypatch.setattr(
+        torch.cuda,
+        "max_memory_allocated",
+        lambda: next(allocated_iter) if peak_allocated_values is not None else 0,
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "max_memory_reserved",
+        lambda: next(reserved_iter) if peak_reserved_values is not None else 0,
+    )
+    if perf_counter_values is not None:
+        perf_counter_iter = iter(perf_counter_values)
+        monkeypatch.setattr(infer_module.time, "perf_counter", lambda: next(perf_counter_iter))
+
+    results = infer_module._generate_native_dynamic(
+        components,
+        prompts=prompts or ["P"],
+        max_new_tokens=max_new_tokens,
+        temperature=1.0,
+        top_k=0,
+        top_p=0.0,
+        return_log_probs=return_log_probs,
+        ignore_eos=ignore_eos,
+        strict_generation=strict_generation,
+        enable_chunked_prefill=False,
+        inference_dynamic_batching_max_tokens=None,
+        inference_dynamic_batching_block_size=16,
+        evo2_batched_decode_size=evo2_batched_decode_size,
+        result_callback=None,
+    )
+    return results, context, forward_model
+
+
+def test_ignore_eos_suppresses_stop_tokens_before_sampling(monkeypatch):
+    results, _context, forward_model = _run_mock_native_generation(
+        monkeypatch,
+        sampled_steps=[[1], [2], [3]],
+        ignore_eos=True,
+        expected_suppressed_token_ids={0},
+    )
+
+    assert results[0].generated_tokens == [1, 2, 3]
+    assert results[0].generated_log_probs == pytest.approx([-math.log(3)] * 3)
+    assert forward_model.calls == 3
+
+
+def test_native_single_loop_omits_ignored_eos_and_reaches_exact_length(monkeypatch):
+    results, _context, forward_model = _run_mock_native_generation(
+        monkeypatch,
+        sampled_steps=[[0], [1], [2], [3]],
+        ignore_eos=True,
+    )
+
+    assert results[0].generated_tokens == [1, 2, 3]
+    assert results[0].generated_log_probs == pytest.approx([-math.log(3)] * 3)
+    assert forward_model.calls == 4
+
+
+def test_native_batched_loop_omits_ignored_eos_and_reaches_exact_length(monkeypatch):
+    results, _context, forward_model = _run_mock_native_generation(
+        monkeypatch,
+        prompts=["P", "Q"],
+        sampled_steps=[[0, 0], [1, 2], [2, 1], [3, 3]],
+        ignore_eos=True,
+        evo2_batched_decode_size=2,
+    )
+
+    assert [result.generated_tokens for result in results] == [[1, 2, 3], [2, 1, 3]]
+    for result in results:
+        assert result.generated_log_probs == pytest.approx([-math.log(3)] * 3)
+        assert result.timings["timing_scope"] == "native_generation_group"
+        assert result.timings["timing_group_id"] == "native-call-00000000-group-00000000"
+        assert result.timings["timing_request_count"] == 2
+    assert forward_model.calls == 4
+
+
+def test_native_single_loop_strict_overflow_reraises(monkeypatch):
+    from megatron.core.inference.contexts.dynamic_context import TokenOverflowError
+
+    with pytest.raises(TokenOverflowError, match="forced overflow"):
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[],
+            forward_error=TokenOverflowError(0, "forced overflow"),
+        )
+
+
+def test_native_batched_loop_strict_error_does_not_fall_back(monkeypatch):
+    with pytest.raises(RuntimeError, match="forced batched failure"):
+        _run_mock_native_generation(
+            monkeypatch,
+            prompts=["P", "Q"],
+            sampled_steps=[],
+            evo2_batched_decode_size=2,
+            forward_error=RuntimeError("forced batched failure"),
+        )
+
+
+def test_native_strict_loop_rejects_short_output(monkeypatch):
+    with pytest.raises(RuntimeError, match=r"expected exactly 3 generated tokens.*got 1"):
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[[1]],
+            stop_after_updates=1,
+        )
+
+
+def test_native_strict_loop_accepts_short_output_stopped_by_eos(monkeypatch):
+    results, _context, _forward_model = _run_mock_native_generation(
+        monkeypatch,
+        sampled_steps=[[1], [0]],
+    )
+
+    assert results[0].generated_tokens == [1]
+    assert results[0].finish_reason == "stop"
+    assert results[0].stopped_on_eos is True
+    assert results[0].truncated is False
+
+
+def test_native_strict_loop_rejects_token_logprob_mismatch(monkeypatch):
+    original_result_type = infer_module._NativeDynamicResult
+
+    def _mismatched_result(**kwargs):
+        result = original_result_type(**kwargs)
+        result.generated_log_probs = result.generated_log_probs[:-1]
+        return result
+
+    monkeypatch.setattr(infer_module, "_NativeDynamicResult", _mismatched_result)
+
+    with pytest.raises(RuntimeError, match="mismatched token/log-prob lengths"):
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[[1], [2], [3]],
+        )
+
+
+def test_native_strict_loop_rejects_requested_but_missing_logprobs(monkeypatch):
+    original_result_type = infer_module._NativeDynamicResult
+
+    def _missing_logprobs_result(**kwargs):
+        result = original_result_type(**kwargs)
+        result.generated_log_probs = None
+        return result
+
+    monkeypatch.setattr(infer_module, "_NativeDynamicResult", _missing_logprobs_result)
+
+    with pytest.raises(RuntimeError, match="missing requested chosen-token log-probs"):
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[[1], [2], [3]],
+        )
+
+
+@pytest.mark.parametrize(
+    "nonfinite_logprob",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "positive_infinity", "negative_infinity"],
+)
+def test_native_strict_loop_rejects_nonfinite_chosen_logprobs(monkeypatch, nonfinite_logprob):
+    monkeypatch.setattr(
+        infer_module,
+        "_selected_log_probs_for_sampled_tokens",
+        lambda _log_probs, sampled_tokens: [nonfinite_logprob] * sampled_tokens.numel(),
+    )
+
+    with pytest.raises(RuntimeError, match=r"non-finite chosen-token log-prob.*prompt 0"):
+        _run_mock_native_generation(
+            monkeypatch,
+            sampled_steps=[[1], [2], [3]],
+        )
+
+
+@pytest.mark.parametrize(
+    ("prompts", "batched_decode_size", "sampled_steps"),
+    [
+        (["P"], 1, [[1], [2], [3]]),
+        (["P", "Q"], 2, [[1, 1], [2, 2], [3, 3]]),
+    ],
+)
+def test_native_loop_synchronizes_only_at_phase_boundaries(
+    monkeypatch,
+    prompts,
+    batched_decode_size,
+    sampled_steps,
+):
+    events = []
+    monkeypatch.setattr(infer_module, "_CUDA_PHASE_EVIDENCE_ENABLED", True)
+
+    results, _context, _forward_model = _run_mock_native_generation(
+        monkeypatch,
+        prompts=prompts,
+        sampled_steps=sampled_steps,
+        evo2_batched_decode_size=batched_decode_size,
+        events=events,
+        perf_counter_values=[10.0, 12.0, 17.0],
+        peak_allocated_values=[101, 303],
+        peak_reserved_values=[202, 404],
+    )
+
+    assert events == [
+        "sync",
+        "forward",
+        "update",
+        "sync",
+        "forward",
+        "update",
+        "forward",
+        "update",
+        "sync",
+    ]
+    assert results[0].timings["prefill_elapsed_s"] == 2.0
+    assert results[0].timings["decode_elapsed_s"] == 5.0
+    assert results[0].timings["total_elapsed_s"] == 7.0
+    assert results[0].timings["context_setup_elapsed_s"] == 0.0
+    assert results[0].timings["cuda_graph_capture_elapsed_s"] == 0.0
+    for result in results:
+        assert result.memory["prefill_peak_allocated_bytes"] == 101
+        assert result.memory["prefill_peak_reserved_bytes"] == 202
+        assert result.memory["decode_peak_allocated_bytes"] == 303
+        assert result.memory["decode_peak_reserved_bytes"] == 404
+        assert result.memory["generation_peak_allocated_bytes"] == 303
+        assert result.memory["generation_peak_reserved_bytes"] == 404
+        assert result.memory["total_peak_allocated_bytes"] == 303
+        assert result.memory["total_peak_reserved_bytes"] == 404
+
+
+def test_shared_dynamic_context_reports_cold_context_and_capture_then_zero_on_warm_reuse(monkeypatch):
+    events = []
+    monkeypatch.setattr(infer_module, "_CUDA_PHASE_EVIDENCE_ENABLED", True)
+
+    class _BuildContext:
+        def __init__(self, *, model_config, inference_config):
+            assert model_config.tensor_model_parallel_size == 1
+            self.max_sequence_length = inference_config.max_sequence_length
+            self.max_tokens = inference_config.max_tokens or inference_config.max_sequence_length
+            self.reset_count = 0
+
+        def initialize_all_tensors(self):
+            events.append("initialize")
+
+        def reset(self):
+            self.reset_count += 1
+            events.append("reset")
+
+    nd = SimpleNamespace(
+        shared_dyn_ctx=None,
+        shared_dyn_ctx_key=None,
+        cuda_graphs_enabled=True,
+        hyena_model=SimpleNamespace(config=SimpleNamespace(tensor_model_parallel_size=1)),
+        mamba_state_config=object(),
+        max_seq_length=64,
+        ctx_cls=_BuildContext,
+    )
+    perf_counter_values = iter([10.0, 12.0, 17.0])
+    allocated_values = iter([101, 303])
+    reserved_values = iter([202, 404])
+
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("sync"))
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: events.append("reset_peak"))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: next(allocated_values))
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: next(reserved_values))
+    monkeypatch.setattr(infer_module.time, "perf_counter", lambda: next(perf_counter_values))
+    monkeypatch.setattr(infer_module, "compute_evo2_paged_kv_buffer_size_gb", lambda *_args, **_kwargs: 0.01)
+    monkeypatch.setattr(
+        infer_module,
+        "_warmup_native_dynamic_cuda_graphs",
+        lambda *_args, **_kwargs: events.append("capture"),
+    )
+
+    context, context_setup, graph_capture = infer_module._get_or_build_shared_dynamic_context(
+        nd,
+        block_size_tokens=16,
+        max_tokens=64,
+        enable_chunked_prefill=False,
+        max_active_requests=2,
+        device=torch.device("cpu"),
+    )
+    warm_context, warm_context_setup, warm_graph_capture = infer_module._get_or_build_shared_dynamic_context(
+        nd,
+        block_size_tokens=16,
+        max_tokens=64,
+        enable_chunked_prefill=False,
+        max_active_requests=2,
+        device=torch.device("cpu"),
+    )
+
+    assert warm_context is context
+    assert context_setup == infer_module._CudaPhaseStats(
+        elapsed_s=2.0,
+        peak_allocated_bytes=101,
+        peak_reserved_bytes=202,
+        performed=True,
+    )
+    assert graph_capture == infer_module._CudaPhaseStats(
+        elapsed_s=5.0,
+        peak_allocated_bytes=303,
+        peak_reserved_bytes=404,
+        performed=True,
+    )
+    assert warm_context_setup == infer_module._CudaPhaseStats()
+    assert warm_graph_capture == infer_module._CudaPhaseStats()
+    assert events == [
+        "sync",
+        "reset_peak",
+        "initialize",
+        "sync",
+        "reset_peak",
+        "capture",
+        "sync",
+        "reset",
+    ]
 
 
 def test_infer_runs(mbridge_checkpoint_path, tmp_path):
@@ -549,6 +1349,10 @@ def run_infer_subprocess_parallel(
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
+    max_batch_size: int | None = None,
+    evo2_batched_decode_size: int | None = None,
+    cuda_graph_impl: str | None = None,
+    expected_log_substrings: tuple[str, ...] = (),
 ) -> list[dict]:
     """Run inference as a subprocess with model parallelism.
 
@@ -567,6 +1371,10 @@ def run_infer_subprocess_parallel(
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
+        max_batch_size: If set, pass --max-batch-size to the CLI.
+        evo2_batched_decode_size: If set, pass --evo2-batched-decode-size to the CLI.
+        cuda_graph_impl: If set, pass --cuda-graph-impl.
+        expected_log_substrings: Strings that must appear in stdout or stderr.
 
     Returns:
         List of parsed JSONL result dicts.
@@ -601,6 +1409,12 @@ def run_infer_subprocess_parallel(
         "--context-parallel-size",
         str(context_parallel_size),
     ]
+    if max_batch_size is not None:
+        cmd.extend(["--max-batch-size", str(max_batch_size)])
+    if evo2_batched_decode_size is not None:
+        cmd.extend(["--evo2-batched-decode-size", str(evo2_batched_decode_size)])
+    if cuda_graph_impl is not None:
+        cmd.extend(["--cuda-graph-impl", str(cuda_graph_impl)])
 
     env = copy.deepcopy(PRETEST_ENV)
     # Prepend the source src/ directory to PYTHONPATH so that local model code
@@ -618,6 +1432,11 @@ def run_infer_subprocess_parallel(
     )
 
     assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    for substring in expected_log_substrings:
+        assert substring in combined_output, (
+            f"Expected infer output to contain {substring!r}.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
     assert output_file.exists(), "Output file was not created"
 
     return _read_jsonl_results(output_file)
@@ -655,11 +1474,8 @@ def test_identical_prompts_should_be_identical(mbridge_checkpoint_path, tmp_path
 
     assert len(generated_1) > 0, "First generation produced empty output"
     assert len(generated_2) > 0, "Second generation produced empty output"
-    assert generated_1 == generated_2, (
-        f"Identical prompts with same seed and greedy decoding produced different outputs:\n"
-        f"Run 1: {generated_1}\n"
-        f"Run 2: {generated_2}"
-    )
+    assert generated_1["completion"] == generated_2["completion"]
+    assert generated_1["completion_token_ids"] == generated_2["completion_token_ids"]
 
 
 @pytest.mark.parametrize("cuda_graph_impl", ["none", "local"])
@@ -838,6 +1654,141 @@ def test_parallel_inference_accuracy(mbridge_checkpoint_path, tmp_path, dna_sequ
 
     assert all(match_percents[sid] >= 0.90 * expected_by_id[sid] for sid in targets_by_id), (
         f"Expected at least 90% of {matchperc_print_expected}, got {matchperc_print}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+@pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI")
+def test_parallel_inference_accuracy_evo2_batched_decode_same_prefix_preserves_accuracy(
+    mbridge_checkpoint_path,
+    tmp_path,
+    dna_sequences,
+):
+    """Same-prefix batched decode may diverge from serial, but should preserve target accuracy.
+
+    The true Evo2 batched-decode path only accepts same-length prompts, so this uses a common prefix
+    length across the DNA accuracy prompts for both serial and batched subprocess inference. Greedy
+    serial-vs-batched completions can diverge after small numerical differences; when they do, the
+    batched completion should remain similarly close to the real next-window target.
+    """
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Batched decode inference accuracy test requires a GPU")
+
+    num_tokens = 500
+    prompt_len = min(len(seq) // 2 for seq in dna_sequences)
+    prompt_len = min(prompt_len, 2048)
+    batch_size = len(dna_sequences)
+
+    targets_by_id: dict[str, str] = {}
+    jsonl_entries = []
+    for i, seq in enumerate(dna_sequences):
+        seq_id = f"seq_{i}"
+        targets_by_id[seq_id] = seq[prompt_len : prompt_len + num_tokens]
+        jsonl_entries.append((seq_id, seq[:prompt_len]))
+
+    serial_prompt_file = tmp_path / "serial_prompts.jsonl"
+    serial_output_file = tmp_path / "serial_outputs.jsonl"
+    batched_prompt_file = tmp_path / "batched_prompts.jsonl"
+    batched_output_file = tmp_path / "batched_outputs.jsonl"
+    _write_prompts_jsonl(serial_prompt_file, jsonl_entries)
+    _write_prompts_jsonl(batched_prompt_file, jsonl_entries)
+
+    serial_records = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=serial_prompt_file,
+        output_file=serial_output_file,
+        max_new_tokens=num_tokens,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        max_batch_size=1,
+        evo2_batched_decode_size=1,
+    )
+    batched_records = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=batched_prompt_file,
+        output_file=batched_output_file,
+        max_new_tokens=num_tokens,
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+        max_batch_size=batch_size,
+        evo2_batched_decode_size=batch_size,
+        expected_log_substrings=(
+            f"[evo2-native] opt-in batched decode active: size={batch_size}",
+            f"[evo2-native] batched prompt prefill: requests={batch_size}",
+        ),
+    )
+
+    serial_by_id = {r["id"]: r for r in serial_records}
+    batched_by_id = {r["id"]: r for r in batched_records}
+    assert set(serial_by_id) == set(batched_by_id) == set(targets_by_id)
+
+    serial_match_percents: dict[str, float] = {}
+    batched_match_percents: dict[str, float] = {}
+    for seq_id, target in targets_by_id.items():
+        serial_identity = calculate_sequence_identity(target, serial_by_id[seq_id]["completion"]) or 0.0
+        batched_identity = calculate_sequence_identity(target, batched_by_id[seq_id]["completion"]) or 0.0
+        serial_match_percents[seq_id] = serial_identity
+        batched_match_percents[seq_id] = batched_identity
+
+    serial_vs_batched_percents = {
+        seq_id: calculate_sequence_identity(serial_by_id[seq_id]["completion"], batched_by_id[seq_id]["completion"])
+        or 0.0
+        for seq_id in targets_by_id
+    }
+    first_diffs = {
+        seq_id: next(
+            (
+                idx
+                for idx, (serial_base, batched_base) in enumerate(
+                    zip(serial_by_id[seq_id]["completion"], batched_by_id[seq_id]["completion"])
+                )
+                if serial_base != batched_base
+            ),
+            None,
+        )
+        for seq_id in targets_by_id
+    }
+
+    exact_matches = {
+        seq_id: serial_by_id[seq_id]["completion"] == batched_by_id[seq_id]["completion"] for seq_id in targets_by_id
+    }
+
+    def _max_homopolymer(sequence: str) -> int:
+        best = 0
+        current = 0
+        previous = None
+        for base in sequence:
+            current = current + 1 if base == previous else 1
+            best = max(best, current)
+            previous = base
+        return best
+
+    batched_completion_stats = {
+        seq_id: {
+            "length": len(batched_by_id[seq_id]["completion"]),
+            "valid_dna": set(batched_by_id[seq_id]["completion"]) <= {"A", "C", "G", "T", "N"},
+            "max_homopolymer": _max_homopolymer(batched_by_id[seq_id]["completion"]),
+        }
+        for seq_id in targets_by_id
+    }
+
+    serial_match_print = {k: f"{v:.2f}%" for k, v in serial_match_percents.items()}
+    batched_match_print = {k: f"{v:.2f}%" for k, v in batched_match_percents.items()}
+    serial_vs_batched_print = {k: f"{v:.2f}%" for k, v in serial_vs_batched_percents.items()}
+    exact_match_print = {k: str(v) for k, v in exact_matches.items()}
+    assert all(stat["length"] == num_tokens and stat["valid_dna"] for stat in batched_completion_stats.values()), (
+        f"Expected full-length DNA completions from batched decode, got {batched_completion_stats=}"
+    )
+    assert all(stat["max_homopolymer"] <= 20 for stat in batched_completion_stats.values()), (
+        f"Expected non-degenerate batched DNA completions, got {batched_completion_stats=}"
+    )
+    assert all(batched_match_percents[sid] >= serial_match_percents[sid] - 5.0 for sid in targets_by_id), (
+        "Expected batched decode to stay within 5 identity points of same-prefix serial target "
+        f"accuracy, got {serial_match_print=}, {batched_match_print=}, "
+        f"{serial_vs_batched_print=}, {exact_match_print=}, and {first_diffs=}"
     )
 
 

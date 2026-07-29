@@ -99,7 +99,6 @@ def default_ngc_client(use_guest_if_api_key_invalid: bool = True) -> "ngcsdk.Cli
                 api_key="no-apikey",
                 org_name="no-org",
                 team_name="no-team",
-                ace_name="no-ace",
             )
 
         else:

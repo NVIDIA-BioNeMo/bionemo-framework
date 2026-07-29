@@ -316,37 +316,55 @@ def compute_evo2_paged_kv_buffer_size_gb(
     ssm_bytes = math.prod(mamba_state_config.ssm_states_shape) * mamba_state_config.ssm_states_dtype.itemsize
     mamba_per_request = (conv_bytes + ssm_bytes) * num_mamba_layers
 
-    # --- Target KV block count: requested sequence + dummy block + safety. ---
-    target_blocks = math.ceil(int(max_sequence_length) / block_size_tokens) + 1 + int(safety_blocks)
+    # --- Target KV block count: every active request needs its own sequence blocks. ---
+    blocks_per_request = math.ceil(int(max_sequence_length) / block_size_tokens)
+    target_blocks = int(max_requests) * blocks_per_request + 1 + int(safety_blocks)
     target_blocks = max(2, target_blocks)  # mcore floors block_count at 2 (active + dummy)
 
-    # --- Invert mcore's hybrid block-count formula for the no-mamba-ratio path. ---
-    total_bytes = target_blocks * (block_size_bytes + mamba_per_request)
+    # --- Invert mcore's hybrid max_requests path. ---
+    # DynamicInferenceContext first reserves ``max_requests * mamba_per_request`` bytes, then derives
+    # KV block count from the remaining active buffer. Short max_sequence_length smoke tests can have
+    # fewer target KV blocks than active requests, so multiplying mamba state by target_blocks
+    # underallocates the total buffer.
+    total_bytes = target_blocks * block_size_bytes + int(max_requests) * mamba_per_request
     return (total_bytes + 1) / (1024**3)
 
 
-def bind_hyena_packed_views_to_dynamic_context(model, dyn_ctx, *, request_slot: int):
-    """Bind Hyena state-dict entries to a live ``DynamicInferenceContext`` Mamba slot.
+def bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, *, request_slots):
+    """Bind Hyena state-dict entries to live ``DynamicInferenceContext`` Mamba slots.
 
     ``DynamicInferenceContext`` allocates ``mamba_conv_states`` and ``mamba_ssm_states``
     from the Evo2 Mamba state config. This function installs the Hyena ``*_filter_state_dict``
-    dictionaries that route each layer's existing state writes into the assigned request slot:
+    dictionaries that route each layer's existing state writes into the assigned request slots:
     the projection FIR ring uses the conv slot, and the layer mixer state uses the leading
     sub-slice of the ssm slot.
 
     It must run after the request has been added and after ``initialize_all_tensors`` so the
-    mamba state buffers and request slot are available. The current standalone path binds one
-    request slot at a time; batched decode would need per-row state gathers in the Hyena step
-    kernels.
+    mamba state buffers and request slots are available. Batched binding is limited to contiguous
+    slots so every registered tensor is a stable view into the dynamic context, not a copy from
+    advanced indexing.
 
     Args:
         model: The Evo2 ``HyenaModel``.
         dyn_ctx: A live ``DynamicInferenceContext`` built with the Evo2 mamba state config.
-        request_slot: The mamba state slot assigned to the active request.
+        request_slots: Mamba state slots assigned to the active requests in request order.
 
     Returns:
         The installed ``_PackedHyenaSlotStateDict`` objects.
     """
+    if torch.is_tensor(request_slots):
+        slots = [int(slot) for slot in request_slots.detach().cpu().tolist()]
+    else:
+        slots = [int(slot) for slot in request_slots]
+    if not slots:
+        raise ValueError("request_slots must contain at least one slot")
+    sorted_slots = sorted(slots)
+    expected_slots = list(range(sorted_slots[0], sorted_slots[0] + len(sorted_slots)))
+    if sorted_slots != expected_slots:
+        raise ValueError(f"Batched Hyena dynamic-context binding requires contiguous request slots; got {slots}")
+    start_slot = sorted_slots[0]
+    end_slot = start_slot + len(slots)
+
     decoder = model.decoder if hasattr(model, "decoder") else model
     _conv_shape, _ssm_shape, per_layer = decoder.hyena_state_shapes_per_request()
 
@@ -376,16 +394,20 @@ def bind_hyena_packed_views_to_dynamic_context(model, dyn_ctx, *, request_slot: 
     )
     for layer, shapes in zip(hyena_layers, per_layer):
         mamba_layer_idx = layer_map[layer.layer_number - 1]
-        # conv slot: whole per-(layer,request) row, reshaped to [B=1, *conv_shape] for the op.
-        conv_row = conv_states[mamba_layer_idx, request_slot]  # (*conv_shape)
-        conv_view = conv_row.unsqueeze(0)  # [1, *conv_shape] — STABLE alias (no copy)
+        # conv slots: whole per-(layer,request) rows, shaped [B, *conv_shape] for the op.
+        conv_view = conv_states[mamba_layer_idx, start_slot:end_slot]  # [B, *conv_shape] — STABLE alias
         packed["fir"].register(shapes.conv_owner_id, conv_view)
-        # ssm slot: leading sub-slice of the row, reshaped to [B=1, :width, :last_dim].
+        # ssm slots: leading sub-slices of the rows, shaped [B, :width, :last_dim].
         w, last = shapes.ssm_shape
-        ssm_view = ssm_states[mamba_layer_idx, request_slot, :w, :last].unsqueeze(0)  # [1, w, last]
+        ssm_view = ssm_states[mamba_layer_idx, start_slot:end_slot, :w, :last]  # [B, w, last]
         packed[shapes.ssm_kind].register(shapes.ssm_owner_id, ssm_view)
 
     return list(packed.values())
+
+
+def bind_hyena_packed_views_to_dynamic_context(model, dyn_ctx, *, request_slot: int):
+    """Bind Hyena state-dict entries to a single live dynamic-context Mamba slot."""
+    return bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, request_slots=[request_slot])
 
 
 def get_batch(
@@ -426,7 +448,7 @@ def get_batch(
     )
 
     # slice batch along sequence dimension for context parallelism
-    batch = get_batch_on_this_cp_rank(batch)
+    batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=False)
     attention_mask = batch.get("attention_mask")
     if need_attention_mask and attention_mask is None:
         raise ValueError("Attention mask is required but not found in the batch")

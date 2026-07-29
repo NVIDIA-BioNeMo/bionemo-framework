@@ -33,6 +33,7 @@ from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.cuda_graphs import CudaGraphManager
 from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import GraphableMegatronModule, MegatronModule
@@ -84,6 +85,11 @@ class HyenaStackSubmodules:
 
 class HyenaStack(GraphableMegatronModule, MegatronModule):
     """A class for the HyenaStack."""
+
+    def create_mcore_cudagraph_manager(self, config):
+        """Register this stack for full-iteration local CUDA graphs."""
+        if not self.config.cuda_graph_scope or CudaGraphScope.full_iteration in (self.config.cuda_graph_scope or []):
+            self.cudagraph_manager = CudaGraphManager(config)
 
     def __init__(
         self,
@@ -447,7 +453,7 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
             hasattr(self, "cudagraph_manager")
             and kwargs["attention_mask"] is None
             and (kwargs.get("inference_context") is not None or kwargs.get("inference_params") is not None)
-            and CudaGraphScope.full_iteration in self.config.cuda_graph_scope
+            and CudaGraphScope.full_iteration in (self.config.cuda_graph_scope or [])
         ):
             if kwargs["inference_context"].is_static_batching():
                 using_cuda_graph = kwargs["inference_context"].is_decode_only()

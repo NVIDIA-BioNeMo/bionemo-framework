@@ -23,6 +23,7 @@ import torch
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.cuda_graphs import CudaGraphManager
 from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import GraphableMegatronModule
@@ -116,8 +117,6 @@ class HyenaLayer(GraphableMegatronModule):
         ``cuda_graph_scope`` captures the whole layer, while ``CudaGraphScope.mamba``
         can be used by callers that only want the recurrent/mixer scope.
         """
-        from megatron.core.transformer.cuda_graphs import CudaGraphManager  # lazy: heavy mcore import
-
         if not self.config.cuda_graph_scope or CudaGraphScope.mamba in (self.config.cuda_graph_scope or []):
             self.cudagraph_manager = CudaGraphManager(config)
 

@@ -1318,7 +1318,7 @@ def predict(
             # Apply context parallel slicing (seq_idx must NOT be sliced)
             if context_parallel_size > 1:
                 seq_idx = batch_gpu.pop("seq_idx", None)
-                batch_gpu = get_batch_on_this_cp_rank(batch_gpu)
+                batch_gpu = get_batch_on_this_cp_rank(batch_gpu, is_hybrid_cp=False)
                 if seq_idx is not None:
                     batch_gpu["seq_idx"] = seq_idx
 
