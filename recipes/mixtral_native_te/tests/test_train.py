@@ -59,12 +59,11 @@ def _assert_loss_valid(loss: float | None, label: str = "") -> None:
     assert torch.isfinite(torch.tensor(loss_val)), f"Loss is not finite: {loss_val}{tag}"
 
 
-def _run_torchrun(worker: str, port: int, tmp_dir: str, nproc: int = 2) -> subprocess.CompletedProcess[str]:
+def _run_torchrun(worker: str, tmp_dir: str, nproc: int = 2) -> subprocess.CompletedProcess[str]:
     cmd = [
         "torchrun",
+        "--standalone",
         f"--nproc_per_node={nproc}",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
         worker,
         tmp_dir,
@@ -220,16 +219,16 @@ def _assert_l0_sanity_result(result: subprocess.CompletedProcess[str], result_pa
 
 @requires_multi_gpu
 @requires_sm100
-def test_l0_sanity_training_decreases_loss(unused_tcp_port, tmp_path, recipe_path):
+def test_l0_sanity_training_decreases_loss(tmp_path, recipe_path):
     """L0 EP=2 training: finite loss that decreases over the run."""
-    result = _run_torchrun("l0_sanity", unused_tcp_port, str(tmp_path))
+    result = _run_torchrun("l0_sanity", str(tmp_path))
     _assert_l0_sanity_result(result, tmp_path / "l0_sanity_result.json", "L0 fused GroupedMLP sanity training")
 
 
 @requires_multi_gpu
-def test_l0_sanity_bf16_grouped_linear_decreases_loss(unused_tcp_port, tmp_path):
+def test_l0_sanity_bf16_grouped_linear_decreases_loss(tmp_path):
     """Randomly initialized tiny Mixtral trains in BF16 with grouped-linear experts."""
-    result = _run_torchrun("l0_sanity_bf16_grouped_linear", unused_tcp_port, str(tmp_path))
+    result = _run_torchrun("l0_sanity_bf16_grouped_linear", str(tmp_path))
     _assert_l0_sanity_result(
         result,
         tmp_path / "l0_sanity_bf16_grouped_linear_result.json",
@@ -238,9 +237,9 @@ def test_l0_sanity_bf16_grouped_linear_decreases_loss(unused_tcp_port, tmp_path)
 
 
 @requires_cuda
-def test_single_gpu_bf16_training_checkpoint_resume(unused_tcp_port, tmp_path):
+def test_single_gpu_bf16_training_checkpoint_resume(tmp_path):
     """Tiny BF16 training saves a checkpoint and resumes in a fresh one-GPU process."""
-    phase1 = _run_torchrun("single_gpu_bf16_checkpoint_save", unused_tcp_port, str(tmp_path), nproc=1)
+    phase1 = _run_torchrun("single_gpu_bf16_checkpoint_save", str(tmp_path), nproc=1)
     if phase1.returncode != 0:
         print(phase1.stdout)
         pytest.fail(f"Single-GPU BF16 checkpoint-save phase failed with exit code {phase1.returncode}")
@@ -248,7 +247,7 @@ def test_single_gpu_bf16_training_checkpoint_resume(unused_tcp_port, tmp_path):
     checkpoint = tmp_path / "train_fsdp2_ep" / "step_2"
     assert checkpoint.is_dir(), f"Missing checkpoint directory {checkpoint}"
 
-    phase2 = _run_torchrun("single_gpu_bf16_checkpoint_resume", unused_tcp_port + 1, str(tmp_path), nproc=1)
+    phase2 = _run_torchrun("single_gpu_bf16_checkpoint_resume", str(tmp_path), nproc=1)
     if phase2.returncode != 0:
         print(phase2.stdout)
         pytest.fail(f"Single-GPU BF16 checkpoint-resume phase failed with exit code {phase2.returncode}")

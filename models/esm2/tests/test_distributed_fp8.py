@@ -38,12 +38,11 @@ requires_multi_gpu = pytest.mark.skipif(
     "strategy", ["ddp", "fsdp2", pytest.param("mfsdp", marks=pytest.mark.xfail(reason="BIONEMO-2999"))]
 )
 @requires_fp8
-def test_single_process_attaches_correct_fp8_recipe(strategy, unused_tcp_port):
+def test_single_process_attaches_correct_fp8_recipe(strategy):
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=1",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{unused_tcp_port}",
         os.path.relpath(__file__),
         "--strategy",
         strategy,
@@ -68,12 +67,11 @@ def test_single_process_attaches_correct_fp8_recipe(strategy, unused_tcp_port):
 )
 @requires_fp8
 @requires_multi_gpu
-def test_multi_process_fp8_recipes_are_synced(strategy, unused_tcp_port):
+def test_multi_process_fp8_recipes_are_synced(strategy):
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{unused_tcp_port}",
         os.path.relpath(__file__),
         "--strategy",
         strategy,

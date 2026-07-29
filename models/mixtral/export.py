@@ -26,6 +26,23 @@ import convert
 from modeling_mixtral_te import AUTO_MAP
 
 
+def _convert_hf_checkpoint(
+    tag: str,
+    *,
+    torch_dtype: torch.dtype | None,
+    low_cpu_mem_usage: bool,
+    config_kwargs: dict,
+):
+    model_hf = AutoModelForCausalLM.from_pretrained(
+        tag,
+        dtype=torch_dtype,
+        low_cpu_mem_usage=low_cpu_mem_usage,
+    )
+    model_te = convert.convert_mixtral_hf_to_te(model_hf, **config_kwargs)
+    del model_hf
+    return model_te
+
+
 def export_hf_checkpoint(
     tag: str,
     export_path: Path,
@@ -47,10 +64,12 @@ def export_hf_checkpoint(
             :func:`convert.convert_mixtral_hf_to_te`, e.g. ``expert_ffn_mode="fused_grouped_mlp"``,
             ``attn_input_format="bshd"``, ``self_attn_mask_type="causal"``.
     """
-    model_hf = AutoModelForCausalLM.from_pretrained(tag, torch_dtype=torch_dtype, low_cpu_mem_usage=low_cpu_mem_usage)
-
-    model_te = convert.convert_mixtral_hf_to_te(model_hf, **config_kwargs)
-    del model_hf
+    model_te = _convert_hf_checkpoint(
+        tag,
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=low_cpu_mem_usage,
+        config_kwargs=config_kwargs,
+    )
 
     # save_pretrained works for every expert_ffn_mode: NVMixtralPreTrainedModel.state_dict() drops the
     # duplicate _experts_ffn_op.* aliases so the safetensors writer sees exactly one copy of each
@@ -70,6 +89,38 @@ def export_hf_checkpoint(
         json.dump(config, f, indent=2, sort_keys=True)
 
     shutil.copy(Path(__file__).parent / "modeling_mixtral_te.py", export_path / "modeling_mixtral_te.py")
+
+
+def export_hf_state_dict(
+    tag: str,
+    output_path: Path,
+    *,
+    torch_dtype: torch.dtype | None = None,
+    low_cpu_mem_usage: bool = False,
+    **config_kwargs,
+) -> None:
+    """Convert a Hugging Face Mixtral checkpoint to one mmap-loadable TE training state dict.
+
+    Unlike :func:`export_hf_checkpoint`, this API intentionally writes only the model state needed
+    by native-TE training. A single ``torch.save`` file is the canonical handoff to the training
+    recipe: it avoids Hugging Face serialization-format dispatch and can be mapped read-only across
+    ranks on a node with ``torch.load(mmap=True)``.
+
+    Args:
+        tag: Hugging Face model tag or local checkpoint path.
+        output_path: Destination file, conventionally ending in ``.pt``.
+        torch_dtype: Optional source-model load dtype.
+        low_cpu_mem_usage: Forwarded to ``from_pretrained``.
+        **config_kwargs: Extra ``NVMixtralConfig`` conversion overrides.
+    """
+    model_te = _convert_hf_checkpoint(
+        tag,
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=low_cpu_mem_usage,
+        config_kwargs=config_kwargs,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model_te.state_dict(), output_path)
 
 
 if __name__ == "__main__":

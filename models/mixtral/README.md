@@ -245,6 +245,27 @@ model_te = convert_mixtral_hf_to_te(model_hf)
 model_te.save_pretrained("/path/to/te_checkpoint")
 ```
 
+For native-TE training, export one memory-mappable state-dict file instead of a Hugging Face model
+directory:
+
+> **Note:** Run from the `models/mixtral` directory, or install dependencies first with
+> `pip install -r requirements.txt`.
+
+```python
+from pathlib import Path
+
+import torch
+from export import export_hf_state_dict
+
+export_hf_state_dict(
+    "mistralai/Mixtral-8x7B-v0.1",
+    Path("/path/to/mixtral_8x7b_fused_bf16.pt"),
+    torch_dtype=torch.bfloat16,
+    low_cpu_mem_usage=True,
+    expert_ffn_mode="fused_grouped_mlp",
+)
+```
+
 ### Converting from TE back to HF Transformers
 
 > **Note:** Run from the `models/mixtral` directory, or install dependencies first with

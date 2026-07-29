@@ -28,7 +28,7 @@ from bionemo.common.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 
-from .utils import find_free_network_port, is_a6000_gpu
+from .utils import is_a6000_gpu
 
 
 def get_device_and_memory_allocated() -> str:
@@ -163,9 +163,8 @@ def lora_finetune_checkpoint(mbridge_checkpoint_1b_8k_bf16, tmp_path_factory) ->
     if is_a6000_gpu():
         env["NCCL_P2P_DISABLE"] = "1"
 
-    port = find_free_network_port()
     cmd = (
-        f"torchrun --nproc-per-node 1 --no-python --master_port {port} "
+        "torchrun --standalone --nproc-per-node 1 --no-python "
         f"train_evo2 --finetune-ckpt-dir {mbridge_checkpoint_1b_8k_bf16.parent} "
         f"--lora-finetune --lora-dim 8 --lora-alpha 16 "
         f"--lora-target-modules linear_qkv,linear_proj,linear_fc1,linear_fc2 "

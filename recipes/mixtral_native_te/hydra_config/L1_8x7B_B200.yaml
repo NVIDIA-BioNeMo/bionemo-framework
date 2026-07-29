@@ -1,0 +1,83 @@
+defaults:
+  - defaults
+  - _self_
+
+config_name_or_path: ./model_configs/mistralai/Mixtral-8x7B-v0.1
+init_from_pretrained: ${oc.env:MIXTRAL_TE_PRETRAINED_CHECKPOINT}
+
+parallelism:
+  dp_size: 2
+  ep_size: 4
+
+# Logs at steps 10/20 include kernel compilation and warmup. Steps 30/40/50 are the three
+# steady-state windows used for the benchmark summary.
+num_train_steps: 60
+# Direct CUDA construction is required for qinit + FSDP2 with the PyTorch 26.06 image. Materializing
+# a meta-initialized model after wrapping currently invalidates FSDP2's sharded-parameter reference.
+use_meta_device: false
+use_sequence_packing: true
+
+dataset:
+  tokenizer_name_or_path: mistralai/Mixtral-8x7B-v0.1
+  micro_batch_size: null
+  token_micro_batch_size: 4096
+  # Each rank receives one local parquet shard; additional workers are disabled by datasets.
+  num_workers: 1
+  max_seq_length: 4096
+  stride: 200
+  buffer_size: 1_000
+  tokenize_batch_size: 4
+  use_stateful_dataloader: false
+  pad_sequences_to_be_divisible_by: 32
+  text_column: "text"
+  load_dataset_kwargs:
+    path: "parquet"
+    data_files: ${oc.env:DCLM_DATA_FILE}
+    split: "train"
+    # The source is streamed only from the local parquet file downloaded by the benchmark script.
+    streaming: true
+
+fp8_config:
+  enabled: true
+  fp8_recipe: transformer_engine.common.recipe.MXFP8BlockScaling
+  fp8_format: E4M3
+  fp8_recipe_kwargs: {}
+  quantized_model_init_kwargs:
+    enabled: true
+    preserve_high_precision_init_val: true
+
+optimizer_master_weights: true
+optimizer_store_param_remainders: false
+
+adamw_kwargs:
+  lr: 1e-4
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.1
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 58_000
+  min_lr_ratio: 0.000001
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: false
+  resume_from_checkpoint: false
+  save_every_n_steps: 5_000
+  async_save: false
+
+wandb:
+  name: "mixtral-8x7b-b200-dp2-ep4-mxfp8"
+  project: null
+  mode: disabled
+
+logger:
+  frequency: 10
+
+profiler:
+  enabled: false
+
+quant_stats_config:
+  enabled: false

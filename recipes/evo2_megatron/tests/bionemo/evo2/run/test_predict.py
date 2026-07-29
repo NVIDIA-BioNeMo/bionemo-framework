@@ -36,7 +36,7 @@ from bionemo.evo2.data.test_utils.create_fasta_file import ALU_SEQUENCE, create_
 from bionemo.evo2.run.predict import batch_collator
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 
-from ..utils import check_fp8_support, find_free_network_port, is_a6000_gpu
+from ..utils import check_fp8_support, is_a6000_gpu
 
 
 # Do this at collection time before we run any tests.
@@ -115,9 +115,8 @@ def test_predict_evo2_runs(
 
     # Build the command string
     output_dir = tmp_path / "test_output"
-    open_port = find_free_network_port()
     command = (
-        f"torchrun --nproc_per_node {world_size} --nnodes 1 --master_port {open_port} "
+        f"torchrun --standalone --nproc_per_node {world_size} --nnodes 1 "
         f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
         f"--output-dir {output_dir} "
         f"--micro-batch-size 3 --write-interval {wi} "
@@ -240,9 +239,8 @@ def baseline_predictions_7b_1m_results(
         repeating_dna_pattern=ALU_SEQUENCE,
     )
     output_dir = tmp_path / "test_output"
-    open_port = find_free_network_port()
     command = (
-        f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {open_port} "
+        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
         f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_7b_1m_path} "
         f"--micro-batch-size 3 "
         f"--output-dir {output_dir} "
@@ -361,9 +359,8 @@ def test_predict_evo2_equivalent_with_log_probs(
     fp8_option = "--mixed-precision-recipe bf16_with_fp8_current_scaling_mixed" if fp8 else ""
     subquadratic_ops_option = "--use-subquadratic-ops" if use_subquadratic_ops else ""
     output_dir = tmp_path / "test_output"
-    open_port = find_free_network_port()
     command = (
-        f"torchrun --nproc_per_node {world_size} --nnodes 1 --master_port {open_port} "
+        f"torchrun --standalone --nproc_per_node {world_size} --nnodes 1 "
         f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_7b_1m_path} "
         f"--micro-batch-size 3 --write-interval {wi} "
         f"--output-dir {output_dir} --tensor-parallel-size {tp} {fp8_option} {subquadratic_ops_option} "
@@ -446,9 +443,8 @@ def test_different_results_with_without_peft(tmp_path, mbridge_checkpoint_1b_8k_
     create_fasta_file(fasta_file_path, 3, sequence_lengths=[32, 65, 129], repeating_dna_pattern=ALU_SEQUENCE)
 
     def _run_predict(ckpt: Path, output_dir: Path) -> None:
-        port = find_free_network_port()
         cmd = (
-            f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {port} "
+            "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
             f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {ckpt} "
             f"--output-dir {output_dir} --micro-batch-size 3 --write-interval epoch "
             f"--pipeline-model-parallel-size 1 --num-nodes 1 --devices 1"
@@ -524,9 +520,8 @@ def test_predict_evo2_embedding_extraction(
         env["NCCL_P2P_DISABLE"] = "1"
 
     output_dir = tmp_path / "test_output"
-    open_port = find_free_network_port()
     command = (
-        f"torchrun --nproc_per_node {world_size} --nnodes 1 --master_port {open_port} "
+        f"torchrun --standalone --nproc_per_node {world_size} --nnodes 1 "
         f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
         f"--output-dir {output_dir} "
         f"--micro-batch-size 2 --write-interval epoch "
@@ -654,10 +649,9 @@ def test_predict_evo2_short_embedding_is_prefix_invariant_across_batch_padding(
         fasta_path.write_text("".join(f">{name}\n{sequence}\n" for name, sequence in records.items()))
 
     def _run_predict(fasta_path: Path, output_dir: Path) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
-        open_port = find_free_network_port()
         subquadratic_arg = " --use-subquadratic-ops" if use_subquadratic_ops else ""
         command = (
-            f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {open_port} "
+            "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
             f"-m bionemo.evo2.run.predict --fasta {fasta_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
             f"--output-dir {output_dir} --micro-batch-size 2 --write-interval epoch --embedding-layer -1"
             f"{subquadratic_arg}"
@@ -742,12 +736,10 @@ def test_predict_evo2_embedding_layer_validation(
         env["NCCL_P2P_DISABLE"] = "1"
 
     output_dir = tmp_path / "test_output"
-    open_port = find_free_network_port()
-
     # Test with an invalid embedding layer (too large positive index)
     # The 1b model has 25 layers, so layer 100 should be invalid
     command = (
-        f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {open_port} "
+        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
         f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
         f"--output-dir {output_dir} --embedding-layer 100"
     )
@@ -783,11 +775,9 @@ def test_predict_evo2_embedding_with_log_probs_rejected(
         env["NCCL_P2P_DISABLE"] = "1"
 
     output_dir = tmp_path / "test_output"
-    open_port = find_free_network_port()
-
     # Test combining embedding extraction with log prob output (should fail)
     command = (
-        f"torchrun --nproc_per_node 1 --nnodes 1 --master_port {open_port} "
+        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
         f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
         f"--output-dir {output_dir} --embedding-layer -1 --output-log-prob-seqs"
     )

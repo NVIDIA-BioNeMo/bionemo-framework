@@ -1,0 +1,5 @@
+-r ../../requirements.txt
+accelerate==1.14.0
+kernels==0.16.0
+# This main commit contains the corrected Blackwell grouped training implementation used here.
+torchao @ git+https://github.com/pytorch/ao.git@693b573f6f3eae8be467db0ef3e49a1553ae2731

@@ -76,16 +76,14 @@ def _compose_config(recipe_path: Path, tmp_path: Path, overrides: list[str] | No
 
 def _run_torchrun(
     worker: str,
-    port: int,
     tmp_dir: str,
     nproc: int,
     *extra_args: str,
 ) -> subprocess.CompletedProcess[str]:
     cmd = [
         "torchrun",
+        "--standalone",
         f"--nproc_per_node={nproc}",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
         worker,
         tmp_dir,
@@ -404,14 +402,14 @@ def _worker_ep2_load_verify(tmp_dir: str) -> None:
 
 @requires_multi_gpu
 @requires_sm100
-def test_ep2_stop_go_loss_parity(unused_tcp_port, tmp_path):
+def test_ep2_stop_go_loss_parity(tmp_path):
     """Train N steps, checkpoint, resume in a fresh process, and match uninterrupted 2N losses."""
-    result_ref = _run_torchrun("stop_go_reference", unused_tcp_port, str(tmp_path), nproc=2)
+    result_ref = _run_torchrun("stop_go_reference", str(tmp_path), nproc=2)
     if result_ref.returncode != 0:
         print(result_ref.stdout)
         pytest.fail(f"Reference run failed: {result_ref.returncode}")
 
-    result_p1 = _run_torchrun("stop_go_phase1", unused_tcp_port + 1, str(tmp_path), nproc=2)
+    result_p1 = _run_torchrun("stop_go_phase1", str(tmp_path), nproc=2)
     if result_p1.returncode != 0:
         print(result_p1.stdout)
         pytest.fail(f"Stop/go phase 1 failed: {result_p1.returncode}")
@@ -419,7 +417,7 @@ def test_ep2_stop_go_loss_parity(unused_tcp_port, tmp_path):
     ckpt_subdir = tmp_path / "ckpt" / "train_fsdp2_ep"
     assert (ckpt_subdir / f"step_{CHECKPOINT_STEP}").is_dir(), f"Missing checkpoint at step {CHECKPOINT_STEP}"
 
-    result_p2 = _run_torchrun("stop_go_phase2", unused_tcp_port + 2, str(tmp_path), nproc=2)
+    result_p2 = _run_torchrun("stop_go_phase2", str(tmp_path), nproc=2)
     if result_p2.returncode != 0:
         print(result_p2.stdout)
         pytest.fail(f"Stop/go phase 2 failed: {result_p2.returncode}")
@@ -445,9 +443,9 @@ def test_ep2_stop_go_loss_parity(unused_tcp_port, tmp_path):
 
 @requires_four_gpu
 @requires_sm100
-def test_ep4_to_ep2_reshard_checkpoint(unused_tcp_port, tmp_path):
+def test_ep4_to_ep2_reshard_checkpoint(tmp_path):
     """Save consolidated checkpoint at EP=4 and verify EP=2 load matches gathered reference."""
-    result_save = _run_torchrun("ep4_save", unused_tcp_port, str(tmp_path), nproc=4)
+    result_save = _run_torchrun("ep4_save", str(tmp_path), nproc=4)
     if result_save.returncode != 0:
         print(result_save.stdout)
         pytest.fail(f"EP=4 save failed: {result_save.returncode}")
@@ -455,7 +453,7 @@ def test_ep4_to_ep2_reshard_checkpoint(unused_tcp_port, tmp_path):
     assert (tmp_path / "global_expert_ref.pt").exists()
     assert (tmp_path / "global_opt_ref.pt").exists()
 
-    result_verify = _run_torchrun("ep2_load_verify", unused_tcp_port + 1, str(tmp_path), nproc=2)
+    result_verify = _run_torchrun("ep2_load_verify", str(tmp_path), nproc=2)
     if result_verify.returncode != 0:
         print(result_verify.stdout)
         pytest.fail(f"EP=2 load/verify failed: {result_verify.returncode}")

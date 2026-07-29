@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""2D (dp, ep) device mesh setup with EP groups before selective FSDP2 wrapping."""
+"""2D (dp, ep) device mesh setup and collectives for selective FSDP2 wrapping."""
 
+import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import fully_shard
@@ -63,6 +64,64 @@ def all_reduce_dense_grads_over_ep(model, ep_group) -> None:
         local = grad.to_local() if isinstance(grad, DTensor) else grad
         dist.all_reduce(local, op=dist.ReduceOp.SUM, group=ep_group)
         local.div_(ep_world)
+
+
+def clip_grad_norm_mixed(
+    model: torch.nn.Module,
+    max_norm: float,
+    ep_group: dist.ProcessGroup | None = None,
+    dp_group: dist.ProcessGroup | None = None,
+) -> torch.Tensor:
+    """Clip the global L2 norm of EP-local parameters mixed with FSDP2 DTensors.
+
+    This is necessary whenever expert parallelism and FSDP2 coexist. Stock
+    ``torch.nn.utils.clip_grad_norm_`` sees only local DTensor shards, while FSDP1's clipping API
+    does not apply to composable FSDP2 or understand that expert and dense parameters have different
+    ownership. We therefore complete the squared norms according to the recipe's 2D layout:
+
+    - expert gradients own disjoint experts across ``ep`` and, for ``dp > 1``, disjoint FSDP shards
+      across ``dp``; their squared norm is reduced over both groups;
+    - dense gradients are FSDP-sharded across ``dp`` but already averaged and identical across
+      ``ep`` by :func:`all_reduce_dense_grads_over_ep`, so their squared norm is reduced only over
+      ``dp``.
+
+    This helper can be removed if PyTorch exposes FSDP2/DTensor norm clipping with heterogeneous
+    parameter placements. Until then the ownership policy is recipe-specific and must be explicit.
+    """
+    device = next(model.parameters()).device
+    expert_sq_sum = torch.zeros((), device=device, dtype=torch.float32)
+    dense_sq_sum = torch.zeros((), device=device, dtype=torch.float32)
+
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+        grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+        local_norm = torch.linalg.vector_norm(grad, ord=2, dtype=torch.float32)
+        sq_sum = local_norm.square()
+        if _is_expert_param(name):
+            expert_sq_sum += sq_sum
+        else:
+            dense_sq_sum += sq_sum
+
+    if ep_group is not None and ep_group.size() > 1:
+        dist.all_reduce(expert_sq_sum, op=dist.ReduceOp.SUM, group=ep_group)
+
+    # Once experts have been completed over EP, both classes need exactly the same DP reduction.
+    # Combining the scalar sums keeps clipping to one collective per non-trivial mesh dimension.
+    total_sq_sum = expert_sq_sum + dense_sq_sum
+    if dp_group is not None and dp_group.size() > 1:
+        dist.all_reduce(total_sq_sum, op=dist.ReduceOp.SUM, group=dp_group)
+
+    total_norm = torch.sqrt(total_sq_sum)
+    clip_coef = max_norm / (total_norm + 1e-6)
+    if clip_coef < 1:
+        for param in model.parameters():
+            if param.grad is not None:
+                if isinstance(param.grad, DTensor):
+                    param.grad = param.grad * clip_coef
+                else:
+                    param.grad.mul_(clip_coef)
+    return total_norm
 
 
 def build_mesh_and_wrap(model, dp_size: int, ep_size: int) -> DeviceMesh:

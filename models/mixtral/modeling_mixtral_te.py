@@ -163,6 +163,47 @@ class NVMixtralPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ("past_key_values",)
     _do_not_quantize = ("lm_head", "model.layers.*.mlp.gate")  # Flag for testing that these layers are not quantized.
 
+    def load_global_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        *,
+        ep_rank: int,
+        strict: bool = False,
+    ):
+        """Load a global converted state dict into this rank's EP-local model.
+
+        Converted checkpoints are intentionally independent of runtime parallelism and number every
+        fused expert globally. An EP model constructs only its contiguous local experts, numbered
+        from zero, so loading must select and renumber the slice owned by ``ep_rank``. This belongs
+        to the model rather than the converter: the converter cannot know the EP degree or rank of a
+        future training run. TE's ``single_grouped_weight`` is only an EP-local ``GroupedTensor``:
+        it does not remove this localization step and cannot currently be distributed by DTensor.
+        This method can be removed if TE exposes an ordinary global expert tensor that DTensor can
+        distribute directly, or if TE's conversion/loading API becomes EP-layout-aware.
+        """
+        ep_size = getattr(self.config, "expert_parallel_size", 1)
+        num_experts = self.config.num_local_experts
+        if num_experts % ep_size != 0:
+            raise ValueError(f"num_local_experts ({num_experts}) must be divisible by ep_size ({ep_size})")
+        if not 0 <= ep_rank < ep_size:
+            raise ValueError(f"ep_rank ({ep_rank}) must be in [0, {ep_size})")
+        state_dict = localize_expert_state_dict(
+            state_dict,
+            ep_rank=ep_rank,
+            num_local_experts=num_experts // ep_size,
+        )
+        incompatible_keys = self.load_state_dict(state_dict, strict=strict)
+
+        # TE's experimental preserved high-precision initializer is not updated by state-dict load.
+        # Keep it aligned with the pretrained value so FusedAdam can seed an exact FP32 master. This
+        # private assignment can be removed when TE updates the value on copy/load or adds a setter.
+        for name, param in self.named_parameters():
+            local = param._local_tensor if isinstance(param, DTensor) else param
+            if name in state_dict and hasattr(local, "get_high_precision_init_val"):
+                local._high_precision_init_val = state_dict[name].detach().cpu()
+
+        return incompatible_keys
+
     def init_empty_weights(self):
         """Handles moving the model from the meta device to the cuda device and initializing the weights."""
         for module in self.modules():
@@ -208,11 +249,48 @@ class NVMixtralPreTrainedModel(PreTrainedModel):
         return {k: v for k, v in state_dict.items() if not k.endswith("_extra_state") and "._experts_ffn_op." not in k}
 
 
+def localize_expert_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    ep_rank: int,
+    num_local_experts: int,
+) -> dict[str, torch.Tensor]:
+    """Select one EP rank's stacked or discrete experts from global model state."""
+    first_expert = ep_rank * num_local_experts
+    last_expert = first_expert + num_local_experts
+    localized = {}
+    stacked_expert_suffixes = ("experts_gate_up_weight", "experts_down_weight")
+    expert_markers = (".experts_gate_up.weight", ".experts_down.weight")
+
+    for key, value in state_dict.items():
+        if key.endswith(stacked_expert_suffixes):
+            localized[key] = value[first_expert:last_expert]
+            continue
+        for marker in expert_markers:
+            prefix, separator, suffix = key.partition(marker)
+            if separator and suffix.isdigit():
+                global_expert = int(suffix)
+                if first_expert <= global_expert < last_expert:
+                    local_expert = global_expert - first_expert
+                    localized[f"{prefix}{marker}{local_expert}"] = value
+                break
+        else:
+            localized[key] = value
+
+    return localized
+
+
 _FUSED_GROUPED_MLP_REGISTERED = False
 
 
 def _ensure_fused_grouped_mlp_registered() -> bool:
-    """Enable the CuteDSL fused GroupedMLP forward fusion once per process. Returns is_supported()."""
+    """Register TE's experimental CuteDSL fused GroupedMLP path once per process.
+
+    The explicit registration is required only for ``fused_grouped_mlp``: TE 2.16 exposes the
+    fusion and its support probe through private ``ops.fused`` APIs but does not automatically add
+    it to ``OperationFuser``. This helper and its environment switch can be removed when TE enables
+    the fused MXFP8 GroupedMLP through a stable public API or registers it itself.
+    """
     global _FUSED_GROUPED_MLP_REGISTERED  # noqa: PLW0603  (process-wide one-time TE fusion registration)
     from transformer_engine.pytorch.ops.fused.forward_grouped_mlp import (
         ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
@@ -227,6 +305,24 @@ def _ensure_fused_grouped_mlp_registered() -> bool:
             register_forward_fusion(fuse_forward_ops, prepend=True)
         _FUSED_GROUPED_MLP_REGISTERED = True
     return supported
+
+
+def assert_fused_mxfp8_supported(expert_ffn_mode: str, fp8_enabled: bool) -> None:
+    """Reject a requested fused MXFP8 expert path when TE cannot provide its kernel.
+
+    This guard is needed only for ``expert_ffn_mode="fused_grouped_mlp"`` with FP8 enabled. TE's ops
+    fuser may otherwise fall back to the unfused grouped-linear sequence, which is not a numerically
+    or performance-equivalent implementation for this recipe. TE could make this redundant by
+    exposing a public "require this fusion" mode that raises instead of silently declining fusion.
+    """
+    if expert_ffn_mode != "fused_grouped_mlp" or not fp8_enabled:
+        return
+    if not _ensure_fused_grouped_mlp_registered():
+        raise RuntimeError(
+            "expert_ffn_mode='fused_grouped_mlp' with MXFP8 (fp8_config.enabled=true) requires "
+            "ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8 support (Blackwell sm_100+). "
+            "Refusing to fall back to the unfused grouped-linear path."
+        )
 
 
 # Per-expert token-count alignment required by the fused MXFP8 grouped-MLP CuteDSL kernel
@@ -303,6 +399,9 @@ class NVMixtralSparseMoeBlock(nn.Module):
 
         # Expert FFNs — only num_local_experts per rank when EP > 1
         if config.expert_ffn_mode == "fused_grouped_mlp":
+            # TE's single_grouped_weight also runs this fused compute path, but TE 2.16 cannot use
+            # that GroupedTensor with FSDP2 or FusedAdam and does not persistently MXFP8-quantize it.
+            # See the module docstring in grouped_dcp.py for the precise upstream blockers.
             os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "0"
             os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
             _ensure_fused_grouped_mlp_registered()
@@ -359,6 +458,9 @@ class NVMixtralSparseMoeBlock(nn.Module):
             # stacked tensor is the real Parameter, and GroupedLinear's ``weight{i}`` become plain
             # (non-registered) views of it — set via ``_sync_expert_views`` — so TE's internal
             # ``getattr(self, "weight{i}")`` calls (reset_parameters / _get_weight_tensors) still work.
+            # TE does offer ``single_grouped_weight``, but that produces a GroupedTensor rather than
+            # an ordinary stacked Tensor. In TE 2.16, DTensor.from_local calls view_as on it and fails
+            # because GroupedTensor only permits view(-1); TE FusedAdam also fails on this parameter.
             self.experts_gate_up_weight = nn.Parameter(
                 torch.stack(
                     [self.experts_gate_up._parameters.pop(f"weight{i}").data for i in range(self.num_local_experts)]

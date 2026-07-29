@@ -40,13 +40,12 @@ requires_multi_gpu = pytest.mark.skipif(
 )
 
 
-def _run_torchrun(test_name: str, port: int):
+def _run_torchrun(test_name: str):
     """Run a named test worker via torchrun with 2 GPUs."""
     cmd = [
         "torchrun",
+        "--standalone",
         "--nproc_per_node=2",
-        "--rdzv-backend=c10d",
-        f"--rdzv-endpoint=localhost:{port}",
         str(Path(__file__).resolve()),
         test_name,
     ]
@@ -66,15 +65,15 @@ def _run_torchrun(test_name: str, port: int):
 
 
 @requires_multi_gpu
-def test_ep2_matches_ep1(unused_tcp_port):
+def test_ep2_matches_ep1():
     """Test that EP=2 produces the same logits as EP=1."""
-    _run_torchrun("forward", unused_tcp_port)
+    _run_torchrun("forward")
 
 
 @requires_multi_gpu
-def test_ep2_backward_matches_ep1(unused_tcp_port):
+def test_ep2_backward_matches_ep1():
     """Test that EP=2 backward pass produces the same gradients as EP=1."""
-    _run_torchrun("backward", unused_tcp_port)
+    _run_torchrun("backward")
 
 
 # ---------------------------------------------------------------------------

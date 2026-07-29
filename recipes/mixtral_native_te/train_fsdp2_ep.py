@@ -30,10 +30,13 @@ from contextlib import nullcontext
 from pathlib import Path
 
 
-# Must be set before importing Transformer Engine. NVTE_GROUPED_LINEAR_SINGLE_PARAM=0 makes TE expose
-# discrete per-expert weight{i} tensors (required by both the fused GroupedMLP path and the
-# consolidated expert checkpointing); NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 enables the Blackwell MXFP8
-# fused expert kernel (ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8).
+# Must be set before importing Transformer Engine. Although TE's experimental
+# NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 representation runs the fused MXFP8 expert kernels in pure EP,
+# it is not usable for this training recipe in TE 2.16: its GroupedTensor cannot be wrapped as a
+# DTensor for FSDP2, FusedAdam fails when updating it, and quantized_model_init leaves it in BF16
+# instead of creating a persistent MXFP8 parameter. Keep discrete weight{i} tensors until TE fixes
+# those integration points. NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 enables the Blackwell MXFP8 fused
+# expert kernel (ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8).
 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "0"
 os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
 
@@ -42,169 +45,30 @@ import torch
 import transformer_engine.pytorch
 from checkpoint import (
     _ckpt_futures,
-    is_expert_key,
     load_checkpoint,
+    load_pretrained_model,
     save_checkpoint,
     save_final_model,
     should_save_checkpoint,
 )
 from dataset import create_bshd_dataloader, create_thd_dataloader
 from distributed_config import DistributedConfig
-from distributed_setup import all_reduce_dense_grads_over_ep, build_mesh_and_wrap
+from distributed_setup import all_reduce_dense_grads_over_ep, build_mesh_and_wrap, clip_grad_norm_mixed
 from modeling_mixtral_te import (
     NVMixtralConfig,
     NVMixtralForCausalLM,
-    _ensure_fused_grouped_mlp_registered,
+    assert_fused_mxfp8_supported,
 )
 from omegaconf import DictConfig, OmegaConf
+from optimizer_setup import HighPrecisionInitValues
 from perf_logger import PerfLogger
 from scheduler import get_cosine_annealing_schedule_with_warmup
-from torch.distributed.tensor import DTensor
 from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.optimizers import FusedAdam
 
 
-def _load_pretrained_te_state_dict(path: str | os.PathLike) -> dict:
-    """Load a converted pretrained TE state dict from a file or a ``save_pretrained`` directory.
-
-    Accepts either a single serialized state dict (``*.pt``) or a Hugging Face checkpoint directory
-    produced by ``export.py`` (``model.safetensors`` or a sharded ``model.safetensors.index.json``).
-    """
-    path = Path(path)
-    if path.is_file():
-        # mmap=True keeps the (potentially >CPU-RAM) checkpoint as reclaimable page cache instead of
-        # anonymous RSS, and is shared read-only across ranks on a node — required to load large
-        # models (e.g. 8x7B ~87GB) under a constrained CPU memory cgroup.
-        return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-
-    from safetensors.torch import load_file
-
-    index = path / "model.safetensors.index.json"
-    if index.exists():
-        import json
-
-        with open(index) as f:
-            weight_map = json.load(f)["weight_map"]
-        state_dict: dict = {}
-        for shard in sorted(set(weight_map.values())):
-            state_dict.update(load_file(path / shard, device="cpu"))
-        return state_dict
-
-    single = path / "model.safetensors"
-    if single.exists():
-        return load_file(single, device="cpu")
-
-    raise FileNotFoundError(
-        f"init_from_pretrained={path} is neither a state-dict file nor a checkpoint directory "
-        "containing model.safetensors / model.safetensors.index.json"
-    )
-
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-def _clip_grad_norm_mixed(
-    model: torch.nn.Module,
-    max_norm: float,
-    ep_group: torch.distributed.ProcessGroup | None = None,
-    dp_group: torch.distributed.ProcessGroup | None = None,
-) -> torch.Tensor:
-    """Global grad-norm clipping when EP-local expert params are mixed with FSDP2 DTensors.
-
-    A global L2 norm needs the sum of squared grads over *all* parameters, but no single group holds
-    all of them: after backward each rank has only a partial squared norm, and the missing piece
-    lives in a different process group for the two param classes. So we reduce each class over the
-    group that owns its missing shards, then combine:
-
-    - **expert** grads are partitioned over ``ep`` (each rank owns disjoint experts) → sum of squares
-      is completed by all-reducing over ``ep_group``;
-    - **dense** grads are FSDP2-sharded over ``dp`` (and, after the earlier dense ep all-reduce, are
-      already identical across ``ep``) → completed by all-reducing over ``dp_group``.
-
-    ``.to_local()`` extracts the owned shard from FSDP2 DTensor grads before the local norm.
-    """
-    device = next(model.parameters()).device
-    expert_sq_sum = torch.zeros((), device=device, dtype=torch.float32)
-    fsdp_sq_sum = torch.zeros((), device=device, dtype=torch.float32)
-
-    for name, param in model.named_parameters():
-        if param.grad is None:
-            continue
-        grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
-        norm = torch.linalg.vector_norm(grad, ord=2).to(torch.float32)
-        if is_expert_key(name):
-            expert_sq_sum += norm * norm
-        else:
-            fsdp_sq_sum += norm * norm
-
-    if ep_group is not None:
-        torch.distributed.all_reduce(expert_sq_sum, op=torch.distributed.ReduceOp.SUM, group=ep_group)
-    if dp_group is not None:
-        torch.distributed.all_reduce(fsdp_sq_sum, op=torch.distributed.ReduceOp.SUM, group=dp_group)
-
-    group_norms: list[torch.Tensor] = []
-    if fsdp_sq_sum > 0:
-        group_norms.append(torch.sqrt(fsdp_sq_sum))
-    if expert_sq_sum > 0:
-        group_norms.append(torch.sqrt(expert_sq_sum))
-
-    if not group_norms:
-        return torch.tensor(0.0, device=device)
-
-    total_norm = torch.linalg.vector_norm(torch.stack(group_norms), ord=2)
-    clip_coef = max_norm / (total_norm + 1e-6)
-    if clip_coef < 1:
-        for param in model.parameters():
-            if param.grad is not None:
-                if isinstance(param.grad, DTensor):
-                    param.grad = param.grad * clip_coef
-                else:
-                    param.grad.mul_(clip_coef)
-    return total_norm
-
-
-def _assert_fused_mxfp8_supported(expert_ffn_mode: str, fp8_enabled: bool) -> None:
-    """Fail loudly if fused grouped MLP + MXFP8 was requested but is unsupported."""
-    if expert_ffn_mode != "fused_grouped_mlp" or not fp8_enabled:
-        return
-
-    from transformer_engine.pytorch.ops.fused.forward_grouped_mlp import (
-        ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
-    )
-
-    ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported.cache_clear()
-    if not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
-        raise RuntimeError(
-            "expert_ffn_mode='fused_grouped_mlp' with MXFP8 (fp8_config.enabled=true) requires "
-            "ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8 support (Blackwell sm_100+). "
-            "Refusing to fall back to the unfused grouped-linear path."
-        )
-    _ensure_fused_grouped_mlp_registered()
-
-
-def _init_master_weights_from_high_precision(
-    optimizer: FusedAdam, model: torch.nn.Module, device: torch.device
-) -> None:
-    """Initialize optimizer master weights from high-precision init values."""
-    count = 0
-    for name, param in model.named_parameters():
-        optimizer.initialize_state(param, store_param_remainders=False)
-
-        local = param._local_tensor if isinstance(param, DTensor) else param
-        if hasattr(local, "get_high_precision_init_val"):
-            hp_val = local.get_high_precision_init_val()
-            if hp_val is not None:
-                optimizer.set_scaled_state(param, "master_param", hp_val.to(device=device, dtype=torch.float32))
-                local.clear_high_precision_init_val()
-                count += 1
-                logger.debug("Seeded master weight for %s from high-precision init val", name)
-    if count > 0:
-        logger.info("Initialized %d master weight(s) from high-precision init values", count)
-    else:
-        logger.info(
-            "No parameters with high-precision init values found (quantized_model_init may not have been used)"
-        )
 
 
 @hydra.main(config_path="hydra_config", config_name="L0_sanity", version_base="1.2")
@@ -228,7 +92,7 @@ def main(args: DictConfig) -> float | None:
             f"world_size ({dist_config.world_size})"
         )
 
-    _assert_fused_mxfp8_supported(args.expert_ffn_mode, args.fp8_config.enabled)
+    assert_fused_mxfp8_supported(args.expert_ffn_mode, args.fp8_config.enabled)
 
     config = NVMixtralConfig.from_pretrained(
         args.config_name_or_path,
@@ -269,16 +133,17 @@ def main(args: DictConfig) -> float | None:
         if args.use_meta_device:
             raise ValueError("init_from_pretrained requires use_meta_device=false")
         logger.info("Loading pretrained TE weights from %s", args.init_from_pretrained)
-        pretrained_sd = _load_pretrained_te_state_dict(args.init_from_pretrained)
-        missing, unexpected = model.load_state_dict(pretrained_sd, strict=False)
-        # Shared fused views (._experts_ffn_op.) and TE _extra_state buffers are expected-missing.
-        real_missing = [k for k in missing if "._experts_ffn_op." not in k and not k.endswith("_extra_state")]
-        if real_missing:
-            logger.warning("Pretrained load: %d unexpected-missing keys, e.g. %s", len(real_missing), real_missing[:5])
-        if unexpected:
-            logger.warning("Pretrained load: %d unexpected keys, e.g. %s", len(unexpected), list(unexpected)[:5])
-        logger.info("Loaded pretrained weights (missing=%d unexpected=%d)", len(missing), len(unexpected))
-        del pretrained_sd
+        load_pretrained_model(
+            model,
+            args.init_from_pretrained,
+            ep_rank=dist_config.rank % ep_size,
+        )
+
+    high_precision_init_values = HighPrecisionInitValues()
+    if quantized_model_init_enabled and args.fp8_config.quantized_model_init_kwargs.get(
+        "preserve_high_precision_init_val", False
+    ):
+        high_precision_init_values = HighPrecisionInitValues.capture(model)
 
     mesh = build_mesh_and_wrap(model, dp_size=dp_size, ep_size=ep_size)
 
@@ -341,7 +206,7 @@ def main(args: DictConfig) -> float | None:
         if quantized_model_init_enabled and args.fp8_config.quantized_model_init_kwargs.get(
             "preserve_high_precision_init_val", False
         ):
-            _init_master_weights_from_high_precision(optimizer, model, device)
+            high_precision_init_values.initialize_master_weights(optimizer, model, device)
 
     perf_logger = PerfLogger(dist_config, args, start_step=start_step)
 
@@ -373,7 +238,7 @@ def main(args: DictConfig) -> float | None:
                 if ep_size > 1:
                     all_reduce_dense_grads_over_ep(model, mesh["ep"].get_group())
 
-                total_norm = _clip_grad_norm_mixed(
+                total_norm = clip_grad_norm_mixed(
                     model,
                     max_norm=1.0,
                     ep_group=mesh["ep"].get_group(),

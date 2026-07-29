@@ -20,8 +20,9 @@ import torch
 from transformer_engine.pytorch import MultiheadAttention
 from transformers import AutoModelForCausalLM, AutoTokenizer, MixtralConfig, MixtralForCausalLM
 
+import export
 from convert import convert_mixtral_hf_to_te, convert_mixtral_te_to_hf
-from export import export_hf_checkpoint
+from export import export_hf_checkpoint, export_hf_state_dict
 from modeling_mixtral_te import NVMixtralForCausalLM
 
 
@@ -96,6 +97,18 @@ def test_export_mixtral_checkpoint(tmp_path):
     assert "NVMixtralConfig" in model.config.__class__.__name__
     # Mixtral uses custom NVMixtralDecoderLayer with TE MultiheadAttention sub-modules
     assert isinstance(model.model.layers[0].self_attention, MultiheadAttention)
+
+
+def test_export_hf_state_dict_writes_mmap_loadable_file(tmp_path, monkeypatch):
+    model = torch.nn.Linear(4, 3, bias=False)
+    expected = model.state_dict()["weight"].clone()
+    monkeypatch.setattr(export, "_convert_hf_checkpoint", lambda *args, **kwargs: model)
+    output_path = tmp_path / "converted.pt"
+
+    export_hf_state_dict("unused", output_path, expert_ffn_mode="fused_grouped_mlp")
+
+    state_dict = torch.load(output_path, map_location="cpu", weights_only=True, mmap=True)
+    torch.testing.assert_close(state_dict["weight"], expected)
 
 
 @requires_cuda

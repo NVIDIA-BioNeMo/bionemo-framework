@@ -140,6 +140,47 @@ def is_expert_key(key: str) -> bool:
     return any(marker in key for marker in _EXPERT_KEY_MARKERS)
 
 
+def load_pretrained_state_dict(path: str | os.PathLike) -> dict[str, torch.Tensor]:
+    """Memory-map the canonical TE training state dict produced by ``export_hf_state_dict``.
+
+    This is needed only for ``init_from_pretrained``: training checkpoints use DCP through
+    :func:`load_checkpoint`. ``models/mixtral/export.py`` owns the conversion format and emits one
+    ``torch.save`` file, so this loader deliberately has no legacy format dispatch.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"init_from_pretrained={path} is not a converted TE state-dict file; create it with "
+            "models/mixtral/export.export_hf_state_dict"
+        )
+    # mmap keeps large checkpoints in reclaimable, node-shared page cache instead of anonymous
+    # per-rank RSS. This is required for an 8x7B checkpoint under constrained CPU cgroups.
+    return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+
+
+def load_pretrained_model(
+    model: torch.nn.Module,
+    path: str | os.PathLike,
+    *,
+    ep_rank: int,
+) -> None:
+    """Load converted pretrained weights into an unsharded TE model on one EP rank.
+
+    Call this before FSDP wrapping. The owned Mixtral model API handles runtime EP localization and
+    preserves TE's high-precision pretrained values for later FusedAdam master initialization.
+    """
+    state_dict = load_pretrained_state_dict(path)
+    missing, unexpected = model.load_global_state_dict(state_dict, ep_rank=ep_rank, strict=False)
+
+    # Shared fused views (._experts_ffn_op.) and TE _extra_state buffers are expected-missing.
+    real_missing = [key for key in missing if "._experts_ffn_op." not in key and not key.endswith("_extra_state")]
+    if real_missing:
+        logger.warning("Pretrained load: %d unexpected-missing keys, e.g. %s", len(real_missing), real_missing[:5])
+    if unexpected:
+        logger.warning("Pretrained load: %d unexpected keys, e.g. %s", len(unexpected), list(unexpected)[:5])
+    logger.info("Loaded pretrained weights (missing=%d unexpected=%d)", len(missing), len(unexpected))
+
+
 def filter_non_expert_model_state(state_dict: dict) -> dict:
     """Keep only non-expert model parameters for FSDP2 DCP."""
     return {

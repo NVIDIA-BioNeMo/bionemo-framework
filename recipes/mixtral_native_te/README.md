@@ -27,8 +27,19 @@ and 10.3 (Blackwell); 12.0 support pending.
 ![Mixtral-8x7B training throughput on 8×B300 (PFLOP/s/GPU), MXFP8 vs BF16 across the four (dp, ep) layouts](benchmarks/mixtral_8x7b_B300_pflops.png)
 
 Steady-state training throughput for Mixtral-8x7B on 8×B300 (DCLM-baseline, `max_seq=8192`,
-`token_mb=16384`). Per-layout / per-precision numbers are in `benchmarks/mixtral_8x7b_8xB300.csv`
-(and `benchmarks/mixtral_8x7b_8xB200.csv`).
+`token_mb=16384`). The corresponding 8×B200 benchmark uses DCLM-baseline with `max_seq=4096` and
+`token_mb=4096`. Per-layout / per-precision numbers are in `benchmarks/mixtral_8x7b_8xB300.csv` and
+`benchmarks/mixtral_8x7b_8xB200.csv`.
+
+Run the complete matrix on B200 or B300 with:
+
+```bash
+./benchmarks/benchmark_8xGPU.sh
+```
+
+The script downloads a pinned DCLM parquet snapshot into `HF_HOME`, then streams only those local
+files during training. It always initializes from the converted pretrained checkpoint at
+`$HF_HOME/te_checkpoints/mixtral_8x7b_fused_bf16.pt`.
 
 ### Installing Dependencies
 
@@ -69,6 +80,23 @@ Training uses a 2D `(dp, ep)` device mesh via `build_mesh_and_wrap(model, dp_siz
   dense params are replicated and kept in sync purely by the explicit dense all-reduce over `ep`.
 - **EP groups are set before FSDP2 wrapping** via `model.model.set_ep_groups(ep_group, ep_mesh)` (see
   `build_mesh_and_wrap` for why the ordering matters).
+
+### Workarounds and upstream status
+
+The training entrypoint intentionally contains the training algorithm, not compatibility shims.
+The remaining integration workarounds are isolated by ownership:
+
+| Area                                                        | Why it is currently necessary                                                                                                                                                                                                                                                                                                                                          | Upstream path to removal                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modeling_mixtral_te.load_global_state_dict`                | Converted state is EP-layout-independent, so the model selects its runtime-local experts; persistent-MXFP8 loads must also replace TE's saved high-precision random initializer with the pretrained value.                                                                                                                                                             | TE could expose an ordinary global expert tensor that DTensor distributes directly (the local `single_grouped_weight` does not suffice), or make conversion/loading EP-layout-aware; it could also update or expose a setter for preserved high-precision values. |
+| `distributed_setup.clip_grad_norm_mixed`                    | Dense and expert gradients have different placements across the `(dp, ep)` mesh, which stock clipping cannot infer.                                                                                                                                                                                                                                                    | PyTorch could provide composable-FSDP2/DTensor clipping for heterogeneous parameter placements.                                                                                                                                                                   |
+| `modeling_mixtral_te.assert_fused_mxfp8_supported`          | TE's experimental CuteDSL fusion uses private registration and otherwise may silently decline the required fused path.                                                                                                                                                                                                                                                 | TE could expose and register a stable "require fused GroupedMLP" API.                                                                                                                                                                                             |
+| `optimizer_setup.HighPrecisionInitValues`                   | TE exposes experimental CPU high-precision initial values, but FusedAdam does not consume/shard them automatically and FSDP2 parameter replacement may drop them.                                                                                                                                                                                                      | TE FusedAdam could initialize masters directly from preserved values through DTensors; PyTorch could preserve tensor-subclass metadata across FSDP2 replacement.                                                                                                  |
+| `checkpoint._patched_reset_sharded_param`                   | PyTorch's private FSDP2 reset path assumes ordinary tensor storage, which TE quantized local tensors do not expose.                                                                                                                                                                                                                                                    | PyTorch FSDP2 could support storage-less/tensor-subclass local shards without a monkey patch.                                                                                                                                                                     |
+| `modeling_mixtral_te` expert-weight views and `grouped_dcp` | TE's `single_grouped_weight` works for fused compute and pure-EP model-weight DCP, but it is a `GroupedTensor`: FSDP2/DTensor wrapping fails, FusedAdam cannot update it, and persistent MXFP8 initialization leaves it BF16. The production path therefore uses discrete `weight{i}` parameters and constructs a logical expert dimension for sharding/checkpointing. | TE could make `GroupedTensor` interoperable with DTensor/FSDP2, FusedAdam, and persistent quantization (or expose an ordinary expert-sharded tensor); DCP could support adapters for logical tensors assembled from tensor-subclass parameters.                   |
+
+The sequence-packing collator is a separate copied utility with its own TE upstream reference beside
+the relevant code.
 
 Configure parallelism in Hydra:
 

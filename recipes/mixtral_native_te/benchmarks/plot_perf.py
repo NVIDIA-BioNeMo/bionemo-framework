@@ -16,7 +16,7 @@
 """Grouped bar chart of Mixtral-8x7B training throughput (PFLOP/s/GPU) from mixtral_8x7b_8xB200.csv.
 
 Usage: python plot_perf.py
-Produces mixtral_8x7b_pflops.png next to this script.
+Produces mixtral_8x7b_B200_pflops.png next to this script.
 """
 
 # E402: pyplot import must follow matplotlib.use/rcParams. I001: import split is intentional.
@@ -39,10 +39,10 @@ import matplotlib.pyplot as plt
 HERE = Path(__file__).parent
 
 DEFAULT_CSV = HERE / "mixtral_8x7b_8xB200.csv"
-DEFAULT_OUT = HERE / "mixtral_8x7b_pflops.png"
+DEFAULT_OUT = HERE / "mixtral_8x7b_B200_pflops.png"
 DEFAULT_TITLE = "Mixtral-8x7B training throughput — 8×B200"
 DEFAULT_SUBTITLE = (
-    "Pretrained weights, THD packing, wikitext, token_mb=4096, max_seq=4096. "
+    "Pretrained weights, local DCLM parquet, THD packing, token_mb=4096, max_seq=4096. "
     "MFU vs dense B200 peaks (fp8 4.5, bf16 2.25 PFLOP/s)."
 )
 
