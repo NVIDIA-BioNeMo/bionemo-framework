@@ -20,20 +20,24 @@ DCP format, bypassing the NeMo2 intermediate step.
 """
 
 import argparse
-import json
 import logging
 import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import huggingface_hub.errors
 import torch
-import torch.distributed.checkpoint as dcp
+import torch.distributed as dist
 from huggingface_hub import hf_hub_download
 from megatron.bridge.training.checkpointing import save_tokenizer_assets
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.mixed_precision import MIXED_PRECISION_RECIPES
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
-from torch.distributed.checkpoint import FileSystemWriter
+from megatron.core.dist_checkpointing.mapping import ShardedObject, ShardedTensor
+from megatron.core.dist_checkpointing.serialization import save as save_dist_checkpoint
+from megatron.core.dist_checkpointing.strategies.torch import TorchDistSaveShardedStrategy
 
 from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS, HyenaModelProvider
 from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
@@ -320,8 +324,39 @@ def _dummy_train_state() -> dict[str, torch.Tensor]:
     }
 
 
+@contextmanager
+def _single_process_dist_group():
+    """Initialize a temporary one-rank process group if MCore save needs one."""
+    if dist.is_available() and dist.is_initialized():
+        yield
+        return
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        dist.init_process_group(
+            backend="gloo",
+            init_method=f"file://{Path(tmp_dir) / 'dist_init'}",
+            rank=0,
+            world_size=1,
+        )
+        try:
+            yield
+        finally:
+            dist.destroy_process_group()
+
+
+def _to_mcore_sharded_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Wrap flat converted tensors using MCore's checkpoint mapping types."""
+    sharded_state_dict = {}
+    for key, value in state_dict.items():
+        if key.endswith("._extra_state"):
+            sharded_state_dict[key] = ShardedObject(key, value, (1,), (0,), replica_id=(0, 0, 0))
+        else:
+            sharded_state_dict[key] = ShardedTensor.from_rank_offsets(key, value)
+    return sharded_state_dict
+
+
 def package_mbridge_checkpoint(
-    state_dict: dict[str, torch.Tensor],
+    state_dict: dict[str, Any],
     mbridge_ckpt_dir: Path,
     model_provider: HyenaModelProvider,
     tokenizer_path: Path,
@@ -343,12 +378,14 @@ def package_mbridge_checkpoint(
     iter_dir = mbridge_ckpt_dir / "iter_0000001"
     iter_dir.mkdir(parents=True, exist_ok=True)
 
-    writer = FileSystemWriter(
-        str(iter_dir),
-        single_file_per_rank=False,
-        thread_count=os.cpu_count(),
-    )
-    dcp.save(state_dict=state_dict, storage_writer=writer, no_dist=True)
+    with _single_process_dist_group():
+        save_dist_checkpoint(
+            _to_mcore_sharded_state_dict(state_dict),
+            str(iter_dir),
+            sharded_strategy=TorchDistSaveShardedStrategy(thread_count=os.cpu_count() or 1),
+            validate_access_integrity=False,
+            async_strategy="mcore",
+        )
 
     with open(mbridge_ckpt_dir / "latest_checkpointed_iteration.txt", "w") as f:
         f.write("1\n")
@@ -371,17 +408,6 @@ def package_mbridge_checkpoint(
         },
         iter_dir / "common.pt",
     )
-
-    with open(iter_dir / "metadata.json", "w") as f:
-        json.dump(
-            {
-                "sharded_backend": "torch_dist",
-                "sharded_backend_version": 1,
-                "common_backend": "torch",
-                "common_backend_version": 1,
-            },
-            f,
-        )
 
     config_container: ConfigContainer = pretrain_config(
         precision_config=mixed_precision_recipe,

@@ -324,7 +324,11 @@ def _convert_attention_layer(
     if proj_bias_key in src:
         dst[f"{block_prefix}.inner_mha_cls.out_proj.bias"] = src.pop(proj_bias_key)
 
-    dst[f"{block_prefix}.inner_mha_cls.rotary_emb.inv_freq"] = _compute_inv_freq(rotary_dim, rotary_base)
+    rotary_key = f"{prefix}.self_attention.rotary_emb.inv_freq"
+    if rotary_key in src:
+        dst[f"{block_prefix}.inner_mha_cls.rotary_emb.inv_freq"] = src.pop(rotary_key)
+    else:
+        dst[f"{block_prefix}.inner_mha_cls.rotary_emb.inv_freq"] = _compute_inv_freq(rotary_dim, rotary_base)
 
 
 def _convert_mlp(
