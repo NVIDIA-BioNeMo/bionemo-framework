@@ -7,7 +7,7 @@
       "expected_output": "An explicit, selective, verified artifact-publication contract.",
       "assertions": [
         "The plan records destination, visibility/retention, triggers, contents, exclusions, expected size, client, and verification.",
-        "The destination is organized under a stable project slug and collision-checked immutable dated/versioned run prefix reused by every stage.",
+        "Local and remote top-level results keep a comparable stable-project/immutable-dated-run/stage hierarchy, and every stage reuses the collision-checked run prefix.",
         "The response discovers aws, s5cmd, and s3cmd and uses a compatible configured client without coupling training success to upload success.",
         "Stage-end publication includes only the selected handoff checkpoint plus lineage, selection evidence, summaries, outputs, configs, hashes, key logs/metrics, and useful generations by default.",
         "The response supports user-requested snapshots and avoids broad result-root syncs, caches, secrets, downloads, and redundant checkpoints.",
