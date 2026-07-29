@@ -22,6 +22,7 @@ Before proposing a plan, locate and read every sibling SKILL.md below. Do not re
 - bionemo-phage-design-calibrate-rl-sampling
 - bionemo-phage-design-operate-nemo-rl
 - bionemo-phage-design-generate-and-screen
+- bionemo-phage-design-publish-stage-artifacts
 
 Search available skill roots if a sibling is not beside this skill. Record a missing skill as a capability gap; do not invent its procedures. Read [project-contract.md](references/project-contract.md) before creating project files, and follow [command-discovery.md](references/command-discovery.md) before emitting commands. Enumerate assets/literature/**/MANIFEST.json and tell sub-skills which checked-in paper assets are relevant.
 
@@ -35,6 +36,7 @@ Search available skill roots if a sibling is not beside this skill. Record a mis
 6. Detect compatible SFT runs in this and other result roots unless the user explicitly requires fresh acquisition/training or forbids prior-run reuse. Distinguish status inspection from artifact reuse; never search for reusable local assets after a fresh-only instruction. Otherwise present evidence and ask whether to reuse one or train anew.
 7. After selecting SFT and approving/implementing the objective/QC contract, invoke bionemo-phage-design-calibrate-rl-sampling. Freeze its SFT prompt-compatibility, training-mixture, and independent validation contracts with paths and hashes.
 8. Write plan, assumptions, and decisions in the result root, then invoke only required stage skills. After approval, immediately activate the declared durable supervisor/recurrence mechanism and report whether activation succeeded. Leaf skills write within their assigned attempt; update root indexes only as controller.
+9. If the user requests artifact publication, invoke bionemo-phage-design-publish-stage-artifacts at the requested point, each completed stage, each ongoing validation event, and final reconciliation. Record destination/backend, cadence, contents, exclusions, client, and verification in the initial plan. Otherwise state that no artifact sync is planned; missing optional publication capability never blocks science.
 
 ## Design logic
 

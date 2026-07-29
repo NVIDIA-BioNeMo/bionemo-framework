@@ -58,6 +58,20 @@
       ],
       "expected_skill": "bionemo-phage-design",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-005-optional-publication",
+      "prompt": "Plan my phage-design run and publish useful artifacts to gs://lab/phage-y after each stage and each RL validation. Upload only the selected checkpoint for handoff, allow an on-demand snapshot, and verify everything important at the end.",
+      "expected_output": "A controller plan that invokes optional backend-aware artifact publication at decision-relevant moments.",
+      "assertions": [
+        "The response invokes bionemo-phage-design-publish-stage-artifacts because publication was requested.",
+        "The initial plan records destination/backend, private/shared/public access intent, cadence, contents, exclusions, expected sizes, client, and verification.",
+        "Ongoing publication includes settled validation outputs while stage-end publication includes the selected handoff checkpoint and its lineage rather than every checkpoint.",
+        "The response supports a user-requested intermediate snapshot and a final manifest reconciliation with verified destination references.",
+        "Transfer failures use bounded retries and remain visible without blocking an otherwise healthy scientific stage."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
     }
   ]
 }
