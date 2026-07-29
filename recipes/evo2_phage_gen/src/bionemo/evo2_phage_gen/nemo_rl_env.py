@@ -468,6 +468,8 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 required_genes_evidence_target=float(external_qc_cfg.get("required_genes_evidence_target", 9.0)),
                 lovis4u_parallel_jobs=external_qc_cfg.get("lovis4u_parallel_jobs", 12),
                 lovis4u_chunk_size=external_qc_cfg.get("lovis4u_chunk_size"),
+                lovis4u_mmseqs_threads=external_qc_cfg.get("lovis4u_mmseqs_threads"),
+                lovis4u_metrics_only=bool(external_qc_cfg.get("lovis4u_metrics_only", False)),
                 lovis4u_collect_pdfs=bool(external_qc_cfg.get("lovis4u_collect_pdfs", False)),
             )
             mmseqs_cfg = cfg.get("mmseqs_cluster_diversity", {}) or {}

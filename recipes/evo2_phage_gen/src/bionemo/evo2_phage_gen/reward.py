@@ -145,6 +145,8 @@ class ExternalQCRewardConfig:
     required_genes_evidence_target: float = 9.0
     lovis4u_parallel_jobs: int | None = 12
     lovis4u_chunk_size: int | None = None
+    lovis4u_mmseqs_threads: int | None = None
+    lovis4u_metrics_only: bool = False
     lovis4u_collect_pdfs: bool = False
 
 
@@ -681,6 +683,9 @@ def _write_external_qc_config(
         chunk_size = int(config.get("chunk_size", 10))
     config["lovis4u_chunk_size"] = chunk_size
     config["chunk_size"] = chunk_size
+    if external_qc.lovis4u_mmseqs_threads is not None:
+        config["lovis4u_mmseqs_threads"] = max(1, int(external_qc.lovis4u_mmseqs_threads))
+    config["lovis4u_metrics_only"] = bool(external_qc.lovis4u_metrics_only)
     config["lovis4u_collect_pdfs"] = bool(external_qc.lovis4u_collect_pdfs)
     if paper_synteny_stage_enabled:
         config["use_reference_genome"] = full_synteny_enabled

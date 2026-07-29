@@ -84,7 +84,7 @@ def test_missing_per_objective_telemetry_fails_closed_after_three_events():
     assert "missing_required_telemetry" in result["objectives"]["synteny"]["signals"]
 
 
-def test_enabled_objective_with_no_measurements_fails_closed_after_three_events():
+def test_enabled_objective_with_no_measurements_starts_confirmation_window():
     history = [
         _event(step, reward=0.0, support=0.0, std=0.0, pass_rate=0.0)
         for step in (10, 20, 30)
@@ -92,9 +92,23 @@ def test_enabled_objective_with_no_measurements_fails_closed_after_three_events(
 
     result = evaluate_objective_history(history)
 
+    assert result["decision"] == "continue"
+    assert result["reason"] == "audit_signal_pending_confirmation:1/8"
+    assert result["objectives"]["protein_hit_count"]["status"] == "warning"
+    assert "objective_unmeasured" in result["objectives"]["protein_hit_count"]["signals"]
+
+
+def test_enabled_objective_with_no_measurements_pauses_after_confirmation_window():
+    history = [
+        _event(step * 10, reward=0.0, support=0.0, std=0.0, pass_rate=0.0)
+        for step in range(1, 11)
+    ]
+
+    result = evaluate_objective_history(history)
+
     assert result["decision"] == "pause_for_audit"
     assert result["objectives"]["protein_hit_count"]["status"] == "suspicious"
-    assert "objective_unmeasured" in result["objectives"]["protein_hit_count"]["signals"]
+    assert result["objectives"]["protein_hit_count"]["signal_streak"] == 8
 
 
 def _masking_history(active_counts: list[int]) -> list[dict]:

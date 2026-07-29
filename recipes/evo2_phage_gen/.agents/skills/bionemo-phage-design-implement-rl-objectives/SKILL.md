@@ -39,4 +39,4 @@ Use [the implementation checklist](references/implementation-contract.md) and [r
 
 ## Stop conditions
 
-Stop on objective ambiguity, incompatible runtime signature, unavailable calibration artifact, unsafe source isolation, or a test that cannot express the behavior. Record the blocker; never silently change biology or reshape rewards to fit.
+Diagnose and repair or compatibly adapt runtime, calibration, and test-harness gaps within scope. Stop only when objective meaning remains unresolved, safe source isolation or new authority is unavailable, or no test can distinguish intended biology from an exploit without changing the contract. Record blockers; never silently change biology or reshape rewards to fit.

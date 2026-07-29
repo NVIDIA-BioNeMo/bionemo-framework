@@ -170,9 +170,7 @@ def evaluate_objective_history(
             signal_streak = signal_streak + 1 if pause_signals.intersection(candidate_signals) else 0
         max_signal_streak = max(max_signal_streak, signal_streak)
         has_signal = bool(pause_signals.intersection(signals))
-        immediate_telemetry_failure = bool(
-            {"missing_required_telemetry", "objective_unmeasured"}.intersection(signals)
-        )
+        immediate_telemetry_failure = "missing_required_telemetry" in signals
         confirmed = immediate_telemetry_failure or signal_streak >= audit_confirmation_events
         if confirmed:
             status = "suspicious"

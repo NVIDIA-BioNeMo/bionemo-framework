@@ -130,6 +130,9 @@ env:
       required_genes_evidence_target: 9.0
       # Per external-QC reward run; set lower if several environment actors score concurrently.
       lovis4u_parallel_jobs: 12
+      # Tune nested cluster threads with outer jobs; clustering is CPU-only in current MMseqs2.
+      lovis4u_mmseqs_threads: 8
+      lovis4u_metrics_only: true
       lovis4u_collect_pdfs: false
 
 logger:

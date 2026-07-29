@@ -39,7 +39,8 @@
         "The response rejects sequential hard-gate survivors as the denominator for later online rewards.",
         "The response measures each enabled objective independently on its declared eligible inputs while preserving final-QC hard-filter order.",
         "The response derives and pins required runtime capabilities and proves them with positive and no-signal/failure controls.",
-        "The response emits stage, measurement, support, missingness, hit/pass, and reward telemetry so real zeros differ from environment faults."
+        "The response emits stage, measurement, support, missingness, hit/pass, and reward telemetry so real zeros differ from environment faults.",
+        "The response diagnoses and compatibly repairs runtime, calibration, or test-harness gaps within scope, stopping only for unresolved biological meaning, unsafe source isolation, new authority, or an untestable contract."
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null

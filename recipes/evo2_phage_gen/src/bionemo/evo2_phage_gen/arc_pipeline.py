@@ -201,6 +201,54 @@ PATCHED_LOVIS4U_PARALLEL_CONFIG = """        # Get parallelization settings from
         max_workers = config.get("lovis4u_parallel_jobs", config.get("n_parallel_jobs", None))
         chunk_size = config.get("lovis4u_chunk_size", config.get("chunk_size", 10))
 """
+ARC_LEGACY_LOVIS4U_COMMAND = """    command = [
+        'lovis4u', 
+"""
+PATCHED_LOVIS4U_COMMAND = """    executable = ['lovis4u']
+    if os.environ.get("LOVIS4U_METRICS_ONLY") == "1":
+        executable = [sys.executable, "-m", "bionemo.evo2_phage_gen.lovis4u_metrics"]
+    command = executable + [
+"""
+ARC_LEGACY_LOVIS4U_RUNTIME_CONFIG = """    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+
+        # Get parallelization settings from config if available
+        max_workers = config.get("lovis4u_parallel_jobs", config.get("n_parallel_jobs", None))
+        chunk_size = config.get("lovis4u_chunk_size", config.get("chunk_size", 10))
+"""
+PATCHED_LOVIS4U_RUNTIME_CONFIG = """    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+
+        if config.get("lovis4u_metrics_only", False):
+            os.environ["LOVIS4U_METRICS_ONLY"] = "1"
+        else:
+            os.environ.pop("LOVIS4U_METRICS_ONLY", None)
+        mmseqs_threads = config.get("lovis4u_mmseqs_threads")
+        if mmseqs_threads is None:
+            os.environ.pop("LOVIS4U_MMSEQS_THREADS", None)
+        else:
+            mmseqs_threads = int(mmseqs_threads)
+            if mmseqs_threads < 1:
+                raise ValueError("lovis4u_mmseqs_threads must be positive")
+            os.environ["LOVIS4U_MMSEQS_THREADS"] = str(mmseqs_threads)
+
+        # Get parallelization settings from config if available
+        max_workers = config.get("lovis4u_parallel_jobs", config.get("n_parallel_jobs", None))
+        chunk_size = config.get("lovis4u_chunk_size", config.get("chunk_size", 10))
+"""
+ARC_ONLINE_GBK_CONVERSION = """        ### Save GBK files ###
+        print("Creating gbk files...")
+        batch_convert_gff_to_gbk(input_dir=f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
+                                 output_dir=f'{config["results_save_dir"]}/{config["gbk_dir_save_location"]}')
+"""
+PATCHED_ONLINE_GBK_CONVERSION = """        ### Save GBK files only for offline filtering, where rejected artifacts may be deleted. ###
+        if online_measurement_mode:
+            print("Skipping unconsumed GBK conversion during online measurement.")
+        else:
+            print("Creating gbk files...")
+            batch_convert_gff_to_gbk(input_dir=f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
+                                     output_dir=f'{config["results_save_dir"]}/{config["gbk_dir_save_location"]}')
+"""
 ARC_LEGACY_MMSEQS_PROTEIN_SEARCH_RUN = """    mmseqs_out = mmseqs_search_proteins(query_fasta, mmseqs_db, results_dir, threads, split, sensitivity)
     hits = parse_mmseqs_results(mmseqs_out)
     df = mmseqs_results_to_df(hits, query_fasta, output_csv, descriptive_prefix, only_top_hits)
@@ -531,7 +579,23 @@ def _apply_online_measurement_patches(output_dir: Path) -> None:
         raise ValueError(f"Failed to apply {len(missing)} online objective-measurement patches")
     for anchor, replacement in replacements:
         text = text.replace(anchor, replacement)
+    text = text.replace(ARC_ONLINE_GBK_CONVERSION, PATCHED_ONLINE_GBK_CONVERSION)
     pipeline_path.write_text(text)
+
+
+def _apply_lovis4u_runtime_patches(output_dir: Path) -> None:
+    """Expose scorer-only LoVis4u work and nested MMseqs threads in copied Arc code."""
+    visualization_path = output_dir / "genetic_architecture_visualization.py"
+    text = visualization_path.read_text()
+    replacements = (
+        (ARC_LEGACY_LOVIS4U_PARALLEL_CONFIG, PATCHED_LOVIS4U_PARALLEL_CONFIG),
+        (ARC_LEGACY_LOVIS4U_COMMAND, PATCHED_LOVIS4U_COMMAND),
+        (ARC_LEGACY_LOVIS4U_RUNTIME_CONFIG, PATCHED_LOVIS4U_RUNTIME_CONFIG),
+    )
+    for anchor, replacement in replacements:
+        if replacement not in text and anchor in text:
+            text = text.replace(anchor, replacement)
+    visualization_path.write_text(text)
 
 
 def prepare_arc_pipeline_workdir(
@@ -584,6 +648,7 @@ def prepare_arc_pipeline_workdir(
     else:
         _apply_legacy_string_patches(output_dir)
     _apply_online_measurement_patches(output_dir)
+    _apply_lovis4u_runtime_patches(output_dir)
     return written_paths
 
 

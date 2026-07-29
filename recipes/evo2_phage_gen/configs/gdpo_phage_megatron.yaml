@@ -39,6 +39,8 @@ grpo:
 loss_fn:
   # Conservative rollout setting: keep policy drift tighter than the smoke/base GRPO config.
   reference_policy_kl_penalty: 0.001
+  # Give each genome equal policy-loss weight when generation lengths differ.
+  token_level_loss: false
 
 policy:
   train_global_batch_size: 96

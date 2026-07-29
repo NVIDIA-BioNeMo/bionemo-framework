@@ -21,7 +21,7 @@
       "prompt": "Generate a 1,000-design proof-of-concept rollout. Filters 1 through 6, 8, and 9 are mandatory; another requirement can pass through either route A or route B. Produce an auditable final manifest.",
       "expected_output": "A deterministic generation, canonicalization, deduplication, nested all/any QC, clustering, and reporting pipeline.",
       "assertions": [
-        "The response freezes checkpoint and calibrated SFT/RL prompt lineage, rollout sampling, seeds, objective/filter versions, tools/models, and source/config hashes before generation.",
+        "The response freezes checkpoint and calibrated SFT/RL prompt lineage, rollout sampling, independent IDs/seeds with overlap audits, objective/filter versions, tools/models, and source/config hashes before generation.",
         "The final rollout inherits the exact deployed RL prompt strata, mixture weights, and sampling values unless an explicitly justified deviation receives fresh comparable calibration.",
         "The response validates sequences, applies topology-aware canonicalization, exact-deduplicates before expensive tools, and preserves raw-to-representative mapping.",
         "The response represents filters 1-6, 8, and 9 as mandatory hard all and the route choice as a nested hard any, with mandatory missing data or tool failure failing closed.",

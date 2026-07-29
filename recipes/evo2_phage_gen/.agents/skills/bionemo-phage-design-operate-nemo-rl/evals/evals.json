@@ -26,7 +26,7 @@
         "The response uses exact resume only with optimizer, scheduler, RNG, original SFT KL reference, prompt manifest, validation manifest, and unchanged training semantics verified.",
         "The response treats weights-only recovery as a new attempt anchored to the selected non-RL SFT baseline.",
         "The response permits prior RL initialization only for an explicit stagewise objective change with rationale, new contract, lineage, and drift implications recorded.",
-        "The response proves the prior job is absent or terminal before relaunch and preserves best/latest checkpoints and logs."
+        "The response proves the prior job is absent or terminal before relaunch, verifies supervisor heartbeats after launch, and preserves best/latest checkpoints and logs."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
@@ -53,6 +53,7 @@
         "The response does not accept aggregate reward or combined policy loss as sufficient evidence of health.",
         "The response compares every objective reward with effective loss or advantage activity, raw support, denominator, missingness, and hard-pass biological grounding.",
         "The response detects shrinking-support reward gain and inactive or masked objectives as possible exploitation.",
+        "The response checks whether response length or early termination changes each sample's gradient contribution and rejects accidental discounting of short low-reward samples.",
         "The response pauses at a complete checkpoint, preserves best/latest, and audits artifacts or sequences before any semantic change.",
         "The response treats objective or weight changes as a new recorded attempt."
       ],
@@ -81,6 +82,20 @@
         "The response requires enabled objectives to remain independently observable after earlier zero or failing gates.",
         "The response estimates ordinary variance without the abrupt spike and treats that spike separately as incident evidence.",
         "The response continues a robust plateau and stops only for sustained material degradation or a collapse trigger while preserving the best checkpoint."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-007-scorer-bottleneck",
+      "prompt": "A full RL smoke works, but one enabled genome scorer dominates wall time. Start the 500-step run with the conservative setting.",
+      "expected_output": "A bounded concurrency/batching benchmark that preserves scores and pins an evidence-based optimal setting before the long run.",
+      "assertions": [
+        "The response profiles the existing full-step smoke and identifies the dominant scoring stage from measured timings without adding another smoke stage.",
+        "The response never gives a bare concurrency number: it records the knob's scope and effective-global total across actors, spawning ranks, and nodes, explicitly distinguishing total from per-GPU, per-rank, and per-node counts and using data-parallel degree as the effective-global floor when supported.",
+        "The response tests safe scorer batching, outer concurrency, nested tool threads, and operation-specific accelerator support against identical inputs, removing unconsumed work where safe.",
+        "The response verifies identical outputs plus stable CPU, memory, I/O, and tool success.",
+        "The response pins an evidence-based optimal setting without changing metric semantics, allows monitored extrapolation with rollback/restart, and does not block indefinitely on optional optimization."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null

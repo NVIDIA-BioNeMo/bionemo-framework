@@ -480,6 +480,8 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     assert run_config["n_parallel_jobs"] == 12
     assert run_config["lovis4u_chunk_size"] == 12
     assert run_config["chunk_size"] == 12
+    assert "lovis4u_mmseqs_threads" not in run_config
+    assert run_config["lovis4u_metrics_only"] is False
     assert run_config["lovis4u_collect_pdfs"] is False
     assert run_config["use_reference_genome"] is True
     assert run_config["reference_genome_gff_file_save_location"].endswith("reference.gff")

@@ -87,6 +87,9 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert config["env"]["phage_qc"]["dustmasker_bin"] == "dustmasker"
     assert config["env"]["phage_qc"]["dustmask_use_external"] is True
     assert config["env"]["phage_qc"]["weight_dustmask_end"] == 1.0
+    external_qc = config["env"]["phage_qc"]["external_qc"]
+    assert external_qc["lovis4u_mmseqs_threads"] == 8
+    assert external_qc["lovis4u_metrics_only"] is True
     assert generation_config["temperature"] > 0.0
     assert generation_config["top_k"] is None
     assert generation_config["top_p"] == 1.0
@@ -256,6 +259,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["defaults"] == "grpo_phage_megatron.yaml"
     assert env_config["reward_output_mode"] == "gdpo"
     assert config["loss_fn"]["reference_policy_kl_penalty"] == 0.001
+    assert config["loss_fn"]["token_level_loss"] is False
     assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
     assert config["policy"]["generation"]["mcore_generation_config"]["generation_adapter_config"]["seed"] == 42
     assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6

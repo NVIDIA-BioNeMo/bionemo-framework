@@ -202,6 +202,18 @@ def test_prepare_arc_pipeline_workdir_applies_maintained_patch(tmp_path):
     assert "save_mmseqs_pident_metrics" in pipeline_text
     assert "metrics_df.to_csv(metrics_csv, index=False)" in pipeline_text
     assert "online_measurement_mode" in pipeline_text
+    assert "Skipping unconsumed GBK conversion during online measurement." in pipeline_text
+    assert 'config.get("lovis4u_collect_pdfs", True)' in pipeline_text
+    assert "Skipping LoVis4u PDF collection" in pipeline_text
+    visualization_text = (workdir / "genetic_architecture_visualization.py").read_text()
+    assert "bionemo.evo2_phage_gen.lovis4u_metrics" in visualization_text
+    assert 'config.get("lovis4u_mmseqs_threads")' in visualization_text
+
+
+def test_maintained_patch_honors_lovis4u_pdf_collection_flag():
+    patch_text = DEFAULT_ARC_PIPELINE_PATCH.read_text()
+    assert '+            if config.get("lovis4u_collect_pdfs", True):' in patch_text
+    assert "Skipping LoVis4u PDF collection" in patch_text
 
 
 def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_path):

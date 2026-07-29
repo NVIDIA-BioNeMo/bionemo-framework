@@ -22,7 +22,7 @@
         "The response ranks settings using clustering performed independently within each setting and uses cross-setting clustering only to assess a proposed mixture or final order.",
         "The response selects the shortest target-retaining prompt stratum plus complementary Pareto strata only when supported, rather than taking noisy scalar leaders.",
         "The response prefers temperature 1.0 unless another temperature is materially better beyond uncertainty.",
-        "The response freezes mixture weights, realizes them within each RL batch when feasible, and reuses the deployed weights in fixed validation and final rollout."
+        "The response limits chosen prefix strata and weights to homogeneous decode microbatches that tile the selected DP/TP topology, verifies no fallback, and reuses deployed weights in fixed validation and final rollout."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": null

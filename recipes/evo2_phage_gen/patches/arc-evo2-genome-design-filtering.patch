@@ -701,7 +701,7 @@
              filter_counts['count_required_genes_filter'] = len(filtered_df)
              print(f"Completed required genes filtering resulting in {filter_counts['count_required_genes_filter'].values[0]} sequences.")
              # Save checkpoint
-@@ -2641,22 +2911,30 @@
+@@ -2641,22 +2911,33 @@
              save_df_as_fasta(filtered_df, f'{config["results_save_dir"]}/{config["synteny_filter_seqs_fasta_file_save_location"]}')
 
          ### Visualize genome annotations ###
@@ -715,8 +715,11 @@
 +            print("Creating genetic architecture visualizations...")
 +            run_lovis4u_in_conda_env(config["lovis4u_conda_env"],
 +                                     f"python {config['genetic_architecture_visualization_script']} {config['current_config_file']}")
-+            move_genetic_architecture_pdfs(f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
-+                                           f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}')
++            if config.get("lovis4u_collect_pdfs", True):
++                move_genetic_architecture_pdfs(f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
++                                               f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}')
++            else:
++                print("Skipping LoVis4u PDF collection; synteny, AAI, and required-gene metrics do not need copied PDFs.")
 +            print("Finished creating genetic architecture visualizations.")
 +        else:
 +            print("No sequences remain for genetic architecture visualization.")
