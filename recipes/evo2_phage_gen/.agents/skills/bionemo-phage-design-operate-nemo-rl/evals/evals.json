@@ -26,7 +26,7 @@
         "The response uses exact resume only with optimizer, scheduler, RNG, original SFT KL reference, prompt manifest, validation manifest, and unchanged training semantics verified.",
         "The response treats weights-only recovery as a new attempt anchored to the selected non-RL SFT baseline.",
         "The response permits prior RL initialization only for an explicit stagewise objective change with rationale, new contract, lineage, and drift implications recorded.",
-        "The response proves the prior job is absent or terminal before relaunch, verifies supervisor heartbeats after launch, and preserves best/latest checkpoints and logs."
+        "The response proves the prior job is absent or terminal before relaunch, uses single-instance atomic/tolerant heartbeat supervision with bounded resumable recovery, and preserves best/latest checkpoints and logs."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null

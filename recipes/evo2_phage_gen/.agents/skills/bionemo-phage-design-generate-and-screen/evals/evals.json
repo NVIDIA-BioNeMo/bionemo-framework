@@ -27,7 +27,8 @@
         "The response represents filters 1-6, 8, and 9 as mandatory hard all and the route choice as a nested hard any, with mandatory missing data or tool failure failing closed.",
         "The response records per-filter waterfall, route overlap and dominance, then clusters passers at 99% identity with declared coverage semantics.",
         "The response writes ordered intent-named scripts plus raw, canonical, exact-deduplicated, QC-passing, cluster-representative, ranked, rejected, provenance, and summary artifacts.",
-        "The response reports the proof-of-concept counts without silently adding filter 7 or conflating them with a different historical profile."
+        "The response reports the proof-of-concept counts without silently adding filter 7 or conflating them with a different historical profile.",
+        "Any unattended stage chain is single-instance, atomically stateful, tolerant of transient reads, heartbeat-visible, bounded-retry, and resumable."
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",
       "expected_script": null

@@ -21,7 +21,7 @@ For an order target, follow [adaptive rollout planning](references/rollout-contr
 
 ## Execute deterministically
 
-1. Freeze checkpoint, rollout manifest/seeds, objective/filter versions, tools/models, and source/config hashes. Inherit the exact deployed RL prompt strata, mixture weights, and sampling values; use independent IDs/seeds and audit overlap with calibration/RL validation. Any scientific deviation requires explicit rationale and fresh comparable calibration. Derive and behavior-test the exact runtime suite required by enabled filters.
+1. Freeze checkpoint, rollout manifest/seeds, objective/filter versions, tools/models, and source/config hashes. Inherit the exact deployed RL prompt strata, mixture weights, and sampling values; use independent IDs/seeds and audit overlap with calibration/RL validation. Any scientific deviation requires explicit rationale and fresh comparable calibration. Derive and behavior-test the exact runtime suite required by enabled filters. Make unattended stage chains single-instance, atomically stateful, tolerant of transient reads, heartbeat-visible, bounded-retry, and resumable.
 2. Validate, then canonicalize circular rotations/reverse complements for circular genomes; use biologically appropriate strand equivalence for linear genomes.
 3. Exact-deduplicate before expensive tools and preserve raw-to-representative mapping.
 4. Run approved nested hard all/any tree. Mandatory missing/failure fails closed. Record waterfalls, OR overlap, and dominance.
