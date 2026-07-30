@@ -17,7 +17,7 @@ Resolve one control mode from the brief; in unattended/batch work default to a f
 - exact number of generations; or
 - proof of concept: 1,000 default or 10,000 extended.
 
-Confirm checkpoint/prompt lineage, topology, hard-filter profile, 99% uniqueness, budget, and whether defensible ranking exists. Select topology through the central [resource policy](../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md). Obtain commands using [runtime command resolution](references/command-resolution.md) and record actions with [action traceability](references/action-traceability.md). Use ordered intent-named scripts and concise lineage/telemetry/checkpoint/QC pointers.
+Confirm checkpoint/prompt lineage, topology, hard-filter profile, 99% uniqueness, budget, and whether defensible ranking exists. Select topology through the central [resource policy](../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md). Route long-running or unattended launch and re-entry through bionemo-phage-design-adapt-execution. Obtain commands using [runtime command resolution](references/command-resolution.md) and record actions with [action traceability](references/action-traceability.md). Use ordered intent-named scripts and concise lineage/telemetry/checkpoint/QC pointers.
 
 For an order target, follow [adaptive rollout planning](references/rollout-contract.md): run/reuse a compatible 1,000 pilot, estimate conservative post-QC/post-cluster yield and saturation, and seek 3 times the order count with meaningful ranking or 1.25 times otherwise. Add 1,000-design batches until reserve, budget, or saturation. Stay within the approved compute/budget envelope; ask only before expanding it. Fixed modes generate requested count.
 

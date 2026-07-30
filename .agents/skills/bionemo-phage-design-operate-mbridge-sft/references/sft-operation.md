@@ -11,7 +11,7 @@ Confirm public resource visibility and license before download. Resolve download
 | Cheap smoke        | evo2/1b-8k-bf16:1.0      | Validate data and runtime, not 7B biological quality.         |
 | Requested scale-up | evo2/40b-1m-fp8-bf16:1.0 | Require explicit hardware/runtime fit.                        |
 
-The -bf16 1B/40B assets support BF16 and FP8 paths broadly and are more portable across hardware; the 7B model does not require an FP8-specific asset. Consult `<repository_root>/recipes/evo2_megatron/README.md` when hardware or precision differs.
+The phage recipe uses BF16; FP8 is not required. The Evo 2 7B 8K/1M family is broadly compatible. If the user requests a different base-model family, consult the current GPU/precision compatibility table in `<repository_root>/recipes/evo2_megatron/README.md` before selecting or downloading its checkpoint.
 
 For a fallback, discover current converters, run focused tests/smoke, and retain source plus converted hashes. Never label converted bytes as the original artifact.
 
@@ -39,7 +39,7 @@ For Slurm or Lepton, preserve both portable stage scripts and resolved submissio
 
 At each validation event append step, timestamp, train-loss summary/window, validation loss, learning rate, grad norm, throughput, GPU health, checkpoint path/hash/status, disk free, telemetry source, and comparability evidence.
 
-Use phase-aware due-gated monitoring: observe somewhat more often through launch, the first few steps, first validation, and first verified checkpoint, while respecting scheduler/site floors. After that healthy boundary, independently back off scheduler, application-log, disk/checkpoint, and telemetry checks to minutes or the validation cadence with jitter. In timerless /goal loops, read next_check_at and return without querying when not due.
+Use phase-aware due-gated monitoring: observe launch and early progress at intervals justified by expected events and site policy. After one or two healthy validation/checkpoint cycles—or equivalent progress evidence—derive each source's wall-clock cadence from measured step timing and a useful fraction of the next validation, checkpoint, or early-stop boundary, such as the duration of about 10 steps. A stable long phase may use 5–30 minutes. In timerless `/goal` loops, read `next_check_at` and return without querying when not due.
 
 Track best_step, lowest finite validation loss, comparable events since best, latest four comparable losses, robust matched-window training-loss trend, checkpoint verification, and exact resume lineage.
 

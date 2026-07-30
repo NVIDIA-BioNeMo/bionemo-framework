@@ -40,13 +40,13 @@ Record `operating_mode: interactive|batch` separately from `project_mode: case-s
 - **Interactive (default):** inspect first, write a compact initial plan and assumptions, then iterate with the user before material launches or biologically consequential choices.
 - **Batch:** consume the supplied brief plus verified repository and result artifacts, infer reversible defaults with evidence/confidence, and produce the best executable handoff without waiting for nonmaterial answers. Leave authority, credential, destructive, and unresolved biological choices blocked rather than guessing.
 
-Use durable files as cross-run memory in this order: current user brief and recorded decisions; PROJECT.yaml/SUMMARY.md and stable stage pointers; immutable requests, manifests, configs, hashes, and OUTPUTS; RUNLOG/ACTIONS and prior evidence; then clearly labeled inference. A harness memory, conversation summary, or agent-specific store may suggest where to look but never overrides checked artifacts. Batch plans record each inferred intent, source, confidence, consequence if wrong, and validation step. Interactive decisions are written before handoff so a later batch run can resume without private context.
+Use durable files as cross-run memory in this order: current user brief and recorded decisions; PROJECT.yaml/SUMMARY.md and stable stage pointers; immutable requests, manifests, configs, hashes, and OUTPUTS; RUNLOG/ACTIONS and prior evidence; then clearly labeled inference. A harness memory, conversation summary, or agent-specific store may suggest where to look but never overrides checked artifacts. Batch plans record each inferred intent, source, confidence, consequence if wrong, and validation step. Interactive decisions are written before handoff so a later batch run can resume without private context. On every fresh or restarted agent session, recover the active attempt from these records and reconcile it with the recorded execution facility before launching, stopping, or relaunching anything.
 
 ## Ordered action trace
 
 Represent every material action performed or handed off as an ordered intent-named script or execution-plane equivalent. Project setup uses project/NNN; stage actions use STAGE/ATTEMPT/NNN, with a monotonic three-digit prefix inside each namespace. Never reuse or overwrite a script path. Root ACTIONS.yaml is the single ordered ledger.
 
-Keep reusable project setup and orchestration scripts under planning/execution/scripts/. Put stage-specific scripts under STAGE/runs/ATTEMPT/scripts/. Each ledger item records ID, intent, prerequisites, script path, script, command, and config hashes, executor, host, scheduler or cloud job identity and URL, start, end, exit status, stdout, stderr, log paths, outputs and hashes, and idempotence or resume guard. No runnable action exists only in chat. Add a guarded run-all only after individual actions stabilize; enforce prerequisites, terminal-state checks, and resume guards.
+Keep reusable project setup and orchestration scripts under planning/execution/scripts/. Put stage-specific scripts under STAGE/runs/ATTEMPT/scripts/. Each ledger item records ID, intent, prerequisites, script path, script, command, and config hashes, executor, host, execution-facility, scheduler, or cloud identity and URL, start, end, exit status, stdout, stderr, log paths, outputs and hashes, and idempotence or resume guard. No runnable action exists only in chat. Add a guarded run-all only after individual actions stabilize; enforce prerequisites, terminal-state checks, and resume guards.
 
 ## Every stage attempt
 
@@ -73,7 +73,7 @@ SUMMARY.md
 RUNLOG.md
 ```
 
-Use lifecycle states planned, submitted, running, succeeded, failed, stopped-early, and blocked. Write status atomically when feasible. Record physical paths and portable artifact identities; never assume another host shares a mount.
+Use lifecycle states planned, submitted, running, succeeded, failed, stopped-early, and blocked. Write status atomically when feasible. Record physical paths and portable artifact identities; never assume another host shares a mount. `RUN.yaml` also records the execution facility, stable handle and native queries, host/lifetime scope, command and config identity, logs/heartbeat, checkpoint-resume state, and restart policy needed to recover after an agent-session restart.
 
 Use blocked only for missing authority or an unresolved material choice. Operational gate/process failures must trigger bounded diagnosis and repair/retry, then become running, succeeded, or explicitly failed; they must not remain an indefinite apparently active wait.
 

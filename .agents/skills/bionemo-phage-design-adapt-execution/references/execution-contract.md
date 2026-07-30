@@ -78,18 +78,26 @@ Use composite ID STAGE/ATTEMPT/NNN, or project/NNN for setup. NNN is monotonic i
 - 060-sync-results.sh: only when approved; upload from declared owner/path and verify.
 - 070-restore-test.sh: restore a representative artifact to scratch and verify.
 
-Each ACTIONS item records id, intent, prerequisites, script path, script/command/config hashes, executor, host, scheduler/cloud ID and URL, start/end/exit, logs, outputs/hashes, and idempotence/resume guard. Trace shell, Slurm, Lepton, and handed-off actions. Nothing runnable exists only in chat. Add a guarded run-all only after individual steps stabilize.
+Each ACTIONS item records id, intent, prerequisites, script path, script/command/config hashes, executor, host, execution-facility or scheduler/cloud ID and URL, start/end/exit, logs, outputs/hashes, and idempotence/resume guard. Trace shell, Slurm, Lepton, and handed-off actions. Nothing runnable exists only in chat. Add a guarded run-all only after individual steps stabilize.
 
 Use set -Eeuo pipefail in Bash, quote expansions, absolute paths, and no embedded secrets. Prefer atomic status writes. Never silently overwrite an attempt or duplicate a submission.
 
+## Agent-session continuity
+
+For every long-running stage, choose any environment- or harness-native execution facility whose worker lifetime and stable status/log queries outlive the current agent shell, chat, PTY, and tool call. Scheduler/cloud jobs, harness-managed durable jobs, services, and detached sessions are examples, not requirements. Record the actual lifetime scope. Use `/goal`, `/loop`, recurring monitors, or equivalent harness features when available to invoke due-gated one-tick monitoring and advance the next approved stage after a verified terminal handoff; this coordinates the workflow and is not worker ownership unless documented as such. A PID or lock, shell backgrounding, `nohup`, or `setsid` alone is not proof.
+
+Before launch succeeds, persist in `RUN.yaml` and `ACTIONS.yaml`: facility and stable handle, host, lifetime scope, status/log/stop queries, command/config/source/working-directory identity, logs, heartbeat/progress marker, checkpoint/resume state, and restart policy. Re-query the handle and verify it identifies the launched work using facility-appropriate evidence.
+
+At every new agent session, read durable project, action, attempt, and monitor state before mutation, then query the facility by handle. Adopt matching live work without duplication; advance completed work; resume or relaunch failed/terminal work only after checkpoint verification; leave unresolved identity untouched. Automatic restart is optional and, when used, must be bounded and invoke an idempotent verified-checkpoint resume path.
+
 ## Rate-limited monitoring
 
-A one-tick monitor reads monitor/state.json before any scheduler, filesystem, process, or telemetry query. Persist last_checked_at, next_check_at, backoff_attempt, phase, and independent due times for scheduler, logs, disk/checkpoints, and telemetry. In timerless /goal loops, return successfully without querying when not due.
+A one-tick monitor reads `monitor/state.json` before any scheduler, filesystem, process, or telemetry query. Persist `last_checked_at`, `next_check_at`, `backoff_attempt`, phase, and independent due times for scheduler, logs, disk/checkpoints, and telemetry. Set due times from measured or expected step/event timing, risk, query cost, and the next decision boundary rather than a universal heartbeat. In timerless `/goal` loops, return successfully without querying when not due.
 
 Use phase-aware cadence:
 
-- Observe launch, first few steps, first validation, and first verified checkpoint more often, while honoring site policy. Default scheduler floor is at least 60 seconds; cheap local log checks may be 30–60 seconds.
-- After the first healthy checkpoint, back off to minutes or validation cadence, independently per source, with 10–20% jitter.
+- Observe launch, first steps, and early validation/checkpoint evidence at intervals justified by expected event timing and risk, while honoring site policy; do not default to a 30-second heartbeat.
+- After one or two healthy validation/checkpoint cycles—or equivalent progress evidence when those events are not applicable—derive each source's wall-clock cadence from measured step/event timing and a useful fraction of the next validation, checkpoint, or early-stop decision boundary—for example, the duration of about 10 steps. A stable long-running phase may use 5–30 minutes.
 - Reset backoff on state change, new validation/checkpoint, or health alert, but never tight-loop.
 
 For Slurm, prefer targeted squeue -j JOB_ID while active and sacct -j JOB_ID for terminal/accounting state. Do not repeatedly scan cluster-wide sinfo or allocate srun solely to monitor. Avoid recursive directory walks; use known files, mtimes, and incremental offsets. Rate-limit W&B/cloud APIs independently.

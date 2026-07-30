@@ -41,7 +41,7 @@ Treat non-safety exploitation signals as pending until they persist for 5–10 f
 
 ## Phase-aware observation cadence
 
-Use the execution adapter's due-gated one-tick monitor. Check somewhat more often through launch, the first few steps, first validation, and first verified checkpoint. After that healthy boundary, back off scheduler, disk, and telemetry sources independently to minutes or the validation cadence, with jitter. On timerless /goal re-entry, return without querying when next_check_at is not due.
+Use the execution adapter's due-gated one-tick monitor. Observe launch and early progress at intervals justified by expected events and site policy. After one or two healthy validation/checkpoint cycles—or equivalent progress evidence—derive each source's wall-clock cadence from measured step timing and a useful fraction of the next validation, checkpoint, or stop-decision boundary, such as the duration of about 10 steps. A stable long phase may use 5–30 minutes. On timerless `/goal` re-entry, return without querying when `next_check_at` is not due.
 
 Do not confuse observation cadence with validation cadence. A cheap log-health check may occur between validations, but checkpoint selection changes only on complete comparable validation events.
 

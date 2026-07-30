@@ -29,7 +29,7 @@ Search available skill roots if a sibling is absent. Record a capability gap; do
 ## Intake and plan
 
 01. Select `interactive` unless the user requests `batch`. Interactive mode inspects and iterates before material launches. Batch mode follows the supplied brief and durable records, stopping for material ambiguity, missing authority, or unsafe irreversible action. Follow [project-contract.md](references/project-contract.md); harness memory is not authoritative.
-02. Resolve only the absolute repository root with the workspace contract; record branch/status and any installed-versus-checkout skill difference.
+02. Resolve only the absolute repository root with the workspace contract; record branch/status and any installed-versus-checkout skill difference. On re-entry to existing results, reconcile durable state with the recorded execution facility before new mutation: adopt live work, advance completed work, and never duplicate unresolved work.
 03. Choose case-study-replication or adapted-design, a concrete target, and the intended outcome. Select the recipe workspace: replication defaults to checked-in `recipes/evo2_phage_gen`; adapted work uses the user's verified owning recipe, in-checkout copy, or full-checkout worktree.
 04. Invoke bionemo-phage-design-adapt-execution. Inspect the repository, results, hardware, execution plane, available skills/models, storage paths, capacity, and writability. State job locations and a per-stage GPU topology matrix; inventory local GPU occupancy before sizing.
 05. Build a compact per-skill matrix of inputs, outputs, knowns, gaps, and need; resolve dependencies in stage order.
@@ -37,7 +37,7 @@ Search available skill roots if a sibling is absent. Record a capability gap; do
 07. With one clear target, default SFT curation to target-similarity bucket/control-prefix conditioning while allowing opt-out. After collection, agree on context: propose p99.9 or the affordable maximum plus worst-case control/prompt/EOD overhead and required alignment. Change the RL length basis only for an explicit expansion/contraction goal.
 08. Unless fresh-only, detect compatible SFT runs locally and in configured result roots. Distinguish status inspection from reuse; present materially different candidates and ask whether to reuse or retrain.
 09. After SFT selection and objective/QC approval, invoke bionemo-phage-design-calibrate-rl-sampling. Freeze its prompt compatibility, training mixture, independent validation, paths, and hashes.
-10. Write plan/assumptions/decisions in the result root, then invoke required stages. After approval, activate the declared durable supervisor and report success. Leaf skills own attempts; the controller owns root indexes. When publication is requested, record destination, cadence, contents, exclusions, client, and verification and invoke the publication skill at requested/stage/validation/final points; otherwise record no sync.
+10. Write plan/assumptions/decisions in the result root, then invoke required stages. After approval, activate the declared agent-independent execution facility and any available recurring due-gated monitor/advancer, persist and re-query the facility's stable handle, and report success. Leaf skills own attempts; the controller owns root indexes. When publication is requested, record destination, cadence, contents, exclusions, client, and verification and invoke the publication skill at requested/stage/validation/final points; otherwise record no sync.
 
 ## Storage gate
 

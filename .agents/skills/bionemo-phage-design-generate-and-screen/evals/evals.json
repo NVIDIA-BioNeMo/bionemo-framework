@@ -45,6 +45,20 @@
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-004-authenticated-asset-failover",
+      "prompt": "Stage 3 external QC needs PHROGs v4, but the official FAA_phrog.tar.gz endpoint has invalid TLS. A TLS-valid Pharokka Zenodo release for PHROGs v4 contains an MMseqs profile database that may be convertible into the search database. Recover safely without silently changing the scientific asset contract.",
+      "expected_output": "An authenticated asset-failover decision that distinguishes an exact mirror from a derived interface-compatible substitute, validates provenance/content/behavior, and blocks when raw-sequence equivalence is required.",
+      "assertions": [
+        "The response resolves the pinned PHROGs release and required downstream interface rather than trusting one URL, records the failed source, and tries bounded TLS-valid provenance-bearing mirrors or archives before blocking.",
+        "The response never disables TLS silently; insecure transport is allowed when bytes match an independently obtained trusted signature or strong cryptographic digest, or after explicit informed user authorization that records the transport risk and reduced provenance assurance. A checksum obtained only through the same broken endpoint is not independent authentication.",
+        "The response treats an exact mirror and a derived profile/consensus database differently and does not substitute the latter when every raw FAA sequence is required.",
+        "A derived substitute is promoted only after recording source/version/license, immutable input and output hashes, exact transformation/tool versions, deviation from the requested asset, expected contents/family identity, and downstream positive plus independent negative/no-signal behavior controls.",
+        "The response stages and atomically promotes verified outputs, records source candidates and failures, and blocks Stage 3 selection when no authenticated exact or scientifically interface-compatible asset exists."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
     }
   ]
 }

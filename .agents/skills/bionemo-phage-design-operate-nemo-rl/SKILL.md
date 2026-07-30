@@ -7,7 +7,7 @@ description: Use when launching, monitoring, resuming, relaunching, or selecting
 
 Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
 
-Run the approved RL contract through bionemo-phage-design-adapt-execution. Select checkpoints from declared comparable biological validation, not last step or training reward.
+Run the approved RL contract through bionemo-phage-design-adapt-execution, including its agent-session continuity contract. Select checkpoints from declared comparable biological validation, not last step or training reward.
 
 ## Prepare
 

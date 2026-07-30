@@ -14,31 +14,32 @@
 
 ## Results
 
-| Surface                     | Result                                                                                                                                                        |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Skill structure             | PASS — all 12 controller/subskill directories passed the skill-creator validator                                                                              |
-| Behavioral eval schema      | PASS — 12 portable eval files, 46 globally unique exact-field cases                                                                                           |
-| Portable eval runner        | PASS — 51/51 unit tests cover Codex and Claude adapters, independent skill/repository/recipe roots, and portable workspace contracts                          |
-| Harness dry runs            | PASS — Codex and Claude each produced all current zero-cost plans; the 2026-07-17 campaign covered the then-current 26 cases                                  |
-| Live Claude behavioral eval | HISTORICAL PASS — the 2026-07-17 effective suite was 26/26: 22 unaffected clean-sweep passes plus four passing current-definition reruns                      |
-| Claude plugin bridge        | PASS — Claude Code 2.1.211 validates .agents as local plugin evo2-phage-gen                                                                                   |
-| Codex plugin bridge         | PASS — the official validator accepts .agents/.codex-plugin/plugin.json and its ./skills/ bundle                                                              |
-| Claude workspace isolation  | PASS — Git-index allowlist, explicit answer/audit/generated-path exclusions, outward-symlink rejection, required-path checks, and a per-file content manifest |
-| Context size                | PASS — SKILL.md entrypoints are 442–857 words; detail is routed to references                                                                                 |
-| Markdown links              | PASS — all checked local skill and recipe links resolve after relocation                                                                                      |
-| Literature utility          | PASS — 26/26 unit tests                                                                                                                                       |
-| Literature manifests        | PASS — both paper bundles verified with zero errors and reconstructed byte-identically offline                                                                |
-| Official workbook           | PASS — media-1.xlsx SHA-256 3cd26d4cca8bc1273a863c4b2304e755635fe0c7bed46308f54029b88f063fc9                                                                  |
-| Workbook extraction         | PASS — 302 rows, 33 columns, 302 unique IDs; repeated extraction produced the same TSV hash                                                                   |
-| Recipe README               | PASS — results-first human guide with top-level Codex and Claude launch examples                                                                              |
-| Result isolation            | PASS — generated runs stay under the selected recipe's gitignored `results/` directory                                                                        |
-| Storage planning            | PASS — total-base forecasting, measured corpus/checkpoint anchors, checkpoint-write headroom, role retention, and user-approved cleanup are launch gates      |
-| Context policy              | PASS — SFT/RL context is agreed after collection from p99.9 or affordable maximum, serialization overhead, and alignment; historical lengths are not defaults |
-| Target conditioning         | PASS — a clear target defaults to measured similarity buckets; unprefixed leakage checks precede frozen prefix serialization and RL handoff                   |
-| Historical evidence         | PASS — the checked-in sanitized snapshot separates empirical outcomes from configuration facts and retains source hashes/locators                             |
-| Portability                 | PASS — canonical isolated fallback, symlink-safe workspace choices, installed/checkout bundle comparison, recipe cwd, and recipe-owned results are explicit   |
-| Policy ownership            | PASS — active recipe instructions add no custom biological policy; each harness retains its normal policy behavior                                            |
-| Pre-commit                  | PASS — license, copied-file, EOF, whitespace, YAML, Ruff, mdformat, and secret hooks pass for the bundle and related docs                                     |
+| Surface                     | Result                                                                                                                                                                              |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Skill structure             | PASS — all 12 controller/subskill directories passed the skill-creator validator                                                                                                    |
+| Behavioral eval schema      | PASS — 12 portable eval files, 48 globally unique exact-field cases                                                                                                                 |
+| Portable eval runner        | PASS — 52/52 unit tests cover Codex and Claude adapters, independent skill/repository/recipe roots, and portable workspace contracts                                                |
+| Harness dry runs            | PASS — Codex and Claude each produced all current zero-cost plans; the 2026-07-17 campaign covered the then-current 26 cases                                                        |
+| Live Claude behavioral eval | HISTORICAL PASS — the 2026-07-17 effective suite was 26/26: 22 unaffected clean-sweep passes plus four passing current-definition reruns                                            |
+| Claude plugin bridge        | PASS — Claude Code 2.1.211 validates .agents as local plugin evo2-phage-gen                                                                                                         |
+| Codex plugin bridge         | PASS — the official validator accepts .agents/.codex-plugin/plugin.json and its ./skills/ bundle                                                                                    |
+| Claude workspace isolation  | PASS — Git-index allowlist, explicit answer/audit/generated-path exclusions, outward-symlink rejection, required-path checks, and a per-file content manifest                       |
+| Context size                | PASS — SKILL.md entrypoints are 451–891 words; detail is routed to references                                                                                                       |
+| Markdown links              | PASS — all checked local skill and recipe links resolve after relocation                                                                                                            |
+| Literature utility          | PASS — 26/26 unit tests                                                                                                                                                             |
+| Literature manifests        | PASS — both paper bundles verified with zero errors and reconstructed byte-identically offline                                                                                      |
+| Official workbook           | PASS — media-1.xlsx SHA-256 3cd26d4cca8bc1273a863c4b2304e755635fe0c7bed46308f54029b88f063fc9                                                                                        |
+| Workbook extraction         | PASS — 302 rows, 33 columns, 302 unique IDs; repeated extraction produced the same TSV hash                                                                                         |
+| Recipe README               | PASS — results-first human guide with top-level Codex and Claude launch examples                                                                                                    |
+| Result isolation            | PASS — generated runs stay under the selected recipe's gitignored `results/` directory                                                                                              |
+| Storage planning            | PASS — total-base forecasting, measured corpus/checkpoint anchors, checkpoint-write headroom, role retention, and user-approved cleanup are launch gates                            |
+| Context policy              | PASS — SFT/RL context is agreed after collection from p99.9 or affordable maximum, serialization overhead, and alignment; historical lengths are not defaults                       |
+| Target conditioning         | PASS — a clear target defaults to measured similarity buckets; unprefixed leakage checks precede frozen prefix serialization and RL handoff                                         |
+| Historical evidence         | PASS — the checked-in sanitized snapshot separates empirical outcomes from configuration facts and retains source hashes/locators                                                   |
+| Portability                 | PASS — canonical isolated fallback, symlink-safe workspace choices, installed/checkout bundle comparison, recipe cwd, recipe-owned results, and agent-session re-entry are explicit |
+| External asset failover     | PASS — pinned identity, bounded source failover, authenticated or user-approved insecure transport, exact-versus-derived gates, controls, and atomic promotion                      |
+| Policy ownership            | PASS — active recipe instructions add no custom biological policy; each harness retains its normal policy behavior                                                                  |
+| Pre-commit                  | PASS — license, copied-file, EOF, whitespace, YAML, Ruff, mdformat, and secret hooks pass for the bundle and related docs                                                           |
 
 ## Reproducible behavioral evals
 

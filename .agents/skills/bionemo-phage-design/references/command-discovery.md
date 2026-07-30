@@ -21,6 +21,16 @@ Keep shared defaults unchanged. Materialize a project-owned resolved config in t
 
 Names such as evo2_phage_download_sft_data, preprocess_evo2, train_evo2, evo2_phage_run_gdpo, evo2_phage_generation, evo2_phage_score_fasta, and download_bionemo_data are discovery hints. Confirm names/interfaces in pyproject.toml and --help.
 
+## External asset failover
+
+Resolve each external model, dataset, or database by pinned identity/version/license and required downstream interface, not one URL. In the attempt asset manifest record required contents, ordered source candidates, independently published signatures/digests and size when available, optional transform/validation hooks, and every failed source.
+
+After bounded retries, prefer TLS-valid official mirrors or archival releases. Never disable TLS silently. Insecure transport is allowed when the bytes match an independently trusted signature or strong cryptographic digest obtained through a secure channel, or after explicit informed user authorization that records the transport risk and reduced provenance assurance. A checksum obtained only through the same broken endpoint is not independent authentication. Stage the payload, compute local SHA-256, validate size/magic/archive contents, then promote atomically.
+
+Classify every fallback as an exact mirror or a derived substitute. A derived asset is allowed only when the approved downstream interface does not require the original raw contents; record immutable input/output hashes, exact transformation and tool versions, the deviation, expected identities/counts, and positive plus independent negative/no-signal behavior controls. Never silently replace raw sequences with profiles or consensus sequences. Block when no verifiable exact or validated interface-compatible asset exists unless the user explicitly changes the asset contract.
+
+For PHROGs v4, the Pharokka v1.8.0 Zenodo record 17110353 is a TLS-valid candidate source for a derived MMseqs search database when QC needs that interface. Reverify its record, checksums, transformation, family inventory, and controls. It is not by itself an exact `FAA_phrog.tar.gz` mirror; a raw-sequence consumer still needs authenticated exact contents or an explicit contract change.
+
 ## Drift maintenance
 
 When an entry point, CLI option, config schema, environment script, or symlink boundary changes:

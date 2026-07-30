@@ -26,6 +26,7 @@
         "The response does not stop on a single blip or count validation events that differ in manifest, sample composition, loss definition, or other comparability fields.",
         "The response evaluates a declared window, uncertainty or data variance, practical minimum change, patience, and bounded rebound behavior before early stopping.",
         "The response monitors train/validation loss, learning rate, gradient norm, throughput, GPU memory/utilization, disk, failures, and checkpoint integrity from disk plus configured telemetry.",
+        "Monitoring is due-gated; after one or two healthy validation, checkpoint, or equivalent progress cycles, cadence follows measured step timing and a useful fraction of the early-stop decision horizon rather than a fixed heartbeat, and stable phases may use 5–30 minutes.",
         "The response stops at the 12,000-step ceiling if sustained comparable overfitting is not established."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",

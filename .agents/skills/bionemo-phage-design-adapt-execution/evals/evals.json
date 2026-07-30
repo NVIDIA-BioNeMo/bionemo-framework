@@ -24,8 +24,8 @@
       "assertions": [
         "The response reads persisted due times before any scheduler, filesystem, process, or telemetry query and exits successfully when no source is due.",
         "The response uses targeted job queries, avoids repeated cluster-wide sinfo and monitoring-only srun allocations, and independently rate-limits scheduler, disk, logs, W&B, and cloud APIs.",
-        "The response permits modestly closer observation through launch, first steps, first validation, and first verified checkpoint while respecting a scheduler floor and site policy.",
-        "The response backs off to minutes or validation cadence with jitter after the first healthy checkpoint and resets only on meaningful state changes or alerts.",
+        "The response observes launch and early validation/checkpoint evidence at intervals justified by expected event timing and risk, honors site policy, and does not use a universal 30-second heartbeat.",
+        "After one or two healthy validation/checkpoint cycles—or equivalent progress evidence when those events are not applicable—the response derives each source's cadence from measured step/event timing and a useful fraction of the next validation, checkpoint, or early-stop decision boundary—for example, the wall-clock duration of about 10 steps; a stable long-running phase may use 5–30 minutes, with resets on meaningful state changes or alerts.",
         "The response uses known files, mtimes, and incremental offsets instead of repeated recursive directory scans."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
@@ -41,6 +41,20 @@
         "The response records revision and image identity plus endpoint, auth mechanism, node group/resources, mounts, egress, secret references, telemetry, and durable-output owner as verified values or explicit unknowns.",
         "The response emits project-owned submit/status/log/cancel/resume wrappers and does not claim an untested Lepton variant will work.",
         "The response leaves object-store synchronization disabled until destination, credentials, owner, cost, retention, and restore behavior are approved."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-004-agent-session-reentry",
+      "prompt": "The agentic CLI/chat was restarted on the same live GPU host while a local phage SFT or RL job may still be running. Recover the workflow safely, then state how future long-running launches should survive another agent, chat, or tool-session restart without mandating one supervisor implementation.",
+      "expected_output": "A mechanism-neutral re-entry and launch contract that reconciles durable project state with a queryable agent-independent execution facility before adopting, advancing, or relaunching work.",
+      "assertions": [
+        "Before any launch, stop, or relaunch, the response reads durable project, action, attempt, monitor, and execution records and queries the recorded execution plane by stable identity, classifying the work as live, completed, failed, or unresolved.",
+        "The response adopts and monitors matching live work without duplication, advances completed work, resumes or relaunches failed work only after terminal-state and checkpoint verification, and blocks mutation while identity is unresolved.",
+        "The response requires the worker lifetime and later status/log queries to be independent of the current agent shell, chat, PTY, or tool call, while allowing any proven harness-native, scheduler, cloud, service, or detached-session facility rather than prescribing one implementation.",
+        "The response persists the facility type and stable handle, host, lifetime scope, command/config/source identity, working directory, logs, heartbeat/progress, checkpoint/resume state, and restart policy in the result root before considering launch successful.",
+        "The response uses /goal, /loop, recurring monitors, or an equivalent harness feature when available to invoke due-gated one-tick monitoring and advance the next approved stage after verified completion. It remains a coordinator rather than the worker owner unless its documented long-running-job facility survives session restart; a PID or stale lock, nohup, setsid, or shell backgrounding alone is not proof of independence."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null

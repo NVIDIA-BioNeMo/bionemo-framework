@@ -631,6 +631,23 @@ class EvalRunnerTests(unittest.TestCase):
             for marker in prohibited_caveats:
                 self.assertNotIn(marker, text, str(path))
 
+    def test_sft_alternate_base_model_uses_current_gpu_compatibility_table(self) -> None:
+        operation = (
+            (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "references" / "sft-operation.md")
+            .read_text(encoding="utf-8")
+            .lower()
+        )
+
+        for marker in (
+            "phage recipe uses bf16",
+            "7b 8k/1m",
+            "different base-model family",
+            "gpu/precision compatibility table",
+            "evo2_megatron/readme.md",
+            "before selecting or downloading",
+        ):
+            self.assertIn(marker, operation)
+
     def test_prepare_sft_defines_target_similarity_conditioning(self) -> None:
         skill = (SKILL_ROOT / "bionemo-phage-design-prepare-sft" / "SKILL.md").read_text(encoding="utf-8").lower()
         self.assertIn("target-conditioning.md", skill)

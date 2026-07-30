@@ -12,7 +12,8 @@
         "The response never labels a 1,000-design result as online validation or substitutes an unsupported unique-cluster count for the recorded profile-specific counts.",
         "The response does not prescribe stopping at step 190; it preserves the step-190 checkpoint as best while collecting later comparable evidence until sustained degradation, collapse, or the 500-step ceiling.",
         "The response distinguishes selected checkpoint from the later evidence-collection stopping step and requires comparable prompt, sampling, denominator, and filter-profile manifests.",
-        "The response allows ordinary variance and a bounded meaningful rebound rather than stopping on one dip."
+        "The response allows ordinary variance and a bounded meaningful rebound rather than stopping on one dip.",
+        "Monitoring is due-gated; after one or two healthy validation, checkpoint, or equivalent progress cycles, cadence follows measured step timing and a useful fraction of the stop-decision horizon rather than a fixed heartbeat, and stable phases may use 5–30 minutes."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null

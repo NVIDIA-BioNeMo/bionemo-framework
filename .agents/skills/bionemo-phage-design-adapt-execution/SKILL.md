@@ -7,7 +7,7 @@ description: Use when a phage-design workflow must discover or adapt to local GP
 
 Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
 
-Turn the actual environment into explicit human-runnable stage scripts. Generated scripts—not chat—are the command source of truth.
+Turn the actual environment into explicit human-runnable stage scripts. Generated scripts—not chat—are the command source of truth. Long-running work must survive and remain queryable across agent-session restarts.
 
 ## Discover before choosing
 
@@ -21,7 +21,7 @@ In a read-only or planning-only session, do not claim those files were written. 
 
 ## Select an operating pattern
 
-- **Local GPU:** run stage scripts directly; use a recurring facility or durable local session for due-gated monitoring.
+- **Local GPU:** run bounded preflight or smoke work directly. Launch longer work through any proven facility whose worker lifetime and later status/log queries are independent of the current agent shell, chat, PTY, and tool call.
 - **SSH GPU:** verify mounts/revision remotely, then launch and monitor by stable run identity.
 - **Slurm:** submit from login; run compute-heavy work only in an allocation. Capture job ID, resolved submission script, scheduler/application logs, and site polling policy.
 - **Lepton:** inspect `<repository_root>/ci/lepton/{README.md,requirements.txt}` and current launcher help, using the recorded checkout rather than the skill path. Generate pinned config plus submit/status/log/resume instructions only after resolving runtime fields, including egress. Do not claim untested image, endpoint, mount, auth, or secret variants.
@@ -31,7 +31,9 @@ With the selected recipe as the working directory, run `<recipe_root>/.ci_build.
 
 ## Persist and recover safely
 
-Use /goal, /loop, recurring monitors, or equivalent harness features when available; otherwise use bounded polling, user handoff, cron/systemd, tmux/screen, or nohup according to policy. After approval, activate it immediately and report success or failure. Add bounded no-progress detection, exact-process checks, and in-scope repair/retry so a failed gate cannot leave an apparently active workflow idle forever. Treat expected startup emptiness and optional observability failures as nonfatal while the primary process progresses. Timerless loops must read next_check_at and return without scheduler/disk/telemetry queries when not due. Never make a proprietary harness command a prerequisite.
+Choose by demonstrated lifetime and query semantics, not mechanism name; a proven harness-native long-running job or infrastructure facility may qualify. Use `/goal`, `/loop`, recurring monitors, or equivalent harness features when available to invoke the due-gated one-tick monitor and advance the next approved stage after verified completion. This coordinates the workflow; it owns the worker only when documented to survive agent-session restart. A PID or lock, shell backgrounding, `nohup`, or `setsid` alone is not proof. Follow [execution-contract.md](references/execution-contract.md) for agent-session continuity.
+
+On every fresh or restarted agent session, reconcile durable project/action/attempt/monitor records with the facility native status before mutation. Adopt matching live work without duplication; advance completed work; resume or relaunch terminal work only after checkpoint verification; leave unresolved identity untouched. After approval, activate the facility and verify its stable handle and status/log queries. Add bounded no-progress detection and in-scope repair/retry. Timerless loops must honor `next_check_at`; never make a proprietary harness command a prerequisite. Observe startup and the first one or two validation/checkpoint cycles more closely. Then, or after equivalent healthy progress evidence when those events are not applicable, derive each source's wall-clock cadence from measured step/event timing and a useful fraction of the next validation, checkpoint, or early-stop decision boundary—for example, the duration of about 10 steps. A stable long-running phase may use 5–30 minutes.
 
 Generate separate launch, one-tick monitor, stop, and resume/relaunch scripts. Prove prior work is absent or terminal before relaunch. Resume only from a verified unchanged-lineage checkpoint; otherwise create a new attempt. Default to no object-store sync until destination, credential mechanism, write owner, cost, retention, and restore behavior are confirmed.
 
