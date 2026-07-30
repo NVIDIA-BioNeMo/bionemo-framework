@@ -75,20 +75,6 @@
       ],
       "expected_skill": "bionemo-phage-design",
       "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-006-external-install-bootstrap",
-      "prompt": "The bionemo-phage-design skill is installed in a shared NVIDIA skill collection. I started the agent from a neutral directory and have no BioNeMo Recipes checkout yet. Prepare a case-study replication workspace for evo2_phage_gen, including where commands and results belong.",
-      "expected_output": "A portable bootstrap plan that acquires BioNeMo Recipes, resolves the recipe revision only when needed, and anchors execution and results to the selected recipe rather than the skill installation path.",
-      "assertions": [
-        "The response does not derive the BioNeMo Recipes checkout or recipe location from the independently installed skill bundle.",
-        "The response clones https://github.com/NVIDIA-BioNeMo/bionemo-recipes and, only if recipes/evo2_phage_gen is absent, offers either https://github.com/NVIDIA-BioNeMo/bionemo-recipes/pull/1699 or the upstream jstjohn/evo2_phage_gen branch as the fallback source.",
-        "The response resolves and records absolute repository, recipe, and result roots before running recipe commands.",
-        "The response defaults case-study replication to recipes/evo2_phage_gen, while an adapted run lets the user choose the owning recipe or a verified copy or worktree.",
-        "The response runs actual workflow commands with the selected recipe as the working directory and keeps generated results under that recipe's results/ directory."
-      ],
-      "expected_skill": "bionemo-phage-design",
-      "expected_script": null
     }
   ]
 }

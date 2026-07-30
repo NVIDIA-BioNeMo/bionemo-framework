@@ -1,0 +1,8 @@
+{
+  "name": "bionemo-phage-generation",
+  "description": "Portable bootstrap and planning for BioNeMo phage generation.",
+  "version": "0.1.0",
+  "author": {
+    "name": "BioNeMo Recipes contributors"
+  }
+}
