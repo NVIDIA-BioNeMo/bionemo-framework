@@ -1,0 +1,27 @@
+{
+  "name": "bionemo-phage-design",
+    "version": "0.2.0",
+  "description": "Portable skills for reproducible Evo 2 phage design workflows.",
+  "author": {
+    "name": "BioNeMo Recipes contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "BioNeMo Phage Design",
+    "shortDescription": "Run traceable Evo 2 phage-design workflows.",
+        "longDescription": "Plan and run evidence-backed phage genome collection, Evo 2 SFT, GDPO optimization, checkpoint selection, generation, quality control, and selective artifact publication.",
+    "developerName": "BioNeMo Recipes contributors",
+    "category": "Science",
+    "capabilities": [
+      "Interactive",
+      "Research",
+      "Training",
+      "Evaluation"
+    ],
+    "defaultPrompt": [
+      "Plan a traceable Evo 2 phage-design project.",
+      "Reproduce the PhiX174 GDPO case study with full provenance.",
+      "Audit SFT-to-RL lineage and checkpoint-selection evidence."
+    ]
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "skill_name": "bionemo-phage-design",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-001-interactive-intake",
+      "prompt": "Help me start an adapted Evo 2 phage-design project for a bacterial phage. I have not chosen the exact target, objective, SFT run, or execution settings yet, but I can answer questions as we refine the plan.",
+      "expected_output": "An interactive discovery plan that inspects the system and prior results first, presents a compact initial plan, and asks only biologically or operationally material questions.",
+      "assertions": [
+        "The response treats interactive planning as the default and proposes an initial plan that can be revised with the user before launch.",
+        "The response first inventories sibling skills, repository state, existing result roots, public model access, execution plane, storage/free space/writability, and locally visible GPU count and occupancy when applicable.",
+        "The response identifies the missing target phage, host, desired change, related SFT corpus, SFT reuse decision, RL objectives, final QC, and order or rollout target without inventing them.",
+        "The response proposes the standard gitignored result-root and provenance files and does not launch training from incomplete information.",
+        "The response is compact enough to serve as an intake rather than a full run log."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-002-batch-intake",
+      "prompt": "Use batch mode to make the best complete phage-design plan you can from this checkout while I am offline. Infer reasonable intent from existing project records and prior compatible runs, record uncertainty, and leave executable handoff scripts rather than waiting for answers.",
+      "expected_output": "A best-effort batch plan grounded in durable project records, with assumptions and unresolved blockers made explicit and no silent irreversible choices.",
+      "assertions": [
+        "The response explicitly selects batch mode and does not behave as though interactive questioning will be answered immediately.",
+        "The response treats versioned project files, summaries, decisions, environment records, action ledgers, and verified artifacts as portable memory; proprietary agent memory may be a hint but is not the source of truth.",
+        "The response infers only reversible defaults, records evidence and confidence for inferred intent, and leaves material biological, authority, credential, or destructive choices unresolved.",
+        "The response produces ordered human-runnable scripts and acceptance checks plus a precise handoff for steps it cannot safely execute.",
+        "The response still performs environment, storage, writability, GPU, prior-result, and lineage discovery before sizing or launching work."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-003-slurm-cross-project-sft",
+      "prompt": "Plan RL for a 50 kb bacterial phage from a Slurm login node. A promising SFT checkpoint exists in another result project, the current microbatch OOMs at full length, and this harness re-enters goals without a timer.",
+      "expected_output": "A controller handoff that verifies cross-project SFT and prompt lineage, preserves the full-genome workload while adapting resources, and rate-limits monitoring.",
+      "assertions": [
+        "The response surfaces the external SFT candidate with checkpoint-selection evidence and asks for explicit reuse approval rather than silently selecting it.",
+        "The response requires complete SFT and prompt lineage including project, stage, checkpoint identity/hash, base model, data/split/config hashes, prompt manifest, and selection rationale.",
+        "The response keeps the 50 kb full-genome context and first reduces microbatch while preserving the approved effective token batch through accumulation before escalating parallelism.",
+        "The response uses Slurm submission and attempt-scoped ordered scripts, records the job identity and logs, and avoids compute-heavy work on the login node.",
+        "The response persists next-check times and returns without scheduler, filesystem, or telemetry queries when a timerless goal re-entry is not due."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-004-unattended-local-replication",
+      "prompt": "Plan a paper replication locally on eight H100s. Keep the historical split sizes, but prevent cluster leakage; after approval I will be offline, so keep it progressing and use W&B if readily available.",
+      "expected_output": "A concise local execution plan that prioritizes cluster-disjoint splits, all approved GPUs, and durable bounded supervision with optional W&B.",
+      "assertions": [
+        "The response states the local execution plane and planned eight-GPU topology rather than silently reducing resources to match history.",
+        "The response assigns whole clusters across train, validation, and test; leakage prevention overrides paper-exact membership while retaining requested sizes when feasible.",
+        "The response places selected-SFT sampling calibration after objective/QC definition and before RL, with byte/token compatibility and independent calibration/validation banks.",
+        "The response says which durable supervisor or recurrence mechanism will be activated immediately after approval and reports activation success or failure.",
+        "The supervisor has bounded no-progress detection, exact-process checks, and in-scope repair/retry rather than waiting indefinitely at a failed gate.",
+        "The response prefers authenticated W&B with separate SFT and RL projects sharing a prefix, but keeps local telemetry authoritative and does not block when W&B is unavailable.",
+        "The response uses a per-stage topology matrix and prefers pure DP when it fits and improves global throughput, reserving TP for fit, measured throughput, or single-request latency.",
+        "The response forecasts disk from total corpus bases and retained representations plus approximately 91 GB SFT and 78 GB RL full checkpoints, reserves checkpoint-write and transient-QC headroom, and obtains user help or approval for role-based cleanup before launch when capacity is short.",
+        "After genomes are collected, the response proposes p99.9 or the affordable maximum from their tokenized length distribution for agreement, adds worst-case serialization overhead and alignment, and changes the RL length basis only for an explicit expansion or contraction objective."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-005-optional-publication",
+      "prompt": "Plan my phage-design run and publish useful artifacts to gs://lab/phage-y after each stage and each RL validation. Upload only the selected checkpoint for handoff, allow an on-demand snapshot, and verify everything important at the end.",
+      "expected_output": "A controller plan that invokes optional backend-aware artifact publication at decision-relevant moments.",
+      "assertions": [
+        "The response invokes bionemo-phage-design-publish-stage-artifacts because publication was requested.",
+        "The initial plan records destination/backend, private/shared/public access intent, cadence, contents, exclusions, expected sizes, client, and verification.",
+        "Ongoing publication includes settled validation outputs while stage-end publication includes the selected handoff checkpoint and its lineage rather than every checkpoint.",
+        "The response supports a user-requested intermediate snapshot and a final manifest reconciliation with verified destination references.",
+        "Transfer failures use bounded retries and remain visible without blocking an otherwise healthy scientific stage."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-006-external-install-bootstrap",
+      "prompt": "The bionemo-phage-design skill is installed in a shared NVIDIA skill collection. I started the agent from a neutral directory and have no BioNeMo Recipes checkout yet. Prepare a case-study replication workspace for evo2_phage_gen, including where commands and results belong.",
+      "expected_output": "A portable bootstrap plan that acquires BioNeMo Recipes, resolves the recipe revision only when needed, and anchors execution and results to the selected recipe rather than the skill installation path.",
+      "assertions": [
+        "The response does not derive the BioNeMo Recipes checkout or recipe location from the independently installed skill bundle.",
+        "The response clones https://github.com/NVIDIA-BioNeMo/bionemo-recipes and, only if recipes/evo2_phage_gen is absent, offers either https://github.com/NVIDIA-BioNeMo/bionemo-recipes/pull/1699 or the upstream jstjohn/evo2_phage_gen branch as the fallback source.",
+        "The response resolves and records absolute repository, recipe, and result roots before running recipe commands.",
+        "The response defaults case-study replication to recipes/evo2_phage_gen, while an adapted run lets the user choose the owning recipe or a verified copy or worktree.",
+        "The response runs actual workflow commands with the selected recipe as the working directory and keeps generated results under that recipe's results/ directory."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    }
+  ]
+}

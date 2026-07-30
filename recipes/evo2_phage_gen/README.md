@@ -6,12 +6,12 @@ This recipe fine-tunes Evo 2 for phage genomes, runs GDPO, and screens generated
 
 The selected checkpoint was GDPO step 190. Training was monitored through at least step 250 under a 500-step ceiling; step 190 was selected after later checkpoints showed worse quality or diversity, not because 190 is a prescribed stopping step.
 
-| Evaluation | Filter profile | Result |
-| --- | --- | ---: |
-| Fixed 96-design validation, before clustering | Full target QC | 50/96 (52.08%) |
-| Fixed 96-design validation, after the run's configured 99%-identity clustering | Full target QC | 48/96 (50.00%) |
-| Independent 1,000-design Arc rollout from step 190 | Filters 1–6, 8, and 9; filter 7 disabled | 358/1,000 (35.80%) |
-| Diagnostic branch from the same offline rollout | Filter 7 also enabled | 5/1,000 (0.50%) |
+| Evaluation                                                                     | Filter profile                           |             Result |
+| ------------------------------------------------------------------------------ | ---------------------------------------- | -----------------: |
+| Fixed 96-design validation, before clustering                                  | Full target QC                           |     50/96 (52.08%) |
+| Fixed 96-design validation, after the run's configured 99%-identity clustering | Full target QC                           |     48/96 (50.00%) |
+| Independent 1,000-design Arc rollout from step 190                             | Filters 1–6, 8, and 9; filter 7 disabled | 358/1,000 (35.80%) |
+| Diagnostic branch from the same offline rollout                                | Filter 7 also enabled                    |    5/1,000 (0.50%) |
 
 The target profile intentionally disables architecture-removal filter 7 and retains total-gene logic. The 96-design online validation and 1,000-design offline rollout use different pipelines and clustering contracts; their rates must not be combined.
 
@@ -30,27 +30,26 @@ Target-profile offline waterfall:
   → 358 synteny/total-gene final passes
 ```
 
-The checked evidence and source hashes are in [historical-evidence.md](.agents/skills/bionemo-phage-design/references/historical-evidence.md). The recorded source revision is `99673b047a196352afcbb35e7aa4200127af2616`.
+The checked evidence and source hashes are in [historical-evidence.md](../../.agents/skills/bionemo-phage-design/references/historical-evidence.md). The recorded source revision is `99673b047a196352afcbb35e7aa4200127af2616`.
 
 ## Agent-run end-to-end result
 
-Not recorded yet. This section will be replaced with the first complete run performed through the recipe-local agent workflow, including its target, SFT lineage, selected RL checkpoint, rollout size, and final QC result.
+Not recorded yet. This section will be replaced with the first complete run performed through the repository-level agent workflow, including its target, SFT lineage, selected RL checkpoint, rollout size, and final QC result.
 
 ## Run the workflow with an agent
 
 From the repository root:
 
 ```bash
-codex -C recipes/evo2_phage_gen \
+codex \
   'Use $bionemo-phage-design in interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
 ```
 
-Codex discovers the skills in this recipe's `.agents/skills/` directory because `-C` makes the recipe its working directory. The same bundle includes a validated [Codex plugin manifest](.agents/.codex-plugin/plugin.json) for packaging, while other Agent Skills-compatible harnesses can start from [the controller skill](.agents/skills/bionemo-phage-design/SKILL.md).
+The skill bundle lives at the repository root and includes a validated [Codex plugin manifest](../../.agents/.codex-plugin/plugin.json). The controller resolves the selected recipe independently of its install location, runs recipe commands from that directory, and keeps results there. Other Agent Skills-compatible harnesses can start from [the controller skill](../../.agents/skills/bionemo-phage-design/SKILL.md).
 
-With Claude Code, load the same skills as a recipe-local plugin:
+With Claude Code, load the same top-level plugin from the repository root:
 
 ```bash
-cd recipes/evo2_phage_gen
 claude --plugin-dir .agents \
   '/evo2-phage-gen:bionemo-phage-design Use interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
 ```
@@ -91,6 +90,8 @@ This prepares MMseqs2, BLAST/DUST, DIAMOND, HMMER, PHROGs, CheckV, and the pinne
 ### 3. Convert the released Microviridae SFT checkpoint
 
 ```bash
+: "${TARGET_CONTEXT_LENGTH:?Set from the agreed upper bound of the tokenized training-genome length distribution}"
+
 evo2_convert_vortex_to_mbridge \
   --hf-repo-id evo-design/evo-2-7b-8k-microviridae \
   --hf-filename evo2_7b_microviridae.pt \
@@ -98,7 +99,7 @@ evo2_convert_vortex_to_mbridge \
   --mbridge-ckpt-dir data/checkpoints/evo2_7b_microviridae_mbridge \
   --model-size evo2_7b_microviridae \
   --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 \
-  --seq-length 10240 \
+  --seq-length "$TARGET_CONTEXT_LENGTH" \
   --mixed-precision-recipe bf16_mixed
 ```
 
@@ -191,21 +192,21 @@ evo2_phage_download_sft_data --include-raw
 preprocess_evo2 --config configs/sft_microviridae_preprocess.yaml
 ```
 
-There is not yet a checked-in canonical launcher for the complete paper SFT run, so the main reproduction path above uses the released SFT checkpoint. The published full fine-tune used 12,000 iterations, 32 H100 GPUs, a sample batch of 32, context length 10,240, 327,680 tokens per optimizer step, initial learning rate `1e-5`, 5% warmup, and cosine decay to `1e-6`.
+There is not yet a checked-in canonical launcher for the complete paper SFT run, so the main reproduction path above uses the released SFT checkpoint. For a new run, download the training genomes, inspect their tokenized length distribution, and agree on a high-coverage context rule (propose p99.9 or the affordable maximum), including worst-case control/prompt/EOD overhead and required alignment, before selecting the model, effective token batch, and SFT/RL settings. The bundled paper supplement preserves the exact historical configuration.
 
 ## Troubleshooting
 
 - If an entrypoint is missing, rerun `.ci_build.sh`, source `.ci_test_env.sh`, and check `pyproject.toml` plus `<command> --help`.
-- If GDPO runs out of memory, lower the microbatch first while preserving the effective global batch; see the [resource and OOM guide](.agents/skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md).
+- If GDPO runs out of memory, lower the microbatch first while preserving the effective global batch; see the [resource and OOM guide](../../.agents/skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md).
 - If external QC fails, verify the large databases completed successfully and inspect the per-stage logs under the rollout root.
 - If a fresh run selects a checkpoint other than step 190, use that checkpoint for rollout and report its validation evidence. Step 190 is historical context, not a fixed target.
 
 ## References
 
 - [Generative design of novel bacteriophages with genome language models](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full)
-- [Checked paper, supplement, and figure assets](.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/)
-- [Skill validation record](.agents/skills/bionemo-phage-design/assets/VALIDATION.md)
-- [Historical result evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md)
+- [Checked paper, supplement, and figure assets](../../.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/)
+- [Skill validation record](../../.agents/skills/bionemo-phage-design/assets/VALIDATION.md)
+- [Historical result evidence](../../.agents/skills/bionemo-phage-design/references/historical-evidence.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)
 - [Recipe commands and dependency pins](pyproject.toml)
 - [Evo 2 model and checkpoint notes](../evo2_megatron/README.md)
