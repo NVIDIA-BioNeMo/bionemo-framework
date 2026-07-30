@@ -381,15 +381,14 @@ def _validate_case(case: Any, *, source: Path, index: int, skill_name: str) -> l
     where = f"{source}: evals[{index}]"
     if not isinstance(case, dict):
         return [f"{where} must be an object"]
-    errors: list[str] = []
-    for field in REQUIRED_CASE_FIELDS:
-        if field not in case:
-            errors.append(f"{where} is missing required field {field!r}")
+    errors = [f"{where} is missing required field {field!r}" for field in REQUIRED_CASE_FIELDS if field not in case]
     if errors:
         return errors
-    for field in ("id", "prompt", "expected_output"):
-        if not isinstance(case[field], str) or not case[field].strip():
-            errors.append(f"{where}.{field} must be a non-empty string")
+    errors.extend(
+        f"{where}.{field} must be a non-empty string"
+        for field in ("id", "prompt", "expected_output")
+        if not isinstance(case[field], str) or not case[field].strip()
+    )
     if isinstance(case["id"], str) and not SAFE_ID.fullmatch(case["id"]):
         errors.append(f"{where}.id must match {SAFE_ID.pattern}")
     assertions = case["assertions"]
@@ -706,9 +705,11 @@ def _structured_error_messages(trace: str) -> list[tuple[str, str]]:
         errors = event.get("errors")
         if isinstance(errors, list):
             candidates.extend(errors)
-        for candidate in candidates:
-            if isinstance(candidate, str) and candidate.strip():
-                messages.append((f"trace:{event['type']}", candidate))
+        messages.extend(
+            (f"trace:{event['type']}", candidate)
+            for candidate in candidates
+            if isinstance(candidate, str) and candidate.strip()
+        )
     return messages
 
 

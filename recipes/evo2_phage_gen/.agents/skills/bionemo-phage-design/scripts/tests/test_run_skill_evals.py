@@ -35,8 +35,8 @@ runner = importlib.util.module_from_spec(RUNNER_SPEC)
 sys.modules[RUNNER_SPEC.name] = runner
 RUNNER_SPEC.loader.exec_module(runner)
 SKILL_ROOT = SCRIPT.parents[2]
-REPOSITORY_ROOT = SCRIPT.parents[4]
-RECIPE_ROOT = REPOSITORY_ROOT / "recipes" / "evo2_phage_gen"
+REPOSITORY_ROOT = next(parent for parent in SCRIPT.parents if (parent / ".git").exists())
+RECIPE_ROOT = SCRIPT.parents[4]
 EXPECTED_RECIPE_SKILLS = {
     "bionemo-phage-design",
     "bionemo-phage-design-adapt-execution",

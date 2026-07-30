@@ -72,7 +72,7 @@ class SourceDriftError(LiteratureAssetError):
     """Pinned input or converter identity changed without explicit update."""
 
 
-class OfflineCacheMiss(LiteratureAssetError):
+class OfflineCacheMissError(LiteratureAssetError):
     """Offline mode was requested but a required object is not cached."""
 
 
@@ -657,7 +657,7 @@ class DownloadCache:
         """Read a cached download for a source URL."""
         payload, metadata = self._paths(url)
         if not payload.is_file() or not metadata.is_file():
-            raise OfflineCacheMiss(f"offline cache miss for {url}")
+            raise OfflineCacheMissError(f"offline cache miss for {url}")
         record = json.loads(metadata.read_text(encoding="utf-8"))
         return Downloaded(payload.read_bytes(), record["content_type"], record["final_url"])
 
@@ -694,7 +694,7 @@ class Fetcher:
         if not self.refresh:
             try:
                 return self.cache.read(url)
-            except OfflineCacheMiss:
+            except OfflineCacheMissError:
                 pass
 
         def attempt() -> bytes:
@@ -839,10 +839,8 @@ def check_asset_tree(root: Path) -> list[str]:
         return [f"invalid MANIFEST.json: {error}"]
     expected = {item["path"]: item for item in manifest.get("files", [])}
     actual = {path.relative_to(root).as_posix(): path for path in _files(root) if path != manifest_path}
-    for missing in sorted(expected.keys() - actual.keys()):
-        errors.append(f"missing file: {missing}")
-    for extra in sorted(actual.keys() - expected.keys()):
-        errors.append(f"extra file: {extra}")
+    errors.extend(f"missing file: {missing}" for missing in sorted(expected.keys() - actual.keys()))
+    errors.extend(f"extra file: {extra}" for extra in sorted(actual.keys() - expected.keys()))
     for relative in sorted(expected.keys() & actual.keys()):
         data = actual[relative].read_bytes()
         record = expected[relative]
@@ -977,8 +975,10 @@ def read_xlsx_sheet(workbook: Path, sheet_name: str) -> XlsxSheet:
         except KeyError:
             pass
         else:
-            for item in shared_root.findall(f"{{{_SHEET_NS}}}si"):
-                shared.append("".join(node.text or "" for node in item.iter(f"{{{_SHEET_NS}}}t")))
+            shared = [
+                "".join(node.text or "" for node in item.iter(f"{{{_SHEET_NS}}}t"))
+                for item in shared_root.findall(f"{{{_SHEET_NS}}}si")
+            ]
 
         parsed: list[dict[int, str]] = []
         max_column = 0

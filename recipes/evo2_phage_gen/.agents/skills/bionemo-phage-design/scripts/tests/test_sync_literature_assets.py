@@ -82,16 +82,16 @@ def _make_xlsx(path: Path, *, rows: int = 3, columns: int = 33, formula_values: 
     """Build a minimal XLSX whose second sheet is named ``Sheet 1``."""
     main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-    workbook = f'''<?xml version="1.0" encoding="UTF-8"?>
+    workbook = f"""<?xml version="1.0" encoding="UTF-8"?>
 <workbook xmlns="{main}" xmlns:r="{rel}"><sheets>
 <sheet name="Contents" sheetId="1" r:id="rId1"/><sheet name="Sheet 1" sheetId="2" r:id="rId2"/>
-</sheets></workbook>'''
+</sheets></workbook>"""
     rels = """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
 <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
 </Relationships>"""
-    contents = f'''<?xml version="1.0"?><worksheet xmlns="{main}"><sheetData/></worksheet>'''
+    contents = f"""<?xml version="1.0"?><worksheet xmlns="{main}"><sheetData/></worksheet>"""
 
     def col_name(number: int) -> str:
         out = ""
@@ -114,8 +114,8 @@ def _make_xlsx(path: Path, *, rows: int = 3, columns: int = 33, formula_values: 
             else:
                 cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{value}</t></is></c>')
         xml_rows.append(f'<row r="{row}">{"".join(cells)}</row>')
-    sheet = f'''<?xml version="1.0" encoding="UTF-8"?>
-<worksheet xmlns="{main}"><dimension ref="A1:AG{rows + 1}"/><sheetData>{"".join(xml_rows)}</sheetData></worksheet>'''
+    sheet = f"""<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="{main}"><dimension ref="A1:AG{rows + 1}"/><sheetData>{"".join(xml_rows)}</sheetData></worksheet>"""
     content_types = """<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"""
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("[Content_Types].xml", content_types)
@@ -295,7 +295,7 @@ class FetchValidationTests(unittest.TestCase):
     def test_offline_cache_miss_fails_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = sync.DownloadCache(Path(tmp))
-            with self.assertRaises(sync.OfflineCacheMiss):
+            with self.assertRaises(sync.OfflineCacheMissError):
                 cache.read("https://www.biorxiv.org/missing")
 
     def test_fallback_is_allowed_only_for_retryable_workbook_failures(self) -> None:
