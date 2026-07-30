@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from megatron.bridge.training.config import OptimizerConfig, OptimizerConfigOverrideProviderContext, SchedulerConfig
-from megatron.core.optimizer import _get_param_groups
+from megatron.core.optimizer import _get_param_groups, get_standard_config_overrides
 
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaOptimizerConfigOverrideProvider
 
@@ -105,7 +105,7 @@ def test_weight_decay_conditions():
         param_groups = _get_param_groups(
             model_chunks=[model],
             config=optimizer_config,
-            config_overrides=None,  # default config overrides
+            config_overrides=get_standard_config_overrides(optimizer_config),
         )
         param_groups2 = _get_param_groups(
             model_chunks=[model],

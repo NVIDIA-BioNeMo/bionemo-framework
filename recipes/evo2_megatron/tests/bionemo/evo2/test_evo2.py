@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import inspect
 import logging
 import os
@@ -35,6 +36,7 @@ from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.mapping import ShardedTensor
+from megatron.core.inference.utils import InferenceMode
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import Float16Module
 
@@ -390,13 +392,15 @@ def test_forward_manual(
                 input_ids = torch.tensor(tokenizer.tokenize(partial_seq)).int().unsqueeze(0).to(device)
                 attention_mask = None
                 # when labels is None, the model returns logits
-                logits = model(
-                    input_ids=input_ids,
-                    position_ids=None,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    **forward_kwargs,
-                )
+                inference_mode_context = InferenceMode.active() if flash_decode else contextlib.nullcontext()
+                with inference_mode_context:
+                    logits = model(
+                        input_ids=input_ids,
+                        position_ids=None,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        **forward_kwargs,
+                    )
                 if flash_decode:
                     forward_kwargs["inference_context"].reset()
                 matchrate = _calc_matchrate(tokenizer=tokenizer, in_seq=partial_seq, logits=logits)
@@ -499,13 +503,15 @@ def test_forward_ckpt_conversion(
                 input_ids = torch.tensor(tokenizer.tokenize(partial_seq)).int().unsqueeze(0).to(device)
                 attention_mask = None
                 # when labels is None, the model returns logits
-                logits = model(
-                    input_ids=input_ids,
-                    position_ids=None,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    **forward_kwargs,
-                )
+                inference_mode_context = InferenceMode.active() if flash_decode else contextlib.nullcontext()
+                with inference_mode_context:
+                    logits = model(
+                        input_ids=input_ids,
+                        position_ids=None,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        **forward_kwargs,
+                    )
                 if flash_decode:
                     forward_kwargs["inference_context"].reset()
                 matchrate = _calc_matchrate(tokenizer=tokenizer, in_seq=partial_seq, logits=logits)

@@ -131,6 +131,40 @@ def test_native_stop_token_ids_resolves_eos_text_token():
     assert _native_stop_token_ids(_FakeTokenizer()) == {0}
 
 
+def test_simple_generation_activates_mcore_inference_mode():
+    from megatron.core.inference.utils import InferenceMode
+
+    from bionemo.evo2.run.infer_example_simple import generate_tokens_simple
+
+    inference_context = HyenaInferenceContext(max_batch_size=1, max_sequence_length=16)
+
+    class _InferenceModeCheckingModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, input_ids, **kwargs):
+            assert InferenceMode.is_active()
+            assert kwargs["inference_context"] is inference_context
+            self.calls += 1
+            logits = torch.zeros((*input_ids.shape, 4), device=input_ids.device)
+            logits[..., 1] = 1.0
+            return logits
+
+    model = _InferenceModeCheckingModel()
+    generated_tokens = generate_tokens_simple(
+        model,
+        torch.tensor([[1, 2]], dtype=torch.long),
+        max_new_tokens=2,
+        top_k=1,
+        inference_context=inference_context,
+    )
+
+    assert generated_tokens == [1, 1]
+    assert model.calls == 3
+    assert not InferenceMode.is_active()
+
+
 def test_sampled_eos_is_omitted_without_stopping_when_ignore_eos_is_enabled():
     assert _sampled_token_action(0, {0}, ignore_eos=True) == (False, False)
 
@@ -1986,7 +2020,7 @@ def test_savanna_to_mbridge_inference_accuracy_7b(mbridge_checkpoint_7b_from_sav
 @pytest.mark.timeout(512)
 @pytest.mark.slow
 def test_different_results_with_without_peft(tmp_path, mbridge_checkpoint_path, lora_finetune_checkpoint):
-    """Greedy-generate from the base ckpt vs. the LoRA ckpt and assert the logprobs differ."""
+    """Top-k sample from the base ckpt vs. the LoRA ckpt and assert the logprobs differ."""
     env = copy.deepcopy(PRETEST_ENV)
     # 64-char prompt for FP8 divisibility.
     prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
@@ -2010,9 +2044,10 @@ def test_different_results_with_without_peft(tmp_path, mbridge_checkpoint_path, 
             "--temperature",
             "1.0",
             "--top-k",
-            "1",
+            "2",
             "--seed",
             "0",
+            "--ignore-eos",
             "--return-log-probs",
             "--output-file",
             str(output_file),

@@ -38,9 +38,11 @@ Example:
     >>> tokens = generate_tokens_simple(model, prompt_tokens, max_new_tokens=100, inference_context=ctx)
 """
 
+import contextlib
 from typing import List, Optional
 
 import torch
+from megatron.core.inference.utils import InferenceMode
 
 from bionemo.evo2.models.evo2_provider import HyenaInferenceContext
 
@@ -106,14 +108,16 @@ def generate_tokens_simple(
 
     # Process the full prompt first (prefill phase)
     # This computes and caches the SSM states for all prompt tokens
-    logits = model(
-        input_ids=prompt_tokens,
-        position_ids=None,
-        attention_mask=None,
-        labels=None,
-        runtime_gather_output=True,
-        inference_context=inference_context,
-    )
+    inference_mode_context = InferenceMode.active() if inference_context is not None else contextlib.nullcontext()
+    with inference_mode_context:
+        logits = model(
+            input_ids=prompt_tokens,
+            position_ids=None,
+            attention_mask=None,
+            labels=None,
+            runtime_gather_output=True,
+            inference_context=inference_context,
+        )
 
     # Update sequence_len_offset after prefill (MCore wrapper does this automatically)
     if inference_context is not None:
@@ -148,14 +152,16 @@ def generate_tokens_simple(
         next_input = torch.tensor([[next_token]], dtype=torch.long, device=device)
 
         # Forward pass with cached state
-        logits = model(
-            input_ids=next_input,
-            position_ids=None,
-            attention_mask=None,
-            labels=None,
-            runtime_gather_output=True,
-            inference_context=inference_context,
-        )
+        inference_mode_context = InferenceMode.active() if inference_context is not None else contextlib.nullcontext()
+        with inference_mode_context:
+            logits = model(
+                input_ids=next_input,
+                position_ids=None,
+                attention_mask=None,
+                labels=None,
+                runtime_gather_output=True,
+                inference_context=inference_context,
+            )
 
         # Update sequence_len_offset after each decode step
         if inference_context is not None:
