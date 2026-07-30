@@ -56,7 +56,7 @@ A total of 15,507 *Microviridae* genomes were collected from public databases as
 
 ##### ***B.1.5.*** Data preprocessing for supervised fine-tuning
 
-*Microviridae* sequences were aligned to the ΦX174 NCBI reference sequence NC_001422.1 using align. align_optimal from the biotite Python package version 0.39.0 ([Kunzmann & Hamacher, 2018](paper.md#ref-53)) and the sequences were prepended with tokens indicating their percent sequence identity to ΦX174. All sequences were prepended with the token “+” indicating *Microviridae*. After the “+” token, sequences with 95–100% identity to ΦX174 were prepended with “∼”, 80–95% with “^”, 70–80% with “#”, 50–70% with “$”, and \<50% with “!”. Note that this soft-prompting strategy was not used for the final generation of generated phage candidates; however, the tokens “+∼” were prepended to every prompt before generation. Before finetuning, phage genomes were randomly split into 14,266 training sequences, 100 validation sequences, and 100 test sequences.
+*Microviridae* sequences were aligned to the ΦX174 NCBI reference sequence NC_001422.1 using align. align_optimal from the biotite Python package version 0.39.0 ([Kunzmann & Hamacher, 2018](paper.md#ref-53)) and the sequences were prepended with tokens indicating their percent sequence identity to ΦX174. All sequences were prepended with the token “+” indicating *Microviridae*. After the “+” token, sequences with 95–100% identity to ΦX174 were prepended with “∼”, 80–95% with “^”, 70–80% with “#”, 50–70% with “$”, and <50% with “!”. Note that this soft-prompting strategy was not used for the final generation of generated phage candidates; however, the tokens “+∼” were prepended to every prompt before generation. Before finetuning, phage genomes were randomly split into 14,266 training sequences, 100 validation sequences, and 100 test sequences.
 
 <a id="sec-23"></a>
 
@@ -218,7 +218,7 @@ Unless otherwise noted, the wild-type ΦX174 reference genome used for all phylo
 
 ##### ***B.3.2.*** Synteny analysis
 
-Synteny was visualized by LoVis4u with flags -hl, --set-category-colour, -cA4p2, -alip, ([Egorov & Atkinson, 2025](paper.md#ref-22)) using GFF3 files for each phage genome created with a custom script (**Data and code availability**). Pairwise synteny between each phage genome was determined in the order presented (**[Figure 4A](paper.md#f4)**) and consolidated into a single synteny plot. Since our gene annotation method only partially predicted gene A\*, it was omitted from synteny visualization. Synonymous, nonsynonymous, and noncoding mutations were determined by aligning each generated genome against the ΦX174 reference genome with MAFFT ([Katoh & Standley, 2013](paper.md#ref-48)) in Geneious Prime version 2025.1.2 ([https://www.geneious.com/](https://www.geneious.com/)), setting ΦX174 as the reference sequence, finding variations/SNVs with Inside&OutsideCDS and genetic code set as Bacter ial, then colored by ProteinEffect. If synonymous and nonsynonymous mutations overlapped due to overlapping genes, the nonsynonymous mutation was visualized as the top layer. Genes sharing synteny with ΦX174 were determined using a custom script (**Data and code availability**) analyzing the pairwise protein identity matrix calculated by LoVis4u. For simply visualizing SNVs relative to ΦX174, ΦX174 was set as the reference sequence and the default mutation highlighting in Geneious Prime was exported and overlaid on the synteny visualization.
+Synteny was visualized by LoVis4u with flags -hl, --set-category-colour, -cA4p2, -alip, ([Egorov & Atkinson, 2025](paper.md#ref-22)) using GFF3 files for each phage genome created with a custom script (**Data and code availability**). Pairwise synteny between each phage genome was determined in the order presented (**[Figure 4A](paper.md#f4)**) and consolidated into a single synteny plot. Since our gene annotation method only partially predicted gene A*, it was omitted from synteny visualization. Synonymous, nonsynonymous, and noncoding mutations were determined by aligning each generated genome against the ΦX174 reference genome with MAFFT ([Katoh & Standley, 2013](paper.md#ref-48)) in Geneious Prime version 2025.1.2 ([https://www.geneious.com/](https://www.geneious.com/)), setting ΦX174 as the reference sequence, finding variations/SNVs with Inside\&OutsideCDS and genetic code set as Bacter ial, then colored by ProteinEffect. If synonymous and nonsynonymous mutations overlapped due to overlapping genes, the nonsynonymous mutation was visualized as the top layer. Genes sharing synteny with ΦX174 were determined using a custom script (**Data and code availability**) analyzing the pairwise protein identity matrix calculated by LoVis4u. For simply visualizing SNVs relative to ΦX174, ΦX174 was set as the reference sequence and the default mutation highlighting in Geneious Prime was exported and overlaid on the synteny visualization.
 
 <a id="sec-50"></a>
 
@@ -310,7 +310,7 @@ A glycerol scrape of *E. coli* C was inoculated in 100 mL of LB and incubated at
 
 ##### ***B.5.2.*** Bacteriophage competition sequencing analysis
 
-The raw sequencing reads from each competition time point were analyzed using a custom script (**Data and code availability**). Sequencing reads with a MAPQ score of \<20, an alignment length of \<70%, and a percent identity of \<90% against their top alignment of the generated phage genomes and ΦX174 were filtered out from the analysis. The top alignment hit was considered the phage identity of a given sequencing read. The fold change for a given phage genome at each time point tn from the time point before it tn-1 was calculated as the read count at tn divided by the read count at tn-1. The cumulative fold change for a given phage genome at time point tn was calculated as the sum of the fold change of all previous time points since the initial infection at t0.
+The raw sequencing reads from each competition time point were analyzed using a custom script (**Data and code availability**). Sequencing reads with a MAPQ score of <20, an alignment length of <70%, and a percent identity of <90% against their top alignment of the generated phage genomes and ΦX174 were filtered out from the analysis. The top alignment hit was considered the phage identity of a given sequencing read. The fold change for a given phage genome at each time point tn from the time point before it tn-1 was calculated as the read count at tn divided by the read count at tn-1. The cumulative fold change for a given phage genome at time point tn was calculated as the sum of the fold change of all previous time points since the initial infection at t0.
 
 <a id="sec-66"></a>
 
@@ -453,7 +453,7 @@ To identify mutational differences potentially conferring resistance amongst ΦX
 
 ![Figure S16](figures/figure-22.jpg)
 
-\**Figure S16 Supplementary data for cryo-EM analysis. (A–B)Titrations of purified ΦX174 (A) and Evo-Φ36 (B) cryo-EM samples. (C–D) SDS-PAGE of ΦX174 (C) and Evo-Φ36 (D) iodixonol gradient fractions. *, fraction used for cryo-EM. (E–F) Representative cryo-EM micrographs of ΦX174 (E) and Evo-Φ36 (F) grids used for cryo-EM data collection.**
+**Figure S16 Supplementary data for cryo-EM analysis. (A–B)Titrations of purified ΦX174 (A) and Evo-Φ36 (B) cryo-EM samples. (C–D) SDS-PAGE of ΦX174 (C) and Evo-Φ36 (D) iodixonol gradient fractions. *, fraction used for cryo-EM. (E–F) Representative cryo-EM micrographs of ΦX174 (E) and Evo-Φ36 (F) grids used for cryo-EM data collection.**
 
 <a id="f23"></a>
 
@@ -488,7 +488,6 @@ To identify mutational differences potentially conferring resistance amongst ΦX
 <a id="t1"></a>
 
 View this table:
-
 - View inline
 - [View popup](https://www.biorxiv.org/highwire/markup/4895020/expansion?width=1000&height=500&iframe=true&postprocessors=highwire_tables%2Chighwire_reclass%2Chighwire_figures%2Chighwire_math%2Chighwire_inline_linked_media%2Chighwire_embed)
 - [Download powerpoint](https://www.biorxiv.org/highwire/powerpoint/4895020)

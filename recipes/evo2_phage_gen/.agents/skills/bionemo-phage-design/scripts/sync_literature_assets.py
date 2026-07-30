@@ -72,7 +72,7 @@ class SourceDriftError(LiteratureAssetError):
     """Pinned input or converter identity changed without explicit update."""
 
 
-class OfflineCacheMissError(LiteratureAssetError):
+class OfflineCacheMiss(LiteratureAssetError):  # noqa: N818 - preserved public compatibility name
     """Offline mode was requested but a required object is not cached."""
 
 
@@ -657,7 +657,7 @@ class DownloadCache:
         """Read a cached download for a source URL."""
         payload, metadata = self._paths(url)
         if not payload.is_file() or not metadata.is_file():
-            raise OfflineCacheMissError(f"offline cache miss for {url}")
+            raise OfflineCacheMiss(f"offline cache miss for {url}")
         record = json.loads(metadata.read_text(encoding="utf-8"))
         return Downloaded(payload.read_bytes(), record["content_type"], record["final_url"])
 
@@ -694,7 +694,7 @@ class Fetcher:
         if not self.refresh:
             try:
                 return self.cache.read(url)
-            except OfflineCacheMissError:
+            except OfflineCacheMiss:
                 pass
 
         def attempt() -> bytes:

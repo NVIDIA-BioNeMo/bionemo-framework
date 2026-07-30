@@ -2,8 +2,8 @@
 
 James R.M. Black, Aaron Maiwald, Jassi Pannu, Oliver M. Crook
 
-Version: v1
-DOI: [10.64898/2026.06.12.731871](https://doi.org/10.64898/2026.06.12.731871)
+Version: v1  
+DOI: [10.64898/2026.06.12.731871](https://doi.org/10.64898/2026.06.12.731871)  
 License: [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
 
 <a id="abstract-1"></a>
@@ -122,7 +122,7 @@ High design efficiency could arise in two ways: by learning to navigate novel se
 
 We reconstructed a phylogeny from the 302 synthetic sequences and 11 natural ΦX174 reference genomes used by [King et al. (2025)](#ref-19) ([Fig. 3B](#f3)), selected in order that analyses were directly comparable with the original phylogenetic analyses, and calculated the patristic distance from each synthetic sequence to its nearest natural neighbour (see methods).
 
-Evo 2 likelihood correlated strongly with evolutionary proximity (Pearson’s *ρ* = − 0.88, *p \<* 2.2*e*<sup>*−*16</sup>; [Fig. 3C](#f3)): sequences the model scored highly were phylogenetically closer to natural genomes. This indicates that Evo 2’s efficiency derives from recognising and reproducing patterns present in natural variation, rather than from successful extrapolation into unexplored regions of sequence space.
+Evo 2 likelihood correlated strongly with evolutionary proximity (Pearson’s *ρ* = − 0.88, *p <* 2.2*e*<sup>*−*16</sup>; [Fig. 3C](#f3)): sequences the model scored highly were phylogenetically closer to natural genomes. This indicates that Evo 2’s efficiency derives from recognising and reproducing patterns present in natural variation, rather than from successful extrapolation into unexplored regions of sequence space.
 
 <a id="sec-12"></a>
 
@@ -152,7 +152,7 @@ At 97% nucleotide identity to the reference phage, the model achieved 5.3% succe
 
 #### Inferring an effective failure rate
 
-To enable comparison, we inferred an effective per-mutation failure rate from the observed data. With 174 mutations at 97% identity (for a 5.8kb genome), and assuming mutations contribute independently, the observed 5.3% viability implies: yielding *p*<sub>*eff*</sub> = 1.67% ≈ (*CI* : 1.45 − 2.04%). This represents a summary statistic rather than a literal per-site lethality rate. The independence assumption is almost certainly wrong: epistasis is pervasive within the ΦX174 genome, which contains multiple overlapping reading frames, whilst the effects of mutation are not multiplicative in practice as we assume here. Therefore, the specific values we report should be treated as approximations, as epistatic interactions mean some mutation combinations are more or less deleterious than the product of individual effects. Calculating more accurate values would require significant dedicated experimental work beyond the scope of this manuscript. However, this effective rate provides a useful basis for comparison with literature values derived under similar assumptions, and the observed uplift is directionally real and plausibly accurate to an approximate order of magnitude.
+To enable comparison, we inferred an effective per-mutation failure rate from the observed data. With 174 mutations at 97% identity (for a 5.8kb genome), and assuming mutations contribute independently, the observed 5.3% viability implies:   yielding *p*<sub>*eff*</sub> = 1.67% ≈ (*CI* : 1.45 − 2.04%). This represents a summary statistic rather than a literal per-site lethality rate. The independence assumption is almost certainly wrong: epistasis is pervasive within the ΦX174 genome, which contains multiple overlapping reading frames, whilst the effects of mutation are not multiplicative in practice as we assume here. Therefore, the specific values we report should be treated as approximations, as epistatic interactions mean some mutation combinations are more or less deleterious than the product of individual effects. Calculating more accurate values would require significant dedicated experimental work beyond the scope of this manuscript. However, this effective rate provides a useful basis for comparison with literature values derived under similar assumptions, and the observed uplift is directionally real and plausibly accurate to an approximate order of magnitude.
 
 <a id="sec-16"></a>
 
@@ -166,7 +166,7 @@ Importantly, these rates measure different things: [Domingo-Calap et al. (2009)]
 
 #### Comparison to MSA-aware mutagenesis
 
-A more generous baseline restricts mutations to sites that vary in natural Φ X174 sequences, where evolution has already demonstrated tolerance of substitution. Even under this assumption, achieving 5.3% viability would require implausibly low lethality rates at variable sites (*\<* 0.5%). Across realistic rates (1–15%), the model still shows a substantial uplift of several orders of magnitude ([Figure 3D](#f3)). Design efficiency therefore cannot be explained solely by mutating at evolutionarily permissive positions.
+A more generous baseline restricts mutations to sites that vary in natural Φ X174 sequences, where evolution has already demonstrated tolerance of substitution. Even under this assumption, achieving 5.3% viability would require implausibly low lethality rates at variable sites (*<* 0.5%). Across realistic rates (1–15%), the model still shows a substantial uplift of several orders of magnitude ([Figure 3D](#f3)). Design efficiency therefore cannot be explained solely by mutating at evolutionarily permissive positions.
 
 <a id="sec-18"></a>
 
@@ -294,14 +294,14 @@ To assess the biological plausibility of the generated sequences, we computed a 
 
 To separate the model’s contribution from simple evolutionary conservation, we quantified ‘Design Efficiency’ as the increase in the probability of generating a viable sequence relative to a random baseline.
 
-First, we inferred an effective per-mutation failure rate for the model. We observed a viability rate of 5.3% for genomes generated at approximately 97% nucleotide identity. Assuming an independent-hits model, we calculated the effective per-mutation failure probability (*p*<sub>eff</sub>) using the equation: where *k* is the number of mutations (174 for a 5.8kb genome) and *V*<sub>observed</sub> is the empirical viability (0.053).
+First, we inferred an effective per-mutation failure rate for the model. We observed a viability rate of 5.3% for genomes generated at approximately 97% nucleotide identity. Assuming an independent-hits model, we calculated the effective per-mutation failure probability (*p*<sub>eff</sub>) using the equation:   where *k* is the number of mutations (174 for a 5.8kb genome) and *V*<sub>observed</sub> is the empirical viability (0.053).
 
 We then calculated the expected viability of baseline generators (*P*<sub>baseline</sub>) under two scenarios:
 
 - Naïve Baseline: Assumes mutations are distributed uniformly with a per-mutation lethality rate of 20% (*p*<sub>lethal</sub> = 0.2), based on deep mutational scanning data ([Domingo-Calap et al., 2009](#ref-9)).
 - MSA-Aware Baseline: Restricts mutations solely to sites identified as variable within the multiple sequence alignment, testing across a range of assumed lethal rates (1–15%).
 
-We define Generative Uplift as the ratio of the model’s viability probability to the baseline viability probability at a given number of mutations *k*: This general formulation allows comparison against any baseline generator. For the naïve random mutagenesis baseline, where each mutation has independent lethality probability *p*<sub>lethal</sub>, this becomes: For the MSA-aware baseline, we substitute the assumed lethality rate at variable sites (*p*<sub>var</sub>) for
+We define Generative Uplift as the ratio of the model’s viability probability to the baseline viability probability at a given number of mutations *k*:   This general formulation allows comparison against any baseline generator. For the naïve random mutagenesis baseline, where each mutation has independent lethality probability *p*<sub>lethal</sub>, this becomes:   For the MSA-aware baseline, we substitute the assumed lethality rate at variable sites (*p*<sub>var</sub>) for
 
 *p*<sub>lethal</sub>, testing across a range of plausible values (0.1–15%).
 
@@ -311,7 +311,7 @@ We define Generative Uplift as the ratio of the model’s viability probability 
 
 All statistical analyses were performed using R (version 4.2.2). Data wrangling and visualisation were conducted using tidyverse alongside ggpubr and gridExtra.
 
-Receiver Operating Characteristic (ROC) analysis was performed using the pROC package to calculate AUC metrics. We first screened potential predictors of viability using univariate logistic regression. Variables that demonstrated statistical significance (*p \<* 0.05) in this univariate screening were subsequently included in a multivariable logistic regression model. Model outputs were processed using the broom package.
+Receiver Operating Characteristic (ROC) analysis was performed using the pROC package to calculate AUC metrics. We first screened potential predictors of viability using univariate logistic regression. Variables that demonstrated statistical significance (*p <* 0.05) in this univariate screening were subsequently included in a multivariable logistic regression model. Model outputs were processed using the broom package.
 
 To quantify the added value of the Evo 2 model, we compared a baseline model (comprising the significant low-complexity covariates) against a full model (baseline + Evo 2 likelihoods). We assessed the improvement in model fit using the Likelihood Ratio Test and calculated McFadden’s pseudo-*R*<sup>2</sup> to quantify the proportion of variance explained by each model configuration.
 
@@ -325,7 +325,7 @@ We simulated viral evolution under repeated serial passage using a minimal stoch
 
 #### Model overview
 
-Each viral genome is represented by the cumulative number of substitutions in three fitness classes: deleterious (*k*<sub>*d*</sub>), neutral (*k*<sub>*n*</sub>), and beneficial (*k*<sub>*b*</sub>). The total number of substitutions is *k* = *k*<sub>*d*</sub> + *k*<sub>*n*</sub> + *k*<sub>*b*</sub>. Fitness is assumed multiplicative: where *s*<sub>del</sub> and *s*<sub>ben</sub> are per-mutation selection coefficients.
+Each viral genome is represented by the cumulative number of substitutions in three fitness classes: deleterious (*k*<sub>*d*</sub>), neutral (*k*<sub>*n*</sub>), and beneficial (*k*<sub>*b*</sub>). The total number of substitutions is *k* = *k*<sub>*d*</sub> + *k*<sub>*n*</sub> + *k*<sub>*b*</sub>. Fitness is assumed multiplicative:   where *s*<sub>del</sub> and *s*<sub>ben</sub> are per-mutation selection coefficients.
 
 Within each passage, the population evolves for *g* effective viral generations. Each generation consists of:
 
@@ -347,7 +347,7 @@ After *g* generations, a **bottleneck** is imposed by sampling *B* genomes multi
 
 #### Sequence identity calculation
 
-The simulator tracks cumulative substitutions per site: Observed sequence identity is derived using the Jukes–Cantor (JC69) substitution model to account for multiple hits and back mutations (Jukes et al., 1969): We report both the population-mean identity and a consensus-like identity computed from the most abundant genotype (modal lineage). All reported identities refer to the JC-corrected expected sequence identity.
+The simulator tracks cumulative substitutions per site:   Observed sequence identity is derived using the Jukes–Cantor (JC69) substitution model to account for multiple hits and back mutations (Jukes et al., 1969):   We report both the population-mean identity and a consensus-like identity computed from the most abundant genotype (modal lineage). All reported identities refer to the JC-corrected expected sequence identity.
 
 <a id="sec-39"></a>
 
@@ -377,7 +377,7 @@ We explored a grid of biologically plausible values for the dominant evolutionar
 
 #### Fraction of deleterious mutations
 
-with *p*<sub>ben</sub> = 10<sup>*−*3</sup> fixed and These values represent the effective fraction of mutations contributing to long-term substitution dynamics, incorporating genome-wide constraint, epistasis, and repeated bottlenecks.
+with *p*<sub>ben</sub> = 10<sup>*−*3</sup> fixed and   These values represent the effective fraction of mutations contributing to long-term substitution dynamics, incorporating genome-wide constraint, epistasis, and repeated bottlenecks.
 
 <a id="sec-44"></a>
 
@@ -431,135 +431,101 @@ JRMB and AM are funded by Coefficient Giving. OMC is funded by an MRC grant (MR/
 - [↵](#xref-ref-1-1)<a id="cit-2026-06-12-731871v1-1"></a>
 
 Almeida, B. P. d., Dalla-Torre, H., Richard, G., Blum, C., Hexemer, L., Gélard, M., Mendoza-Revilla, J., Tang, Z., Marin, F. I., Emms, D. M., Pandey, P., Laurent, S., Lopez, M., Laterre, A., Lang, M., Şahin, U., Beguir, K., and Pierrot, T. Annotating the genome at single-nucleotide resolution with DNA foundation models, March 2025. URL [https://www.biorxiv.org/content/10.1101/2024.03.14.584712v4](https://www.biorxiv.org/content/10.1101/2024.03.14.584712v4). Pages: 2024.03.14.584712 Section: New Results.
-
 - [↵](#xref-ref-2-1)<a id="cit-2026-06-12-731871v1-2"></a>
 
 Benegas, G., Batra, S. S., and Song, Y. S. DNA language models are powerful predictors of genome-wide variant effects. Proceedings of the National Academy of Sciences, 120(44): e2311219120, October 2023. ISSN 0027-8424, 1091-6490. doi: 10.1073/pnas.2311219120. URL [https://pnas.org/doi/10.1073/pnas.2311219120](https://pnas.org/doi/10.1073/pnas.2311219120).
-
 - [↵](#xref-ref-3-1)<a id="cit-2026-06-12-731871v1-3"></a>
 
 Benegas, G., Albors, C., Aw, A. J., Ye, C., and Song, Y. S. A DNA language model based on multispecies alignment predicts the effects of genome-wide variants. Nature Biotechnology, 43 (12):1960–1965, December 2025. ISSN 1546-1696. doi: 10.1038/s41587-024-02511-w. URL [https://www.nature.com/articles/s41587-024-02511-w](https://www.nature.com/articles/s41587-024-02511-w). Publisher: Nature Publishing Group.
-
 - [↵](#xref-ref-4-1)<a id="cit-2026-06-12-731871v1-4"></a>
 
 Black, J. R. M., Hanke, M. S., Maiwald, A., Hernandez-Boussard, T., Crook, O. M., and Pannu, J. Open-weight genome language model safeguards: Assessing robustness via adversarial fine-tuning, November 2025. URL [http://arxiv.org/abs/2511.19299](http://arxiv.org/abs/2511.19299). arXiv:2511.19299 [cs].
-
 - [↵](#xref-ref-5-1)<a id="cit-2026-06-12-731871v1-5"></a>
 
 Bloomfield, D., Pannu, J., Zhu, A. W., Ng, M. Y., Lewis, A., Bendavid, E., Asch, S. M., Hernandez-Boussard, T., Cicero, A., and Inglesby, T. AI and biosecurity: The need for governance. Science, 385(6711):831–833, August 2024. doi: 10.1126/science.adq1977. URL [https://www.science.org/doi/10.1126/science.adq1977](https://www.science.org/doi/10.1126/science.adq1977). Publisher: American Association for the Advancement of Science.
-
 - [↵](#xref-ref-6-1)<a id="cit-2026-06-12-731871v1-6"></a>
 
 Brixi, G., Durrant, M. G., Ku, J., Poli, M., Brockman, G., Chang, D., Gonzalez, G. A., King, S. H., Li, D. B., Merchant, A. T., Naghipourfar, M., Nguyen, E., Ricci-Tam, C., Romero, D. W., Sun, G., Taghibakshi, A., Vorontsov, A., Yang, B., Deng, M., Gorton, L., Nguyen, N., Wang, N. K., Adams, E., Baccus, S. A., Dillmann, S., Ermon, S., Guo, D., Ilango, R., Janik, K., Lu, A. X., Mehta, R., Mofrad, M. R. K., Ng, M. Y., Pannu, J., Ré, C., Schmok, J. C., John, J. S., Sullivan, J., Zhu, K., Zynda, G., Balsam, D., Collison, P., Costa, A. B., Hernandez-Boussard, T., Ho, E., Liu, M.-Y., McGrath, T., Powell, K., Burke, D. P., Goodarzi, H., Hsu, P. D., and Hie, B. L. Genome modeling and design across all domains of life with Evo 2, February 2025. URL [https://www.biorxiv.org/content/10.1101/2025.02.18.638918v1](https://www.biorxiv.org/content/10.1101/2025.02.18.638918v1). Pages: 2025.02.18.638918 Section: New Results.
-
 - [↵](#xref-ref-7-1)<a id="cit-2026-06-12-731871v1-7"></a>
 
 Camacho, C., Coulouris, G., Avagyan, V., Ma, N., Papadopoulos, J., Bealer, K., and Madden, T. L. BLAST+: architecture and applications. BMC Bioinformatics, 10(1):421, December 2009. ISSN 1471-2105. doi: 10.1186/1471-2105-10-421. URL https://doi.org/10.1186/1471-2105-10-421.
-
 - [↵](#xref-ref-8-1)<a id="cit-2026-06-12-731871v1-8"></a>
 
 Dalla-Torre, H., Gonzalez, L., Mendoza-Revilla, J., Lopez Carranza, N., Grzywaczewski, A. H., Oteri, F., Dallago, C., Trop, E., de Almeida, B. P., Sirelkhatim, H., Richard, G., Skwark, M., Beguir, K., Lopez, M., and Pierrot, T. Nucleotide Transformer: building and evaluating robust foundation models for human genomics. Nature Methods, 22(2):287–297, February 2025. ISSN 1548-7105. doi: 10.1038/s41592-024-02523-z. URL [https://www.nature.com/articles/s41592-024-02523-z](https://www.nature.com/articles/s41592-024-02523-z). Publisher: Nature Publishing Group.
-
 - [↵](#xref-ref-9-1)<a id="cit-2026-06-12-731871v1-9"></a>
 
 Domingo-Calap, P., Cuevas, J. M., and Sanjuán, R. The Fitness Effects of Random Mutations in Single-Stranded DNA and RNA Bacteriophages. PLOS Genetics, 5(11):e1000742, November 2009. ISSN 1553-7404. doi: 10.1371/journal.pgen.1000742. URL [https://journals.plos.org/plosgenetics/article?id=10.1371/journal.pgen.1000742](https://journals.plos.org/plosgenetics/article?id=10.1371/journal.pgen.1000742). Publisher: Public Library of Science.
-
 - [↵](#xref-ref-10-1)<a id="cit-2026-06-12-731871v1-10"></a>
 
 Fishman, V., Kuratov, Y., Shmelev, A., Petrov, M., Penzar, D., Shepelin, D., Chekanov, N., Kardymon, O., and Burtsev, M. GENA-LM: a family of open-source foundational DNA language models for long sequences. Nucleic Acids Research, 53(2):gkae1310, January 2025. ISSN 1362-4962. doi: 10.1093/nar/gkae1310. URL https://doi.org/10.1093/nar/gkae1310.
-
 - [↵](#xref-ref-11-1)<a id="cit-2026-06-12-731871v1-11"></a>
 
 Fourment, M. and Gibbs, M. J. PATRISTIC: a program for calculating patristic distances and graphically comparing the components of genetic change. BMC Evolutionary Biology, 6:1, January 2006. ISSN 1471-2148. doi: 10.1186/1471-2148-6-1. URL [https://pmc.ncbi.nlm.nih.gov/articles/PMC1352388/](https://pmc.ncbi.nlm.nih.gov/articles/PMC1352388/).
-
 - [↵](#xref-ref-12-1)<a id="cit-2026-06-12-731871v1-12"></a>
 
 Hatfull, G. F. and Hendrix, R. W. Bacteriophages and their Genomes. Current opinion in virology, 1(4):298–303, October 2011. ISSN 1879-6257. doi: 10.1016/j.coviro.2011.06.009. URL [https://pmc.ncbi.nlm.nih.gov/articles/PMC3199584/](https://pmc.ncbi.nlm.nih.gov/articles/PMC3199584/).
-
 - [↵](#xref-ref-13-1)<a id="cit-2026-06-12-731871v1-13"></a>
 
 Hyatt, D., Chen, G.-L., LoCascio, P. F., Land, M. L., Larimer, F. W., and Hauser, L. J. Prodigal: prokaryotic gene recognition and translation initiation site identification. BMC Bioinformatics, 11(1):119, March 2010. ISSN 1471-2105. doi: 10.1186/1471-2105-11-119. URL https://doi.org/10.1186/1471-2105-11-119.
-
 - [↵](#xref-ref-14-1)<a id="cit-2026-06-12-731871v1-14"></a>
 
 Jha, N., Kravitz, J., West-Roberts, J., Camargo, A., Roux, S., Cornman, A., and Hwang, Y. Gaia: A Context-Aware Sequence Search and Discovery Tool for Microbial Proteins, November 2024. URL [https://www.biorxiv.org/content/10.1101/2024.11.19.624387v1](https://www.biorxiv.org/content/10.1101/2024.11.19.624387v1). Pages: 2024.11.19.624387 Section: New Results.
-
 - [↵](#xref-ref-15-1)<a id="cit-2026-06-12-731871v1-15"></a>
 
 Ji, Y., Zhou, Z., Liu, H., and Davuluri, R. V. DNABERT: pre-trained Bidirectional Encoder Representations from Transformers model for DNA-language in genome. Bioinformatics, 37 (15):2112–2120, August 2021. ISSN 1367-4803. doi: 10.1093/bioinformatics/btab083. URL https://doi.org/10.1093/bioinformatics/btab083.
-
 - <a id="cit-2026-06-12-731871v1-16"></a>
 
 Jukes, T. H., Cantor, C. R., et al. Evolution of protein molecules. Mammalian protein metabolism, 3(21):132, 1969.
-
 - [↵](#xref-ref-17-1)<a id="cit-2026-06-12-731871v1-17"></a>
 
 Katoh, K. and Standley, D. M. MAFFT Multiple Sequence Alignment Software Version 7: Improvements in Performance and Usability. Molecular Biology and Evolution, 30(4):772–780, April 2013. ISSN 0737-4038. doi: 10.1093/molbev/mst010. URL https://doi.org/10.1093/molbev/mst010.
-
 - [↵](#xref-ref-18-1)<a id="cit-2026-06-12-731871v1-18"></a>
 
 Kilcher, S. and Loessner, M. J. Engineering Bacteriophages as Versatile Biologics. Trends in Microbiology, 27(4):355–367, April 2019. ISSN 1878-4380. doi: 10.1016/j.tim.2018.09.006.
-
 - [↵](#xref-ref-19-1)<a id="cit-2026-06-12-731871v1-19"></a>
 
 King, S. H., Driscoll, C. L., Li, D. B., Guo, D., Merchant, A. T., Brixi, G., Wilkinson, M. E., and Hie, B. L. Generative design of novel bacteriophages with genome language models, September 2025. URL [https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1). xISSN: 2692-8205 Pages: 2025.09.12.675911 Section: New Results.
-
 - [↵](#xref-ref-20-1)<a id="cit-2026-06-12-731871v1-20"></a>
 
 Li, H. Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics, 34(18):3094– 3100, September 2018. ISSN 1367-4803. doi: 10.1093/bioinformatics/bty191. URL https://doi.org/10.1093/bioinformatics/bty191.
-
 - [↵](#xref-ref-21-1)<a id="cit-2026-06-12-731871v1-21"></a>
 
 Mendoza-Revilla, J., Trop, E., Gonzalez, L., Roller, M., Dalla-Torre, H., De Almeida, B. P., Richard, G., Caton, J., Lopez Carranza, N., Skwark, M., Laterre, A., Beguir, K., Pierrot, T., and Lopez, M. A foundational large language model for edible plant genomes. Communications Biology, 7(1):835, July 2024. ISSN 2399-3642. doi: 10.1038/s42003-024-06465-2. URL [https://www.nature.com/articles/s42003-024-06465-2](https://www.nature.com/articles/s42003-024-06465-2).
-
 - [↵](#xref-ref-22-1)<a id="cit-2026-06-12-731871v1-22"></a>
 
 Nguyen, E., Poli, M., Durrant, M. G., Kang, B., Katrekar, D., Li, D. B., Bartie, L. J., Thomas, A. W., King, S. H., Brixi, G., Sullivan, J., Ng, M. Y., Lewis, A., Lou, A., Ermon, S., Baccus, S. A., Hernandez-Boussard, T., Ré, C., Hsu, P. D., and Hie, B. L. Sequence modeling and design from molecular to genome scale with Evo. Science, 386(6723):eado9336, November 2024. doi: 10.1126/science.ado9336. URL [https://www.science.org/doi/10.1126/science.ado9336](https://www.science.org/doi/10.1126/science.ado9336). Publisher: American Association for the Advancement of Science.
-
 - [↵](#xref-ref-23-1)<a id="cit-2026-06-12-731871v1-23"></a>
 
 Nguyen, L.-T., Schmidt, H. A., von Haeseler, A., and Minh, B. Q. IQ-TREE: A Fast and Effective Stochastic Algorithm for Estimating Maximum-Likelihood Phylogenies. Molecular Biology and Evolution, 32(1):268–274, January 2015. ISSN 0737-4038. doi: 10.1093/molbev/msu300. URL https://doi.org/10.1093/molbev/msu300.
-
 - [↵](#xref-ref-24-1)<a id="cit-2026-06-12-731871v1-24"></a>
 
 Pannu, J., Bloomfield, D., MacKnight, R., Hanke, M. S., Zhu, A., Gomes, G., Cicero, A., and Inglesby, T. V. Dual-use capabilities of concern of biological AI models. PLOS Computational Biology, 21(5):e1012975, August 2025. ISSN 1553-7358. doi: 10.1371/journal.pcbi.1012975. URL [https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1012975](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1012975). Publisher: Public Library of Science.
-
 - [↵](#xref-ref-25-1)<a id="cit-2026-06-12-731871v1-25"></a>
 
 Ranveer, S. A., Dasriya, V., Ahmad, M. F., Dhillon, H. S., Samtiya, M., Shama, E., Anand, T., Dhewa, T., Chaudhary, V., Chaudhary, P., Behare, P., Ram, C., Puniya, D. V., Khedkar, G. D., Raposo, A., Han, H., and Puniya, A. K. Positive and negative aspects of bacteriophages and their immense role in the food chain. npj Science of Food, 8(1):1, January 2024. ISSN 2396-8370. doi: 10.1038/s41538-023-00245-8. URL [https://www.nature.com/articles/s41538-023-00245-8](https://www.nature.com/articles/s41538-023-00245-8).
-
 - [↵](#xref-ref-26-1)<a id="cit-2026-06-12-731871v1-26"></a>
 
 - Jurafsky, D.,
-
 - Chai, J.,
-
 - Schluter, N., and
-
 - Tetreault, J.
 
 Salazar, J., Liang, D., Nguyen, T. Q., and Kirchhoff, K. Masked Language Model Scoring. In Jurafsky, D., Chai, J., Schluter, N., and Tetreault, J. (eds.), Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics, pp. 2699–2712, Online, July 2020. Association for Computational Linguistics. doi: 10.18653/v1/2020.acl-main.240. URL [https://aclanthology.org/2020.acl-main.240/](https://aclanthology.org/2020.acl-main.240/).
-
 - [↵](#xref-ref-27-1)<a id="cit-2026-06-12-731871v1-27"></a>
 
 SantaLucia, J. A unified view of polymer, dumbbell, and oligonucleotide DNA nearest-neighborthermodynamics. Proceedings of the National Academy of Sciences, 95(4):1460–1465, February 1998. doi: 10.1073/pnas.95.4.1460. URL [https://www.pnas.org/doi/10.1073/pnas.95.4.1460](https://www.pnas.org/doi/10.1073/pnas.95.4.1460). Publisher: Proceedings of the National Academy of Sciences.
-
 - [↵](#xref-ref-28-1)<a id="cit-2026-06-12-731871v1-28"></a>
 
 Schiff, Y., Kao, C.-H., Gokaslan, A., Dao, T., Gu, A., and Kuleshov, V. Caduceus: Bi-Directional Equivariant Long-Range DNA Sequence Modeling, June 2024. URL [http://arxiv.org/abs/2403.03234](http://arxiv.org/abs/2403.03234). arXiv:2403.03234 [q-bio].
-
 - [↵](#xref-ref-29-1)<a id="cit-2026-06-12-731871v1-29"></a>
 
 Steinegger, M. and Söding, J. MMseqs2 enables sensitive protein sequence searching for the analysis of massive data sets. Nature Biotechnology, 35(11):1026–1028, November 2017. ISSN 1546-1696. doi: 10.1038/nbt.3988.
-
 - [↵](#xref-ref-30-1)<a id="cit-2026-06-12-731871v1-30"></a>
 
 Wei, B., Che, Z., Li, N., Sehwag, U. M., Götting, J., Nedungadi, S., Michael, J., Yue, S., Hendrycks, D., Henderson, P., Wang, Z., Donoughe, S., and Mazeika, M. Best Practices for Biorisk Evaluations on Open-Weight Bio-Foundation Models, November 2025. URL [http://arxiv.org/abs/2510.27629](http://arxiv.org/abs/2510.27629). xarXiv:2510.27629 [cs].
-
 - [↵](#xref-ref-31-1)<a id="cit-2026-06-12-731871v1-31"></a>
 
 Wright, S. Evolution in mendelian populations. Genetics, 16(2):97, 1931.
-
 - [↵](#xref-ref-32-1)<a id="cit-2026-06-12-731871v1-32"></a>
 
 Zhai, J., Gokaslan, A., Schiff, Y., Berthel, A., Liu, Z.-Y., Lai, W.-Y., Miller, Z. R., Scheben, A., Stitzer, M. C., Romay, M. C., Buckler, E. S., and Kuleshov, V. Cross-species modeling of plant genomes at single-nucleotide resolution using a pretrained DNA language model. Proceedings of the National Academy of Sciences, 122(24):e2421738122, June 2025. doi: 10.1073/pnas.2421738122. URL [https://www.pnas.org/doi/10.1073/pnas.2421738122](https://www.pnas.org/doi/10.1073/pnas.2421738122).

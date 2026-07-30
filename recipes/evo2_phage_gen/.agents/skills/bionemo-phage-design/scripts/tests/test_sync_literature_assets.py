@@ -295,7 +295,7 @@ class FetchValidationTests(unittest.TestCase):
     def test_offline_cache_miss_fails_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = sync.DownloadCache(Path(tmp))
-            with self.assertRaises(sync.OfflineCacheMissError):
+            with self.assertRaises(sync.OfflineCacheMiss):
                 cache.read("https://www.biorxiv.org/missing")
 
     def test_fallback_is_allowed_only_for_retryable_workbook_failures(self) -> None:
