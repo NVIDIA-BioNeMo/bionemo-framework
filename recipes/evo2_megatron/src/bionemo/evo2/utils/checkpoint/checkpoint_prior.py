@@ -17,6 +17,7 @@
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -156,6 +157,11 @@ def analyze_filter_priors(
     decay_preset: str = "weak",
 ) -> dict[str, Any]:
     """Analyze real checkpoint filters against inversion priors."""
+    if gamma_min <= 0:
+        raise ValueError("gamma_min must be positive")
+    if gamma_min >= gamma_max:
+        raise ValueError("gamma_min must be less than gamma_max")
+
     filter_tensors = load_filter_tensors(checkpoint_dir)
     grouped = _group_by_suffix(filter_tensors)
     return {
@@ -168,6 +174,29 @@ def analyze_filter_priors(
             "decay": _decay_prior_stats(grouped["decay"], decay_preset=decay_preset),
         },
     }
+
+
+def _sanitize_nonfinite_for_json(value: Any) -> tuple[Any, int]:
+    """Recursively replace non-finite floats with null-compatible values."""
+    if isinstance(value, float):
+        return (value, 0) if math.isfinite(value) else (None, 1)
+    if isinstance(value, dict):
+        sanitized = {}
+        nonfinite_count = 0
+        for key, item in value.items():
+            sanitized_item, item_count = _sanitize_nonfinite_for_json(item)
+            sanitized[key] = sanitized_item
+            nonfinite_count += item_count
+        return sanitized, nonfinite_count
+    if isinstance(value, (list, tuple)):
+        sanitized_items = []
+        nonfinite_count = 0
+        for item in value:
+            sanitized_item, item_count = _sanitize_nonfinite_for_json(item)
+            sanitized_items.append(sanitized_item)
+            nonfinite_count += item_count
+        return sanitized_items, nonfinite_count
+    return value, 0
 
 
 def main() -> None:
@@ -186,7 +215,9 @@ def main() -> None:
         gamma_max=args.gamma_max,
         decay_preset=args.decay_preset,
     )
-    text = json.dumps(report, indent=2, sort_keys=True)
+    sanitized_report, nonfinite_value_count = _sanitize_nonfinite_for_json(report)
+    sanitized_report["nonfinite_value_count"] = nonfinite_value_count
+    text = json.dumps(sanitized_report, indent=2, sort_keys=True, allow_nan=False)
     if args.output_json is not None:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(text + "\n")
