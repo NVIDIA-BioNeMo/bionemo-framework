@@ -265,6 +265,24 @@ model tag:
 ```bash
 python train_fsdp2.py --config-name L0_sanity model_tag=facebook/esm2_t6_8M_UR50D
 ```
+### Troubleshooting
+
+#### `AssertionError: assert len(self.block_stack) == 1` with `torch.compile`
+
+If you hit this error during training:
+
+```bash
+AssertionError: assert len(self.block_stack) == 1
+File "/workspace/bionemo/modeling_esm_te.py", line 259, in forward
+with self.get_autocast_context(None, outer=True):
+```
+
+This is caused by TorchDynamo being unable to trace through a context manager returned by a method
+(`self.get_autocast_context(...)`). Disable `torch.compile` as a workaround:
+
+```bash
+torchrun --nproc_per_node=8 train_fsdp2.py use_torch_compile=false
+```
 
 ## Downloading Pre-Training Data For Offline Training
 
