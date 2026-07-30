@@ -587,16 +587,25 @@ class _MockNativeDynamicContext:
         self.request_count = 0
 
 
-def test_cuda_graph_warmup_restores_disabled_batched_decode_flag(monkeypatch):
-    context = _MockNativeDynamicContext()
-    context.evo2_max_batched_decode_requests = 2
-    context.mamba_metadata.request_to_mamba_state_idx[:2] = torch.tensor([7, 6])
+def test_cuda_graph_warmup_captures_every_active_request_count(monkeypatch):
+    class _WarmupContext(_MockNativeDynamicContext):
+        def add_request(self, request, *, prefill_chunk_length: int):
+            super().add_request(request, prefill_chunk_length=prefill_chunk_length)
+            request_idx = self.request_count - 1
+            self.mamba_metadata.request_to_mamba_state_idx[request_idx] = 9 - request_idx
+
+    context = _WarmupContext()
+    context.evo2_max_batched_decode_requests = 3
     bound_slots = []
+    batched_decode_enabled_when_bound = []
 
     def _capture_bound_slots(_model, _context, *, request_slots):
         bound_slots.append(request_slots.tolist())
+        batched_decode_enabled_when_bound.append(context.evo2_batched_decode_enabled)
 
     forward_model = _MockLoopForwardModel()
+    batch_sizes = []
+    forward_model.register_forward_pre_hook(lambda _module, args: batch_sizes.append(args[0].shape[0]))
     native_dynamic = SimpleNamespace(forward_model=forward_model, hyena_model=forward_model)
     monkeypatch.setattr(
         infer_module,
@@ -610,9 +619,11 @@ def test_cuda_graph_warmup_restores_disabled_batched_decode_flag(monkeypatch):
         torch.device("cpu"),
     )
 
-    assert forward_model.calls == 3
-    assert bound_slots == [[6, 7]]
-    assert context.reset_count == 1
+    assert forward_model.calls == 9
+    assert batch_sizes == [1, 1, 1, 2, 2, 2, 3, 3, 3]
+    assert bound_slots == [[9], [8, 9], [7, 8, 9]]
+    assert batched_decode_enabled_when_bound == [False, False, False]
+    assert context.reset_count == 3
     assert context.evo2_batched_decode_enabled is False
 
 

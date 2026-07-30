@@ -1078,48 +1078,55 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
 
     # A short throwaway prompt is enough: the decode CUDA graph shape is independent of prompt length.
     n_warmup_prompt_tokens = max(1, min(8, int(dyn_ctx.max_tokens)))
-    try:
-        with torch.inference_mode():
-            warmup_request_count = max(1, int(getattr(dyn_ctx, "evo2_max_batched_decode_requests", 1)))
-            for request_id in range(warmup_request_count):
-                req = DynamicInferenceRequest(
-                    request_id=request_id,
-                    prompt_tokens=torch.zeros(n_warmup_prompt_tokens, dtype=torch.int64, device=device),
-                    sampling_params=SamplingParams(num_tokens_to_generate=8, termination_id=-1),
-                )
-                dyn_ctx.add_request(req, prefill_chunk_length=n_warmup_prompt_tokens)
-            slots = _normalize_new_request_slots_for_packed_hyena(dyn_ctx, warmup_request_count)
-            bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
-            dyn_ctx.evo2_batched_decode_enabled = warmup_request_count > 1
-            # One prefill forward (eager; not graphed) seeds the Hyena recurrent state, then two decode
-            # forwards: the first triggers graph capture, the second replays it so any capture/replay
-            # mismatch surfaces here rather than on a user prompt.
-            for _step in range(3):
-                dyn_ctx.initialize_attention_state()
-                input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
-                try:
-                    from megatron.core.inference.utils import InferenceMode
-
-                    inference_mode_context = InferenceMode.active()
-                except ImportError:
-                    inference_mode_context = contextlib.nullcontext()
-                with inference_mode_context:
-                    forward_model(
-                        input_ids,
-                        position_ids,
-                        None,
-                        inference_context=dyn_ctx,
-                        runtime_gather_output=True,
+    with torch.inference_mode():
+        max_warmup_request_count = max(
+            1,
+            int(getattr(dyn_ctx, "evo2_max_batched_decode_requests", 1)),
+        )
+        for warmup_request_count in range(1, max_warmup_request_count + 1):
+            try:
+                for request_id in range(warmup_request_count):
+                    req = DynamicInferenceRequest(
+                        request_id=request_id,
+                        prompt_tokens=torch.zeros(n_warmup_prompt_tokens, dtype=torch.int64, device=device),
+                        sampling_params=SamplingParams(num_tokens_to_generate=8, termination_id=-1),
                     )
-                dyn_ctx.update_requests(
-                    torch.ones(warmup_request_count, dtype=torch.bool, device=device),
-                    torch.zeros(warmup_request_count, dtype=torch.int64, device=device),
-                )
-    finally:
-        dyn_ctx.evo2_batched_decode_enabled = False
-        dyn_ctx.reset()
+                    dyn_ctx.add_request(req, prefill_chunk_length=n_warmup_prompt_tokens)
+                slots = _normalize_new_request_slots_for_packed_hyena(dyn_ctx, warmup_request_count)
+                bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
+                dyn_ctx.evo2_batched_decode_enabled = warmup_request_count > 1
+                # One prefill forward (eager; not graphed) seeds the Hyena recurrent state, then two decode
+                # forwards: the first triggers graph capture, the second replays it so any capture/replay
+                # mismatch surfaces here rather than on a user prompt.
+                for _step in range(3):
+                    dyn_ctx.initialize_attention_state()
+                    input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
+                    try:
+                        from megatron.core.inference.utils import InferenceMode
+
+                        inference_mode_context = InferenceMode.active()
+                    except ImportError:
+                        inference_mode_context = contextlib.nullcontext()
+                    with inference_mode_context:
+                        forward_model(
+                            input_ids,
+                            position_ids,
+                            None,
+                            inference_context=dyn_ctx,
+                            runtime_gather_output=True,
+                        )
+                    dyn_ctx.update_requests(
+                        torch.ones(warmup_request_count, dtype=torch.bool, device=device),
+                        torch.zeros(warmup_request_count, dtype=torch.int64, device=device),
+                    )
+            finally:
+                dyn_ctx.evo2_batched_decode_enabled = False
+                dyn_ctx.reset()
     if rank == 0:
-        logger.info("[evo2-native-cg] captured decode CUDA graph(s) via throwaway warmup request")
+        logger.info(
+            "[evo2-native-cg] warmed decode CUDA graph(s) for request counts 1-%d",
+            max_warmup_request_count,
+        )
 
 
 def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:

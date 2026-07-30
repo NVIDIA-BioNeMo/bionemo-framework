@@ -88,7 +88,7 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
 
     def create_mcore_cudagraph_manager(self, config):
         """Register this stack for full-iteration local CUDA graphs."""
-        if CudaGraphScope.full_iteration in (self.config.cuda_graph_scope or []):
+        if CudaGraphScope.full_iteration in (config.cuda_graph_scope or []):
             self.cudagraph_manager = CudaGraphManager(config)
 
     def __init__(

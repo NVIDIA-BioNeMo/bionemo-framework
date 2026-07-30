@@ -24,9 +24,11 @@ import torch
 from megatron.bridge.training.config import OptimizerConfig, OptimizerConfigOverrideProviderContext, SchedulerConfig
 from megatron.core.inference.utils import InferenceMode
 from megatron.core.optimizer import _get_param_groups, get_standard_config_overrides
+from megatron.core.transformer.enums import CudaGraphScope
 
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaOptimizerConfigOverrideProvider
 from bionemo.evo2.models.megatron.hyena.hyena_block import HyenaStack
+from bionemo.evo2.models.megatron.hyena.hyena_layer import HyenaLayer
 from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel
 
 
@@ -85,6 +87,52 @@ def test_hyena_stack_does_not_create_full_iteration_manager_for_empty_scope():
         stack.create_mcore_cudagraph_manager(stack.config)
 
     assert not hasattr(stack, "cudagraph_manager")
+
+
+def test_hyena_stack_uses_cudagraph_manager_config_scope():
+    stack = HyenaStack.__new__(HyenaStack)
+    torch.nn.Module.__init__(stack)
+    stack.config = SimpleNamespace(cuda_graph_scope=[])
+    config = SimpleNamespace(cuda_graph_scope=[CudaGraphScope.full_iteration])
+    manager = object()
+
+    with patch(
+        "bionemo.evo2.models.megatron.hyena.hyena_block.CudaGraphManager",
+        return_value=manager,
+    ) as manager_cls:
+        stack.create_mcore_cudagraph_manager(config)
+
+    assert stack.cudagraph_manager is manager
+    manager_cls.assert_called_once_with(config)
+
+
+def test_hyena_layer_cuda_graph_cache_key_includes_evo2_request_shape():
+    layer = HyenaLayer.__new__(HyenaLayer)
+    torch.nn.Module.__init__(layer)
+    layer.eval()
+    layer.config = SimpleNamespace(cuda_graph_impl="local", cuda_graph_scope=[])
+    layer.cudagraph_manager = MagicMock(return_value="graph output")
+    padded_batch_dimensions = object()
+    inference_context = SimpleNamespace(
+        evo2_max_batched_decode_requests=4,
+        evo2_batched_decode_enabled=True,
+        total_request_count=2,
+        paused_request_count=0,
+        padded_batch_dimensions=padded_batch_dimensions,
+        is_static_batching=lambda: False,
+        using_cuda_graph_this_step=lambda: True,
+    )
+    hidden_states = torch.zeros(1)
+
+    output = layer(hidden_states, attention_mask=None, inference_context=inference_context)
+
+    assert output == "graph output"
+    layer.cudagraph_manager.assert_called_once_with(
+        layer,
+        (hidden_states,),
+        {"attention_mask": None, "inference_context": inference_context},
+        cache_key=(padded_batch_dimensions, 2, True),
+    )
 
 
 def test_weight_decay_conditions():

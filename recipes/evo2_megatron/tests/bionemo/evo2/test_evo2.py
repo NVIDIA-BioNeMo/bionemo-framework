@@ -147,6 +147,12 @@ def determine_memory_requirement_and_skip_if_not_met(ckpt_name: str, test_name: 
                 "memory_needed_by_test": 16,
             },  # checked both variants in isolation - needs ~21GB peak on L4
             {
+                "test_name": "test_batch_generate_mbridge_evo2_batched_decode_accuracy",
+                "model_size": "evo2_1b_base",
+                "seq_len_cap": -1,
+                "memory_needed_by_test": 16,
+            },
+            {
                 "test_name": "test_batch_generate_mbridge",
                 "model_size": "evo2_7b_base",
                 "seq_len_cap": -1,
@@ -880,14 +886,9 @@ def test_batch_generate_mbridge_evo2_batched_decode_accuracy(sequences: list[str
     # shared 2048-token prefix used here, not the variable-length midpoint prompts in
     # test_batch_generate_mbridge.
     expected_matchpercents = [45.2, 56.8, 41.4, 100.0]
-    try:
-        _ = determine_memory_requirement_and_skip_if_not_met(
-            ckpt_name, test_name="test_batch_generate_mbridge_evo2_batched_decode_accuracy"
-        )
-    except KeyError:
-        gb_available = torch.cuda.mem_get_info()[0] / 1024**3
-        if gb_available < 16:
-            pytest.skip(f"Insufficient GPU memory: {gb_available:.1f}GB available, need at least 16GB")
+    _ = determine_memory_requirement_and_skip_if_not_met(
+        ckpt_name, test_name="test_batch_generate_mbridge_evo2_batched_decode_accuracy"
+    )
 
     num_tokens_to_generate = 500
     prompt_len = min(len(seq) // 2 for seq in sequences)
