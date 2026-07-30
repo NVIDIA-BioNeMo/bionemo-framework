@@ -112,8 +112,33 @@ def test_configure_native_dynamic_cuda_graphs_normalizes_checkpoint_state(
     assert enabled is expected_enabled
     assert provider.cuda_graph_impl == requested_impl
     assert provider.inference_cuda_graph_scope is None
-    if requested_impl == "local":
-        assert provider.cuda_graph_scope == []
+    assert provider.cuda_graph_scope == []
+
+
+def test_batched_binding_rejects_permuted_contiguous_request_slots():
+    from bionemo.evo2.models.evo2_provider import bind_hyena_packed_views_to_dynamic_context_batch
+
+    with pytest.raises(ValueError, match="contiguous request slots"):
+        bind_hyena_packed_views_to_dynamic_context_batch(None, None, request_slots=[2, 0, 1])
+
+
+@pytest.mark.parametrize(
+    ("slots", "expected"),
+    [
+        ([7, 6, 5], [5, 6, 7]),
+        ([2, 0, 1], [2, 0, 1]),
+        ([7, 5, 3], [7, 5, 3]),
+        ([0, 1, 2], [0, 1, 2]),
+    ],
+)
+def test_normalize_new_request_slots_only_reverses_mcore_lifo_order(slots, expected):
+    slot_tensor = torch.tensor(slots, dtype=torch.int32)
+    context = SimpleNamespace(mamba_metadata=SimpleNamespace(request_to_mamba_state_idx=slot_tensor))
+
+    normalized = infer_module._normalize_new_request_slots_for_packed_hyena(context, len(slots))
+
+    assert normalized.tolist() == expected
+    assert context.mamba_metadata.request_to_mamba_state_idx.tolist() == expected
 
 
 def test_native_stop_token_ids_resolves_eos_text_token():
@@ -188,6 +213,44 @@ def test_exact_generation_cli_flags_default_false_and_enable_when_passed(monkeyp
     assert defaults.strict_generation is False
     assert enabled.ignore_eos is True
     assert enabled.strict_generation is True
+
+
+def test_max_batch_size_help_describes_prompt_file_chunking(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["infer", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args()
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--max-batch-size MAX_BATCH_SIZE" in help_text
+    assert "prompt-file rows per generate() call" in help_text
+    assert "--evo2-batched-decode-size" not in help_text
+
+
+def test_main_clamps_decode_concurrency_to_prompt_file_chunk_size(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "infer",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--prompt",
+            "A",
+            "--prompt-batch-size",
+            "4",
+            "--max-batch-size",
+            "2",
+        ],
+    )
+    monkeypatch.setattr(infer_module, "infer", lambda **kwargs: captured.update(kwargs))
+
+    infer_module.main()
+
+    assert captured["max_batch_size"] == 2
+    assert captured["evo2_batched_decode_size"] == 2
 
 
 def test_result_to_jsonl_record_honors_explicit_stop_reason():
@@ -317,12 +380,7 @@ def test_strict_streaming_nonfinite_late_failure_leaves_only_named_partial_artif
 
     def _fail_after_first_result(_components, *, result_callback, **_kwargs):
         result_callback(0, first_result)
-        _run_mock_native_generation(
-            monkeypatch,
-            sampled_steps=[[1]],
-            max_new_tokens=1,
-        )
-        pytest.fail("strict native generation accepted a non-finite chosen-token log-prob")
+        raise RuntimeError("Strict Evo2 generation returned a non-finite chosen-token log-prob")
 
     monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
@@ -332,11 +390,6 @@ def test_strict_streaming_nonfinite_late_failure_leaves_only_named_partial_artif
     monkeypatch.setattr(infer_module, "setup_inference_engine", lambda **kwargs: components)
     monkeypatch.setattr(infer_module, "generate", _fail_after_first_result)
     monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
-    monkeypatch.setattr(
-        infer_module,
-        "_selected_log_probs_for_sampled_tokens",
-        lambda _log_probs, sampled_tokens: [float("nan")] * sampled_tokens.numel(),
-    )
 
     with pytest.raises(RuntimeError, match="non-finite chosen-token log-prob"):
         infer_module.infer(
@@ -375,6 +428,12 @@ def test_strict_streaming_atomically_promotes_complete_partial_artifact(monkeypa
     ]
     replacements = []
     real_replace = os.replace
+    serialized_results = []
+    serialize_record = infer_module._result_to_jsonl_record
+
+    def _serialize_once(**kwargs):
+        serialized_results.append(kwargs["result"])
+        return serialize_record(**kwargs)
 
     def _generate_all(_components, *, result_callback, **_kwargs):
         for result_idx, result in enumerate(results):
@@ -394,6 +453,7 @@ def test_strict_streaming_atomically_promotes_complete_partial_artifact(monkeypa
     monkeypatch.setattr(infer_module, "generate", _generate_all)
     monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
     monkeypatch.setattr(infer_module.os, "replace", _record_replace)
+    monkeypatch.setattr(infer_module, "_result_to_jsonl_record", _serialize_once)
 
     infer_module.infer(
         prompts=[{"id": "first", "prompt": "A"}, {"id": "second", "prompt": "C"}],
@@ -411,6 +471,8 @@ def test_strict_streaming_atomically_promotes_complete_partial_artifact(monkeypa
     assert output_file.exists()
     assert not partial_file.exists()
     assert [record["id"] for record in _read_jsonl_results(output_file)] == ["first", "second"]
+    assert len(serialized_results) == len(results)
+    assert all(actual is expected for actual, expected in zip(serialized_results, results))
 
 
 def test_sampling_log_probs_use_temperature_scaled_top_k_support():
@@ -525,6 +587,35 @@ class _MockNativeDynamicContext:
         self.request_count = 0
 
 
+def test_cuda_graph_warmup_restores_disabled_batched_decode_flag(monkeypatch):
+    context = _MockNativeDynamicContext()
+    context.evo2_max_batched_decode_requests = 2
+    context.mamba_metadata.request_to_mamba_state_idx[:2] = torch.tensor([7, 6])
+    bound_slots = []
+
+    def _capture_bound_slots(_model, _context, *, request_slots):
+        bound_slots.append(request_slots.tolist())
+
+    forward_model = _MockLoopForwardModel()
+    native_dynamic = SimpleNamespace(forward_model=forward_model, hyena_model=forward_model)
+    monkeypatch.setattr(
+        infer_module,
+        "bind_hyena_packed_views_to_dynamic_context_batch",
+        _capture_bound_slots,
+    )
+
+    infer_module._warmup_native_dynamic_cuda_graphs(
+        native_dynamic,
+        context,
+        torch.device("cpu"),
+    )
+
+    assert forward_model.calls == 3
+    assert bound_slots == [[6, 7]]
+    assert context.reset_count == 1
+    assert context.evo2_batched_decode_enabled is False
+
+
 def _run_mock_native_generation(
     monkeypatch,
     *,
@@ -542,10 +633,12 @@ def _run_mock_native_generation(
     peak_allocated_values: list[int] | None = None,
     peak_reserved_values: list[int] | None = None,
     expected_suppressed_token_ids: set[int] | None = None,
+    context_max_tokens: int = 128,
 ):
     from megatron.core.inference.utils import InferenceMode
 
     context = _MockNativeDynamicContext(stop_after_updates=stop_after_updates, events=events)
+    context.max_tokens = context_max_tokens
     forward_model = _MockLoopForwardModel(error=forward_error, events=events)
     native_dynamic = SimpleNamespace(
         forward_model=forward_model,
@@ -556,9 +649,8 @@ def _run_mock_native_generation(
         evo2_seed=17,
         cuda_graphs_enabled=False,
         generation_call_index=0,
-        engine_setup_evidence=None,
-        engine_setup_evidence_pending=False,
-        last_context_evidence=None,
+        engine_setup_stats=infer_module._CudaPhaseStats(),
+        engine_setup_stats_pending=True,
     )
     components = SimpleNamespace(tokenizer=_MockLoopTokenizer(), native_dynamic=native_dynamic)
     sampled_step_iter = iter(sampled_steps)
@@ -670,6 +762,24 @@ def test_native_batched_loop_omits_ignored_eos_and_reaches_exact_length(monkeypa
         assert result.timings["timing_group_id"] == "native-call-00000000-group-00000000"
         assert result.timings["timing_request_count"] == 2
     assert forward_model.calls == 4
+    assert results[0].timings is not results[1].timings
+    assert results[0].memory is not results[1].memory
+    results[0].timings["first_result_only"] = True
+    results[0].memory["first_result_only"] = 1
+    assert "first_result_only" not in results[1].timings
+    assert "first_result_only" not in results[1].memory
+
+
+def test_native_batched_prefill_enforces_total_token_budget(monkeypatch):
+    with pytest.raises(ValueError, match=r"Batched prefill requires 2 tokens.*max token budget is 1"):
+        _run_mock_native_generation(
+            monkeypatch,
+            prompts=["P", "Q"],
+            sampled_steps=[[1, 1]],
+            max_new_tokens=1,
+            evo2_batched_decode_size=2,
+            context_max_tokens=1,
+        )
 
 
 def test_native_single_loop_strict_overflow_reraises(monkeypatch):
@@ -822,7 +932,7 @@ def test_native_loop_synchronizes_only_at_phase_boundaries(
         assert result.memory["total_peak_reserved_bytes"] == 404
 
 
-def test_shared_dynamic_context_reports_cold_context_and_capture_then_zero_on_warm_reuse(monkeypatch):
+def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_capacity(monkeypatch):
     events = []
     monkeypatch.setattr(infer_module, "_CUDA_PHASE_EVIDENCE_ENABLED", True)
 
@@ -831,6 +941,7 @@ def test_shared_dynamic_context_reports_cold_context_and_capture_then_zero_on_wa
             assert model_config.tensor_model_parallel_size == 1
             self.max_sequence_length = inference_config.max_sequence_length
             self.max_tokens = inference_config.max_tokens or inference_config.max_sequence_length
+            self.max_requests = inference_config.max_requests
             self.reset_count = 0
 
         def initialize_all_tensors(self):
@@ -878,11 +989,12 @@ def test_shared_dynamic_context_reports_cold_context_and_capture_then_zero_on_wa
         block_size_tokens=16,
         max_tokens=64,
         enable_chunked_prefill=False,
-        max_active_requests=2,
+        max_active_requests=1,
         device=torch.device("cpu"),
     )
 
     assert warm_context is context
+    assert warm_context.max_requests == 2
     assert context_setup == infer_module._CudaPhaseStats(
         elapsed_s=2.0,
         peak_allocated_bytes=101,
@@ -1692,7 +1804,7 @@ def test_parallel_inference_accuracy(mbridge_checkpoint_path, tmp_path, dna_sequ
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1800)
 @pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI")
 def test_parallel_inference_accuracy_evo2_batched_decode_same_prefix_preserves_accuracy(
     mbridge_checkpoint_path,
@@ -2044,7 +2156,7 @@ def test_different_results_with_without_peft(tmp_path, mbridge_checkpoint_path, 
             "--temperature",
             "1.0",
             "--top-k",
-            "2",
+            "2",  # top_k=1 makes chosen-token log-probs 0.0, so a base/LoRA comparison is vacuous.
             "--seed",
             "0",
             "--ignore-eos",

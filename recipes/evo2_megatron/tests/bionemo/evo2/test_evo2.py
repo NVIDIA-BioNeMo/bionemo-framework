@@ -934,6 +934,7 @@ def test_batch_generate_mbridge_evo2_batched_decode_accuracy(sequences: list[str
             calculate_sequence_identity(target, generated_text) or 0.0
             for target, generated_text in zip(targets, batched_texts)
         ]
+        assert len(batched_match_percents) == len(expected_matchpercents)
         for i, (match_percent, expected_matchpercent) in enumerate(
             zip(batched_match_percents, expected_matchpercents)
         ):

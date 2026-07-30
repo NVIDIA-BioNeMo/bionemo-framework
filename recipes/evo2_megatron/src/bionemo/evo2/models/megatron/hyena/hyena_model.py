@@ -265,7 +265,7 @@ class HyenaModel(LanguageModule):
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
         # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
 
-        in_inference_mode = InferenceMode.is_active()
+        in_inference_mode = InferenceMode.is_active() and inference_context is not None
 
         # Decoder embedding.
         if decoder_input is not None:
@@ -342,7 +342,7 @@ class HyenaModel(LanguageModule):
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
         # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
         inference_context = deprecate_inference_params(inference_context, inference_params)
-        in_inference_mode = InferenceMode.is_active()
+        in_inference_mode = InferenceMode.is_active() and inference_context is not None
         if in_inference_mode:
             assert runtime_gather_output, "Inference must always gather TP logits"
         else:

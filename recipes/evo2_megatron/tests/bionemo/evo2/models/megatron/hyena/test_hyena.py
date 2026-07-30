@@ -16,13 +16,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from megatron.bridge.training.config import OptimizerConfig, OptimizerConfigOverrideProviderContext, SchedulerConfig
+from megatron.core.inference.utils import InferenceMode
 from megatron.core.optimizer import _get_param_groups, get_standard_config_overrides
 
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaOptimizerConfigOverrideProvider
+from bionemo.evo2.models.megatron.hyena.hyena_block import HyenaStack
+from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel
 
 
 class _FakePGCollection:
@@ -45,6 +50,41 @@ def _no_op_context_manager():
 
 def _mock_all_gather_object(object_list, obj, group=None):
     object_list[:] = [obj]
+
+
+def test_flash_decode_requires_inference_context_when_inference_mode_is_active():
+    model = HyenaModel.__new__(HyenaModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(flash_decode=True)
+
+    with (
+        InferenceMode.active(),
+        pytest.raises(
+            AssertionError,
+            match="Flash decode is only supported in inference mode, but no inference_context is provided",
+        ),
+    ):
+        model.forward(
+            input_ids=None,
+            position_ids=None,
+            attention_mask=None,
+            inference_context=None,
+            runtime_gather_output=True,
+        )
+
+
+def test_hyena_stack_does_not_create_full_iteration_manager_for_empty_scope():
+    stack = HyenaStack.__new__(HyenaStack)
+    torch.nn.Module.__init__(stack)
+    stack.config = SimpleNamespace(cuda_graph_scope=[])
+
+    with patch(
+        "bionemo.evo2.models.megatron.hyena.hyena_block.CudaGraphManager",
+        return_value=object(),
+    ):
+        stack.create_mcore_cudagraph_manager(stack.config)
+
+    assert not hasattr(stack, "cudagraph_manager")
 
 
 def test_weight_decay_conditions():
