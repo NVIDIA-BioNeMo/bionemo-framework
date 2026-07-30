@@ -15,7 +15,7 @@ Default to interactive planning. Use batch only when requested. In batch mode, i
 
 ## Locate or acquire the recipe
 
-Prefer an explicit checkout, then a matching nearby checkout. Otherwise clone https://github.com/NVIDIA-BioNeMo/bionemo-recipes. Require `recipes/evo2_phage_gen/VERSION >= 2.4`. Preserve incompatible or dirty checkouts; obtain `origin/jstjohn/evo2_phage_gen` or a newer compatible revision in a separate checkout or worktree. Record the repository revision and absolute checkout and recipe roots.
+Prefer an explicit checkout, then a matching nearby checkout. Reuse either when `recipes/evo2_phage_gen/VERSION >= 2.4`; preserve and record any dirty state, and isolate later mutations as needed. Dirtiness alone never triggers the special branch. If no compatible checkout exists, clone or acquire the canonical default revision from https://github.com/NVIDIA-BioNeMo/bionemo-recipes in a separate clean checkout and inspect it. Only after that canonical default revision is shown not to contain `recipes/evo2_phage_gen/VERSION >= 2.4`, obtain `origin/jstjohn/evo2_phage_gen` or a newer compatible revision in a separate checkout or worktree. Record the repository revision and absolute checkout and recipe roots.
 
 ## Hand off to the checked-out implementation
 

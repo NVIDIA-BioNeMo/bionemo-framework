@@ -7,7 +7,7 @@
       "expected_output": "A portable bootstrap plan that acquires a compatible BioNeMo Recipes checkout and hands implementation work to its recipe-local controller.",
       "assertions": [
         "The response clones exactly https://github.com/NVIDIA-BioNeMo/bionemo-recipes rather than deriving a checkout from the installed skill bundle.",
-        "The response defaults to interactive mode unless batch is requested and, only if the recipe is absent or incompatible, uses origin/jstjohn/evo2_phage_gen or a newer compatible revision in a separate checkout or worktree.",
+        "The response defaults to interactive mode unless batch is requested; it preserves any dirty checkout without treating dirtiness alone as a special-branch trigger, reuses an explicit or nearby checkout when VERSION >= 2.4 while recording dirtiness and isolating later mutations, and only after a separate clean checkout of the canonical default revision is shown not to contain recipes/evo2_phage_gen VERSION >= 2.4 uses origin/jstjohn/evo2_phage_gen or a newer compatible revision.",
         "The response selects recipes/evo2_phage_gen, requires its VERSION to be at least 2.4, and records the repository revision.",
         "The response resolves and records absolute checkout and recipe roots before implementation work.",
         "The response discovers bionemo-phage-design from the selected checkout's recipe-local .agents/skills and hands off to it."
@@ -22,8 +22,8 @@
       "assertions": [
         "The response checks recipes/evo2_phage_gen/VERSION and rejects a version below 2.4 for implementation handoff.",
         "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the clone source and selects default interactive mode unless batch is requested.",
-        "The response preserves the incompatible or dirty checkout without reset, overwrite, or destructive cleanup.",
-        "The response obtains origin/jstjohn/evo2_phage_gen or a newer compatible revision in a separate checkout or worktree only when the selected checkout is incompatible.",
+        "The response preserves any dirty checkout without reset, overwrite, or destructive cleanup; dirtiness alone does not trigger the special branch, and an explicit or nearby checkout with VERSION >= 2.4 is reused while its dirty state is recorded and later mutations are isolated.",
+        "Only when no compatible checkout exists does the response clone or acquire the canonical default revision in a separate clean checkout and inspect it; it uses origin/jstjohn/evo2_phage_gen or a newer compatible revision only after that canonical default revision is shown not to contain recipes/evo2_phage_gen VERSION >= 2.4.",
         "The response records the revision and absolute checkout and recipe roots, discovers the local skill, and hands off to bionemo-phage-design."
       ],
       "expected_skill": "bionemo-phage-generation",
@@ -35,7 +35,7 @@
       "expected_output": "An interactive bootstrap and handoff that leaves recipe-specific planning to the compatible recipe-local controller.",
       "assertions": [
         "The response explicitly selects interactive mode as the default.",
-        "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the clone source and uses origin/jstjohn/evo2_phage_gen or a newer compatible revision in a separate checkout or worktree only if the supplied checkout is absent or incompatible.",
+        "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the canonical clone source; it preserves any dirty checkout and reuses an explicit or nearby checkout with VERSION >= 2.4 while recording dirtiness and isolating later mutations, then only when none is compatible inspects a separate clean canonical default checkout and uses origin/jstjohn/evo2_phage_gen or a newer compatible revision only after that default lacks recipes/evo2_phage_gen VERSION >= 2.4.",
         "The response verifies VERSION >= 2.4, records the repository revision and absolute checkout and recipe roots, and avoids recipe commands or fixed implementation values.",
         "The response reloads or starts the agent from recipes/evo2_phage_gen so its .agents/skills are discovered.",
         "The response directs the agent to read bionemo-phage-design and relevant sibling skills completely before handing off to bionemo-phage-design."
@@ -49,7 +49,7 @@
       "expected_output": "A batch bootstrap and handoff that applies reversible defaults but pauses for decisions outside its authority.",
       "assertions": [
         "The response explicitly selects batch mode because it was requested.",
-        "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the clone source and uses origin/jstjohn/evo2_phage_gen or a newer compatible revision in a separate checkout or worktree only if the supplied checkout is absent or incompatible.",
+        "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the canonical clone source; it preserves any dirty checkout and reuses an explicit or nearby checkout with VERSION >= 2.4 while recording dirtiness and isolating later mutations, then only when none is compatible inspects a separate clean canonical default checkout and uses origin/jstjohn/evo2_phage_gen or a newer compatible revision only after that default lacks recipes/evo2_phage_gen VERSION >= 2.4.",
         "The response infers only reversible choices from durable records and stops for missing authority, irreversible risk, or unresolved material biology.",
         "The response verifies VERSION >= 2.4 and records the repository revision plus absolute checkout and recipe roots before implementation work.",
         "The response discovers the recipe-local bionemo-phage-design skill and hands control to it after reloading or starting the agent from recipes/evo2_phage_gen."
