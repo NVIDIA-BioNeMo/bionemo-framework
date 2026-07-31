@@ -84,8 +84,8 @@ jobs:
           fi
           echo "Recipes to run: $DIRS"
 
-          # Attach the runner image (the dockerhub-cached squashed pytorch, like the repo-wide lane).
-          IMG="svcbionemo023/bionemo-framework:pytorch26.04-py3-squashed"
+          # Attach the same default runner image as the repo-wide recipe lane.
+          IMG="nvcr.io/nvidia/pytorch:26.06-py3"
           MATRIX=$(echo "$DIRS" | jq -c --arg img "$IMG" \
             'map({dir: ., name: (. | split("/") | last), image: $img})')
           echo "dirs=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -137,6 +137,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-huggingface-interp-${{ matrix.recipe.name }}-
             ${{ runner.os }}-huggingface-
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          enable-cache: true
 
       - name: Install dependencies
         working-directory: ${{ matrix.recipe.dir }}
