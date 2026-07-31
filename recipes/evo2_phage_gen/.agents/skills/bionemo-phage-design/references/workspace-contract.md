@@ -27,7 +27,9 @@ git clone --branch jstjohn/evo2_phage_gen --single-branch \
 
 An agent may start at the repository root or elsewhere. Resolve `repository_root` first. After selecting mode, recipe workspace, target, and slug, record absolute `recipe_root` and `result_root` before recipe commands.
 
-If this skill is globally installed or imported and the checkout also contains a top-level `.agents` bundle, compare their revisions or file hashes. Report meaningful differences and record which bundle and hash govern the run; never silently mix installed and checkout bundle versions.
+If this skill is globally installed or imported and the checkout also contains the recipe-local implementation bundle under `recipes/evo2_phage_gen/.agents/skills`, compare their revisions or file hashes. Report meaningful differences and record which bundle and hash govern the run; never silently mix installed and checkout bundle versions.
+
+The repository-root `.agents` package contains the portable `bionemo-phage-generation` entrypoint. It is not a substitute for the recipe-local implementation bundle.
 
 ## Select the recipe workspace
 

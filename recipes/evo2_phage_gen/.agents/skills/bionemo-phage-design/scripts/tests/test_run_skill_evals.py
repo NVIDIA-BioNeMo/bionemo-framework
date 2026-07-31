@@ -535,8 +535,10 @@ class EvalRunnerTests(unittest.TestCase):
             "globally installed",
             "checkout bundle",
             "record which bundle",
+            "recipe-local implementation bundle",
         ):
             self.assertIn(marker, text)
+        self.assertNotIn("top-level `.agents` bundle", text)
         self.assertNotIn("git fetch origin", text)
         self.assertNotIn("git switch evo2-phage-gen", text)
 
@@ -550,10 +552,34 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertLess(workspace, result)
         self.assertLess(result, command)
 
-    def test_validation_examples_accept_an_external_skill_bundle(self) -> None:
+    def test_validation_examples_resolve_the_recipe_local_runner(self) -> None:
         validation = (SKILL_ROOT / "bionemo-phage-design" / "assets" / "VALIDATION.md").read_text(encoding="utf-8")
-        for marker in (
+        skill_root_match = re.search(
+            r'^PHAGE_SKILL_ROOT="\$\{PHAGE_SKILL_ROOT:-\$PWD/(?P<relative>[^"}]+)\}"$',
+            validation,
+            flags=re.MULTILINE,
+        )
+        self.assertIsNotNone(skill_root_match)
+        assert skill_root_match is not None
+        relative_skill_root = skill_root_match.group("relative")
+        self.assertEqual(relative_skill_root, "recipes/evo2_phage_gen/.agents/skills")
+        self.assertNotIn(
             'PHAGE_SKILL_ROOT="${PHAGE_SKILL_ROOT:-$PWD/.agents/skills}"',
+            validation,
+        )
+
+        runner_match = re.search(
+            r'^PHAGE_EVAL_RUNNER="\$PHAGE_SKILL_ROOT/(?P<relative>[^"]+)"$',
+            validation,
+            flags=re.MULTILINE,
+        )
+        self.assertIsNotNone(runner_match)
+        assert runner_match is not None
+        documented_runner = REPOSITORY_ROOT / relative_skill_root / runner_match.group("relative")
+        self.assertTrue(documented_runner.is_file(), documented_runner)
+        self.assertEqual(documented_runner.resolve(), SCRIPT.resolve())
+
+        for marker in (
             'python "$PHAGE_EVAL_RUNNER"',
             '--skill-root "$PHAGE_SKILL_ROOT"',
             "Git-tracked plugin directory",

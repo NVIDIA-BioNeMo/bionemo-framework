@@ -9,37 +9,37 @@
 - Historical live-campaign revision: 54250070db2d407b3ee2f2e65e0c8202e0904590
 - Portable-refresh base: e8a042ad688135695d6eac38601d47b3e2060bb7
 - Branch: jstjohn/evo2_phage_gen
-- Evaluated changes: the original skill bundle and README; the refresh relocates the bundle to top-level `.agents/**` and adds checkout/recipe-root portability coverage
+- Evaluated changes: the original skill bundle and README; the refresh places the implementation bundle under `recipes/evo2_phage_gen/.agents/**`, adds the portable root `bionemo-phage-generation` entrypoint, and adds checkout/recipe-root portability coverage
 - Runtime scope: skills, documentation, literature assets, and standard-library utilities; no SFT, RL, inference, GPU, scheduler, or cloud job was launched
 
 ## Results
 
-| Surface                     | Result                                                                                                                                                                              |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Skill structure             | PASS — all 12 controller/subskill directories passed the skill-creator validator                                                                                                    |
-| Behavioral eval schema      | PASS — 12 portable eval files, 48 globally unique exact-field cases                                                                                                                 |
-| Portable eval runner        | PASS — 52/52 unit tests cover Codex and Claude adapters, independent skill/repository/recipe roots, and portable workspace contracts                                                |
-| Harness dry runs            | PASS — Codex and Claude each produced all current zero-cost plans; the 2026-07-17 campaign covered the then-current 26 cases                                                        |
-| Live Claude behavioral eval | HISTORICAL PASS — the 2026-07-17 effective suite was 26/26: 22 unaffected clean-sweep passes plus four passing current-definition reruns                                            |
-| Claude plugin bridge        | PASS — Claude Code 2.1.211 validates .agents as local plugin evo2-phage-gen                                                                                                         |
-| Codex plugin bridge         | PASS — the official validator accepts .agents/.codex-plugin/plugin.json and its ./skills/ bundle                                                                                    |
-| Claude workspace isolation  | PASS — Git-index allowlist, explicit answer/audit/generated-path exclusions, outward-symlink rejection, required-path checks, and a per-file content manifest                       |
-| Context size                | PASS — SKILL.md entrypoints are 451–891 words; detail is routed to references                                                                                                       |
-| Markdown links              | PASS — all checked local skill and recipe links resolve after relocation                                                                                                            |
-| Literature utility          | PASS — 26/26 unit tests                                                                                                                                                             |
-| Literature manifests        | PASS — both paper bundles verified with zero errors and reconstructed byte-identically offline                                                                                      |
-| Official workbook           | PASS — media-1.xlsx SHA-256 3cd26d4cca8bc1273a863c4b2304e755635fe0c7bed46308f54029b88f063fc9                                                                                        |
-| Workbook extraction         | PASS — 302 rows, 33 columns, 302 unique IDs; repeated extraction produced the same TSV hash                                                                                         |
-| Recipe README               | PASS — results-first human guide with top-level Codex and Claude launch examples                                                                                                    |
-| Result isolation            | PASS — generated runs stay under the selected recipe's gitignored `results/` directory                                                                                              |
-| Storage planning            | PASS — total-base forecasting, measured corpus/checkpoint anchors, checkpoint-write headroom, role retention, and user-approved cleanup are launch gates                            |
-| Context policy              | PASS — SFT/RL context is agreed after collection from p99.9 or affordable maximum, serialization overhead, and alignment; historical lengths are not defaults                       |
-| Target conditioning         | PASS — a clear target defaults to measured similarity buckets; unprefixed leakage checks precede frozen prefix serialization and RL handoff                                         |
-| Historical evidence         | PASS — the checked-in sanitized snapshot separates empirical outcomes from configuration facts and retains source hashes/locators                                                   |
-| Portability                 | PASS — canonical isolated fallback, symlink-safe workspace choices, installed/checkout bundle comparison, recipe cwd, recipe-owned results, and agent-session re-entry are explicit |
-| External asset failover     | PASS — pinned identity, bounded source failover, authenticated or user-approved insecure transport, exact-versus-derived gates, controls, and atomic promotion                      |
-| Policy ownership            | PASS — active recipe instructions add no custom biological policy; each harness retains its normal policy behavior                                                                  |
-| Pre-commit                  | PASS — license, copied-file, EOF, whitespace, YAML, Ruff, mdformat, and secret hooks pass for the bundle and related docs                                                           |
+| Surface                     | Result                                                                                                                                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Skill structure             | PASS — all 12 recipe-local controller/subskill directories passed the skill-creator validator                                                                                                 |
+| Behavioral eval schema      | PASS — 12 recipe-local eval files contain 47 globally unique exact-field cases; the portable root skill has one eval file with four cases                                                     |
+| Focused skill tests         | PASS — 80 tests plus six subtests cover the package-boundary split, Codex and Claude adapters, independent skill/repository/recipe roots, portable workspace contracts, and literature assets |
+| Harness dry runs            | HISTORICAL PASS — the 2026-07-29 portability refresh produced both harnesses' then-current 46-case zero-cost plans; the 2026-07-17 campaign covered the then-current 26 cases                 |
+| Live Claude behavioral eval | HISTORICAL PASS — the 2026-07-17 effective suite was 26/26: 22 unaffected clean-sweep passes plus four passing current-definition reruns                                                      |
+| Claude plugin bridge        | PASS — Claude Code 2.1.211 validates the recipe-local `.agents` directory as local plugin evo2-phage-gen                                                                                      |
+| Codex plugin bridge         | PASS — the official validator accepts `recipes/evo2_phage_gen/.agents/.codex-plugin/plugin.json` and its `./skills/` bundle                                                                   |
+| Claude workspace isolation  | PASS — Git-index allowlist, explicit answer/audit/generated-path exclusions, outward-symlink rejection, required-path checks, and a per-file content manifest                                 |
+| Context size                | PASS — SKILL.md entrypoints are 451–891 words; detail is routed to references                                                                                                                 |
+| Markdown links              | PASS — all checked local skill and recipe links resolve after relocation                                                                                                                      |
+| Literature utility          | PASS — 26/26 unit tests                                                                                                                                                                       |
+| Literature manifests        | PASS — both paper bundles verified with zero errors and reconstructed byte-identically offline                                                                                                |
+| Official workbook           | PASS — media-1.xlsx SHA-256 3cd26d4cca8bc1273a863c4b2304e755635fe0c7bed46308f54029b88f063fc9                                                                                                  |
+| Workbook extraction         | PASS — 302 rows, 33 columns, 302 unique IDs; repeated extraction produced the same TSV hash                                                                                                   |
+| Recipe README               | PASS — results-first human guide with portable bootstrap and recipe-local Codex and Claude launch examples                                                                                    |
+| Result isolation            | PASS — generated runs stay under the selected recipe's gitignored `results/` directory                                                                                                        |
+| Storage planning            | PASS — total-base forecasting, measured corpus/checkpoint anchors, checkpoint-write headroom, role retention, and user-approved cleanup are launch gates                                      |
+| Context policy              | PASS — SFT/RL context is agreed after collection from p99.9 or affordable maximum, serialization overhead, and alignment; historical lengths are not defaults                                 |
+| Target conditioning         | PASS — a clear target defaults to measured similarity buckets; unprefixed leakage checks precede frozen prefix serialization and RL handoff                                                   |
+| Historical evidence         | PASS — the checked-in sanitized snapshot separates empirical outcomes from configuration facts and retains source hashes/locators                                                             |
+| Portability                 | PASS — canonical isolated fallback, symlink-safe workspace choices, installed/checkout bundle comparison, recipe cwd, recipe-owned results, and agent-session re-entry are explicit           |
+| External asset failover     | PASS — pinned identity, bounded source failover, authenticated or user-approved insecure transport, exact-versus-derived gates, controls, and atomic promotion                                |
+| Policy ownership            | PASS — active recipe instructions add no custom biological policy; each harness retains its normal policy behavior                                                                            |
+| Pre-commit                  | PASS — license, copied-file, EOF, whitespace, YAML, Ruff, mdformat, and secret hooks pass for the bundle and related docs                                                                     |
 
 ## Reproducible behavioral evals
 
@@ -50,7 +50,7 @@ The standard-library runner follows the [OpenAI skill-eval loop](https://develop
 From the BioNeMo Recipes repository root (the skill bundle may be installed elsewhere):
 
 ```bash
-PHAGE_SKILL_ROOT="${PHAGE_SKILL_ROOT:-$PWD/.agents/skills}"
+PHAGE_SKILL_ROOT="${PHAGE_SKILL_ROOT:-$PWD/recipes/evo2_phage_gen/.agents/skills}"
 PHAGE_EVAL_RUNNER="$PHAGE_SKILL_ROOT/bionemo-phage-design/scripts/run_skill_evals.py"
 
 # Validate shape, ownership, required fields, and globally unique IDs.
@@ -137,7 +137,7 @@ A structured-input audit found no source-checkout path, eval definition, expecte
 Run the offline runner tests with:
 
 ```bash
-python .agents/skills/bionemo-phage-design/scripts/tests/test_run_skill_evals.py
+python recipes/evo2_phage_gen/.agents/skills/bionemo-phage-design/scripts/tests/test_run_skill_evals.py
 ```
 
 ## Scientific forward checks
@@ -168,14 +168,14 @@ The 96-design validation and 1,000-design offline Arc results are different eval
 ## Limitations
 
 - No training, inference, external-QC pipeline, scheduler/cloud launch, or hardware-fit test was run.
-- The 2026-07-17 suite ran live through Claude; Codex had 26-case dry-run coverage. The portability refresh adds 46-case dry runs for both harnesses, with no new paid/live generation or grading.
+- The 2026-07-17 suite ran live through Claude; Codex had 26-case dry-run coverage. The 2026-07-29 portability refresh produced 46-case dry runs for both harnesses, with no new paid/live generation or grading. The current recipe-local eval schema contains 47 cases; that current set has validation coverage but no new paid/live generation or grading.
 - Broader recipe tests were not run because recipe source/config behavior was not changed.
 - Public-source discovery reflects the state observed on 2026-07-17 and should be rerun as literature and APIs change.
 - This is a validation snapshot, not workflow authority. Changes were not committed at capture time.
 
 ## Minimal recheck
 
-1. Run eval validation, the runner unit tests, and both 46-case dry runs.
+1. Run eval validation, the full focused test suite, and both harnesses' current 47-case dry runs.
 2. Validate all 12 skills and both plugin manifests.
 3. Run the 26 literature tests, manifest check, and byte-identical offline reconstruction.
 4. Recheck relative links, forbidden portable-content patterns, historical snapshot hashes, git diff whitespace, scoped status, and core.worktree.
