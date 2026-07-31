@@ -36,6 +36,7 @@ encode, feature labels, and the decode-only feature-clamp hook.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -81,6 +82,17 @@ def clean_dna(seq: str) -> str:
     return _VALID_BASES.sub("", (seq or "").upper())
 
 
+class RequestAborted(Exception):
+    """Raised at a cooperative-cancel checkpoint when the caller has gone away.
+
+    The engine polls an optional ``cancel`` predicate (``() -> bool``) at safe points — between
+    encode micro-batches, and before the generate baseline pass — and raises this to stop burning
+    the single serialized GPU on work whose HTTP client has disconnected. The server maps it to
+    499 (client closed request). ``cancel=None`` (the CLI/library default) disables the checks, so
+    non-server callers are unaffected.
+    """
+
+
 def annotate(engine, sequence: str, organism: str = "None (raw DNA)", tag: Optional[str] = None):
     """Shared encode path for the CLI ``encode`` and the server ``/annotate`` (topk).
 
@@ -102,7 +114,7 @@ def annotate(engine, sequence: str, organism: str = "None (raw DNA)", tag: Optio
     # Reject over-length input rather than letting encode() silently truncate to max_seq_len —
     # the per-base `activations` would then be shorter than `bases` and the viz would misalign.
     if len(full) > engine.max_seq_len:
-        raise ValueError(f"sequence too long: {len(full)} > max_seq_len ({engine.max_seq_len})")
+        raise ValueError(f"sequence too long: {len(full)} bp (> {engine.max_seq_len} bp context)")
     codes = engine.encode(full)
     if codes.shape[0] != len(full):  # belt-and-suspenders: encode must be 1:1 with the input here
         raise ValueError("encoded length != input length (tokenizer truncated)")
@@ -207,6 +219,7 @@ class Evo2SAE:
         self.n_features = None
         self.labels: dict[int, str] = {}
         self.peaks: dict[int, float] = {}
+        self.feature_extra: dict[int, dict] = {}  # optional curated columns (steerable / description / auroc)
         self._lock = threading.Lock()  # serialize GPU access (Megatron isn't thread-safe)
         self.ready = False
 
@@ -229,9 +242,20 @@ class Evo2SAE:
         # first encode. We can only catch a dim mismatch (wrong SAE/model); a wrong layer with the
         # same hidden size is undetectable here (the SAE checkpoint records no training layer).
         self._check_dim(self._sae_input_dim, self._model_hidden_size(), self.layer)
-        self.labels, self.peaks = self._load_feature_meta()
+        self.labels, self.peaks, self.feature_extra = self._load_feature_meta()
+        # Server-side renames: the parquet labels are the immutable base; user renames are overlaid
+        # from a JSON sidecar (durable across restarts/redeploys, shared across browsers). See set_label.
+        self._base_labels = dict(self.labels)
+        self.renames = self._load_renames()
+        self.labels.update(self.renames)
         self.ready = True
-        logger.info("Evo2SAE ready: layer=%d n_features=%d n_labels=%d", self.layer, self.n_features, len(self.labels))
+        logger.info(
+            "Evo2SAE ready: layer=%d n_features=%d n_labels=%d n_renames=%d",
+            self.layer,
+            self.n_features,
+            len(self.labels),
+            len(self.renames),
+        )
         return self
 
     def _ensure_engine(self):
@@ -303,32 +327,108 @@ class Evo2SAE:
         logger.info("SAE loaded: TopKSAE input_dim=%d n_features=%d", cfg["input_dim"], cfg["hidden_dim"])
         return sae, int(cfg["hidden_dim"])
 
+    def _renames_path(self) -> Path:
+        """Path where user renames are persisted.
+
+        ``FEATURE_RENAMES`` overrides; else a sidecar next to the annotations parquet (so it lands on
+        the same mounted/persistent volume); else the CWD.
+        """
+        env = os.getenv("FEATURE_RENAMES")
+        if env:
+            return Path(env)
+        if self.feature_annotations:
+            return Path(self.feature_annotations).with_name("feature_renames.json")
+        return Path("feature_renames.json")
+
+    def _load_renames(self) -> dict:
+        """Load persisted {feature_id: label} overlays. Missing/corrupt file -> no renames (never fatal)."""
+        p = self._renames_path()
+        if not p.exists():
+            return {}
+        try:
+            raw = json.loads(p.read_text())
+            return {int(k): str(v) for k, v in raw.items() if str(v).strip()}
+        except Exception as e:
+            logger.warning("Could not read renames %s: %s — ignoring", p, e)
+            return {}
+
+    def _save_renames(self) -> None:
+        p = self._renames_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(json.dumps({str(k): v for k, v in sorted(self.renames.items())}, indent=0))
+            tmp.replace(p)  # atomic on POSIX — no half-written file if we crash mid-write
+        except Exception as e:
+            logger.warning("Could not write renames %s: %s", p, e)
+
+    def set_label(self, feature_id: int, label: str) -> Optional[str]:
+        """Persist a user rename: update in-memory labels + the sidecar.
+
+        A blank label reverts to the original parquet annotation. Returns the resulting label
+        (None if it became unlabeled).
+        """
+        fid = int(feature_id)
+        text = (label or "").strip()
+        if text:
+            self.renames[fid] = text
+            self.labels[fid] = text
+        else:
+            self.renames.pop(fid, None)
+            base = self._base_labels.get(fid)
+            if base is not None:
+                self.labels[fid] = base
+            else:
+                self.labels.pop(fid, None)
+        self._save_renames()
+        return self.labels.get(fid)
+
     def _load_feature_meta(self):
-        """feature_id -> (label, natural peak) from the annotation **parquet** (produced by probe.py annotate)."""
+        """feature_id -> (labels, peaks, extra) from the annotation **parquet**.
+
+        `extra` carries optional curated per-feature columns — ``steerable`` (bool), ``description``
+        (str), ``auroc`` (float) — loaded and keyed by feature_id right alongside the label/peak, and
+        served on /features. They're descriptive (they don't change encode/generate), and the UI
+        surfaces them. Columns absent from the parquet are skipped, so any annotation file loads.
+        """
         labels: dict[int, str] = {}
         peaks: dict[int, float] = {}
+        extra: dict[int, dict] = {}
         if not self.feature_annotations:
-            return labels, peaks
+            return labels, peaks, extra
         path = Path(self.feature_annotations)
         if not path.exists():
             logger.warning("Feature annotations %s not found — features unlabeled", path)
-            return labels, peaks
+            return labels, peaks, extra
         if path.suffix.lower() != ".parquet":
             logger.warning("Feature annotations %s: only .parquet is supported — features unlabeled", path)
-            return labels, peaks
+            return labels, peaks, extra
         import pyarrow.parquet as pq
 
         tbl = pq.read_table(path).to_pydict()
         ids = tbl.get("feature_id", [])
         names = tbl.get("label", tbl.get("annotation", [None] * len(ids)))
         pk = tbl.get("max_activation", [None] * len(ids))
-        for i, n, p in zip(ids, names, pk):
-            if n is not None:
-                labels[int(i)] = str(n)
-            if p is not None:
-                peaks[int(i)] = float(p)
-        logger.info("Loaded %d labels from %s", len(labels), path)
-        return labels, peaks
+        steer = tbl.get("steerable", [None] * len(ids))
+        desc = tbl.get("description", [None] * len(ids))
+        auroc = tbl.get("auroc", [None] * len(ids))
+        for j, i in enumerate(ids):
+            fid = int(i)
+            if names[j] is not None:
+                labels[fid] = str(names[j])
+            if pk[j] is not None:
+                peaks[fid] = float(pk[j])
+            ex = {}
+            if steer[j] is not None:
+                ex["steerable"] = bool(steer[j])
+            if desc[j] is not None:
+                ex["description"] = str(desc[j])
+            if auroc[j] is not None:
+                ex["auroc"] = float(auroc[j])
+            if ex:
+                extra[fid] = ex
+        logger.info("Loaded %d labels from %s (%d with curated extra)", len(labels), path, len(extra))
+        return labels, peaks, extra
 
     # ------------------------------------------------------------------ tokenize
     def tokenize(self, text: str) -> list[int]:
@@ -350,7 +450,7 @@ class Evo2SAE:
         return self.encode_batch([dna])[0]
 
     @torch.no_grad()
-    def encode_batch(self, seqs: list[str], batch_size: int = 8) -> list[torch.Tensor]:
+    def encode_batch(self, seqs: list[str], batch_size: int = 8, cancel=None) -> list[torch.Tensor]:
         """MANY sequences -> list of SAE codes [S_i, n_features], batched on the GPU.
 
         Sequences are padded to the longest in each micro-batch; padding is masked
@@ -359,12 +459,21 @@ class Evo2SAE:
         Work is length-bucketed (processed in token-length order) so each micro-batch holds
         similar-length sequences and wastes little padding on mixed-length inputs; results are
         written back by original index, so the returned order matches the input order.
+
+        ``cancel`` is an optional ``() -> bool`` predicate polled between micro-batches; when it
+        returns True the encode aborts with ``RequestAborted`` (see the server's cancel-on-disconnect
+        path). ``None`` (default) never checks, so CLI/library callers are unaffected.
         """
         out: list[torch.Tensor] = [None] * len(seqs)  # type: ignore
         order = [(i, self.tokenize(s)) for i, s in enumerate(seqs)]
         order.sort(key=lambda it: len(it[1]))  # length-bucket to minimize padding (out[orig_i] un-sorts)
         with self._lock:
             for start in range(0, len(order), batch_size):
+                # Cooperative cancel checkpoint: bail before the next micro-batch's forward if the
+                # caller has disconnected, so a big /gene_embed (up to 1000 seqs) stops holding the
+                # single GPU for a client that's gone. Granularity = one micro-batch (batch_size seqs).
+                if cancel is not None and cancel():
+                    raise RequestAborted(f"cancelled after {start}/{len(order)} sequences")
                 chunk = order[start : start + batch_size]
                 id_lists = [ids for _, ids in chunk]
                 hiddens = self._forward_hidden(id_lists)  # list of [S_i, H]
@@ -375,6 +484,65 @@ class Evo2SAE:
                         else torch.empty(0, self.n_features)
                     )
         return out
+
+    def embed_bundle(self, tagged_seqs, tag_len, meta, min_firing=10, batch_size=8, cancel=None):
+        """Pool per-sequence SAE vectors into the Sequence-UMAP bundle dict.
+
+        Encodes each tag-prefixed sequence, drops the ``tag_len`` phylo-tag tokens, and mean/max-pools
+        the DNA region into a per-feature vector. Ships ONLY the columns that fire in ``>= min_firing``
+        sequences — a wide SAE (e.g. 65536 features) is almost entirely zeros per gene, so sending the
+        full matrix is hundreds of MB and pointless for UMAP. ``feature_ids`` maps each returned column
+        back to its real SAE feature id. Returns base64 float32 ``[n_genes, n_firing_features]`` (mean and
+        max) + ``feature_ids`` + per-sequence ``meta`` + per-feature firing stats — the exact shape the
+        ``/gene_embed`` endpoint and the offline ``dashboard.py embeddings`` precompute both serve.
+        ``None`` if nothing was encodable. ``meta`` is a list of dicts aligned to ``tagged_seqs``.
+        """
+        import base64
+
+        import numpy as np
+
+        rows_mean, rows_max, meta_out = [], [], []
+        for codes, m in zip(self.encode_batch(tagged_seqs, batch_size=batch_size, cancel=cancel), meta):
+            tl = tag_len if codes.shape[0] > tag_len else 0
+            seg = codes[tl:]  # DNA region only (drop the phylo-tag tokens)
+            if seg.shape[0] == 0:
+                continue
+            rows_mean.append(seg.mean(dim=0).numpy().astype(np.float32))
+            rows_max.append(seg.max(dim=0).values.numpy().astype(np.float32))
+            meta_out.append(m)
+        if not rows_mean:
+            return None
+        gmean = np.stack(rows_mean).astype(np.float32)  # [n_genes, n_features]
+        gmax = np.stack(rows_max).astype(np.float32)
+        n_firing = (gmax > 0).sum(0)  # TopK/ReLU codes >= 0 -> firing set is pooling-invariant
+        fire_ids = np.nonzero(n_firing >= min_firing)[0]  # the only columns worth shipping
+        stats = []
+        for fid in fire_ids:
+            fid = int(fid)
+            col = gmean[:, fid]
+            stats.append(
+                {
+                    "feature_id": fid,
+                    "n_firing": int(n_firing[fid]),
+                    "mean_act_when_firing": float(col[col > 0].mean()) if (col > 0).any() else 0.0,
+                    "max_act": float(gmax[:, fid].max()),
+                    "label": self.labels.get(fid),
+                }
+            )
+        stats.sort(key=lambda s: -s["n_firing"])
+        # Slice to the firing columns only; feature_ids[col] -> real SAE feature id. tobytes()
+        # copies in C order, so the fancy-indexed views serialize correctly.
+        gmean = gmean[:, fire_ids]
+        gmax = gmax[:, fire_ids]
+        return {
+            "G_b64": base64.b64encode(gmean.tobytes()).decode(),
+            "Gmax_b64": base64.b64encode(gmax.tobytes()).decode(),
+            "n_features": int(gmean.shape[1]),  # = number of firing features (reduced width)
+            "n_genes": int(gmean.shape[0]),
+            "feature_ids": [int(f) for f in fire_ids],  # column index -> real SAE feature id
+            "genes": meta_out,
+            "feature_stats": stats,
+        }
 
     @torch.no_grad()
     def _forward_hidden(self, id_lists: list[list[int]]) -> list[torch.Tensor]:
@@ -464,6 +632,7 @@ class Evo2SAE:
         temperature=1.0,
         top_k=0,
         compare_baseline=False,
+        cancel=None,
     ) -> dict:
         """Autoregressively generate DNA, optionally clamping features on the continuation.
 
@@ -471,6 +640,12 @@ class Evo2SAE:
         through the recipe's inference engine (`infer.generate`, eager so the hook applies);
         steering is a decode-only forward hook on layer `layer`. Returns
         {generation:{sequence,activations}, baseline:..|None, features, steered}.
+
+        `cancel` is an optional `() -> bool` predicate for cooperative cancel-on-disconnect. The
+        autoregressive loop lives inside `INF.generate` (the recipe's infer engine), which we can't
+        interrupt mid-call — so the one checkpoint we expose is *between* the steered and baseline
+        passes: if the client has disconnected by then, we skip the equally-long baseline pass
+        (raising `RequestAborted`) instead of generating output nobody will read. `None` disables it.
         """
         from bionemo.evo2.run import infer as INF
 
@@ -487,7 +662,7 @@ class Evo2SAE:
         # Reject an over-context prompt rather than silently truncating it in tokenize() (parity
         # with annotate; the server maps "too long" -> 413). Raise MAX_SEQ_LEN to allow longer.
         if len(full_prompt) > self.max_seq_len:
-            raise ValueError(f"prompt too long: {len(full_prompt)} > max_seq_len ({self.max_seq_len})")
+            raise ValueError(f"prompt too long: {len(full_prompt)} bp (> {self.max_seq_len} bp context)")
         # Cap to the engine's configured context budget (prompt + generation must fit max_seq_len),
         # not an arbitrary constant. Raise MAX_SEQ_LEN at launch to generate longer — the 7B is the
         # long-context (1M) model, so it's memory-bound, not architecture-bound (OOD past training len).
@@ -521,6 +696,11 @@ class Evo2SAE:
                             handle.remove()
 
                 main_dna = _run(steer=True)
+                # The steered pass can run for minutes; if the client has since disconnected, don't
+                # burn the GPU on an equally-long baseline pass nobody will read. (This is the only
+                # checkpoint /generate exposes — a single INF.generate call can't be interrupted.)
+                if compare_baseline and clamps and cancel is not None and cancel():
+                    raise RequestAborted("client disconnected before baseline generation")
                 base_dna = _run(steer=False) if (compare_baseline and clamps) else None
         except Exception as e:
             # PURELY DEFENSIVE: the known client-reachable CUDA-assert triggers are all neutralized

@@ -118,3 +118,31 @@ def test_generate_rejects_overlong_prompt():
     # An over-context prompt is rejected (server -> 413), not silently truncated by tokenize().
     with pytest.raises(ValueError, match="too long"):
         _engine(max_seq_len=16).generate(prompt="A" * 32, organism="None (raw DNA)")
+
+
+# ------------------------------------------------------------------------------- rename persistence
+def test_set_label_persists_and_reverts(tmp_path, monkeypatch):
+    monkeypatch.delenv("FEATURE_RENAMES", raising=False)  # honor the sidecar-next-to-annotations path
+    eng = _engine(feature_annotations=str(tmp_path / "annotations.parquet"))
+    eng.labels = {0: "base0"}
+    eng._base_labels = {0: "base0"}
+    eng.renames = {}
+
+    # relabel a labeled feature + name an unlabeled one -> in-memory AND persisted to the sidecar
+    assert eng.set_label(0, "renamed0") == "renamed0"
+    assert eng.set_label(3, "new3") == "new3"
+    assert eng.labels == {0: "renamed0", 3: "new3"}
+    assert eng._load_renames() == {0: "renamed0", 3: "new3"}  # survives a fresh read from disk
+
+    # blank reverts: feature 0 back to its base label; feature 3 (no base) becomes unlabeled — persisted
+    assert eng.set_label(0, "  ") == "base0"
+    assert eng.set_label(3, "") is None
+    assert eng.labels == {0: "base0"}
+    assert eng._load_renames() == {}
+
+
+def test_load_renames_ignores_corrupt_sidecar(tmp_path, monkeypatch):
+    monkeypatch.delenv("FEATURE_RENAMES", raising=False)
+    eng = _engine(feature_annotations=str(tmp_path / "annotations.parquet"))
+    eng._renames_path().write_text("{ not valid json")
+    assert eng._load_renames() == {}  # a bad sidecar is ignored, never fatal

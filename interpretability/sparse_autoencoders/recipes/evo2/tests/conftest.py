@@ -134,7 +134,12 @@ class FakeEngine:
         self.layer = 19
         self.n_features = 4
         self.labels = {0: "feat0", 1: "feat1"}
+        self._base_labels = dict(self.labels)
+        self.renames = {}  # user rename overlay (in-memory here; the real engine persists to a sidecar)
         self.peaks = {0: 0.5}
+        # Curated per-feature extras (steerable/description/auroc) — feat0 is flagged steerable so tests
+        # can assert these flow through /features; feat1 has none (defaults to steerable=False).
+        self.feature_extra = {0: {"steerable": True, "description": "fires on feat0 motifs", "auroc": 0.91}}
         self.organism_tags = {"None (raw DNA)": "", "Human": "|tag|"}
         self.device = "cpu"
         self.sae_ckpt_path = "fake.pt"
@@ -149,12 +154,32 @@ class FakeEngine:
     def resolve_tag(self, organism, tag):
         return tag if tag is not None else self.organism_tags.get(organism)
 
+    def set_label(self, feature_id, label):
+        """In-memory mirror of Evo2SAE.set_label (blank reverts to the base label)."""
+        fid = int(feature_id)
+        text = (label or "").strip()
+        if text:
+            self.renames[fid] = text
+            self.labels[fid] = text
+        else:
+            self.renames.pop(fid, None)
+            base = self._base_labels.get(fid)
+            if base is not None:
+                self.labels[fid] = base
+            else:
+                self.labels.pop(fid, None)
+        return self.labels.get(fid)
+
     def encode(self, full):
         codes = torch.zeros(len(full), self.n_features)
         codes[:, 0] = 1.0  # feature 0 fires everywhere
         return codes
 
-    def encode_batch(self, seqs, batch_size=8):
+    def encode_batch(self, seqs, batch_size=8, cancel=None):
+        # Mirror the real engine's cooperative-cancel checkpoint (real encode_batch checks between
+        # micro-batches). embed_bundle — bound from the real Evo2SAE below — forwards cancel here.
+        if cancel is not None and cancel():
+            raise core.RequestAborted("cancelled")
         return [self.encode(s) for s in seqs]
 
     def top_features(self, codes, tag_len=0, k=8):
@@ -193,6 +218,10 @@ class FakeEngine:
         if kw.get("compare_baseline") and specs:
             resp["baseline"] = {"sequence": "TTTT", "activations": {}}
         return resp
+
+    # /gene_embed delegates pooling/packing to the real Evo2SAE.embed_bundle (uses only
+    # encode_batch + labels), so bind it here to exercise the shared implementation.
+    embed_bundle = core.Evo2SAE.embed_bundle
 
 
 @pytest.fixture

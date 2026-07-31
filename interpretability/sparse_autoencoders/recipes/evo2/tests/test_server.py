@@ -66,7 +66,35 @@ def test_annotate_rejects_too_long(client, fake_engine):
 
 def test_features(client):
     rows = client.get("/api/features").json()
-    assert {"id", "label", "natural_peak"} <= set(rows[0])
+    assert {"id", "label", "natural_peak", "steerable", "description", "auroc"} <= set(rows[0])
+    by_id = {r["id"]: r for r in rows}
+    # curated extras flow through from engine.feature_extra, keyed per feature
+    assert by_id[0]["steerable"] is True and by_id[0]["description"] == "fires on feat0 motifs"
+    assert by_id[1]["steerable"] is False and by_id[1]["description"] is None  # no extra → sensible defaults
+
+
+def test_rename_persists_and_surfaces(client, fake_engine):
+    # rename a previously-unlabeled feature -> reflected in the engine, /renames, and /features
+    r = client.post("/api/rename", json={"feature_id": 2, "label": "my motif"})
+    assert r.status_code == 200 and r.json() == {"feature_id": 2, "label": "my motif"}
+    assert fake_engine.labels[2] == "my motif"
+    assert client.get("/api/renames").json() == {"2": "my motif"}
+    by_id = {row["id"]: row["label"] for row in client.get("/api/features").json()}
+    assert by_id[2] == "my motif"
+
+
+def test_rename_blank_reverts_to_base(client, fake_engine):
+    # feature 0 has a base label; rename then blank -> back to the base, not gone
+    client.post("/api/rename", json={"feature_id": 0, "label": "renamed"})
+    assert fake_engine.labels[0] == "renamed"
+    client.post("/api/rename", json={"feature_id": 0, "label": "  "})
+    assert fake_engine.labels[0] == "feat0" and 0 not in fake_engine.renames
+    assert client.get("/api/renames").json() == {}
+
+
+def test_rename_rejects_out_of_range(client, fake_engine):
+    assert client.post("/api/rename", json={"feature_id": fake_engine.n_features, "label": "x"}).status_code == 400
+    assert client.post("/api/rename", json={"feature_id": -1, "label": "x"}).status_code == 400
 
 
 def test_annotate_returns_per_base_activations(client):
@@ -77,6 +105,12 @@ def test_annotate_returns_per_base_activations(client):
 
 def test_annotate_rejects_non_dna(client):
     assert client.post("/api/annotate", json={"sequence": "ZZZZ"}).status_code == 400
+
+
+def test_annotate_rejects_unknown_organism(client):
+    # an organism with no preset tag (and no custom tag) -> 400, not a 500 from a None tag downstream
+    r = client.post("/api/annotate", json={"sequence": "ACGT", "organism": "Klingon"})
+    assert r.status_code == 400
 
 
 def test_annotate_pick_mode(client):
@@ -116,14 +150,104 @@ def test_generate_returns_sequence(client):
     assert b["generation"]["sequence"]
 
 
+def test_gene_embed_returns_decodable_matrix(client):
+    import base64
+
+    import numpy as np
+
+    genes = [{"symbol": "g1", "sequence": "ACGTACGT"}, {"symbol": "g2", "sequence": "TTTTGGGG"}]
+    b = client.post("/api/gene_embed", json={"genes": genes, "min_firing": 1}).json()
+    assert {"G_b64", "Gmax_b64", "n_features", "n_genes", "genes", "feature_ids"} <= set(b)
+    assert b["n_genes"] == 2 and len(b["genes"]) == 2
+    # only firing columns are shipped: feature_ids maps column -> real SAE feature id
+    assert len(b["feature_ids"]) == b["n_features"]
+    assert b["feature_ids"] == [0]  # the fake fires feature 0 in every sequence, nothing else
+    g = np.frombuffer(base64.b64decode(b["G_b64"]), dtype=np.float32)
+    assert g.size == b["n_genes"] * b["n_features"]  # [n_genes x n_firing_features], what the client UMAPs
+    # accounting fields so the UI can warn instead of silently embedding fewer than submitted —
+    # lock the full set the banner interpolates (counts + the limits it names in the message).
+    assert b["n_received"] == 2 and b["n_skipped_short"] == 0 and b["n_clamped"] == 0
+    assert b["n_dropped_over_cap"] == 0
+    assert b["max_seq_len"] > 0 and b["max_genes"] == 1000  # referenced verbatim in the UI warning
+
+
+def test_gene_embed_clamps_overlength(client, fake_engine):
+    """Over-length sequences are CLAMPED to the context window and still embedded (reported via
+    n_clamped) — the UMAP tab keeps every point rather than dropping. Too-short ones are dropped+reported."""
+    genes = [
+        {"symbol": "ok", "sequence": "ACGTACGT"},
+        {"symbol": "short", "sequence": "AC"},  # < 3 bases -> dropped
+        {"symbol": "toolong", "sequence": "A" * (fake_engine.max_seq_len + 1)},  # > context -> clamped, embedded
+    ]
+    b = client.post("/api/gene_embed", json={"genes": genes, "min_firing": 1}).json()
+    assert b["n_received"] == 3
+    assert b["n_genes"] == 2  # the valid one + the clamped one
+    assert b["n_skipped_short"] == 1 and b["n_clamped"] == 1
+
+
+def test_gene_embed_all_invalid_400(client, fake_engine):
+    """If nothing is embeddable (all too short), 400 with a message accounting for why."""
+    r = client.post("/api/gene_embed", json={"genes": [{"sequence": "AC"}, {"sequence": "A"}]})
+    # /gene_embed streams keepalives, so a mid-run error is framed in the 200 body, not an HTTP status.
+    err = r.json()["__error__"]
+    assert err["status"] == 400 and "too short" in err["detail"]
+
+
+def test_gene_embed_rejects_unknown_organism(client):
+    # unknown organism (no preset tag, no custom tag) -> 400 before embedding, not a 500
+    r = client.post("/api/gene_embed", json={"genes": [{"sequence": "ACGT"}], "organism": "Klingon"})
+    assert r.status_code == 400
+
+
+def test_embed_bundle_forwards_cancel(fake_engine):
+    """The real embed_bundle must forward its cancel predicate to encode_batch so a disconnected
+    /gene_embed stops between micro-batches instead of encoding every sequence. Exercises the real
+    core.Evo2SAE.embed_bundle (bound onto FakeEngine) + the fake's cooperative-cancel checkpoint;
+    the TestClient can't simulate a mid-request disconnect, so this locks the plumbing directly."""
+    from evo2_sae.core import RequestAborted
+
+    with pytest.raises(RequestAborted):
+        fake_engine.embed_bundle(["ACGTACGT", "TTTTGGGG"], 0, [{}, {}], cancel=lambda: True)
+    # cancel=None (the default / non-server path) must never trip the checkpoint.
+    assert fake_engine.embed_bundle(["ACGTACGT"], 0, [{}], cancel=None) is not None
+
+
+def test_restart_disabled_by_default_403(client):
+    """POST /restart is gated: without ALLOW_ENGINE_RESTART it returns 403 (never exits the process).
+    The enabled path calls os._exit, so it's validated live, not in-process here."""
+    r = client.post("/api/restart")
+    assert r.status_code == 403
+    assert "not enabled" in r.json()["detail"].lower()
+
+
+def test_health_reports_restart_disabled(client):
+    assert client.get("/api/health").json()["restart_enabled"] is False
+
+
+def test_generate_409_when_engine_busy(client):
+    """Single-flight: a request arriving while the engine is occupied gets a fast 409, not a silent
+    queue behind the running one. (Hold the module busy-lock to simulate an in-flight request.)"""
+    import evo2_sae.server as srv
+
+    assert srv._engine_busy.acquire(blocking=False)
+    try:
+        r = client.post("/api/generate", json={"prompt": "ACGT"})
+        assert r.status_code == 409
+        assert "busy" in r.json()["detail"].lower()
+    finally:
+        srv._engine_busy.release()
+
+
 def test_generate_rejects_out_of_range_feature(client):
     r = client.post("/api/generate", json={"prompt": "ACGT", "features": [{"feature_id": 999}]})
-    assert r.status_code == 400  # the wedge guard, surfaced to the client
+    # streamed -> the wedge guard's error is framed in the 200 body, not an HTTP status.
+    assert r.json()["__error__"]["status"] == 400
 
 
 def test_generate_rejects_too_long(client, fake_engine):
     seq = "A" * (fake_engine.max_seq_len + 1)  # exceeds the context budget -> 413 (parity w/ annotate)
-    assert client.post("/api/generate", json={"prompt": seq}).status_code == 413
+    # streamed -> the too-long error is framed in the 200 body, not an HTTP status.
+    assert client.post("/api/generate", json={"prompt": seq}).json()["__error__"]["status"] == 413
 
 
 def test_generate_compare_baseline(client):
@@ -186,5 +310,15 @@ def test_api_only_when_no_frontend(fake_engine, monkeypatch):
     """
     monkeypatch.delenv("DASHBOARD_DIST", raising=False)
     with TestClient(build_app(fake_engine)) as c:
+        assert c.get("/").status_code == 404
+        assert c.get("/api/health").status_code == 200
+
+
+def test_bad_static_dir_degrades_to_api_only(fake_engine, tmp_path, monkeypatch):
+    """A bogus static_dir (e.g. a wrong DASHBOARD_DIST) must NOT crash the app — it degrades to
+    API-only (/ 404s, /api still works) instead of erroring at mount time."""
+    monkeypatch.delenv("DASHBOARD_DIST", raising=False)
+    missing = tmp_path / "does-not-exist"  # not a directory
+    with TestClient(build_app(fake_engine, static_dir=str(missing))) as c:
         assert c.get("/").status_code == 404
         assert c.get("/api/health").status_code == 200
