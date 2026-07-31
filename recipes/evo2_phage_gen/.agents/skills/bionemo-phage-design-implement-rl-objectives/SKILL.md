@@ -5,7 +5,7 @@ description: Use when adding or changing Evo2 phage RL metrics, reward functions
 
 # Implement Phage RL Objectives
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Implement the approved RL_OBJECTIVES.yaml without changing its biological meaning. Make online rewards, offline validation, and final filtering share tested primitives wherever possible.
 

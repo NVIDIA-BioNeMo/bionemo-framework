@@ -33,7 +33,7 @@
     },
     {
       "id": "bionemo-phage-design-adapt-execution-003-lepton-contract",
-      "prompt": "Prepare a launch, monitor, cancel, and resume handoff for this phage recipe on cloud Lepton. The skill may be installed outside the checkout; repository_root and recipe_root have been recorded, but endpoint, image, mounts, authentication, and durable-output ownership have not been confirmed.",
+      "prompt": "Prepare a launch, monitor, cancel, and resume handoff for this phage recipe on cloud Lepton. The recipe-local package is already discovered and repository_root and recipe_root have been recorded, but endpoint, image, mounts, authentication, and durable-output ownership have not been confirmed.",
       "expected_output": "A conservative Lepton execution contract that discovers current interfaces and leaves unverified infrastructure fields unresolved.",
       "assertions": [
         "The response inspects <repository_root>/ci/lepton/README.md, <repository_root>/ci/lepton/requirements.txt, current launcher help, and recipe environment scripts when available; if sandboxed away, it records those exact inspections as unresolved preflight rather than copying a site-specific command.",

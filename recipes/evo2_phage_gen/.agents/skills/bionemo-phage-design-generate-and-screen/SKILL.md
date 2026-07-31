@@ -5,7 +5,7 @@ description: Use when producing, deduplicating, hard-QC screening, clustering, r
 
 # Generate and Screen Phages
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Scale inference to the user's decision, then apply the same versioned hard-QC contract used for RL checkpoint selection. A high reward is not a final design.
 

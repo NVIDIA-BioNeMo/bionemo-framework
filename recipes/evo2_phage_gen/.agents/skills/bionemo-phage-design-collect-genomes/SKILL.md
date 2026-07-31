@@ -5,7 +5,7 @@ description: Use when an Evo 2 phage SFT project needs a reproducible Microvirid
 
 # Collect Phage Genomes
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Build a licensed, checksummed, provenance-rich collection of usable full genomes. Store dataset-scale FASTA only in the gitignored project result root.
 

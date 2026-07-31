@@ -514,37 +514,63 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertLessEqual(len(interface["defaultPrompt"]), 3)
         self.assertTrue(all(len(prompt) <= 128 for prompt in interface["defaultPrompt"]))
 
-    def test_controller_defines_a_portable_workspace_contract(self) -> None:
+    def test_controller_defines_a_recipe_local_workspace_contract(self) -> None:
         contract = SKILL_ROOT / "bionemo-phage-design" / "references" / "workspace-contract.md"
         self.assertTrue(contract.is_file(), contract)
         text = contract.read_text(encoding="utf-8")
         for marker in (
-            "independent of the skill installation",
-            "https://github.com/NVIDIA-BioNeMo/bionemo-recipes",
-            "https://github.com/NVIDIA-BioNeMo/bionemo-recipes/pull/1699",
-            "jstjohn/evo2_phage_gen",
+            "recipe-local package",
             "recipes/evo2_phage_gen",
-            "case-study replication",
-            "working directory",
+            "repository_root",
+            "read-only Git",
+            "dirty state",
             "results/",
-            "copy",
-            "worktree",
-            "separate clean checkout",
-            "tracked relative symlinks",
-            "full-checkout copy or worktree",
-            "globally installed",
-            "checkout bundle",
-            "record which bundle",
-            "recipe-local implementation bundle",
+            "bionemo-phage-generation",
         ):
             self.assertIn(marker, text)
-        self.assertNotIn("top-level `.agents` bundle", text)
-        self.assertNotIn("git fetch origin", text)
-        self.assertNotIn("git switch evo2-phage-gen", text)
+        for forbidden in (
+            "git clone",
+            "git fetch",
+            "git switch",
+            "pull/1699",
+            "jstjohn/evo2_phage_gen",
+            "VERSION >= 2.4",
+            "globally installed",
+            "checkout bundle",
+            "installed-versus-checkout",
+        ):
+            self.assertNotIn(forbidden, text)
+
+    def test_recipe_local_runtime_documents_cannot_reenter_portable_bootstrap(self) -> None:
+        runtime_documents = [
+            path for path in SKILL_ROOT.rglob("*.md") if path.name == "SKILL.md" or "references" in path.parts
+        ]
+        forbidden_patterns = {
+            "checkout clone": r"(?im)^\s*git\s+clone\b",
+            "checkout fetch": r"(?im)^\s*git\s+fetch\b",
+            "checkout switch": r"(?im)^\s*git\s+switch\b",
+            "compatibility version selection": r"(?i)VERSION\s*(?:>=|>|==)\s*2\.4",
+            "portable checkout acquisition": r"(?i)\b(?:acquire|locate)\s+(?:a\s+)?(?:compatible\s+)?checkout\b",
+            "installation comparison": r"(?i)(?:globally installed|installed-versus-checkout|checkout bundle|skill installation is never the checkout)",
+        }
+        for path in runtime_documents:
+            text = path.read_text(encoding="utf-8")
+            for description, pattern in forbidden_patterns.items():
+                self.assertIsNone(re.search(pattern, text), f"{description}: {path}")
+
+        controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("package integrity error", controller)
+        self.assertNotIn("Search available skill roots", controller)
+
+    def test_recipe_local_evals_do_not_describe_an_external_installation(self) -> None:
+        eval_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "evals" / "evals.json"
+        text = eval_path.read_text(encoding="utf-8")
+        self.assertNotIn("skill may be installed outside the checkout", text)
+        self.assertIn("recipe-local package", text)
 
     def test_controller_resolves_roots_in_dependency_order(self) -> None:
         text = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8").lower()
-        repository = text.index("resolve only the absolute repository root")
+        repository = text.index("resolve the absolute recipe and repository roots")
         workspace = text.index("select the recipe workspace")
         result = text.index("record absolute recipe and result roots")
         command = text.index("before emitting recipe commands")

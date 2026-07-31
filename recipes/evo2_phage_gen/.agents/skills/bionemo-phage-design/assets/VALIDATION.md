@@ -17,7 +17,7 @@
 | Surface                     | Result                                                                                                                                                                                        |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Skill structure             | PASS — all 12 recipe-local controller/subskill directories passed the skill-creator validator                                                                                                 |
-| Behavioral eval schema      | PASS — 12 recipe-local eval files contain 47 globally unique exact-field cases; the portable root skill has one eval file with four cases                                                     |
+| Behavioral eval schema      | PASS — 12 recipe-local eval files contain 47 globally unique exact-field cases; the portable root skill has one eval file with five cases                                                     |
 | Focused skill tests         | PASS — 80 tests plus six subtests cover the package-boundary split, Codex and Claude adapters, independent skill/repository/recipe roots, portable workspace contracts, and literature assets |
 | Harness dry runs            | HISTORICAL PASS — the 2026-07-29 portability refresh produced both harnesses' then-current 46-case zero-cost plans; the 2026-07-17 campaign covered the then-current 26 cases                 |
 | Live Claude behavioral eval | HISTORICAL PASS — the 2026-07-17 effective suite was 26/26: 22 unaffected clean-sweep passes plus four passing current-definition reruns                                                      |
@@ -36,7 +36,7 @@
 | Context policy              | PASS — SFT/RL context is agreed after collection from p99.9 or affordable maximum, serialization overhead, and alignment; historical lengths are not defaults                                 |
 | Target conditioning         | PASS — a clear target defaults to measured similarity buckets; unprefixed leakage checks precede frozen prefix serialization and RL handoff                                                   |
 | Historical evidence         | PASS — the checked-in sanitized snapshot separates empirical outcomes from configuration facts and retains source hashes/locators                                                             |
-| Portability                 | PASS — canonical isolated fallback, symlink-safe workspace choices, installed/checkout bundle comparison, recipe cwd, recipe-owned results, and agent-session re-entry are explicit           |
+| Portability                 | PASS — portable compatibility acquisition, colocated recipe roots, recipe-owned results, and deterministic agent-session re-entry are explicit                                                |
 | External asset failover     | PASS — pinned identity, bounded source failover, authenticated or user-approved insecure transport, exact-versus-derived gates, controls, and atomic promotion                                |
 | Policy ownership            | PASS — active recipe instructions add no custom biological policy; each harness retains its normal policy behavior                                                                            |
 | Pre-commit                  | PASS — license, copied-file, EOF, whitespace, YAML, Ruff, mdformat, and secret hooks pass for the bundle and related docs                                                                     |
@@ -47,7 +47,7 @@ Each owning skill has evals/evals.json with the BioNeMo Agent Toolkit-compatible
 
 The standard-library runner follows the [OpenAI skill-eval loop](https://developers.openai.com/blog/eval-skills): prompt, preserved trace/artifacts, deterministic checks, then a fresh structured rubric grade. Harness-specific execution and provenance stay outside the portable eval JSON.
 
-From the BioNeMo Recipes repository root (the skill bundle may be installed elsewhere):
+From the BioNeMo Recipes repository root:
 
 ```bash
 PHAGE_SKILL_ROOT="${PHAGE_SKILL_ROOT:-$PWD/recipes/evo2_phage_gen/.agents/skills}"

@@ -5,7 +5,7 @@ description: Use after selecting an Evo 2 phage SFT checkpoint and defining RL o
 
 # Calibrate Phage RL Sampling
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Run a fresh selected-SFT calibration against the approved objective/QC contract before RL. Treat paper settings and prior RL runs as hypotheses, not defaults to copy.
 

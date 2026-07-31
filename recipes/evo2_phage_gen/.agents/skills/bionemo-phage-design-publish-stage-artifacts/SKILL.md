@@ -5,7 +5,7 @@ description: Use when a phage-design user requests publication, backup, or an in
 
 # Publish Phage Stage Artifacts
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Publish durable, decision-relevant artifacts without coupling scientific progress to transfer availability.
 

@@ -24,12 +24,12 @@ Before proposing a plan, locate and read every sibling SKILL.md below. Do not re
 - bionemo-phage-design-generate-and-screen
 - bionemo-phage-design-publish-stage-artifacts
 
-Search available skill roots if a sibling is absent. Record a capability gap; do not invent procedures. Resolve the checkout with [workspace-contract.md](references/workspace-contract.md), read [project-contract.md](references/project-contract.md) before creating files, and follow [command-discovery.md](references/command-discovery.md) before commands. Enumerate `assets/literature/**/MANIFEST.json` and route relevant assets.
+The local sibling package is required. A missing sibling is a package integrity error: stop, report the missing skill and recipe-local package path, and do not search unrelated roots or acquire another checkout. Derive colocated roots with [workspace-contract.md](references/workspace-contract.md), read [project-contract.md](references/project-contract.md) before creating files, and follow [command-discovery.md](references/command-discovery.md) before commands. Enumerate `assets/literature/**/MANIFEST.json` and route relevant assets.
 
 ## Intake and plan
 
 01. Select `interactive` unless the user requests `batch`. Interactive mode inspects and iterates before material launches. Batch mode follows the supplied brief and durable records, stopping for material ambiguity, missing authority, or unsafe irreversible action. Follow [project-contract.md](references/project-contract.md); harness memory is not authoritative.
-02. Resolve only the absolute repository root with the workspace contract; record branch/status and any installed-versus-checkout skill difference. On re-entry to existing results, reconcile durable state with the recorded execution facility before new mutation: adopt live work, advance completed work, and never duplicate unresolved work.
+02. Resolve the absolute recipe and repository roots with the workspace contract; record revision and dirty state for provenance. On re-entry to existing results, reconcile durable state with the recorded execution facility before new mutation: adopt live work, advance completed work, and never duplicate unresolved work.
 03. Choose case-study-replication or adapted-design, a concrete target, and the intended outcome. Select the recipe workspace: replication defaults to checked-in `recipes/evo2_phage_gen`; adapted work uses the user's verified owning recipe, in-checkout copy, or full-checkout worktree.
 04. Invoke bionemo-phage-design-adapt-execution. Inspect the repository, results, hardware, execution plane, available skills/models, storage paths, capacity, and writability. State job locations and a per-stage GPU topology matrix; inventory local GPU occupancy before sizing.
 05. Build a compact per-skill matrix of inputs, outputs, knowns, gaps, and need; resolve dependencies in stage order.

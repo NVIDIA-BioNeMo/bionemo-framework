@@ -5,18 +5,38 @@ description: Use when starting, planning, or resuming BioNeMo phage generation a
 
 # BioNeMo Phage Generation
 
-## Capabilities
+This portable entrypoint locates a compatible recipe checkout and transfers work to its recipe-local implementation package. It owns checkout discovery and acquisition; it does not prescribe recipe commands or workflow parameters.
 
-Plan or resume evidence review, genome collection, SFT, GDPO objective planning and training, sampling calibration, generation, QC, lineage, monitoring, and optional publication. Leave recipe-specific commands and implementation choices to the checked-out recipe.
+## Select mode and locate the recipe
 
-## Choose a mode
+Use `interactive` unless the user requests `batch`. Preserve the user's original request and constraints.
 
-Default to interactive planning. Use batch only when requested. In batch mode, infer reversible choices only from durable records; stop for missing authority, irreversible risk, or unresolved material biology.
+Prefer an explicit checkout, then a matching nearby checkout. A checkout is compatible only when all of the following exist:
 
-## Locate or acquire the recipe
+- `recipes/evo2_phage_gen/VERSION >= 2.4`;
+- `recipes/evo2_phage_gen/.agents/skills/bionemo-phage-design/SKILL.md`;
+- the recipe-local handoff manifests, including `.agents/.codex-plugin/plugin.json` whose plugin name is `bionemo-phage-design`, and `.agents/.claude-plugin/plugin.json`.
 
-Prefer an explicit checkout, then a matching nearby checkout. Reuse either when `recipes/evo2_phage_gen/VERSION >= 2.4`; preserve and record any dirty state, and isolate later mutations as needed. Dirtiness alone never triggers the special branch. If no compatible checkout exists, clone or acquire the canonical default revision from https://github.com/NVIDIA-BioNeMo/bionemo-recipes in a separate clean checkout and inspect it. Only after that canonical default revision is shown not to contain `recipes/evo2_phage_gen/VERSION >= 2.4`, obtain `origin/jstjohn/evo2_phage_gen` or a newer compatible revision in a separate checkout or worktree. Record the repository revision and absolute checkout and recipe roots.
+Preserve and record any dirty state. A checkout with `VERSION == 2.4` but no recipe-local controller is incompatible: leave it unchanged and continue the existing ordered canonical-default then fallback acquisition policy in a separate clean checkout. Never retrofit that checkout during bootstrap. Record the selected revision, absolute checkout root, and exact absolute recipe root.
 
-## Hand off to the checked-out implementation
+## Make a durable handoff
 
-Reload or start the agent from `recipes/evo2_phage_gen` so its `.agents/skills` are discovered. Read `bionemo-phage-design` and relevant sibling skills completely, then hand control to `bionemo-phage-design`. Treat the current checkout's docs, pyproject entry points, configs, and tests as implementation authority.
+Build this handoff prompt before changing sessions:
+
+```
+Continue the Evo 2 phage-design request in MODE=<interactive|batch>.
+Original request and constraints: <verbatim user request and durable constraints>.
+Selected checkout root: <absolute checkout root>.
+Selected recipe root: <absolute recipe root>.
+Selected revision: <commit or revision>.
+First verify the recipe-local controller and all expected sibling skills are discoverable,
+then read their SKILL.md files completely before planning or invoking a stage.
+```
+
+Use the recorded absolute recipe root, never this portable skill's installation path.
+
+- Codex: start a fresh or reloaded session with its cwd set to the absolute recipe root and invoke `$bionemo-phage-design` with the handoff prompt.
+- Claude: start from the absolute recipe root with `--plugin-dir .agents` and invoke `/evo2-phage-gen:bionemo-phage-design` with the handoff prompt.
+- Other Agent Skills-compatible harnesses: start from the absolute recipe root, or explicitly load the controller from that root with the harness-supported mechanism.
+
+In the new session, verify that `bionemo-phage-design` and the expected siblings are discoverable from the recipe-local package and read them completely. If discovery fails, stop and report the exact absolute recipe root and missing skill; do not invent implementation procedures.

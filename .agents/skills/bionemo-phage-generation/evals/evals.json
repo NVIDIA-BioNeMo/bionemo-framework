@@ -56,6 +56,21 @@
       ],
       "expected_skill": "bionemo-phage-generation",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-generation-005-complete-local-handoff",
+      "prompt": "The portable skill is installed by an aggregation service under /srv/skill-aggregation. It acquired /tmp/acquired-bionemo-recipes/recipes/evo2_phage_gen for an interactive PhiX174 replication request. The first candidate has VERSION == 2.4 but no recipe-local controller. Hand off safely after selecting a valid checkout.",
+      "expected_output": "A portable compatibility decision and deterministic absolute-root handoff that carries the original request into a fresh recipe-local session.",
+      "assertions": [
+        "The response treats VERSION == 2.4 with no recipe-local controller as incompatible, preserves that checkout, and continues the ordered clean-checkout acquisition policy without retrofitting it.",
+        "The response verifies the controller SKILL.md and required recipe-local manifests, including the Codex manifest named bionemo-phage-design, before selecting a checkout.",
+        "The response keeps the aggregation installation root disjoint from the absolute checkout and recipe roots and records the selected revision.",
+        "The handoff prompt carries interactive mode, the original request and constraints, absolute checkout and recipe roots, and selected revision.",
+        "The response gives an absolute-root Codex handoff invoking $bionemo-phage-design and an absolute-root Claude handoff using --plugin-dir .agents and /evo2-phage-gen:bionemo-phage-design.",
+        "The new session performs explicit discovery verification for bionemo-phage-design and expected siblings, reads them completely, and stops with the absolute root and missing skill if discovery fails."
+      ],
+      "expected_skill": "bionemo-phage-generation",
+      "expected_script": null
     }
   ]
 }

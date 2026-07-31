@@ -1,6 +1,6 @@
 # Command discovery and drift contract
 
-Resolve commands from the checkout and active environment at execution time. Skill examples and old run logs are snapshots, never authority. Use the absolute repository and selected recipe roots recorded by [workspace-contract.md](workspace-contract.md); never derive them from the skill path.
+Resolve commands from the colocated recipe and active environment at execution time. Skill examples and old run logs are snapshots, never authority. Use the absolute repository and recipe roots recorded by [workspace-contract.md](workspace-contract.md); never derive them from an unrelated skill path.
 
 ## Source-isolation gate
 
@@ -9,9 +9,9 @@ Before changing recipe code, confirm the user owns the checkout or has authorize
 ## Resolution order
 
 1. In the selected recipe, read current `pyproject.toml`, especially `[project.scripts]`.
-2. With that recipe as the working directory, discover and run `.ci_build.sh` before sourcing `.ci_test_env.sh`; verify names in the checkout.
+2. With that recipe as the working directory, discover and run `.ci_build.sh` before sourcing `.ci_test_env.sh`; verify names in the repository.
 3. Run the selected entry point's --help and, when supported, --version. Resolve it with command -v.
-4. Inspect the mapped source function, nearest maintained config, focused tests, and current README under the recorded roots. Follow repository symlinks deliberately.
+4. Inspect the mapped source function, nearest maintained config, focused tests, and current README under the recorded colocated roots. Follow repository symlinks deliberately.
 5. Compare required inputs/flags with the intended stage. Fail on unknown/removed options instead of guessing.
 6. Put the exact resolved command in attempt command.sh; record executable path, versions, repository revision, source/config hashes, and help-text hash.
 
@@ -36,7 +36,7 @@ For PHROGs v4, the Pharokka v1.8.0 Zenodo record 17110353 is a TLS-valid candida
 When an entry point, CLI option, config schema, environment script, or symlink boundary changes:
 
 1. update owning code/tests/docs under repository policy;
-2. search the discovered installed skill bundle for the old interface;
+2. search the discovered recipe-local skill package for the old interface;
 3. update this reference and affected stage references;
 4. rerun skill validation and command-resolution smoke.
 

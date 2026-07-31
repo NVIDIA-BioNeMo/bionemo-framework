@@ -5,7 +5,7 @@ description: Use when phage genomes must be deduplicated, clustered, split witho
 
 # Prepare Phage SFT
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Create a deterministic, cluster-held-out dataset so validation loss can reveal overfitting instead of sequence leakage.
 

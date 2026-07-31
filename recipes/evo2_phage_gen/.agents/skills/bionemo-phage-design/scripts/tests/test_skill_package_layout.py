@@ -56,3 +56,37 @@ def test_recipe_agent_package_owns_implementation_skills() -> None:
     assert _plugin(RECIPE_AGENT_DIR)["name"] == "bionemo-phage-design"
     assert (RECIPE_ROOT / "CLAUDE.md").is_symlink()
     assert (RECIPE_ROOT / "CLAUDE.md").readlink() == Path("AGENTS.md")
+
+
+def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handoff() -> None:
+    portable_skill = (ROOT_AGENT_DIR / "skills" / "bionemo-phage-generation" / "SKILL.md").read_text(encoding="utf-8")
+    for marker in (
+        "VERSION >= 2.4",
+        "bionemo-phage-design/SKILL.md",
+        ".codex-plugin/plugin.json",
+        "absolute checkout root",
+        "absolute recipe root",
+        "original request",
+        "Codex",
+        "$bionemo-phage-design",
+        "--plugin-dir .agents",
+        "/evo2-phage-gen:bionemo-phage-design",
+        "discoverable",
+        "missing skill",
+    ):
+        assert marker in portable_skill
+
+    portable_evals = json.loads(
+        (ROOT_AGENT_DIR / "skills" / "bionemo-phage-generation" / "evals" / "evals.json").read_text(encoding="utf-8")
+    )
+    portable_evals_text = json.dumps(portable_evals)
+    for marker in (
+        "VERSION == 2.4",
+        "no recipe-local controller",
+        "aggregation",
+        "absolute-root Codex",
+        "absolute-root Claude",
+        "original request",
+        "discovery verification",
+    ):
+        assert marker in portable_evals_text

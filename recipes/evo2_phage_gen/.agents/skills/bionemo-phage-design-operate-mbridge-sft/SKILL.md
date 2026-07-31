@@ -5,7 +5,7 @@ description: Use when launching, monitoring, stopping, resuming, or relaunching 
 
 # Operate Megatron Bridge Phage SFT
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Run SFT from an explicit leakage-controlled split and select the checkpoint with the lowest comparable validation loss. A step limit is a ceiling, not a target.
 

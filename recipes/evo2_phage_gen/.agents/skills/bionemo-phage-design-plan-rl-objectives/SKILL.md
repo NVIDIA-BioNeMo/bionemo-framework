@@ -5,7 +5,7 @@ description: Use when converting a phage-design goal into target-specific RL rew
 
 # Design Phage RL Objectives
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Turn the user's desired outcome into an evidence-backed contract connecting every online reward to validation and final selection. Treat viability, bootability enrichment, intended change, and diversity as distinct needs.
 

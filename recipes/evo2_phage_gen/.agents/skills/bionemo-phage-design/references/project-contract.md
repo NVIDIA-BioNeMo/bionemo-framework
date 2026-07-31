@@ -1,6 +1,6 @@
 # Project and attempt contract
 
-After applying [workspace-contract.md](workspace-contract.md), use paths relative to the absolute project result root under the selected recipe's `results/` directory. Keep large and generated data there; do not write run artifacts beside the installed skill.
+After applying [workspace-contract.md](workspace-contract.md), use paths relative to the absolute project result root under the selected recipe's `results/` directory. Keep large and generated data there; do not write run artifacts beside the recipe-local skill documents.
 
 ## Root layout
 

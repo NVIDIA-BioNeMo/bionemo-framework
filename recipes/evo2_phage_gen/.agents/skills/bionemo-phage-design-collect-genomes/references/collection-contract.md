@@ -28,7 +28,7 @@ artifacts/
   CHECKSUMS.sha256
 ```
 
-Large payloads remain here or in a documented durable data path linked from here; never copy them into the installed skill bundle or a tracked distribution folder.
+Large payloads remain here or in a documented durable data path linked from here; never copy them into the recipe-local skill package or a tracked distribution folder.
 
 `genomes.tsv` includes at least:
 

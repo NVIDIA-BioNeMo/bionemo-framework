@@ -5,7 +5,7 @@ description: Use when a phage-design decision needs literature, database, datase
 
 # Research Phage Evidence
 
-Use the controller's recorded absolute roots. If absent, apply its [workspace contract](../bionemo-phage-design/references/workspace-contract.md); the skill installation is never the checkout.
+Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Produce a compact, auditable evidence packet for a stated decision. Prefer primary sources and distinguish observation, author claim, and inference.
 
