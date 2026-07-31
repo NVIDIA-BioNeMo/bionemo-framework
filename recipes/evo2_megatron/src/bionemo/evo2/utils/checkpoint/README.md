@@ -95,9 +95,11 @@ The `--savanna-ckpt-path` flag accepts a HuggingFace repo ID
 Vortex is ARC Institute's inference format for Evo2 Hyena models, used by the
 public Evo2 repository. The Vortex checkpoints omit some training-time state,
 so `vortex_to_mbridge.py` reconstructs the MBridge parameterization that can be
-loaded by Megatron Bridge. Vortex runtime caches (`filter.t`) and Transformer
-Engine extra state are intentionally excluded because they are not model parameters
-and each runtime regenerates its own copies when loading a checkpoint.
+loaded by Megatron Bridge. Vortex runtime buffers (`filter.t` and
+`rotary_emb.inv_freq`) and Transformer Engine extra state are intentionally
+excluded because they are not model parameters and each runtime regenerates its
+own copies when loading a checkpoint. Stored rotary frequencies are validated
+against the target model provider before they are omitted.
 
 ```bash
 evo2_convert_vortex_to_mbridge \
@@ -118,8 +120,14 @@ seed used for training so any initialization anchors are reproducible.
 The optional long-running round-trip test downloads the smaller public 1B Vortex
 checkpoint from `arcinstitute/evo2_1b_base`, converts it to MBridge state-dict
 form, converts back to Vortex, and asserts exact key and value equality for all
-model tensors. Runtime-generated `filter.t` caches and Transformer Engine extra
-state are excluded from the comparison.
+learned model tensors. Descriptor-derived rotary frequencies are compared within
+their source precision. Runtime-generated `filter.t` caches and Transformer
+Engine extra state are excluded from the comparison.
+
+Conversion fails on missing required learned tensors, invalid core tensor
+geometry, or unexpected non-runtime entries. Ordinary parameters are normalized
+to the target provider dtype, while Hyena filter parameters retain their required
+FP32 representation.
 
 ```bash
 LONG_TESTS=1 EVO2_CHECKPOINT_CACHE_DIR=/tmp/evo2-checkpoints \
