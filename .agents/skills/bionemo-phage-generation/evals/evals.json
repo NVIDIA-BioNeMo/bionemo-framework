@@ -67,7 +67,7 @@
         "The response keeps the aggregation installation root disjoint from the absolute checkout and recipe roots and records the selected revision.",
         "The handoff prompt carries interactive mode, the original request and constraints, absolute checkout and recipe roots, and selected revision.",
         "The response gives an absolute-root Codex handoff invoking $bionemo-phage-design and an absolute-root Claude handoff using --plugin-dir .agents and /evo2-phage-gen:bionemo-phage-design.",
-        "The new session performs explicit discovery verification for bionemo-phage-design and expected siblings, reads them completely, and stops with the absolute root and missing skill if discovery fails."
+        "The new session performs explicit discovery verification by enumerating every immediate SKILL.md child in the selected recipe-local plugin skills root, requires and reads bionemo-phage-design plus every discovered sibling, records their names, and stops with the absolute root and missing skill if enumeration or loading fails."
       ],
       "expected_skill": "bionemo-phage-generation",
       "expected_script": null

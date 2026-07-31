@@ -64,6 +64,10 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "VERSION >= 2.4",
         "bionemo-phage-design/SKILL.md",
         ".codex-plugin/plugin.json",
+        "https://github.com/NVIDIA-BioNeMo/bionemo-recipes",
+        "canonical default revision",
+        "origin/jstjohn/evo2_phage_gen",
+        "separate clean checkout",
         "absolute checkout root",
         "absolute recipe root",
         "original request",
@@ -73,6 +77,11 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "/evo2-phage-gen:bionemo-phage-design",
         "discoverable",
         "missing skill",
+        "plugin's `skills` root",
+        "immediate child",
+        "Record the discovered names",
+        "controller and every discovered sibling",
+        "enumeration or loading fails",
     ):
         assert marker in portable_skill
 

@@ -17,7 +17,11 @@ Prefer an explicit checkout, then a matching nearby checkout. A checkout is comp
 - `recipes/evo2_phage_gen/.agents/skills/bionemo-phage-design/SKILL.md`;
 - the recipe-local handoff manifests, including `.agents/.codex-plugin/plugin.json` whose plugin name is `bionemo-phage-design`, and `.agents/.claude-plugin/plugin.json`.
 
-Preserve and record any dirty state. A checkout with `VERSION == 2.4` but no recipe-local controller is incompatible: leave it unchanged and continue the existing ordered canonical-default then fallback acquisition policy in a separate clean checkout. Never retrofit that checkout during bootstrap. Record the selected revision, absolute checkout root, and exact absolute recipe root.
+Preserve and record any dirty state. A checkout with `VERSION == 2.4` but no recipe-local controller is incompatible: leave it unchanged; never retrofit it during bootstrap. When no fully compatible explicit or nearby checkout exists, acquire `https://github.com/NVIDIA-BioNeMo/bionemo-recipes` in a separate clean checkout and inspect its canonical default revision first. Only if that revision lacks a fully compatible recipe package, use `origin/jstjohn/evo2_phage_gen` or a newer compatible revision in a separate checkout or worktree. Record the selected revision, absolute checkout root, and exact absolute recipe root.
+
+## Discover the selected implementation package
+
+From the selected recipe-local Codex plugin, use the plugin's `skills` root. Enumerate every immediate child containing `SKILL.md`; require `bionemo-phage-design` among the discoverable skills. Record the discovered names, then read the controller and every discovered sibling completely before handoff. If enumeration or loading fails, stop and report the exact absolute recipe root and missing skill; do not invent implementation procedures.
 
 ## Make a durable handoff
 
@@ -29,8 +33,8 @@ Original request and constraints: <verbatim user request and durable constraints
 Selected checkout root: <absolute checkout root>.
 Selected recipe root: <absolute recipe root>.
 Selected revision: <commit or revision>.
-First verify the recipe-local controller and all expected sibling skills are discoverable,
-then read their SKILL.md files completely before planning or invoking a stage.
+First enumerate the selected recipe-local plugin skills root and verify the controller plus every
+discovered sibling are loadable; read every SKILL.md completely before planning or invoking a stage.
 ```
 
 Use the recorded absolute recipe root, never this portable skill's installation path.
@@ -39,4 +43,4 @@ Use the recorded absolute recipe root, never this portable skill's installation 
 - Claude: start from the absolute recipe root with `--plugin-dir .agents` and invoke `/evo2-phage-gen:bionemo-phage-design` with the handoff prompt.
 - Other Agent Skills-compatible harnesses: start from the absolute recipe root, or explicitly load the controller from that root with the harness-supported mechanism.
 
-In the new session, verify that `bionemo-phage-design` and the expected siblings are discoverable from the recipe-local package and read them completely. If discovery fails, stop and report the exact absolute recipe root and missing skill; do not invent implementation procedures.
+In the new session, repeat the selected plugin-skills-root enumeration, verify `bionemo-phage-design` and every discovered sibling are loadable, record the names, and read them completely. If discovery fails, stop and report the exact absolute recipe root and missing skill; do not invent implementation procedures.
