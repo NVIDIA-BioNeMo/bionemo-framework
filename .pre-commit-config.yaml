@@ -16,6 +16,15 @@ repos:
         language: python
         pass_filenames: true
         always_run: false
+  - repo: local
+    hooks:
+      - id: check-skill-references
+        name: Run check-skill-references script
+        entry: ./ci/scripts/check_skill_references.py
+        language: python
+        files: ^(skills/|\.claude/skills/).*\.md$
+        pass_filenames: true
+        always_run: false
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v2.3.0
     hooks:

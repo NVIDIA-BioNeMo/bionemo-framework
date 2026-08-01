@@ -219,4 +219,8 @@ outputs/
 # Nsys profiles
 *.nsys-rep
 
-.claude/
+# Local Claude Code state is ignored, but checked-in agent skills are shared with the repo.
+# Note the `.claude/*` form: git will not descend into an ignored directory, so a plain
+# `.claude/` rule cannot be un-ignored by a later negation.
+.claude/*
+!.claude/skills/
