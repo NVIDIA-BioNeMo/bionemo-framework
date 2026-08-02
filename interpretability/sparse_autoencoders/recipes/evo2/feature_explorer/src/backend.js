@@ -6,6 +6,12 @@ import { useEffect, useRef, useState } from 'react'
 
 export const BACKEND = (import.meta.env && import.meta.env.VITE_BACKEND) || '/api'
 
+// UI config, defaulting to the DNA (Evo 2) build. The server can override this at runtime by
+// returning a `ui` block from /health (see useHealth) — e.g. the GPT-2 build flips textMode on so
+// pasted natural-language text is not stripped to A/C/G/T/N, and sets its own brand. With no `ui`
+// block in health this stays DNA, so the Evo 2 build behaves exactly as before.
+export const UI = { textMode: false, brand: 'Evo 2 SAE Feature Explorer' }
+
 // Per-nucleotide letter colors (shared with the steering strips).
 export const BASE_COLORS = { A: '#59A14F', C: '#4E79A7', G: '#F28E2B', T: '#E15759', N: '#888', U: '#E15759' }
 
@@ -21,6 +27,9 @@ export function useHealth(pollMs = 4000) {
         const r = await fetchWithTimeout(`${BACKEND}/health`, { cache: 'no-store' }, 8000)
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         const info = await r.json()
+        // Merge any server-provided UI config (textMode/brand) so one built dashboard can serve both
+        // the DNA (Evo 2) and the text (GPT-2) backends. Absent `ui` block -> defaults unchanged.
+        if (info && info.ui) Object.assign(UI, info.ui)
         if (alive) setHealth({ status: info.ready ? 'ready' : 'loading', info })
       } catch (e) {
         if (alive) setHealth({ status: 'offline', error: String(e) })
@@ -70,7 +79,11 @@ export function activationColor(value, max) {
   return `rgba(${r}, ${g}, ${b}, ${(0.22 + 0.78 * t).toFixed(3)})`
 }
 
+// Sanitize pasted input before sending. DNA build (default): strip to A/C/G/T/N. Text build
+// (UI.textMode, set from the /health `ui` block): pass the raw text through untouched, since the
+// A/C/G/T/N filter would gut natural language ("LOOK AT THIS TEXT" -> "ATTTT").
 export function cleanDNA(raw) {
+  if (UI.textMode) return raw || ''
   return (raw || '').toUpperCase().replace(/[^ACGTN]/g, '')
 }
 

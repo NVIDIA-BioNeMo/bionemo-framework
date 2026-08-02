@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt2-sae"
+version = "0.1.0"
+description = "Sparse-autoencoder feature explorer for the GPT-2 small language model"
+requires-python = ">=3.10"
+
+dependencies = [
+    "sae",
+    "torch>=2.0",
+    "transformer-lens>=2.0",  # HookedTransformer — SAEs were trained in this runtime (fold_ln/center)
+    "huggingface-hub>=0.20",  # pulls the Bloom SAE weights
+    "safetensors>=0.4",
+    "numpy>=1.20",
+    "pyarrow>=23.0.0",  # atlas / metadata parquets
+    "fastapi>=0.110",  # server.py
+    "uvicorn>=0.29",  # serve entry point
+    "anyio>=4.0",  # server.py: threadpool concurrency cap (ships with fastapi, declared explicitly)
+]
+
+[project.optional-dependencies]
+# Only needed to (re)build the static atlas from scratch (scripts/); the recipe ships prebuilt parquets.
+build = [
+    "scikit-learn>=1.3",
+    "umap-learn>=0.5",
+]
+
+[project.scripts]
+gpt2-sae = "gpt2_sae.cli:main"
+gpt2-sae-serve = "gpt2_sae.server:main"
+
+# The `gpt2_sae` package (src/) holds the live inference engine, the feature-clamp steering hook, and
+# the FastAPI server + CLI. scripts/ (build_atlas, build_meta, fetch_neuronpedia, curate_steerable) are
+# standalone entry points that regenerate the bundled data in dashboard_data/. The dashboard itself is
+# reused from ../evo2/feature_explorer/dist (config-driven into text mode), not shipped here.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+sae = { workspace = true }
