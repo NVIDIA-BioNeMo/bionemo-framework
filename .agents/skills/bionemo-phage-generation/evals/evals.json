@@ -63,9 +63,9 @@
       "expected_output": "A portable compatibility decision and deterministic absolute-root handoff that carries the original request into a fresh recipe-local session.",
       "assertions": [
         "The response treats VERSION == 2.4 with no recipe-local controller as incompatible, preserves that checkout, and continues the ordered clean-checkout acquisition policy without retrofitting it.",
-        "The response verifies the controller SKILL.md and required recipe-local manifests, including the Codex manifest named bionemo-phage-design, before selecting a checkout.",
+        "The response verifies the controller SKILL.md, its design-scope-and-viability and cleaned EMA draft references, and required recipe-local manifests, including the Codex manifest named bionemo-phage-design, before selecting a checkout.",
         "The response keeps the aggregation installation root disjoint from the absolute checkout and recipe roots and records the selected revision.",
-        "The handoff prompt carries interactive mode, the original request and constraints, absolute checkout and recipe roots, and selected revision.",
+        "The handoff prompt carries interactive mode, the original request and constraints, absolute checkout and recipe roots, selected revision, and generic verification of root RUNLOG initialization, whole-genome/lifecycle scope, explicit approval for scope reduction, applicable EMA-derived therapeutic RL objectives without reward starvation, and default authenticated W&B telemetry.",
         "The response gives an absolute-root Codex handoff invoking $bionemo-phage-design and an absolute-root Claude handoff using --plugin-dir .agents and /evo2-phage-gen:bionemo-phage-design.",
         "The new session performs explicit discovery verification by enumerating every immediate SKILL.md child in the selected recipe-local plugin skills root, requires and reads bionemo-phage-design plus every discovered sibling, records their names, and stops with the absolute root and missing skill if enumeration or loading fails."
       ],

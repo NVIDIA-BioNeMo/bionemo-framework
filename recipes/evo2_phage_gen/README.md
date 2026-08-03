@@ -131,6 +131,7 @@ The second command creates the 96-row validation file referenced by the historic
 ```bash
 RESULT_ROOT="$PWD/results/phix174-gdpo-replication"
 RL_ROOT="$RESULT_ROOT/rl"
+PHAGE_WANDB_ENABLED="${PHAGE_WANDB_ENABLED:-false}"
 mkdir -p "$RL_ROOT"
 
 evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml \
@@ -139,11 +140,13 @@ evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml \
   env.phage_qc.external_qc.work_dir="$RL_ROOT/external_qc" \
   env.phage_qc.mmseqs_cluster_diversity.work_dir="$RL_ROOT/mmseqs_cluster_diversity" \
   logger.log_dir="$RL_ROOT/logs" \
-  logger.wandb_enabled=false \
+  logger.wandb_enabled="$PHAGE_WANDB_ENABLED" \
+  logger.wandb.project=evo2_phage_design_rl_gdpo \
+  logger.wandb.name=phix174-gdpo-replication \
   logger.tensorboard_enabled=true
 ```
 
-The overrides replace project-specific checkpoint, output, and W&B settings in the checked-in historical config. Validation runs every 10 steps with a 500-step ceiling. Select the best checkpoint from sustained full-QC and diversity evidence; do not stop at step 190 merely because it was best in the recorded run.
+The overrides replace project-specific checkpoint, output, and W&B settings in the checked-in historical config. Agent-managed attempts write the preflight result directly into their resolved config. For this manual command, set `PHAGE_WANDB_ENABLED=true` after supported authentication succeeds; its shell fallback is deliberately false so someone without a W&B account cannot fail on telemetry. W&B is the normal remote telemetry path when the installed client can authenticate through the current session, environment, netrc, or supported login flow; keep TensorBoard and local artifacts authoritative, and use the false fallback only after an explicit opt-out or a recorded bounded authentication/network failure. Validation runs every 10 steps with a 500-step ceiling. Select the best checkpoint from sustained full-QC and diversity evidence; do not stop at step 190 merely because it was best in the recorded run.
 
 ### 6. Generate the 1,000-design rollout
 

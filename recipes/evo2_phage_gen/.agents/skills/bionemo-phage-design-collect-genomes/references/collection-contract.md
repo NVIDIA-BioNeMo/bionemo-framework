@@ -46,7 +46,7 @@ Large payloads remain here or in a documented durable data path linked from here
 
 Require the expected compression or file magic, at least one FASTA header, nonempty nucleotide sequences, and no obvious HTML/JSON error body. Reject mixed payloads unless the selected archive members are explicitly mapped. Use IUPAC nucleotide validation and report ambiguous symbols; do not silently coerce them.
 
-Count at four checkpoints: source-declared records, parsed sequences, policy-valid sequences, and distinct sequence hashes. The last count governs the 15,000 target and 10,000 stop gate. Leave circular canonicalization and similarity clustering to SFT preparation, but retain source duplicates in the audit trail.
+Count at four checkpoints: source-declared records, parsed sequences, policy-valid sequences, and distinct sequence hashes. Also report similarity-cluster count/effective support, total bases/tokens, target-relevant coverage, and feasible cluster-held-out sizes. Compare these observations with the preregistered data-adequacy contract; do not apply a universal 15,000 target or 10,000 stop gate. Leave circular canonicalization and definitive similarity clustering to SFT preparation, but retain source duplicates in the audit trail.
 
 ## Reproducibility
 

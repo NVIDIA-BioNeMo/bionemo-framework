@@ -10,6 +10,7 @@ SUMMARY.md
 RUNLOG.md
 planning/
   PLAN.md
+  DESIGN_SPEC.yaml
   DECISIONS.md
   handoffs/
   execution/
@@ -31,7 +32,9 @@ rollout/runs/
 reports/
 ```
 
-PROJECT.yaml records schema version, slug, creation time, operating mode, project mode, absolute repository/recipe/result roots, target accession and sequence hash, host, objective, repository revision, execution-plan path, and stage pointers. Root PROJECT.yaml and SUMMARY.md expose concise jump links for source revision, stage attempts, selected SFT, RL, and rollout checkpoints, prompt manifest, TensorBoard directories, optional W&B URLs, and scheduler or cloud jobs. Keep detail append-only in ACTIONS.yaml, run logs, and monitor events. Never store credentials.
+PROJECT.yaml records schema version, slug, creation time, operating mode, project mode, absolute repository/recipe/result roots, target accession and sequence hash, host, objective, design-spec path and hash, repository revision, execution-plan path, and stage pointers. Root PROJECT.yaml and SUMMARY.md expose concise jump links for source revision, design scope, stage attempts, selected SFT, RL, and rollout checkpoints, prompt manifest, TensorBoard directories, W&B status/URLs, and scheduler or cloud jobs. Keep detail append-only in ACTIONS.yaml, run logs, and monitor events. Never store credentials.
+
+Create `PROJECT.yaml`, `SUMMARY.md`, root `RUNLOG.md`, `planning/PLAN.md`, `planning/DESIGN_SPEC.yaml`, and `planning/DECISIONS.md` as one initialization action before creating any stage attempt. Seed the root RUNLOG with the user brief or its durable path, mode, roots, revision/dirty state, initial whole-genome scope, assumptions, unresolved decisions, and telemetry plan. Append every controller decision, material user approval, stage handoff, attempt status transition, and root-pointer promotion. Stage RUNLOG files do not replace this project-wide chronology, and SUMMARY.md does not replace it. In a read-only session, name these exact planned files without claiming creation.
 
 ## Operating mode and portable memory
 

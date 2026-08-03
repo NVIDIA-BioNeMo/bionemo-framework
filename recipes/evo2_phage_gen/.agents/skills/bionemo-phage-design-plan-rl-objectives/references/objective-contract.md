@@ -5,12 +5,44 @@ The proposed source of truth is `rl/runs/<attempt>/artifacts/RL_OBJECTIVES.yaml`
 ## Required sections
 
 ```yaml
-schema_version: 1
+schema_version: 3
+project_mode: adapted-design
 intent:
   reference_phage: {id: null, sequence_sha256: null, topology: null}
-  host: {domain: null, taxon: null}
+  host: {domain: null, taxon: null, strain: null}
+  original_hosts: []
   desired_change: null
+  desired_host_range: {gain: [], retain: [], lose: [], avoid: []}
   protected_traits: []
+  intended_use: {category: null, rationale: null}
+design_scope:
+  design_spec_path: null
+  design_spec_sha256: null
+  output_unit: complete-genome
+  mutable_scope: whole-genome
+  fixed_regions: []
+  scope_reduction: {status: none, decision_record: null, approved_by: null}
+viability_contract:
+  viable_reference_set: {manifest: null, sha256: null}
+  lifecycle_coverage: []
+  complete_genome_checks: []
+  production_host_and_dna_modification: []
+host_model:
+  model_id: null
+  interaction_datasets: []
+  sequence_mapping_manifest: null
+  split_and_leakage_contract: null
+  pooling_ablations: []
+  calibration: null
+  operating_threshold: null
+therapeutic_quality:
+  ema_source: null
+  ema_status_verified: null
+  applicability: []
+  online_objectives: []
+  hard_qc: []
+  experimental_validation: []
+  reward_support: []
 lineage:
   sft_project: null
   sft_stage_name: null
@@ -37,9 +69,10 @@ validation_generation:
   sample_count: null
   filter_profile_sha256: null
 goal_trace:
-  viability: []
-  bootability_enrichment: []
-  directional_change: []
+  complete_genome_viability: []
+  lifecycle_productive_infection: []
+  host_range_and_directional_change: []
+  therapeutic_quality: []
   diversity: []
 evidence: []
 online_objectives: []
@@ -52,9 +85,50 @@ calibration_and_ablations: []
 unresolved_decisions: []
 ```
 
+Schema 3 adds intended-use applicability, EMA-derived therapeutic-quality objectives, and reward
+support to schema 2's explicit design scope, lifecycle coverage, viable references, and host-model
+lineage. Preserve older artifacts as historical evidence; a new adapted project must resolve a
+schema-3 contract rather than interpreting missing fields as approval or not-applicable.
+
+When the request does not clearly state another intended use, resolve adapted design provisionally as
+therapeutic, record that assumption and its rationale, and expose it for revision. Do not use a null
+category to bypass the applicability review or its default online components.
+
 Each evidence row records claim, objective/filter IDs, tier, citation/artifact, population/context, assumption, uncertainty, threshold derivation, validation, and owner/status.
 
+Every lifecycle-coverage row records axis, applicability/rationale, target-strain and production-host
+context, evidence, implicated genes/modules/motifs or host factors, measurement and controls, failure
+mode, uncertainty, online objective, final filter, experimental validation, and status. The contract
+is incomplete while an applicable axis is silently absent.
+
 Each online objective records stable ID, goal trace, function/version, biological meaning/proxy status, baseline mapped to 0, target mapped to 1, monotonic clipped formula, units/direction, fail-closed invalid behavior, weight/range/calibration/ablation, matching final filters, and known mismatch.
+
+For therapeutic intended use, base `therapeutic_quality.applicability` on the design-relevant parts of
+the EMA draft: [phage seed
+lots](../../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md#phage-seed-lots),
+[genome characterisation](../../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md#genome-characterisation),
+[host range](../../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md#host-range),
+[potency](../../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md#potency),
+and [transducing
+capacity](../../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md#transducing-capacity).
+Each row records source section, applicability and rationale, design-time evidence, online component or
+no-proxy reason, hard filter, experimental endpoint, and uncertainty. Adapted therapeutic work
+includes every defensibly measurable applicable item in `online_objectives`; base-paper replication
+does so only when requested, and explicitly non-therapeutic work records why therapy-specific rows are
+not applicable.
+
+Each `reward_support` row records the component's independent denominator, reference and baseline-SFT
+distribution, nonzero/partial/full-credit rates, missingness, expected gradient support, and recovery
+action. A sparse or fixed-zero component triggers runtime/proxy diagnosis and, when scientifically
+valid, recalibrated partial credit, proposal-distribution work, or a preapproved staged schedule. It
+does not authorize dropping the component, weakening final hard QC, or zeroing the entire portfolio
+behind a sequential gate.
+
+For an increasing host-model score `s`, the default anti-score-chasing form is
+`clip((s - baseline) / (target_threshold - baseline), 0, 1)`. Both anchors must come from held-out,
+deployment-relevant calibration and `target_threshold` must exceed `baseline`; values above the
+accepted threshold stay at 1. Another saturating transform is allowed only with equivalent documented
+anchors and tests.
 
 Each per-objective adversarial row records a concrete shortcut candidate, affected numerator/denominator/support/default or proxy, expected score, biological failure, detection fixture, and mitigation. Include empty/missing/tool-failure, deletion/truncation/duplication, denominator shrinkage, threshold-edge, canonicalization, and support-manipulation cases when applicable. Portfolio rows record the component vector and aggregate for reference, baseline/random, desired, and adversarial designs; correlated/double-counted terms, weight/scale dominance, conflicts, OR dominance, A+B-to-C failure modes, sensitivity/ablation result, and any added guardrail. Do not approve a portfolio when an unintended design ranks with or above the desired target without a recorded resolution.
 

@@ -7,10 +7,10 @@
       "expected_output": "A bounded, primary-source evidence plan and auditable packet that covers the objective portfolio without pretending transferred thresholds are universal.",
       "assertions": [
         "The response defines the decision, target and host, acceptable transfer distance, evidence needs, and stopping condition before searching.",
-        "The response searches installed specialist life-science skills and checked-in manifests first, then uses up to three bounded primary-source lanes with recorded queries and access dates.",
-        "The response covers viability, bootability proxies, gene essentiality, synteny definition, topology/packaging, beneficial and harmful directions, host prediction, diversity, and final QC as an interacting portfolio.",
+        "The response searches installed specialist life-science skills and checked-in manifests first, uses the three-lane cap only for bounded identifier/payload discovery, and conducts coverage-driven primary-source research across applicable design axes with recorded queries and access dates.",
+        "The response covers complete-genome viability plus adsorption/entry, intracellular defense and phage counter-defense, takeover/replication, morphogenesis/packaging, lysis/progeny, production-host-dependent DNA modification, therapeutic suitability plus safety-related exclusion criteria when applicable, key genes/regulatory architecture, synteny, composition, viable-reference similarity, host prediction, diversity, and final QC as an interacting portfolio; it cites ema-2025-draft-phage-therapy-quality-guideline.md for intended therapeutic use and records a reason for therapy-specific items omitted from an explicitly non-therapeutic project.",
         "The response ranks direct same-phage evidence above relatives and transferred evidence and records uncertainty, contradictions, population, conditions, and calibration needs.",
-        "The response does not convert expression, conservation, a predictive score, or a transferred threshold into universal essentiality or viability.",
+        "The response does not convert expression, conservation, a predictive score, adsorption, or a transferred threshold into universal essentiality, productive infection, or viability, and it marks unresolved lifecycle axes instead of omitting them.",
         "The response specifies the standard evidence, sources, search-log, candidate-dataset, summary, and run-log artifacts."
       ],
       "expected_skill": "bionemo-phage-design-research-evidence",

@@ -31,7 +31,7 @@ If the available tools cannot range-fetch and decompress a candidate, emit the e
 
 Every response, including a read-only research answer, must include a concise provenance block with the exact retrieval query or API request, access date, article and repository versions, license, supplied source checksum, planned local checksum, eligibility rules, and exclusions. Do not defer those fields only to future artifacts.
 
-Aim for at least 15,000 usable unique genomes. Explain any shortfall. If the validated unique count is 10,000 or fewer, stop before SFT and obtain explicit acceptance with a warning about coverage and overfitting risk. Never inflate counts with rotations, versions, or exact duplicates.
+Predeclare data-adequacy evidence for the intended model and taxon: distinct full-genome hashes and similarity clusters, total nucleotide/token mass, target-relevant taxonomic and similarity coverage, length/composition support, cluster-held-out validation/test support, model scale, and the planned regularization or reuse strategy. Fifteen thousand unique genomes is a useful broad-corpus heuristic from the historical workflow, not a universal biological gate; 10,000 is not a universal stop threshold. If the available collection is materially below the preregistered need, pause for an explicit go/no-go or a smaller-model/transfer-learning/data-expansion decision. Never inflate support with rotations, versions, exact duplicates, or interaction-matrix rows.
 
 ## Handoff
 

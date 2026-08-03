@@ -11,8 +11,10 @@ Implement the approved RL_OBJECTIVES.yaml without changing its biological meanin
 
 ## Preconditions
 
-- Read the selected project's objective contract and decision log, including approved per-objective exploit analysis and joint portfolio analysis.
+- Read the selected project's design spec, objective contract, and decision log, including approved scope, per-objective exploit analysis, lifecycle coverage, and joint portfolio analysis.
+- For adapted therapeutic work, require the intended-use block and separate online components for every applicable, defensibly measurable [EMA-derived design guardrail](../bionemo-phage-design/references/design-scope-and-viability.md#apply-intended-use-therapeutic-guardrails). Base-paper replication adds them only when requested; explicitly non-therapeutic work must carry applicability rationales.
 - Require explicit formulas, [0,1] anchors, missing-data behavior, hard all/any tree, and expected runtime call shape. Return unresolved choices to bionemo-phage-design-plan-rl-objectives.
+- Require complete-genome generation/evaluation when `mutable_scope: whole-genome`. Reject an implementation that converts similarity, synteny, host-range emphasis, or a regional predictor into an undeclared fixed backbone or locus-only path.
 - Confirm a user-owned checkout or authorized branch/worktree/copy. Record branch, revision, existing dirty diff, and symlink/copied-file boundaries; preserve unrelated changes. Stop before mutation if safe source isolation is unavailable.
 
 ## TDD workflow
@@ -26,8 +28,9 @@ Optional engineering workflow plugins may help with planning, TDD, debugging, an
 5. Cover unit examples, exact boundaries, monotonicity/range properties, invalid/missing/support inputs, adversarial fixtures, circular/strand equivalence where relevant, and explicit all/any behavior.
 6. Run an offline fixture through online scoring and final QC. Verify alignment; document intentional proxy differences. Require the intended aggregate ordering across reference, baseline/random, desired, and adversarial designs; retain every child score and support field.
 7. Derive the required runtime capabilities from enabled objectives, pin exact paths, and test representative positive and failure/no-signal controls. Measure each online objective independently on its intended denominator; hard-gate sequencing belongs in final QC and must not silently starve later rewards.
-8. Verify the pinned runtime contract with a tiny real batch, then a short RL smoke. Record GREEN commands/output, environment, source hash, and resolved config.
-9. Put generated configs/reports in the result attempt. Do not mutate shared defaults for one run.
+8. Score the reference and representative baseline-SFT generations before RL. For every enabled therapeutic-quality component, verify measurable support, partial-credit ordering when defined, and isolation from earlier gates. Diagnose fixed-zero or missing components; implement only contract-compatible shaping or a preapproved staged schedule, never removal of a hard endpoint merely to make the aggregate trainable.
+9. Verify the pinned runtime contract with a tiny real batch, then a short RL smoke. Record GREEN commands/output, environment, source hash, and resolved config.
+10. Put generated configs/reports in the result attempt. Do not mutate shared defaults for one run.
 
 Use [the implementation checklist](references/implementation-contract.md) and [runtime adapter contract](references/runtime-contract.md).
 
@@ -38,7 +41,9 @@ Use [the implementation checklist](references/implementation-contract.md) and [r
 - Implement AND as separate channels plus hard all. Implement OR as the approved aggregate—normally max(children)—plus hard any; retain children to detect dominance.
 - Default diversity is 1 / cluster_size at declared 99% identity unless the contract names a tested substitute.
 - Do not promote an empirical threshold to viability/bootability. Preserve calibration population, model identity, and uncertainty.
+- Emit design-spec identity and scope with every resolved config and score report. A regional metric is one named component; complete-genome and lifecycle hard checks remain independently observable.
+- Keep intended-use therapeutic components separately observable and bounded. Do not combine them into one opaque pass/fail reward, let a sparse component zero unrelated rewards, or relax final harmful-cargo and other hard exclusions to improve reward support.
 
 ## Stop conditions
 
-Diagnose and repair or compatibly adapt runtime, calibration, and test-harness gaps within scope. Stop only when objective meaning remains unresolved, safe source isolation or new authority is unavailable, or no test can distinguish intended biology from an exploit without changing the contract. Record blockers; never silently change biology or reshape rewards to fit.
+Diagnose and repair or compatibly adapt runtime, calibration, proposal support, and test-harness gaps within scope. Stop only when objective meaning remains unresolved, safe source isolation or new authority is unavailable, or no test can distinguish intended biology from an exploit without changing the contract. Low initial reward support alone is not a reason to drop an approved therapeutic objective or abandon the run. Record blockers; never silently change biology or reshape rewards to fit.

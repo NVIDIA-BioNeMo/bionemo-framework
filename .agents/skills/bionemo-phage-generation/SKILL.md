@@ -15,6 +15,8 @@ Prefer an explicit checkout, then a matching nearby checkout. A checkout is comp
 
 - `recipes/evo2_phage_gen/VERSION >= 2.4`;
 - `recipes/evo2_phage_gen/.agents/skills/bionemo-phage-design/SKILL.md`;
+- `recipes/evo2_phage_gen/.agents/skills/bionemo-phage-design/references/design-scope-and-viability.md`;
+- `recipes/evo2_phage_gen/.agents/skills/bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md`;
 - the recipe-local handoff manifests, including `.agents/.codex-plugin/plugin.json` whose plugin name is `bionemo-phage-design`, and `.agents/.claude-plugin/plugin.json`.
 
 Preserve and record any dirty state. A checkout with `VERSION == 2.4` but no recipe-local controller is incompatible: leave it unchanged; never retrofit it during bootstrap. When no fully compatible explicit or nearby checkout exists, acquire `https://github.com/NVIDIA-BioNeMo/bionemo-recipes` in a separate clean checkout and inspect its canonical default revision first. Only if that revision lacks a fully compatible recipe package, use `origin/jstjohn/evo2_phage_gen` or a newer compatible revision in a separate checkout or worktree. Record the selected revision, absolute checkout root, and exact absolute recipe root.
@@ -35,6 +37,12 @@ Selected recipe root: <absolute recipe root>.
 Selected revision: <commit or revision>.
 First enumerate the selected recipe-local plugin skills root and verify the controller plus every
 discovered sibling are loadable; read every SKILL.md completely before planning or invoking a stage.
+Verify the implementation initializes a project-wide RUNLOG, defaults to complete whole-genome
+design with lifecycle-wide host-range/viability analysis, requires explicit approval for a material
+scope reduction, adds applicable design-relevant EMA-derived therapeutic objectives to adapted
+therapeutic RL
+without reward starvation, and auto-enables supported authenticated W&B telemetry unless the user
+opts out.
 ```
 
 Use the recorded absolute recipe root, never this portable skill's installation path.

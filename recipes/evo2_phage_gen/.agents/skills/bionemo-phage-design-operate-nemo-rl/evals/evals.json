@@ -81,6 +81,7 @@
       "assertions": [
         "The response checks stage reach, measurement availability, artifacts, exact runtime capabilities, and behavioral controls before calling the zero biological; its target-phage control requires measurable scores and objective-specific expected directions, not blanket scores of 1.",
         "The response requires enabled objectives to remain independently observable after earlier zero or failing gates.",
+        "The response does not drop an approved therapeutic-quality component or weaken final hard exclusions solely because initial support is sparse; any shaping, proposal-support work, or staged restart remains contract-compatible and recorded.",
         "The response estimates ordinary variance without the abrupt spike and treats that spike separately as incident evidence.",
         "The response continues a robust plateau and stops only for sustained material degradation or a collapse trigger while preserving the best checkpoint."
       ],
@@ -97,6 +98,19 @@
         "The response tests safe scorer batching, outer concurrency, nested tool threads, and operation-specific accelerator support against identical inputs, removing unconsumed work where safe.",
         "The response verifies identical outputs plus stable CPU, memory, I/O, and tool success.",
         "The response pins an evidence-based optimal setting without changing metric semantics, allows monitored extrapolation with rollback/restart, and does not block indefinitely on optional optimization."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-008-wandb-default",
+      "prompt": "Prepare the approved phage RL launch. The inherited config says wandb_enabled: false, but the current environment may already have valid W&B credentials. I did not opt out of remote telemetry.",
+      "expected_output": "An RL launch that keeps local telemetry authoritative and enables W&B automatically after safe bounded credential discovery, or records a concrete fallback reason.",
+      "assertions": [
+        "The response does not treat the inherited false setting as a user opt-out and does not silently omit W&B.",
+        "The response uses the execution adapter to presence-check environment credentials without printing them, check netrc or an existing session/settings safely, and discover the supported current status/login flow before bounded authentication.",
+        "When authentication succeeds, the project-owned resolved config enables W&B in an RL-specific project sharing the project-family prefix and records run ID/URL plus only the sanitized mechanism name.",
+        "When package, authentication, or network access remains unavailable, the response continues with authoritative local TensorBoard/logs and records bounded attempts, sanitized failure category, and remediation rather than exposing secrets or blocking."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null

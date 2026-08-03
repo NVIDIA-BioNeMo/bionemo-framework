@@ -74,6 +74,37 @@
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-006-lifecycle-host-range",
+      "prompt": "Design objectives for complete therapeutic phage genomes that should gain productive infection of a new bacterial strain while retaining selected original-host activity and staying within a plausible distance of known viable relatives. A calibrated whole-genome host classifier is available, and receptor-binding changes are likely important, but no reduced edit scope has been approved.",
+      "expected_output": "A whole-genome objective portfolio with a lifecycle coverage table, calibrated saturating host-model reward, independently scored EMA-derived design guardrails, and an explicit gate for any proposed scope reduction.",
+      "assertions": [
+        "The response reads or proposes DESIGN_SPEC.yaml, defaults output and mutable scope to complete whole genomes, treats similarity as a scored guardrail rather than an edit mask, and requires explicit approval before a tail-only, locus-only, fixed-backbone, or edit-count restriction.",
+        "The response specifies the desired host-range vector for target gain, original-host retention or loss, and disfavored-host avoidance rather than reducing the goal to one target score.",
+        "The lifecycle table covers adsorption/entry, host defenses and phage counter-defense, takeover/replication, morphogenesis/packaging, lysis/progeny, and therapeutic suitability plus safety-related exclusion criteria when applicable, with production-host-dependent methylation or DNA modification handled separately from sequence; for therapeutic use it cites ema-2025-draft-phage-therapy-quality-guideline.md, keeps design-relevant checks separate, and does not treat manufacturing purity as a sequence objective.",
+        "Because this is adapted therapeutic work, the objective contract cites the EMA phage-seed, genome-characterisation, host-range, potency, and transducing-capacity sections and emits a separate bounded component for each applicable design-relevant criterion with a defensible proxy, while unscorable criteria remain explicit experimental endpoints and final hard exclusions remain hard.",
+        "Reference and baseline-SFT distributions establish independent support for each therapeutic component; sparse or fixed-zero support triggers runtime/proxy diagnosis, calibrated partial credit, proposal-distribution work, or a preapproved staged schedule rather than a multiplicative starvation gate, silent omission, weakened QC, or abandonment.",
+        "The viability portfolio includes complete topology/termini and packaging length, intact key genes/modules and regulatory architecture, evidence-appropriate synteny, composition envelopes, whole-genome QC/model evidence, and coverage-aware similarity to a versioned viable-reference set; unknown genes are not assumed dispensable.",
+        "The host classifier remains one calibrated signal: the response records assembly/interaction lineage, missing genomes, deployment-matched host/phage holdouts, OOD/leakage checks and any pooling ablation, and does not claim that it replaces lifecycle evidence or productive-infection assays.",
+        "The increasing host score maps a calibrated baseline to zero and accepted operating threshold to one with monotonic clipping or an equivalent saturating transform; higher scores remain one, missing data fails closed, and the hard threshold plus independent phenotype validation remain."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-007-replication-therapeutic-boundary",
+      "prompt": "Reproduce the base paper's phage RL objective and filters faithfully. I have not requested a therapeutic-quality extension, and I need the historical score to remain comparable.",
+      "expected_output": "A faithful historical objective contract that does not silently add adapted-design therapeutic scores while preserving a clear opt-in extension path.",
+      "assertions": [
+        "The response retains the pinned historical objective and filter profile rather than applying the adapted-therapeutic default.",
+        "The response does not infer that omission of EMA-derived online objectives is a therapeutic-safety claim or waive the historical run's documented final filters.",
+        "It states that adding applicable EMA-derived therapeutic-quality components requires the user's request and a distinct replication-plus-extension objective contract.",
+        "Any later extension keeps each applicable measurable guardrail separate, preserves hard or experimental endpoints, and does not compare its changed aggregate reward directly with the base historical profile.",
+        "The response retains exact objective, filter, code/config, validation, and checkpoint lineage needed for historical comparability."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
     }
   ]
 }

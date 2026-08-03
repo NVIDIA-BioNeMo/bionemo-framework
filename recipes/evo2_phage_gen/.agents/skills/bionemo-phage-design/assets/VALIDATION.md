@@ -2,7 +2,31 @@
 
 > Human audit record, not agent instructions. Agents should use ../SKILL.md and only the references it names. This asset is not linked from SKILL.md, so normal skill loading does not consume it.
 
-## Snapshot
+## 2026-08-03 contract-hardening recheck
+
+This recheck covers project-wide RUNLOG initialization, default whole-genome scope, explicit approval
+for material scope reductions, lifecycle-wide host-range/viability evidence, host-model dataset and
+reward calibration, intended-use EMA-derived therapeutic objectives with non-starving online support,
+fresh-runtime hygiene, and default-on authenticated W&B with a non-failing local fallback.
+
+- PASS — the skill-creator validator accepted the portable entry skill and all 12 recipe-local skills.
+- PASS — the recipe eval validator accepted 12 files and 53 globally unique cases, including six new
+  regression cases for whole-genome scope/lifecycle analysis, clean runtime plus W&B discovery,
+  lifecycle-aware objective planning, therapeutic reward support and replication boundaries, and RL
+  W&B fallback.
+- PASS — 54 eval-runner unit tests and five package-layout tests passed.
+- PASS — all 53 current cases produced zero-cost Codex and Claude dry-run plans.
+- PASS — two isolated, read-only forward tests followed the current skills: the first retained
+  whole-genome mutable scope, lifecycle coverage, a saturating host-model reward, and separate-versus-
+  pooled dataset ablation; the second auto-enabled W&B after supported authentication and explicitly
+  disabled it in attempt configs when unavailable while retaining authoritative local telemetry.
+- PASS — all JSON parsed, `git diff --check` passed, and no recipe implementation/config behavior was
+  changed.
+
+No new paid/live behavioral eval, training, inference, external-QC, scheduler/cloud launch, or W&B
+login was performed for this documentation-only recheck.
+
+## Historical snapshot
 
 - Live campaign recorded: 2026-07-17 UTC
 - Portable-workspace refresh: 2026-07-29 UTC
@@ -168,14 +192,14 @@ The 96-design validation and 1,000-design offline Arc results are different eval
 ## Limitations
 
 - No training, inference, external-QC pipeline, scheduler/cloud launch, or hardware-fit test was run.
-- The 2026-07-17 suite ran live through Claude; Codex had 26-case dry-run coverage. The 2026-07-29 portability refresh produced 46-case dry runs for both harnesses, with no new paid/live generation or grading. The current recipe-local eval schema contains 47 cases; that current set has validation coverage but no new paid/live generation or grading.
+- The 2026-07-17 suite ran live through Claude; Codex had 26-case dry-run coverage. The 2026-07-29 portability refresh produced 46-case dry runs for both harnesses, with no new paid/live generation or grading. The recipe-local eval schema contained 47 cases at that snapshot; the 2026-08-03 recheck above covers the current 53-case schema without new paid/live generation or grading.
 - Broader recipe tests were not run because recipe source/config behavior was not changed.
 - Public-source discovery reflects the state observed on 2026-07-17 and should be rerun as literature and APIs change.
 - This is a validation snapshot, not workflow authority. Changes were not committed at capture time.
 
 ## Minimal recheck
 
-1. Run eval validation, the full focused test suite, and both harnesses' current 47-case dry runs.
+1. Run eval validation, the full focused test suite, and both harnesses' current 53-case dry runs.
 2. Validate all 12 skills and both plugin manifests.
 3. Run the 26 literature tests, manifest check, and byte-identical offline reconstruction.
 4. Recheck relative links, forbidden portable-content patterns, historical snapshot hashes, git diff whitespace, scoped status, and core.worktree.

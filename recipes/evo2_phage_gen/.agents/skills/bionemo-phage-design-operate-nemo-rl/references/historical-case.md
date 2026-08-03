@@ -2,6 +2,10 @@
 
 This reference prevents the documented case from becoming a generic recipe. Audit its exact historical numbers against the checked-in [evidence snapshot](../../bionemo-phage-design/references/historical-evidence.md); ignored local logs are optional corroboration, not a portability requirement.
 
+Keep intended-use therapeutic-quality objectives out of the faithful base-paper replication unless
+the user explicitly requests a replication-plus-extension. Record that extension as a distinct
+objective contract and do not compare its aggregate reward directly with the historical profile.
+
 - Step 190 was the historical best, not a prescribed stopping point. Sustained-degradation logic would have continued for several validations—roughly to step 250—before selecting 190.
 - Step-190 validation, reported separately: 50/96 raw full-QC passes (52.08%); 48/96 after 99%-identity cluster deduplication (50%).
 - Step-190 Offline Arc Sequential Final with Architecture Removal disabled: 358/1000 (35.80%).

@@ -5,7 +5,7 @@
 Record observed values, discovery commands, timestamps, and unresolved fields. Use null plus a reason for unknowns.
 
 ```yaml
-schema_version: 1
+schema_version: 2
 profile: local-gpu        # local-gpu|ssh-gpu|slurm|lepton|manual|hybrid
 harness:
   name: unknown
@@ -36,7 +36,17 @@ runtime:
   command_versions: {}
 telemetry:
   local: {tensorboard: true, path: null}
-  wandb: {entity: null, project_family: null, sft: {enabled: false, project: null, run_id: null}, rl: {enabled: false, project: null, run_id: null}}
+  wandb:
+    policy: auto-enable-unless-opted-out
+    installed: null
+    auth_status: unchecked       # unchecked|authenticated|unavailable|opted-out
+    auth_mechanism: null         # mechanism name only; never a secret value
+    attempts: []
+    entity: null
+    project_family: null
+    sft: {enabled: null, project: null, run_id: null, url: null}
+    calibration: {enabled: null, project: null, run_id: null, url: null}
+    rl: {enabled: null, project: null, run_id: null, url: null}
 credentials:
   mechanisms: []
 storage:
@@ -57,6 +67,23 @@ storage:
     restore_test: null
 unresolved: []
 ```
+
+Local telemetry remains authoritative. Unless the user explicitly opts out, discover the installed
+W&B interface and make a bounded authentication attempt using supported mechanisms already available
+to the session. Presence-check `WANDB_API_KEY` without emitting it; check for an `api.wandb.ai` netrc
+entry or an existing authenticated session/settings file without copying credential contents; and
+inspect current `wandb` help/status before using its login flow. Do not require the user to reconfirm
+an entity or project when the integration can resolve them safely. Enable project-owned SFT,
+calibration, and RL runs when authentication succeeds. A checked-in `wandb_enabled: false` default is
+not an opt-out. If the user has no account, does not know W&B, or the package, network, or
+authentication is unavailable after bounded attempts, set W&B disabled in the attempt's resolved
+config so launch cannot fail on telemetry, continue with local telemetry, and record the mechanism
+names tried, sanitized error category, and remediation. Never persist a key or login output that
+contains one.
+
+When reading a schema-1 environment record, treat absent W&B policy/auth fields as unresolved rather
+than as an opt-out. Preserve the old record and emit schema 2 in the new attempt or approved project
+update.
 
 For each required input, cache, temporary, checkpoint, log, and result path record host/mount, visibility, shared or node-local, durable or ephemeral, readers, writer, free/total bytes, free inodes when relevant, contents, and the timestamp/result of a reversible create-write-fsync-rename-delete probe when it must be writable. Do not infer writability from permission bits alone. Identify one owner for every write/upload and resolve checkpoint durability before launch.
 

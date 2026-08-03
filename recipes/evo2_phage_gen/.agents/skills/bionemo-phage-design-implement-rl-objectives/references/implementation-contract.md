@@ -7,6 +7,7 @@ Locate the recipe that owns the RL entry point. Put reusable functions in its `s
 Generated artifacts belong to the result attempt:
 
 - `resolved_config.yaml`
+- `design_spec.yaml` or an immutable path/hash reference to the approved project design spec
 - `source_state.json` with commit/diff or content hashes
 - `metrics/objective_contract.json`
 - `artifacts/SCORE_AUDIT.md` with individual shortcuts, joint counterexamples, mitigations, and fixture expectations
@@ -33,10 +34,17 @@ For each scalar reward or filter:
 
 Add invariant/property tests when the domain is combinatorial. For sequences, include empty, truncated, duplicated, circularly rotated, reverse-complemented, ambiguous-base, and over-limit cases as applicable. For synteny, exercise strand, circular origin, overlaps, duplicated homolog groups, insertions/deletions, and both preservation and deliberate-break directions. For `any`, verify every winning branch, no branch, ties, and dominance telemetry; for `all`, verify each isolated failure.
 
+For each enabled therapeutic-quality component, add reference, representative baseline-SFT,
+partial-credit or near-pass, target/pass, isolated hard-violation, missing-tool, and insufficient-support
+fixtures as applicable. Verify that components are scored independently, sparse support does not zero
+unrelated rewards, and final hard exclusions remain unchanged by online shaping.
+
 ## Integration gates
 
 - Run an offline fixture through the same callable used online.
 - Run final hard QC over the fixture and compare every aligned primitive.
+- Measure each enabled component's reference and baseline-SFT support before training; treat an
+  unexplained missing or fixed-zero distribution as a preflight fault, not permission to omit it.
 - Validate names, order, dtype, device, shape, and reduction against the installed RL runtime.
 - Run a tiny deterministic RL smoke that exercises reward calculation, logging, checkpoint writing, and restart metadata.
 - Run focused tests plus the nearest relevant suite and formatter/linter configured by the recipe.
@@ -53,3 +61,6 @@ Record every command, exit status, package/runtime versions, source hash, config
 - Are calibrated thresholds tied to the exact population and model?
 - Does the implementation preserve OR children rather than only the max?
 - Could sequence canonicalization merge biologically distinct cases or split equivalent circular cases?
+- Does the runtime still generate and evaluate complete genomes under the approved mutable scope, and can every scope reduction be traced to an explicit decision?
+- Does every applicable, measurable intended-use therapeutic objective remain visible and trainable
+  without weakening its final hard or experimental endpoint?

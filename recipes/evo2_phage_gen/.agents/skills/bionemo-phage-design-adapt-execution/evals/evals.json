@@ -58,6 +58,20 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-005-fresh-runtime-and-wandb",
+      "prompt": "Prepare execution for a new phage run. The checkout may contain a virtual environment left by earlier experiments, a checked-in training config disables W&B, and this session may already authenticate through WANDB_API_KEY, netrc, or a previous wandb login.",
+      "expected_output": "A clean, reproducible runtime and telemetry plan that avoids destructive cleanup, discovers supported authentication safely, and enables W&B by default when available.",
+      "assertions": [
+        "The response treats the existing environment as untrusted when provenance cannot be verified and prefers a fresh project-owned virtual environment or container with pinned construction and smoke validation.",
+        "The response does not delete, overwrite, or broadly clean the old environment; it resolves the exact path and requires the applicable cleanup authority while preserving rollback.",
+        "Unless the user opted out, the response presence-checks WANDB_API_KEY without printing it, checks an api.wandb.ai netrc entry and existing authenticated session/settings without copying secrets, and discovers the current CLI status/login flow before a bounded authentication attempt.",
+        "On successful authentication the response overrides the checked-in false default in a project-owned resolved config and enables distinct SFT, calibration, and RL W&B runs with a shared project-family prefix; no extra confirmation is required for safely resolved entity/project values.",
+        "The response keeps local TensorBoard/logs authoritative and, if the user has no account or W&B is otherwise unavailable, explicitly disables W&B in the attempt's resolved config and records sanitized attempt mechanisms, error category, and remediation rather than silently skipping logging, asking a novice to configure it, blocking, or letting telemetry crash the run."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

@@ -6,11 +6,11 @@
       "prompt": "Build an SFT collection for jumbo bacteriophages. Find the best current paper-linked public genome corpus, verify the actual biological payload before downloading it, and tell me whether it is large enough for fine-tuning.",
       "expected_output": "A reproducible source-selection and acquisition plan for the strongest currently qualifying public corpus, based on dataset properties rather than a hard-coded paper identity.",
       "assertions": [
-        "The response identifies a current primary paper and stable versioned repository record whose validated biological genome payload contains more than 10,000 qualifying records, preferring at least 15,000 usable unique genomes when available.",
+        "The response identifies the strongest current primary paper and stable versioned repository record for the requested taxon and validates the biological genome payload without imposing a universal 10,000-record gate or preferring a larger but less relevant corpus solely by count.",
         "The response reports the exact record and usable-genome counts with their units and does not infer corpus size from a paper title, repository landing page, archive size, script count, or search snippet.",
         "The response follows Data Availability to an exact file and inspects metadata plus a capped payload prefix; if its read-only tools cannot range-fetch/decompress the file, it gives an exact bounded check, leaves the payload unverified, and does not infer FASTA content from metadata, an installer, analysis code, or a similarly named record.",
         "The response records article and repository versions, access date, license, source checksum when supplied, local checksum plan, retrieval query, eligibility rules, and exclusions.",
-        "The response does not inflate the count with exact duplicates, rotations, or accession versions and stops for explicit acceptance when the final validated unique count is 10,000 or fewer.",
+        "The response does not inflate support with exact duplicates, rotations, accession versions, or interaction rows; it evaluates adequacy from unique hashes and clusters, total bases/tokens, target coverage, feasible cluster-held-out sizes, model scale, and training strategy, then requests an explicit go/no-go only when those preregistered needs are not met.",
         "The result remains valid if a newer qualifying paper and archive supersede the source that existed when this eval was authored."
       ],
       "expected_skill": "bionemo-phage-design-collect-genomes",

@@ -2,7 +2,7 @@
 
 Keep the rollout attempt self-contained and traceable. At minimum write:
 
-- `RUN.yaml`: status, execution environment, exact command/version/hash, checkpoint and SFT lineage, prompt/generation/filter/tool/source identities;
+- `RUN.yaml`: status, execution environment, exact command/version/hash, checkpoint and SFT lineage, design-spec path/hash and approved scope, prompt/generation/filter/tool/source identities;
 - `command.sh` and adapter-produced scheduler/SSH/human scripts;
 - `logs/`, `metrics/`, and append-only `monitor/events.jsonl`;
 - raw design manifest with stable ID, batch, prompt ID, seed, sequence hash, validity, and source artifact;
@@ -20,6 +20,7 @@ Lead with requested mode/count and achieved result. State:
 - attempted, valid, exact-unique, raw hard-QC pass, and unique passing-cluster counts/rates;
 - target orders/reserve and whether it was achieved;
 - checkpoint hash and exact SFT/RL lineage;
+- complete-genome output and mutable-scope confirmation, with any approved reduction and its decision record;
 - filter-profile and code/config hashes;
 - uniqueness identity/coverage/topology semantics;
 - per-filter waterfall and OR branch/dominance results;
@@ -31,4 +32,4 @@ Never report “unique” without naming exact versus clustered, denominator, id
 
 ## Reproducibility checks
 
-Before completion, verify counts reconcile across manifests; every selected sequence maps to one raw generation and one passing canonical representative; all required tools completed; hashes match; rerunning canonicalization/filter aggregation produces identical results; and final picks contain no duplicate cluster representatives.
+Before completion, verify counts reconcile across manifests; every selected sequence maps to one raw generation and one passing canonical representative; every final pick satisfies the approved complete-genome/lifecycle integrity contract; all required tools completed; hashes match; rerunning canonicalization/filter aggregation produces identical results; and final picks contain no duplicate cluster representatives.

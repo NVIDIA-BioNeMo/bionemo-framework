@@ -24,7 +24,7 @@ Apply ../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy
 
 Approve an effective token batch for the selected context, then choose global batch and accumulation to preserve it within 5% when feasible. Document the nearest feasible value otherwise. Set at most 12,000 optimizer steps. Schedule at least 30 validation events and 30 recoverable checkpoint saves by that ceiling.
 
-Keep local TensorBoard authoritative. Prefer W&B when installed and authenticated, using an SFT-specific project with a shared project-family prefix; record run ID/URL, never keys. Fall back without blocking or asking when unavailable. Keep resolved config, exact ordered scripts, logs, metrics, checkpoints, and monitor events in the attempt.
+Keep local TensorBoard authoritative. Unless the user opted out, follow the execution adapter's bounded credential discovery and enable W&B automatically when the installed integration authenticates through `WANDB_API_KEY`, netrc, an existing session/settings file, or another supported current mechanism. Use an SFT-specific project with a shared project-family prefix and record the sanitized auth mechanism plus run ID/URL, never keys. A checked-in false default is not project policy. When authentication, package, account, or network access is unavailable, explicitly disable W&B in the attempt's resolved config, record why, and continue without blocking. Keep resolved config, exact ordered scripts, logs, metrics, checkpoints, and monitor events in the attempt.
 
 ## Monitor and decide
 

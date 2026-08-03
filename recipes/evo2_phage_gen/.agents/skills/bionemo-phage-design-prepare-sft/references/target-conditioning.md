@@ -1,6 +1,6 @@
 # Target-similarity conditioning
 
-Apply this during SFT curation when the project has a single unambiguous target phage. Default to building the signal, but let the user opt out or revise it; its usefulness is a testable hypothesis, not an assumed result. The method and replication mapping are described in the bundled [original paper](../../bionemo-phage-design/assets/literature/king-2025-generative-phage-design/paper.md) and [supplemental methods](../../bionemo-phage-design/assets/literature/king-2025-generative-phage-design/supplement.md).
+Apply this during SFT curation when the project has a single unambiguous target phage. Default to building the signal, but let the user opt out or revise it; its usefulness is a testable hypothesis, not an assumed result. It is a whole-genome conditioning signal, not an edit mask or authority to freeze a backbone, gene, module, or region. The method and replication mapping are described in the bundled [original paper](../../bionemo-phage-design/assets/literature/king-2025-generative-phage-design/paper.md) and [supplemental methods](../../bionemo-phage-design/assets/literature/king-2025-generative-phage-design/supplement.md).
 
 1. Freeze the target FASTA, ID/accession, reference hash, topology, and orientation/rotation policy. Work from normalized, unprefixed genomes.
 2. Measure every genome against the target with a reproducible whole-genome method. Record identity and coverage separately, including tool/version, parameters, and failure status; missing measurement is not a low-similarity bucket.

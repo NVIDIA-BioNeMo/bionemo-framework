@@ -2,6 +2,10 @@
 
 Use these values only for faithful replication of the documented case. Never present them as defaults for another phage or goal. The checked-in [evidence snapshot](../../bionemo-phage-design/references/historical-evidence.md) is the portable audit source; ignored local logs are optional corroboration.
 
+A faithful base-paper replication keeps this historical objective profile. Add the intended-use
+therapeutic-quality objectives only when the user requests them, and label the result as a
+replication-plus-extension rather than conflating it with the base replication.
+
 ## Filter semantics
 
 - Select filters 1–6, 8, and 9; disable filter 7 for this specific replication.

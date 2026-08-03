@@ -63,6 +63,8 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
     for marker in (
         "VERSION >= 2.4",
         "bionemo-phage-design/SKILL.md",
+        "design-scope-and-viability.md",
+        "ema-2025-draft-phage-therapy-quality-guideline.md",
         ".codex-plugin/plugin.json",
         "https://github.com/NVIDIA-BioNeMo/bionemo-recipes",
         "canonical default revision",
@@ -82,6 +84,10 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "Record the discovered names",
         "controller and every discovered sibling",
         "enumeration or loading fails",
+        "project-wide RUNLOG",
+        "complete whole-genome",
+        "EMA-derived therapeutic objectives",
+        "auto-enables supported authenticated W&B",
     ):
         assert marker in portable_skill
 
@@ -97,5 +103,175 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "absolute-root Claude",
         "original request",
         "discovery verification",
+        "whole-genome/lifecycle scope",
+        "without reward starvation",
     ):
         assert marker in portable_evals_text
+
+
+def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
+    skills_root = RECIPE_AGENT_DIR / "skills"
+    controller = (skills_root / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+    project_contract = (
+        skills_root / "bionemo-phage-design" / "references" / "project-contract.md"
+    ).read_text(encoding="utf-8")
+    design_contract = (
+        skills_root / "bionemo-phage-design" / "references" / "design-scope-and-viability.md"
+    ).read_text(encoding="utf-8")
+    ema_guideline = (
+        skills_root
+        / "bionemo-phage-design"
+        / "references"
+        / "ema-2025-draft-phage-therapy-quality-guideline.md"
+    ).read_text(encoding="utf-8")
+    execution_contract = (
+        skills_root / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"
+    ).read_text(encoding="utf-8")
+    objective_skill = (
+        skills_root / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    objective_contract = (
+        skills_root
+        / "bionemo-phage-design-plan-rl-objectives"
+        / "references"
+        / "objective-contract.md"
+    ).read_text(encoding="utf-8")
+    implementation_skill = (
+        skills_root / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    ema_linked_docs = (
+        controller,
+        (skills_root / "bionemo-phage-design-research-evidence" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ),
+        objective_skill,
+        (skills_root / "bionemo-phage-design-generate-and-screen" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ),
+        (
+            skills_root
+            / "bionemo-phage-design-research-evidence"
+            / "references"
+            / "search-protocol.md"
+        ).read_text(encoding="utf-8"),
+    )
+
+    for marker in (
+        "complete whole-genome candidates",
+        "provisionally treat adapted work as therapeutic",
+        "planning/DESIGN_SPEC.yaml",
+        "explicit approval",
+        "root `RUNLOG.md`",
+        "auto-enable W&B",
+        "ema-2025-draft-phage-therapy-quality-guideline.md",
+    ):
+        assert marker in controller
+    for marker in ("root `RUNLOG.md`", "one initialization action", "Stage RUNLOG files do not replace"):
+        assert marker in project_contract
+    for marker in (
+        "mutable_scope: whole-genome",
+        "locus-only edit",
+        "productive infection rather than adsorption alone",
+        "physical epigenetic state",
+        "same-taxon pooled",
+        "scores remain 1",
+        "Apply intended-use therapeutic guardrails",
+        "provisionally classify an",
+        "do not collapse them into one learned",
+        "Product-manufacturing controls",
+        "explicitly non-therapeutic project",
+        "separate online RL component",
+        "Base-paper replication retains",
+    ):
+        assert marker in design_contract
+    for marker in (
+        "Intended-use therapeutic objectives",
+        "#phage-seed-lots",
+        "#genome-characterisation",
+        "#host-range",
+        "#potency",
+        "#transducing-capacity",
+        "hard exclusion passable",
+    ):
+        assert marker in objective_skill
+    for marker in (
+        "schema_version: 3",
+        "therapeutic_quality:",
+        "reward_support:",
+        "base-paper replication",
+        "fixed-zero component triggers",
+    ):
+        assert marker in objective_contract
+    for marker in (
+        "adapted therapeutic work",
+        "baseline-SFT generations",
+        "Low initial reward support alone",
+    ):
+        assert marker in implementation_skill
+    for document in ema_linked_docs:
+        assert "ema-2025-draft-phage-therapy-quality-guideline.md" in document
+    assert (
+        "[therapeutic suitability and safety-related exclusion criteria]"
+        "(references/ema-2025-draft-phage-therapy-quality-guideline.md)" in controller
+    )
+    assert (
+        "[therapeutic suitability and safety-related exclusion criteria]"
+        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)"
+        in ema_linked_docs[1]
+    )
+    assert (
+        "[therapeutic suitability and safety-related exclusion criteria]"
+        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)"
+        in objective_skill
+    )
+    assert (
+        "[therapeutic-suitability exclusion rules]"
+        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)"
+        in ema_linked_docs[3]
+    )
+    for marker in (
+        "EMA/CHMP/BWP/1/2024",
+        "e7953ee8e56b55bf147962872e721746e0667815a70428dd88bad428c461db48",
+        "The phages used to generate a seed lot should be strictly lytic",
+        "lysogeny modules",
+        "lysogeny should be demonstrated",
+    ):
+        assert marker in ema_guideline
+    assert "Page 2/15" not in ema_guideline
+    for marker in (
+        "auto-enable-unless-opted-out",
+        "WANDB_API_KEY",
+        "api.wandb.ai",
+        "A checked-in `wandb_enabled: false` default is",
+        "not an opt-out",
+    ):
+        assert marker in execution_contract
+
+
+def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
+    eval_ids = set()
+    eval_text = ""
+    for eval_path in sorted((RECIPE_AGENT_DIR / "skills").glob("*/evals/evals.json")):
+        payload = json.loads(eval_path.read_text(encoding="utf-8"))
+        eval_ids.update(case["id"] for case in payload["evals"])
+        eval_text += json.dumps(payload)
+
+    assert "bionemo-phage-design-006-whole-genome-host-range-scope" in eval_ids
+    assert "bionemo-phage-design-adapt-execution-005-fresh-runtime-and-wandb" in eval_ids
+    assert "bionemo-phage-design-plan-rl-objectives-006-lifecycle-host-range" in eval_ids
+    assert (
+        "bionemo-phage-design-plan-rl-objectives-007-replication-therapeutic-boundary" in eval_ids
+    )
+    assert (
+        "bionemo-phage-design-implement-rl-objectives-004-therapeutic-reward-support" in eval_ids
+    )
+    assert "bionemo-phage-design-operate-nemo-rl-008-wandb-default" in eval_ids
+    for marker in (
+        "root RUNLOG.md",
+        "tail-only",
+        "scores above the threshold",
+        "WANDB_API_KEY",
+        "ema-2025-draft-phage-therapy-quality-guideline.md",
+        "sparse or fixed-zero support triggers",
+    ):
+        assert marker in eval_text
