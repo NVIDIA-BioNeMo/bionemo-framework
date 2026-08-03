@@ -1,0 +1,130 @@
+# Annotated Hydra defaults config for FSDP2 training.
+#
+# This is a generalized version of the bionemo-recipes training config.
+# Fields marked with ??? are required and must be overridden.
+#
+# Source: bionemo-recipes/recipes/esm2_native_te/hydra_config/defaults.yaml
+
+# ---------------------------------------------------------------------------
+# Model config
+# ---------------------------------------------------------------------------
+
+# Whether to use TransformerEngine layers (true) or plain HuggingFace model (false)
+use_te: true
+
+# HuggingFace model ID or local path to config.json
+# Examples: "nvidia/esm2_t6_8M_UR50D", "meta-llama/Llama-3.2-1B-Instruct"
+config_name_or_path: ???
+
+# Extra kwargs passed to Config.from_pretrained()
+config_kwargs: {}
+
+# Total number of training steps
+num_train_steps: ???
+
+# ---------------------------------------------------------------------------
+# Distributed / FSDP config
+# ---------------------------------------------------------------------------
+
+# Use meta device for memory-efficient initialization (recommended for large models).
+# Parameters are created as metadata only, then materialized after FSDP sharding.
+use_meta_device: true
+
+# Whether to wrap model in torch.compile (may not be compatible with all features)
+use_torch_compile: false
+
+# Context parallelism size. Set >1 for FSDP+CP with a 2D device mesh.
+cp_size: 1
+
+# ---------------------------------------------------------------------------
+# Dataset config
+# ---------------------------------------------------------------------------
+
+# Whether to use sequence packing (THD format) for better GPU utilization
+use_sequence_packing: false
+
+dataset:
+  tokenizer_name: ???
+  micro_batch_size: ???
+  num_workers: 1
+  max_seq_length: 1024
+  # For MLM models: set mlm_probability (e.g., 0.15)
+  # For causal LM models: omit or set to null
+  mlm_probability: 0.15
+  use_stateful_dataloader: false
+  load_dataset_kwargs:
+    path: ???        # HuggingFace dataset path
+    split: "train"
+    streaming: true  # Streaming avoids downloading entire dataset
+
+# ---------------------------------------------------------------------------
+# Logging config
+# ---------------------------------------------------------------------------
+
+wandb_init_args:
+  name: ???
+
+logger:
+  frequency: 100
+
+# ---------------------------------------------------------------------------
+# FP8 / FP4 quantization config
+# ---------------------------------------------------------------------------
+
+# TransformerEngine FP8 config.
+# See https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html
+fp8_config:
+  enabled: false
+  # Recipe class path. Options:
+  #   transformer_engine.common.recipe.DelayedScaling (classic FP8)
+  #   transformer_engine.common.recipe.Float8CurrentScaling (per-tensor)
+  #   transformer_engine.common.recipe.Float8BlockScaling (MXFP8)
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  # Format: "HYBRID" (E4M3 forward, E5M2 backward) or "E4M3"
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+
+# NVFP4 quantization config
+fp4_config:
+  enabled: false
+  fp4_recipe: transformer_engine.common.recipe.NVFP4BlockScaling
+  fp4_format: "E2M1"
+  fp4_recipe_kwargs: {}
+
+# Per-layer precision assignment (1-indexed layer lists).
+# null means "all layers" when the corresponding config is enabled.
+# Example: fp8_layers=[1,2,3] assigns layers 1-3 to FP8.
+fp8_layers: null
+fp4_layers: null
+
+# Whether to use FP32 master weights with BF16 compute.
+# Recommended for training stability.
+use_fp32_master_weights: null
+
+# ---------------------------------------------------------------------------
+# Optimizer config
+# ---------------------------------------------------------------------------
+
+adamw_kwargs:
+  lr: 4e-4
+  fused: true         # Use CUDA fused AdamW for better performance
+  betas: [0.9, 0.98]
+  eps: 1e-8
+  weight_decay: 0.01
+
+# Learning rate scheduler (linear warmup then linear decay)
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_training_steps: 500_000
+
+# ---------------------------------------------------------------------------
+# Checkpoint config
+# ---------------------------------------------------------------------------
+
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 1_000
+  max_checkpoints: 5     # Keep only the latest N checkpoints
+  async_save: true       # Async save (currently only supported with FSDP2)
