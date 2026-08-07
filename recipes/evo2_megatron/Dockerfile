@@ -8,15 +8,39 @@ FROM nvcr.io/nvidia/pytorch:26.06-py3
 WORKDIR /workspace/bionemo
 COPY . .
 
+# 2. Fix for "No such file or directory: /workspace/TransformerEngine"
+# This removes the "direct_url" reference that confuses tools when TE was installed from source in the base image.
+RUN rm -f /usr/local/lib/python*/dist-packages/transformer_engine-*.dist-info/direct_url.json
+
 ENV UV_LINK_MODE=copy
-ENV VIRTUAL_ENV=/workspace/bionemo/.venv
+# Ensure we use the venv by default for all future commands
+ENV VIRTUAL_ENV=/workspace/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# 3. Create the venv with access to system packages (Torch, TE, etc.)
+# We create it one level up (/workspace/.venv) to keep it out of the source dir
+# Sandboxed agent CLIs use these helpers on Linux.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    uidmap \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN uv venv --system-site-packages --seed $VIRTUAL_ENV
+
+# FIXME: Pin warp-lang<1.13.0 until subquadratic-ops is compatible with warp 1.13+
+RUN uv pip install 'warp-lang<1.13.0'
+
+# 4. Pin transformer_engine to the version pre-installed in the base image.
+# Without this constraint uv may try to upgrade or rebuild TE, which breaks the build.
+RUN pip freeze | grep transformer_engine > pip-constraints.txt
 
 ## Trying to workaround CAUSAL_CONV1D build issues
 ENV CAUSAL_CONV1D_FORCE_BUILD=1
 ENV PIP_NO_BINARY=causal-conv1d
 
-# Build the same recipe environment used by CI.
+# 5. Install package and dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    ./.ci_build.sh
+    uv pip install -r build_requirements.txt --no-build-isolation && \
+    uv pip install -c pip-constraints.txt -e . --no-build-isolation

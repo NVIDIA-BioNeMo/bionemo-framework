@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import inspect
 import logging
 import os
@@ -35,6 +36,7 @@ from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.mapping import ShardedTensor
+from megatron.core.inference.utils import InferenceMode
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import Float16Module
 
@@ -144,6 +146,12 @@ def determine_memory_requirement_and_skip_if_not_met(ckpt_name: str, test_name: 
                 "seq_len_cap": -1,
                 "memory_needed_by_test": 16,
             },  # checked both variants in isolation - needs ~21GB peak on L4
+            {
+                "test_name": "test_batch_generate_mbridge_evo2_batched_decode_accuracy",
+                "model_size": "evo2_1b_base",
+                "seq_len_cap": -1,
+                "memory_needed_by_test": 16,
+            },
             {
                 "test_name": "test_batch_generate_mbridge",
                 "model_size": "evo2_7b_base",
@@ -390,13 +398,15 @@ def test_forward_manual(
                 input_ids = torch.tensor(tokenizer.tokenize(partial_seq)).int().unsqueeze(0).to(device)
                 attention_mask = None
                 # when labels is None, the model returns logits
-                logits = model(
-                    input_ids=input_ids,
-                    position_ids=None,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    **forward_kwargs,
-                )
+                inference_mode_context = InferenceMode.active() if flash_decode else contextlib.nullcontext()
+                with inference_mode_context:
+                    logits = model(
+                        input_ids=input_ids,
+                        position_ids=None,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        **forward_kwargs,
+                    )
                 if flash_decode:
                     forward_kwargs["inference_context"].reset()
                 matchrate = _calc_matchrate(tokenizer=tokenizer, in_seq=partial_seq, logits=logits)
@@ -499,13 +509,15 @@ def test_forward_ckpt_conversion(
                 input_ids = torch.tensor(tokenizer.tokenize(partial_seq)).int().unsqueeze(0).to(device)
                 attention_mask = None
                 # when labels is None, the model returns logits
-                logits = model(
-                    input_ids=input_ids,
-                    position_ids=None,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    **forward_kwargs,
-                )
+                inference_mode_context = InferenceMode.active() if flash_decode else contextlib.nullcontext()
+                with inference_mode_context:
+                    logits = model(
+                        input_ids=input_ids,
+                        position_ids=None,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        **forward_kwargs,
+                    )
                 if flash_decode:
                     forward_kwargs["inference_context"].reset()
                 matchrate = _calc_matchrate(tokenizer=tokenizer, in_seq=partial_seq, logits=logits)
@@ -737,13 +749,6 @@ def test_batch_generate_coding_sequences(
         pytest.param(
             "evo2/7b-8k:1.0",
             [97.60, 89.63, 80.03, 84.57],
-            False,
-            id="7b-8k_bf16",
-            marks=pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI due to disk space"),
-        ),
-        pytest.param(
-            "evo2/7b-8k:1.0",
-            [97.60, 89.63, 80.03, 84.57],
             True,
             id="7b-8k_fp8",
             marks=pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI due to disk space"),
@@ -794,7 +799,7 @@ def test_batch_generate_mbridge(
 
     num_tokens_to_generate = 500  # Match original test
     # Precision modes covered by the (ckpt, fp8) params, run at inference (not just at conversion):
-    #   * bf16            -> bf16_mixed,  no fp8                (ids "1b-bf16_bf16", "7b-8k_bf16")
+    #   * bf16            -> bf16_mixed,  no fp8                (id "1b-bf16_bf16")
     #   * full fp8        -> fp8 on ALL TE linears             (id "1b-bf16_fp8", bf16 checkpoint)
     #   * vortex-style fp8 -> bf16 recipe + fp8 only on the    (id "1b_fp8", the fp8-required 1b-8k ckpt)
     #                         hyena dense_projection
@@ -881,14 +886,9 @@ def test_batch_generate_mbridge_evo2_batched_decode_accuracy(sequences: list[str
     # shared 2048-token prefix used here, not the variable-length midpoint prompts in
     # test_batch_generate_mbridge.
     expected_matchpercents = [45.2, 56.8, 41.4, 100.0]
-    try:
-        _ = determine_memory_requirement_and_skip_if_not_met(
-            ckpt_name, test_name="test_batch_generate_mbridge_evo2_batched_decode_accuracy"
-        )
-    except KeyError:
-        gb_available = torch.cuda.mem_get_info()[0] / 1024**3
-        if gb_available < 16:
-            pytest.skip(f"Insufficient GPU memory: {gb_available:.1f}GB available, need at least 16GB")
+    _ = determine_memory_requirement_and_skip_if_not_met(
+        ckpt_name, test_name="test_batch_generate_mbridge_evo2_batched_decode_accuracy"
+    )
 
     num_tokens_to_generate = 500
     prompt_len = min(len(seq) // 2 for seq in sequences)
@@ -935,6 +935,7 @@ def test_batch_generate_mbridge_evo2_batched_decode_accuracy(sequences: list[str
             calculate_sequence_identity(target, generated_text) or 0.0
             for target, generated_text in zip(targets, batched_texts)
         ]
+        assert len(batched_match_percents) == len(expected_matchpercents)
         for i, (match_percent, expected_matchpercent) in enumerate(
             zip(batched_match_percents, expected_matchpercents)
         ):

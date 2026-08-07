@@ -141,6 +141,27 @@ class HyenaLayer(GraphableMegatronModule):
             return bool(context.using_cuda_graph_this_step())
         return False
 
+    def __call__(self, *args, **kwargs):
+        """Keep Evo2's real request-count shapes in distinct local CUDA graphs."""
+        if self._should_call_local_cudagraph(*args, **kwargs):
+            inference_context = kwargs.get("inference_context")
+            cache_key = None
+            if (
+                inference_context is not None
+                and not inference_context.is_static_batching()
+                and hasattr(inference_context, "evo2_max_batched_decode_requests")
+            ):
+                active_request_count = int(inference_context.total_request_count) - int(
+                    inference_context.paused_request_count
+                )
+                cache_key = (
+                    inference_context.padded_batch_dimensions,
+                    active_request_count,
+                    bool(getattr(inference_context, "evo2_batched_decode_enabled", False)),
+                )
+            return self.cudagraph_manager(self, args, kwargs, cache_key=cache_key)
+        return super().__call__(*args, **kwargs)
+
     @property
     def bias_dropout_add_exec_handler(self):
         """Return the appropriate execution handler for the current mode."""

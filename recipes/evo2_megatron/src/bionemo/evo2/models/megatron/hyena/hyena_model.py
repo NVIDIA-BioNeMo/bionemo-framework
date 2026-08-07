@@ -24,6 +24,7 @@ import torch
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
+from megatron.core.inference.utils import InferenceMode
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.models.common.language_module.language_module import LanguageModule
@@ -264,7 +265,7 @@ class HyenaModel(LanguageModule):
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
         # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
 
-        in_inference_mode = inference_context is not None and not self.training
+        in_inference_mode = InferenceMode.is_active() and inference_context is not None
 
         # Decoder embedding.
         if decoder_input is not None:
@@ -341,7 +342,7 @@ class HyenaModel(LanguageModule):
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
         # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
         inference_context = deprecate_inference_params(inference_context, inference_params)
-        in_inference_mode = inference_context is not None and not self.training
+        in_inference_mode = InferenceMode.is_active() and inference_context is not None
         if in_inference_mode:
             assert runtime_gather_output, "Inference must always gather TP logits"
         else:

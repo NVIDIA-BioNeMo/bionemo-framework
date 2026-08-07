@@ -100,9 +100,7 @@ def _reshape_dynamic_context_requests(
     if paused_request_count != 0 or active_request_count <= 1:
         return features, None
 
-    request_query_lengths = inference_context.request_query_lengths[
-        paused_request_count:total_request_count
-    ].detach()
+    request_query_lengths = inference_context.request_query_lengths[paused_request_count:total_request_count].detach()
     first_query_length = int(request_query_lengths[0].item())
     if first_query_length <= 0 or not bool((request_query_lengths == first_query_length).all().item()):
         raise ValueError(
@@ -137,8 +135,7 @@ def _restore_dynamic_context_requests(z: torch.Tensor, layout: tuple[int, int] |
     active_request_count, query_length = layout
     if z.shape[0] != active_request_count or z.shape[-1] != query_length:
         raise ValueError(
-            "Evo2 batched decode Hyena output shape changed unexpectedly; "
-            f"output={tuple(z.shape)}, layout={layout}"
+            f"Evo2 batched decode Hyena output shape changed unexpectedly; output={tuple(z.shape)}, layout={layout}"
         )
     return z.permute(1, 0, 2).contiguous().reshape(1, z.shape[1], active_request_count * query_length)
 

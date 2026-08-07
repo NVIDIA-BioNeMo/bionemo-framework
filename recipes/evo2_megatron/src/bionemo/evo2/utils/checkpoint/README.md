@@ -95,8 +95,11 @@ The `--savanna-ckpt-path` flag accepts a HuggingFace repo ID
 Vortex is ARC Institute's inference format for Evo2 Hyena models, used by the
 public Evo2 repository. The Vortex checkpoints omit some training-time state,
 so `vortex_to_mbridge.py` reconstructs the MBridge parameterization that can be
-loaded by Megatron Bridge and records Vortex-only byte metadata in
-`vortex_passthrough.pt` for exact export back to Vortex.
+loaded by Megatron Bridge. Vortex runtime buffers (`filter.t` and
+`rotary_emb.inv_freq`) and Transformer Engine extra state are intentionally
+excluded because they are not model parameters and each runtime regenerates its
+own copies when loading a checkpoint. Stored rotary frequencies are validated
+against the target model provider before they are omitted.
 
 ```bash
 evo2_convert_vortex_to_mbridge \
@@ -114,25 +117,31 @@ seed used for training so any initialization anchors are reproducible.
 
 ### Vortex-to-MBridge validation
 
-The CI-friendly round-trip test downloads the smaller public 1B Vortex
+The optional long-running round-trip test downloads the smaller public 1B Vortex
 checkpoint from `arcinstitute/evo2_1b_base`, converts it to MBridge state-dict
-form, converts back to Vortex, and asserts exact key and value equality for
-every tensor or byte-metadata value.
+form, converts back to Vortex, and asserts exact key and value equality for all
+learned model tensors. Descriptor-derived rotary frequencies are compared within
+their source precision. Runtime-generated `filter.t` caches and Transformer
+Engine extra state are excluded from the comparison.
+
+Conversion fails on missing required learned tensors, invalid core tensor
+geometry, or unexpected non-runtime entries. Ordinary parameters are normalized
+to the target provider dtype, while Hyena filter parameters retain their required
+FP32 representation.
 
 ```bash
-EVO2_CHECKPOINT_CACHE_DIR=recipes/evo2_phage_gen/data/checkpoints \
+LONG_TESTS=1 EVO2_CHECKPOINT_CACHE_DIR=/tmp/evo2-checkpoints \
 python -m pytest \
-  recipes/evo2_megatron/tests/bionemo/evo2/utils/checkpoint/test_vortex_to_mbridge.py \
-  -q
+  recipes/evo2_megatron/tests/bionemo/evo2/test_vortex_to_mbridge.py \
+  -k 1b_base_checkpoint_weight_roundtrip -q
 ```
 
 The Microviridae bootstrap path has also been validated with
 `evo-design/evo-2-7b-8k-microviridae/evo2_7b_microviridae.pt`, a 13 GB Vortex
 checkpoint from a 10,240-token, 12,000-iteration fine-tune of
-`arcinstitute/evo2_7b_base`. The cached validation compared the original Vortex
-file with an MBridge-to-Vortex export and passed exact equality: 386 original
-keys, 386 round-trip keys, zero missing or extra keys, and exact tensor or byte
-equality for every value.
+`arcinstitute/evo2_7b_base`. Cached validation confirmed exact equality for all
+model tensors after an MBridge-to-Vortex export; Vortex runtime state was
+excluded because it is regenerated on load.
 
 ### Ambiguous inverse mappings
 
@@ -165,12 +174,12 @@ an iteration directory, a `weights/` DCP directory, or a NeMo2 DCP extraction.
 
 ```bash
 evo2_analyze_inverse_prior \
-  --checkpoint-dir "$HOME/.cache/bionemo/d663c529ac7ae0b6f2fd3a852253a484bd8a6576992e9ec73045ce7af2365990-nemo2_evo2_1b_8k.tar.gz.untar" \
-  --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_1b_8k_prior.json
+  --checkpoint-dir $(download_bionemo_data evo2/1b-8k:1.0) \
+  --output-json /tmp/evo2-prior-analysis/evo2_1b_8k_prior.json
 
 evo2_analyze_inverse_prior \
-  --checkpoint-dir "$HOME/.cache/bionemo/78fc05536e1a9bd2febacea079a4beedf93ddcba1c69ac24690a5f7b649a0655-nemo2_evo2_7b_8k.tar.gz.untar" \
-  --output-json recipes/evo2_phage_gen/data/checkpoints/prior_analysis/evo2_7b_8k_prior.json
+  --checkpoint-dir $(download_bionemo_data evo2/7b-8k:1.0) \
+  --output-json /tmp/evo2-prior-analysis/evo2_7b_8k_prior.json
 ```
 
 Both reference reports showed less than 0.01 percent of `gamma` values inside

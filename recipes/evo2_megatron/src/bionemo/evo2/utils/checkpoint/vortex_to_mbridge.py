@@ -21,8 +21,11 @@ BioNeMo Evo2 training and inference.
 """
 
 import argparse
+import codecs
 import logging
 from collections import OrderedDict
+from collections.abc import Mapping
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,8 @@ from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import package_mbridge_che
 
 
 logger = logging.getLogger(__name__)
+_FP32_SUFFIXES = frozenset({"h", "decay", "gamma", "R", "p"})
+
 
 MICROVIRIDAE_MODEL_SIZE = "evo2_7b_microviridae"
 MICROVIRIDAE_SEQ_LENGTH = 10_240
@@ -75,12 +80,27 @@ def download_vortex_checkpoint(
         raise FileNotFoundError(f"Could not find {filename!r} in Hugging Face repo {repo_id!r}") from exc
 
 
-def load_vortex_state_dict(path: Path) -> OrderedDict[str, torch.Tensor]:
-    """Load a Vortex ``.pt`` checkpoint state dict."""
-    state_dict = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
-    if "module" in state_dict:
-        state_dict = state_dict["module"]
-    return OrderedDict((k.removeprefix("module."), v) for k, v in state_dict.items())
+def load_vortex_state_dict(path: Path) -> OrderedDict[str, Any]:
+    """Load a Vortex ``.pt`` checkpoint without executing checkpoint code."""
+    with torch.serialization.safe_globals([BytesIO, codecs.encode]):
+        raw = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
+
+    if not isinstance(raw, Mapping) or not raw:
+        raise ValueError("Vortex checkpoint is not a non-empty state dictionary")
+
+    state_dict = raw["module"] if "module" in raw else raw
+    if not isinstance(state_dict, Mapping) or not state_dict:
+        raise ValueError("Vortex checkpoint module is not a non-empty state dictionary")
+
+    normalized_state: OrderedDict[str, Any] = OrderedDict()
+    for key, value in state_dict.items():
+        if not isinstance(key, str):
+            raise ValueError(f"Vortex checkpoint key is not a string: {key!r}")
+        normalized_key = key.removeprefix("module.")
+        if normalized_key in normalized_state:
+            raise ValueError(f"duplicate normalized Vortex key: {normalized_key}")
+        normalized_state[normalized_key] = value
+    return normalized_state
 
 
 def _merge_fc1(l1_weight: torch.Tensor, l2_weight: torch.Tensor) -> torch.Tensor:
@@ -222,8 +242,94 @@ def _invert_medium_filter(filter_h: torch.Tensor, decay_preset: str = "weak") ->
     return h, decay
 
 
+def _required_mbridge_keys(model_provider: HyenaModelProvider, te_enabled: bool) -> set[str]:
+    """Return structural model keys that every compatible Vortex checkpoint must produce."""
+    required = {
+        "embedding.word_embeddings.weight",
+        "decoder.final_norm.weight",
+    }
+    for layer_idx, symbol in enumerate(model_provider.hybrid_override_pattern):
+        prefix = f"decoder.layers.{layer_idx}"
+        if symbol == "*":
+            norm_key = (
+                f"{prefix}.self_attention.linear_qkv.layer_norm_weight"
+                if te_enabled
+                else f"{prefix}.input_layernorm.weight"
+            )
+            required.update(
+                {
+                    norm_key,
+                    f"{prefix}.self_attention.linear_qkv.weight",
+                    f"{prefix}.self_attention.linear_proj.weight",
+                    f"{prefix}.self_attention.linear_proj.bias",
+                }
+            )
+        else:
+            norm_key = f"{prefix}.mixer.dense_projection.layer_norm_weight" if te_enabled else f"{prefix}.norm.weight"
+            required.update(
+                {
+                    norm_key,
+                    f"{prefix}.mixer.dense_projection.weight",
+                    f"{prefix}.mixer.hyena_proj_conv.short_conv_weight",
+                    f"{prefix}.mixer.dense.weight",
+                    f"{prefix}.mixer.dense.bias",
+                }
+            )
+            if symbol == "S":
+                required.add(f"{prefix}.mixer.mixer.short_conv.short_conv_weight")
+            elif symbol == "D":
+                required.update(
+                    {
+                        f"{prefix}.mixer.mixer.conv_bias",
+                        f"{prefix}.mixer.mixer.filter.h",
+                        f"{prefix}.mixer.mixer.filter.decay",
+                    }
+                )
+            elif symbol == "H":
+                required.update(
+                    {
+                        f"{prefix}.mixer.mixer.conv_bias",
+                        f"{prefix}.mixer.mixer.filter.p",
+                        f"{prefix}.mixer.mixer.filter.gamma",
+                        f"{prefix}.mixer.mixer.filter.R",
+                    }
+                )
+
+        post_norm_key = (
+            f"{prefix}.mlp.linear_fc1.layer_norm_weight" if te_enabled else f"{prefix}.pre_mlp_layernorm.weight"
+        )
+        required.update({post_norm_key, f"{prefix}.mlp.linear_fc1.weight", f"{prefix}.mlp.linear_fc2.weight"})
+    return required
+
+
+def _validate_rotary_frequencies(rotary: torch.Tensor, model_provider: HyenaModelProvider) -> None:
+    """Validate a Vortex rotary buffer before omitting this runtime-derived state."""
+    if not rotary.dtype.is_floating_point:
+        raise ValueError(f"Vortex rotary frequencies must be floating point, got {rotary.dtype}")
+
+    rotary_dim = model_provider.hidden_size // model_provider.num_attention_heads
+    expected = 1.0 / (
+        float(model_provider.rotary_base) ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+    )
+    actual = rotary.detach().reshape(-1).float()
+    if actual.shape != expected.shape:
+        raise ValueError(
+            f"Vortex rotary frequencies have shape {tuple(rotary.shape)}; "
+            f"target provider expects {tuple(expected.shape)}"
+        )
+
+    precision_dtype = rotary.dtype
+    if rotary.dtype == torch.float32 and torch.equal(actual, actual.to(torch.bfloat16).float()):
+        # Some released checkpoints store BF16-quantized rotary values in an
+        # FP32 tensor. Validate those at their actual source precision.
+        precision_dtype = torch.bfloat16
+    tolerance = torch.finfo(precision_dtype).eps
+    if not torch.isfinite(actual).all() or not torch.allclose(actual, expected, rtol=tolerance, atol=tolerance):
+        raise ValueError("Vortex rotary frequencies disagree with the target model provider")
+
+
 def vortex_to_mbridge_state_dict(
-    vortex_state_dict: dict[str, torch.Tensor],
+    vortex_state_dict: dict[str, Any],
     model_provider: HyenaModelProvider,
     te_enabled: bool = True,
 ) -> OrderedDict[str, torch.Tensor]:
@@ -238,24 +344,25 @@ def vortex_to_mbridge_state_dict(
         Ordered MBridge-style state dict.
     """
     pattern = model_provider.hybrid_override_pattern
-    num_groups = model_provider.num_groups_hyena
     mbridge_sd: OrderedDict[str, torch.Tensor] = OrderedDict()
     src = OrderedDict(vortex_state_dict)
 
     embed_key = "embedding_layer.weight"
     unembed_key = "unembed.weight"
     if embed_key in src:
-        if unembed_key in src and not torch.equal(src[embed_key], src[unembed_key]):
+        if unembed_key not in src:
+            raise ValueError("Vortex checkpoint is missing tied output projection unembed.weight")
+        if not torch.equal(src[embed_key], src[unembed_key]):
             raise ValueError("Vortex embedding_layer.weight and unembed.weight differ; MBridge expects tied weights")
         mbridge_sd["embedding.word_embeddings.weight"] = src.pop(embed_key)
-        src.pop(unembed_key, None)
+        src.pop(unembed_key)
 
     for layer_idx, symbol in enumerate(pattern):
         block_prefix = f"blocks.{layer_idx}"
         prefix = f"decoder.layers.{layer_idx}"
 
         if symbol == "*":
-            _convert_attention_layer(src, mbridge_sd, block_prefix, prefix, te_enabled)
+            _convert_attention_layer(src, mbridge_sd, block_prefix, prefix, te_enabled, model_provider)
         else:
             _convert_hyena_layer(
                 src,
@@ -264,22 +371,42 @@ def vortex_to_mbridge_state_dict(
                 prefix,
                 symbol,
                 te_enabled,
-                num_groups,
+                model_provider,
             )
-        _convert_mlp(src, mbridge_sd, block_prefix, prefix, te_enabled)
+        _convert_mlp(
+            src,
+            mbridge_sd,
+            block_prefix,
+            prefix,
+            te_enabled,
+            model_provider.hidden_size,
+            model_provider.ffn_hidden_size,
+        )
 
     final_norm_key = "norm.scale"
     if final_norm_key in src:
         mbridge_sd["decoder.final_norm.weight"] = src.pop(final_norm_key)
 
-    passthrough_keys = [k for k in src if k.endswith("._extra_state") or k.endswith(".filter.t")]
-    for key in passthrough_keys:
-        mbridge_sd[f"_vortex_passthrough.{key}"] = src.pop(key)
+    missing = sorted(_required_mbridge_keys(model_provider, te_enabled) - mbridge_sd.keys())
+    if missing:
+        raise ValueError(
+            f"Vortex checkpoint is incompatible with target pattern {pattern!r}: "
+            f"missing required MBridge keys ({len(missing)}): {missing[:20]}"
+        )
 
-    ignored_suffixes = (".rotary_emb.inv_freq",)
+    # These are runtime-generated caches/state rather than model parameters.
+    # Each framework rebuilds its own copies when loading the converted model.
+    ignored_suffixes = ("._extra_state", ".filter.t")
     unmapped = [k for k in src if not k.endswith(ignored_suffixes)]
     if unmapped:
-        logger.warning("Unmapped Vortex keys (%d): %s", len(unmapped), sorted(unmapped)[:20])
+        raise ValueError(f"unmapped Vortex entries are fatal: {sorted(unmapped)[:20]} ({len(unmapped)} total)")
+
+    params_dtype = model_provider.params_dtype
+    for key, source_tensor in mbridge_sd.items():
+        suffix = key.rsplit(".", 1)[-1]
+        target_dtype = torch.float32 if suffix in _FP32_SUFFIXES else params_dtype
+        converted_tensor = source_tensor.to(target_dtype) if source_tensor.dtype != target_dtype else source_tensor
+        mbridge_sd[key] = converted_tensor.contiguous()
 
     return mbridge_sd
 
@@ -291,7 +418,7 @@ def _convert_hyena_layer(
     prefix: str,
     symbol: str,
     te_enabled: bool,
-    num_groups: int,
+    model_provider: HyenaModelProvider,
 ) -> None:
     if te_enabled:
         ln_key = f"{prefix}.mixer.dense_projection.layer_norm_weight"
@@ -305,9 +432,10 @@ def _convert_hyena_layer(
 
     if (key := f"{block_prefix}.filter.short_filter_weight") in src:
         w = src.pop(key)
-        if w.dim() == 3 and w.shape[1] == 1:
-            w = w.squeeze(1)
-        dst[f"{prefix}.mixer.hyena_proj_conv.short_conv_weight"] = w
+        expected_shape = (3 * model_provider.hidden_size, 1, 3)
+        if tuple(w.shape) != expected_shape:
+            raise ValueError(f"{block_prefix} has invalid Vortex projection FIR: {tuple(w.shape)}")
+        dst[f"{prefix}.mixer.hyena_proj_conv.short_conv_weight"] = w[:, 0, :]
 
     if (key := f"{block_prefix}.out_filter_dense.weight") in src:
         dst[f"{prefix}.mixer.dense.weight"] = src.pop(key)
@@ -321,18 +449,42 @@ def _convert_hyena_layer(
         if (key := f"{block_prefix}.filter.D") in src:
             dst[f"{prefix}.mixer.mixer.conv_bias"] = src.pop(key)
         if (key := f"{block_prefix}.filter.h") in src:
+            filter_h = src[key]
+            medium_groups = model_provider.num_groups_hyena_medium or model_provider.num_groups_hyena
+            medium_conv_len = getattr(model_provider, "hyena_medium_conv_len", 128) or 128
+            expected_shape = (medium_groups, 1, medium_conv_len)
+            if not isinstance(filter_h, torch.Tensor) or tuple(filter_h.shape) != expected_shape:
+                shape = tuple(filter_h.shape) if isinstance(filter_h, torch.Tensor) else type(filter_h).__name__
+                raise ValueError(f"{block_prefix} has invalid Vortex medium filter: {shape}")
             h, decay = _invert_medium_filter(src.pop(key))
             dst[f"{prefix}.mixer.mixer.filter.h"] = h
             dst[f"{prefix}.mixer.mixer.filter.decay"] = decay
     elif symbol == "H":
         if (key := f"{block_prefix}.filter.D") in src:
             dst[f"{prefix}.mixer.mixer.conv_bias"] = src.pop(key)
-        if (key := f"{block_prefix}.filter.log_poles") in src:
-            p, gamma = _invert_log_poles(src.pop(key), num_groups)
+        log_poles_key = f"{block_prefix}.filter.log_poles"
+        residues_key = f"{block_prefix}.filter.residues"
+        if log_poles_key in src and residues_key in src:
+            log_poles = src[log_poles_key]
+            residues = src[residues_key]
+            num_groups = model_provider.num_groups_hyena
+            if (
+                not isinstance(log_poles, torch.Tensor)
+                or not isinstance(residues, torch.Tensor)
+                or log_poles.ndim != 3
+                or log_poles.shape[0] != num_groups
+                or log_poles.shape[-1] != 1
+                or tuple(residues.shape) != tuple(log_poles.shape[:-1])
+                or not torch.isfinite(log_poles).all()
+                or not torch.all(log_poles < 0)
+            ):
+                raise ValueError(f"{block_prefix} has invalid Vortex poles/residues")
+        if log_poles_key in src:
+            p, gamma = _invert_log_poles(src.pop(log_poles_key), model_provider.num_groups_hyena)
             dst[f"{prefix}.mixer.mixer.filter.p"] = p
             dst[f"{prefix}.mixer.mixer.filter.gamma"] = gamma
-        if (key := f"{block_prefix}.filter.residues") in src:
-            dst[f"{prefix}.mixer.mixer.filter.R"] = src.pop(key).to(torch.float32)
+        if residues_key in src:
+            dst[f"{prefix}.mixer.mixer.filter.R"] = src.pop(residues_key).to(torch.float32)
 
 
 def _convert_attention_layer(
@@ -341,6 +493,7 @@ def _convert_attention_layer(
     block_prefix: str,
     prefix: str,
     te_enabled: bool,
+    model_provider: HyenaModelProvider,
 ) -> None:
     if te_enabled:
         ln_key = f"{prefix}.self_attention.linear_qkv.layer_norm_weight"
@@ -356,7 +509,7 @@ def _convert_attention_layer(
     if (key := f"{block_prefix}.inner_mha_cls.out_proj.bias") in src:
         dst[f"{prefix}.self_attention.linear_proj.bias"] = src.pop(key)
     if (key := f"{block_prefix}.inner_mha_cls.rotary_emb.inv_freq") in src:
-        dst[f"{prefix}.self_attention.rotary_emb.inv_freq"] = src.pop(key)
+        _validate_rotary_frequencies(src.pop(key), model_provider)
 
 
 def _convert_mlp(
@@ -365,6 +518,8 @@ def _convert_mlp(
     block_prefix: str,
     prefix: str,
     te_enabled: bool,
+    hidden_size: int,
+    ffn_hidden_size: int,
 ) -> None:
     if te_enabled:
         post_norm_key = f"{prefix}.mlp.linear_fc1.layer_norm_weight"
@@ -376,6 +531,11 @@ def _convert_mlp(
     l1_key = f"{block_prefix}.mlp.l1.weight"
     l2_key = f"{block_prefix}.mlp.l2.weight"
     if l1_key in src and l2_key in src:
+        l1_weight = src[l1_key]
+        l2_weight = src[l2_key]
+        expected_shape = (ffn_hidden_size, hidden_size)
+        if tuple(l1_weight.shape) != expected_shape or tuple(l2_weight.shape) != expected_shape:
+            raise ValueError(f"{block_prefix} has invalid Vortex gated-MLP geometry")
         dst[f"{prefix}.mlp.linear_fc1.weight"] = _merge_fc1(src.pop(l1_key), src.pop(l2_key))
 
     if (key := f"{block_prefix}.mlp.l3.weight") in src:
@@ -443,21 +603,13 @@ def vortex_to_mbridge(
         _add_mbridge_te_extra_states(mbridge_sd, model_provider)
     logger.info("Converted to %d MBridge keys", len(mbridge_sd))
 
-    passthrough_prefix = "_vortex_passthrough."
-    passthrough_sd = {key: mbridge_sd.pop(key) for key in list(mbridge_sd) if key.startswith(passthrough_prefix)}
-
-    ckpt_dir = package_mbridge_checkpoint(
+    return package_mbridge_checkpoint(
         mbridge_sd,
         mbridge_ckpt_dir=mbridge_ckpt_dir,
         model_provider=model_provider,
         tokenizer_path=tokenizer_path,
         mixed_precision_recipe=mixed_precision_recipe,
     )
-    if passthrough_sd:
-        sidecar_path = Path(mbridge_ckpt_dir) / "vortex_passthrough.pt"
-        torch.save(passthrough_sd, sidecar_path)
-        logger.info("Saved %d Vortex passthrough metadata keys to %s", len(passthrough_sd), sidecar_path)
-    return ckpt_dir
 
 
 def main():

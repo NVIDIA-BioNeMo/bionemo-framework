@@ -17,7 +17,8 @@
     A 1b parameter evo2 model used in testing, torch_dist format. First converted from hf://arcinstitute/savanna_evo2_1b_base,
     then fine-tuned on the same pretraining dataset for a further 30k steps with a learning rate of 1e-5, global batch size of 256,
     and bf16 precision with 1% dropout on attention and hidden layers. This lead to a similar final loss as the original 1b model
-    on fp8 but it also generalizes to bf16 precision at inference time.
+    on fp8 but it also generalizes to bf16 precision at inference time. Fine-tuning run:
+    https://wandb.ai/clara-discovery/evo2_rc1/runs/oZ2zap4Y.
 
 - tag: 7b-8k:1.0
   ngc: nvidia/clara/evo2-7b-8k-nemo2:1.0
@@ -55,7 +56,7 @@
   description: >
     A 40b parameter evo2 model that was fine-tuned from hf://arcinstitute/savanna_evo2_40b to add support for fp8
     and bf16 precision on Hopper/Blackwell/Ampere GPUs. The original evo2 40b model only supported fp8 precision on
-    Hopper.
+    Hopper. Fine-tuning run: https://wandb.ai/nvidia/evo2_40b_finetune/runs/Ji2IRcrz/overview.
 
 - tag: 7b-8k-nofp8-te-goldvalue-testdata:1.0
   ngc: nvidia/clara/evo2-7b-8k-nofp8-te-goldvalue-testdata:1.0

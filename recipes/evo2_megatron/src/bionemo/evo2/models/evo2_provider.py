@@ -265,11 +265,11 @@ def compute_evo2_paged_kv_buffer_size_gb(
 ) -> float:
     """Compute a right-sized ``buffer_size_gb`` for one Evo2 dynamic context.
 
-    ``DynamicInferenceContext`` derives its KV block count from ``buffer_size_gb``. For
-    hybrid models in the installed mcore version, the no-``mamba_memory_ratio`` path uses
-    ``buffer_size_bytes // (block_size_bytes + mamba_states_memory_per_request)``. This
-    helper mirrors that arithmetic and returns the smallest buffer that covers
-    ``ceil(max_sequence_length / block_size_tokens) + 1 dummy + safety_blocks`` KV blocks.
+    ``DynamicInferenceContext`` first reserves ``max_requests * mamba_per_request`` bytes for
+    recurrent state. This helper computes ``blocks_per_request`` as
+    ``ceil(max_sequence_length / block_size_tokens)``, scales that by ``max_requests``, adds one
+    dummy block plus ``safety_blocks``, and enforces mcore's minimum of two KV blocks. The returned
+    buffer is the sum of those KV blocks and the per-request recurrent-state reservation.
 
     Args:
         model_config: The Evo2 ``HyenaModel`` transformer config.
@@ -358,14 +358,10 @@ def bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, *, request_
         slots = [int(slot) for slot in request_slots]
     if not slots:
         raise ValueError("request_slots must contain at least one slot")
-    sorted_slots = sorted(slots)
-    expected_slots = list(range(sorted_slots[0], sorted_slots[0] + len(sorted_slots)))
-    if sorted_slots != expected_slots:
-        raise ValueError(
-            "Batched Hyena dynamic-context binding requires contiguous request slots; "
-            f"got {slots}"
-        )
-    start_slot = sorted_slots[0]
+    expected_slots = list(range(slots[0], slots[0] + len(slots)))
+    if slots != expected_slots:
+        raise ValueError(f"Batched Hyena dynamic-context binding requires contiguous request slots; got {slots}")
+    start_slot = slots[0]
     end_slot = start_slot + len(slots)
 
     decoder = model.decoder if hasattr(model, "decoder") else model

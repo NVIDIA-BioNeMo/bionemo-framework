@@ -1,0 +1,52 @@
+- datapaths: ["/workspace/bionemo2/data/mmseqs_results_rep_seq_distinct.fasta"]
+  output_dir: "/workspace/bionemo2/data"
+  output_prefix: promoters_ab_test_noodles_uint8_distinct
+  # Datasplit
+  train_split: 1.0  # because they do manual splits of first 1000 for validation, 2nd 1000 for test, and leftover for training
+  valid_split: 0.0
+  test_split: 0.0
+  # Overwrite existing binaries. Otherwise, skip already preprocessed datasets.
+  overwrite: True
+  # Raw Preprocessing Transforms
+  embed_reverse_complement: true
+  random_reverse_complement: 0.0
+  random_lineage_dropout: 0.1
+  transcribe: "back_transcribe"
+  force_uppercase: true
+  indexed_dataset_dtype: "uint8"
+  # Tokenizer Transforms
+  append_eod: true
+  enforce_sample_length: null
+  ftfy: false
+  # Tokenizer
+  tokenizer_type: "Byte-Level"
+  vocab_file: null
+  vocab_size: null
+  merges_file: null
+  tokenizer_model_name: null
+  pretrained_tokenizer_model: null
+  special_tokens: null
+  fast_hf_tokenizer: true
+  # Compute
+  workers: 1
+  preproc_concurrency: 100000
+  chunksize: 25
+  # Filters
+  drop_empty_sequences: true
+  nnn_filter: true
+  # RNG
+  seed: 42
+  # Evo2 Taxonomic Lineage Tags
+  taxonomy_data:
+    FP002272:
+      kingdom: KINGDOM
+      phylum: PHYLUM
+      clazz: CLASS
+      order: ORDER
+      family: FAMILY
+      genus: GENUS
+      species: SPECIES
+    FP000491:
+      kingdom: king
+      order: ord
+      family: fam
