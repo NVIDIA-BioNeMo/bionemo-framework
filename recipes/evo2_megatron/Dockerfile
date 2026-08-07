@@ -19,6 +19,13 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # 3. Create the venv with access to system packages (Torch, TE, etc.)
 # We create it one level up (/workspace/.venv) to keep it out of the source dir
+# Sandboxed agent CLIs use these helpers on Linux.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    uidmap \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN uv venv --system-site-packages --seed $VIRTUAL_ENV
 
 # FIXME: Pin warp-lang<1.13.0 until subquadratic-ops is compatible with warp 1.13+
