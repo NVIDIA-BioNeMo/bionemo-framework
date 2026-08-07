@@ -9,9 +9,14 @@ runtime_manifest: data/external/safety/asset_manifest.yaml
 
 amrfinder_plus:
   release: amrfinder_v4.2.7
-  release_url: https://github.com/ncbi/amr/releases/download/amrfinder_v4.2.7/amrfinder.tar.gz
+  release_url: https://github.com/ncbi/amr/releases/download/amrfinder_v4.2.7/amrfinder_binaries_v4.2.7.tar.gz
+  archive_sha256: 68045a8bccdbe3c5dcdf941bebe2352ed419758a9914c41f48f0bbbd6fbade56
   database_directory_role: pinned custom AMRFinderPlus database directory
   require_recorded_database_version: true
+  citation: >-
+    Feldgarden et al. (2021), AMRFinderPlus and the Reference Gene Catalog
+    facilitate examination of the genomic links among antimicrobial resistance,
+    stress response, and virulence, Scientific Reports 11:12728.
 
 toxin_reference:
   provider: UniProtKB/Swiss-Prot
@@ -25,9 +30,16 @@ toxin_reference:
 
 phrogs_v4:
   annotation_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv
+  annotation_sha256: 502f96101597c21133bcce5711803e0b95e0c162cd4e86425c352549bd95e8c2
   mmseqs_database_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrogs_mmseqs_db.tar.gz
   sequence_archive_url: https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz
-  integration_excision_category: integration/excision
+  integration_excision_category: integration and excision
+  citation: >-
+    Terzian et al. (2021), PHROG: families of prokaryotic virus proteins
+    clustered using remote homology, Nucleic Acids Research 49:D1345-D1353.
+  use_terms: >-
+    Consult the PHROGs project download page for its published use and download
+    conditions; this recipe does not assert a license.
   high_confidence_terms:
     - integrase
     - excisionase
@@ -47,5 +59,5 @@ expected_file_roles:
   toxin_fasta: reviewed toxin protein FASTA snapshot
   toxin_diamond_database: DIAMOND index built from the reviewed toxin FASTA snapshot
   phrogs_annotation: PHROGs v4 annotation source table
-  phrogs_sequence_database: existing PHROGs v4 sequence search database
+  phrogs_sequence_database: complete PHROGs v4 sequence search database with all selected sidecar files
   phrogs_lysogeny_table: versioned integration/excision PHROG confidence lookup table
