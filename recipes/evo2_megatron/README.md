@@ -35,7 +35,9 @@ All CLI tools are defined in `pyproject.toml` under `[project.scripts]`.
 | `splice_evo2`                     | Extract spliced transcripts from FASTA + GTF files    |
 | `evo2_convert_nemo2_to_mbridge`   | Convert NeMo2 checkpoints to MBridge DCP format       |
 | `evo2_convert_savanna_to_mbridge` | Convert Savanna checkpoints to MBridge DCP format     |
+| `evo2_convert_vortex_to_mbridge`  | Convert Vortex `.pt` checkpoints to MBridge format    |
 | `evo2_export_mbridge_to_vortex`   | Export MBridge checkpoint to Vortex `.pt` format      |
+| `evo2_analyze_inverse_prior`      | Analyze Hyena filter priors for Vortex inversion      |
 | `evo2_remove_optimizer`           | Strip optimizer state from an MBridge checkpoint      |
 | `bionemo_fasta_to_jsonl`          | Convert FASTA files to JSONL format                   |
 
