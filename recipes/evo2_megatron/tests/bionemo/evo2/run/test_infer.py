@@ -309,6 +309,28 @@ def test_result_to_jsonl_record_serializes_complete_benchmark_evidence():
     assert record["memory"]["generation_peak_reserved_bytes"] == 8192
 
 
+def test_top_level_infer_rejects_data_parallel_before_engine_setup(monkeypatch):
+    """Standalone inference must not duplicate an unsharded prompt list across DP replicas."""
+    monkeypatch.setattr(infer_module, "get_world_size_safe", lambda: 4)
+    monkeypatch.setattr(
+        infer_module,
+        "setup_inference_engine",
+        lambda **_kwargs: pytest.fail("DP validation must run before inference-engine setup"),
+    )
+    monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+
+    with pytest.raises(
+        NotImplementedError,
+        match=r"Top-level Evo2 inference does not yet support data parallelism.*world_size=4.*model_parallel_size=2",
+    ):
+        infer_module.infer(
+            prompts=[{"id": "seq", "prompt": "A"}],
+            ckpt_dir=Path("/tmp/ckpt"),
+            tensor_parallel_size=2,
+        )
+
+
 @pytest.mark.parametrize(
     ("phase_evidence_enabled", "expected_synchronizations"),
     [
@@ -336,6 +358,7 @@ def test_infer_reports_setup_elapsed_and_peak_memory(
         },
     )
 
+    monkeypatch.setenv("RANK", "0")
     monkeypatch.setattr(infer_module, "_CUDA_PHASE_EVIDENCE_ENABLED", phase_evidence_enabled)
     monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
@@ -363,6 +386,46 @@ def test_infer_reports_setup_elapsed_and_peak_memory(
     assert records[0]["completion_token_ids"] == [65]
 
 
+def test_non_primary_global_rank_does_not_write_results(monkeypatch, tmp_path):
+    """Only distributed global rank zero may perform output-file side effects."""
+    output_file = tmp_path / "results.jsonl"
+    components = SimpleNamespace(
+        tokenizer=SimpleNamespace(tokenize=lambda text: [ord(char) for char in text]),
+        native_dynamic=SimpleNamespace(cuda_graphs_enabled=False),
+    )
+    native_result = _NativeDynamicResult(
+        generated_text="A",
+        generated_length=1,
+        prompt_tokens=[65],
+        generated_tokens=[65],
+    )
+
+    # The initialized process group is authoritative; a stale launcher environment must not
+    # make another process believe it owns the single shared output file.
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setattr(infer_module, "get_world_size_safe", lambda: 1)
+    monkeypatch.setattr(infer_module.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(infer_module.dist, "get_rank", lambda: 1)
+    monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 0)
+    monkeypatch.setattr(infer_module, "setup_inference_engine", lambda **kwargs: components)
+    monkeypatch.setattr(infer_module, "generate", lambda *args, **kwargs: [native_result])
+    monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
+
+    records = infer_module.infer(
+        prompts=[{"id": "seq", "prompt": "A"}],
+        ckpt_dir=Path("/tmp/ckpt"),
+        max_new_tokens=1,
+        max_seq_length=16,
+        output_file=output_file,
+    )
+
+    assert records[0]["completion_token_ids"] == [65]
+    assert not output_file.exists()
+
+
 def test_strict_streaming_nonfinite_late_failure_leaves_only_named_partial_artifact(monkeypatch, tmp_path):
     output_file = tmp_path / "audit.jsonl"
     partial_file = tmp_path / "audit.jsonl.partial"
@@ -382,6 +445,7 @@ def test_strict_streaming_nonfinite_late_failure_leaves_only_named_partial_artif
         result_callback(0, first_result)
         raise RuntimeError("Strict Evo2 generation returned a non-finite chosen-token log-prob")
 
+    monkeypatch.setenv("RANK", "0")
     monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
@@ -444,6 +508,7 @@ def test_strict_streaming_atomically_promotes_complete_partial_artifact(monkeypa
         replacements.append((Path(source), Path(destination)))
         real_replace(source, destination)
 
+    monkeypatch.setenv("RANK", "0")
     monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)

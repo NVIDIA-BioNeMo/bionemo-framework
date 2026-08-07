@@ -93,7 +93,7 @@ from megatron.bridge.training.utils.checkpoint_utils import (
     get_checkpoint_run_config_filename,
     read_run_config,
 )
-from megatron.bridge.utils.common_utils import get_world_size_safe
+from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_safe
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.inference.sampling_params import SamplingParams
@@ -1047,6 +1047,13 @@ def _normalize_new_request_slots_for_packed_hyena(dyn_ctx: Any, request_count: i
     slots = [int(slot) for slot in request_slots.tolist()]
     expected_lifo_slots = list(range(slots[0], slots[0] - len(slots), -1)) if slots else []
     if slots and slots == expected_lifo_slots:
+        # This intentionally updates mcore's canonical request-to-slot map, not just the
+        # tensor passed to Hyena binding. mcore reads the map again in
+        # initialize_attention_state() and update_requests(). Reassigning the same freshly
+        # allocated slot set before the first forward keeps those later reads aligned with
+        # the ascending packed Hyena views. Evo2 leaves prefix caching off and keeps the
+        # batched requests active until they reset together, so no restored state or
+        # within-group compaction retains the original order.
         request_slots.copy_(request_slots.flip(0))
     return request_slots
 
@@ -2262,6 +2269,24 @@ def infer(
     Returns:
         List of JSONL-serialisable result dicts.
     """
+    world_size = get_world_size_safe()
+    model_parallel_size = tensor_parallel_size * pipeline_model_parallel_size * context_parallel_size
+
+    # TODO: Add standalone/offline DP orchestration here: assign indexed prompt shards to DP
+    # replicas while keeping each shard replicated across its TP/PP/CP ranks, then gather and
+    # restore input order on global rank zero without weakening streaming or strict-output
+    # semantics. NeMo-RL already performs that orchestration before calling
+    # _generate_native_dynamic(), so the lower-level generation path must remain shard-local.
+    if world_size > model_parallel_size:
+        raise NotImplementedError(
+            "Top-level Evo2 inference does not yet support data parallelism: "
+            f"world_size={world_size} exceeds model_parallel_size={model_parallel_size} "
+            f"(tensor_parallel_size={tensor_parallel_size}, "
+            f"pipeline_model_parallel_size={pipeline_model_parallel_size}, "
+            f"context_parallel_size={context_parallel_size}). "
+            "Launch with world_size equal to model_parallel_size."
+        )
+
     random_seed = seed or 1234
 
     _prune_caches()
@@ -2317,7 +2342,11 @@ def infer(
     total_prompt_tokens = 0
     total_completion_tokens = 0
     t_generate_start = time.perf_counter()
-    is_rank_zero = int(os.environ.get("RANK", "0")) == 0
+    # Every process runs the same unsharded prompt list. Use one global writer for the shared
+    # output path: data-parallel rank zero is true once per model-parallel coordinate and can
+    # therefore select multiple writers. get_rank_safe() uses the initialized process group
+    # before falling back to launcher state.
+    is_rank_zero = get_rank_safe() == 0
     stream_file = None
     streamed_record_count = 0
     strict_stream_partial_path: Optional[Path] = None
