@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import os
 import shutil
 import ssl
@@ -25,7 +27,11 @@ import subprocess
 import tarfile
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
+
+import yaml
 
 from bionemo.evo2_phage_gen.arc_pipeline import ARC_EVO2_GIT_URL, ARC_EVO2_REV, _assert_arc_source_revision
 
@@ -44,6 +50,33 @@ DEFAULT_ARC_EVO2_REPO_URL = ARC_EVO2_GIT_URL
 DEFAULT_ARC_EVO2_REPO_REV = ARC_EVO2_REV
 DEFAULT_DIAMOND_URL = "https://github.com/bbuchfink/diamond/releases/download/v2.1.24/diamond-linux64.tar.gz"
 DEFAULT_HMMER_URL = "https://conda.anaconda.org/bioconda/linux-64/hmmer-3.4-hb6cb901_4.tar.bz2"
+DEFAULT_SAFETY_DIR = DEFAULT_EXTERNAL_DIR / "safety"
+DEFAULT_SAFETY_MANIFEST = DEFAULT_SAFETY_DIR / "asset_manifest.yaml"
+DEFAULT_SAFETY_RECIPE_PATH = RECIPE_ROOT / "configs" / "phage_safety_assets.yaml"
+DEFAULT_AMRFINDER_RELEASE = "amrfinder_v4.2.7"
+DEFAULT_AMRFINDER_URL = "https://github.com/ncbi/amr/releases/download/amrfinder_v4.2.7/amrfinder.tar.gz"
+DEFAULT_UNIPROT_TOXIN_QUERY = (
+    "reviewed:true AND keyword:KW-0800 AND\n(taxonomy_id:2 OR taxonomy_id:2157 OR taxonomy_id:10239)"
+)
+DEFAULT_UNIPROT_TOXIN_ANNOTATIONS_URL = "https://rest.uniprot.org/uniprotkb/stream?" + urlencode(
+    {
+        "query": DEFAULT_UNIPROT_TOXIN_QUERY,
+        "format": "tsv",
+        "fields": "accession,id,protein_name,gene_names,organism_name,organism_id,cc_function",
+    }
+)
+DEFAULT_UNIPROT_TOXIN_FASTA_URL = "https://rest.uniprot.org/uniprotkb/stream?" + urlencode(
+    {"query": DEFAULT_UNIPROT_TOXIN_QUERY, "format": "fasta"}
+)
+PHROGS_INTEGRATION_EXCISION_CATEGORY = "integration/excision"
+PHROGS_HIGH_CONFIDENCE_TERMS = (
+    "integrase",
+    "excisionase",
+    "site-specific recombinase",
+    "lysogeny repressor",
+)
+PHROGS_REVIEW_TERMS = ("recombinase", "repressor", "lysogeny", "integration", "excision")
+UNIPROT_CC_BY_4_0_ATTRIBUTION = "UniProt data are available under the CC BY 4.0 license."
 
 
 @dataclass(frozen=True)
@@ -55,18 +88,90 @@ class PreparedAsset:
     detail: str
 
 
-def _download(url: str, output_path: Path, *, overwrite: bool = False, insecure: bool = False) -> Path:
-    """Download ``url`` to ``output_path`` unless it already exists."""
+def _sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest for a file."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sha256_path(path: Path) -> str:
+    """Return a stable SHA-256 digest for a file or a directory tree."""
+    path = Path(path)
+    if path.is_file():
+        return _sha256_file(path)
+
+    digest = hashlib.sha256()
+    for child in sorted(path.rglob("*")):
+        if not child.is_file():
+            continue
+        digest.update(str(child.relative_to(path)).encode())
+        digest.update(b"\0")
+        with child.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def _verify_sha256(path: Path, expected_sha256: str | None) -> str:
+    """Verify an optional declared digest and return the observed digest."""
+    observed_sha256 = _sha256_file(path)
+    if expected_sha256 is None:
+        return observed_sha256
+    normalized_expected = expected_sha256.removeprefix("sha256:").lower()
+    if observed_sha256 != normalized_expected:
+        raise ValueError(f"SHA-256 mismatch for {path}: expected {normalized_expected}, observed {observed_sha256}")
+    return observed_sha256
+
+
+def _download_with_headers(
+    url: str,
+    output_path: Path,
+    *,
+    overwrite: bool = False,
+    insecure: bool = False,
+    expected_sha256: str | None = None,
+) -> tuple[Path, dict[str, str]]:
+    """Download a file and retain response headers needed for provenance."""
     output_path = Path(output_path)
     if output_path.exists() and not overwrite:
-        return output_path
+        _verify_sha256(output_path, expected_sha256)
+        return output_path, {}
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     context = ssl._create_unverified_context() if insecure else None
     with urllib.request.urlopen(url, context=context) as response, tmp_path.open("wb") as output:
         shutil.copyfileobj(response, output)
+        headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+    try:
+        _verify_sha256(tmp_path, expected_sha256)
+    except ValueError:
+        tmp_path.unlink(missing_ok=True)
+        raise
     tmp_path.replace(output_path)
-    return output_path
+    return output_path, headers
+
+
+def _download(
+    url: str,
+    output_path: Path,
+    *,
+    overwrite: bool = False,
+    insecure: bool = False,
+    expected_sha256: str | None = None,
+) -> Path:
+    """Download ``url`` to ``output_path`` unless it already exists."""
+    downloaded_path, _ = _download_with_headers(
+        url,
+        output_path,
+        overwrite=overwrite,
+        insecure=insecure,
+        expected_sha256=expected_sha256,
+    )
+    return downloaded_path
 
 
 def _extract_tar(archive_path: Path, output_dir: Path, *, overwrite: bool = False) -> Path:
@@ -239,6 +344,274 @@ def prepare_hmmer(
     return PreparedAsset("hmmer", hmmsearch_path, f"downloaded {len(written)} executables from {hmmer_url}")
 
 
+def _link_executable(source_path: Path, link_path: Path) -> Path:
+    """Expose an extracted executable through the selected binary directory."""
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    if link_path.exists() or link_path.is_symlink():
+        link_path.unlink()
+    link_path.symlink_to(source_path.resolve())
+    return link_path
+
+
+def _find_extracted_executable(extracted_dir: Path, executable_name: str) -> Path:
+    """Find a named executable in an extracted upstream tool archive."""
+    candidates = sorted(path for path in extracted_dir.rglob(executable_name) if path.is_file())
+    if not candidates:
+        raise FileNotFoundError(f"No {executable_name} binary found after extracting to {extracted_dir}")
+    return candidates[0]
+
+
+def _read_safety_manifest(manifest_path: Path) -> dict:
+    """Read a mutable safety asset manifest, rejecting malformed top-level data."""
+    if not manifest_path.exists():
+        return {"schema_version": 1}
+    manifest = yaml.safe_load(manifest_path.read_text())
+    if manifest is None:
+        return {"schema_version": 1}
+    if not isinstance(manifest, dict):
+        raise ValueError(f"Safety manifest must be a mapping: {manifest_path}")
+    return manifest
+
+
+def _update_safety_manifest(manifest_path: Path, section: str, values: dict) -> None:
+    """Persist one scanner-asset record while preserving prior preparation records."""
+    if not DEFAULT_SAFETY_RECIPE_PATH.exists():
+        raise FileNotFoundError(f"Safety asset recipe does not exist: {DEFAULT_SAFETY_RECIPE_PATH}")
+    manifest = _read_safety_manifest(manifest_path)
+    manifest["schema_version"] = 1
+    manifest["recipe"] = {
+        "path": str(DEFAULT_SAFETY_RECIPE_PATH),
+        "sha256": _sha256_file(DEFAULT_SAFETY_RECIPE_PATH),
+    }
+    manifest[section] = values
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
+
+def prepare_amrfinder_plus(
+    external_dir: Path = DEFAULT_EXTERNAL_DIR,
+    *,
+    bin_dir: Path | None = None,
+    amrfinder_url: str = DEFAULT_AMRFINDER_URL,
+    amrfinder_sha256: str | None = None,
+    database_dir: Path | None = None,
+    manifest_path: Path | None = None,
+    overwrite: bool = False,
+    insecure_downloads: bool = False,
+) -> PreparedAsset:
+    """Prepare the pinned AMRFinderPlus release and a recordable custom database directory."""
+    external_dir = Path(external_dir)
+    safety_dir = external_dir / "safety"
+    archive_path = _download(
+        amrfinder_url,
+        safety_dir / "downloads" / f"{DEFAULT_AMRFINDER_RELEASE}.tar.gz",
+        overwrite=overwrite,
+        insecure=insecure_downloads,
+        expected_sha256=amrfinder_sha256,
+    )
+    extracted_dir = _extract_tar(
+        archive_path,
+        safety_dir / "tools" / DEFAULT_AMRFINDER_RELEASE,
+        overwrite=overwrite,
+    )
+    target_bin_dir = Path(bin_dir) if bin_dir is not None else external_dir / "bin"
+    amrfinder_path = _link_executable(
+        _find_extracted_executable(extracted_dir, "amrfinder"), target_bin_dir / "amrfinder"
+    )
+    amrfinder_update_path = _link_executable(
+        _find_extracted_executable(extracted_dir, "amrfinder_update"), target_bin_dir / "amrfinder_update"
+    )
+
+    requested_database_dir = Path(database_dir) if database_dir is not None else safety_dir / "amrfinder" / "database"
+    if overwrite and requested_database_dir.exists():
+        shutil.rmtree(requested_database_dir)
+    needs_database_update = not requested_database_dir.exists() or not any(requested_database_dir.iterdir())
+    if needs_database_update:
+        requested_database_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [str(amrfinder_update_path), "-d", str(requested_database_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    latest_database_dir = requested_database_dir / "latest"
+    pinned_database_dir = (
+        latest_database_dir.resolve() if latest_database_dir.exists() else requested_database_dir.resolve()
+    )
+    if not pinned_database_dir.exists():
+        raise FileNotFoundError(f"AMRFinder update did not create a database under {requested_database_dir}")
+    amrfinder_version = subprocess.run(
+        [str(amrfinder_path), "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    if "4.2.7" not in amrfinder_version:
+        raise RuntimeError(
+            f"Expected AMRFinderPlus {DEFAULT_AMRFINDER_RELEASE}, but the prepared binary reports: {amrfinder_version}"
+        )
+    database_version = subprocess.run(
+        [str(amrfinder_path), "--database", str(pinned_database_dir), "--database_version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    selected_manifest_path = Path(manifest_path) if manifest_path is not None else safety_dir / "asset_manifest.yaml"
+    _update_safety_manifest(
+        selected_manifest_path,
+        "amrfinder_plus",
+        {
+            "release": DEFAULT_AMRFINDER_RELEASE,
+            "release_url": amrfinder_url,
+            "archive_sha256": _sha256_file(archive_path),
+            "binary_path": str(amrfinder_path.resolve()),
+            "amrfinder_version": amrfinder_version,
+            "database_path": str(pinned_database_dir),
+            "database_version": database_version,
+            "database_sha256": _sha256_path(pinned_database_dir),
+        },
+    )
+    return PreparedAsset("amrfinder_plus", amrfinder_path, f"{DEFAULT_AMRFINDER_RELEASE}: {database_version}")
+
+
+def prepare_toxin_reference(
+    external_dir: Path = DEFAULT_EXTERNAL_DIR,
+    *,
+    diamond_bin: Path | None = None,
+    annotations_url: str = DEFAULT_UNIPROT_TOXIN_ANNOTATIONS_URL,
+    fasta_url: str = DEFAULT_UNIPROT_TOXIN_FASTA_URL,
+    manifest_path: Path | None = None,
+    overwrite: bool = False,
+    insecure_downloads: bool = False,
+) -> PreparedAsset:
+    """Build a DIAMOND database from the reviewed UniProt toxin reference snapshot."""
+    external_dir = Path(external_dir)
+    safety_dir = external_dir / "safety"
+    toxin_dir = safety_dir / "toxins"
+    annotations_path, annotation_headers = _download_with_headers(
+        annotations_url,
+        toxin_dir / "reviewed_toxins.tsv",
+        overwrite=overwrite,
+        insecure=insecure_downloads,
+    )
+    fasta_path, fasta_headers = _download_with_headers(
+        fasta_url,
+        toxin_dir / "reviewed_toxins.faa",
+        overwrite=overwrite,
+        insecure=insecure_downloads,
+    )
+    selected_manifest_path = Path(manifest_path) if manifest_path is not None else safety_dir / "asset_manifest.yaml"
+    existing_manifest = _read_safety_manifest(selected_manifest_path)
+    existing_toxin_reference = existing_manifest.get("toxin_reference", {})
+    if not isinstance(existing_toxin_reference, dict):
+        existing_toxin_reference = {}
+    uniprot_release = (
+        annotation_headers.get("x-uniprot-release")
+        or fasta_headers.get("x-uniprot-release")
+        or existing_toxin_reference.get("uniprot_release")
+    )
+    if not isinstance(uniprot_release, str) or not uniprot_release:
+        raise RuntimeError("UniProt response did not include the required X-UniProt-Release header")
+
+    diamond_database = toxin_dir / "reviewed_toxins.dmnd"
+    if overwrite or not diamond_database.exists():
+        selected_diamond_bin = Path(diamond_bin) if diamond_bin is not None else external_dir / "bin" / "diamond"
+        subprocess.run(
+            [str(selected_diamond_bin), "makedb", "--in", str(fasta_path), "--db", str(diamond_database)],
+            check=True,
+        )
+    if not diamond_database.exists():
+        raise FileNotFoundError(f"DIAMOND did not create toxin database: {diamond_database}")
+
+    _update_safety_manifest(
+        selected_manifest_path,
+        "toxin_reference",
+        {
+            "query": DEFAULT_UNIPROT_TOXIN_QUERY,
+            "annotations_url": annotations_url,
+            "fasta_url": fasta_url,
+            "retrieved_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "uniprot_release": uniprot_release,
+            "license": "CC BY 4.0",
+            "attribution": UNIPROT_CC_BY_4_0_ATTRIBUTION,
+            "files": {
+                "annotations": {
+                    "path": str(annotations_path.resolve()),
+                    "role": "canonical reviewed toxin accessions and annotations",
+                    "sha256": _sha256_file(annotations_path),
+                },
+                "fasta": {
+                    "path": str(fasta_path.resolve()),
+                    "role": "reviewed toxin protein sequences",
+                    "sha256": _sha256_file(fasta_path),
+                },
+                "diamond_database": {
+                    "path": str(diamond_database.resolve()),
+                    "role": "DIAMOND index of reviewed toxin proteins",
+                    "sha256": _sha256_file(diamond_database),
+                },
+            },
+        },
+    )
+    return PreparedAsset("toxin_reference", diamond_database, "reviewed UniProt toxin DIAMOND database")
+
+
+def prepare_phrogs_safety_metadata(
+    external_dir: Path = DEFAULT_EXTERNAL_DIR,
+    *,
+    manifest_path: Path | None = None,
+) -> PreparedAsset:
+    """Build a PHROGs v4 integration/excision lookup table for lysogeny evidence."""
+    external_dir = Path(external_dir)
+    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
+    if not annotation_path.exists():
+        raise FileNotFoundError(f"PHROGs v4 annotation table is required: {annotation_path}")
+
+    safety_dir = external_dir / "safety"
+    lookup_path = safety_dir / "phrogs" / "phrogs_integration_excision_v4.tsv"
+    lookup_path.parent.mkdir(parents=True, exist_ok=True)
+    with annotation_path.open(newline="") as source, lookup_path.open("w", newline="") as output:
+        reader = csv.DictReader(source, delimiter="\t")
+        required_columns = {"phrog", "annot", "category"}
+        if reader.fieldnames is None or not required_columns.issubset(reader.fieldnames):
+            raise ValueError(f"PHROGs v4 table must contain {sorted(required_columns)}: {annotation_path}")
+        writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+        writer.writerow(["phrog", "annot", "category", "confidence", "matched_term"])
+        for row in reader:
+            category = row["category"].strip()
+            if category.casefold() != PHROGS_INTEGRATION_EXCISION_CATEGORY:
+                continue
+            annotation = row["annot"].strip()
+            normalized_annotation = annotation.casefold()
+            high_confidence_term = next(
+                (term for term in PHROGS_HIGH_CONFIDENCE_TERMS if term in normalized_annotation), None
+            )
+            review_term = next((term for term in PHROGS_REVIEW_TERMS if term in normalized_annotation), None)
+            confidence = "high_confidence" if high_confidence_term is not None else "review"
+            matched_term = high_confidence_term or review_term or "integration/excision category"
+            writer.writerow([row["phrog"].strip(), annotation, category, confidence, matched_term])
+
+    selected_manifest_path = Path(manifest_path) if manifest_path is not None else safety_dir / "asset_manifest.yaml"
+    _update_safety_manifest(
+        selected_manifest_path,
+        "phrogs_v4",
+        {
+            "annotation_url": DEFAULT_PHROGS_ANNOTATION_URL,
+            "source_path": str(annotation_path.resolve()),
+            "source_sha256": _sha256_file(annotation_path),
+            "category": PHROGS_INTEGRATION_EXCISION_CATEGORY,
+            "high_confidence_terms": list(PHROGS_HIGH_CONFIDENCE_TERMS),
+            "review_terms": list(PHROGS_REVIEW_TERMS),
+            "lookup_path": str(lookup_path.resolve()),
+            "lookup_sha256": _sha256_file(lookup_path),
+            "sequence_assets": {
+                "mmseqs_profile_database": str((external_dir / "phrogs" / "phrogs_mmseqs_db").resolve()),
+                "gpu_sequence_database": str((external_dir / "phrogs" / "phrogs_gpu_seq_db_pad").resolve()),
+            },
+        },
+    )
+    return PreparedAsset("phrogs_safety_metadata", lookup_path, "PHROGs v4 integration/excision lookup table")
+
+
 def prepare_phrogs_annotation(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
@@ -374,6 +747,8 @@ def prepare_external_assets(
     download_large_databases: bool = False,
     download_checkv: bool = True,
     configure_lovis4u: bool = True,
+    with_safety: bool = False,
+    safety_manifest: Path | None = None,
     mmseqs_url: str = DEFAULT_MMSEQS_GPU_URL,
     blast_plus_url: str = DEFAULT_BLAST_PLUS_URL,
     diamond_url: str = DEFAULT_DIAMOND_URL,
@@ -463,6 +838,29 @@ def prepare_external_assets(
         )
         if download_checkv:
             assets.append(prepare_checkv_database(external_dir, bin_dir=target_bin_dir, overwrite=overwrite))
+    if with_safety:
+        selected_safety_manifest = (
+            Path(safety_manifest) if safety_manifest is not None else external_dir / "safety" / "asset_manifest.yaml"
+        )
+        assets.append(
+            prepare_amrfinder_plus(
+                external_dir,
+                bin_dir=target_bin_dir,
+                manifest_path=selected_safety_manifest,
+                overwrite=overwrite,
+                insecure_downloads=insecure_downloads,
+            )
+        )
+        assets.append(
+            prepare_toxin_reference(
+                external_dir,
+                diamond_bin=target_bin_dir / "diamond",
+                manifest_path=selected_safety_manifest,
+                overwrite=overwrite,
+                insecure_downloads=insecure_downloads,
+            )
+        )
+        assets.append(prepare_phrogs_safety_metadata(external_dir, manifest_path=selected_safety_manifest))
     return assets
 
 
@@ -484,6 +882,17 @@ def main() -> None:
         "--download-large-databases", action="store_true", help="Also download PHROGs MMseqs DB and CheckV DB"
     )
     parser.add_argument("--skip-checkv", action="store_true", help="Do not download/build the CheckV database")
+    parser.add_argument(
+        "--with-safety",
+        action="store_true",
+        help="Also prepare pinned AMRFinderPlus, toxin, and PHROGs sequence-safety assets",
+    )
+    parser.add_argument(
+        "--safety-manifest",
+        type=Path,
+        default=DEFAULT_SAFETY_MANIFEST,
+        help="Runtime safety asset manifest (default: data/external/safety/asset_manifest.yaml)",
+    )
     parser.add_argument("--mmseqs-url", default=DEFAULT_MMSEQS_GPU_URL)
     parser.add_argument("--blast-plus-url", default=DEFAULT_BLAST_PLUS_URL)
     parser.add_argument("--diamond-url", default=DEFAULT_DIAMOND_URL)
@@ -512,6 +921,8 @@ def main() -> None:
         download_large_databases=args.download_large_databases,
         download_checkv=not args.skip_checkv,
         configure_lovis4u=not args.skip_lovis4u_config,
+        with_safety=args.with_safety,
+        safety_manifest=args.safety_manifest,
         mmseqs_url=args.mmseqs_url,
         blast_plus_url=args.blast_plus_url,
         diamond_url=args.diamond_url,

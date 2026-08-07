@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+
+# Tracked recipe for material that is generated under data/external/safety/.
+# The generated asset_manifest.yaml records observed versions, release headers,
+# retrieval times, and SHA-256 digests; it is intentionally not committed.
+schema_version: 1
+runtime_manifest: data/external/safety/asset_manifest.yaml
+
+amrfinder_plus:
+  release: amrfinder_v4.2.7
+  release_url: https://github.com/ncbi/amr/releases/download/amrfinder_v4.2.7/amrfinder.tar.gz
+  database_directory_role: pinned custom AMRFinderPlus database directory
+  require_recorded_database_version: true
+
+toxin_reference:
+  provider: UniProtKB/Swiss-Prot
+  query: |-
+    reviewed:true AND keyword:KW-0800 AND
+    (taxonomy_id:2 OR taxonomy_id:2157 OR taxonomy_id:10239)
+  annotations_url: https://rest.uniprot.org/uniprotkb/stream
+  fasta_url: https://rest.uniprot.org/uniprotkb/stream
+  license: CC BY 4.0
+  attribution: UniProt data are available under the CC BY 4.0 license.
+
+phrogs_v4:
+  annotation_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv
+  mmseqs_database_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrogs_mmseqs_db.tar.gz
+  sequence_archive_url: https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz
+  integration_excision_category: integration/excision
+  high_confidence_terms:
+    - integrase
+    - excisionase
+    - site-specific recombinase
+    - lysogeny repressor
+  review_terms:
+    - recombinase
+    - repressor
+    - lysogeny
+    - integration
+    - excision
+
+expected_file_roles:
+  amrfinder_binary: AMRFinderPlus executable from the pinned release
+  amrfinder_database: resolved custom AMRFinderPlus database, never an unrecorded latest alias
+  toxin_annotations: canonical reviewed toxin accessions and annotations table
+  toxin_fasta: reviewed toxin protein FASTA snapshot
+  toxin_diamond_database: DIAMOND index built from the reviewed toxin FASTA snapshot
+  phrogs_annotation: PHROGs v4 annotation source table
+  phrogs_sequence_database: existing PHROGs v4 sequence search database
+  phrogs_lysogeny_table: versioned integration/excision PHROG confidence lookup table
