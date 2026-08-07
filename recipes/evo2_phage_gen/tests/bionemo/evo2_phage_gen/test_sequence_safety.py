@@ -63,6 +63,17 @@ def test_only_all_required_passes_yield_pass():
     assert result.state is SafetyState.PASS
 
 
+def test_missing_required_results_are_indeterminate():
+    """An empty or informational-only result set cannot pass a required safety gate."""
+    empty = GenomeSafetyResult.from_class_results(())
+    only_informational = GenomeSafetyResult.from_class_results(
+        (_class_result("lysogeny", SafetyState.PASS, required=False),)
+    )
+
+    assert empty.state is SafetyState.INDETERMINATE
+    assert only_informational.state is SafetyState.INDETERMINATE
+
+
 def test_policy_load_is_strict_and_digest_is_canonical(tmp_path):
     """Policy input must reject unknown classes and hash its sorted JSON representation."""
     policy_path = tmp_path / "policy.yaml"
@@ -111,4 +122,71 @@ def test_policy_rejects_unknown_schema_version(tmp_path):
     policy_path.write_text("schema_version: 2\n")
 
     with pytest.raises(ValueError, match="unsupported policy schema version"):
+        load_phage_safety_policy(policy_path)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "expected_message"),
+    [
+        (
+            "regulatory_compliance_claimed: false",
+            "regulatory_compliance_claimed: true",
+            "regulatory_compliance_claimed",
+        ),
+        ("strict_lytic_required: true", "strict_lytic_required: false", "strict_lytic_required"),
+        ("label: EMA-derived sequence-design safety gate", "label: non-regulatory label", "regulatory_basis"),
+        ("source_status: draft", "source_status: final", "regulatory_basis"),
+        ("lysogeny: informational", "lysogeny: required", "archaeal_only_profile"),
+        ("required_sequence_classes: [amr, toxin]", "required_sequence_classes: [amr]", "required_sequence_classes"),
+        (
+            "required_sequence_classes: [amr, toxin]",
+            "required_sequence_classes: [amr, amr, toxin]",
+            "duplicate required sequence class",
+        ),
+        (
+            "required_sequence_classes: [amr, toxin, lysogeny]",
+            "required_sequence_classes: [amr, toxin]",
+            "bacterial_replication_profile",
+        ),
+        (
+            "archaeal_only_profile:\n  required_sequence_classes: [amr, toxin]",
+            "archaeal_only_profile:\n  required_sequence_classes: [amr]",
+            "archaeal_only_profile",
+        ),
+    ],
+)
+def test_policy_rejects_invalid_schema_v1_scalar_and_profile_values(tmp_path, original, replacement, expected_message):
+    """Schema v1 requires its fixed scalars and exact profile class semantics."""
+    policy_path = tmp_path / "invalid-policy.yaml"
+    policy_path.write_text(
+        """
+schema_version: 1
+policy_id: phage-sequence-safety-v1
+regulatory_basis:
+  label: EMA-derived sequence-design safety gate
+  source: EMA/CHMP/BWP/1/2024
+  source_status: draft
+  source_status_as_of: 2026-08-07
+  regulatory_compliance_claimed: false
+host_scope:
+  allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
+  disallowed_endpoint: increased_productive_eukaryotic_infection_or_replication
+required_sequence_classes: [amr, toxin]
+bacterial_replication_profile:
+  required_sequence_classes: [amr, toxin, lysogeny]
+  strict_lytic_required: true
+archaeal_only_profile:
+  required_sequence_classes: [amr, toxin]
+  lysogeny: informational
+failure_policy:
+  missing_required_tool: INDETERMINATE
+  missing_required_database: INDETERMINATE
+  parser_schema_mismatch: INDETERMINATE
+  incomplete_host_evidence: INDETERMINATE
+""".lstrip()
+    )
+
+    policy_path.write_text(policy_path.read_text().replace(original, replacement, 1))
+
+    with pytest.raises(ValueError, match=expected_message):
         load_phage_safety_policy(policy_path)

@@ -58,6 +58,25 @@ class ObjectiveDirection(StrEnum):
     EVALUATE = "evaluate"
 
 
+class ObjectiveEndpoint(StrEnum):
+    """Validated endpoint semantics for a structured design objective."""
+
+    PRODUCTIVE_INFECTION = "productive_infection"
+    PRODUCTIVE_REPLICATION = "productive_replication"
+    INCREASED_PRODUCTIVE_EUKARYOTIC_INFECTION_OR_REPLICATION = (
+        "increased_productive_eukaryotic_infection_or_replication"
+    )
+    PHARMACOKINETICS = "pharmacokinetics"
+    BIODISTRIBUTION = "biodistribution"
+    PERSISTENCE = "persistence"
+    CIRCULATION_HALF_LIFE = "circulation_half_life"
+    REDUCED_PREMATURE_CLEARANCE = "reduced_premature_clearance"
+    REDUCED_NEUTRALIZATION = "reduced_neutralization"
+    REDUCED_DEGRADATION = "reduced_degradation"
+    MAMMALIAN_NONINFECTIVITY = "mammalian_noninfectivity"
+    MAMMALIAN_CYTOTOXICITY = "mammalian_cytotoxicity"
+
+
 @dataclass(frozen=True)
 class DesignObjective:
     """A structured objective, deliberately separate from free-text annotations."""
@@ -65,11 +84,15 @@ class DesignObjective:
     kind: ObjectiveKind
     direction: ObjectiveDirection
     replication_host_domains: frozenset[HostDomain]
-    endpoint: str
+    endpoint: ObjectiveEndpoint
 
     def __post_init__(self) -> None:
         """Normalize replication-host domains to an immutable set."""
         object.__setattr__(self, "replication_host_domains", frozenset(self.replication_host_domains))
+        try:
+            object.__setattr__(self, "endpoint", ObjectiveEndpoint(self.endpoint))
+        except ValueError as error:
+            raise ValueError(f"unsupported design endpoint: {self.endpoint}") from error
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the structured objective for a provenance record."""
@@ -77,7 +100,7 @@ class DesignObjective:
             "kind": self.kind.value,
             "direction": self.direction.value,
             "replication_host_domains": sorted(domain.value for domain in self.replication_host_domains),
-            "endpoint": self.endpoint,
+            "endpoint": self.endpoint.value,
         }
 
 
@@ -129,17 +152,27 @@ class HostEvidence:
 
 
 _PROKARYOTIC_DOMAINS = frozenset({HostDomain.BACTERIA, HostDomain.ARCHAEA, HostDomain.BACTERIA_AND_ARCHAEA})
-_PRODUCTIVE_ENDPOINTS = frozenset({"productive_infection", "productive_replication"})
+_PRODUCTIVE_ENDPOINTS = frozenset(
+    {
+        ObjectiveEndpoint.PRODUCTIVE_INFECTION,
+        ObjectiveEndpoint.PRODUCTIVE_REPLICATION,
+        ObjectiveEndpoint.INCREASED_PRODUCTIVE_EUKARYOTIC_INFECTION_OR_REPLICATION,
+    }
+)
 _PRODUCTIVE_KINDS = frozenset({ObjectiveKind.PRODUCTIVE_INFECTION, ObjectiveKind.PRODUCTIVE_REPLICATION})
 
 
 def _freeze_metadata(value: object) -> object:
     """Freeze nested metadata while retaining a JSON-compatible representation."""
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze_metadata(item) for key, item in value.items()})
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("unsupported host-evidence metadata value: mapping keys must be strings")
+        return MappingProxyType({key: _freeze_metadata(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_metadata(item) for item in value)
-    return value
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"unsupported host-evidence metadata value: {type(value).__name__}")
 
 
 def _serialize_metadata(value: object) -> object:

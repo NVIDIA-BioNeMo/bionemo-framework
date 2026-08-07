@@ -15,6 +15,10 @@
 
 """Behavioral tests for the declarative phage host-scope contract."""
 
+import json
+
+import pytest
+
 from bionemo.evo2_phage_gen.design_scope import (
     DesignObjective,
     HostDomain,
@@ -69,6 +73,29 @@ def test_productive_eukaryotic_endpoints_are_rejected():
     assert entry_decision.reason_codes == ("EUKARYOTIC_PRODUCTIVE_ENDPOINT",)
 
 
+def test_policy_productive_endpoint_cannot_bypass_entry_scope():
+    """Entry must reject the policy's declared productive eukaryotic endpoint."""
+    policy_productive_endpoint = DesignObjective(
+        kind=ObjectiveKind.ENTRY,
+        direction=ObjectiveDirection.INCREASE,
+        replication_host_domains=frozenset({HostDomain.EUKARYOTA}),
+        endpoint="increased_productive_eukaryotic_infection_or_replication",
+    )
+
+    assert not validate_design_scope(policy_productive_endpoint).allowed
+
+
+def test_unknown_entry_endpoint_is_rejected_at_objective_construction():
+    """Unvalidated endpoint strings cannot silently acquire scope semantics."""
+    with pytest.raises(ValueError, match="unsupported design endpoint"):
+        DesignObjective(
+            kind=ObjectiveKind.ENTRY,
+            direction=ObjectiveDirection.INCREASE,
+            replication_host_domains=frozenset({HostDomain.EUKARYOTA}),
+            endpoint="unvalidated_productive_endpoint",
+        )
+
+
 def test_eukaryotic_pharmacokinetic_and_safety_assessment_objectives_are_allowed():
     """Host-cell PK and noninfectivity assessment are not productive-host objectives."""
     human_pk_persistence_for_bacterial_replication = DesignObjective(
@@ -86,6 +113,32 @@ def test_eukaryotic_pharmacokinetic_and_safety_assessment_objectives_are_allowed
 
     assert validate_design_scope(human_pk_persistence_for_bacterial_replication).allowed
     assert validate_design_scope(mammalian_noninfectivity_assay).allowed
+
+
+@pytest.mark.parametrize(
+    ("kind", "direction", "endpoint"),
+    [
+        (ObjectiveKind.PHARMACOKINETICS, ObjectiveDirection.INCREASE, "pharmacokinetics"),
+        (ObjectiveKind.BIODISTRIBUTION, ObjectiveDirection.INCREASE, "biodistribution"),
+        (ObjectiveKind.PERSISTENCE, ObjectiveDirection.INCREASE, "persistence"),
+        (ObjectiveKind.CIRCULATION_HALF_LIFE, ObjectiveDirection.INCREASE, "circulation_half_life"),
+        (ObjectiveKind.PREMATURE_CLEARANCE, ObjectiveDirection.DECREASE, "reduced_premature_clearance"),
+        (ObjectiveKind.NEUTRALIZATION, ObjectiveDirection.DECREASE, "reduced_neutralization"),
+        (ObjectiveKind.DEGRADATION, ObjectiveDirection.DECREASE, "reduced_degradation"),
+        (ObjectiveKind.NONINFECTIVITY_ASSESSMENT, ObjectiveDirection.EVALUATE, "mammalian_noninfectivity"),
+        (ObjectiveKind.CYTOTOXICITY_ASSESSMENT, ObjectiveDirection.EVALUATE, "mammalian_cytotoxicity"),
+    ],
+)
+def test_validated_nonproductive_endpoints_remain_allowed_for_prokaryotic_replication(kind, direction, endpoint):
+    """Endpoint validation must preserve every explicitly permitted nonproductive objective."""
+    objective = DesignObjective(
+        kind=kind,
+        direction=direction,
+        replication_host_domains=frozenset({HostDomain.BACTERIA}),
+        endpoint=endpoint,
+    )
+
+    assert validate_design_scope(objective).allowed
 
 
 def test_only_confirmed_versioned_prokaryotic_host_evidence_is_eligible():
@@ -165,7 +218,23 @@ def test_host_evidence_deep_freezes_metadata_for_serializable_records():
         source_version="2026-08-07",
         replication_host_domains=frozenset({HostDomain.BACTERIA}),
         confirmed=True,
-        metadata={"evidence_ids": ["host-record-1"]},
+        metadata={"nested": {"evidence_ids": ["host-record-1"]}},
     )
 
-    assert evidence.metadata["evidence_ids"] == ("host-record-1",)
+    assert evidence.metadata["nested"]["evidence_ids"] == ("host-record-1",)
+    with pytest.raises(TypeError):
+        evidence.metadata["nested"]["evidence_ids"] = ()
+    assert json.dumps(evidence.to_dict())
+
+
+@pytest.mark.parametrize("unsupported_value", [{"record-1"}, object()])
+def test_host_evidence_rejects_non_json_metadata_values(unsupported_value):
+    """Sets and arbitrary objects cannot enter immutable serializable metadata."""
+    with pytest.raises(TypeError, match="unsupported host-evidence metadata value"):
+        HostEvidence(
+            source="ncbi",
+            source_version="2026-08-07",
+            replication_host_domains=frozenset({HostDomain.BACTERIA}),
+            confirmed=True,
+            metadata={"unsupported": unsupported_value},
+        )

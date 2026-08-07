@@ -89,6 +89,8 @@ class SafetyClassResult:
 def aggregate_safety_state(class_results: tuple[SafetyClassResult, ...]) -> SafetyState:
     """Apply the required-class precedence: FAIL, then INDETERMINATE, then PASS."""
     required_states = [result.state for result in class_results if result.required]
+    if not required_states:
+        return SafetyState.INDETERMINATE
     if SafetyState.FAIL in required_states:
         return SafetyState.FAIL
     if SafetyState.INDETERMINATE in required_states:
@@ -167,7 +169,37 @@ def _parse_required_sequence_classes(value: object, *, name: str) -> tuple[str, 
     unknown = sorted(set(value) - _KNOWN_SEQUENCE_CLASSES)
     if unknown:
         raise ValueError(f"unknown required sequence class: {', '.join(unknown)}")
+    if len(value) != len(set(value)):
+        raise ValueError(f"duplicate required sequence class in {name}")
     return tuple(sorted(value))
+
+
+def _validate_required_sequence_classes(value: object, *, name: str, required: frozenset[str]) -> tuple[str, ...]:
+    """Validate that a policy field contains exactly its schema-v1 required classes."""
+    classes = _parse_required_sequence_classes(value, name=name)
+    if classes != tuple(sorted(required)):
+        raise ValueError(f"{name} must match its schema-v1 required sequence classes")
+    return classes
+
+
+def _validate_regulatory_basis(regulatory_basis: Mapping[str, object]) -> None:
+    """Require the fixed regulatory metadata carried by schema version one."""
+    if (
+        type(regulatory_basis["regulatory_compliance_claimed"]) is not bool
+        or regulatory_basis["regulatory_compliance_claimed"] is not False
+    ):
+        raise ValueError("regulatory_compliance_claimed must be false in schema version 1")
+    if (
+        not isinstance(regulatory_basis["label"], str)
+        or regulatory_basis["label"] != "EMA-derived sequence-design safety gate"
+        or not isinstance(regulatory_basis["source"], str)
+        or regulatory_basis["source"] != "EMA/CHMP/BWP/1/2024"
+        or not isinstance(regulatory_basis["source_status"], str)
+        or regulatory_basis["source_status"] != "draft"
+        or type(regulatory_basis["source_status_as_of"]) is not date
+        or regulatory_basis["source_status_as_of"] != date(2026, 8, 7)
+    ):
+        raise ValueError("regulatory_basis must match schema version 1")
 
 
 def _json_safe(value: object) -> object:
@@ -244,9 +276,11 @@ def load_phage_safety_policy(path: str | Path) -> PhageSafetyPolicy:
     raw = yaml.safe_load(Path(path).read_text())
     if not isinstance(raw, dict):
         raise ValueError("policy must be a mapping")
-    if raw.get("schema_version") != 1:
+    if type(raw.get("schema_version")) is not int or raw.get("schema_version") != 1:
         raise ValueError(f"unsupported policy schema version: {raw.get('schema_version')}")
     policy = _strict_mapping(raw, name="policy", keys=_POLICY_KEYS)
+    if not isinstance(policy["policy_id"], str) or policy["policy_id"] != "phage-sequence-safety-v1":
+        raise ValueError("policy_id must match schema version 1")
 
     regulatory_basis = _strict_mapping(
         policy["regulatory_basis"], name="regulatory_basis", keys=_REGULATORY_BASIS_KEYS
@@ -262,16 +296,29 @@ def load_phage_safety_policy(path: str | Path) -> PhageSafetyPolicy:
     )
     failure_policy = _strict_mapping(policy["failure_policy"], name="failure_policy", keys=_FAILURE_POLICY_KEYS)
 
+    _validate_regulatory_basis(regulatory_basis)
+
     if not isinstance(host_scope["allowed_replication_host_domains"], list) or not all(
         isinstance(domain, str) for domain in host_scope["allowed_replication_host_domains"]
     ):
         raise ValueError("allowed_replication_host_domains must be a list of host domains")
-    if set(host_scope["allowed_replication_host_domains"]) != {
-        "BACTERIA",
-        "ARCHAEA",
-        "BACTERIA_AND_ARCHAEA",
-    }:
+    if (
+        set(host_scope["allowed_replication_host_domains"]) != {"BACTERIA", "ARCHAEA", "BACTERIA_AND_ARCHAEA"}
+        or len(host_scope["allowed_replication_host_domains"]) != 3
+    ):
         raise ValueError("allowed_replication_host_domains must match schema version 1")
+    if (
+        not isinstance(host_scope["disallowed_endpoint"], str)
+        or host_scope["disallowed_endpoint"] != "increased_productive_eukaryotic_infection_or_replication"
+    ):
+        raise ValueError("disallowed_endpoint must match schema version 1")
+    if (
+        type(bacterial_profile["strict_lytic_required"]) is not bool
+        or bacterial_profile["strict_lytic_required"] is not True
+    ):
+        raise ValueError("strict_lytic_required must be true in schema version 1")
+    if not isinstance(archaeal_profile["lysogeny"], str) or archaeal_profile["lysogeny"] != "informational":
+        raise ValueError("archaeal_only_profile lysogeny must be informational")
     if any(value != SafetyState.INDETERMINATE.value for value in failure_policy.values()):
         raise ValueError("failure_policy values must be INDETERMINATE")
 
@@ -280,21 +327,23 @@ def load_phage_safety_policy(path: str | Path) -> PhageSafetyPolicy:
         policy_id=policy["policy_id"],
         regulatory_basis=regulatory_basis,
         host_scope=host_scope,
-        required_sequence_classes=_parse_required_sequence_classes(
-            policy["required_sequence_classes"], name="required_sequence_classes"
+        required_sequence_classes=_validate_required_sequence_classes(
+            policy["required_sequence_classes"], name="required_sequence_classes", required=frozenset({"amr", "toxin"})
         ),
         bacterial_replication_profile={
             **bacterial_profile,
-            "required_sequence_classes": _parse_required_sequence_classes(
+            "required_sequence_classes": _validate_required_sequence_classes(
                 bacterial_profile["required_sequence_classes"],
                 name="bacterial_replication_profile.required_sequence_classes",
+                required=frozenset({"amr", "toxin", "lysogeny"}),
             ),
         },
         archaeal_only_profile={
             **archaeal_profile,
-            "required_sequence_classes": _parse_required_sequence_classes(
+            "required_sequence_classes": _validate_required_sequence_classes(
                 archaeal_profile["required_sequence_classes"],
                 name="archaeal_only_profile.required_sequence_classes",
+                required=frozenset({"amr", "toxin"}),
             ),
         },
         failure_policy=failure_policy,
