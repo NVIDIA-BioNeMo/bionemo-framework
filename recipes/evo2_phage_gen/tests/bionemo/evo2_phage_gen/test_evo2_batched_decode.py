@@ -26,10 +26,10 @@ from bionemo.evo2.models.megatron.hyena.hyena_mixer import (
     _restore_dynamic_context_requests,
 )
 from bionemo.evo2.run.infer import (
-    _native_generated_ids_hit_stop,
     _native_stop_token_ids,
+    _normalize_new_request_slots_for_packed_hyena,
+    _sampled_token_action,
     _sampling_rng_for_native_dynamic,
-    _trim_native_text_stop_markers,
 )
 from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
     _batched_sampling_value,
@@ -167,26 +167,29 @@ def test_batched_decode_reshape_rejects_mixed_query_lengths():
         _reshape_dynamic_context_requests(features, context)
 
 
-def test_batched_decode_stop_helpers_trim_textual_markers():
-    """Text STOP/EOS/EOD markers should trim completion text for FASTA-style generation."""
-    assert _trim_native_text_stop_markers("ACGT STOP ignored") == "ACGT"
-    assert _trim_native_text_stop_markers("ACGTEOS ignored") == "ACGT"
-    assert _trim_native_text_stop_markers("ACGT") == "ACGT"
-
-
-def test_batched_decode_stop_helpers_detect_row_local_stop():
-    """Stop detection should be row-local and support both token ids and decoded markers."""
+def test_batched_decode_stop_actions_are_row_local():
+    """Each sampled token should independently append or stop its request."""
     tokenizer = _DummyTokenizer()
     stop_token_ids = _native_stop_token_ids(tokenizer)
 
     assert stop_token_ids == {0, 99}
-    assert not _native_generated_ids_hit_stop(tokenizer, [1, 2, 3, 4], stop_token_ids)
-    assert _native_generated_ids_hit_stop(tokenizer, [1, 2, 0], stop_token_ids)
-    assert _native_generated_ids_hit_stop(tokenizer, [1, 2, 5], stop_token_ids)
+    assert [_sampled_token_action(token_id, stop_token_ids, ignore_eos=False) for token_id in (1, 0, 2, 99)] == [
+        (True, False),
+        (False, True),
+        (True, False),
+        (False, True),
+    ]
 
 
-def test_batched_hyena_binding_accepts_reverse_contiguous_slots():
-    """MCore can allocate Mamba state slots in reverse order; the batched view should still bind."""
+def test_batched_decode_ignore_eos_omits_stop_token_without_stopping():
+    """Ignoring EOS should omit the stop token while keeping the request active."""
+    stop_token_ids = _native_stop_token_ids(_DummyTokenizer())
+
+    assert _sampled_token_action(0, stop_token_ids, ignore_eos=True) == (False, False)
+
+
+def test_batched_hyena_binding_normalizes_reverse_contiguous_slots():
+    """MCore's reverse slot allocation should normalize before binding packed Hyena views."""
     conv_owner = object()
     ssm_owner = object()
     shapes = SimpleNamespace(
@@ -203,15 +206,19 @@ def test_batched_hyena_binding_accepts_reverse_contiguous_slots():
     context = SimpleNamespace(
         mamba_conv_states=torch.zeros(1, 8, 2, 2),
         mamba_ssm_states=torch.zeros(1, 8, 3, 4),
+        mamba_metadata=SimpleNamespace(request_to_mamba_state_idx=torch.tensor([7, 6, 5, 4])),
         layer_map=[0],
     )
 
+    request_slots = _normalize_new_request_slots_for_packed_hyena(context, request_count=4)
     packed_dicts = bind_hyena_packed_views_to_dynamic_context_batch(
         decoder,
         context,
-        request_slots=torch.tensor([7, 6, 5, 4]),
+        request_slots=request_slots,
     )
 
+    assert request_slots.tolist() == [4, 5, 6, 7]
+    assert context.mamba_metadata.request_to_mamba_state_idx.tolist() == [4, 5, 6, 7]
     assert len(packed_dicts) == 3
     context.fir_filter_state_dict[id(conv_owner)] = torch.ones(4, 2, 2)
     context.iir_filter_state_dict[id(ssm_owner)] = torch.ones(4, 3, 2)
