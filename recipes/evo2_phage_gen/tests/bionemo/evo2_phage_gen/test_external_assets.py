@@ -1638,6 +1638,149 @@ def test_safety_manifest_records_a_generation_owned_phrogs_snapshot(tmp_path, mo
     external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
 
 
+def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_db(tmp_path, monkeypatch):
+    """Safety preparation remains additive by publishing the validated padded DB at its legacy path."""
+    external_dir = tmp_path / "external"
+    original_prepare_metadata = external_assets.prepare_phrogs_safety_metadata
+
+    def staged_asset(name):
+        def prepare(*_args, **kwargs):
+            section, record = _materialize_mock_safety_manifest_section(name, Path(kwargs["safety_dir"]))
+            kwargs["manifest"][section] = record
+            return PreparedAsset(name, Path(kwargs["safety_dir"]) / name, name)
+
+        return prepare
+
+    def prepare_annotation(prepared_external_dir, **_kwargs):
+        annotation_path = Path(prepared_external_dir) / "phrogs" / "phrog_annot_v4.tsv"
+        annotation_path.parent.mkdir(parents=True, exist_ok=True)
+        annotation_path.write_text(
+            "phrog\tcolor\tannot\tcategory\nphrog_1\t#000000\tIntegrase\tintegration and excision\n"
+        )
+        return PreparedAsset("phrogs_annotation", annotation_path, "prepared")
+
+    def prepare_profile_database(prepared_external_dir, **_kwargs):
+        return PreparedAsset("phrogs_mmseqs_db", Path(prepared_external_dir) / "phrogs" / "profiles", "prepared")
+
+    def prepare_sequence_database(prepared_external_dir, **_kwargs):
+        sequence_database = _write_mmseqs_padded_database(
+            Path(prepared_external_dir) / "phrogs" / "phrogs_gpu_seq_db_pad"
+        )
+        return PreparedAsset("phrogs_gpu_seq_db", sequence_database, "prepared")
+
+    def prepare_snapshot_metadata(*args, **kwargs):
+        selected_annotation_path = Path(kwargs["annotation_path"])
+        return original_prepare_metadata(
+            *args,
+            annotation_sha256=external_assets._sha256_file(selected_annotation_path),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", staged_asset("amrfinder"))
+    monkeypatch.setattr(external_assets, "prepare_toxin_reference", staged_asset("toxins"))
+    monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", prepare_annotation)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_mmseqs_db", prepare_profile_database)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_gpu_sequence_db", prepare_sequence_database)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_safety_metadata", prepare_snapshot_metadata)
+
+    prepare_external_assets(
+        external_dir,
+        download_mmseqs=False,
+        download_dustmasker=False,
+        download_diamond=False,
+        download_hmmer=False,
+        download_phrogs_annotation=True,
+        download_arc_evo2=False,
+        download_large_databases=True,
+        download_checkv=False,
+        configure_lovis4u=False,
+        with_safety=True,
+    )
+
+    manifest = yaml.safe_load((external_dir / "safety" / "asset_manifest.yaml").read_text())
+    phrogs_record = manifest["phrogs_v4"]
+    snapshot_source_path = Path(phrogs_record["source_path"])
+    snapshot_database_path = Path(phrogs_record["sequence_database"]["path"])
+    generation_root = (external_dir / "safety" / "generations").resolve()
+    shared_phrogs_dir = (external_dir / "phrogs").resolve()
+
+    assert snapshot_source_path.is_relative_to(generation_root)
+    assert snapshot_database_path.is_relative_to(generation_root)
+    external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
+
+    shared_source_path = shared_phrogs_dir / "phrog_annot_v4.tsv"
+    shared_database_path = shared_phrogs_dir / "phrogs_gpu_seq_db_pad"
+    assert shared_source_path.read_bytes() == snapshot_source_path.read_bytes()
+    shared_database_sha256, shared_database_files = external_assets._complete_phrogs_sequence_database(
+        shared_database_path
+    )
+    assert shared_database_sha256 == phrogs_record["sequence_database"]["sha256"]
+    assert [path.name for path in shared_database_files] == [
+        Path(path).name for path in phrogs_record["sequence_database"]["files"]
+    ]
+
+
+def test_safety_postpublication_legacy_phrogs_failure_retains_published_generation(tmp_path, monkeypatch):
+    """A compatibility-copy error after manifest publication cannot delete the trusted generation."""
+    external_dir = tmp_path / "external"
+    source_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
+    _write_phrogs_v4_fixture(source_path)
+    original_prepare_metadata = external_assets.prepare_phrogs_safety_metadata
+
+    def staged_asset(name):
+        def prepare(*_args, **kwargs):
+            section, record = _materialize_mock_safety_manifest_section(name, Path(kwargs["safety_dir"]))
+            kwargs["manifest"][section] = record
+            return PreparedAsset(name, Path(kwargs["safety_dir"]) / name, name)
+
+        return prepare
+
+    def prepare_annotation(prepared_external_dir, **_kwargs):
+        annotation_path = Path(prepared_external_dir) / "phrogs" / "phrog_annot_v4.tsv"
+        annotation_path.parent.mkdir(parents=True, exist_ok=True)
+        annotation_path.write_text(
+            "phrog\tcolor\tannot\tcategory\nphrog_1\t#000000\tIntegrase\tintegration and excision\n"
+        )
+        return PreparedAsset("phrogs_annotation", annotation_path, "prepared")
+
+    def prepare_snapshot_metadata(*args, **kwargs):
+        selected_annotation_path = Path(kwargs["annotation_path"])
+        return original_prepare_metadata(
+            *args,
+            annotation_sha256=external_assets._sha256_file(selected_annotation_path),
+            **kwargs,
+        )
+
+    def fail_legacy_publication(*_args, **_kwargs):
+        raise RuntimeError("injected legacy PHROGs publication failure")
+
+    monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", staged_asset("amrfinder"))
+    monkeypatch.setattr(external_assets, "prepare_toxin_reference", staged_asset("toxins"))
+    monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", prepare_annotation)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_safety_metadata", prepare_snapshot_metadata)
+    monkeypatch.setattr(external_assets, "_publish_phrogs_legacy_assets", fail_legacy_publication)
+
+    with pytest.raises(RuntimeError, match="injected legacy PHROGs publication failure"):
+        prepare_external_assets(
+            external_dir,
+            download_mmseqs=False,
+            download_dustmasker=False,
+            download_diamond=False,
+            download_hmmer=False,
+            download_phrogs_annotation=True,
+            download_arc_evo2=False,
+            download_large_databases=False,
+            configure_lovis4u=False,
+            with_safety=True,
+        )
+
+    manifest = yaml.safe_load((external_dir / "safety" / "asset_manifest.yaml").read_text())
+    generation_root = (external_dir / "safety" / "generations").resolve()
+    assert Path(manifest["phrogs_v4"]["source_path"]).is_relative_to(generation_root)
+    assert Path(manifest["phrogs_v4"]["sequence_database"]["path"]).is_relative_to(generation_root)
+    external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
+
+
 def test_update_safety_manifest_publishes_with_replace_and_fsync(tmp_path, monkeypatch):
     """Single-section publication is crash-safe: write/fsync a sibling temp file, then replace."""
     manifest_path = tmp_path / "safety" / "asset_manifest.yaml"

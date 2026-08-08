@@ -910,6 +910,62 @@ def _snapshot_phrogs_safety_assets(
     return snapshot_annotation_path, snapshot_database_path
 
 
+def _publish_phrogs_legacy_assets(
+    annotation_path: Path,
+    sequence_database: Path,
+    external_dir: Path,
+) -> tuple[Path, Path]:
+    """Publish a verified immutable PHROGs snapshot at the legacy external path.
+
+    This compatibility copy is deliberately made only after the safety manifest
+    points at the immutable generation.  A failed safety generation therefore
+    cannot alter a shared PHROGs source or padded database trusted by an older
+    manifest.
+    """
+    annotation_path = Path(annotation_path)
+    sequence_database = Path(sequence_database)
+    annotation_sha256 = _sha256_file(annotation_path)
+    database_sha256, database_files = _complete_phrogs_sequence_database(sequence_database)
+    expected_database_names = [path.name for path in database_files]
+
+    legacy_dir = Path(external_dir) / "phrogs"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=".phrogs-safety-publish-", dir=legacy_dir))
+    try:
+        staged_annotation_path = staging_dir / annotation_path.name
+        shutil.copy2(annotation_path, staged_annotation_path)
+        for database_file in database_files:
+            shutil.copy2(database_file, staging_dir / database_file.name)
+
+        staged_database_path = staging_dir / sequence_database.name
+        staged_database_sha256, staged_database_files = _complete_phrogs_sequence_database(staged_database_path)
+        if _sha256_file(staged_annotation_path) != annotation_sha256:
+            raise RuntimeError("Staged legacy PHROGs annotation digest does not match its safety snapshot")
+        if staged_database_sha256 != database_sha256:
+            raise RuntimeError("Staged legacy PHROGs database digest does not match its safety snapshot")
+        if [path.name for path in staged_database_files] != expected_database_names:
+            raise RuntimeError("Staged legacy PHROGs database file inventory does not match its safety snapshot")
+
+        for staged_path in (staged_annotation_path, *staged_database_files):
+            os.replace(staged_path, legacy_dir / staged_path.name)
+        for stale_path in legacy_dir.glob(f"{sequence_database.name}*"):
+            if stale_path.name not in expected_database_names and (stale_path.is_file() or stale_path.is_symlink()):
+                stale_path.unlink()
+
+        legacy_annotation_path = legacy_dir / annotation_path.name
+        legacy_database_path = legacy_dir / sequence_database.name
+        if _sha256_file(legacy_annotation_path) != annotation_sha256:
+            raise RuntimeError("Published legacy PHROGs annotation digest does not match its safety snapshot")
+        legacy_database_sha256, legacy_database_files = _complete_phrogs_sequence_database(legacy_database_path)
+        if legacy_database_sha256 != database_sha256:
+            raise RuntimeError("Published legacy PHROGs database digest does not match its safety snapshot")
+        if [path.name for path in legacy_database_files] != expected_database_names:
+            raise RuntimeError("Published legacy PHROGs database file inventory does not match its safety snapshot")
+        return legacy_annotation_path, legacy_database_path
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def _write_phrogs_lookup(lookup_path: Path, rows: list[list[str]]) -> None:
     """Atomically replace the generated PHROGs lookup only after all rows validate."""
     lookup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1357,6 +1413,7 @@ def prepare_external_assets(
     safety_generation_dir = _create_safety_generation_dir(external_dir) if with_safety else None
     prepared_phrogs_annotation: PreparedAsset | None = None
     prepared_phrogs_sequence_database: PreparedAsset | None = None
+    safety_manifest_published = False
     try:
         if download_phrogs_annotation:
             phrogs_annotation_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
@@ -1455,9 +1512,12 @@ def prepare_external_assets(
             )
             _validate_staged_safety_manifest(staged_manifest, verify_asset_paths=True)
             _write_safety_manifest_atomic(selected_safety_manifest, staged_manifest)
+            safety_manifest_published = True
+            if prepared_phrogs_annotation is not None or prepared_phrogs_sequence_database is not None:
+                _publish_phrogs_legacy_assets(snapshot_annotation_path, snapshot_sequence_database, external_dir)
         return assets
     except Exception:
-        if safety_generation_dir is not None:
+        if safety_generation_dir is not None and not safety_manifest_published:
             shutil.rmtree(safety_generation_dir, ignore_errors=True)
         raise
 
