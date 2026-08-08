@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import bionemo.evo2_phage_gen.sequence_safety_adapters as sequence_safety_adapters
 from bionemo.evo2_phage_gen.design_scope import HostDomain
 from bionemo.evo2_phage_gen.sequence_safety import SafetyFinding, SafetyState
 from bionemo.evo2_phage_gen.sequence_safety_adapters import (
@@ -1281,9 +1282,31 @@ _PHROGS_HEADER = (
 _PHROGS_HIGH_PROFILE_IDS = ("phrog_1", *(f"phrog_{index}" for index in range(4, 60)))
 _PHROGS_REVIEW_PROFILE_IDS = ("phrog_2", *(f"phrog_{index}" for index in range(60, 111)))
 _PHROGS_FULL_PROFILE_IDS = tuple(f"phrog_{index}" for index in range(1, 111))
+_PHROGS_ANNOTATION_SOURCE_TEXT = (
+    "phrog\tcolor\tannot\tcategory\n"
+    + "".join(f"{profile}\tblack\tintegrase\tintegration and excision\n" for profile in _PHROGS_HIGH_PROFILE_IDS)
+    + "".join(
+        f"{profile}\tblack\tputative recombinase\tintegration and excision\n" for profile in _PHROGS_REVIEW_PROFILE_IDS
+    )
+    + "phrog_3\tblack\tmajor capsid protein\thead and packaging\n"
+)
+_PHROGS_TEST_ANNOTATION_SHA256 = hashlib.sha256(_PHROGS_ANNOTATION_SOURCE_TEXT.encode()).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def _pin_synthetic_phrogs_annotation_for_adapter_tests(monkeypatch):
+    """Use a deterministic local annotation pin; production retains the official PHROGs v4 SHA-256."""
+    monkeypatch.setattr(sequence_safety_adapters, "_PHROGS_ANNOTATION_SHA256", _PHROGS_TEST_ANNOTATION_SHA256)
 
 
 def _phrogs_manifest(tmp_path):
+    annotation_source = tmp_path / "phrog_annot_v4.tsv"
+    annotation_source.write_text(_PHROGS_ANNOTATION_SOURCE_TEXT)
+    archive_payload = b"pinned Pharokka profile archive fixture\n"
+    archive_sha256 = hashlib.sha256(archive_payload).hexdigest()
+    archive_path = tmp_path / "downloads" / "phrogs_safety_profile_archives" / f"{archive_sha256}.tar.gz"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_bytes(archive_payload)
     lookup = tmp_path / "phrogs_integration_excision_v4.tsv"
     lookup_rows = [
         *(
@@ -1330,6 +1353,18 @@ def _phrogs_manifest(tmp_path):
         profile_id_digest.update(profile_id.encode())
         profile_id_digest.update(b"\n")
     return {
+        "annotation_url": "https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv",
+        "annotation_sha256": _PHROGS_TEST_ANNOTATION_SHA256,
+        "source_path": str(annotation_source),
+        "source_sha256": _PHROGS_TEST_ANNOTATION_SHA256,
+        "category": "integration and excision",
+        "high_confidence_terms": [
+            "integrase",
+            "excisionase",
+            "site-specific recombinase",
+            "lysogeny repressor",
+        ],
+        "review_terms": ["recombinase", "repressor", "lysogeny", "integration", "excision"],
         "lookup_path": str(lookup),
         "lookup_sha256": hashlib.sha256(lookup.read_bytes()).hexdigest(),
         "lookup_counts": {"total": 109, "high_confidence": 57, "review": 52},
@@ -1356,7 +1391,7 @@ def _phrogs_manifest(tmp_path):
             },
             "provenance": {
                 "source_url": "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz",
-                "archive_observed_sha256": "c" * 64,
+                "archive_observed_sha256": archive_sha256,
                 "archive_published_sha256": None,
                 "archive_published_md5": "a63c485241b900a11989bd1821bfbb09",
                 "archive_published_size": 656171247,
@@ -1368,6 +1403,7 @@ def _phrogs_manifest(tmp_path):
                 "citation": "Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353).",
                 "minimum_mmseqs_version": "14",
                 "built_with_mmseqs_version": "18.8cc5c",
+                "verified_archive": {"path": str(archive_path.resolve()), "sha256": archive_sha256},
             },
         },
     }
@@ -1486,6 +1522,71 @@ def test_phrogs_self_consistent_confidence_imbalance_is_indeterminate_before_exe
     assert commands == []
 
 
+def test_phrogs_count_preserving_safety_profile_substitution_is_indeterminate_before_execution(tmp_path):
+    """Replacing one pinned safety family with another known profile must fail before MMseqs runs."""
+    manifest = _phrogs_manifest(tmp_path)
+    lookup_rows = Path(manifest["lookup_path"]).read_text().splitlines(keepends=True)[1:]
+    lookup_rows[0] = lookup_rows[0].replace("phrog_1\t", "phrog_3\t", 1)
+    _rewrite_phrogs_lookup(
+        manifest,
+        lookup_rows,
+        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
+    )
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("PHROGS_ASSET_PROVENANCE_MISMATCH",)
+    assert commands == []
+
+
+def test_phrogs_verified_content_addressed_archive_contract_allows_measured_search(tmp_path):
+    """The finalized Task-2 archive evidence must validate before MMseqs can produce measured PASS."""
+    manifest = _phrogs_manifest(tmp_path)
+    archive_payload = b"verified Pharokka profile archive fixture\n"
+    archive_sha256 = hashlib.sha256(archive_payload).hexdigest()
+    archive_path = tmp_path / "downloads" / "phrogs_safety_profile_archives" / f"{archive_sha256}.tar.gz"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_bytes(archive_payload)
+    provenance = manifest["profile_database"]["provenance"]
+    provenance["archive_observed_sha256"] = archive_sha256
+    provenance["verified_archive"] = {"path": str(archive_path.resolve()), "sha256": archive_sha256}
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.PASS
+    assert len(commands) == 2
+    assert commands[0][1:] == ("version",)
+    assert commands[1][1] == "easy-search"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda manifest: manifest["profile_database"]["provenance"].pop("verified_archive"),
+        lambda manifest: manifest["profile_database"]["provenance"]["verified_archive"].__setitem__(
+            "sha256", "0" * 64
+        ),
+        lambda manifest: manifest["profile_database"]["provenance"]["verified_archive"].__setitem__(
+            "path", "relative/phrogs_safety_profile_archives/archive.tar.gz"
+        ),
+        lambda manifest: Path(manifest["profile_database"]["provenance"]["verified_archive"]["path"]).write_bytes(
+            b"tampered archive bytes\n"
+        ),
+    ],
+)
+def test_phrogs_verified_archive_drift_is_indeterminate_before_execution(tmp_path, mutate):
+    """Missing, unbound, misplaced, or changed archive evidence must stop before MMseqs executes."""
+    manifest = _phrogs_manifest(tmp_path)
+    mutate(manifest)
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("PHROGS_ASSET_PROVENANCE_MISMATCH",)
+    assert commands == []
+
+
 def test_phrogs_command_uses_profile_query_against_predicted_orf_target(tmp_path):
     """Reversing the verified profile orientation would destroy the profile-to-lookup identity join."""
     command = build_phrogs_command(
@@ -1558,6 +1659,22 @@ def test_current_raw_phrogs_manifest_fails_closed_without_verified_profile_ident
         ),
         (
             lambda manifest: manifest["profile_database"]["profile_id_inventory"].__setitem__("count", 2),
+            "PHROGS_ASSET_PROVENANCE_MISMATCH",
+        ),
+        (
+            lambda manifest: manifest.__setitem__("annotation_url", "https://example.invalid/phrogs.tsv"),
+            "PHROGS_ASSET_PROVENANCE_MISMATCH",
+        ),
+        (
+            lambda manifest: manifest.__setitem__("annotation_sha256", "0" * 64),
+            "PHROGS_ASSET_PROVENANCE_MISMATCH",
+        ),
+        (
+            lambda manifest: manifest.__setitem__("source_sha256", "0" * 64),
+            "PHROGS_ASSET_PROVENANCE_MISMATCH",
+        ),
+        (
+            lambda manifest: Path(manifest["source_path"]).write_text("tampered annotation source\n"),
             "PHROGS_ASSET_PROVENANCE_MISMATCH",
         ),
     ],
@@ -2019,6 +2136,68 @@ def test_circular_six_frame_fallback_retains_origin_crossing_peptides_without_du
         if record.end > len(sequence)
     ] == [(*crossing_coordinates, "KKKKK", "six-frame-fallback")]
     assert len({record.query_id for record in circular.query_records}) == len(circular.query_records)
+
+
+@pytest.mark.parametrize(
+    ("sequence", "strand", "false_call"),
+    [
+        ("ACTAGGCGAAAGCCGCCTGAGGTGC", "-", (3, 26, -1, "CTSGGFRL")),
+        ("GCACCTCAGGCGGCTTTCGCCTAGT", "+", (25, 48, 1, "CTSGGFRL")),
+    ],
+)
+def test_circular_six_frame_fallback_never_emits_buffer_sentinel_clipped_peptide(
+    tmp_path,
+    sequence,
+    strand,
+    false_call,
+):
+    """The end of a finite translation buffer is not a biological stop codon."""
+    artifacts = prepare_orf_artifacts(
+        (GenomeInput(sequence_id="sentinel_circle", sequence=sequence, circular=True),),
+        tmp_path,
+        predictor=_NoGenePredictor(),
+        minimum_fallback_amino_acids=8,
+    )
+
+    observed = [
+        (record.start, record.end, record.frame, record.protein)
+        for record in artifacts.query_records
+        if record.strand == strand and record.end > len(sequence)
+    ]
+    assert false_call not in observed
+
+
+@pytest.mark.parametrize(
+    ("sequence", "expected_call"),
+    [
+        (_ORIGIN_CROSSING_FRAME_ONE, (25, 39, "+", 1, "KKKKK")),
+        (_ORIGIN_CROSSING_FRAME_ONE.translate(str.maketrans("ACGT", "TGCA"))[::-1], (28, 42, "-", -1, "KKKKK")),
+        ("ACTAGGATCGAAAGCCGCCTGAGGTGC", (23, 46, "+", 2, "GALGSKAA")),
+        ("ACTAGGATCGAAAGCCGCCTGAGGTGC", (6, 29, "+", 3, "DRKPPEVH")),
+        ("GCACCTCAGGCGGCTTTCGATCCTAGT", (9, 32, "-", -2, "GALGSKAA")),
+        ("ACTAGGATCGAAAGCCGCCTGAGGTGC", (5, 28, "-", -3, "CTSGGFRS")),
+        ("TACGTAGAGTAACGCGTAAGTGCCT", (20, 34, "+", 2, "VPYVE")),
+    ],
+)
+def test_circular_six_frame_fallback_retains_real_stop_delimited_crossings_in_all_frames(
+    tmp_path,
+    sequence,
+    expected_call,
+):
+    """Real stop-to-stop crossings remain available in every frame, including a 25-nt genome."""
+    artifacts = prepare_orf_artifacts(
+        (GenomeInput(sequence_id="real_stop_circle", sequence=sequence, circular=True),),
+        tmp_path,
+        predictor=_NoGenePredictor(),
+        minimum_fallback_amino_acids=4,
+    )
+
+    observed = {
+        (record.start, record.end, record.strand, record.frame, record.protein)
+        for record in artifacts.query_records
+        if record.end > len(sequence)
+    }
+    assert expected_call in observed
 
 
 def test_public_amrfinder_parser_cannot_pass_unbound_header_only_output(tmp_path):

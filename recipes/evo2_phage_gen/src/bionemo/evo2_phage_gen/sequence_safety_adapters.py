@@ -22,6 +22,7 @@ absence of harmful sequence, or regulatory compliance.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import math
@@ -35,6 +36,13 @@ from typing import Callable, Mapping, Protocol
 from urllib.parse import quote
 
 from bionemo.evo2_phage_gen.design_scope import HostDomain
+from bionemo.evo2_phage_gen.external_assets import (
+    DEFAULT_PHROGS_ANNOTATION_SHA256,
+    DEFAULT_PHROGS_ANNOTATION_URL,
+    PHROGS_HIGH_CONFIDENCE_TERMS,
+    PHROGS_INTEGRATION_EXCISION_CATEGORY,
+    PHROGS_REVIEW_TERMS,
+)
 from bionemo.evo2_phage_gen.sequence_safety import SafetyClassResult, SafetyFinding, SafetyState
 
 
@@ -333,8 +341,8 @@ def _six_frame_records(
             coding = search_oriented[offset : offset + usable_length]
             translated = str(Seq(coding).translate())
             amino_start = 0
-            for amino_end in range(len(translated) + 1):
-                if amino_end < len(translated) and translated[amino_end] != "*":
+            for amino_end, amino_acid in enumerate(translated):
+                if amino_acid != "*":
                     continue
                 protein = translated[amino_start:amino_end]
                 nucleotide_start = offset + 3 * amino_start
@@ -1771,6 +1779,8 @@ _PHROGS_PROFILE_LICENSE = "CC BY 4.0"
 _PHROGS_PROFILE_CITATION = "Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353)."
 _PHROGS_MINIMUM_MMSEQS_VERSION = "14"
 _PHROGS_BUILT_WITH_MMSEQS_VERSION = "18.8cc5c"
+_PHROGS_ANNOTATION_URL = DEFAULT_PHROGS_ANNOTATION_URL
+_PHROGS_ANNOTATION_SHA256 = DEFAULT_PHROGS_ANNOTATION_SHA256
 _PHROGS_V4_SAFETY_LOOKUP_COUNTS = MappingProxyType(
     {
         "total": 109,
@@ -1880,6 +1890,50 @@ def _phrogs_profile_id_inventory(profile_ids: frozenset[str]) -> dict[str, int |
         digest.update(profile_id.encode())
         digest.update(b"\n")
     return {"count": len(profile_ids), "sha256": digest.hexdigest()}
+
+
+def _read_phrogs_annotation_lookup(path: Path) -> dict[str, Mapping[str, str]]:
+    """Regenerate the safety lookup exactly from the digest-pinned PHROGs v4 annotation snapshot."""
+    profiles: dict[str, Mapping[str, str]] = {}
+    try:
+        with path.open(newline="") as source:
+            reader = csv.DictReader(source, delimiter="\t")
+            required_columns = {"phrog", "color", "annot", "category"}
+            if reader.fieldnames is None or not required_columns.issubset(reader.fieldnames):
+                raise AssetProvenanceError("PHROGs annotation source schema mismatch")
+            for source_row in reader:
+                category = source_row["category"].strip()
+                if category.casefold() != PHROGS_INTEGRATION_EXCISION_CATEGORY.casefold():
+                    continue
+                profile = source_row["phrog"].strip()
+                annotation = source_row["annot"].strip()
+                normalized_annotation = annotation.casefold()
+                high_term = next(
+                    (term for term in PHROGS_HIGH_CONFIDENCE_TERMS if term in normalized_annotation),
+                    None,
+                )
+                review_term = next(
+                    (term for term in PHROGS_REVIEW_TERMS if term in normalized_annotation),
+                    None,
+                )
+                confidence = "high_confidence" if high_term is not None else "review"
+                matched_term = high_term or review_term or "integration and excision category"
+                if not re.fullmatch(_PHROGS_QUERY_ID_PATTERN, profile) or profile in profiles or not annotation:
+                    raise AssetProvenanceError("PHROGs annotation source contains invalid safety metadata")
+                profiles[profile] = MappingProxyType(
+                    {
+                        "phrog": profile,
+                        "annot": annotation,
+                        "category": category,
+                        "confidence": confidence,
+                        "matched_term": matched_term,
+                    }
+                )
+    except (OSError, UnicodeError) as error:
+        raise AssetProvenanceError("PHROGs annotation source is unreadable") from error
+    if not profiles:
+        raise AssetProvenanceError("PHROGs annotation source has no integration/excision profiles")
+    return profiles
 
 
 def _read_phrogs_lookup(path: Path) -> dict[str, Mapping[str, str]]:
@@ -2048,6 +2102,7 @@ def _validate_phrogs_assets(
             "citation",
             "minimum_mmseqs_version",
             "built_with_mmseqs_version",
+            "verified_archive",
         }
     )
     if not isinstance(provenance, Mapping) or frozenset(provenance) != expected_provenance_keys:
@@ -2074,6 +2129,44 @@ def _validate_phrogs_assets(
         or not provenance["retrieved_at"]
     ):
         raise AssetProvenanceError("PHROGs profile retrieval provenance is invalid")
+    verified_archive = provenance.get("verified_archive")
+    if not isinstance(verified_archive, Mapping) or frozenset(verified_archive) != {"path", "sha256"}:
+        raise AssetProvenanceError("PHROGs verified profile archive provenance is incomplete")
+    archive_path_value = verified_archive.get("path")
+    archive_sha256 = verified_archive.get("sha256")
+    if (
+        not isinstance(archive_path_value, str)
+        or not isinstance(archive_sha256, str)
+        or archive_sha256 != provenance["archive_observed_sha256"]
+    ):
+        raise AssetProvenanceError("PHROGs verified profile archive digest does not match observed provenance")
+    archive_path = Path(archive_path_value)
+    if (
+        not archive_path.is_absolute()
+        or archive_path.parent.name != "phrogs_safety_profile_archives"
+        or archive_path.parent.parent.name != "downloads"
+        or archive_path.name != f"{archive_sha256}.tar.gz"
+        or not archive_path.is_file()
+        or _sha256_file(archive_path) != archive_sha256
+    ):
+        raise AssetProvenanceError("PHROGs verified profile archive path or digest drift")
+
+    if (
+        section.get("annotation_url") != _PHROGS_ANNOTATION_URL
+        or section.get("annotation_sha256") != _PHROGS_ANNOTATION_SHA256
+        or section.get("source_sha256") != _PHROGS_ANNOTATION_SHA256
+        or section.get("category") != PHROGS_INTEGRATION_EXCISION_CATEGORY
+        or section.get("high_confidence_terms") != list(PHROGS_HIGH_CONFIDENCE_TERMS)
+        or section.get("review_terms") != list(PHROGS_REVIEW_TERMS)
+    ):
+        raise AssetProvenanceError("PHROGs annotation provenance does not match the pinned v4 source")
+    source_path_value = section.get("source_path")
+    if not isinstance(source_path_value, str) or not source_path_value:
+        raise AssetProvenanceError("PHROGs annotation source path is missing")
+    source_path = Path(source_path_value)
+    if not source_path.is_file() or _sha256_file(source_path) != _PHROGS_ANNOTATION_SHA256:
+        raise AssetProvenanceError("PHROGs annotation source path or digest drift")
+    expected_profiles = _read_phrogs_annotation_lookup(source_path)
 
     lookup_counts = section.get("lookup_counts")
     if not isinstance(lookup_counts, Mapping) or dict(lookup_counts) != dict(_PHROGS_V4_SAFETY_LOOKUP_COUNTS):
@@ -2093,6 +2186,8 @@ def _validate_phrogs_assets(
         raise VerifiedIdentityMappingMissingError(
             "PHROGs safety lookup contains profiles absent from the pinned full profile database"
         )
+    if profiles != expected_profiles:
+        raise AssetProvenanceError("PHROGs safety lookup does not match the pinned annotation source")
     observed_lookup_counts = {
         "total": len(profiles),
         "high_confidence": sum(row["confidence"] == "high_confidence" for row in profiles.values()),
