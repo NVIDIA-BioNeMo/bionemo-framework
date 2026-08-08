@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from bionemo.evo2_phage_gen.generation import ensure_paper_useful_rl_prompt_files
+from bionemo.evo2_phage_gen.rl_readiness import _load_config_with_defaults
 
 
 RECIPE_ROOT = Path(__file__).parents[3]
@@ -88,6 +89,13 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert config["env"]["phage_qc"]["dustmask_use_external"] is True
     assert config["env"]["phage_qc"]["weight_dustmask_end"] == 1.0
     external_qc = config["env"]["phage_qc"]["external_qc"]
+    sequence_safety = config["env"]["phage_qc"]["sequence_safety"]
+    assert sequence_safety["enabled"] is True
+    assert sequence_safety["host_domain"] == "BACTERIA"
+    assert sequence_safety["host_evidence"]["confirmed"] is True
+    assert sequence_safety["host_evidence"]["replication_host_domains"] == ["BACTERIA"]
+    assert sequence_safety["policy_path"] == "configs/phage_safety_policy.yaml"
+    assert sequence_safety["asset_manifest_path"] == "data/external/safety/asset_manifest.yaml"
     assert external_qc["lovis4u_mmseqs_threads"] == 8
     assert external_qc["lovis4u_metrics_only"] is True
     assert generation_config["temperature"] > 0.0
@@ -265,7 +273,10 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6
     assert config["policy"]["megatron_cfg"]["optimizer"]["min_lr"] == 1.0e-7
     assert config["policy"]["megatron_cfg"]["scheduler"]["lr_warmup_init"] == 1.0e-7
-    assert config["checkpointing"]["metric_name"] == "val:phage_qc/binary_core_pass_cluster_deduplicated_rate"
+    assert (
+        config["checkpointing"]["metric_name"]
+        == "val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"
+    )
     assert [objective["name"] for objective in objectives] == [
         "valid_nt_chars",
         "genome_length",
@@ -279,11 +290,19 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "synteny",
         "average_protein_identity",
         "mmseqs_cluster_diversity",
+        "safety_amr",
+        "safety_toxin",
+        "safety_lysogeny",
     ]
     assert all(len(objective["columns"]) == 1 for objective in objectives)
     assert all("reward" not in objective["columns"] for objective in objectives)
-    assert "reward_mmseqs_cluster_diversity" in objectives[-1]["columns"]
+    objective_by_name = {objective["name"]: objective for objective in objectives}
+    assert "reward_mmseqs_cluster_diversity" in objective_by_name["mmseqs_cluster_diversity"]["columns"]
     assert "reward_dustmask_end" in objectives[4]["columns"]
+    for name in ("safety_amr", "safety_toxin", "safety_lysogeny"):
+        assert objective_by_name[name]["requires_safety_eligibility"] is False
+    for objective in objectives[:-3]:
+        assert objective["requires_safety_eligibility"] is True
     assert env_config["weight_mmseqs_cluster_diversity"] == 1.0
     assert env_config["dustmask_filter"] is True
     assert env_config["weight_dustmask_end"] == 1.0
@@ -294,7 +313,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
     assert mmseqs_config == {
         "enabled": True,
-            "mmseqs_bin": "data/external/bin/mmseqs",
+        "mmseqs_bin": "data/external/bin/mmseqs",
         "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity",
         "keep_artifacts": False,
         "min_seq_id": 0.99,
@@ -318,6 +337,53 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert "lr1e-6-kl0.001" in config["logger"]["wandb"]["name"]
     assert "batched96" in config["logger"]["wandb"]["name"]
     assert config["logger"]["wandb"]["name"].startswith("gdpo-phage")
+
+
+def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():
+    """Base, smoke, and diagnostic overlays must not silently lose the mandatory safety gate."""
+    config_dir = RECIPE_ROOT / "configs"
+    config_paths = sorted({*config_dir.glob("grpo_phage*.yaml"), *config_dir.glob("gdpo_phage*.yaml")})
+    assert config_paths
+
+    for config_path in config_paths:
+        resolved = _load_config_with_defaults(config_path)
+        safety = resolved["env"]["phage_qc"]["sequence_safety"]
+        assert type(safety["enabled"]) is bool and safety["enabled"] is True, config_path.name
+        assert safety["host_domain"] in {"BACTERIA", "ARCHAEA", "BACTERIA_AND_ARCHAEA"}, config_path.name
+        evidence = safety["host_evidence"]
+        assert type(evidence["confirmed"]) is bool and evidence["confirmed"] is True, config_path.name
+        assert set(evidence["replication_host_domains"]) <= {
+            "BACTERIA",
+            "ARCHAEA",
+            "BACTERIA_AND_ARCHAEA",
+        }, config_path.name
+        for path_key in (
+            "policy_path",
+            "asset_manifest_path",
+            "diamond_tool_pin_path",
+            "mmseqs_tool_pin_path",
+            "work_dir",
+        ):
+            assert isinstance(safety[path_key], str) and safety[path_key], (config_path.name, path_key)
+
+        if config_path.name.startswith("gdpo_"):
+            assert (
+                resolved["checkpointing"]["metric_name"]
+                == "val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"
+            ), config_path.name
+            objectives = resolved["env"]["phage_qc"]["gdpo_objectives"]
+            objective_by_name = {objective["name"]: objective for objective in objectives}
+            assert {
+                "safety_amr",
+                "safety_toxin",
+                "safety_lysogeny",
+            } <= objective_by_name.keys(), config_path.name
+            for name, objective in objective_by_name.items():
+                assert type(objective.get("requires_safety_eligibility")) is bool, (config_path.name, name)
+                assert objective["requires_safety_eligibility"] is (not name.startswith("safety_")), (
+                    config_path.name,
+                    name,
+                )
 
 
 def test_gdpo_tp1dp2_smoke_uses_local_decode_48_but_training_microbatch_1():

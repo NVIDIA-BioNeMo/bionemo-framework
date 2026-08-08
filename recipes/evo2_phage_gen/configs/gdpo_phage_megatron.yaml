@@ -11,7 +11,7 @@ checkpointing:
     # Start GDPO from the converted base Evo2 Microviridae checkpoint, not from a prior RL run.
     path: "data/checkpoints/evo2_7b_microviridae_mbridge"
     format: "megatron_bridge"
-  metric_name: "val:phage_qc/binary_core_pass_cluster_deduplicated_rate"
+  metric_name: "val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"
   higher_is_better: true
 
 grpo:
@@ -109,28 +109,49 @@ env:
     gdpo_objectives:
       - name: "valid_nt_chars"
         columns: ["reward_valid_nt_chars"]
+        requires_safety_eligibility: true
       - name: "genome_length"
         columns: ["reward_genome_length"]
+        requires_safety_eligibility: true
       - name: "gc_content"
         columns: ["reward_gc_content"]
+        requires_safety_eligibility: true
       - name: "nt_homopolymer"
         columns: ["reward_nt_homopolymer"]
+        requires_safety_eligibility: true
       - name: "dustmask_end"
         columns: ["reward_dustmask_end"]
+        requires_safety_eligibility: true
       - name: "nucleotide_pass"
         columns: ["reward_nucleotide_pass"]
+        requires_safety_eligibility: true
       - name: "protein_hit_count"
         columns: ["reward_external_protein_hit_count"]
+        requires_safety_eligibility: true
       - name: "tropism"
         columns: ["reward_external_tropism"]
+        requires_safety_eligibility: true
       - name: "required_genes"
         columns: ["reward_external_required_genes"]
+        requires_safety_eligibility: true
       - name: "synteny"
         columns: ["reward_external_synteny"]
+        requires_safety_eligibility: true
       - name: "average_protein_identity"
         columns: ["reward_external_average_protein_identity"]
+        requires_safety_eligibility: true
       - name: "mmseqs_cluster_diversity"
         columns: ["reward_mmseqs_cluster_diversity"]
+        requires_safety_eligibility: true
+      - name: "safety_amr"
+        columns: ["reward_safety_amr"]
+        requires_safety_eligibility: false
+      - name: "safety_toxin"
+        columns: ["reward_safety_toxin"]
+        requires_safety_eligibility: false
+      - name: "safety_lysogeny"
+        columns: ["reward_safety_lysogeny"]
+        requires_safety_eligibility: false
     external_qc:
       enabled: true
       tool_bin_dir: "data/external/bin"

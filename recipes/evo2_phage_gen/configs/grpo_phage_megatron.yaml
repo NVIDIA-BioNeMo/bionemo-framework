@@ -113,6 +113,28 @@ env:
     weight_synteny: 0.25
     weight_average_protein_identity: 0.25
     weight_required_genes: 0.1
+    # Mandatory fail-closed Task 4 gate for the PhiX/Microviridae bacterial design context.
+    # Runtime asset and tool-pin files are generated locally and digest-validated before use.
+    sequence_safety:
+      enabled: true
+      host_domain: "BACTERIA"
+      host_evidence:
+        source: "NCBI Datasets v2alpha genome dataset report"
+        source_version: "NC_001422.1"
+        replication_host_domains: ["BACTERIA"]
+        confirmed: true
+        metadata:
+          accession: "NC_001422.1"
+          intended_design_context: "PhiX/Microviridae bacterial phage"
+      asset_manifest_path: "data/external/safety/asset_manifest.yaml"
+      diamond_tool_pin_path: "data/external/safety/diamond_tool_pin.json"
+      mmseqs_tool_pin_path: "data/external/safety/mmseqs_tool_pin.json"
+      policy_path: "configs/phage_safety_policy.yaml"
+      work_dir: "data/checkpoints/phage_sequence_safety_reward"
+      strict_lysis: false
+      circular: true
+      threads: 16
+      timeout_seconds: 300.0
     external_qc:
       enabled: true
       config_path: "configs/arc_genome_design_filtering_local.yaml"

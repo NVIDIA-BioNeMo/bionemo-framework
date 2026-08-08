@@ -15,20 +15,26 @@
 
 """NeMo-RL environment wrapper for online phage sequence rewards."""
 
+import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from numbers import Number
+from numbers import Integral, Real
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from bionemo.evo2_phage_gen.design_scope import HostDomain, HostEvidence
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 from bionemo.evo2_phage_gen.reward import (
     REWARD_COMPONENTS,
+    SEQUENCE_SAFETY_CLASSES,
     TIMING_COLUMN_PREFIX,
     ExternalQCRewardConfig,
     MMseqsClusterDiversityConfig,
     RewardWeights,
+    SequenceSafetyRewardConfig,
     binary_cluster_deduplicated_pass_mask,
     binary_core_pass_mask,
     binary_full_qc_pass_mask,
@@ -43,6 +49,12 @@ class GDPOObjective:
     name: str
     columns: tuple[str, ...]
     reducer: str = "mean"
+    requires_safety_eligibility: bool = True
+
+    def __post_init__(self) -> None:
+        """Reject bool lookalikes that could silently invert a mandatory gate."""
+        if type(self.requires_safety_eligibility) is not bool:
+            raise TypeError("GDPO objective requires_safety_eligibility must be a boolean.")
 
 
 TIMING_METRIC_MARKER_PREFIX = "__timing__/"
@@ -76,25 +88,237 @@ DEFAULT_GDPO_OBJECTIVES: tuple[GDPOObjective, ...] = (
             "reward_mmseqs_cluster_diversity",
         ),
     ),
+    GDPOObjective(name="safety_amr", columns=("reward_safety_amr",), requires_safety_eligibility=False),
+    GDPOObjective(name="safety_toxin", columns=("reward_safety_toxin",), requires_safety_eligibility=False),
+    GDPOObjective(name="safety_lysogeny", columns=("reward_safety_lysogeny",), requires_safety_eligibility=False),
 )
+
+
+_PROKARYOTIC_HOST_DOMAINS = frozenset({HostDomain.BACTERIA, HostDomain.ARCHAEA, HostDomain.BACTERIA_AND_ARCHAEA})
+_SEQUENCE_SAFETY_CONFIG_KEYS = frozenset(
+    {
+        "enabled",
+        "host_domain",
+        "host_evidence",
+        "asset_manifest_path",
+        "diamond_tool_pin_path",
+        "mmseqs_tool_pin_path",
+        "policy_path",
+        "work_dir",
+        "strict_lysis",
+        "circular",
+        "threads",
+        "timeout_seconds",
+    }
+)
+_HOST_EVIDENCE_KEYS = frozenset({"source", "source_version", "replication_host_domains", "confirmed", "metadata"})
+
+
+def _require_exact_keys(mapping: Mapping[str, object], expected: frozenset[str], *, label: str) -> None:
+    """Reject missing and unknown safety config keys instead of guessing intent."""
+    keys = set(mapping)
+    if keys != expected:
+        missing = sorted(expected - keys)
+        unknown = sorted(keys - expected)
+        raise ValueError(f"{label} keys do not match schema; missing={missing}, unknown={unknown}")
+
+
+def _nonempty_string(value: object, *, label: str) -> str:
+    """Return one unmodified nonempty string from a strict config field."""
+    if type(value) is not str or not value.strip():
+        raise TypeError(f"{label} must be a nonempty string.")
+    return value
+
+
+def _config_path(value: object, *, label: str) -> Path:
+    """Parse a required nonempty YAML path without truthiness coercion."""
+    return Path(_nonempty_string(value, label=label))
+
+
+def _coerce_sequence_safety_config(raw_config: Any) -> SequenceSafetyRewardConfig | None:
+    """Parse the mandatory sequence-safety mapping into the strict Task 6 contract."""
+    if raw_config is None:
+        return None
+    if not isinstance(raw_config, Mapping):
+        raise TypeError("sequence_safety must be a mapping.")
+    _require_exact_keys(raw_config, _SEQUENCE_SAFETY_CONFIG_KEYS, label="sequence_safety")
+
+    for key in ("enabled", "strict_lysis", "circular"):
+        if type(raw_config[key]) is not bool:
+            raise TypeError(f"sequence_safety {key} must be a boolean.")
+    if type(raw_config["threads"]) is not int or raw_config["threads"] < 1:
+        raise TypeError("sequence_safety threads must be a positive integer.")
+    timeout = raw_config["timeout_seconds"]
+    if not isinstance(timeout, Real) or isinstance(timeout, bool) or not math.isfinite(float(timeout)) or timeout <= 0:
+        raise TypeError("sequence_safety timeout_seconds must be a positive finite number.")
+
+    try:
+        host_domain = HostDomain(_nonempty_string(raw_config["host_domain"], label="sequence_safety host_domain"))
+    except ValueError as error:
+        raise ValueError("sequence_safety host_domain is unsupported.") from error
+    if host_domain not in _PROKARYOTIC_HOST_DOMAINS:
+        raise ValueError("sequence_safety host_domain must be prokaryotic.")
+
+    raw_evidence = raw_config["host_evidence"]
+    if not isinstance(raw_evidence, Mapping):
+        raise TypeError("sequence_safety host_evidence must be a mapping.")
+    _require_exact_keys(raw_evidence, _HOST_EVIDENCE_KEYS, label="sequence_safety host_evidence")
+    if type(raw_evidence["confirmed"]) is not bool:
+        raise TypeError("sequence_safety host_evidence confirmed must be a boolean.")
+    if raw_evidence["confirmed"] is not True:
+        raise ValueError("sequence_safety host_evidence must be confirmed.")
+    raw_domains = raw_evidence["replication_host_domains"]
+    if not isinstance(raw_domains, list) or not raw_domains:
+        raise TypeError("sequence_safety host_evidence replication_host_domains must be a nonempty list.")
+    try:
+        evidence_domains = tuple(
+            HostDomain(_nonempty_string(domain, label="sequence_safety host evidence domain"))
+            for domain in raw_domains
+        )
+    except ValueError as error:
+        raise ValueError("sequence_safety host evidence must contain only prokaryotic domains.") from error
+    if len(set(evidence_domains)) != len(evidence_domains) or any(
+        domain not in _PROKARYOTIC_HOST_DOMAINS for domain in evidence_domains
+    ):
+        raise ValueError("sequence_safety host evidence must contain unique prokaryotic domains.")
+    if frozenset(evidence_domains) != frozenset({host_domain}):
+        raise ValueError("sequence_safety host evidence must be consistent with host_domain.")
+    metadata = raw_evidence["metadata"]
+    if not isinstance(metadata, Mapping):
+        raise TypeError("sequence_safety host_evidence metadata must be a mapping.")
+
+    evidence = HostEvidence(
+        source=_nonempty_string(raw_evidence["source"], label="sequence_safety host_evidence source"),
+        source_version=_nonempty_string(
+            raw_evidence["source_version"], label="sequence_safety host_evidence source_version"
+        ),
+        replication_host_domains=frozenset(evidence_domains),
+        confirmed=True,
+        metadata=dict(metadata),
+    )
+    return SequenceSafetyRewardConfig(
+        host_domain=host_domain,
+        host_evidence=evidence,
+        asset_manifest_path=_config_path(
+            raw_config["asset_manifest_path"], label="sequence_safety asset_manifest_path"
+        ),
+        diamond_tool_pin_path=_config_path(
+            raw_config["diamond_tool_pin_path"], label="sequence_safety diamond_tool_pin_path"
+        ),
+        mmseqs_tool_pin_path=_config_path(
+            raw_config["mmseqs_tool_pin_path"], label="sequence_safety mmseqs_tool_pin_path"
+        ),
+        policy_path=_config_path(raw_config["policy_path"], label="sequence_safety policy_path"),
+        work_dir=_config_path(raw_config["work_dir"], label="sequence_safety work_dir"),
+        enabled=raw_config["enabled"],
+        strict_lysis=raw_config["strict_lysis"],
+        circular=raw_config["circular"],
+        threads=raw_config["threads"],
+        timeout_seconds=float(timeout),
+    )
 
 
 def _coerce_gdpo_objectives(raw_objectives: Any) -> tuple[GDPOObjective, ...]:
     """Parse GDPO objective config into a stable positional objective list."""
-    if not raw_objectives:
+    if raw_objectives is None:
         return DEFAULT_GDPO_OBJECTIVES
+    if not isinstance(raw_objectives, list) or not raw_objectives:
+        raise TypeError("gdpo_objectives must be a nonempty list.")
 
     objectives: list[GDPOObjective] = []
     for raw in raw_objectives:
-        if not isinstance(raw, dict):
+        if not isinstance(raw, Mapping):
             raise TypeError("Each gdpo_objectives entry must be a mapping with name and columns.")
-        name = str(raw.get("name", "")).strip()
-        columns = tuple(str(column) for column in raw.get("columns", ()) if str(column).strip())
-        reducer = str(raw.get("reducer", "mean")).strip().lower()
-        if not name or not columns:
+        allowed_keys = {"name", "columns", "reducer", "requires_safety_eligibility"}
+        if not set(raw) <= allowed_keys:
+            raise ValueError("GDPO objective contains unknown keys.")
+        name = raw.get("name")
+        raw_columns = raw.get("columns")
+        reducer = raw.get("reducer", "mean")
+        requires_safety_eligibility = raw.get("requires_safety_eligibility", True)
+        if type(name) is not str or not name or name != name.strip():
             raise ValueError("Each gdpo_objectives entry must define a non-empty name and columns list.")
-        objectives.append(GDPOObjective(name=name, columns=columns, reducer=reducer))
+        if not isinstance(raw_columns, list) or not raw_columns:
+            raise ValueError("Each gdpo_objectives entry must define a non-empty name and columns list.")
+        if any(type(column) is not str or not column or column != column.strip() for column in raw_columns):
+            raise ValueError("GDPO objective columns must be nonempty strings.")
+        columns = tuple(raw_columns)
+        if len(set(columns)) != len(columns):
+            raise ValueError("GDPO objective columns must be unique.")
+        if type(reducer) is not str or reducer not in {"mean", "product", "min"}:
+            raise ValueError("GDPO objective reducer must be 'mean', 'product', or 'min'.")
+        if type(requires_safety_eligibility) is not bool:
+            raise TypeError("GDPO objective requires_safety_eligibility must be a boolean.")
+        objectives.append(
+            GDPOObjective(
+                name=name,
+                columns=columns,
+                reducer=reducer,
+                requires_safety_eligibility=requires_safety_eligibility,
+            )
+        )
+    names = [objective.name for objective in objectives]
+    if len(set(names)) != len(names):
+        raise ValueError("GDPO objective names must be unique.")
     return tuple(objectives)
+
+
+def _exact_safety_eligibility(scored: pd.DataFrame) -> pd.Series:
+    """Accept only reconciled PASS plus real, non-bool numeric gate value one."""
+    values = scored.get("safety_gate_pass", pd.Series(0.0, index=scored.index))
+    states = scored.get("safety_gate_state", pd.Series(None, index=scored.index, dtype=object))
+    return states.eq("PASS") & values.map(_is_exact_one)
+
+
+def _is_exact_finite_real(value: object) -> bool:
+    """Return whether a value is a finite real number without bool/string coercion."""
+    if not isinstance(value, Real) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _is_exact_one(value: object) -> bool:
+    """Return whether a value is exactly numeric one without accepting bool lookalikes."""
+    return _is_exact_finite_real(value) and value == 1.0
+
+
+def _is_exact_binary(value: object) -> bool:
+    """Return whether a value is exactly numeric zero or one without coercion."""
+    return _is_exact_finite_real(value) and value in {0.0, 1.0}
+
+
+def _qualified_scalar_rewards(scored: pd.DataFrame) -> pd.Series:
+    """Return finite [0, 1] scalar rewards backed by exact aggregate safety eligibility."""
+    raw_rewards = scored.get("reward", pd.Series(0.0, index=scored.index))
+    bounded_rewards = raw_rewards.map(
+        lambda value: float(value) if _is_exact_finite_real(value) and 0.0 <= value <= 1.0 else 0.0
+    )
+    return bounded_rewards.where(_exact_safety_eligibility(scored), 0.0)
+
+
+def _exact_safety_class_support(scored: pd.DataFrame, reward_column: str) -> pd.Series:
+    """Reconcile one safety reward with its raw class state and required flag."""
+    safety_class = reward_column.removeprefix("reward_safety_")
+    if safety_class not in SEQUENCE_SAFETY_CLASSES:
+        return pd.Series(True, index=scored.index, dtype=bool)
+    state_column = f"safety_{safety_class}_state"
+    required_column = f"safety_{safety_class}_required"
+    if state_column not in scored or required_column not in scored:
+        return pd.Series(False, index=scored.index, dtype=bool)
+
+    reward_values = scored[reward_column]
+    states = scored[state_column]
+    required_values = scored[required_column]
+    valid_required = required_values.map(_is_exact_binary)
+    valid_state = states.isin(("PASS", "FAIL", "INDETERMINATE"))
+    expected_rewards = pd.Series(0.0, index=scored.index)
+    expected_rewards.loc[valid_required] = (
+        (required_values.loc[valid_required] == 0.0) | states.loc[valid_required].eq("PASS")
+    ).astype(float)
+    return reward_values.map(_is_exact_finite_real) & valid_required & valid_state & reward_values.eq(expected_rewards)
 
 
 def gdpo_objective_scores_from_scored(
@@ -102,6 +326,14 @@ def gdpo_objective_scores_from_scored(
     objectives: tuple[GDPOObjective, ...],
 ) -> pd.DataFrame:
     """Build a positional GDPO reward matrix from scored reward columns."""
+    if scored.empty:
+        return pd.DataFrame(
+            0.0,
+            index=scored.index,
+            columns=[objective.name for objective in objectives],
+            dtype=float,
+        )
+
     objective_scores = pd.DataFrame(index=scored.index)
     for objective in objectives:
         missing_columns = [column for column in objective.columns if column not in scored]
@@ -109,7 +341,14 @@ def gdpo_objective_scores_from_scored(
             raise ValueError(
                 f"GDPO objective {objective.name!r} missing reward column(s): {', '.join(missing_columns)}"
             )
-        values = scored[list(objective.columns)].astype(float).clip(0.0, 1.0)
+        raw_values = scored[list(objective.columns)]
+        valid_components = raw_values.apply(lambda column: column.map(_is_exact_finite_real))
+        valid_rows = valid_components.all(axis=1)
+        for column in objective.columns:
+            valid_rows &= _exact_safety_class_support(scored, column)
+        values = raw_values.apply(
+            lambda column: column.map(lambda value: float(value) if _is_exact_finite_real(value) else 0.0)
+        ).clip(0.0, 1.0)
         if objective.reducer == "mean":
             objective_scores[objective.name] = values.mean(axis=1)
         elif objective.reducer == "product":
@@ -121,7 +360,32 @@ def gdpo_objective_scores_from_scored(
                 f"Unsupported GDPO reducer {objective.reducer!r} for objective {objective.name!r}; "
                 "expected 'mean', 'product', or 'min'."
             )
+        objective_scores[objective.name] = objective_scores[objective.name].where(valid_rows, 0.0)
+        if objective.requires_safety_eligibility:
+            objective_scores[objective.name] = objective_scores[objective.name].where(
+                _exact_safety_eligibility(scored),
+                0.0,
+            )
     return objective_scores
+
+
+def _validate_gdpo_safety_objectives(objectives: tuple[GDPOObjective, ...]) -> None:
+    """Require exactly the three unmasked safety signals and mask every other objective."""
+    required = {
+        "safety_amr": ("reward_safety_amr",),
+        "safety_toxin": ("reward_safety_toxin",),
+        "safety_lysogeny": ("reward_safety_lysogeny",),
+    }
+    objective_by_name = {objective.name: objective for objective in objectives}
+    missing = sorted(set(required) - set(objective_by_name))
+    if missing:
+        raise ValueError(f"GDPO objectives are missing mandatory safety objectives: {missing}")
+    for name, objective in objective_by_name.items():
+        if name in required:
+            if objective.columns != required[name] or objective.requires_safety_eligibility is not False:
+                raise ValueError(f"GDPO safety objective {name!r} must expose its one unmasked safety reward column.")
+        elif objective.requires_safety_eligibility is not True:
+            raise ValueError(f"GDPO biological objective {name!r} must require safety eligibility.")
 
 
 try:  # pragma: no cover - exercised only when NeMo-RL is installed.
@@ -157,6 +421,7 @@ def score_message_logs(
     weights: RewardWeights = RewardWeights(),
     external_qc: ExternalQCRewardConfig | None = None,
     mmseqs_cluster_diversity: MMseqsClusterDiversityConfig | None = None,
+    sequence_safety: SequenceSafetyRewardConfig | None = None,
 ) -> pd.DataFrame:
     """Score a NeMo-RL message-log batch with the dependency-light phage reward."""
     sequences_df = pd.DataFrame(
@@ -173,6 +438,7 @@ def score_message_logs(
         weights=weights,
         external_qc=external_qc,
         mmseqs_cluster_diversity=mmseqs_cluster_diversity,
+        sequence_safety=sequence_safety,
     )
 
 
@@ -194,6 +460,8 @@ def _add_binary_pass_metrics(
     """Add core/full binary pass counts and cluster-deduplicated rates."""
     binary_pass = binary_core_pass_mask(scored, weights)
     cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(scored, binary_pass)
+    safety_qualified_pass = binary_pass & _exact_safety_eligibility(scored)
+    safety_qualified_cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(scored, safety_qualified_pass)
     key_prefix = f"{prefix}/" if prefix else ""
     metrics[f"{key_prefix}binary_core_pass_count"] = int(binary_pass.sum())
     metrics[f"{key_prefix}binary_core_pass_rate"] = float(binary_pass.astype(float).mean())
@@ -201,10 +469,22 @@ def _add_binary_pass_metrics(
     metrics[f"{key_prefix}binary_core_pass_cluster_deduplicated_rate"] = float(
         cluster_deduplicated_pass.astype(float).mean()
     )
+    metrics[f"{key_prefix}binary_safety_qualified_core_pass_count"] = int(safety_qualified_pass.sum())
+    metrics[f"{key_prefix}binary_safety_qualified_core_pass_rate"] = float(safety_qualified_pass.astype(float).mean())
+    metrics[f"{key_prefix}binary_safety_qualified_core_pass_cluster_deduplicated_count"] = int(
+        safety_qualified_cluster_deduplicated_pass.sum()
+    )
+    metrics[f"{key_prefix}binary_safety_qualified_core_pass_cluster_deduplicated_rate"] = float(
+        safety_qualified_cluster_deduplicated_pass.astype(float).mean()
+    )
 
     full_qc_pass = binary_full_qc_pass_mask(scored, binary_pass)
     if full_qc_pass is not None:
         full_qc_cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(scored, full_qc_pass)
+        safety_qualified_full_qc_pass = full_qc_pass & _exact_safety_eligibility(scored)
+        safety_qualified_full_qc_cluster_deduplicated_pass = binary_cluster_deduplicated_pass_mask(
+            scored, safety_qualified_full_qc_pass
+        )
         metrics[f"{key_prefix}binary_full_qc_pass_count"] = int(full_qc_pass.sum())
         metrics[f"{key_prefix}binary_full_qc_pass_rate"] = float(full_qc_pass.astype(float).mean())
         metrics[f"{key_prefix}binary_full_qc_pass_cluster_deduplicated_count"] = int(
@@ -213,14 +493,45 @@ def _add_binary_pass_metrics(
         metrics[f"{key_prefix}binary_full_qc_pass_cluster_deduplicated_rate"] = float(
             full_qc_cluster_deduplicated_pass.astype(float).mean()
         )
+        metrics[f"{key_prefix}binary_safety_qualified_full_qc_count"] = int(safety_qualified_full_qc_pass.sum())
+        metrics[f"{key_prefix}binary_safety_qualified_full_qc_rate"] = float(
+            safety_qualified_full_qc_pass.astype(float).mean()
+        )
+        metrics[f"{key_prefix}binary_safety_qualified_full_qc_cluster_deduplicated_count"] = int(
+            safety_qualified_full_qc_cluster_deduplicated_pass.sum()
+        )
+        metrics[f"{key_prefix}binary_safety_qualified_full_qc_cluster_deduplicated_rate"] = float(
+            safety_qualified_full_qc_cluster_deduplicated_pass.astype(float).mean()
+        )
 
 
 def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -> dict[str, float | int]:
     """Summarize per-sequence phage QC scores into scalar logger metrics."""
     if scored.empty:
-        return {"num_sequences": 0}
+        return {
+            "num_sequences": 0,
+            "binary_safety_qualified_full_qc_cluster_deduplicated_rate": 0.0,
+        }
 
     metrics: dict[str, float | int] = {"num_sequences": len(scored)}
+    safety_states = scored.get("safety_gate_state", pd.Series(None, index=scored.index, dtype=object))
+    safety_eligibility = _exact_safety_eligibility(scored)
+    for state in ("PASS", "FAIL", "INDETERMINATE"):
+        metrics[f"safety_gate_state_count/{state}"] = int((safety_states == state).sum())
+    metrics["safety_gate_pass_rate"] = float(safety_eligibility.astype(float).mean())
+    metrics["safety_gate_indeterminate_rate"] = float((safety_states == "INDETERMINATE").mean())
+    for safety_class in SEQUENCE_SAFETY_CLASSES:
+        state_column = f"safety_{safety_class}_state"
+        if state_column in scored:
+            states = scored[state_column]
+            metrics[f"safety_{safety_class}_pass_rate"] = float((states == "PASS").mean())
+            metrics[f"safety_{safety_class}_indeterminate_rate"] = float((states == "INDETERMINATE").mean())
+    if "reward_historical" in scored:
+        historical_mean = _mean_numeric(scored, "reward_historical")
+        if historical_mean is not None:
+            metrics["reward_historical_mean"] = historical_mean
+    if "reward" in scored:
+        metrics["reward_safety_qualified_mean"] = float(_qualified_scalar_rewards(scored).mean())
     for column in sorted(str(column) for column in scored.columns if str(column).startswith(TIMING_COLUMN_PREFIX)):
         mean_value = _mean_numeric(scored, column)
         if mean_value is not None:
@@ -352,6 +663,7 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
             metrics["mmseqs_cluster_largest_cluster_fraction"] = 0.0
 
     _add_binary_pass_metrics(metrics, scored, weights)
+    metrics.setdefault("binary_safety_qualified_full_qc_cluster_deduplicated_rate", 0.0)
 
     if "prompt_nt_length" in scored:
         prompt_lengths = pd.to_numeric(scored["prompt_nt_length"], errors="coerce")
@@ -375,28 +687,72 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
 
 def _scored_records(scored: pd.DataFrame) -> list[dict[str, Any]]:
     """Convert per-sequence scores into metadata-safe scalar/status dictionaries."""
-    return [
-        {
-            key: value
-            for key, value in row.items()
-            if (
-                isinstance(value, Number | bool)
-                or key == "mmseqs_cluster_id"
-                or key.endswith(("_pass", "_available", "_artifact"))
-            )
-        }
-        for row in scored.where(pd.notna(scored), None).to_dict("records")
-    ]
+    records: list[dict[str, Any]] = []
+    for row in scored.to_dict("records"):
+        record: dict[str, Any] = {}
+        for key, value in row.items():
+            if type(key) is not str:
+                continue
+            if isinstance(value, bool):
+                record[key] = value
+            elif isinstance(value, Integral) and _is_exact_finite_real(value):
+                record[key] = int(value)
+            elif _is_exact_finite_real(value):
+                record[key] = float(value)
+            elif (
+                type(value) is str
+                and _is_bounded_utf8(value)
+                and (
+                    key == "mmseqs_cluster_id"
+                    or key.startswith("safety_")
+                    or key.endswith(("_pass", "_available", "_artifact"))
+                )
+            ):
+                record[key] = value
+        records.append(record)
+    return records
+
+
+def _is_bounded_utf8(value: str) -> bool:
+    """Accept only well-formed UTF-8 strings within the rollout metadata bound."""
+    try:
+        return len(value.encode("utf-8")) <= 4096
+    except UnicodeEncodeError:
+        return False
 
 
 def _scored_from_batch_metadata(batch: Any) -> pd.DataFrame:
-    """Recover scored rows carried through rollout metadata."""
-    rows = [
-        info["_phage_qc_scored"]
-        for info in batch.get("extra_env_info", []) or []
-        if isinstance(info, dict) and isinstance(info.get("_phage_qc_scored"), dict)
-    ]
+    """Recover scored rows only when every rollout position has one metadata mapping."""
+    extra_env_info = batch.get("extra_env_info", [])
+    if not isinstance(extra_env_info, list):
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for info in extra_env_info:
+        if not isinstance(info, dict) or not isinstance(info.get("_phage_qc_scored"), dict):
+            return pd.DataFrame()
+        rows.append(info["_phage_qc_scored"])
     return pd.DataFrame(rows)
+
+
+def _batch_metadata_is_complete(
+    scored: pd.DataFrame,
+    expected_rows: int,
+    objectives: tuple[GDPOObjective, ...],
+) -> bool:
+    """Require one nonmissing aggregate/objective record for every assembled rollout row."""
+    if len(scored) != expected_rows:
+        return False
+    required_columns = {"reward", "safety_gate_state", "safety_gate_pass"}
+    for objective in objectives:
+        required_columns.update(objective.columns)
+        for column in objective.columns:
+            safety_class = column.removeprefix("reward_safety_")
+            if safety_class in SEQUENCE_SAFETY_CLASSES:
+                required_columns.add(f"safety_{safety_class}_state")
+                required_columns.add(f"safety_{safety_class}_required")
+    if not required_columns.issubset(scored.columns):
+        return expected_rows == 0
+    return bool(scored[list(required_columns)].notna().to_numpy().all())
 
 
 if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
@@ -445,6 +801,13 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 raise ValueError("reward_output_mode must be 'scalar', 'grpo', or 'gdpo'.")
             self.reward_output_mode = reward_output_mode
             self.gdpo_objectives = _coerce_gdpo_objectives(cfg.get("gdpo_objectives"))
+            if self.reward_output_mode == "gdpo":
+                _validate_gdpo_safety_objectives(self.gdpo_objectives)
+            self.sequence_safety = _coerce_sequence_safety_config(cfg.get("sequence_safety"))
+            if self.sequence_safety is None:
+                raise ValueError("sequence_safety configuration is required for phage RL training.")
+            if self.sequence_safety.enabled is not True:
+                raise ValueError("sequence_safety must be enabled for phage RL training.")
             external_qc_cfg = cfg.get("external_qc", {}) or {}
             self.external_qc = ExternalQCRewardConfig(
                 enabled=bool(external_qc_cfg.get("enabled", False)),
@@ -502,8 +865,10 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 weights=self.weights,
                 external_qc=self.external_qc,
                 mmseqs_cluster_diversity=self.mmseqs_cluster_diversity,
+                sequence_safety=self.sequence_safety,
             )
             reward_scoring_s = time.perf_counter() - phase_start
+            qualified_scalar_rewards = _qualified_scalar_rewards(scored)
             if self.reward_output_mode == "gdpo":
                 phase_start = time.perf_counter()
                 objective_scores = gdpo_objective_scores_from_scored(scored, self.gdpo_objectives)
@@ -513,7 +878,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             else:
                 gdpo_objectives_s = 0.0
                 self._last_gdpo_objective_scores = pd.DataFrame()
-                rewards = torch.tensor(scored["reward"].tolist(), dtype=torch.float32).cpu()
+                rewards = torch.tensor(qualified_scalar_rewards.tolist(), dtype=torch.float32).cpu()
 
             env_step_end_unix_s = time.time()
             env_step_timings = {
@@ -535,7 +900,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 returned_metadata.append(item_dict)
             observations = [
                 {"role": "environment", "content": f"phage_qc_reward={reward:.6f}"}
-                for reward in scored["reward"].tolist()
+                for reward in qualified_scalar_rewards.tolist()
             ]
             return EnvironmentReturn(
                 observations=observations,
@@ -552,44 +917,42 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             """Report rollout-level reward metrics."""
             reward_tensor = batch["rewards"] if "rewards" in batch else batch["total_reward"]
             rewards = reward_tensor if reward_tensor.ndim == 1 else reward_tensor.float().mean(dim=1)
-            scored = _scored_from_batch_metadata(batch)
-            last_scored = getattr(self, "_last_scored", pd.DataFrame())
-            if scored.empty:
-                scored = last_scored
-            elif (
-                "mmseqs_cluster_size" in scored
-                and "mmseqs_cluster_id" not in scored
-                and isinstance(last_scored, pd.DataFrame)
-                and len(last_scored) == len(scored)
-            ):
-                scored = last_scored
-            phage_metrics = phage_qc_metrics_from_scored(scored, self.weights) if not scored.empty else {}
-            binary_pass_rate = float(phage_metrics.get("binary_core_pass_rate", 0.0))
+            batch_scored = _scored_from_batch_metadata(batch)
+            reward_output_mode = getattr(self, "reward_output_mode", "scalar")
+            gdpo_objectives = self.gdpo_objectives if reward_output_mode == "gdpo" else ()
+            if not _batch_metadata_is_complete(batch_scored, int(rewards.shape[0]), gdpo_objectives):
+                batch_scored = pd.DataFrame()
+            phage_metrics = phage_qc_metrics_from_scored(batch_scored, self.weights)
+            binary_pass_rate = float(phage_metrics.get("binary_safety_qualified_core_pass_rate", 0.0))
             cluster_deduplicated_pass_rate = float(
-                phage_metrics.get("binary_core_pass_cluster_deduplicated_rate", binary_pass_rate)
+                phage_metrics.get(
+                    "binary_safety_qualified_core_pass_cluster_deduplicated_rate",
+                    binary_pass_rate,
+                )
             )
+            has_rewards = rewards.numel() > 0
             metrics = {
-                "mean_reward": rewards.float().mean().item(),
+                "mean_reward": rewards.float().mean().item() if has_rewards else 0.0,
                 "pass_rate": cluster_deduplicated_pass_rate,
-                "dense_reward_ge_1_rate": (rewards >= 1.0).float().mean().item(),
+                "dense_reward_ge_1_rate": (rewards >= 1.0).float().mean().item() if has_rewards else 0.0,
                 "num_sequences": int(rewards.shape[0]),
             }
-            objective_scores = getattr(self, "_last_gdpo_objective_scores", pd.DataFrame())
-            if not objective_scores.empty:
+            if reward_output_mode == "gdpo":
+                objective_scores = gdpo_objective_scores_from_scored(batch_scored, gdpo_objectives)
                 metrics["gdpo/num_objectives"] = int(objective_scores.shape[1])
-                for objective_name in objective_scores.columns:
-                    values = objective_scores[objective_name].astype(float)
-                    metrics[f"gdpo/{objective_name}_mean"] = float(values.mean())
-                    metrics[f"gdpo/{objective_name}_std"] = float(values.std(ddof=0))
-                    metrics[f"gdpo/{objective_name}_min"] = float(values.min())
-                    metrics[f"gdpo/{objective_name}_max"] = float(values.max())
-                    metrics[f"gdpo/{objective_name}_nonzero_rate"] = float((values != 0.0).mean())
-            if phage_metrics:
-                for key, value in phage_metrics.items():
-                    if key.startswith(TIMING_METRIC_MARKER_PREFIX):
-                        metrics[key] = value
-                    else:
-                        metrics[f"phage_qc/{key}"] = value
+                if not objective_scores.empty:
+                    for objective_name in objective_scores.columns:
+                        values = objective_scores[objective_name].astype(float)
+                        metrics[f"gdpo/{objective_name}_mean"] = float(values.mean())
+                        metrics[f"gdpo/{objective_name}_std"] = float(values.std(ddof=0))
+                        metrics[f"gdpo/{objective_name}_min"] = float(values.min())
+                        metrics[f"gdpo/{objective_name}_max"] = float(values.max())
+                        metrics[f"gdpo/{objective_name}_nonzero_rate"] = float((values != 0.0).mean())
+            for key, value in phage_metrics.items():
+                if key.startswith(TIMING_METRIC_MARKER_PREFIX):
+                    metrics[key] = value
+                else:
+                    metrics[f"phage_qc/{key}"] = value
             return batch, metrics
 
 else:
