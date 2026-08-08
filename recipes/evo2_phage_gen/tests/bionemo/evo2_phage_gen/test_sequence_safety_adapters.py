@@ -34,6 +34,11 @@ from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     NormalizedSafetyFinding,
     PredictedGene,
     ToolPin,
+    VerifiedIdentityMappingMissingError,
+    _parse_amrfinder_output_validated,
+    _parse_phrogs_output_validated,
+    _parse_toxin_diamond_output_validated,
+    _read_phrogs_profile_ids,
     build_amrfinder_command,
     build_diamond_command,
     build_phrogs_command,
@@ -489,7 +494,7 @@ def test_amrfinder_header_only_success_is_measured_pass(tmp_path):
     output = tmp_path / "amrfinder.tsv"
     _write_amrfinder_output(output, comments=("AMRFinderPlus measured output",))
 
-    result = parse_amrfinder_output(
+    result = _parse_amrfinder_output_validated(
         output,
         artifacts=artifacts,
         manifest_section=_amrfinder_manifest(tmp_path),
@@ -572,7 +577,7 @@ def test_amrfinder_plus_virulence_is_supplemental_toxin_evidence_not_complete_sc
         ),
     )
 
-    result = parse_amrfinder_output(
+    result = _parse_amrfinder_output_validated(
         output,
         artifacts=artifacts,
         manifest_section=_amrfinder_manifest(tmp_path),
@@ -931,7 +936,7 @@ def test_toxin_header_only_success_is_measured_pass(tmp_path):
     output = tmp_path / "toxin.tsv"
     _write_diamond_output(output, comments=("normalized measured DIAMOND output",))
 
-    result = parse_toxin_diamond_output(
+    result = _parse_toxin_diamond_output_validated(
         output,
         artifacts=_orf_artifacts(tmp_path),
         manifest_section=_toxin_manifest(tmp_path),
@@ -1053,7 +1058,7 @@ def test_toxin_short_motif_does_not_pass_joint_coverage_gate_and_remains_raw(tmp
     row = _diamond_row(pident="99.0", qcovhsp="12.0", scovhsp="9.0", evalue="1e-40")
     _write_diamond_output(output, row)
 
-    result = parse_toxin_diamond_output(
+    result = _parse_toxin_diamond_output_validated(
         output,
         artifacts=_orf_artifacts(tmp_path),
         manifest_section=_toxin_manifest(tmp_path),
@@ -1273,23 +1278,35 @@ _PHROGS_HEADER = (
     "bits",
 )
 
+_PHROGS_HIGH_PROFILE_IDS = ("phrog_1", *(f"phrog_{index}" for index in range(4, 60)))
+_PHROGS_REVIEW_PROFILE_IDS = ("phrog_2", *(f"phrog_{index}" for index in range(60, 111)))
+_PHROGS_FULL_PROFILE_IDS = tuple(f"phrog_{index}" for index in range(1, 111))
+
 
 def _phrogs_manifest(tmp_path):
     lookup = tmp_path / "phrogs_integration_excision_v4.tsv"
-    lookup.write_text(
-        "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
-        "phrog_1\tintegrase\tintegration and excision\thigh_confidence\tintegrase\n"
-        "phrog_2\tputative recombinase\tintegration and excision\treview\trecombinase\n"
-    )
+    lookup_rows = [
+        *(
+            f"{profile}\tintegrase\tintegration and excision\thigh_confidence\tintegrase\n"
+            for profile in _PHROGS_HIGH_PROFILE_IDS
+        ),
+        *(
+            f"{profile}\tputative recombinase\tintegration and excision\treview\trecombinase\n"
+            for profile in _PHROGS_REVIEW_PROFILE_IDS
+        ),
+    ]
+    lookup.write_text("phrog\tannot\tcategory\tconfidence\tmatched_term\n" + "".join(lookup_rows))
     profile_prefix = tmp_path / "phrogs_profile_db"
-    profile_lookup = b"0\tphrog_1\t0\n1\tphrog_2\t1\n2\tphrog_3\t2\n"
+    profile_lookup = "".join(
+        f"{index}\t{profile_id}\t{index}\n" for index, profile_id in enumerate(_PHROGS_FULL_PROFILE_IDS)
+    ).encode()
     profile_files = {
         profile_prefix: b"profile-db",
         Path(f"{profile_prefix}.index"): b"profile-index",
         Path(f"{profile_prefix}.dbtype"): b"profile-dbtype",
         Path(f"{profile_prefix}.lookup"): profile_lookup,
         Path(f"{profile_prefix}.source"): b"pharokka-v1.8.0\n",
-        Path(f"{profile_prefix}_h"): b"phrog_1\nphrog_2\nphrog_3\n",
+        Path(f"{profile_prefix}_h"): ("\n".join(_PHROGS_FULL_PROFILE_IDS) + "\n").encode(),
         Path(f"{profile_prefix}_h.index"): b"profile-header-index",
         Path(f"{profile_prefix}_h.dbtype"): b"profile-header-dbtype",
     }
@@ -1309,12 +1326,13 @@ def _phrogs_manifest(tmp_path):
         tree_digest.update(b"\0")
         tree_digest.update(path.read_bytes())
     profile_id_digest = hashlib.sha256()
-    for profile_id in ("phrog_1", "phrog_2", "phrog_3"):
+    for profile_id in sorted(_PHROGS_FULL_PROFILE_IDS):
         profile_id_digest.update(profile_id.encode())
         profile_id_digest.update(b"\n")
     return {
         "lookup_path": str(lookup),
         "lookup_sha256": hashlib.sha256(lookup.read_bytes()).hexdigest(),
+        "lookup_counts": {"total": 109, "high_confidence": 57, "review": 52},
         "profile_database": {
             "path": str(profile_prefix),
             "role": "complete PHROGs v4 MMseqs profile database for identity-bearing lysogeny search",
@@ -1330,9 +1348,12 @@ def _phrogs_manifest(tmp_path):
             "lookup_join_policy": "classify_only_profile_ids_present_in_pinned_lookup",
             "output_fields": list(_PHROGS_HEADER),
             "units": {"pident": "percent", "qcov": "fraction", "tcov": "fraction"},
-            "query_id_pattern": r"^phrog_[0-9]+$",
+            "query_id_pattern": r"^phrog_[1-9][0-9]*$",
             "query_ids_join_lookup": True,
-            "profile_id_inventory": {"count": 3, "sha256": profile_id_digest.hexdigest()},
+            "profile_id_inventory": {
+                "count": len(_PHROGS_FULL_PROFILE_IDS),
+                "sha256": profile_id_digest.hexdigest(),
+            },
             "provenance": {
                 "source_url": "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz",
                 "archive_observed_sha256": "c" * 64,
@@ -1387,6 +1408,82 @@ def _write_phrogs_output(path, *rows, header=_PHROGS_HEADER, comments=()):
         + "\n"
         + "".join(f"{row}\n" for row in rows)
     )
+
+
+def _rewrite_phrogs_lookup(manifest, rows, *, lookup_counts):
+    lookup = Path(manifest["lookup_path"])
+    lookup.write_text("phrog\tannot\tcategory\tconfidence\tmatched_term\n" + "".join(rows))
+    manifest["lookup_sha256"] = hashlib.sha256(lookup.read_bytes()).hexdigest()
+    manifest["lookup_counts"] = lookup_counts
+
+
+def _run_phrogs_with_measured_empty_output(tmp_path, manifest):
+    commands = []
+    tool_pin = _mmseqs_pin(tmp_path)
+
+    def runner(command, **kwargs):
+        commands.append(tuple(command))
+        if command[1:] == ["version"]:
+            return subprocess.CompletedProcess(command, 0, stdout=tool_pin.version + "\n", stderr="")
+        Path(command[4]).write_text("")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = run_phrogs(
+        _orf_artifacts(tmp_path),
+        manifest_section=manifest,
+        tool_pin=tool_pin,
+        host_domain=HostDomain.BACTERIA,
+        work_dir=tmp_path / "scan",
+        runner=runner,
+    )
+    return result, commands
+
+
+def test_phrogs_missing_pinned_safety_lookup_counts_is_indeterminate_before_execution(tmp_path):
+    """Removing the cardinality pin must not turn an incomplete safety gate into measured PASS."""
+    manifest = _phrogs_manifest(tmp_path)
+    manifest.pop("lookup_counts")
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("PHROGS_ASSET_PROVENANCE_MISMATCH",)
+    assert commands == []
+
+
+def test_phrogs_self_consistent_truncated_safety_lookup_is_indeterminate_before_execution(tmp_path):
+    """A re-digested lookup missing one reviewed profile must still fail closed before MMseqs runs."""
+    manifest = _phrogs_manifest(tmp_path)
+    lookup_rows = Path(manifest["lookup_path"]).read_text().splitlines(keepends=True)[1:-1]
+    _rewrite_phrogs_lookup(
+        manifest,
+        lookup_rows,
+        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
+    )
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("PHROGS_ASSET_PROVENANCE_MISMATCH",)
+    assert commands == []
+
+
+def test_phrogs_self_consistent_confidence_imbalance_is_indeterminate_before_execution(tmp_path):
+    """Relabeling one pinned high-confidence family as review must fail before MMseqs runs."""
+    manifest = _phrogs_manifest(tmp_path)
+    lookup_rows = Path(manifest["lookup_path"]).read_text().splitlines(keepends=True)[1:]
+    lookup_rows[0] = lookup_rows[0].replace("\thigh_confidence\t", "\treview\t")
+    _rewrite_phrogs_lookup(
+        manifest,
+        lookup_rows,
+        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
+    )
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("PHROGS_ASSET_PROVENANCE_MISMATCH",)
+    assert commands == []
 
 
 def test_phrogs_command_uses_profile_query_against_predicted_orf_target(tmp_path):
@@ -1490,7 +1587,7 @@ def test_phrogs_known_full_profile_without_safety_lookup_mapping_remains_raw_onl
     row = _phrogs_row(profile="phrog_3")
     _write_phrogs_output(output, row)
 
-    result = parse_phrogs_output(
+    result = _parse_phrogs_output_validated(
         output,
         artifacts=_orf_artifacts(tmp_path),
         manifest_section=_phrogs_manifest(tmp_path),
@@ -1558,7 +1655,7 @@ def test_phrogs_header_only_success_is_measured_pass_for_bacterial_profile(tmp_p
     output = tmp_path / "phrogs.tsv"
     _write_phrogs_output(output, comments=("normalized measured MMseqs output",))
 
-    result = parse_phrogs_output(
+    result = _parse_phrogs_output_validated(
         output,
         artifacts=_orf_artifacts(tmp_path),
         manifest_section=_phrogs_manifest(tmp_path),
@@ -1853,3 +1950,223 @@ def test_zero_byte_output_is_unmeasured_not_a_header_only_pass(tmp_path, detecto
 
     assert result.class_result.state is SafetyState.INDETERMINATE
     assert result.class_result.reason_codes == (reason_code,)
+
+
+_ORIGIN_CROSSING_FRAME_ONE = "AAA" * 2 + "TAA" + "AAA" * 4 + "TAA" + "AAA" * 3
+
+
+class _NoGenePredictor:
+    def predict(self, sequence, *, circular):
+        return ()
+
+
+@pytest.mark.parametrize(
+    ("sequence_id", "sequence", "strand", "frame", "linear_coordinates", "crossing_coordinates"),
+    [
+        ("plus_circle", _ORIGIN_CROSSING_FRAME_ONE, "+", 1, (10, 21), (25, 39)),
+        (
+            "minus_circle",
+            _ORIGIN_CROSSING_FRAME_ONE.translate(str.maketrans("ACGT", "TGCA"))[::-1],
+            "-",
+            -1,
+            (13, 24),
+            (28, 42),
+        ),
+    ],
+)
+def test_circular_six_frame_fallback_retains_origin_crossing_peptides_without_duplicate_linear_calls(
+    tmp_path,
+    sequence_id,
+    sequence,
+    strand,
+    frame,
+    linear_coordinates,
+    crossing_coordinates,
+):
+    """Circular fallback must add the wraparound peptide once while retaining each ordinary call once."""
+    linear = prepare_orf_artifacts(
+        (GenomeInput(sequence_id=sequence_id, sequence=sequence, circular=False),),
+        tmp_path / "linear",
+        predictor=_NoGenePredictor(),
+        minimum_fallback_amino_acids=4,
+    )
+    circular = prepare_orf_artifacts(
+        (GenomeInput(sequence_id=sequence_id, sequence=sequence, circular=True),),
+        tmp_path / "circular",
+        predictor=_NoGenePredictor(),
+        minimum_fallback_amino_acids=4,
+    )
+    linear_frame_records = [
+        record for record in linear.query_records if (record.strand, record.frame) == (strand, frame)
+    ]
+    circular_frame_records = [
+        record for record in circular.query_records if (record.strand, record.frame) == (strand, frame)
+    ]
+
+    assert [
+        (record.start, record.end, record.protein)
+        for record in linear_frame_records
+        if (record.start, record.end) == linear_coordinates
+    ] == [(*linear_coordinates, "KKKK")]
+    assert [
+        (record.start, record.end, record.protein, record.evidence_path)
+        for record in circular_frame_records
+        if (record.start, record.end) == linear_coordinates
+    ] == [(*linear_coordinates, "KKKK", "six-frame-fallback")]
+    assert [
+        (record.start, record.end, record.protein, record.evidence_path)
+        for record in circular_frame_records
+        if record.end > len(sequence)
+    ] == [(*crossing_coordinates, "KKKKK", "six-frame-fallback")]
+    assert len({record.query_id for record in circular.query_records}) == len(circular.query_records)
+
+
+def test_public_amrfinder_parser_cannot_pass_unbound_header_only_output(tmp_path):
+    """A stale AMRFinder header cannot certify a completed pinned search without runner evidence."""
+    output = tmp_path / "amrfinder.tsv"
+    _write_amrfinder_output(output)
+
+    result = parse_amrfinder_output(
+        output,
+        artifacts=_orf_artifacts(tmp_path),
+        manifest_section={},
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("AMRFINDER_SEARCH_EVIDENCE_UNVALIDATED",)
+
+
+def test_public_toxin_parser_cannot_pass_output_unbound_from_pinned_tool(tmp_path):
+    """A stale DIAMOND header cannot pass after the purported executable bytes have drifted."""
+    output = tmp_path / "toxin.tsv"
+    _write_diamond_output(output)
+    tool_pin = _diamond_pin(tmp_path)
+    tool_pin.path.write_bytes(b"drifted-diamond")
+
+    result = parse_toxin_diamond_output(
+        output,
+        artifacts=_orf_artifacts(tmp_path),
+        manifest_section=_toxin_manifest(tmp_path),
+        tool_pin=tool_pin,
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("TOXIN_DIAMOND_SEARCH_EVIDENCE_UNVALIDATED",)
+
+
+def test_public_phrogs_parser_cannot_pass_output_unbound_from_pinned_tool(tmp_path):
+    """A stale MMseqs header cannot pass after the purported executable bytes have drifted."""
+    output = tmp_path / "phrogs.tsv"
+    _write_phrogs_output(output)
+    tool_pin = _mmseqs_pin(tmp_path)
+    tool_pin.path.write_bytes(b"drifted-mmseqs")
+
+    result = parse_phrogs_output(
+        output,
+        artifacts=_orf_artifacts(tmp_path),
+        manifest_section=_phrogs_manifest(tmp_path),
+        tool_pin=tool_pin,
+        host_domain=HostDomain.BACTERIA,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("PHROGS_SEARCH_EVIDENCE_UNVALIDATED",)
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+def test_amrfinder_tool_validation_os_errors_are_indeterminate(tmp_path, error_type):
+    """An unreadable or unexecutable AMRFinder pin is unmeasured evidence, not an uncaught exception."""
+
+    def runner(command, **kwargs):
+        raise error_type("tool version unavailable")
+
+    result = run_amrfinder(
+        _orf_artifacts(tmp_path),
+        manifest_section=_amrfinder_manifest(tmp_path),
+        work_dir=tmp_path / "scan",
+        runner=runner,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("AMRFINDER_ASSET_PROVENANCE_MISMATCH",)
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+def test_toxin_tool_validation_os_errors_are_indeterminate(tmp_path, error_type):
+    """An unreadable or unexecutable DIAMOND pin is unmeasured evidence, not an uncaught exception."""
+
+    def runner(command, **kwargs):
+        raise error_type("tool version unavailable")
+
+    result = run_toxin_diamond(
+        _orf_artifacts(tmp_path),
+        manifest_section=_toxin_manifest(tmp_path),
+        tool_pin=_diamond_pin(tmp_path),
+        work_dir=tmp_path / "scan",
+        runner=runner,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("TOXIN_ASSET_PROVENANCE_MISMATCH",)
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+def test_phrogs_tool_validation_os_errors_are_indeterminate(tmp_path, error_type):
+    """An unreadable or unexecutable MMseqs pin is unmeasured evidence, not an uncaught exception."""
+
+    def runner(command, **kwargs):
+        raise error_type("tool version unavailable")
+
+    result = run_phrogs(
+        _orf_artifacts(tmp_path),
+        manifest_section=_phrogs_manifest(tmp_path),
+        tool_pin=_mmseqs_pin(tmp_path),
+        host_domain=HostDomain.BACTERIA,
+        work_dir=tmp_path / "scan",
+        runner=runner,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("PHROGS_ASSET_PROVENANCE_MISMATCH",)
+
+
+def test_six_frame_fallback_deduplicates_exact_primary_call_but_preserves_distinct_evidence_path(tmp_path):
+    """An identical translated call should occur once, while the retained primary record keeps its provenance."""
+
+    class MatchingPredictor:
+        def predict(self, sequence, *, circular):
+            return (
+                PredictedGene(
+                    start=10,
+                    end=21,
+                    strand="+",
+                    nucleotide="AAA" * 4,
+                    protein="KKKK",
+                ),
+            )
+
+    artifacts = prepare_orf_artifacts(
+        (GenomeInput(sequence_id="dedup", sequence=_ORIGIN_CROSSING_FRAME_ONE, circular=False),),
+        tmp_path,
+        predictor=MatchingPredictor(),
+        minimum_fallback_amino_acids=4,
+    )
+
+    exact_calls = [
+        record
+        for record in artifacts.query_records
+        if (record.start, record.end, record.strand, record.protein) == (10, 21, "+", "KKKK")
+    ]
+    assert [(record.query_id, record.evidence_path) for record in exact_calls] == [("dedup__orf0001", "pyrodigal-gv")]
+
+
+@pytest.mark.parametrize("profile_id", ["phrog_0", "phrog_01", "phrog_\u0661"])
+def test_phrogs_profile_identity_rejects_zero_leading_zero_and_unicode_digit_aliases(tmp_path, profile_id):
+    """Only positive ASCII canonical `phrog_N` identifiers may join the pinned profile inventory."""
+    profile_prefix = tmp_path / "phrogs_profile_db"
+    Path(f"{profile_prefix}.lookup").write_text(f"0\t{profile_id}\t0\n")
+
+    with pytest.raises(VerifiedIdentityMappingMissingError, match="invalid or duplicate identity"):
+        _read_phrogs_profile_ids(profile_prefix)

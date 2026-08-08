@@ -252,12 +252,45 @@ def _six_frame_records(
     *,
     minimum_amino_acids: int,
 ) -> list[ORFQueryRecord]:
-    """Translate stop-delimited segments in all six frames with exact genomic coordinates."""
+    """Translate all six frames, adding one normalized origin-crossing segment per circular frame."""
     from Bio.Seq import Seq
 
     records: list[ORFQueryRecord] = []
+    seen: set[tuple[int, int, str, str, str]] = set()
+    segment_counts: dict[int, int] = {}
     sequence_length = len(genome.sequence)
     oriented_sequences = (("+", genome.sequence), ("-", str(Seq(genome.sequence).reverse_complement())))
+
+    def append_record(
+        *,
+        start: int,
+        end: int,
+        strand: str,
+        frame: int,
+        nucleotide: str,
+        protein: str,
+    ) -> None:
+        key = (start, end, strand, nucleotide, protein)
+        if key in seen:
+            return
+        seen.add(key)
+        segment_counts[frame] = segment_counts.get(frame, 0) + 1
+        frame_label = f"p{frame}" if frame > 0 else f"m{-frame}"
+        query_id = f"{genome.sequence_id}__sixframe_{frame_label}_{segment_counts[frame]:04d}"
+        records.append(
+            ORFQueryRecord(
+                query_id=query_id,
+                sequence_id=genome.sequence_id,
+                start=start,
+                end=end,
+                strand=strand,
+                frame=frame,
+                nucleotide=nucleotide,
+                protein=protein,
+                evidence_path="six-frame-fallback",
+            )
+        )
+
     for strand, oriented in oriented_sequences:
         for offset in range(3):
             usable_length = ((len(oriented) - offset) // 3) * 3
@@ -265,14 +298,12 @@ def _six_frame_records(
                 continue
             coding = oriented[offset : offset + usable_length]
             translated = str(Seq(coding).translate())
-            segment_index = 0
             amino_start = 0
             for amino_end in range(len(translated) + 1):
                 if amino_end < len(translated) and translated[amino_end] != "*":
                     continue
                 protein = translated[amino_start:amino_end]
                 if len(protein) >= minimum_amino_acids:
-                    segment_index += 1
                     if strand == "+":
                         start = offset + 3 * amino_start + 1
                         end = offset + 3 * amino_end
@@ -282,20 +313,56 @@ def _six_frame_records(
                         end = sequence_length - (offset + 3 * amino_start)
                         frame = -(offset + 1)
                     nucleotide = coding[3 * amino_start : 3 * amino_end]
-                    frame_label = f"p{frame}" if frame > 0 else f"m{-frame}"
-                    query_id = f"{genome.sequence_id}__sixframe_{frame_label}_{segment_index:04d}"
-                    records.append(
-                        ORFQueryRecord(
-                            query_id=query_id,
-                            sequence_id=genome.sequence_id,
-                            start=start,
-                            end=end,
-                            strand=strand,
-                            frame=frame,
-                            nucleotide=nucleotide,
-                            protein=protein,
-                            evidence_path="six-frame-fallback",
-                        )
+                    append_record(
+                        start=start,
+                        end=end,
+                        strand=strand,
+                        frame=frame,
+                        nucleotide=nucleotide,
+                        protein=protein,
+                    )
+                amino_start = amino_end + 1
+
+    if not genome.circular:
+        return records
+
+    for strand, oriented in oriented_sequences:
+        search_oriented = oriented * 3
+        for offset in range(3):
+            usable_length = ((len(search_oriented) - offset) // 3) * 3
+            coding = search_oriented[offset : offset + usable_length]
+            translated = str(Seq(coding).translate())
+            amino_start = 0
+            for amino_end in range(len(translated) + 1):
+                if amino_end < len(translated) and translated[amino_end] != "*":
+                    continue
+                protein = translated[amino_start:amino_end]
+                nucleotide_start = offset + 3 * amino_start
+                nucleotide_end = offset + 3 * amino_end
+                crosses_center_origin = (
+                    sequence_length <= nucleotide_start < 2 * sequence_length
+                    and nucleotide_end > 2 * sequence_length
+                    and nucleotide_end - nucleotide_start <= sequence_length
+                )
+                if len(protein) >= minimum_amino_acids and crosses_center_origin:
+                    oriented_start = nucleotide_start - sequence_length
+                    oriented_end = nucleotide_end - sequence_length
+                    if strand == "+":
+                        start = oriented_start + 1
+                        end = oriented_end
+                        frame = (start - 1) % 3 + 1
+                    else:
+                        start = 2 * sequence_length - oriented_end + 1
+                        end = 2 * sequence_length - oriented_start
+                        end_on_genome = (end - 1) % sequence_length + 1
+                        frame = -((sequence_length - end_on_genome) % 3 + 1)
+                    append_record(
+                        start=start,
+                        end=end,
+                        strand=strand,
+                        frame=frame,
+                        nucleotide=coding[3 * amino_start : 3 * amino_end],
+                        protein=protein,
                     )
                 amino_start = amino_end + 1
     return records
@@ -335,9 +402,11 @@ def prepare_orf_artifacts(
     gff_lines = ["##gff-version 3"]
     for genome in genomes:
         gff_lines.append(f"##sequence-region {genome.sequence_id} 1 {len(genome.sequence)}")
+        genome_primary_keys: set[tuple[int, int, str, str]] = set()
         calls = selected_predictor.predict(genome.sequence, circular=genome.circular)
         for ordinal, gene in enumerate(calls, start=1):
             query_id = f"{genome.sequence_id}__orf{ordinal:04d}"
+            genome_primary_keys.add((gene.start, gene.end, gene.strand, gene.protein))
             primary_records.append(
                 ORFQueryRecord(
                     query_id=query_id,
@@ -367,7 +436,11 @@ def prepare_orf_artifacts(
                     )
                 )
             )
-        fallback_records.extend(_six_frame_records(genome, minimum_amino_acids=minimum_fallback_amino_acids))
+        fallback_records.extend(
+            record
+            for record in _six_frame_records(genome, minimum_amino_acids=minimum_fallback_amino_acids)
+            if (record.start, record.end, record.strand, record.protein) not in genome_primary_keys
+        )
 
     query_records = (*primary_records, *fallback_records)
     _write_fasta(
@@ -718,6 +791,27 @@ def _indeterminate_adapter_result(
     )
 
 
+def _without_validated_search_pass(
+    result: AdapterResult,
+    *,
+    safety_class: str,
+    reason_code: str,
+) -> AdapterResult:
+    """Keep conservative findings but never certify PASS from a caller-supplied output file."""
+    if result.class_result.state is not SafetyState.PASS:
+        return result
+    return replace(
+        result,
+        class_result=_class_result(
+            safety_class,
+            SafetyState.INDETERMINATE,
+            required=result.class_result.required,
+            findings=tuple(result.class_result.findings),
+            reason_codes=(reason_code,),
+        ),
+    )
+
+
 def _query_record_index(artifacts: ORFArtifacts, *, primary_only: bool = False) -> dict[str, ORFQueryRecord]:
     records = (
         record for record in artifacts.query_records if not primary_only or record.evidence_path == "pyrodigal-gv"
@@ -927,6 +1021,31 @@ def parse_amrfinder_output(
     )
 
 
+_parse_amrfinder_output_validated = parse_amrfinder_output
+
+
+@_bind_result_policy(policy_id=_AMRFINDER_POLICY_ID, policy_sha256=_AMRFINDER_POLICY_SHA256)
+def parse_amrfinder_output(
+    output_tsv: Path,
+    *,
+    artifacts: ORFArtifacts,
+    manifest_section: Mapping[str, object],
+    required: bool,
+) -> AdapterResult:
+    """Parse caller-supplied output conservatively; only :func:`run_amrfinder` may emit measured PASS."""
+    parsed = _parse_amrfinder_output_validated(
+        output_tsv,
+        artifacts=artifacts,
+        manifest_section=manifest_section,
+        required=required,
+    )
+    return _without_validated_search_pass(
+        parsed,
+        safety_class="amr",
+        reason_code="AMRFINDER_SEARCH_EVIDENCE_UNVALIDATED",
+    )
+
+
 def _sha256_path(path: Path) -> str:
     """Match the Task-2 stable digest for a file or directory tree."""
     path = Path(path)
@@ -1008,7 +1127,7 @@ def run_amrfinder(
                 "AMRFinder database version drift: "
                 f"expected {database_version!r}, observed {database_completed.stdout.strip()!r}"
             )
-    except (AssetProvenanceError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+    except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError):
         return _indeterminate_adapter_result(
             "amr", required=required, reason_code="AMRFINDER_ASSET_PROVENANCE_MISMATCH"
         )
@@ -1060,7 +1179,7 @@ def run_amrfinder(
             command=command,
             raw_output_path=output_tsv,
         )
-    parsed = parse_amrfinder_output(
+    parsed = _parse_amrfinder_output_validated(
         output_tsv,
         artifacts=artifacts,
         manifest_section=manifest_section,
@@ -1479,6 +1598,39 @@ def parse_toxin_diamond_output(
     )
 
 
+_parse_toxin_diamond_output_validated = parse_toxin_diamond_output
+
+
+@_bind_result_policy(
+    policy_id=TOXIN_HOMOLOGY_POLICY_V1.policy_id,
+    policy_sha256=TOXIN_HOMOLOGY_POLICY_V1.sha256,
+    policy_kwarg=True,
+)
+def parse_toxin_diamond_output(
+    output_tsv: Path,
+    *,
+    artifacts: ORFArtifacts,
+    manifest_section: Mapping[str, object],
+    tool_pin: ToolPin,
+    required: bool,
+    policy: HomologyPolicy = TOXIN_HOMOLOGY_POLICY_V1,
+) -> AdapterResult:
+    """Parse caller-supplied output conservatively; only :func:`run_toxin_diamond` may emit measured PASS."""
+    parsed = _parse_toxin_diamond_output_validated(
+        output_tsv,
+        artifacts=artifacts,
+        manifest_section=manifest_section,
+        tool_pin=tool_pin,
+        required=required,
+        policy=policy,
+    )
+    return _without_validated_search_pass(
+        parsed,
+        safety_class="toxin",
+        reason_code="TOXIN_DIAMOND_SEARCH_EVIDENCE_UNVALIDATED",
+    )
+
+
 def _write_normalized_header(output_path: Path, columns: tuple[str, ...], raw_path: Path) -> None:
     raw_text = raw_path.read_text()
     if raw_text and not raw_text.endswith("\n"):
@@ -1507,7 +1659,7 @@ def run_toxin_diamond(
     try:
         database_path, _ = _validate_toxin_assets(manifest_section)
         validate_tool_pin(tool_pin, runner=runner, timeout=timeout)
-    except (AssetProvenanceError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+    except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError):
         return _indeterminate_adapter_result("toxin", required=required, reason_code="TOXIN_ASSET_PROVENANCE_MISMATCH")
 
     work_dir = Path(work_dir)
@@ -1567,7 +1719,7 @@ def run_toxin_diamond(
             command=command,
             raw_output_path=raw_output,
         )
-    parsed = parse_toxin_diamond_output(
+    parsed = _parse_toxin_diamond_output_validated(
         normalized_output,
         artifacts=artifacts,
         manifest_section=manifest_section,
@@ -1604,7 +1756,7 @@ _PHROGS_LOOKUP_COLUMNS = ("phrog", "annot", "category", "confidence", "matched_t
 _PHROGS_SEARCH_ORIENTATION = "phrog_profile_query_vs_orf_target"
 _PHROGS_SEARCH_PROFILE_SCOPE = "full_phrogs_v4_profile_database"
 _PHROGS_LOOKUP_JOIN_POLICY = "classify_only_profile_ids_present_in_pinned_lookup"
-_PHROGS_QUERY_ID_PATTERN = r"^phrog_[0-9]+$"
+_PHROGS_QUERY_ID_PATTERN = r"^phrog_[1-9][0-9]*$"
 _PHROGS_UNITS = {"pident": "percent", "qcov": "fraction", "tcov": "fraction"}
 _PHROGS_PROFILE_DATABASE_NAME = "phrogs_profile_db"
 _PHROGS_PROFILE_RELEASE_MARKER = "VERSION_1_8_0"
@@ -1619,6 +1771,13 @@ _PHROGS_PROFILE_LICENSE = "CC BY 4.0"
 _PHROGS_PROFILE_CITATION = "Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353)."
 _PHROGS_MINIMUM_MMSEQS_VERSION = "14"
 _PHROGS_BUILT_WITH_MMSEQS_VERSION = "18.8cc5c"
+_PHROGS_V4_SAFETY_LOOKUP_COUNTS = MappingProxyType(
+    {
+        "total": 109,
+        "high_confidence": 57,
+        "review": 52,
+    }
+)
 
 
 class VerifiedIdentityMappingMissingError(AssetProvenanceError):
@@ -1916,6 +2075,12 @@ def _validate_phrogs_assets(
     ):
         raise AssetProvenanceError("PHROGs profile retrieval provenance is invalid")
 
+    lookup_counts = section.get("lookup_counts")
+    if not isinstance(lookup_counts, Mapping) or dict(lookup_counts) != dict(_PHROGS_V4_SAFETY_LOOKUP_COUNTS):
+        raise AssetProvenanceError(
+            "PHROGs safety lookup cardinality manifest does not match the pinned PHROGs v4 policy"
+        )
+
     lookup_path_value = section.get("lookup_path")
     lookup_digest = section.get("lookup_sha256")
     if not isinstance(lookup_path_value, str) or not isinstance(lookup_digest, str):
@@ -1928,6 +2093,13 @@ def _validate_phrogs_assets(
         raise VerifiedIdentityMappingMissingError(
             "PHROGs safety lookup contains profiles absent from the pinned full profile database"
         )
+    observed_lookup_counts = {
+        "total": len(profiles),
+        "high_confidence": sum(row["confidence"] == "high_confidence" for row in profiles.values()),
+        "review": sum(row["confidence"] == "review" for row in profiles.values()),
+    }
+    if observed_lookup_counts != dict(_PHROGS_V4_SAFETY_LOOKUP_COUNTS):
+        raise AssetProvenanceError("PHROGs safety lookup rows violate the pinned PHROGs v4 cardinality policy")
     database_version = f"{_PHROGS_DATASET_RELEASE} / {_PHROGS_PROFILE_RELEASE}"
     return (
         profile_path,
@@ -2187,6 +2359,41 @@ def parse_phrogs_output(
     )
 
 
+_parse_phrogs_output_validated = parse_phrogs_output
+
+
+@_bind_result_policy(
+    policy_id=PHROGS_HOMOLOGY_POLICY_V1.policy_id,
+    policy_sha256=PHROGS_HOMOLOGY_POLICY_V1.sha256,
+    policy_kwarg=True,
+)
+def parse_phrogs_output(
+    output_tsv: Path,
+    *,
+    artifacts: ORFArtifacts,
+    manifest_section: Mapping[str, object],
+    tool_pin: ToolPin,
+    host_domain: HostDomain,
+    strict_lysis: bool = False,
+    policy: HomologyPolicy = PHROGS_HOMOLOGY_POLICY_V1,
+) -> AdapterResult:
+    """Parse caller-supplied output conservatively; only :func:`run_phrogs` may emit measured PASS."""
+    parsed = _parse_phrogs_output_validated(
+        output_tsv,
+        artifacts=artifacts,
+        manifest_section=manifest_section,
+        tool_pin=tool_pin,
+        host_domain=host_domain,
+        strict_lysis=strict_lysis,
+        policy=policy,
+    )
+    return _without_validated_search_pass(
+        parsed,
+        safety_class="lysogeny",
+        reason_code="PHROGS_SEARCH_EVIDENCE_UNVALIDATED",
+    )
+
+
 @_bind_result_policy(
     policy_id=PHROGS_HOMOLOGY_POLICY_V1.policy_id,
     policy_sha256=PHROGS_HOMOLOGY_POLICY_V1.sha256,
@@ -2222,7 +2429,7 @@ def run_phrogs(
         return _indeterminate_adapter_result(
             "lysogeny", required=required, reason_code="PHROGS_VERIFIED_IDENTITY_MAPPING_MISSING"
         )
-    except (AssetProvenanceError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+    except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError):
         return _indeterminate_adapter_result(
             "lysogeny", required=required, reason_code="PHROGS_ASSET_PROVENANCE_MISMATCH"
         )
@@ -2286,7 +2493,7 @@ def run_phrogs(
             command=command,
             raw_output_path=raw_output,
         )
-    parsed = parse_phrogs_output(
+    parsed = _parse_phrogs_output_validated(
         normalized_output,
         artifacts=artifacts,
         manifest_section=manifest_section,
