@@ -880,6 +880,36 @@ def _complete_phrogs_sequence_database(sequence_database: Path) -> tuple[str, li
     return digest.hexdigest(), sidecar_paths
 
 
+def _snapshot_phrogs_safety_assets(
+    annotation_path: Path,
+    sequence_database: Path,
+    safety_dir: Path,
+) -> tuple[Path, Path]:
+    """Copy a complete PHROGs source/database pair into an unpublished safety generation."""
+    annotation_path = Path(annotation_path)
+    sequence_database = Path(sequence_database)
+    database_sha256, database_files = _complete_phrogs_sequence_database(sequence_database)
+    if not annotation_path.is_file() or annotation_path.stat().st_size == 0:
+        raise FileNotFoundError(f"PHROGs v4 annotation table is required: {annotation_path}")
+
+    snapshot_dir = Path(safety_dir) / "phrogs" / "snapshot"
+    if snapshot_dir.exists():
+        raise FileExistsError(f"PHROGs safety snapshot already exists: {snapshot_dir}")
+    snapshot_dir.mkdir(parents=True)
+    snapshot_annotation_path = snapshot_dir / annotation_path.name
+    shutil.copy2(annotation_path, snapshot_annotation_path)
+    for database_file in database_files:
+        shutil.copy2(database_file, snapshot_dir / database_file.name)
+
+    snapshot_database_path = snapshot_dir / sequence_database.name
+    snapshot_database_sha256, _ = _complete_phrogs_sequence_database(snapshot_database_path)
+    if snapshot_database_sha256 != database_sha256:
+        raise RuntimeError("PHROGs safety snapshot database digest does not match its source")
+    if _sha256_file(snapshot_annotation_path) != _sha256_file(annotation_path):
+        raise RuntimeError("PHROGs safety snapshot annotation digest does not match its source")
+    return snapshot_annotation_path, snapshot_database_path
+
+
 def _write_phrogs_lookup(lookup_path: Path, rows: list[list[str]]) -> None:
     """Atomically replace the generated PHROGs lookup only after all rows validate."""
     lookup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -913,6 +943,7 @@ def prepare_phrogs_safety_metadata(
     manifest_path: Path | None = None,
     manifest: dict | None = None,
     annotation_sha256: str | None = DEFAULT_PHROGS_ANNOTATION_SHA256,
+    annotation_path: Path | None = None,
     sequence_database: Path | None = None,
     safety_dir: Path | None = None,
 ) -> PreparedAsset:
@@ -920,10 +951,12 @@ def prepare_phrogs_safety_metadata(
     if annotation_sha256 is None:
         raise ValueError("PHROGs annotation digest is required before using its metadata")
     external_dir = Path(external_dir)
-    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
-    if not annotation_path.exists():
-        raise FileNotFoundError(f"PHROGs v4 annotation table is required: {annotation_path}")
-    source_sha256 = _verify_sha256(annotation_path, annotation_sha256)
+    selected_annotation_path = (
+        Path(annotation_path) if annotation_path is not None else external_dir / "phrogs" / "phrog_annot_v4.tsv"
+    )
+    if not selected_annotation_path.exists():
+        raise FileNotFoundError(f"PHROGs v4 annotation table is required: {selected_annotation_path}")
+    source_sha256 = _verify_sha256(selected_annotation_path, annotation_sha256)
     selected_sequence_database = (
         Path(sequence_database) if sequence_database is not None else external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
     )
@@ -931,18 +964,18 @@ def prepare_phrogs_safety_metadata(
 
     lookup_rows = []
     selected_phrogs = set()
-    with annotation_path.open(newline="") as source:
+    with selected_annotation_path.open(newline="") as source:
         reader = csv.DictReader(source, delimiter="\t")
         required_columns = {"phrog", "color", "annot", "category"}
         if reader.fieldnames is None or not required_columns.issubset(reader.fieldnames):
-            raise ValueError(f"PHROGs v4 table must contain {sorted(required_columns)}: {annotation_path}")
+            raise ValueError(f"PHROGs v4 table must contain {sorted(required_columns)}: {selected_annotation_path}")
         for row in reader:
             category = row["category"].strip()
             if category.casefold() != PHROGS_INTEGRATION_EXCISION_CATEGORY.casefold():
                 continue
             phrog = row["phrog"].strip()
             if not phrog:
-                raise ValueError(f"PHROGs v4 table has an empty PHROG identifier: {annotation_path}")
+                raise ValueError(f"PHROGs v4 table has an empty PHROG identifier: {selected_annotation_path}")
             if phrog in selected_phrogs:
                 raise ValueError(f"PHROGs lookup has duplicate PHROG identifier: {phrog}")
             selected_phrogs.add(phrog)
@@ -977,7 +1010,7 @@ def prepare_phrogs_safety_metadata(
         {
             "annotation_url": DEFAULT_PHROGS_ANNOTATION_URL,
             "annotation_sha256": normalized_declared_sha256,
-            "source_path": str(annotation_path.resolve()),
+            "source_path": str(selected_annotation_path.resolve()),
             "source_sha256": source_sha256,
             "category": PHROGS_INTEGRATION_EXCISION_CATEGORY,
             "high_confidence_terms": list(PHROGS_HIGH_CONFIDENCE_TERMS),
@@ -1046,6 +1079,7 @@ def prepare_phrogs_mmseqs_db(
 def prepare_phrogs_gpu_sequence_db(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
+    bin_dir: Path | None = None,
     phrogs_fasta_url: str = DEFAULT_PHROGS_FASTA_URL,
     overwrite: bool = False,
     insecure_downloads: bool = False,
@@ -1078,7 +1112,8 @@ def prepare_phrogs_gpu_sequence_db(
                 shutil.copyfileobj(source, output)
 
     seq_db = phrogs_dir / "phrogs_gpu_seq_db"
-    mmseqs_bin = external_dir / "bin" / "mmseqs"
+    selected_bin_dir = Path(bin_dir) if bin_dir is not None else external_dir / "bin"
+    mmseqs_bin = selected_bin_dir / "mmseqs"
     mmseqs_cmd = str(mmseqs_bin) if mmseqs_bin.exists() else "mmseqs"
     subprocess.run([mmseqs_cmd, "createdb", str(combined_fasta), str(seq_db)], check=True)
     subprocess.run(
@@ -1319,57 +1354,80 @@ def prepare_external_assets(
                 insecure_downloads=False,
             )
         )
-    if download_phrogs_annotation:
-        assets.append(
-            prepare_phrogs_annotation(external_dir, overwrite=overwrite, insecure_downloads=insecure_downloads)
-        )
-    if download_arc_evo2:
-        assets.append(
-            prepare_arc_evo2_checkout(
-                external_dir,
-                repo_url=arc_evo2_repo_url,
-                repo_rev=arc_evo2_repo_rev,
+    safety_generation_dir = _create_safety_generation_dir(external_dir) if with_safety else None
+    prepared_phrogs_annotation: PreparedAsset | None = None
+    prepared_phrogs_sequence_database: PreparedAsset | None = None
+    try:
+        if download_phrogs_annotation:
+            phrogs_annotation_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
+            prepared_phrogs_annotation = prepare_phrogs_annotation(
+                phrogs_annotation_dir,
                 overwrite=overwrite,
+                insecure_downloads=insecure_downloads,
             )
-        )
-    if download_large_databases:
-        assets.append(
-            prepare_phrogs_mmseqs_db(
-                external_dir,
-                phrogs_mmseqs_url=phrogs_mmseqs_url,
-                overwrite=overwrite,
-                insecure_downloads=False,
+            assets.append(prepared_phrogs_annotation)
+        if download_arc_evo2:
+            assets.append(
+                prepare_arc_evo2_checkout(
+                    external_dir,
+                    repo_url=arc_evo2_repo_url,
+                    repo_rev=arc_evo2_repo_rev,
+                    overwrite=overwrite,
+                )
             )
-        )
-        assets.append(
-            prepare_phrogs_gpu_sequence_db(
-                external_dir,
+        if download_large_databases:
+            assets.append(
+                prepare_phrogs_mmseqs_db(
+                    external_dir,
+                    phrogs_mmseqs_url=phrogs_mmseqs_url,
+                    overwrite=overwrite,
+                    insecure_downloads=False,
+                )
+            )
+            phrogs_sequence_database_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
+            prepared_phrogs_sequence_database = prepare_phrogs_gpu_sequence_db(
+                phrogs_sequence_database_dir,
+                bin_dir=target_bin_dir,
                 phrogs_fasta_url=phrogs_fasta_url,
                 overwrite=overwrite,
                 insecure_downloads=False,
             )
-        )
-        if download_checkv:
-            assets.append(prepare_checkv_database(external_dir, bin_dir=target_bin_dir, overwrite=overwrite))
-    if with_safety:
-        selected_safety_manifest = (
-            Path(safety_manifest) if safety_manifest is not None else external_dir / "safety" / "asset_manifest.yaml"
-        )
-        selected_sequence_database = external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
-        _complete_phrogs_sequence_database(selected_sequence_database)
-        previous_manifest = _read_safety_manifest(selected_safety_manifest)
-        staged_manifest: dict = {"schema_version": 1}
-        _set_safety_manifest_recipe(staged_manifest)
-        generation_dir = _create_safety_generation_dir(external_dir)
-        try:
-            generation_bin_dir = generation_dir / "bin"
+            assets.append(prepared_phrogs_sequence_database)
+            if download_checkv:
+                assets.append(prepare_checkv_database(external_dir, bin_dir=target_bin_dir, overwrite=overwrite))
+        if with_safety:
+            assert safety_generation_dir is not None
+            selected_safety_manifest = (
+                Path(safety_manifest)
+                if safety_manifest is not None
+                else external_dir / "safety" / "asset_manifest.yaml"
+            )
+            selected_annotation_path = (
+                prepared_phrogs_annotation.path
+                if prepared_phrogs_annotation is not None
+                else external_dir / "phrogs" / "phrog_annot_v4.tsv"
+            )
+            selected_sequence_database = (
+                prepared_phrogs_sequence_database.path
+                if prepared_phrogs_sequence_database is not None
+                else external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
+            )
+            snapshot_annotation_path, snapshot_sequence_database = _snapshot_phrogs_safety_assets(
+                selected_annotation_path,
+                selected_sequence_database,
+                safety_generation_dir,
+            )
+            previous_manifest = _read_safety_manifest(selected_safety_manifest)
+            staged_manifest: dict = {"schema_version": 1}
+            _set_safety_manifest_recipe(staged_manifest)
+            generation_bin_dir = safety_generation_dir / "bin"
             assets.append(
                 prepare_amrfinder_plus(
                     external_dir,
                     bin_dir=generation_bin_dir,
                     prerequisite_bin_dir=target_bin_dir,
-                    database_dir=generation_dir / "amrfinder" / "database",
-                    safety_dir=generation_dir,
+                    database_dir=safety_generation_dir / "amrfinder" / "database",
+                    safety_dir=safety_generation_dir,
                     manifest=staged_manifest,
                     overwrite=overwrite,
                     insecure_downloads=False,
@@ -1379,7 +1437,7 @@ def prepare_external_assets(
                 prepare_toxin_reference(
                     external_dir,
                     diamond_bin=target_bin_dir / "diamond",
-                    safety_dir=generation_dir,
+                    safety_dir=safety_generation_dir,
                     manifest=staged_manifest,
                     existing_manifest=previous_manifest,
                     overwrite=overwrite,
@@ -1389,17 +1447,19 @@ def prepare_external_assets(
             assets.append(
                 prepare_phrogs_safety_metadata(
                     external_dir,
-                    safety_dir=generation_dir,
+                    safety_dir=safety_generation_dir,
                     manifest=staged_manifest,
-                    sequence_database=selected_sequence_database,
+                    annotation_path=snapshot_annotation_path,
+                    sequence_database=snapshot_sequence_database,
                 )
             )
             _validate_staged_safety_manifest(staged_manifest, verify_asset_paths=True)
             _write_safety_manifest_atomic(selected_safety_manifest, staged_manifest)
-        except Exception:
-            shutil.rmtree(generation_dir, ignore_errors=True)
-            raise
-    return assets
+        return assets
+    except Exception:
+        if safety_generation_dir is not None:
+            shutil.rmtree(safety_generation_dir, ignore_errors=True)
+        raise
 
 
 def main() -> None:
