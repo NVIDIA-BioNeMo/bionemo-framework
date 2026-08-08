@@ -16,6 +16,9 @@
 """Pluggable reward functions for Evo2 phage design RL."""
 
 import argparse
+import hashlib
+import json
+import math
 import os
 import re
 import shutil
@@ -25,11 +28,14 @@ import time
 import uuid
 import warnings
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
+from bionemo.evo2_phage_gen import sequence_safety_cli
+from bionemo.evo2_phage_gen.design_scope import HostDomain, HostEvidence
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig, add_nucleotide_metrics, load_fasta_records, save_fasta
 
 
@@ -47,6 +53,7 @@ ARC_PATH_KEYS = (
     "reference_genome_gff_file_save_location",
 )
 TIMING_COLUMN_PREFIX = "timing/phage_qc/"
+SEQUENCE_SAFETY_CLASSES = ("amr", "toxin", "lysogeny")
 
 
 def _attach_timing_columns(scored_df: pd.DataFrame, timings: dict[str, float]) -> pd.DataFrame:
@@ -86,7 +93,7 @@ class RewardComponent:
     """A swappable 0-1 reward component used by the aggregate RL score."""
 
     name: str
-    weight_attr: str
+    weight_attr: str | None
     score_column: str
     required_for_binary_pass: bool = True
 
@@ -119,6 +126,9 @@ REWARD_COMPONENTS: tuple[RewardComponent, ...] = (
         "reward_mmseqs_cluster_diversity",
         required_for_binary_pass=False,
     ),
+    RewardComponent("safety_amr", None, "reward_safety_amr"),
+    RewardComponent("safety_toxin", None, "reward_safety_toxin"),
+    RewardComponent("safety_lysogeny", None, "reward_safety_lysogeny"),
 )
 
 
@@ -165,6 +175,71 @@ class MMseqsClusterDiversityConfig:
     cluster_mode: int = 0
     threads: int | None = None
     verbosity: int = 0
+
+
+@dataclass(frozen=True)
+class SequenceSafetyRewardConfig:
+    """Configuration for manifest-backed Task 4 sequence-safety rewards."""
+
+    host_domain: HostDomain
+    host_evidence: HostEvidence
+    asset_manifest_path: Path
+    diamond_tool_pin_path: Path
+    mmseqs_tool_pin_path: Path
+    policy_path: Path = Path("configs/phage_safety_policy.yaml")
+    work_dir: Path = Path("data/checkpoints/phage_sequence_safety_reward")
+    enabled: bool = True
+    strict_lysis: bool = False
+    circular: bool = True
+    threads: int = 1
+    timeout_seconds: float = 300.0
+
+
+def _sequence_safety_config_is_valid(config: object) -> bool:
+    """Validate runtime types and bounds before any safety configuration can influence eligibility."""
+    if type(config) is not SequenceSafetyRewardConfig:
+        return False
+    if type(config.host_domain) is not HostDomain or config.host_domain not in {
+        HostDomain.BACTERIA,
+        HostDomain.ARCHAEA,
+        HostDomain.BACTERIA_AND_ARCHAEA,
+    }:
+        return False
+    if type(config.host_evidence) is not HostEvidence:
+        return False
+    evidence = config.host_evidence
+    if (
+        type(evidence.source) is not str
+        or (evidence.source_version is not None and type(evidence.source_version) is not str)
+        or type(evidence.confirmed) is not bool
+        or any(type(domain) is not HostDomain for domain in evidence.replication_host_domains)
+    ):
+        return False
+    path_values = (
+        config.asset_manifest_path,
+        config.diamond_tool_pin_path,
+        config.mmseqs_tool_pin_path,
+        config.policy_path,
+        config.work_dir,
+    )
+    if not all(isinstance(path, Path) for path in path_values):
+        return False
+    if any(type(value) is not bool for value in (config.enabled, config.strict_lysis, config.circular)):
+        return False
+    if type(config.threads) is not int or config.threads < 1:
+        return False
+    if (
+        not isinstance(config.timeout_seconds, Real)
+        or isinstance(config.timeout_seconds, bool)
+        or not math.isfinite(float(config.timeout_seconds))
+        or config.timeout_seconds <= 0
+    ):
+        return False
+    try:
+        json.dumps(config.host_evidence.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _recipe_path(path: str | Path) -> Path:
@@ -452,10 +527,18 @@ def _active_reward_components(weights: RewardWeights, scored_df: pd.DataFrame) -
     """Return weighted reward components whose score columns are available."""
     active_components = []
     for component in REWARD_COMPONENTS:
+        if component.weight_attr is None:
+            continue
         weight = float(getattr(weights, component.weight_attr))
         if weight > 0.0 and component.score_column in scored_df:
             active_components.append((weight, component))
     return active_components
+
+
+def _exact_safety_gate_pass_mask(scored_df: pd.DataFrame) -> pd.Series:
+    """Accept only a real numeric scalar equal to one, never bools or numeric strings."""
+    values = scored_df.get("safety_gate_pass", pd.Series(0.0, index=scored_df.index))
+    return values.map(lambda value: isinstance(value, Real) and not isinstance(value, bool) and value == 1.0)
 
 
 def _aggregate_reward(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.DataFrame:
@@ -471,15 +554,33 @@ def _aggregate_reward(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Dat
         weighted_sum = weighted_sum + weight * scored_df[component.score_column]
         total_weight += weight
 
-    scored_df["reward"] = weighted_sum / total_weight
+    scored_df["reward_historical"] = weighted_sum / total_weight
+    safety_gate_pass = _exact_safety_gate_pass_mask(scored_df)
+    scored_df["reward_safety_penalty"] = (~safety_gate_pass).astype(float)
+    scored_df["reward"] = (scored_df["reward_historical"] - scored_df["reward_safety_penalty"]).clip(0.0, 1.0)
     scored_df["reward_active_components"] = ",".join(component.name for _, component in active_components)
     scored_df["reward_total_weight"] = total_weight
+    historical_binary_pass = _historical_binary_core_pass_mask(scored_df, weights)
+    scored_df["reward_binary_historical_core_pass"] = historical_binary_pass.astype(float)
+    scored_df["reward_binary_historical_core_cluster_deduplicated_pass"] = binary_cluster_deduplicated_pass_mask(
+        scored_df,
+        historical_binary_pass,
+    ).astype(float)
     binary_pass = binary_core_pass_mask(scored_df, weights)
     scored_df["reward_binary_core_pass"] = binary_pass.astype(float)
     scored_df["reward_binary_core_cluster_deduplicated_pass"] = binary_cluster_deduplicated_pass_mask(
         scored_df,
         binary_pass,
     ).astype(float)
+    historical_full_qc_pass = _historical_binary_full_qc_pass_mask(scored_df, historical_binary_pass)
+    if historical_full_qc_pass is not None:
+        scored_df["reward_binary_historical_full_qc_pass"] = historical_full_qc_pass.astype(float)
+        scored_df["reward_binary_historical_full_qc_cluster_deduplicated_pass"] = (
+            binary_cluster_deduplicated_pass_mask(
+                scored_df,
+                historical_full_qc_pass,
+            ).astype(float)
+        )
     full_qc_pass = binary_full_qc_pass_mask(scored_df, binary_pass)
     if full_qc_pass is not None:
         scored_df["reward_binary_full_qc_pass"] = full_qc_pass.astype(float)
@@ -490,8 +591,8 @@ def _aggregate_reward(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Dat
     return scored_df
 
 
-def binary_core_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Series:
-    """Return the lab-facing binary pass mask for active non-diversity criteria."""
+def _historical_binary_core_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Series:
+    """Return the pre-safety binary pass mask for paper comparability."""
     active_components = [
         component
         for _, component in _active_reward_components(weights, scored_df)
@@ -505,33 +606,52 @@ def binary_core_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd
     return pass_mask
 
 
+def binary_core_pass_mask(scored_df: pd.DataFrame, weights: RewardWeights) -> pd.Series:
+    """Return the safety-qualified lab-facing binary pass mask."""
+    historical_pass = _historical_binary_core_pass_mask(scored_df, weights)
+    return historical_pass & _exact_safety_gate_pass_mask(scored_df)
+
+
 def binary_cluster_deduplicated_pass_mask(scored_df: pd.DataFrame, pass_mask: pd.Series) -> pd.Series:
     """Return one passing representative per MMseqs cluster when cluster data is available."""
-    pass_mask = pass_mask.astype(bool)
-    deduplicated = pd.Series(False, index=scored_df.index)
+    if len(pass_mask) != len(scored_df):
+        raise ValueError("binary pass mask length does not match scored rows")
+    positions = pd.RangeIndex(len(scored_df))
+    positional_pass = pd.Series(pass_mask.astype(bool).to_numpy(), index=positions)
+    deduplicated = pd.Series(False, index=positions)
     if not {"mmseqs_cluster_id", "mmseqs_cluster_size"}.issubset(scored_df.columns):
-        deduplicated.loc[pass_mask] = True
-        return deduplicated
+        deduplicated.loc[positional_pass] = True
+        return pd.Series(deduplicated.to_numpy(), index=scored_df.index)
 
-    cluster_sizes = pd.to_numeric(scored_df["mmseqs_cluster_size"], errors="coerce").fillna(0).astype(int)
-    cluster_ids = scored_df["mmseqs_cluster_id"].astype(str)
-    clustered_pass = pass_mask & (cluster_sizes > 0) & (cluster_ids != "")
-    for _cluster_id, cluster_df in scored_df.loc[clustered_pass].groupby(cluster_ids[clustered_pass], sort=False):
-        deduplicated.loc[cluster_df.index[0]] = True
+    cluster_sizes = pd.Series(
+        pd.to_numeric(scored_df["mmseqs_cluster_size"], errors="coerce").fillna(0).astype(int).to_numpy(),
+        index=positions,
+    )
+    cluster_ids = pd.Series(scored_df["mmseqs_cluster_id"].astype(str).to_numpy(), index=positions)
+    clustered_pass = positional_pass & (cluster_sizes > 0) & (cluster_ids != "")
+    cluster_rows = pd.DataFrame({"cluster_id": cluster_ids}).loc[clustered_pass]
+    for _cluster_id, cluster_df in cluster_rows.groupby("cluster_id", sort=False):
+        deduplicated.iloc[cluster_df.index[0]] = True
 
     if "mmseqs_cluster_valid_for_clustering" in scored_df:
-        valid_for_clustering = (
-            pd.to_numeric(scored_df["mmseqs_cluster_valid_for_clustering"], errors="coerce").fillna(0.0) > 0.0
+        valid_for_clustering = pd.Series(
+            (
+                pd.to_numeric(scored_df["mmseqs_cluster_valid_for_clustering"], errors="coerce").fillna(0.0) > 0.0
+            ).to_numpy(),
+            index=positions,
         )
-        nonclusterable_pass = pass_mask & ~valid_for_clustering
+        nonclusterable_pass = positional_pass & ~valid_for_clustering
     else:
-        nonclusterable_pass = pass_mask & ~clustered_pass
+        nonclusterable_pass = positional_pass & ~clustered_pass
     deduplicated.loc[nonclusterable_pass] = True
-    return deduplicated
+    return pd.Series(deduplicated.to_numpy(), index=scored_df.index)
 
 
-def binary_full_qc_pass_mask(scored_df: pd.DataFrame, binary_pass: pd.Series) -> pd.Series | None:
-    """Return binary pass plus available full Arc QC gates such as synteny, AAI, and required genes."""
+def _historical_binary_full_qc_pass_mask(
+    scored_df: pd.DataFrame,
+    binary_pass: pd.Series,
+) -> pd.Series | None:
+    """Return the pre-safety core pass plus available full Arc QC gates."""
     full_qc_pass_columns = [
         "reward_external_synteny_pass",
         "reward_external_average_protein_identity_pass",
@@ -547,12 +667,372 @@ def binary_full_qc_pass_mask(scored_df: pd.DataFrame, binary_pass: pd.Series) ->
     return pass_mask
 
 
+def binary_full_qc_pass_mask(scored_df: pd.DataFrame, binary_pass: pd.Series) -> pd.Series | None:
+    """Return safety-qualified binary pass plus available full Arc QC gates."""
+    pass_mask = _historical_binary_full_qc_pass_mask(scored_df, binary_pass)
+    if pass_mask is None:
+        return None
+    return pass_mask & _exact_safety_gate_pass_mask(scored_df)
+
+
+def _sequence_safety_required_by_class(config: SequenceSafetyRewardConfig) -> dict[str, bool]:
+    """Mirror Task 4 applicability for fail-closed rows that lack a scan manifest."""
+    lysogeny_required = config.host_domain is not HostDomain.ARCHAEA or config.strict_lysis
+    return {"amr": True, "toxin": True, "lysogeny": lysogeny_required}
+
+
+def _add_unavailable_sequence_safety_rewards(
+    scored_df: pd.DataFrame,
+    *,
+    reason_code: str,
+    required_by_class: dict[str, bool] | None = None,
+    strict_lysis: bool = False,
+) -> pd.DataFrame:
+    """Attach explicit fail-closed telemetry when no trusted scan can be used."""
+    if type(strict_lysis) is not bool:
+        raise ValueError("sequence-safety strict_lysis telemetry must be a boolean")
+    required_classes = dict.fromkeys(SEQUENCE_SAFETY_CLASSES, True) if required_by_class is None else required_by_class
+    if set(required_classes) != set(SEQUENCE_SAFETY_CLASSES) or not all(
+        type(required) is bool for required in required_classes.values()
+    ):
+        raise ValueError("sequence-safety applicability must define every class as required or informational")
+    reasons_json = json.dumps([reason_code], separators=(",", ":"))
+    defaults: dict[str, object] = {
+        "safety_gate_state": "INDETERMINATE",
+        "safety_gate_pass": 0.0,
+        "safety_gate_reason_codes": reasons_json,
+        "safety_environment_healthy": 0.0,
+        "safety_gate_measurement_available": 0.0,
+        "safety_required_class_count": sum(required_classes.values()),
+        "safety_required_class_pass_count": 0,
+        "safety_scan_record_id": "",
+        "safety_scan_input_index": -1,
+    }
+    for safety_class in SEQUENCE_SAFETY_CLASSES:
+        prefix = f"safety_{safety_class}"
+        required = required_classes[safety_class]
+        defaults.update(
+            {
+                f"{prefix}_state": "INDETERMINATE",
+                f"{prefix}_required": float(required),
+                f"{prefix}_reason_codes": reasons_json,
+                f"{prefix}_finding_count": 0,
+                f"{prefix}_measurement_available": 0.0,
+                f"{prefix}_execution_status": "NOT_STARTED",
+                f"{prefix}_policy_id": "",
+                f"{prefix}_policy_sha256": "",
+                f"reward_safety_{safety_class}": float(not required),
+            }
+        )
+    for column in (
+        "safety_policy_id",
+        "safety_policy_sha256",
+        "safety_asset_manifest_sha256",
+        "safety_asset_recipe_sha256",
+        "safety_scan_manifest_path",
+        "safety_scan_manifest_sha256",
+        "safety_resolved_profile",
+        "safety_diamond_tool_sha256",
+        "safety_mmseqs_tool_sha256",
+        "safety_orf_identity_sha256",
+    ):
+        defaults[column] = ""
+    defaults["safety_strict_lysis"] = strict_lysis
+    original_index = scored_df.index
+    base = scored_df.drop(columns=[column for column in defaults if column in scored_df]).reset_index(drop=True)
+    telemetry = pd.DataFrame(
+        {column: [value] * len(base) for column, value in defaults.items()},
+        index=base.index,
+    )
+    combined = pd.concat([base, telemetry], axis=1).copy()
+    combined.index = original_index
+    return combined
+
+
+def _sequence_is_scannable(sequence: object) -> bool:
+    """Match the Task 4 normalized nucleotide alphabet without rewriting invalid generations."""
+    return isinstance(sequence, str) and re.fullmatch(r"[ACGTNacgtn]+", sequence) is not None
+
+
+def _set_row_values(scored_df: pd.DataFrame, position: int, values: dict[str, object]) -> None:
+    """Set telemetry by row position so duplicate caller indexes cannot alter manifest mapping."""
+    for column, value in values.items():
+        if column not in scored_df:
+            scored_df[column] = ""
+        scored_df.iloc[position, scored_df.columns.get_loc(column)] = value
+
+
+def _set_unavailable_reason(scored_df: pd.DataFrame, positions: list[int], reason_code: str) -> None:
+    """Set one fail-closed reason consistently on a subset of unqualified records."""
+    reasons = json.dumps([reason_code], separators=(",", ":"))
+    for position in positions:
+        values = {"safety_gate_reason_codes": reasons}
+        values.update({f"safety_{safety_class}_reason_codes": reasons for safety_class in SEQUENCE_SAFETY_CLASSES})
+        _set_row_values(scored_df, position, values)
+
+
+def _json_reason_codes(value: object) -> str:
+    """Serialize validated manifest reason-code lists without Python repr ambiguity."""
+    if not isinstance(value, list) or not all(isinstance(reason, str) for reason in value):
+        raise ValueError("sequence-safety reason codes must be a string list")
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+
+
+def _manifest_safety_row(
+    record: object,
+    *,
+    expected_input_index: int,
+    expected_record_id: str,
+    manifest: dict[str, object],
+    manifest_path: Path,
+    manifest_sha256: str,
+) -> dict[str, object]:
+    """Convert one strictly validated Task 4 record into reward telemetry."""
+    if not isinstance(record, dict):
+        raise ValueError("sequence-safety manifest record must be a mapping")
+    if type(record.get("input_index")) is not int or record["input_index"] != expected_input_index:
+        raise ValueError("sequence-safety manifest input-index mapping drift")
+    if record.get("record_id") != expected_record_id:
+        raise ValueError("sequence-safety manifest record-ID mapping drift")
+    class_results = record.get("class_results")
+    adapter_attempts = record.get("adapter_attempts")
+    if (
+        not isinstance(class_results, list)
+        or len(class_results) != len(SEQUENCE_SAFETY_CLASSES)
+        or not isinstance(adapter_attempts, list)
+        or len(adapter_attempts) != len(SEQUENCE_SAFETY_CLASSES)
+    ):
+        raise ValueError("sequence-safety class telemetry is missing")
+    class_by_name = {result.get("safety_class"): result for result in class_results if isinstance(result, dict)}
+    attempt_by_name = {
+        attempt.get("safety_class"): attempt for attempt in adapter_attempts if isinstance(attempt, dict)
+    }
+    if set(class_by_name) != set(SEQUENCE_SAFETY_CLASSES) or set(attempt_by_name) != set(SEQUENCE_SAFETY_CLASSES):
+        raise ValueError("sequence-safety class inventory drift")
+
+    policy = manifest.get("policy")
+    assets = manifest.get("safety_asset_manifest")
+    profile = manifest.get("resolved_profile")
+    tools = manifest.get("tools")
+    if not all(isinstance(value, dict) for value in (policy, assets, profile, tools)):
+        raise ValueError("sequence-safety provenance is incomplete")
+    diamond = tools.get("diamond")
+    mmseqs = tools.get("mmseqs")
+    orf_predictor = tools.get("orf_predictor")
+    if not all(isinstance(value, dict) for value in (diamond, mmseqs, orf_predictor)):
+        raise ValueError("sequence-safety tool provenance is incomplete")
+
+    declared_state = record.get("state")
+    if declared_state not in {"PASS", "FAIL", "INDETERMINATE"}:
+        raise ValueError("sequence-safety gate state is invalid")
+    record_reasons = record.get("reason_codes")
+    record_reasons_json = _json_reason_codes(record_reasons)
+    values: dict[str, object] = {
+        "safety_scan_record_id": expected_record_id,
+        "safety_scan_input_index": expected_input_index,
+        "safety_gate_state": declared_state,
+        "safety_gate_pass": float(declared_state == "PASS"),
+        "safety_gate_reason_codes": record_reasons_json,
+        "safety_policy_id": policy.get("policy_id"),
+        "safety_policy_sha256": policy.get("canonical_sha256"),
+        "safety_asset_manifest_sha256": assets.get("sha256"),
+        "safety_asset_recipe_sha256": assets.get("recipe_sha256"),
+        "safety_scan_manifest_path": str(manifest_path),
+        "safety_scan_manifest_sha256": manifest_sha256,
+        "safety_resolved_profile": profile.get("host_domain"),
+        "safety_strict_lysis": profile.get("strict_lysis"),
+        "safety_diamond_tool_sha256": diamond.get("sha256"),
+        "safety_mmseqs_tool_sha256": mmseqs.get("sha256"),
+        "safety_orf_identity_sha256": orf_predictor.get("identity_sha256"),
+    }
+    required_count = 0
+    required_pass_count = 0
+    required_measurements: list[bool] = []
+    required_states: list[str] = []
+    recomputed_reasons: list[str] = []
+    for safety_class in SEQUENCE_SAFETY_CLASSES:
+        result = class_by_name[safety_class]
+        attempt = attempt_by_name[safety_class]
+        class_state = result.get("state")
+        required = result.get("required")
+        findings = result.get("findings")
+        class_reasons = result.get("reason_codes")
+        execution_status = attempt.get("execution_status")
+        if (
+            class_state not in {"PASS", "FAIL", "INDETERMINATE"}
+            or type(required) is not bool
+            or not isinstance(findings, list)
+            or not isinstance(execution_status, str)
+        ):
+            raise ValueError("sequence-safety class telemetry is invalid")
+        class_reasons_json = _json_reason_codes(class_reasons)
+        recomputed_reasons.extend(class_reasons)
+        measured = execution_status == "COMPLETED_AND_PARSED"
+        if required:
+            required_count += 1
+            required_pass_count += int(class_state == "PASS")
+            required_measurements.append(measured)
+            required_states.append(class_state)
+        prefix = f"safety_{safety_class}"
+        values.update(
+            {
+                f"{prefix}_state": class_state,
+                f"{prefix}_required": float(required),
+                f"{prefix}_reason_codes": class_reasons_json,
+                f"{prefix}_finding_count": len(findings),
+                f"{prefix}_measurement_available": float(measured),
+                f"{prefix}_execution_status": execution_status,
+                f"{prefix}_policy_id": attempt.get("policy_id"),
+                f"{prefix}_policy_sha256": attempt.get("policy_sha256"),
+                f"reward_safety_{safety_class}": float(not required or class_state == "PASS"),
+            }
+        )
+    if not required_states:
+        recomputed_state = "INDETERMINATE"
+    elif "FAIL" in required_states:
+        recomputed_state = "FAIL"
+    elif "INDETERMINATE" in required_states:
+        recomputed_state = "INDETERMINATE"
+    else:
+        recomputed_state = "PASS"
+    recomputed_reasons = list(dict.fromkeys(recomputed_reasons))
+    if declared_state != recomputed_state or record_reasons != recomputed_reasons:
+        raise ValueError("sequence-safety record aggregate drift")
+    environment_healthy = bool(required_measurements) and all(required_measurements)
+    if recomputed_state == "PASS" and not environment_healthy:
+        raise ValueError("sequence-safety PASS lacks measured required-class support")
+    values["safety_environment_healthy"] = float(environment_healthy)
+    values["safety_gate_measurement_available"] = float(environment_healthy)
+    values["safety_required_class_count"] = required_count
+    values["safety_required_class_pass_count"] = required_pass_count
+    return values
+
+
+def _sequence_safety_scan_argv(
+    *,
+    input_fasta: Path,
+    output_dir: Path,
+    config: SequenceSafetyRewardConfig,
+) -> list[str]:
+    """Build the Task 4 scan invocation from typed reward configuration."""
+    argv = [
+        "scan",
+        "--input-fasta",
+        str(input_fasta),
+        "--output-dir",
+        str(output_dir),
+        "--policy",
+        str(_recipe_path(config.policy_path)),
+        "--asset-manifest",
+        str(_recipe_path(config.asset_manifest_path)),
+        "--host-domain",
+        config.host_domain.value,
+        "--host-evidence-json",
+        json.dumps(config.host_evidence.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
+        "--diamond-tool-pin",
+        str(_recipe_path(config.diamond_tool_pin_path)),
+        "--mmseqs-tool-pin",
+        str(_recipe_path(config.mmseqs_tool_pin_path)),
+        "--threads",
+        str(config.threads),
+        "--timeout",
+        str(config.timeout_seconds),
+    ]
+    if config.strict_lysis:
+        argv.append("--strict-lysis")
+    if not config.circular:
+        argv.append("--linear")
+    return argv
+
+
+def add_sequence_safety_rewards(
+    scored_df: pd.DataFrame,
+    config: SequenceSafetyRewardConfig,
+) -> pd.DataFrame:
+    """Run Task 4 and consume only its revalidated published scan manifest."""
+    if not _sequence_safety_config_is_valid(config):
+        return _add_unavailable_sequence_safety_rewards(
+            scored_df.copy(),
+            reason_code="SEQUENCE_SAFETY_CONFIG_INVALID",
+        )
+    result = _add_unavailable_sequence_safety_rewards(
+        scored_df.copy(),
+        reason_code="SEQUENCE_SAFETY_RECORD_UNSCANNABLE",
+        required_by_class=_sequence_safety_required_by_class(config),
+        strict_lysis=config.strict_lysis,
+    )
+    valid_positions = [
+        position for position, sequence in enumerate(result["sequence"].tolist()) if _sequence_is_scannable(sequence)
+    ]
+    if not valid_positions:
+        return result
+    _set_unavailable_reason(result, valid_positions, "SEQUENCE_SAFETY_SCAN_UNAVAILABLE")
+    try:
+        work_dir = _recipe_path(config.work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = work_dir / f"batch_{uuid.uuid4().hex}"
+        run_dir.mkdir()
+        input_fasta = run_dir / "input.fasta"
+        output_dir = run_dir / "scan"
+        record_ids = [f"safety_record_{position:06d}" for position in valid_positions]
+        scan_df = pd.DataFrame(
+            {
+                "id_prompt": record_ids,
+                "sequence": [result.iloc[position]["sequence"] for position in valid_positions],
+            }
+        )
+        save_fasta(scan_df, input_fasta)
+        exit_code = sequence_safety_cli.main(
+            _sequence_safety_scan_argv(
+                input_fasta=input_fasta,
+                output_dir=output_dir,
+                config=config,
+            )
+        )
+        if exit_code not in {0, 2, 3}:
+            raise RuntimeError(f"sequence-safety scanner returned unsupported exit code {exit_code}")
+        manifest_path = (output_dir / "manifest.json").absolute()
+        manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        try:
+            manifest = sequence_safety_cli.validate_manifest_file(
+                manifest_path,
+                expected_type="sequence_safety_scan",
+            )
+            if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != manifest_sha256:
+                raise ValueError("sequence-safety manifest changed during reward mapping")
+            if not isinstance(manifest, dict) or manifest.get("manifest_type") != "sequence_safety_scan":
+                raise ValueError("sequence-safety scan did not publish a trusted scan manifest")
+            records = manifest.get("records")
+            if not isinstance(records, list) or len(records) != len(valid_positions):
+                raise ValueError("sequence-safety manifest record inventory drift")
+            mapped_rows = [
+                _manifest_safety_row(
+                    record,
+                    expected_input_index=scan_index,
+                    expected_record_id=record_id,
+                    manifest=manifest,
+                    manifest_path=manifest_path,
+                    manifest_sha256=manifest_sha256,
+                )
+                for scan_index, (record_id, record) in enumerate(zip(record_ids, records, strict=True))
+            ]
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            _set_unavailable_reason(result, valid_positions, "SEQUENCE_SAFETY_MANIFEST_REJECTED")
+            return result
+        for position, values in zip(valid_positions, mapped_rows, strict=True):
+            _set_row_values(result, position, values)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return result
+    return result
+
+
 def score_nucleotide_metrics(
     sequences_df: pd.DataFrame,
     config: NucleotideQCConfig = NucleotideQCConfig(),
     weights: RewardWeights = RewardWeights(),
     external_qc: ExternalQCRewardConfig | None = None,
     mmseqs_cluster_diversity: MMseqsClusterDiversityConfig | None = None,
+    sequence_safety: SequenceSafetyRewardConfig | None = None,
 ) -> pd.DataFrame:
     """Score sequences with nucleotide QC, optional external QC, and optional batch diversity."""
     timings: dict[str, float] = {"reward/begin_unix_s": time.time()}
@@ -596,6 +1076,22 @@ def score_nucleotide_metrics(
         phase_start = time.perf_counter()
         df = add_mmseqs_cluster_diversity_rewards(df, config, mmseqs_cluster_diversity)
         _record_elapsed(timings, "reward/mmseqs_cluster_diversity_s", phase_start)
+
+    if sequence_safety is None:
+        df = _add_unavailable_sequence_safety_rewards(df, reason_code="SEQUENCE_SAFETY_CONFIG_MISSING")
+    elif not _sequence_safety_config_is_valid(sequence_safety):
+        df = _add_unavailable_sequence_safety_rewards(df, reason_code="SEQUENCE_SAFETY_CONFIG_INVALID")
+    elif not sequence_safety.enabled:
+        df = _add_unavailable_sequence_safety_rewards(
+            df,
+            reason_code="SEQUENCE_SAFETY_DISABLED",
+            required_by_class=_sequence_safety_required_by_class(sequence_safety),
+            strict_lysis=sequence_safety.strict_lysis,
+        )
+    else:
+        phase_start = time.perf_counter()
+        df = add_sequence_safety_rewards(df, sequence_safety)
+        _record_elapsed(timings, "reward/sequence_safety_s", phase_start)
 
     phase_start = time.perf_counter()
     df = _aggregate_reward(df, weights)
@@ -1343,6 +1839,7 @@ def score_fasta(
     config: NucleotideQCConfig = NucleotideQCConfig(),
     weights: RewardWeights = RewardWeights(),
     mmseqs_cluster_diversity: MMseqsClusterDiversityConfig | None = None,
+    sequence_safety: SequenceSafetyRewardConfig | None = None,
 ) -> Path:
     """Score a FASTA file and write per-sequence reward diagnostics."""
     sequences_df = load_fasta_records(input_fasta)
@@ -1351,6 +1848,7 @@ def score_fasta(
         config=config,
         weights=weights,
         mmseqs_cluster_diversity=mmseqs_cluster_diversity,
+        sequence_safety=sequence_safety,
     )
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     scored_df.to_csv(output_csv, index=False)
