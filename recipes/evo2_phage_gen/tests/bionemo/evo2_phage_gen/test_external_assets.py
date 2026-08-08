@@ -110,8 +110,45 @@ def _write_mmseqs_padded_database(sequence_database: Path) -> Path:
     return sequence_database
 
 
+def _write_phrogs_profile_database(
+    profile_database: Path,
+    *,
+    profile_ids: tuple[str, ...] = ("phrog_1", "phrog_2", "phrog_3", "phrog_4"),
+) -> Path:
+    """Write a complete Pharokka v1.8.0-style PHROGs MMseqs profile database."""
+    profile_database.parent.mkdir(parents=True, exist_ok=True)
+    lookup_rows = b"".join(f"{index}\t{profile_id}\t0\n".encode() for index, profile_id in enumerate(profile_ids))
+    files = {
+        profile_database: b"profile\n\0",
+        Path(f"{profile_database}.index"): b"0\t0\t8\n",
+        Path(f"{profile_database}.dbtype"): b"\x10\x00\x00\x00",
+        Path(f"{profile_database}_h"): b"\n".join(profile_id.encode() for profile_id in profile_ids) + b"\n\0",
+        Path(f"{profile_database}_h.index"): b"0\t0\t9\n",
+        Path(f"{profile_database}_h.dbtype"): b"\x0c\x00\x00\x00",
+        Path(f"{profile_database}.lookup"): lookup_rows,
+        Path(f"{profile_database}.source"): b"pharokka-v1.8.0\n",
+        profile_database.parent / "VERSION_1_8_0": b"1.8.0\n",
+    }
+    for path, content in files.items():
+        path.write_bytes(content)
+    return profile_database
+
+
+def _profile_metadata_kwargs(profile_database: Path, archive_path: Path) -> dict[str, str]:
+    """Return complete local provenance arguments for PHROGs profile metadata tests."""
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    if not archive_path.exists():
+        archive_path.write_bytes(b"PHROGs Pharokka profile archive\n")
+    return {
+        "profile_source_url": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
+        "profile_archive_observed_sha256": external_assets._sha256_file(archive_path),
+        "profile_retrieved_at": "2026-08-08T00:00:00Z",
+        "profile_release": external_assets.PHROGS_PROFILE_RELEASE,
+    }
+
+
 def _write_phrogs_v4_fixture(annotation_path: Path, *, duplicate: bool = False, empty: bool = False) -> Path:
-    """Write a small real-schema PHROGs v4 fixture and complete sequence DB prefix."""
+    """Write a small real-schema PHROGs v4 fixture plus complete raw and profile DBs."""
     annotation_path.parent.mkdir(parents=True, exist_ok=True)
     rows = ["phrog\tcolor\tannot\tcategory"]
     if not empty:
@@ -127,6 +164,13 @@ def _write_phrogs_v4_fixture(annotation_path: Path, *, duplicate: bool = False, 
     if duplicate:
         rows.append("phrog_1\t#000005\tIntegrase\tintegration and excision")
     annotation_path.write_text("\n".join(rows) + "\n")
+    _write_phrogs_profile_database(annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db")
+    archive_path = (
+        annotation_path.parent.parent / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    )
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    if not archive_path.exists():
+        archive_path.write_bytes(b"PHROGs Pharokka profile archive\n")
     return _write_mmseqs_padded_database(annotation_path.parent / "phrogs_gpu_seq_db_pad")
 
 
@@ -290,6 +334,9 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
         lookup_path.write_text("lookup\n")
         sequence_database = _write_mmseqs_padded_database(safety_dir / "phrogs_gpu_seq_db_pad")
         sequence_database_sha256, _ = external_assets._complete_phrogs_sequence_database(sequence_database)
+        profile_database = _write_phrogs_profile_database(safety_dir / "phrogs_profile_db")
+        profile_database_sha256, profile_files = external_assets._complete_phrogs_profile_database(profile_database)
+        profile_tree_files = external_assets._phrogs_profile_tree_files(profile_database)
         return (
             "phrogs_v4",
             {
@@ -300,6 +347,39 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
                 "sequence_database": {
                     "path": str(sequence_database),
                     "sha256": sequence_database_sha256,
+                },
+                "profile_database": {
+                    "path": str(profile_database),
+                    "sha256": profile_database_sha256,
+                    "files": [str(path) for path in profile_files],
+                    "extracted_tree": {
+                        "path": str(profile_database.parent),
+                        "sha256": external_assets._sha256_file_inventory(profile_database.parent, profile_tree_files),
+                        "files": [str(path) for path in profile_tree_files],
+                    },
+                    "search_orientation": external_assets.PHROGS_PROFILE_SEARCH_ORIENTATION,
+                    "search_profile_scope": external_assets.PHROGS_PROFILE_SEARCH_SCOPE,
+                    "lookup_join_policy": external_assets.PHROGS_PROFILE_LOOKUP_JOIN_POLICY,
+                    "output_fields": list(external_assets.PHROGS_PROFILE_OUTPUT_FIELDS),
+                    "units": external_assets.PHROGS_PROFILE_OUTPUT_UNITS,
+                    "query_id_pattern": external_assets.PHROGS_PROFILE_QUERY_ID_PATTERN,
+                    "query_ids_join_lookup": True,
+                    "profile_id_inventory": external_assets._phrogs_profile_id_inventory(profile_database),
+                    "provenance": {
+                        "source_url": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
+                        "archive_observed_sha256": "0" * 64,
+                        "archive_published_sha256": None,
+                        "archive_published_md5": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5,
+                        "archive_published_size": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE,
+                        "retrieved_at": "2026-08-08T00:00:00Z",
+                        "release": external_assets.PHROGS_PROFILE_RELEASE,
+                        "dataset_release": external_assets.PHROGS_PROFILE_DATASET_RELEASE,
+                        "doi": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_DOI,
+                        "license": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_LICENSE,
+                        "citation": external_assets.PHROGS_PROFILE_SOURCE_CITATION,
+                        "minimum_mmseqs_version": external_assets.PHROGS_PROFILE_MIN_MMSEQS_VERSION,
+                        "built_with_mmseqs_version": external_assets.PHROGS_PROFILE_BUILDER_MMSEQS_VERSION,
+                    },
                 },
             },
         )
@@ -974,6 +1054,10 @@ def test_prepare_phrogs_safety_metadata_splits_real_schema_hits_by_confidence(tm
     """Real PHROGs v4 columns and category produce a versioned confidence lookup."""
     annotation_path = tmp_path / "external" / "phrogs" / "phrog_annot_v4.tsv"
     sequence_database = _write_phrogs_v4_fixture(annotation_path)
+    profile_database = annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    profile_archive = (
+        annotation_path.parent.parent / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    )
     manifest_path = tmp_path / "external" / "safety" / "asset_manifest.yaml"
 
     asset = prepare_phrogs_safety_metadata(
@@ -981,6 +1065,8 @@ def test_prepare_phrogs_safety_metadata_splits_real_schema_hits_by_confidence(tm
         manifest_path=manifest_path,
         annotation_sha256=hashlib.sha256(annotation_path.read_bytes()).hexdigest(),
         sequence_database=sequence_database,
+        profile_database=profile_database,
+        **_profile_metadata_kwargs(profile_database, profile_archive),
     )
 
     rows = [line.split("\t") for line in asset.path.read_text().splitlines()]
@@ -1022,16 +1108,88 @@ def test_prepare_phrogs_safety_metadata_splits_real_schema_hits_by_confidence(tm
     ]
 
 
+def test_prepare_phrogs_safety_metadata_records_profile_identity_search_contract(tmp_path):
+    """PHROGs metadata records the profile-query contract that makes lookup joins meaningful."""
+    external_dir = tmp_path / "external"
+    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
+    sequence_database = _write_phrogs_v4_fixture(annotation_path)
+    profile_database = _write_phrogs_profile_database(
+        external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    )
+    archive_path = external_dir / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    manifest_path = external_dir / "safety" / "asset_manifest.yaml"
+
+    prepare_phrogs_safety_metadata(
+        external_dir,
+        manifest_path=manifest_path,
+        annotation_sha256=external_assets._sha256_file(annotation_path),
+        sequence_database=sequence_database,
+        profile_database=profile_database,
+        **_profile_metadata_kwargs(profile_database, archive_path),
+    )
+
+    profile_record = yaml.safe_load(manifest_path.read_text())["phrogs_v4"]["profile_database"]
+    assert profile_record["path"] == str(profile_database.resolve())
+    assert profile_record["search_orientation"] == "phrog_profile_query_vs_orf_target"
+    assert profile_record["search_profile_scope"] == "full_phrogs_v4_profile_database"
+    assert profile_record["lookup_join_policy"] == "classify_only_profile_ids_present_in_pinned_lookup"
+    assert profile_record["output_fields"] == [
+        "query",
+        "target",
+        "pident",
+        "alnlen",
+        "qlen",
+        "tlen",
+        "qcov",
+        "tcov",
+        "evalue",
+        "bits",
+    ]
+    assert profile_record["units"] == {"pident": "percent", "qcov": "fraction", "tcov": "fraction"}
+    assert profile_record["query_id_pattern"] == r"^phrog_[0-9]+$"
+    assert profile_record["query_ids_join_lookup"] is True
+    profile_files = sorted(profile_database.parent.glob(f"{profile_database.name}*"))
+    profile_tree_files = sorted([*profile_files, profile_database.parent / "VERSION_1_8_0"])
+    assert profile_record["files"] == [str(path.resolve()) for path in profile_files]
+    assert profile_record["profile_id_inventory"] == external_assets._phrogs_profile_id_inventory(profile_database)
+    assert profile_record["extracted_tree"] == {
+        "path": str(profile_database.parent.resolve()),
+        "sha256": external_assets._sha256_file_inventory(profile_database.parent, profile_tree_files),
+        "files": [str(path.resolve()) for path in profile_tree_files],
+    }
+    assert profile_record["provenance"] == {
+        "source_url": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
+        "archive_observed_sha256": external_assets._sha256_file(archive_path),
+        "archive_published_sha256": None,
+        "archive_published_md5": "a63c485241b900a11989bd1821bfbb09",
+        "archive_published_size": 656_171_247,
+        "retrieved_at": "2026-08-08T00:00:00Z",
+        "release": "Pharokka database v1.8.0",
+        "dataset_release": "PHROGs v4",
+        "doi": "10.5281/zenodo.17110353",
+        "license": "CC BY 4.0",
+        "citation": "Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353).",
+        "minimum_mmseqs_version": "14",
+        "built_with_mmseqs_version": "18.8cc5c",
+    }
+
+
 def test_prepare_phrogs_safety_metadata_rejects_empty_or_duplicate_lookup(tmp_path):
     """An empty or ambiguous PHROGs lookup must fail before it can be trusted."""
     annotation_path = tmp_path / "external" / "phrogs" / "phrog_annot_v4.tsv"
     sequence_database = _write_phrogs_v4_fixture(annotation_path, duplicate=True)
+    profile_database = annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    profile_archive = (
+        annotation_path.parent.parent / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    )
 
     with pytest.raises(ValueError, match="duplicate"):
         prepare_phrogs_safety_metadata(
             tmp_path / "external",
             annotation_sha256=hashlib.sha256(annotation_path.read_bytes()).hexdigest(),
             sequence_database=sequence_database,
+            profile_database=profile_database,
+            **_profile_metadata_kwargs(profile_database, profile_archive),
         )
 
     sequence_database = _write_phrogs_v4_fixture(annotation_path, empty=True)
@@ -1040,6 +1198,8 @@ def test_prepare_phrogs_safety_metadata_rejects_empty_or_duplicate_lookup(tmp_pa
             tmp_path / "external",
             annotation_sha256=hashlib.sha256(annotation_path.read_bytes()).hexdigest(),
             sequence_database=sequence_database,
+            profile_database=profile_database,
+            **_profile_metadata_kwargs(profile_database, profile_archive),
         )
 
 
@@ -1048,17 +1208,25 @@ def test_prepare_phrogs_safety_metadata_real_schema_has_bounded_expected_confide
     annotation_path = tmp_path / "external" / "phrogs" / "phrog_annot_v4.tsv"
     annotation_path.parent.mkdir(parents=True)
     rows = ["phrog\tcolor\tannot\tcategory"]
-    rows.extend(f"phrog_high_{index}\t#000000\tIntegrase\tintegration and excision" for index in range(57))
-    rows.extend(
-        f"phrog_review_{index}\t#000000\tPutative recombinase\tintegration and excision" for index in range(52)
-    )
+    profile_ids = tuple(f"phrog_{index}" for index in range(109))
+    rows.extend(f"phrog_{index}\t#000000\tIntegrase\tintegration and excision" for index in range(57))
+    rows.extend(f"phrog_{index + 57}\t#000000\tPutative recombinase\tintegration and excision" for index in range(52))
     annotation_path.write_text("\n".join(rows) + "\n")
     sequence_database = _write_mmseqs_padded_database(annotation_path.parent / "phrogs_gpu_seq_db_pad")
+    profile_database = _write_phrogs_profile_database(
+        annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db",
+        profile_ids=profile_ids,
+    )
+    profile_archive = (
+        annotation_path.parent.parent / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    )
 
     asset = prepare_phrogs_safety_metadata(
         tmp_path / "external",
         annotation_sha256=hashlib.sha256(annotation_path.read_bytes()).hexdigest(),
         sequence_database=sequence_database,
+        profile_database=profile_database,
+        **_profile_metadata_kwargs(profile_database, profile_archive),
     )
 
     confidence_rows = [line.split("\t") for line in asset.path.read_text().splitlines()[1:]]
@@ -1075,6 +1243,248 @@ def test_complete_phrogs_sequence_database_rejects_a_thin_nonsearchable_prefix(t
 
     with pytest.raises(FileNotFoundError, match="complete MMseqs"):
         external_assets._complete_phrogs_sequence_database(sequence_database)
+
+
+@pytest.mark.parametrize(
+    "missing_path",
+    (
+        lambda database: Path(f"{database}.lookup"),
+        lambda database: Path(f"{database}.source"),
+        lambda database: database.parent / "VERSION_1_8_0",
+    ),
+)
+def test_complete_phrogs_profile_database_requires_official_pharokka_identity_sidecars(tmp_path, missing_path):
+    """A complete safety profile needs Pharokka's lookup, source, and release identity files."""
+    profile_database = _write_phrogs_profile_database(tmp_path / "phrogs_profile_db")
+    missing_path(profile_database).unlink()
+
+    with pytest.raises(FileNotFoundError, match="complete MMseqs profile"):
+        external_assets._complete_phrogs_profile_database(profile_database)
+
+
+@pytest.mark.parametrize(
+    "lookup_contents, error",
+    (
+        (b"not-an-integer\tphrog_1\t0\n", "malformed"),
+        (b"0\tnot_a_phrog\t0\n", "noncanonical"),
+        (b"0\tphrog_1\t0\n0\tphrog_2\t0\n", "duplicate"),
+        (b"0\tphrog_1\t0\n1\tphrog_1\t0\n", "duplicate"),
+    ),
+)
+def test_prepare_phrogs_safety_metadata_rejects_noncanonical_or_duplicate_profile_lookup_ids(
+    tmp_path, lookup_contents, error
+):
+    """The profile's MMseqs lookup, not a boolean, proves PHROG query identity."""
+    external_dir = tmp_path / "external"
+    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
+    sequence_database = _write_phrogs_v4_fixture(annotation_path)
+    profile_database = _write_phrogs_profile_database(
+        external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    )
+    Path(f"{profile_database}.lookup").write_bytes(lookup_contents)
+    archive_path = external_dir / "downloads" / "pharokka_v1.8.0_databases.tar.gz"
+
+    with pytest.raises(ValueError, match=error):
+        prepare_phrogs_safety_metadata(
+            external_dir,
+            annotation_sha256=external_assets._sha256_file(annotation_path),
+            sequence_database=sequence_database,
+            profile_database=profile_database,
+            **_profile_metadata_kwargs(profile_database, archive_path),
+        )
+
+
+def test_prepare_phrogs_safety_metadata_rejects_annotation_ids_absent_from_profile_lookup(tmp_path):
+    """Every pinned lysogeny-table PHROG must be queryable in the validated profile DB."""
+    external_dir = tmp_path / "external"
+    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
+    sequence_database = _write_phrogs_v4_fixture(annotation_path)
+    profile_database = _write_phrogs_profile_database(
+        external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db",
+        profile_ids=("phrog_1",),
+    )
+    archive_path = external_dir / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+
+    with pytest.raises(ValueError, match="absent from the verified profile database"):
+        prepare_phrogs_safety_metadata(
+            external_dir,
+            annotation_sha256=external_assets._sha256_file(annotation_path),
+            sequence_database=sequence_database,
+            profile_database=profile_database,
+            **_profile_metadata_kwargs(profile_database, archive_path),
+        )
+
+
+def test_snapshot_phrogs_profile_database_copies_only_identity_bearing_profile_inventory(tmp_path):
+    """A Pharokka bundle's unrelated CARD/VFDB files cannot enter the PHROGs safety snapshot digest."""
+    source_root = tmp_path / "pharokka_bundle"
+    profile_database = _write_phrogs_profile_database(source_root / "phrogs_profile_db")
+    (source_root / "CARD").write_bytes(b"unrelated CARD database")
+    (source_root / "vfdb").write_bytes(b"unrelated VFDB database")
+
+    snapshot_database, snapshot_root = external_assets._snapshot_phrogs_profile_database(
+        profile_database, tmp_path / "safety"
+    )
+
+    assert not (snapshot_root / "CARD").exists()
+    assert not (snapshot_root / "vfdb").exists()
+    snapshot_files = external_assets._phrogs_profile_tree_files(snapshot_database)
+    assert [path.name for path in snapshot_files] == [
+        "VERSION_1_8_0",
+        "phrogs_profile_db",
+        "phrogs_profile_db.dbtype",
+        "phrogs_profile_db.index",
+        "phrogs_profile_db.lookup",
+        "phrogs_profile_db.source",
+        "phrogs_profile_db_h",
+        "phrogs_profile_db_h.dbtype",
+        "phrogs_profile_db_h.index",
+    ]
+
+
+def test_safety_profile_source_is_the_versioned_pharokka_release():
+    """Safety identity searches pin the compatible Pharokka database rather than PHROGs latest."""
+    assert external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL == (
+        "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz"
+    )
+    assert external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5 == "a63c485241b900a11989bd1821bfbb09"
+
+
+def test_prepare_phrogs_safety_profile_db_verifies_published_md5_before_extracting(tmp_path, monkeypatch):
+    """A corrupt pinned Pharokka archive must fail before profile files are extracted or scanned."""
+    extract_called = False
+
+    def fake_download(_url, output_path, **_kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"corrupt Pharokka archive")
+        return output_path
+
+    def fail_extract(*_args, **_kwargs):
+        nonlocal extract_called
+        extract_called = True
+        pytest.fail("extraction ran before published MD5 verification")
+
+    monkeypatch.setattr(external_assets, "_download", fake_download)
+    monkeypatch.setattr(external_assets, "_verify_file_size", lambda *_args, **_kwargs: 656_171_247)
+    monkeypatch.setattr(external_assets, "_extract_tar", fail_extract)
+
+    with pytest.raises(ValueError, match="MD5 mismatch"):
+        external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external")
+
+    assert extract_called is False
+
+
+def test_prepare_phrogs_safety_profile_db_verifies_published_size_before_extracting(tmp_path, monkeypatch):
+    """A short Pharokka archive must fail before extraction even when its MD5 verifier is reached."""
+    extract_called = False
+
+    def fake_download(_url, output_path, **_kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"short Pharokka archive")
+        return output_path
+
+    def fail_extract(*_args, **_kwargs):
+        nonlocal extract_called
+        extract_called = True
+        pytest.fail("extraction ran before published size verification")
+
+    monkeypatch.setattr(external_assets, "_download", fake_download)
+    monkeypatch.setattr(external_assets, "_verify_md5", lambda *_args, **_kwargs: pytest.fail("MD5 ran first"))
+    monkeypatch.setattr(external_assets, "_extract_tar", fail_extract)
+
+    with pytest.raises(ValueError, match="size mismatch"):
+        external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external")
+
+    assert extract_called is False
+
+
+def test_prepare_phrogs_safety_profile_db_cleanly_reextracts_the_verified_archive(tmp_path, monkeypatch):
+    """A digest-named existing extraction cannot be reused as an unverified safety profile tree."""
+    download_calls = []
+    extract_overwrite_flags = []
+
+    def fake_download(url, output_path, **kwargs):
+        download_calls.append((url, kwargs))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"verified Pharokka archive")
+        return output_path
+
+    def fake_extract(_archive_path, output_dir, *, overwrite):
+        extract_overwrite_flags.append(overwrite)
+        _write_phrogs_profile_database(output_dir / "phrogs_profile_db")
+        return output_dir
+
+    monkeypatch.setattr(external_assets, "_download", fake_download)
+    monkeypatch.setattr(external_assets, "_verify_file_size", lambda *_args, **_kwargs: 656_171_247)
+    monkeypatch.setattr(external_assets, "_verify_md5", lambda *_args, **_kwargs: "a63c485241b900a11989bd1821bfbb09")
+    monkeypatch.setattr(external_assets, "_extract_tar", fake_extract)
+
+    external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external", overwrite=False)
+
+    assert download_calls == [
+        (
+            external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
+            {"overwrite": False, "insecure": False},
+        )
+    ]
+    assert extract_overwrite_flags == [True]
+
+
+def test_staged_safety_manifest_rejects_raw_phrogs_database_without_identity_search_contract(tmp_path):
+    """A raw FAA-derived PHROGs prefix cannot stand in for PHROG-identity profile search."""
+    safety_dir = tmp_path / "safety"
+    manifest = {"schema_version": 1}
+    for name in ("amrfinder", "toxins", "phrogs"):
+        section, record = _materialize_mock_safety_manifest_section(name, safety_dir)
+        if section == "phrogs_v4":
+            record.pop("profile_database")
+        manifest[section] = record
+
+    with pytest.raises(RuntimeError, match="profile_database"):
+        external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
+
+
+def test_staged_safety_manifest_rejects_malformed_phrogs_profile_observed_archive_digest(tmp_path):
+    """A profile manifest cannot present arbitrary text as its observed archive SHA-256 evidence."""
+    safety_dir = tmp_path / "safety"
+    manifest = {"schema_version": 1}
+    for name in ("amrfinder", "toxins", "phrogs"):
+        section, record = _materialize_mock_safety_manifest_section(name, safety_dir)
+        manifest[section] = record
+    manifest["phrogs_v4"]["profile_database"]["provenance"]["archive_observed_sha256"] = "not-a-sha256"
+
+    with pytest.raises(RuntimeError, match="observed archive SHA-256"):
+        external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
+
+
+def test_prepare_external_assets_with_safety_rejects_incomplete_phrogs_profile_database(tmp_path, monkeypatch):
+    """Safety setup must reject a thin PHROGs profile prefix before running scanners."""
+    external_dir = tmp_path / "external"
+    _write_phrogs_v4_fixture(external_dir / "phrogs" / "phrog_annot_v4.tsv")
+    thin_profile = external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    for profile_file in thin_profile.parent.iterdir():
+        profile_file.unlink()
+    thin_profile.write_bytes(b"profile\n\0")
+    Path(f"{thin_profile}.dbtype").write_bytes(b"\x10\x00\x00\x00")
+    monkeypatch.setattr(
+        external_assets,
+        "prepare_amrfinder_plus",
+        lambda *_args, **_kwargs: pytest.fail("AMRFinder ran before PHROGs profile preflight"),
+    )
+
+    with pytest.raises(FileNotFoundError, match="complete MMseqs profile"):
+        prepare_external_assets(
+            external_dir,
+            download_mmseqs=False,
+            download_dustmasker=False,
+            download_diamond=False,
+            download_hmmer=False,
+            download_phrogs_annotation=False,
+            download_arc_evo2=False,
+            download_large_databases=False,
+            configure_lovis4u=False,
+            with_safety=True,
+        )
 
 
 def test_prepare_phrogs_gpu_sequence_db_requests_a_lookup_sidecar(tmp_path, monkeypatch):
@@ -1151,6 +1561,54 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
     assert recipe["phrogs_v4"]["integration_excision_category"] == "integration and excision"
     assert recipe["phrogs_v4"]["citation"]
     assert recipe["phrogs_v4"]["use_terms"]
+    profile_recipe = recipe["phrogs_v4"]["profile_database"]
+    assert profile_recipe == {
+        "source_url": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
+        "release": external_assets.PHROGS_PROFILE_RELEASE,
+        "dataset_release": external_assets.PHROGS_PROFILE_DATASET_RELEASE,
+        "archive_published_sha256": None,
+        "archive_published_md5": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5,
+        "archive_published_size": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE,
+        "archive_digest_provenance": (
+            "verify the published MD5 and size before extraction; record observed SHA-256 at preparation; "
+            "no published SHA-256 is asserted"
+        ),
+        "doi": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_DOI,
+        "license": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_LICENSE,
+        "citation": external_assets.PHROGS_PROFILE_SOURCE_CITATION,
+        "minimum_mmseqs_version": external_assets.PHROGS_PROFILE_MIN_MMSEQS_VERSION,
+        "built_with_mmseqs_version": external_assets.PHROGS_PROFILE_BUILDER_MMSEQS_VERSION,
+        "release_marker": external_assets.PHROGS_PROFILE_RELEASE_MARKER,
+        "search_orientation": "phrog_profile_query_vs_orf_target",
+        "search_profile_scope": "full_phrogs_v4_profile_database",
+        "lookup_join_policy": "classify_only_profile_ids_present_in_pinned_lookup",
+        "output_fields": [
+            "query",
+            "target",
+            "pident",
+            "alnlen",
+            "qlen",
+            "tlen",
+            "qcov",
+            "tcov",
+            "evalue",
+            "bits",
+        ],
+        "units": {"pident": "percent", "qcov": "fraction", "tcov": "fraction"},
+        "query_id_pattern": "^phrog_[0-9]+$",
+        "required_files": [
+            "phrogs_profile_db",
+            "phrogs_profile_db.dbtype",
+            "phrogs_profile_db.index",
+            "phrogs_profile_db.lookup",
+            "phrogs_profile_db.source",
+            "phrogs_profile_db_h",
+            "phrogs_profile_db_h.dbtype",
+            "phrogs_profile_db_h.index",
+            "VERSION_1_8_0",
+        ],
+        "require_complete_profile_database": True,
+    }
     assert recipe["phrogs_v4"]["high_confidence_terms"] == [
         "integrase",
         "excisionase",
@@ -1164,6 +1622,7 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
         "toxin_annotations",
         "toxin_fasta",
         "toxin_diamond_database",
+        "phrogs_profile_database",
         "phrogs_lysogeny_table",
     }
 
@@ -1485,7 +1944,7 @@ def test_safety_failure_preserves_every_digest_referenced_by_the_previous_genera
 
 
 def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(tmp_path, monkeypatch):
-    """A shared-PHROGs overwrite cannot invalidate a prior trusted manifest on a later safety failure."""
+    """A shared-PHROGs overwrite cannot invalidate a prior manifest's source, raw, or profile DB."""
     external_dir = tmp_path / "external"
     source_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
     source_path.parent.mkdir(parents=True)
@@ -1495,8 +1954,14 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
     sequence_database_sha256, sequence_database_files = external_assets._complete_phrogs_sequence_database(
         sequence_database
     )
+    profile_database = _write_phrogs_profile_database(
+        external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    )
+    profile_database_files = sorted(profile_database.parent.glob(f"{profile_database.name}*"))
+    profile_tree_files = external_assets._phrogs_profile_tree_files(profile_database)
     referenced_assets = {source_path: external_assets._sha256_file(source_path)}
     referenced_assets.update({path: external_assets._sha256_file(path) for path in sequence_database_files})
+    referenced_assets.update({path: external_assets._sha256_file(path) for path in profile_tree_files})
     manifest_path = external_dir / "safety" / "asset_manifest.yaml"
     manifest_path.parent.mkdir()
     old_manifest = {
@@ -1508,6 +1973,11 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
                 "path": str(sequence_database.resolve()),
                 "sha256": sequence_database_sha256,
                 "files": [str(path.resolve()) for path in sequence_database_files],
+            },
+            "profile_database": {
+                "path": str(profile_database.resolve()),
+                "sha256": external_assets._complete_phrogs_profile_database(profile_database)[0],
+                "files": [str(path.resolve()) for path in profile_database_files],
             },
         },
     }
@@ -1526,7 +1996,15 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
     def rebuild_profile_database(prepared_external_dir, **kwargs):
         assert kwargs["overwrite"] is True
         calls.append("profile")
-        return PreparedAsset("phrogs_mmseqs_db", Path(prepared_external_dir) / "phrogs" / "profiles", "rebuilt")
+        profile_root = Path(prepared_external_dir) / "phrogs" / "phrogs_mmseqs_db"
+        rebuilt_profile = _write_phrogs_profile_database(profile_root / "phrogs_profile_db")
+        rebuilt_profile.write_bytes(b"new PHROGs profile database\n\0")
+        archive_path = (
+            Path(prepared_external_dir) / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+        )
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_bytes(b"new PHROGs profile archive\n")
+        return PreparedAsset("phrogs_safety_profile_db", profile_root, "rebuilt")
 
     def rebuild_sequence_database(prepared_external_dir, **kwargs):
         assert kwargs["overwrite"] is True
@@ -1541,7 +2019,7 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
         raise RuntimeError("injected AMRFinder failure")
 
     monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", rebuild_annotation)
-    monkeypatch.setattr(external_assets, "prepare_phrogs_mmseqs_db", rebuild_profile_database)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_safety_profile_db", rebuild_profile_database)
     monkeypatch.setattr(external_assets, "prepare_phrogs_gpu_sequence_db", rebuild_sequence_database)
     monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", fail_amrfinder)
 
@@ -1623,11 +2101,14 @@ def test_safety_manifest_records_a_generation_owned_phrogs_snapshot(tmp_path, mo
     shared_phrogs_dir = (external_dir / "phrogs").resolve()
     snapshot_source_path = Path(phrogs_record["source_path"])
     snapshot_database_path = Path(phrogs_record["sequence_database"]["path"])
+    snapshot_profile_path = Path(phrogs_record["profile_database"]["path"])
 
     assert snapshot_source_path.is_relative_to(generation_root)
     assert snapshot_database_path.is_relative_to(generation_root)
+    assert snapshot_profile_path.is_relative_to(generation_root)
     assert not snapshot_source_path.is_relative_to(shared_phrogs_dir)
     assert not snapshot_database_path.is_relative_to(shared_phrogs_dir)
+    assert not snapshot_profile_path.is_relative_to(shared_phrogs_dir)
     assert snapshot_source_path.read_bytes() == source_path.read_bytes()
     snapshot_database_sha256, snapshot_database_files = external_assets._complete_phrogs_sequence_database(
         snapshot_database_path
@@ -1635,6 +2116,12 @@ def test_safety_manifest_records_a_generation_owned_phrogs_snapshot(tmp_path, mo
     assert snapshot_database_sha256 == phrogs_record["sequence_database"]["sha256"]
     assert [str(path.resolve()) for path in snapshot_database_files] == phrogs_record["sequence_database"]["files"]
     assert all(Path(path).is_relative_to(generation_root) for path in phrogs_record["sequence_database"]["files"])
+    snapshot_profile_sha256, snapshot_profile_files = external_assets._complete_phrogs_profile_database(
+        snapshot_profile_path
+    )
+    assert snapshot_profile_sha256 == phrogs_record["profile_database"]["sha256"]
+    assert [str(path.resolve()) for path in snapshot_profile_files] == phrogs_record["profile_database"]["files"]
+    assert all(Path(path).is_relative_to(generation_root) for path in phrogs_record["profile_database"]["files"])
     external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
 
 
@@ -1660,7 +2147,15 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
         return PreparedAsset("phrogs_annotation", annotation_path, "prepared")
 
     def prepare_profile_database(prepared_external_dir, **_kwargs):
-        return PreparedAsset("phrogs_mmseqs_db", Path(prepared_external_dir) / "phrogs" / "profiles", "prepared")
+        profile_root = Path(prepared_external_dir) / "phrogs" / "phrogs_mmseqs_db"
+        _write_phrogs_profile_database(profile_root / "phrogs_profile_db")
+        (profile_root / "CARD").write_bytes(b"unrelated Pharokka CARD database")
+        archive_path = (
+            Path(prepared_external_dir) / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+        )
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_bytes(b"prepared Pharokka profile archive\n")
+        return PreparedAsset("phrogs_safety_profile_db", profile_root, "prepared")
 
     def prepare_sequence_database(prepared_external_dir, **_kwargs):
         sequence_database = _write_mmseqs_padded_database(
@@ -1679,7 +2174,7 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
     monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", staged_asset("amrfinder"))
     monkeypatch.setattr(external_assets, "prepare_toxin_reference", staged_asset("toxins"))
     monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", prepare_annotation)
-    monkeypatch.setattr(external_assets, "prepare_phrogs_mmseqs_db", prepare_profile_database)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_safety_profile_db", prepare_profile_database)
     monkeypatch.setattr(external_assets, "prepare_phrogs_gpu_sequence_db", prepare_sequence_database)
     monkeypatch.setattr(external_assets, "prepare_phrogs_safety_metadata", prepare_snapshot_metadata)
 
@@ -1701,11 +2196,13 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
     phrogs_record = manifest["phrogs_v4"]
     snapshot_source_path = Path(phrogs_record["source_path"])
     snapshot_database_path = Path(phrogs_record["sequence_database"]["path"])
+    snapshot_profile_path = Path(phrogs_record["profile_database"]["path"])
     generation_root = (external_dir / "safety" / "generations").resolve()
     shared_phrogs_dir = (external_dir / "phrogs").resolve()
 
     assert snapshot_source_path.is_relative_to(generation_root)
     assert snapshot_database_path.is_relative_to(generation_root)
+    assert snapshot_profile_path.is_relative_to(generation_root)
     external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
 
     shared_source_path = shared_phrogs_dir / "phrog_annot_v4.tsv"
@@ -1718,6 +2215,19 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
     assert [path.name for path in shared_database_files] == [
         Path(path).name for path in phrogs_record["sequence_database"]["files"]
     ]
+    shared_profile_path = shared_phrogs_dir / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    shared_profile_sha256, shared_profile_files = external_assets._complete_phrogs_profile_database(
+        shared_profile_path
+    )
+    assert shared_profile_sha256 == phrogs_record["profile_database"]["sha256"]
+    assert [path.name for path in shared_profile_files] == [
+        Path(path).name for path in phrogs_record["profile_database"]["files"]
+    ]
+    generation_profile_root = snapshot_profile_path.parent.parent / "phrogs_mmseqs_db"
+    assert not generation_profile_root.exists()
+    assert not (
+        snapshot_profile_path.parents[2] / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    ).exists()
 
 
 def test_safety_postpublication_legacy_phrogs_failure_retains_published_generation(tmp_path, monkeypatch):

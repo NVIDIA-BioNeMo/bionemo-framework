@@ -34,6 +34,39 @@ phrogs_v4:
   annotation_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv
   annotation_sha256: 502f96101597c21133bcce5711803e0b95e0c162cd4e86425c352549bd95e8c2
   mmseqs_database_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrogs_mmseqs_db.tar.gz
+  profile_database:
+    source_url: https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz
+    release: Pharokka database v1.8.0
+    dataset_release: PHROGs v4
+    archive_published_sha256: null
+    archive_published_md5: a63c485241b900a11989bd1821bfbb09
+    archive_published_size: 656171247
+    archive_digest_provenance: >-
+      verify the published MD5 and size before extraction; record observed SHA-256
+      at preparation; no published SHA-256 is asserted
+    doi: 10.5281/zenodo.17110353
+    license: CC BY 4.0
+    citation: 'Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353).'
+    minimum_mmseqs_version: '14'
+    built_with_mmseqs_version: 18.8cc5c
+    release_marker: VERSION_1_8_0
+    search_orientation: phrog_profile_query_vs_orf_target
+    search_profile_scope: full_phrogs_v4_profile_database
+    lookup_join_policy: classify_only_profile_ids_present_in_pinned_lookup
+    output_fields: [query, target, pident, alnlen, qlen, tlen, qcov, tcov, evalue, bits]
+    units: {pident: percent, qcov: fraction, tcov: fraction}
+    query_id_pattern: ^phrog_[0-9]+$
+    required_files:
+      - phrogs_profile_db
+      - phrogs_profile_db.dbtype
+      - phrogs_profile_db.index
+      - phrogs_profile_db.lookup
+      - phrogs_profile_db.source
+      - phrogs_profile_db_h
+      - phrogs_profile_db_h.dbtype
+      - phrogs_profile_db_h.index
+      - VERSION_1_8_0
+    require_complete_profile_database: true
   sequence_archive_url: https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz
   integration_excision_category: integration and excision
   citation: >-
@@ -63,5 +96,6 @@ expected_file_roles:
   toxin_fasta: reviewed toxin protein FASTA snapshot
   toxin_diamond_database: DIAMOND index built from the reviewed toxin FASTA snapshot
   phrogs_annotation: PHROGs v4 annotation source table
+  phrogs_profile_database: complete PHROGs v4 MMseqs profile database for PHROG-identity safety search
   phrogs_sequence_database: complete PHROGs v4 sequence search database with all selected sidecar files
   phrogs_lysogeny_table: versioned integration/excision PHROG confidence lookup table
