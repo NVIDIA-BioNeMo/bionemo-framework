@@ -1,7 +1,8 @@
 - datapaths:
-    - data/external/zenodo/microviridae_sft_training_data_processed.fna
+    - data/curated/microviridae_sft_training_data_safety_pass.fna
+  safety_manifest: data/curated/SAFETY_MANIFEST.yaml
   output_dir: data/sft/preprocessed
-  output_prefix: microviridae_sft_processed
+  output_prefix: microviridae_sft_safety_pass
   train_split: 0.98
   valid_split: 0.01
   test_split: 0.01
