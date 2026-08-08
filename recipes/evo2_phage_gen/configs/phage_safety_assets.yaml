@@ -13,6 +13,8 @@ amrfinder_plus:
   archive_sha256: 68045a8bccdbe3c5dcdf941bebe2352ed419758a9914c41f48f0bbbd6fbade56
   database_directory_role: pinned custom AMRFinderPlus database directory
   require_recorded_database_version: true
+  require_recorded_amrfinder_index: true
+  require_contained_latest_symlink: true
   citation: >-
     Feldgarden et al. (2021), AMRFinderPlus and the Reference Gene Catalog
     facilitate examination of the genomic links among antimicrobial resistance,
@@ -54,6 +56,8 @@ phrogs_v4:
 
 expected_file_roles:
   amrfinder_binary: AMRFinderPlus executable from the pinned release
+  amrfinder_index: AMRFinderPlus companion index executable from the pinned release
+  amrfinder_updater: AMRFinderPlus database updater from the pinned release
   amrfinder_database: resolved custom AMRFinderPlus database, never an unrecorded latest alias
   toxin_annotations: canonical reviewed toxin accessions and annotations table
   toxin_fasta: reviewed toxin protein FASTA snapshot

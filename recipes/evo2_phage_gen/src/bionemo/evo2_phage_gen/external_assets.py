@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import yaml
 
@@ -361,6 +362,21 @@ def _link_executable(source_path: Path, link_path: Path) -> Path:
     return link_path
 
 
+def _copy_executable(source_path: Path, destination_path: Path) -> Path:
+    """Copy an executable into an immutable safety generation without retaining a mutable link."""
+    source_path = Path(source_path)
+    destination_path = Path(destination_path)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Required executable does not exist: {source_path}")
+    if source_path.resolve() == destination_path.resolve():
+        return destination_path
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    if destination_path.exists() or destination_path.is_symlink():
+        destination_path.unlink()
+    shutil.copy2(source_path, destination_path)
+    return destination_path
+
+
 def _find_extracted_executable(extracted_dir: Path, executable_name: str) -> Path:
     """Find a named executable in an extracted upstream tool archive."""
     candidates = sorted(path for path in extracted_dir.rglob(executable_name) if path.is_file())
@@ -412,15 +428,22 @@ def _write_safety_manifest_atomic(manifest_path: Path, manifest: dict) -> None:
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
         os.replace(temporary_path, manifest_path)
+        temporary_path = None
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+    # The rename is the publication point. A later directory-sync failure cannot be rolled back
+    # safely, so preserve commit semantics rather than reporting a false failed publication.
+    try:
         directory_descriptor = os.open(manifest_path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory_descriptor)
         finally:
             os.close(directory_descriptor)
-    except Exception:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-        raise
+    except OSError:
+        return
 
 
 def _stage_safety_manifest_section(manifest: dict, section: str, values: dict) -> None:
@@ -450,6 +473,33 @@ def _record_safety_manifest_section(
     _stage_safety_manifest_section(manifest, section, values)
 
 
+def _resolve_amrfinder_latest_database(requested_database_dir: Path) -> Path:
+    """Resolve AMRFinder's documented ``latest`` symlink to a contained populated version directory."""
+    requested_database_dir = Path(requested_database_dir)
+    latest_database_dir = requested_database_dir / "latest"
+    if not latest_database_dir.is_symlink():
+        raise FileNotFoundError(f"AMRFinder database latest must be a symbolic link under {requested_database_dir}")
+    try:
+        pinned_database_dir = latest_database_dir.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"AMRFinder database latest link is broken under {requested_database_dir}") from error
+    requested_database_root = requested_database_dir.resolve()
+    try:
+        pinned_database_dir.relative_to(requested_database_root)
+    except ValueError as error:
+        raise ValueError(
+            f"AMRFinder latest database must remain contained under {requested_database_root}: {pinned_database_dir}"
+        ) from error
+    if pinned_database_dir.parent != requested_database_root:
+        raise ValueError(
+            "AMRFinder latest database must resolve to a direct version directory under "
+            f"{requested_database_root}: {pinned_database_dir}"
+        )
+    if not pinned_database_dir.is_dir() or not any(pinned_database_dir.rglob("*")):
+        raise FileNotFoundError(f"AMRFinder latest database is empty: {pinned_database_dir}")
+    return pinned_database_dir
+
+
 def prepare_amrfinder_plus(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
@@ -457,6 +507,8 @@ def prepare_amrfinder_plus(
     amrfinder_url: str = DEFAULT_AMRFINDER_URL,
     amrfinder_sha256: str | None = DEFAULT_AMRFINDER_SHA256,
     database_dir: Path | None = None,
+    prerequisite_bin_dir: Path | None = None,
+    safety_dir: Path | None = None,
     manifest_path: Path | None = None,
     manifest: dict | None = None,
     overwrite: bool = False,
@@ -465,8 +517,9 @@ def prepare_amrfinder_plus(
     """Prepare a digest-pinned AMRFinderPlus release and resolved custom database."""
     if amrfinder_sha256 is None:
         raise ValueError("AMRFinder archive digest is required before extraction or execution")
+    del insecure_downloads
     external_dir = Path(external_dir)
-    safety_dir = external_dir / "safety"
+    safety_dir = Path(safety_dir) if safety_dir is not None else external_dir / "safety"
     archive_path = _download(
         amrfinder_url,
         safety_dir / "downloads" / f"{DEFAULT_AMRFINDER_RELEASE}.tar.gz",
@@ -478,28 +531,40 @@ def prepare_amrfinder_plus(
     extracted_dir = _extract_tar(
         archive_path,
         safety_dir / "tools" / f"{DEFAULT_AMRFINDER_RELEASE}-{archive_sha256[:16]}",
-        overwrite=overwrite,
+        # The archive digest authenticates only the archive. Never trust a pre-existing tree
+        # named after that digest before executing any extracted AMRFinder component.
+        overwrite=True,
     )
     target_bin_dir = Path(bin_dir) if bin_dir is not None else external_dir / "bin"
     amrfinder_path = _link_executable(
         _find_extracted_executable(extracted_dir, "amrfinder"), target_bin_dir / "amrfinder"
     )
+    amrfinder_index_path = _link_executable(
+        _find_extracted_executable(extracted_dir, "amrfinder_index"), target_bin_dir / "amrfinder_index"
+    )
     amrfinder_update_path = _link_executable(
         _find_extracted_executable(extracted_dir, "amrfinder_update"), target_bin_dir / "amrfinder_update"
     )
-    makeblastdb_path = target_bin_dir / "makeblastdb"
-    hmmpress_path = target_bin_dir / "hmmpress"
-    if not makeblastdb_path.exists():
-        raise FileNotFoundError(f"AMRFinder update requires makeblastdb in {target_bin_dir}")
-    if not hmmpress_path.exists():
-        raise FileNotFoundError(f"AMRFinder update requires hmmpress in {target_bin_dir}")
+    source_prerequisite_bin_dir = Path(prerequisite_bin_dir) if prerequisite_bin_dir is not None else target_bin_dir
+    makeblastdb_source_path = source_prerequisite_bin_dir / "makeblastdb"
+    hmmpress_source_path = source_prerequisite_bin_dir / "hmmpress"
+    if not makeblastdb_source_path.exists():
+        raise FileNotFoundError(f"AMRFinder update requires makeblastdb in {source_prerequisite_bin_dir}")
+    if not hmmpress_source_path.exists():
+        raise FileNotFoundError(f"AMRFinder update requires hmmpress in {source_prerequisite_bin_dir}")
+    makeblastdb_path = _copy_executable(makeblastdb_source_path, target_bin_dir / "makeblastdb")
+    hmmpress_path = _copy_executable(hmmpress_source_path, target_bin_dir / "hmmpress")
     blast_bin_dir = makeblastdb_path.parent.resolve()
     hmmer_bin_dir = hmmpress_path.parent.resolve()
 
     requested_database_dir = Path(database_dir) if database_dir is not None else safety_dir / "amrfinder" / "database"
     if overwrite and requested_database_dir.exists():
         shutil.rmtree(requested_database_dir)
+    if requested_database_dir.exists() and not requested_database_dir.is_dir():
+        raise ValueError(f"AMRFinder database root is not a directory: {requested_database_dir}")
     needs_database_update = not requested_database_dir.exists() or not any(requested_database_dir.iterdir())
+    if not needs_database_update:
+        _resolve_amrfinder_latest_database(requested_database_dir)
     if needs_database_update:
         requested_database_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(
@@ -517,14 +582,7 @@ def prepare_amrfinder_plus(
             text=True,
         )
 
-    latest_database_dir = requested_database_dir / "latest"
-    if not latest_database_dir.exists():
-        raise FileNotFoundError(
-            f"AMRFinder update did not create a latest database link under {requested_database_dir}"
-        )
-    pinned_database_dir = latest_database_dir.resolve()
-    if not pinned_database_dir.is_dir() or not any(pinned_database_dir.rglob("*")):
-        raise FileNotFoundError(f"AMRFinder latest database is empty: {pinned_database_dir}")
+    pinned_database_dir = _resolve_amrfinder_latest_database(requested_database_dir)
     amrfinder_version = subprocess.run(
         [str(amrfinder_path), "--version"], check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -538,6 +596,13 @@ def prepare_amrfinder_plus(
         capture_output=True,
         text=True,
     ).stdout.strip()
+    if not database_version:
+        raise RuntimeError("AMRFinder reported no nonempty database version")
+    if database_version != pinned_database_dir.name:
+        raise RuntimeError(
+            "AMRFinder reported database version does not match its resolved version directory: "
+            f"{database_version} != {pinned_database_dir.name}"
+        )
 
     selected_manifest_path = Path(manifest_path) if manifest_path is not None else safety_dir / "asset_manifest.yaml"
     _record_safety_manifest_section(
@@ -549,6 +614,8 @@ def prepare_amrfinder_plus(
             "archive_sha256": archive_sha256,
             "binary_path": str(amrfinder_path.resolve()),
             "binary_sha256": _sha256_file(amrfinder_path),
+            "amrfinder_index_path": str(amrfinder_index_path.resolve()),
+            "amrfinder_index_sha256": _sha256_file(amrfinder_index_path),
             "amrfinder_update_path": str(amrfinder_update_path.resolve()),
             "amrfinder_update_sha256": _sha256_file(amrfinder_update_path),
             "makeblastdb_path": str(makeblastdb_path.resolve()),
@@ -678,6 +745,7 @@ def prepare_toxin_reference(
     diamond_bin: Path | None = None,
     annotations_url: str = DEFAULT_UNIPROT_TOXIN_ANNOTATIONS_URL,
     fasta_url: str = DEFAULT_UNIPROT_TOXIN_FASTA_URL,
+    safety_dir: Path | None = None,
     manifest_path: Path | None = None,
     manifest: dict | None = None,
     existing_manifest: dict | None = None,
@@ -689,7 +757,7 @@ def prepare_toxin_reference(
     if annotations_url != DEFAULT_UNIPROT_TOXIN_ANNOTATIONS_URL or fasta_url != DEFAULT_UNIPROT_TOXIN_FASTA_URL:
         raise ValueError("Custom UniProt override URLs require explicit provenance and are not supported")
     external_dir = Path(external_dir)
-    safety_dir = external_dir / "safety"
+    safety_dir = Path(safety_dir) if safety_dir is not None else external_dir / "safety"
     toxin_dir = safety_dir / "toxins"
     selected_manifest_path = Path(manifest_path) if manifest_path is not None else safety_dir / "asset_manifest.yaml"
     prior_manifest = (
@@ -727,7 +795,9 @@ def prepare_toxin_reference(
         )
     _validate_uniprot_accession_parity(annotations_path, fasta_path)
 
-    if overwrite or not diamond_database.exists():
+    # Fresh TSV/FASTA bytes require a DIAMOND index built from those same bytes, even
+    # when a stale filename happens to exist from an earlier snapshot.
+    if annotations_downloaded or overwrite or not diamond_database.exists():
         selected_diamond_bin = Path(diamond_bin) if diamond_bin is not None else external_dir / "bin" / "diamond"
         subprocess.run(
             [str(selected_diamond_bin), "makedb", "--in", str(fasta_path), "--db", str(diamond_database)],
@@ -774,25 +844,32 @@ def prepare_toxin_reference(
 
 
 def _complete_phrogs_sequence_database(sequence_database: Path) -> tuple[str, list[Path]]:
-    """Validate and digest a complete PHROGs searchable database asset or prefix."""
+    """Validate and digest the complete MMseqs padded sequence/header database prefix."""
     sequence_database = Path(sequence_database)
     if not sequence_database.exists():
         raise FileNotFoundError(f"PHROGs searchable sequence database is required: {sequence_database}")
-    if sequence_database.is_dir():
-        files = sorted(path for path in sequence_database.rglob("*") if path.is_file())
-        if len(files) < 2:
-            raise FileNotFoundError(f"PHROGs searchable sequence database is incomplete: {sequence_database}")
-        if not any(path.name == "dbtype" or path.name.endswith(".dbtype") for path in files):
-            raise FileNotFoundError(f"PHROGs searchable sequence database lacks a dbtype sidecar: {sequence_database}")
-        return _sha256_path(sequence_database), files
     if not sequence_database.is_file():
-        raise FileNotFoundError(f"PHROGs searchable sequence database is not a file or directory: {sequence_database}")
+        raise FileNotFoundError(
+            f"PHROGs searchable sequence database must be an MMseqs prefix file: {sequence_database}"
+        )
+    required_paths = (
+        sequence_database,
+        Path(f"{sequence_database}.index"),
+        Path(f"{sequence_database}.dbtype"),
+        Path(f"{sequence_database}_h"),
+        Path(f"{sequence_database}_h.index"),
+        Path(f"{sequence_database}_h.dbtype"),
+        Path(f"{sequence_database}.lookup"),
+    )
+    missing_paths = [path for path in required_paths if not path.is_file() or path.stat().st_size == 0]
+    if missing_paths:
+        raise FileNotFoundError(
+            "PHROGs searchable sequence database is not a complete MMseqs padded database; missing "
+            + ", ".join(str(path) for path in missing_paths)
+        )
     sidecar_paths = sorted(
         path for path in sequence_database.parent.glob(f"{sequence_database.name}*") if path.is_file()
     )
-    dbtype_path = Path(f"{sequence_database}.dbtype")
-    if dbtype_path not in sidecar_paths or len(sidecar_paths) < 2:
-        raise FileNotFoundError(f"PHROGs database prefix is incomplete: {sequence_database}")
     digest = hashlib.sha256()
     for sidecar_path in sidecar_paths:
         digest.update(sidecar_path.name.encode())
@@ -837,6 +914,7 @@ def prepare_phrogs_safety_metadata(
     manifest: dict | None = None,
     annotation_sha256: str | None = DEFAULT_PHROGS_ANNOTATION_SHA256,
     sequence_database: Path | None = None,
+    safety_dir: Path | None = None,
 ) -> PreparedAsset:
     """Build a digest-pinned PHROGs v4 integration/excision lookup for lysogeny evidence."""
     if annotation_sha256 is None:
@@ -889,7 +967,7 @@ def prepare_phrogs_safety_metadata(
                 f"(109 total, 57 high, 52 review): {(len(lookup_rows), high_confidence_count, review_count)}"
             )
 
-    safety_dir = external_dir / "safety"
+    safety_dir = Path(safety_dir) if safety_dir is not None else external_dir / "safety"
     lookup_path = safety_dir / "phrogs" / "phrogs_integration_excision_v4.tsv"
     _write_phrogs_lookup(lookup_path, lookup_rows)
     selected_manifest_path = Path(manifest_path) if manifest_path is not None else safety_dir / "asset_manifest.yaml"
@@ -1003,7 +1081,10 @@ def prepare_phrogs_gpu_sequence_db(
     mmseqs_bin = external_dir / "bin" / "mmseqs"
     mmseqs_cmd = str(mmseqs_bin) if mmseqs_bin.exists() else "mmseqs"
     subprocess.run([mmseqs_cmd, "createdb", str(combined_fasta), str(seq_db)], check=True)
-    subprocess.run([mmseqs_cmd, "makepaddedseqdb", str(seq_db), str(padded_db)], check=True)
+    subprocess.run(
+        [mmseqs_cmd, "makepaddedseqdb", str(seq_db), str(padded_db), "--write-lookup", "1"],
+        check=True,
+    )
     return PreparedAsset("phrogs_gpu_seq_db", padded_db, f"built from {len(fasta_paths)} PHROGs FASTA files")
 
 
@@ -1051,15 +1132,42 @@ def prepare_arc_evo2_checkout(
     return PreparedAsset("arc_evo2", checkout_dir, f"cloned from {repo_url}@{repo_rev}")
 
 
-def _validate_staged_safety_manifest(manifest: dict) -> None:
+def _validate_recorded_asset_digest(record: dict, path_field: str, digest_field: str, label: str) -> None:
+    """Fail closed when a staged manifest asset path is missing or changed before publication."""
+    path_value = record.get(path_field)
+    expected_sha256 = record.get(digest_field)
+    if not isinstance(path_value, str) or not path_value:
+        raise RuntimeError(f"Safety manifest {label} lacks required path {path_field}")
+    if not isinstance(expected_sha256, str) or not expected_sha256:
+        raise RuntimeError(f"Safety manifest {label} lacks required digest {digest_field}")
+    asset_path = Path(path_value)
+    if not asset_path.exists():
+        raise RuntimeError(f"Safety manifest {label} path no longer exists: {asset_path}")
+    observed_sha256 = _sha256_path(asset_path)
+    if observed_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"Safety manifest {label} digest does not match its staged path: "
+            f"expected {expected_sha256}, observed {observed_sha256}"
+        )
+
+
+def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool = False) -> None:
     """Ensure all scanner sections are present before publishing a new trusted generation."""
     required_fields = {
         "amrfinder_plus": (
             "archive_sha256",
+            "binary_path",
             "binary_sha256",
+            "amrfinder_index_path",
+            "amrfinder_index_sha256",
+            "amrfinder_update_path",
             "amrfinder_update_sha256",
+            "makeblastdb_path",
             "makeblastdb_sha256",
+            "hmmpress_path",
             "hmmpress_sha256",
+            "database_path",
+            "database_version",
             "database_sha256",
         ),
         "toxin_reference": (
@@ -1085,11 +1193,58 @@ def _validate_staged_safety_manifest(manifest: dict) -> None:
         raise RuntimeError("Safety manifest toxin_reference lacks required field files")
     for file_role in ("annotations", "fasta", "diamond_database"):
         file_record = toxin_files.get(file_role)
-        if not isinstance(file_record, dict) or not file_record.get("sha256"):
-            raise RuntimeError(f"Safety manifest toxin_reference lacks required field files.{file_role}.sha256")
+        if not isinstance(file_record, dict) or not file_record.get("path") or not file_record.get("sha256"):
+            raise RuntimeError(f"Safety manifest toxin_reference lacks required fields files.{file_role}")
     sequence_database = manifest["phrogs_v4"]["sequence_database"]
-    if not isinstance(sequence_database, dict) or not sequence_database.get("sha256"):
-        raise RuntimeError("Safety manifest phrogs_v4 lacks required field sequence_database.sha256")
+    if (
+        not isinstance(sequence_database, dict)
+        or not sequence_database.get("path")
+        or not sequence_database.get("sha256")
+    ):
+        raise RuntimeError("Safety manifest phrogs_v4 lacks required fields sequence_database.path/sha256")
+
+    if not verify_asset_paths:
+        return
+    amrfinder_record = manifest["amrfinder_plus"]
+    for path_field, digest_field, label in (
+        ("binary_path", "binary_sha256", "AMRFinder binary"),
+        ("amrfinder_index_path", "amrfinder_index_sha256", "AMRFinder index"),
+        ("amrfinder_update_path", "amrfinder_update_sha256", "AMRFinder updater"),
+        ("makeblastdb_path", "makeblastdb_sha256", "AMRFinder BLAST prerequisite"),
+        ("hmmpress_path", "hmmpress_sha256", "AMRFinder HMMER prerequisite"),
+        ("database_path", "database_sha256", "AMRFinder database"),
+    ):
+        _validate_recorded_asset_digest(amrfinder_record, path_field, digest_field, label)
+    toxin_record = manifest["toxin_reference"]
+    for file_role in ("annotations", "fasta", "diamond_database"):
+        _validate_recorded_asset_digest(
+            toxin_record["files"][file_role],
+            "path",
+            "sha256",
+            f"UniProt toxin {file_role}",
+        )
+    _validate_recorded_asset_digest(manifest["phrogs_v4"], "source_path", "source_sha256", "PHROGs source")
+    _validate_recorded_asset_digest(manifest["phrogs_v4"], "lookup_path", "lookup_sha256", "PHROGs lookup")
+    sequence_database_path = Path(sequence_database["path"])
+    observed_sequence_database_sha256, _ = _complete_phrogs_sequence_database(sequence_database_path)
+    if observed_sequence_database_sha256 != sequence_database["sha256"]:
+        raise RuntimeError(
+            "Safety manifest PHROGs sequence database digest does not match its staged path: "
+            f"expected {sequence_database['sha256']}, observed {observed_sequence_database_sha256}"
+        )
+
+
+def _create_safety_generation_dir(external_dir: Path) -> Path:
+    """Create a new, unpublished immutable safety asset generation on the manifest filesystem."""
+    generation_root = Path(external_dir) / "safety" / "generations"
+    generation_root.mkdir(parents=True, exist_ok=True)
+    while True:
+        generation_dir = generation_root / uuid4().hex
+        try:
+            generation_dir.mkdir()
+        except FileExistsError:
+            continue
+        return generation_dir
 
 
 def prepare_external_assets(
@@ -1205,34 +1360,45 @@ def prepare_external_assets(
         previous_manifest = _read_safety_manifest(selected_safety_manifest)
         staged_manifest: dict = {"schema_version": 1}
         _set_safety_manifest_recipe(staged_manifest)
-        assets.append(
-            prepare_amrfinder_plus(
-                external_dir,
-                bin_dir=target_bin_dir,
-                manifest=staged_manifest,
-                overwrite=overwrite,
-                insecure_downloads=False,
+        generation_dir = _create_safety_generation_dir(external_dir)
+        try:
+            generation_bin_dir = generation_dir / "bin"
+            assets.append(
+                prepare_amrfinder_plus(
+                    external_dir,
+                    bin_dir=generation_bin_dir,
+                    prerequisite_bin_dir=target_bin_dir,
+                    database_dir=generation_dir / "amrfinder" / "database",
+                    safety_dir=generation_dir,
+                    manifest=staged_manifest,
+                    overwrite=overwrite,
+                    insecure_downloads=False,
+                )
             )
-        )
-        assets.append(
-            prepare_toxin_reference(
-                external_dir,
-                diamond_bin=target_bin_dir / "diamond",
-                manifest=staged_manifest,
-                existing_manifest=previous_manifest,
-                overwrite=overwrite,
-                insecure_downloads=False,
+            assets.append(
+                prepare_toxin_reference(
+                    external_dir,
+                    diamond_bin=target_bin_dir / "diamond",
+                    safety_dir=generation_dir,
+                    manifest=staged_manifest,
+                    existing_manifest=previous_manifest,
+                    overwrite=overwrite,
+                    insecure_downloads=False,
+                )
             )
-        )
-        assets.append(
-            prepare_phrogs_safety_metadata(
-                external_dir,
-                manifest=staged_manifest,
-                sequence_database=selected_sequence_database,
+            assets.append(
+                prepare_phrogs_safety_metadata(
+                    external_dir,
+                    safety_dir=generation_dir,
+                    manifest=staged_manifest,
+                    sequence_database=selected_sequence_database,
+                )
             )
-        )
-        _validate_staged_safety_manifest(staged_manifest)
-        _write_safety_manifest_atomic(selected_safety_manifest, staged_manifest)
+            _validate_staged_safety_manifest(staged_manifest, verify_asset_paths=True)
+            _write_safety_manifest_atomic(selected_safety_manifest, staged_manifest)
+        except Exception:
+            shutil.rmtree(generation_dir, ignore_errors=True)
+            raise
     return assets
 
 
