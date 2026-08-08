@@ -55,7 +55,7 @@ phrogs_v4:
     lookup_join_policy: classify_only_profile_ids_present_in_pinned_lookup
     output_fields: [query, target, pident, alnlen, qlen, tlen, qcov, tcov, evalue, bits]
     units: {pident: percent, qcov: fraction, tcov: fraction}
-    query_id_pattern: ^phrog_[0-9]+$
+    query_id_pattern: ^phrog_[1-9][0-9]*$
     required_files:
       - phrogs_profile_db
       - phrogs_profile_db.dbtype

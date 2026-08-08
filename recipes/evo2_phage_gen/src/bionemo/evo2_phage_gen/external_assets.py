@@ -110,7 +110,7 @@ PHROGS_PROFILE_OUTPUT_FIELDS = (
     "bits",
 )
 PHROGS_PROFILE_OUTPUT_UNITS = {"pident": "percent", "qcov": "fraction", "tcov": "fraction"}
-PHROGS_PROFILE_QUERY_ID_PATTERN = r"^phrog_[0-9]+$"
+PHROGS_PROFILE_QUERY_ID_PATTERN = r"^phrog_[1-9][0-9]*$"
 UNIPROT_CC_BY_4_0_ATTRIBUTION = "UniProt data are available under the CC BY 4.0 license."
 AMRFINDER_CITATION = (
     "Feldgarden et al. (2021), AMRFinderPlus and the Reference Gene Catalog facilitate examination "
@@ -980,7 +980,8 @@ def _complete_phrogs_profile_database(profile_database: Path) -> tuple[str, list
 def _is_phrogs_profile_identifier(identifier: str) -> bool:
     """Return whether a PHROGs family identifier has the documented ``phrog_N`` form."""
     prefix = "phrog_"
-    return identifier.startswith(prefix) and identifier.removeprefix(prefix).isdigit()
+    suffix = identifier.removeprefix(prefix)
+    return identifier.startswith(prefix) and suffix.isascii() and suffix.isdecimal() and not suffix.startswith("0")
 
 
 def _phrogs_profile_ids(profile_database: Path) -> set[str]:
@@ -1044,6 +1045,16 @@ def _find_phrogs_profile_database(profile_root: Path) -> Path:
     return candidates[0]
 
 
+def _extract_verified_phrogs_safety_profile_archive(archive_path: Path, output_dir: Path) -> tuple[Path, Path, str]:
+    """Cleanly extract the official, size- and MD5-verified Pharokka profile archive."""
+    archive_path = Path(archive_path)
+    _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
+    _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+    extracted_dir = _extract_tar(archive_path, output_dir, overwrite=True)
+    profile_database = _find_phrogs_profile_database(extracted_dir)
+    return extracted_dir, profile_database, _sha256_file(archive_path)
+
+
 def _phrogs_profile_tree_files(profile_database: Path) -> list[Path]:
     """Return only the complete pinned PHROGs profile inventory, never bundled unrelated databases."""
     profile_database = Path(profile_database)
@@ -1103,6 +1114,19 @@ def _snapshot_phrogs_profile_database(profile_database: Path, safety_dir: Path) 
     if _phrogs_profile_id_inventory(snapshot_database) != source_profile_ids:
         raise RuntimeError("PHROGs safety profile snapshot identity inventory does not match its source")
     return snapshot_database, snapshot_root
+
+
+def _publish_phrogs_safety_profile_archive(archive_path: Path, external_dir: Path) -> Path:
+    """Atomically retain a verified Pharokka archive in the shared cache after safety publication."""
+    archive_path = Path(archive_path)
+    _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
+    _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+    cache_path = Path(external_dir) / "downloads" / Path(DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(archive_path, cache_path)
+    _verify_file_size(cache_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
+    _verify_md5(cache_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+    return cache_path
 
 
 def _publish_phrogs_legacy_profile_database(
@@ -1412,6 +1436,11 @@ def prepare_phrogs_safety_metadata(
             "PHROGs integration/excision lookup contains IDs absent from the verified profile database: "
             + ", ".join(missing_profile_ids)
         )
+    if not profile_ids - selected_phrogs:
+        raise ValueError(
+            "PHROGs safety profile must contain families beyond the pinned safety lookup; "
+            "a subset-only profile cannot represent the full PHROGs v4 search scope"
+        )
     normalized_declared_sha256 = annotation_sha256.removeprefix("sha256:").lower()
     if normalized_declared_sha256 == DEFAULT_PHROGS_ANNOTATION_SHA256:
         high_confidence_count = sum(row[3] == "high_confidence" for row in lookup_rows)
@@ -1545,10 +1574,10 @@ def prepare_phrogs_safety_profile_db(
         overwrite=overwrite,
         insecure=False,
     )
-    _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
-    _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
-    extracted_dir = _extract_tar(archive_path, external_dir / "phrogs" / "phrogs_mmseqs_db", overwrite=True)
-    _find_phrogs_profile_database(extracted_dir)
+    extracted_dir, _profile_database, _observed_archive_sha256 = _extract_verified_phrogs_safety_profile_archive(
+        archive_path,
+        external_dir / "phrogs" / "phrogs_mmseqs_db",
+    )
     return PreparedAsset(
         "phrogs_safety_profile_db",
         extracted_dir,
@@ -2024,12 +2053,6 @@ def prepare_external_assets(
                 selected_sequence_database,
                 safety_generation_dir,
             )
-            selected_profile_root = (
-                prepared_phrogs_profile_database.path
-                if prepared_phrogs_profile_database is not None
-                else external_dir / "phrogs" / "phrogs_mmseqs_db"
-            )
-            selected_profile_database = _find_phrogs_profile_database(selected_profile_root)
             profile_archive_dir = (
                 safety_generation_dir if prepared_phrogs_profile_database is not None else external_dir
             )
@@ -2038,19 +2061,30 @@ def prepare_external_assets(
                 raise FileNotFoundError(
                     f"PHROGs profile archive is required to record profile provenance: {profile_archive_path}"
                 )
+            if prepared_phrogs_profile_database is not None:
+                selected_profile_root = prepared_phrogs_profile_database.path
+                selected_profile_database = _find_phrogs_profile_database(selected_profile_root)
+                profile_archive_observed_sha256 = _sha256_file(profile_archive_path)
+            else:
+                (
+                    selected_profile_root,
+                    selected_profile_database,
+                    profile_archive_observed_sha256,
+                ) = _extract_verified_phrogs_safety_profile_archive(
+                    profile_archive_path,
+                    safety_generation_dir / "phrogs" / "verified_profile_source",
+                )
             snapshot_profile_database, snapshot_profile_root = _snapshot_phrogs_profile_database(
                 selected_profile_database,
                 safety_generation_dir,
             )
-            profile_archive_observed_sha256 = _sha256_file(profile_archive_path)
             profile_retrieved_at = (
                 datetime.fromtimestamp(profile_archive_path.stat().st_mtime, timezone.utc)
                 .isoformat()
                 .replace("+00:00", "Z")
             )
+            shutil.rmtree(selected_profile_root)
             if prepared_phrogs_profile_database is not None:
-                shutil.rmtree(selected_profile_root)
-                profile_archive_path.unlink()
                 assets.append(
                     PreparedAsset(
                         "phrogs_safety_profile_db",
@@ -2101,6 +2135,8 @@ def prepare_external_assets(
             _validate_staged_safety_manifest(staged_manifest, verify_asset_paths=True)
             _write_safety_manifest_atomic(selected_safety_manifest, staged_manifest)
             safety_manifest_published = True
+            if prepared_phrogs_profile_database is not None:
+                _publish_phrogs_safety_profile_archive(profile_archive_path, external_dir)
             if prepared_phrogs_annotation is not None or prepared_phrogs_sequence_database is not None:
                 _publish_phrogs_legacy_assets(snapshot_annotation_path, snapshot_sequence_database, external_dir)
             if prepared_phrogs_profile_database is not None:
