@@ -2,32 +2,38 @@
 
 This recipe fine-tunes Evo 2 for phage genomes, runs GDPO, and screens generated designs. The result below is the current computational PhiX174 case study; it is not evidence of wet-lab bootability or viability.
 
-## Current result: PhiX174 RL case study
+## Current result: PhiX174 SFT+RL case study
 
-The selected checkpoint was GDPO step 190. Training was monitored through at least step 250 under a 500-step ceiling; step 190 was selected after later checkpoints showed worse quality or diversity, not because 190 is a prescribed stopping step.
+SFT was performed on the same set of sequences as the original publication, with an added stage to verify that no sequences held-out for validation were 99% or
+more similar to any sequences in the training sets. 14266 genomes were in training, 100 in validation and 100 in test. 12,000 maximum steps were performed, and the checkpoint at
+step 5,600 was chosen by the agent as having the lowest validation loss at 0.750670. It had a similar test set loss of 0.798180. This is significantly higher than
+the loss reported by the evo2 microviridae model, which may have been overfit by the 12,000th step. A loss in this range however is more in line with validation/test
+set losses reported by the model on other validation sets when training the original 7B model, so this may be a better starting point for RL than the published microviridae checkpoint.
 
-| Evaluation                                                                     | Filter profile                           |             Result |
-| ------------------------------------------------------------------------------ | ---------------------------------------- | -----------------: |
-| Fixed 96-design validation, before clustering                                  | Full target QC                           |     50/96 (52.08%) |
-| Fixed 96-design validation, after the run's configured 99%-identity clustering | Full target QC                           |     48/96 (50.00%) |
-| Independent 1,000-design Arc rollout from step 190                             | Filters 1–6, 8, and 9; filter 7 disabled | 358/1,000 (35.80%) |
-| Diagnostic branch from the same offline rollout                                | Filter 7 also enabled                    |    5/1,000 (0.50%) |
+Pre-RL calibration was performed to chose settings for RL. A temperature of 1.0 performed similarly to other settings, so was chosen. We also chose a mix of 50% length 16 prompts, and 50% length 24 prompts.
 
-The target profile intentionally disables architecture-removal filter 7 and retains total-gene logic. The 96-design online validation and 1,000-design offline rollout use different pipelines and clustering contracts; their rates must not be combined.
+GDPO was ran up to 500 steps, with step 430 chosen as having the lowest RL score.
+
+| Evaluation                                         | Filter profile                           |             Result |
+| -------------------------------------------------- | ---------------------------------------- | -----------------: |
+| Independent 1,000-design Arc rollout from step 190 | Filters 1–6, 8, and 9; filter 7 disabled | 610/1,000 (61.00%) |
+| Diagnostic branch from the same offline rollout    | Filter 7 also enabled                    |   22/1,000 (2.20%) |
+
+The target profile intentionally disables architecture-removal filter 7 and retains total-gene logic.
 
 Target-profile offline waterfall:
 
 ```text
 1,000 generated
-  → 996 valid nucleotide
-  → 974 length/GC
-  → 940 nucleotide/ORF
-  → 897 protein/CheckV/GA gates
-  → 861 tropism
-  → 645 representatives at 99% identity
-  → 425 AAI
-  → 425 required genes
-  → 358 synteny/total-gene final passes
+  → 998 valid nucleotide
+  → 994 length/GC
+  → 992 nucleotide/ORF
+  → 957 protein/CheckV/GA gates
+  → 815 tropism
+  → 815 representatives at 99% identity
+  → 815 AAI
+  → 698 required genes
+  → 610 synteny/total-gene final passes
 ```
 
 The checked evidence and source hashes are in [historical-evidence.md](.agents/skills/bionemo-phage-design/references/historical-evidence.md). The recorded source revision is `99673b047a196352afcbb35e7aa4200127af2616`.
