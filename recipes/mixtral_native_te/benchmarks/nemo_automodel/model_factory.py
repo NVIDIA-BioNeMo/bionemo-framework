@@ -26,8 +26,8 @@ class MXFP8Linear(nn.Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Apply a dynamically quantized MXFP8 linear operation."""
+        from torchao.prototype.moe_training.mxfp8_linear import _to_mxfp8_then_scaled_mm
         from torchao.prototype.mx_formats.config import ScaleCalculationMode
-        from torchao.prototype.mx_formats.mx_linear import _to_mxfp8_then_scaled_mm
         from torchao.quantization.quantize_.common import KernelPreference
 
         output = _to_mxfp8_then_scaled_mm(

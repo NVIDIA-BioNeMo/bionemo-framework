@@ -23,7 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, MixtralConfig, Mix
 import export
 from convert import convert_mixtral_hf_to_te, convert_mixtral_te_to_hf
 from export import export_hf_checkpoint, export_hf_state_dict
-from modeling_mixtral_te import NVMixtralForCausalLM
+from modeling_mixtral_te import NVMixtralForCausalLM, _ensure_fused_grouped_mlp_registered
 
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -36,13 +36,10 @@ LOGIT_PARITY_RTOL = 2e-2
 
 
 def _fused_grouped_mlp_available() -> bool:
-    if not (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10):
+    if not torch.cuda.is_available():
         return False
     os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-    from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as f
-
-    f.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported.cache_clear()
-    return bool(f.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported())
+    return _ensure_fused_grouped_mlp_registered()
 
 
 def _tiny_mixtral_config(**overrides) -> MixtralConfig:

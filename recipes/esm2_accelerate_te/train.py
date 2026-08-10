@@ -23,6 +23,7 @@ import transformers
 import wandb
 from accelerate import PartialState
 from omegaconf import DictConfig, OmegaConf
+from transformer_engine.pytorch.attention.dot_product_attention import utils as te_attention_utils
 from transformers import AutoConfig, AutoModelForMaskedLM
 from transformers.trainer import Trainer
 from transformers.training_args import TrainingArguments
@@ -33,6 +34,18 @@ from metrics import compute_metrics
 
 
 logger = logging.getLogger(__name__)
+
+
+def _disable_te_attention_backend_compilation() -> None:
+    """Keep Transformer Engine's runtime attention backend selection out of Dynamo graphs."""
+    # PyTorch 2.13 in NVIDIA PyTorch 26.07 recurses while tracing int() on the pybind enum returned
+    # by Transformer Engine 2.17's get_fused_attn_backend. This also covers remote-code TE models
+    # such as AMPLIFY, which do not import the local ESM model compatibility hook.
+    if not getattr(te_attention_utils.get_attention_backend, "_torchdynamo_disable", False):
+        te_attention_utils.get_attention_backend = torch.compiler.disable(te_attention_utils.get_attention_backend)
+
+
+_disable_te_attention_backend_compilation()
 
 
 @hydra.main(config_path="hydra_config", config_name="L0_sanity", version_base="1.2")

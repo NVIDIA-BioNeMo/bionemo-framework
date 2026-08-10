@@ -283,26 +283,63 @@ def localize_expert_state_dict(
 _FUSED_GROUPED_MLP_REGISTERED = False
 
 
+def _fused_grouped_mlp_registration():
+    """Return the fused GroupedMLP implementation and registration API for this TE version."""
+    from transformer_engine.pytorch.ops.fuser import OperationFuser
+
+    try:
+        from transformer_engine.pytorch.ops.fused.grouped_mlp import GroupedMLP_CuTeGEMMGLU, fuse_ops
+    except ModuleNotFoundError as error:
+        # TE 2.17 replaced the forward-only implementation with a unified forward/backward op.
+        # Fall back only when that module itself is absent; do not hide missing dependencies or
+        # other import failures raised while loading an installed implementation.
+        if error.name != "transformer_engine.pytorch.ops.fused.grouped_mlp":
+            raise
+        from transformer_engine.pytorch.ops.fused.forward_grouped_mlp import (
+            ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+            fuse_forward_ops,
+        )
+        from transformer_engine.pytorch.ops.fuser import register_forward_fusion
+
+        return (
+            ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+            fuse_forward_ops,
+            OperationFuser.forward_fusion_functions,
+            register_forward_fusion,
+        )
+
+    from transformer_engine.pytorch.ops.fuser import register_forward_backward_fusion
+
+    return (
+        GroupedMLP_CuTeGEMMGLU,
+        fuse_ops,
+        OperationFuser.forward_backward_fusion_functions,
+        register_forward_backward_fusion,
+    )
+
+
+def _fused_grouped_mlp_op_class():
+    """Return TE's fused GroupedMLP operation class for capability probes and tests."""
+    return _fused_grouped_mlp_registration()[0]
+
+
 def _ensure_fused_grouped_mlp_registered() -> bool:
     """Register TE's experimental CuteDSL fused GroupedMLP path once per process.
 
-    The explicit registration is required only for ``fused_grouped_mlp``: TE 2.16 exposes the
-    fusion and its support probe through private ``ops.fused`` APIs but does not automatically add
-    it to ``OperationFuser``. This helper and its environment switch can be removed when TE enables
-    the fused MXFP8 GroupedMLP through a stable public API or registers it itself.
+    TE 2.16 exposes a forward-only fusion through ``ops.fused.forward_grouped_mlp`` and requires
+    explicit registration. TE 2.17 replaces it with the unified forward/backward implementation in
+    ``ops.fused.grouped_mlp`` and normally registers it at import time. In both versions the support
+    probe is cached and depends on ``NVTE_CUTEDSL_FUSED_GROUPED_MLP``, so re-check and register after
+    the model enables that environment switch.
     """
     global _FUSED_GROUPED_MLP_REGISTERED  # noqa: PLW0603  (process-wide one-time TE fusion registration)
-    from transformer_engine.pytorch.ops.fused.forward_grouped_mlp import (
-        ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
-        fuse_forward_ops,
-    )
-    from transformer_engine.pytorch.ops.fuser import OperationFuser, register_forward_fusion
 
-    ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported.cache_clear()
-    supported = ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported()
+    fused_op, fuse_ops, registered_fusions, register_fusion = _fused_grouped_mlp_registration()
+    fused_op.is_supported.cache_clear()
+    supported = fused_op.is_supported()
     if supported and not _FUSED_GROUPED_MLP_REGISTERED:
-        if fuse_forward_ops not in OperationFuser.forward_fusion_functions:
-            register_forward_fusion(fuse_forward_ops, prepend=True)
+        if fuse_ops not in registered_fusions:
+            register_fusion(fuse_ops, prepend=True)
         _FUSED_GROUPED_MLP_REGISTERED = True
     return supported
 
@@ -320,7 +357,7 @@ def assert_fused_mxfp8_supported(expert_ffn_mode: str, fp8_enabled: bool) -> Non
     if not _ensure_fused_grouped_mlp_registered():
         raise RuntimeError(
             "expert_ffn_mode='fused_grouped_mlp' with MXFP8 (fp8_config.enabled=true) requires "
-            "ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8 support (Blackwell sm_100+). "
+            "TE fused GroupedMLP support (Blackwell sm_100+). "
             "Refusing to fall back to the unfused grouped-linear path."
         )
 

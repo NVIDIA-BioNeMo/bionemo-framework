@@ -32,12 +32,25 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch
 import transformers
 from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention.dot_product_attention import utils as te_attention_utils
 from transformer_engine.pytorch.attention.inference import PagedKVCacheManager
 from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding
 from transformers import LlamaConfig, PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.utils.generic import TransformersKwargs
+
+
+def _disable_te_attention_backend_compilation() -> None:
+    """Keep Transformer Engine's runtime attention backend selection out of Dynamo graphs."""
+    # PyTorch 2.13 in NVIDIA PyTorch 26.07 recurses while tracing int() on the pybind enum returned
+    # by Transformer Engine 2.17's get_fused_attn_backend. Backend selection is runtime bookkeeping,
+    # so isolate only that function while leaving the model and TE attention kernels compilable.
+    if not getattr(te_attention_utils.get_attention_backend, "_torchdynamo_disable", False):
+        te_attention_utils.get_attention_backend = torch.compiler.disable(te_attention_utils.get_attention_backend)
+
+
+_disable_te_attention_backend_compilation()
 
 
 AUTO_MAP = {

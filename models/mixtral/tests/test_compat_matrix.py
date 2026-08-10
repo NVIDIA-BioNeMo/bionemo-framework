@@ -54,6 +54,7 @@ from distributed_helpers import DistributedConfig
 from test_te_capabilities import _is_supported_blackwell
 
 from grouped_dcp import load_consolidated, save_consolidated
+from modeling_mixtral_te import _ensure_fused_grouped_mlp_registered
 
 
 # Fused CuteDSL MXFP8 grouped GEMM requires each group's token count divisible by 256.
@@ -80,19 +81,12 @@ def _mxfp8_supported() -> tuple[bool, str]:
 def _fused_mxfp8_kernel_supported() -> bool:
     """True only when the real CuteDSL fused MXFP8 kernel will fire (not the unfused fallback).
 
-    ``is_supported`` is ``functools.lru_cache``d and is called once at ``forward_grouped_mlp``
-    import time — possibly before ``NVTE_CUTEDSL_FUSED_GROUPED_MLP`` is set — which would cache a
-    stale ``False``. Clear the cache after setting the env var so we evaluate current state.
+    ``is_supported`` is ``functools.lru_cache``d and may be called at fused-op import time before
+    ``NVTE_CUTEDSL_FUSED_GROUPED_MLP`` is set, which would cache a stale ``False``. The model's
+    compatibility helper clears that cache and registers the version-appropriate TE fusion.
     """
     os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-    try:
-        from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd
-
-        cls = _fwd.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8
-        cls.is_supported.cache_clear()
-        return bool(cls.is_supported())
-    except Exception:
-        return False
+    return _ensure_fused_grouped_mlp_registered()
 
 
 def _cell_marks(cell: MatrixCell) -> list:
