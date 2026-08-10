@@ -137,7 +137,7 @@ jobs:
                 if . == "models/amplify" then
                   "svcbionemo023/bionemo-framework:amplify-model-devcontainer-082025"
                 else
-                  "nvcr.io/nvidia/pytorch:26.06-py3"
+                  "nvcr.io/nvidia/pytorch:26.07-py3"
                 end
               )
             })
@@ -253,7 +253,7 @@ jobs:
         )
     name: "notebook-tests (evo2_megatron)"
     container:
-      image: nvcr.io/nvidia/pytorch:26.06-py3
+      image: nvcr.io/nvidia/pytorch:26.07-py3
       options: --shm-size=16G
       env:
         CI: true

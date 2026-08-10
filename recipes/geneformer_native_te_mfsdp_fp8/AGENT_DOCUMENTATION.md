@@ -178,7 +178,7 @@ torchrun --nproc_per_node=1 train.py  # Uses default sanity config
 
 ### Software Dependencies
 
-- **Base**: `nvcr.io/nvidia/pytorch:26.06-py3`
+- **Base**: `nvcr.io/nvidia/pytorch:26.07-py3`
 - **Key Libraries**:
   - `transformers` - HuggingFace transformers
   - `megatron-fsdp==0.1.0rc1` - Megatron-FSDP

@@ -85,7 +85,7 @@ jobs:
           echo "Recipes to run: $DIRS"
 
           # Attach the same default runner image as the repo-wide recipe lane.
-          IMG="nvcr.io/nvidia/pytorch:26.06-py3"
+          IMG="nvcr.io/nvidia/pytorch:26.07-py3"
           MATRIX=$(echo "$DIRS" | jq -c --arg img "$IMG" \
             'map({dir: ., name: (. | split("/") | last), image: $img})')
           echo "dirs=$MATRIX" >> "$GITHUB_OUTPUT"
