@@ -2,7 +2,7 @@
 
 This recipe fine-tunes Evo 2 for phage genomes, runs GDPO, and screens generated designs. The result below is the current computational PhiX174 case study; it is not evidence of wet-lab bootability or viability.
 
-## Current result: PhiX174 SFT+RL case study
+## Current agent ran result: PhiX174 SFT+RL case study
 
 SFT was performed on the same set of sequences as the original publication, with an added stage to verify that no sequences held-out for validation were 99% or
 more similar to any sequences in the training sets. 14266 genomes were in training, 100 in validation and 100 in test. 12,000 maximum steps were performed, and the checkpoint at
@@ -37,10 +37,6 @@ Target-profile offline waterfall:
 ```
 
 The checked evidence and source hashes are in [historical-evidence.md](.agents/skills/bionemo-phage-design/references/historical-evidence.md). The recorded source revision is `99673b047a196352afcbb35e7aa4200127af2616`.
-
-## Agent-run end-to-end result
-
-Not recorded yet. This section will be replaced with the first complete run performed through the repository-level agent workflow, including its target, SFT lineage, selected RL checkpoint, rollout size, and final QC result.
 
 ## Run the workflow with an agent
 
