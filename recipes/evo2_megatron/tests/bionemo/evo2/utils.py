@@ -16,7 +16,6 @@
 """Shared test utilities for evo2 tests."""
 
 import gc
-import socket
 from contextlib import contextmanager
 
 import megatron.core.num_microbatches_calculator
@@ -27,16 +26,34 @@ from pytest import MonkeyPatch
 
 
 DEFAULT_MASTER_ADDR = "localhost"
-DEFAULT_MASTER_PORT = "29500"
 DEFAULT_NCCL_TIMEOUT = "30"  # in seconds
 
 
-def find_free_network_port(address: str = "localhost") -> int:
-    """Find a free port on localhost for distributed testing."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((address, 0))
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return s.getsockname()[1]
+def _initialize_distributed_process_group(
+    context: MonkeyPatch,
+    backend: str,
+    rank: int,
+    world_size: int,
+) -> None:
+    """Initialize a process group using a TCPStore bound to a kernel-assigned port.
+
+    Passing port zero lets TCPStore bind an available port atomically. Keeping that
+    store alive and passing it to ``init_process_group`` avoids the race caused by
+    probing a port, releasing it, and then asking TCPStore to bind it again.
+    """
+    store = torch.distributed.TCPStore(
+        host_name=DEFAULT_MASTER_ADDR,
+        port=0,
+        world_size=world_size,
+        is_master=rank == 0,
+    )
+    context.setenv("MASTER_PORT", str(store.port))
+    torch.distributed.init_process_group(
+        backend=backend,
+        store=store,
+        rank=rank,
+        world_size=world_size,
+    )
 
 
 def get_compute_capability() -> tuple[int, int]:
@@ -183,14 +200,10 @@ def distributed_model_parallel_state(
             # distributed and parallel state set up
             if not torch.distributed.is_initialized():
                 context.setenv("MASTER_ADDR", DEFAULT_MASTER_ADDR)
-                free_network_port = find_free_network_port()
-                context.setenv(
-                    "MASTER_PORT", str(free_network_port) if free_network_port is not None else DEFAULT_MASTER_PORT
-                )
                 context.setenv("NCCL_TIMEOUT", DEFAULT_NCCL_TIMEOUT)
                 context.setenv("RANK", str(rank))
 
-                torch.distributed.init_process_group(backend=backend, world_size=world_size)
+                _initialize_distributed_process_group(context, backend, rank, world_size)
             parallel_state.initialize_model_parallel(**initialize_model_parallel_kwargs)
 
             # tensor parallel random seed set up

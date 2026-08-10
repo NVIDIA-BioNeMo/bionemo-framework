@@ -20,6 +20,7 @@ This file provides comprehensive tests for the LLaMA3 model including:
 - LLaMA-specific tests (inference, generation, THD inputs, etc.)
 """
 
+import gc
 from typing import Callable, Dict, List, Literal, Type
 
 import pytest
@@ -136,6 +137,61 @@ class TestLlama3Model(BaseModelTest):
             cp_loss_atol=0.5,
             cp_loss_rtol=0.25,
         )
+
+    def test_rotary_inv_freq_after_from_pretrained(self, tmp_path):
+        """The non-persistent TE rotary buffer is reinitialized after meta-device checkpoint loading."""
+        config = self.create_test_config(
+            dtype=torch.bfloat16,
+            hidden_size=64,
+            intermediate_size=128,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            vocab_size=128,
+        )
+        model = self.get_model_class()(config)
+        model.save_pretrained(tmp_path)
+
+        reloaded = self.get_model_class().from_pretrained(tmp_path, dtype=torch.bfloat16)
+        expected = transformers.models.llama.modeling_llama.LlamaRotaryEmbedding(config=reloaded.config).inv_freq
+
+        rotary_emb = reloaded.model.rotary_emb
+        assert "inv_freq" in rotary_emb._buffers
+        assert "inv_freq" in rotary_emb._non_persistent_buffers_set
+        assert rotary_emb.inv_freq.device == reloaded.model.embed_tokens.weight.device
+        assert rotary_emb.inv_freq.dtype == torch.float32
+        torch.testing.assert_close(rotary_emb.inv_freq.cpu(), expected)
+
+        # A later manual weight-tying call must not overwrite an intentionally customized RoPE buffer.
+        rotary_emb.inv_freq = torch.zeros_like(rotary_emb.inv_freq)
+        reloaded.tie_weights()
+        torch.testing.assert_close(rotary_emb.inv_freq, torch.zeros_like(rotary_emb.inv_freq))
+
+    def compare_thd_losses(
+        self,
+        bshd_loss: torch.Tensor,
+        thd_loss: torch.Tensor,
+        input_data_bshd: Dict[str, torch.Tensor],
+    ) -> None:
+        """Compare both TE input formats to the same Hugging Face reference loss."""
+        model_hf = self.get_reference_model(dtype=torch.bfloat16)
+        model_hf.eval()
+        with torch.inference_mode():
+            hf_loss = model_hf(**input_data_bshd).loss.detach().clone()
+        del model_hf
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        tolerances = self.get_tolerances()
+        for input_format, loss in (("bshd", bshd_loss), ("thd", thd_loss)):
+            torch.testing.assert_close(
+                loss,
+                hf_loss,
+                atol=tolerances.golden_value_loss_atol,
+                rtol=tolerances.golden_value_loss_rtol,
+                msg=lambda error, input_format=input_format: (
+                    f"{input_format.upper()} loss mismatch against Hugging Face: {error}"
+                ),
+            )
 
     # ==================== LLaMA3-Specific Overrides ====================
 
