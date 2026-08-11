@@ -10,6 +10,7 @@ SUMMARY.md
 RUNLOG.md
 planning/
   PLAN.md
+  DEPENDENCY_GRAPH.yaml
   DESIGN_SPEC.yaml
   DECISIONS.md
   handoffs/
@@ -34,7 +35,7 @@ reports/
 
 PROJECT.yaml records schema version, slug, creation time, operating mode, project mode, absolute repository/recipe/result roots, target accession and sequence hash, host, objective, design-spec path and hash, repository revision, execution-plan path, and stage pointers. Root PROJECT.yaml and SUMMARY.md expose concise jump links for source revision, design scope, stage attempts, selected SFT, RL, and rollout checkpoints, prompt manifest, TensorBoard directories, W&B status/URLs, and scheduler or cloud jobs. Keep detail append-only in ACTIONS.yaml, run logs, and monitor events. Never store credentials.
 
-Create `PROJECT.yaml`, `SUMMARY.md`, root `RUNLOG.md`, `planning/PLAN.md`, `planning/DESIGN_SPEC.yaml`, and `planning/DECISIONS.md` as one initialization action before creating any stage attempt. Seed the root RUNLOG with the user brief or its durable path, mode, roots, revision/dirty state, initial whole-genome scope, assumptions, unresolved decisions, and telemetry plan. Append every controller decision, material user approval, stage handoff, attempt status transition, and root-pointer promotion. Stage RUNLOG files do not replace this project-wide chronology, and SUMMARY.md does not replace it. In a read-only session, name these exact planned files without claiming creation.
+Create `PROJECT.yaml`, `SUMMARY.md`, root `RUNLOG.md`, `planning/PLAN.md`, `planning/DEPENDENCY_GRAPH.yaml`, `planning/DESIGN_SPEC.yaml`, and `planning/DECISIONS.md` as one initialization action before creating any stage attempt. Seed the root RUNLOG with the user brief or its durable path, mode, roots, revision/dirty state, initial whole-genome scope, assumptions, unresolved decisions, and telemetry plan. Append every controller decision, material user approval, stage handoff, attempt status transition, and root-pointer promotion. Stage RUNLOG files do not replace this project-wide chronology, and SUMMARY.md does not replace it. In a read-only session, name these exact planned files without claiming creation.
 
 ## Operating mode and portable memory
 
@@ -44,6 +45,35 @@ Record `operating_mode: interactive|batch` separately from `project_mode: case-s
 - **Batch:** consume the supplied brief plus verified repository and result artifacts, infer reversible defaults with evidence/confidence, and produce the best executable handoff without waiting for nonmaterial answers. Leave authority, credential, destructive, and unresolved biological choices blocked rather than guessing.
 
 Use durable files as cross-run memory in this order: current user brief and recorded decisions; PROJECT.yaml/SUMMARY.md and stable stage pointers; immutable requests, manifests, configs, hashes, and OUTPUTS; RUNLOG/ACTIONS and prior evidence; then clearly labeled inference. A harness memory, conversation summary, or agent-specific store may suggest where to look but never overrides checked artifacts. Batch plans record each inferred intent, source, confidence, consequence if wrong, and validation step. Interactive decisions are written before handoff so a later batch run can resume without private context. On every fresh or restarted agent session, recover the active attempt from these records and reconcile it with the recorded execution facility before launching, stopping, or relaunching anything.
+
+## Dependency DAG and bounded autonomy
+
+`planning/DEPENDENCY_GRAPH.yaml` is the durable scheduling source of truth; `planning/PLAN.md` holds its editable Mermaid view.
+
+Each node defines `id`, `owner_skill`, `state`, hard/soft dependencies, `approval_gates`, `resource_pool`, `resource_request`, `write_scope`, `exclusive_locks`, `priority`, `outputs`, and `acceptance_checks`.
+
+The project-level `autonomy_envelope`, approved with the plan and consumed by the execution adapter, defines intent, resource/cost ceiling, reversible adaptations, retry limits, reporting policy, and escalation.
+
+The adapter supplies current occupancy and admits only dependency-ready nodes whose requests fit the approved pool and ceiling; unknown material capacity prevents admission. A blocked node blocks only its descendants, while unrelated safe work continues. Record in-envelope decisions and deviations in `planning/DECISIONS.md` and root `RUNLOG.md`; escalate only for changed biological intent, safety conflict, missing authority, new irreversible action, exhausted recovery, or resource/cost expansion.
+
+Numeric action IDs preserve traceability without imposing runtime order.
+The editable starting graph is:
+
+```mermaid
+flowchart LR
+    A[Intake, scope, environment] --> B[Evidence and genomes]
+    B --> C[Prepare SFT data]
+    A --> D[Approve RL objectives]
+    C --> E[SFT training and monitoring]
+    D --> F[Implement and test RL functions]
+    E --> G[Select SFT checkpoint]
+    F --> H[Sampling calibration]
+    G --> H
+    H --> R1[RL A<br/>GPU request: 8]
+    H --> R2[RL B<br/>GPU request: 8]
+    R1 --> J[Compare, select, generate, and screen]
+    R2 --> J
+```
 
 ## Ordered action trace
 

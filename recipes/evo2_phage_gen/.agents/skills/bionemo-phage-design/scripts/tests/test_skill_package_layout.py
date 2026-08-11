@@ -235,6 +235,29 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
         assert marker in execution_contract
 
 
+def test_controller_uses_dependency_graph_and_bounded_autonomy() -> None:
+    skills_root = RECIPE_AGENT_DIR / "skills"
+    controller = (skills_root / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+    contract = (skills_root / "bionemo-phage-design" / "references" / "project-contract.md").read_text(
+        encoding="utf-8"
+    )
+
+    for marker in (
+        "planning/DEPENDENCY_GRAPH.yaml",
+        "dependency-ready and resource-admissible",
+        "blocked node blocks only its descendants",
+    ):
+        assert marker in controller
+    for marker in (
+        "autonomy_envelope",
+        "Numeric action IDs preserve traceability",
+        "```mermaid",
+        "Implement and test RL functions",
+        "GPU request: 8",
+    ):
+        assert marker in contract
+
+
 def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
     eval_ids = set()
     eval_text = ""
@@ -245,6 +268,7 @@ def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
 
     assert "bionemo-phage-design-006-whole-genome-host-range-scope" in eval_ids
     assert "bionemo-phage-design-adapt-execution-005-fresh-runtime-and-wandb" in eval_ids
+    assert "bionemo-phage-design-007-resource-aware-dag-autonomy" in eval_ids
     assert "bionemo-phage-design-adapt-execution-006-sandbox-gpu-visibility" in eval_ids
     assert "bionemo-phage-design-plan-rl-objectives-006-lifecycle-host-range" in eval_ids
     assert "bionemo-phage-design-plan-rl-objectives-007-replication-therapeutic-boundary" in eval_ids

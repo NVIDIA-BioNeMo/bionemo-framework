@@ -94,6 +94,20 @@
       ],
       "expected_skill": "bionemo-phage-design",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-007-resource-aware-dag-autonomy",
+      "prompt": "An approved eight-GPU phage plan is active and I will be offline. SFT is healthy and training; its selected checkpoint is not available yet. The RL objective contract is approved, but its reward functions are not implemented. Sampling calibration requires both the selected SFT checkpoint and tested reward functions. I requested two alternative eight-GPU RL runs after calibration on this single eight-GPU host. Keep useful work moving without changing the biological intent or resource ceiling.",
+      "expected_output": "A dependency- and resource-aware continuation that overlaps safe work, queues incompatible GPU jobs, and proceeds autonomously inside the approved envelope.",
+      "assertions": [
+        "The response updates a durable dependency DAG and editable Mermaid view; stage or action numbers are traceability rather than mandatory runtime order.",
+        "While SFT is monitored, the response starts implementation and tests for the already-approved RL objectives; calibration still waits for both tested objectives and the selected SFT checkpoint.",
+        "The two eight-GPU RL alternatives may be dependency-ready together, but admission control reserves the single eight-GPU pool for only one at a time and queues the other with a resource reason.",
+        "A blocked node stalls only its descendants while unrelated safe work continues.",
+        "The response records in-envelope decisions and deviations in DECISIONS.md and RUNLOG.md without routine questions, escalating only for changed biological intent, safety conflict, missing authority, new irreversible action, exhausted recovery, or resource/cost expansion."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
     }
   ]
 }
