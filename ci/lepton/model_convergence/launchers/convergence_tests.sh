@@ -20,11 +20,11 @@ __SCRIPT__
 RC=$?
 set -e
 
-echo "commit in bionemo-framework"
-(cd bionemo-framework && git log -1 || true)
-# Always grab the exact commit currently checked out in the framework repo
-COMMIT_SHA="$(cd bionemo-framework && git rev-parse HEAD 2>/dev/null || true)"
-echo "Resolved framework commit: ${COMMIT_SHA:-<none>}"
+echo "commit in bionemo-recipes"
+(cd bionemo-recipes && git log -1 || true)
+# Always grab the exact commit currently checked out in the recipes repo
+COMMIT_SHA="$(cd bionemo-recipes && git rev-parse HEAD 2>/dev/null || true)"
+echo "Resolved recipes commit: ${COMMIT_SHA:-<none>}"
 
 # Authenticate to Lepton
 pip install -q leptonai >/dev/null 2>&1 || pip install -q leptonai || true
@@ -95,12 +95,12 @@ else
   ALL_CONFIG_JSON_UPDATED='{}'
 fi
 
-# Inject/overwrite the resolved framework commit (only if we actually got one)
+# Inject/overwrite the resolved recipes commit (only if we actually got one)
 if [ -n "${COMMIT_SHA:-}" ]; then
   ALL_CONFIG_JSON_UPDATED="$(printf '%s' "$ALL_CONFIG_JSON_UPDATED" | jq -c --arg commit "$COMMIT_SHA" '.commit_sha = $commit')"
 
   # Find which branch contains this commit
-  RESOLVED_BRANCH="$(cd bionemo-framework && git branch -r --contains "$COMMIT_SHA" | grep 'origin/' | head -1 | sed 's|.*origin/||' || true)"
+  RESOLVED_BRANCH="$(cd bionemo-recipes && git branch -r --contains "$COMMIT_SHA" | grep 'origin/' | head -1 | sed 's|.*origin/||' || true)"
 
   if [ -n "$RESOLVED_BRANCH" ] && [ "$RESOLVED_BRANCH" != "HEAD" ]; then
     ALL_CONFIG_JSON_UPDATED="$(printf '%s' "$ALL_CONFIG_JSON_UPDATED" | jq -c --arg branch "$RESOLVED_BRANCH" '.branch = $branch')"
@@ -180,7 +180,7 @@ NVIDIA_DRIVER_INFO="$(jq -n --arg dv "$DRIVER_VERSION" --arg cv "$CUDA_VERSION" 
 set -e
 
 # Look for W&B files
-WANDB_DIR="/workspace/bionemo-framework/recipes/$RECIPE_SUBDIR/wandb"
+WANDB_DIR="/workspace/bionemo-recipes/recipes/$RECIPE_SUBDIR/wandb"
 
 WANDB_FOUND=0
 WANDB_SUMMARY=""

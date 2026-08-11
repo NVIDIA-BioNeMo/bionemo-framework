@@ -14,5 +14,5 @@
 # limitations under the License.
 
 
-# FIXME:  remove this notebooks from ignore when this issue is fixed: https://github.com/NVIDIA/bionemo-framework/issues/778
+# FIXME:  remove this notebooks from ignore when this issue is fixed: https://github.com/NVIDIA-BioNeMo/bionemo-recipes/issues/778
 collect_ignore = ["docs/user-guide/examples/bionemo-geneformer/geneformer_cellxgene_tutorial.ipynb"]

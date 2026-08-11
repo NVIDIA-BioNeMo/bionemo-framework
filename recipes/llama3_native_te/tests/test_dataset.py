@@ -500,7 +500,7 @@ def test_streaming_dataset_removes_columns_correctly(tokenizer_path, tmp_path):
 
     Note: Regular datasets (like ESM2) don't have this issue because they have consistent schemas.
 
-    Reference: https://github.com/NVIDIA/bionemo-framework/commit/3c0aee6de065ef494389591ca9028e8301dc385a
+    Reference: https://github.com/NVIDIA-BioNeMo/bionemo-recipes/commit/3c0aee6de065ef494389591ca9028e8301dc385a
     """
     # Create a Parquet file with both 'text' (sequence column) and 'record' (metadata)
     parquet_path = tmp_path / "genomic_with_metadata.parquet"
@@ -570,7 +570,7 @@ def test_streaming_dataset_handles_missing_record_column(tokenizer_path, tmp_pat
 
     TODO: Remove this workaround once Arc Institute fixes OpenGenome2 schema consistency.
 
-    Reference: https://github.com/NVIDIA/bionemo-framework/commit/a41f306eda7605552ee736e3291c098f2623828a
+    Reference: https://github.com/NVIDIA-BioNeMo/bionemo-recipes/commit/a41f306eda7605552ee736e3291c098f2623828a
     """
     # Create a Parquet file with ONLY 'text' column (no 'record')
     parquet_path = tmp_path / "genomic_no_record.parquet"

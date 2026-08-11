@@ -221,7 +221,7 @@ export default function EmbeddingView({ brush, categoryColumn, categoryColumns, 
           theme: {
             brandingLink: {
               text: "NVIDIA BioNeMo",
-              href: "https://github.com/NVIDIA/bionemo-framework",
+              href: "https://github.com/NVIDIA-BioNeMo/bionemo-recipes",
             },
           },
           additionalFields: additionalFields,

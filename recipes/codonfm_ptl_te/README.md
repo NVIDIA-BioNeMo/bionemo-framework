@@ -104,8 +104,8 @@ To run the scripts in this repository, we recommend using the provided Docker se
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/NVIDIA/bionemo-framework/tree/main
-cd recipes/codonfm_ptl_te
+git clone https://github.com/NVIDIA-BioNeMo/bionemo-recipes.git
+cd bionemo-recipes/recipes/codonfm_ptl_te
 ```
 
 ### 2. Docker Setup
