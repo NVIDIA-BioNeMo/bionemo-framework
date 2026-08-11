@@ -249,6 +249,7 @@ def test_controller_uses_dependency_graph_and_bounded_autonomy() -> None:
     ):
         assert marker in controller
     for marker in (
+        "Every applicable safety, biological-evidence, approval, lineage, and acceptance gate MUST be a satisfied `hard_dependencies` entry",
         "autonomy_envelope",
         "Numeric action IDs preserve traceability",
         "```mermaid",

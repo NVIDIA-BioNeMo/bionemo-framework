@@ -52,6 +52,7 @@ Use durable files as cross-run memory in this order: current user brief and reco
 
 Each node defines `id`, `owner_skill`, `state`, hard/soft dependencies, `approval_gates`, `resource_pool`, `resource_request`, `write_scope`, `exclusive_locks`, `priority`, `outputs`, and `acceptance_checks`.
 
+Every applicable safety, biological-evidence, approval, lineage, and acceptance gate MUST be a satisfied `hard_dependencies` entry before its node is dependency-ready; `soft_dependencies` inform priority only and never admit a node.
 The project-level `autonomy_envelope`, approved with the plan and consumed by the execution adapter, defines intent, resource/cost ceiling, reversible adaptations, retry limits, reporting policy, and escalation.
 
 The adapter supplies current occupancy and admits only dependency-ready nodes whose requests fit the approved pool and ceiling; unknown material capacity prevents admission. A blocked node blocks only its descendants, while unrelated safe work continues. Record in-envelope decisions and deviations in `planning/DECISIONS.md` and root `RUNLOG.md`; escalate only for changed biological intent, safety conflict, missing authority, new irreversible action, exhausted recovery, or resource/cost expansion.
