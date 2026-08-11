@@ -113,9 +113,11 @@ and [transducing
 capacity](../../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md#transducing-capacity).
 Each row records source section, applicability and rationale, design-time evidence, online component or
 no-proxy reason, hard filter, experimental endpoint, and uncertainty. Adapted therapeutic work
-includes every defensibly measurable applicable item in `online_objectives`; base-paper replication
-does so only when requested, and explicitly non-therapeutic work records why therapy-specific rows are
-not applicable.
+includes every defensibly measurable applicable item in `online_objectives`. The recipe's current
+PhiX174 replication profile also includes applicable design-relevant safety items by default while
+keeping filters 1–6, 8, and 9 enabled and filter 7 disabled. Record historical and active component-set
+identities separately and never directly compare aggregates built from different component sets.
+Explicitly non-therapeutic adapted work records why therapy-specific rows are not applicable.
 
 Each `reward_support` row records the component's independent denominator, reference and baseline-SFT
 distribution, nonzero/partial/full-credit rates, missingness, expected gradient support, and recovery
@@ -149,7 +151,14 @@ An all branch normally keeps distinct GDPO objectives. An any branch normally ha
 
 ## Threshold and validation selection
 
-For every threshold, record positive and negative consequences. Prefer same-phage outcomes, then related comparable phages, natural/reference and baseline-SFT distributions, then clearly uncertain transferred evidence. Hold calibration data out of checkpoint selection/final claims.
+For every threshold, record positive and negative consequences. During planning, distinguish a
+user-supplied operational threshold from an evidence-calibrated proposal. A user-supplied threshold
+may set the approved operational decision boundary when its source, rationale, comparator, model and
+population identity, uncertainty, applicability limits, and validation are recorded; it does not
+establish viability, bootability, productive infection, or therapeutic suitability. Prefer same-phage
+outcomes, then related comparable phages, natural/reference and baseline-SFT distributions, then
+clearly uncertain transferred evidence. Hold calibration data out of checkpoint selection/final
+claims.
 
 Pin validation generation before training. Checkpoint comparisons count only when prompt manifest, prompt IDs/length strata, seeds, sampling parameters, sample count, canonicalization, filter/tool versions, and denominator are compatible. Otherwise use predeclared stratified/reweighted analysis or mark the event non-comparable. Record uncertainty and a practical minimum change.
 

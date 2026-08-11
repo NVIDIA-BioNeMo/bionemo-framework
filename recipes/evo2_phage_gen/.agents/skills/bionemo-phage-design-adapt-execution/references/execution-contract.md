@@ -18,6 +18,8 @@ access: {ssh: null, scheduler: null, network_egress: null}
 compute:
   gpus: []                 # model, UUID, memory, utilization, processes, topology
   gpu_observed_at: null
+  gpu_visibility_status: unresolved  # unresolved|host-confirmed|host-unavailable
+  gpu_probe_contexts: []   # command, time, host identity, sandbox/container/host boundary, result
   cpu_count: null
   ram_bytes: null
 scheduler:
@@ -135,7 +137,7 @@ Treat a failed gate, absent process, stale heartbeat, or unchanged progress mark
 
 ### Local GPU and SSH
 
-Confirm intended GPU host with nvidia-smi and hostname, paths, and session lifetime. SSH uses configured aliases and strict failures; never distribute keys/tokens. Treat disconnect recovery separately from training resume.
+Confirm intended GPU host with `nvidia-smi` and `hostname`, paths, and session lifetime. Record whether each probe ran in an agent sandbox, container, SSH session, scheduler allocation, or directly on the host. A sandbox-visible GPU failure does not establish a host driver failure: sandboxes may omit GPU devices, NVML access, driver libraries, or accelerator permissions even when the host is healthy. Repeat `hostname`, `nvidia-smi`, `/dev/nvidia*`, and runtime CUDA visibility through a permitted host-visible execution context before diagnosing missing drivers or hardware. If host-visible execution requires elevation, request approval; do not bypass the boundary. Until that comparison exists, keep GPU capacity unresolved and do not install/reload drivers, switch to CPU, reduce the approved GPU topology, or abandon a local-GPU plan based only on the sandbox result. Record both contexts and any mismatch. SSH uses configured aliases and strict failures; never distribute keys/tokens. Treat disconnect recovery separately from training resume.
 
 ### Slurm
 

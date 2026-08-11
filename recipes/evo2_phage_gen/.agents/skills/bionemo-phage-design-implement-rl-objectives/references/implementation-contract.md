@@ -2,7 +2,7 @@
 
 ## Repository placement
 
-Locate the recipe that owns the RL entry point. Put reusable functions in its `src/` package and tests in the corresponding `tests/` tree, following neighboring names and fixtures. Respect repository copied-file mappings and symlinks; edit an authoritative source, then use its documented regeneration tool. Do not add imports between recipe folders.
+Locate the recipe that owns the RL entry point. Put reusable functions in its `src/` package and tests in the corresponding `tests/` tree, following neighboring names and fixtures. Preserve existing repository-authorized symlink boundaries, but do not add ad hoc cross-recipe imports or symlinks. For intentionally identical copies, edit the authoritative source, update `SOURCE_TO_DESTINATION_MAP` when the mapping changes, and run `python ci/scripts/check_copied_files.py --fix`.
 
 Generated artifacts belong to the result attempt:
 
@@ -21,6 +21,11 @@ Brainstorm before writing tests or code. Trace every objective from raw model ou
 Audit the portfolio separately from its components. Score reference, baseline/random, desired-target, and adversarial designs through the exact aggregate. Check correlated or duplicated terms, weights/scales, opposing directions, discontinuities, OR-branch dominance, and whether A+B drives toward C when the user wants D. Expected objective tension is acceptable; an unintended design that ties or beats the desired design is a contract failure. Add a discriminating reward, hard filter, support gate, calibration, or revised weights and repeat sensitivity/ablation analysis. If tests cannot express the desired ordering, return to objective design rather than coding the scalar.
 
 ## Test matrix
+
+Scale extra verification to the objective's biological and integration risk, but keep the following
+contract-critical matrix and integration gates. Proportionality may reduce redundant cases; it does
+not remove adversarial, boundary, missing-input, online/final-alignment, installed-runtime, or RL-smoke
+coverage.
 
 For each scalar reward or filter:
 
@@ -58,7 +63,7 @@ Record every command, exit status, package/runtime versions, source hash, config
 - Can deletion, truncation, duplication, canonicalization, or a tiny matching subset game a component?
 - Does the aggregate rank desired fixtures above reference, baseline/random, and adversarial counterexamples, and do ablations reveal double counting or dominance?
 - Are online and final algorithms identical where promised?
-- Are calibrated thresholds tied to the exact population and model?
+- Is every approved operational threshold tied to the exact population and model without being promoted to viability or bootability proof?
 - Does the implementation preserve OR children rather than only the max?
 - Could sequence canonicalization merge biologically distinct cases or split equivalent circular cases?
 - Does the runtime still generate and evaluate complete genomes under the approved mutable scope, and can every scope reduction be traced to an explicit decision?

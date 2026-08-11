@@ -309,7 +309,7 @@ def load_phage_safety_policy(path: str | Path) -> PhageSafetyPolicy:
         raise ValueError("allowed_replication_host_domains must match schema version 1")
     if (
         not isinstance(host_scope["disallowed_endpoint"], str)
-        or host_scope["disallowed_endpoint"] != "increased_productive_eukaryotic_infection_or_replication"
+        or host_scope["disallowed_endpoint"] != "increased_eukaryotic_replication"
     ):
         raise ValueError("disallowed_endpoint must match schema version 1")
     if (

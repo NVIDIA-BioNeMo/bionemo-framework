@@ -112,48 +112,35 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
 def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
     skills_root = RECIPE_AGENT_DIR / "skills"
     controller = (skills_root / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
-    project_contract = (
-        skills_root / "bionemo-phage-design" / "references" / "project-contract.md"
-    ).read_text(encoding="utf-8")
+    project_contract = (skills_root / "bionemo-phage-design" / "references" / "project-contract.md").read_text(
+        encoding="utf-8"
+    )
     design_contract = (
         skills_root / "bionemo-phage-design" / "references" / "design-scope-and-viability.md"
     ).read_text(encoding="utf-8")
     ema_guideline = (
-        skills_root
-        / "bionemo-phage-design"
-        / "references"
-        / "ema-2025-draft-phage-therapy-quality-guideline.md"
+        skills_root / "bionemo-phage-design" / "references" / "ema-2025-draft-phage-therapy-quality-guideline.md"
     ).read_text(encoding="utf-8")
     execution_contract = (
         skills_root / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"
     ).read_text(encoding="utf-8")
-    objective_skill = (
-        skills_root / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    objective_skill = (skills_root / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     objective_contract = (
-        skills_root
-        / "bionemo-phage-design-plan-rl-objectives"
-        / "references"
-        / "objective-contract.md"
+        skills_root / "bionemo-phage-design-plan-rl-objectives" / "references" / "objective-contract.md"
     ).read_text(encoding="utf-8")
-    implementation_skill = (
-        skills_root / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    implementation_skill = (skills_root / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     ema_linked_docs = (
         controller,
-        (skills_root / "bionemo-phage-design-research-evidence" / "SKILL.md").read_text(
-            encoding="utf-8"
-        ),
+        (skills_root / "bionemo-phage-design-research-evidence" / "SKILL.md").read_text(encoding="utf-8"),
         objective_skill,
-        (skills_root / "bionemo-phage-design-generate-and-screen" / "SKILL.md").read_text(
+        (skills_root / "bionemo-phage-design-generate-and-screen" / "SKILL.md").read_text(encoding="utf-8"),
+        (skills_root / "bionemo-phage-design-research-evidence" / "references" / "search-protocol.md").read_text(
             encoding="utf-8"
         ),
-        (
-            skills_root
-            / "bionemo-phage-design-research-evidence"
-            / "references"
-            / "search-protocol.md"
-        ).read_text(encoding="utf-8"),
     )
 
     for marker in (
@@ -181,7 +168,7 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
         "Product-manufacturing controls",
         "explicitly non-therapeutic project",
         "separate online RL component",
-        "Base-paper replication retains",
+        "current PhiX174 case-study replication",
     ):
         assert marker in design_contract
     for marker in (
@@ -198,12 +185,12 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
         "schema_version: 3",
         "therapeutic_quality:",
         "reward_support:",
-        "base-paper replication",
+        "filter 7 disabled",
         "fixed-zero component triggers",
     ):
         assert marker in objective_contract
     for marker in (
-        "adapted therapeutic work",
+        "planning-owned intended-use and safety-applicability block",
         "baseline-SFT generations",
         "Low initial reward support alone",
     ):
@@ -216,18 +203,15 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
     )
     assert (
         "[therapeutic suitability and safety-related exclusion criteria]"
-        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)"
-        in ema_linked_docs[1]
+        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)" in ema_linked_docs[1]
     )
     assert (
         "[therapeutic suitability and safety-related exclusion criteria]"
-        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)"
-        in objective_skill
+        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)" in objective_skill
     )
     assert (
         "[therapeutic-suitability exclusion rules]"
-        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)"
-        in ema_linked_docs[3]
+        "(../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md)" in ema_linked_docs[3]
     )
     for marker in (
         "EMA/CHMP/BWP/1/2024",
@@ -244,6 +228,9 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
         "api.wandb.ai",
         "A checked-in `wandb_enabled: false` default is",
         "not an opt-out",
+        "sandbox-visible GPU failure",
+        "host-visible execution context",
+        "does not establish a host driver failure",
     ):
         assert marker in execution_contract
 
@@ -258,13 +245,10 @@ def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
 
     assert "bionemo-phage-design-006-whole-genome-host-range-scope" in eval_ids
     assert "bionemo-phage-design-adapt-execution-005-fresh-runtime-and-wandb" in eval_ids
+    assert "bionemo-phage-design-adapt-execution-006-sandbox-gpu-visibility" in eval_ids
     assert "bionemo-phage-design-plan-rl-objectives-006-lifecycle-host-range" in eval_ids
-    assert (
-        "bionemo-phage-design-plan-rl-objectives-007-replication-therapeutic-boundary" in eval_ids
-    )
-    assert (
-        "bionemo-phage-design-implement-rl-objectives-004-therapeutic-reward-support" in eval_ids
-    )
+    assert "bionemo-phage-design-plan-rl-objectives-007-replication-therapeutic-boundary" in eval_ids
+    assert "bionemo-phage-design-implement-rl-objectives-004-therapeutic-reward-support" in eval_ids
     assert "bionemo-phage-design-operate-nemo-rl-008-wandb-default" in eval_ids
     for marker in (
         "root RUNLOG.md",
@@ -275,3 +259,46 @@ def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
         "sparse or fixed-zero support triggers",
     ):
         assert marker in eval_text
+
+
+def test_readme_and_historical_evidence_distinguish_rerun_generations() -> None:
+    readme = (RECIPE_ROOT / "README.md").read_text(encoding="utf-8")
+    historical_evidence = (
+        RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design" / "references" / "historical-evidence.md"
+    ).read_text(encoding="utf-8")
+
+    for marker in (
+        "Prior GDPO run: published Microviridae SFT + step 190",
+        "Latest SFT+GDPO run: step 430",
+        "Latest step-430 diagnostic",
+        "Publication-era screen; not directly comparable",
+        "358/1,000 (35.80%)",
+        "610/1,000 (61.00%)",
+        "22/1,000 (2.20%)",
+        "15/110,000 (~0.014%)",
+    ):
+        assert marker in readme
+
+    for marker in (
+        "Later operator-reported SFT+RL rerun",
+        "55efb7c2dbe799dfc8b7c67d9517186309c76499",
+        "raw run manifests are not present",
+        "step `430`",
+        "610/1000",
+        "22/1000",
+    ):
+        assert marker in historical_evidence
+
+
+def test_publication_citation_distinguishes_final_article_from_bundled_preprint() -> None:
+    readme = (RECIPE_ROOT / "README.md").read_text(encoding="utf-8")
+    controller = (RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "https://www.science.org/doi/10.1126/science.aec2657" in readme
+    assert "https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full" in readme
+    for marker in (
+        "CC BY bioRxiv v1",
+        "king-2025-generative-phage-design",
+        "final Science publication",
+    ):
+        assert marker in controller

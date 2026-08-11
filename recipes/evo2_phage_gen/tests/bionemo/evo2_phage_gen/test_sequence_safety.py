@@ -89,7 +89,7 @@ regulatory_basis:
   regulatory_compliance_claimed: false
 host_scope:
   allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
-  disallowed_endpoint: increased_productive_eukaryotic_infection_or_replication
+  disallowed_endpoint: increased_eukaryotic_replication
 required_sequence_classes: [toxin, amr]
 bacterial_replication_profile:
   required_sequence_classes: [amr, toxin, lysogeny]
@@ -170,7 +170,7 @@ regulatory_basis:
   regulatory_compliance_claimed: false
 host_scope:
   allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
-  disallowed_endpoint: increased_productive_eukaryotic_infection_or_replication
+  disallowed_endpoint: increased_eukaryotic_replication
 required_sequence_classes: [amr, toxin]
 bacterial_replication_profile:
   required_sequence_classes: [amr, toxin, lysogeny]

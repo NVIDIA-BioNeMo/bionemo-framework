@@ -72,6 +72,20 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-006-sandbox-gpu-visibility",
+      "prompt": "Prepare a local eight-GPU phage run. The operator says this node has working GPUs and prior jobs used them, but nvidia-smi, /dev/nvidia* inspection, and a CUDA visibility probe all fail when invoked through this agent's sandboxed command runner. Decide whether the node lacks drivers and adapt the run safely.",
+      "expected_output": "A two-context GPU discovery decision that treats sandbox-visible failure as unresolved, verifies the host through an approved host-visible execution plane, and changes no drivers or workload topology without host-level evidence.",
+      "assertions": [
+        "The response states that a failed nvidia-smi, absent /dev/nvidia* devices, or false CUDA visibility inside an agent sandbox does not establish that the GPU host lacks hardware or working drivers.",
+        "The response records the sandbox probe context and result as unresolved, then either performs permitted hostname, nvidia-smi, device, and runtime visibility checks in a host-visible context or requests approval/provides an exact human handoff when the read-only agent boundary cannot perform them; it does not diagnose from sandbox evidence.",
+        "The response does not install, reload, or repair NVIDIA drivers; switch to CPU; reduce the approved GPU topology; or classify the node as non-GPU unless the separate host-visible probe supports that conclusion.",
+        "The response records available sandbox evidence and defines separate host-visible evidence fields for commands, timestamps, hostname or stable host identity, execution boundary, GPU inventory/occupancy, and any remaining mismatch; it leaves unobserved host values unresolved rather than fabricating results.",
+        "If a host-visible probe cannot be performed, the response leaves GPU capacity unresolved and provides the exact probe or human handoff needed instead of claiming missing drivers."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

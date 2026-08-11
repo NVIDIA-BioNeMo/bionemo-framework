@@ -4,7 +4,7 @@ Resolve commands from the colocated recipe and active environment at execution t
 
 ## Source-isolation gate
 
-Before changing recipe code, confirm the user owns the checkout or has authorized the branch/worktree/copy. Record branch, revision, status, and a hash or saved copy of the pre-existing dirty diff in source_state.json. Preserve unrelated changes. Do not hand-edit copied destinations or symlink targets without following repository policy. If safe isolation cannot be established, stop before source mutation and offer a branch, worktree, or user-owned copy.
+Before changing recipe code, confirm the user owns the checkout or has authorized the branch/worktree/copy. Record branch, revision, status, and a hash or saved copy of the pre-existing dirty diff in source_state.json. Preserve unrelated changes. Do not hand-edit copied destinations or symlink targets without following repository policy. If safe isolation cannot be established, stop before source mutation and offer a branch, worktree, or user-owned copy. Note that some tools may be blocked from execution in your harnesses sandbox environment, check this before declaring that a tool is not available or cuda is not available. When executing on a remote server, for example through ssh or slurm, this step may not be possible but can be inferred from examining scripts and pyproject.toml files.
 
 ## Resolution order
 

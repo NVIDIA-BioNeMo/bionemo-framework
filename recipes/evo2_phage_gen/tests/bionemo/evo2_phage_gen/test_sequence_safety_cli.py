@@ -61,7 +61,7 @@ regulatory_basis:
   regulatory_compliance_claimed: false
 host_scope:
   allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
-  disallowed_endpoint: increased_productive_eukaryotic_infection_or_replication
+  disallowed_endpoint: increased_eukaryotic_replication
 required_sequence_classes: [amr, toxin]
 bacterial_replication_profile:
   required_sequence_classes: [amr, toxin, lysogeny]
@@ -477,7 +477,7 @@ def test_adapter_trust_downgrade_is_a_failed_not_replayable_attempt(tmp_path: Pa
     assert _adapter_execution_status(trusted) == "FAILED"
 
 
-def test_productive_eukaryotic_scope_objective_is_biological_fail_exit_two(tmp_path: Path):
+def test_eukaryotic_replication_objective_is_biological_fail_exit_two(tmp_path: Path):
     from bionemo.evo2_phage_gen.sequence_safety_cli import main
 
     request = tmp_path / "scope.json"
@@ -507,7 +507,7 @@ def test_productive_eukaryotic_scope_objective_is_biological_fail_exit_two(tmp_p
 
     assert exit_code == 2
     assert result["state"] == "FAIL"
-    assert result["reason_codes"][0] == "EUKARYOTIC_PRODUCTIVE_ENDPOINT"
+    assert result["reason_codes"][0] == "EUKARYOTIC_REPLICATION_OBJECTIVE"
 
 
 def test_conflicting_host_evidence_is_indeterminate_exit_three(tmp_path: Path):

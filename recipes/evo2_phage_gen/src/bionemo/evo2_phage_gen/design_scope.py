@@ -63,9 +63,7 @@ class ObjectiveEndpoint(StrEnum):
 
     PRODUCTIVE_INFECTION = "productive_infection"
     PRODUCTIVE_REPLICATION = "productive_replication"
-    INCREASED_PRODUCTIVE_EUKARYOTIC_INFECTION_OR_REPLICATION = (
-        "increased_productive_eukaryotic_infection_or_replication"
-    )
+    INCREASED_EUKARYOTIC_REPLICATION = "increased_eukaryotic_replication"
     PHARMACOKINETICS = "pharmacokinetics"
     BIODISTRIBUTION = "biodistribution"
     PERSISTENCE = "persistence"
@@ -152,14 +150,14 @@ class HostEvidence:
 
 
 _PROKARYOTIC_DOMAINS = frozenset({HostDomain.BACTERIA, HostDomain.ARCHAEA, HostDomain.BACTERIA_AND_ARCHAEA})
-_PRODUCTIVE_ENDPOINTS = frozenset(
+_REPLICATION_ENDPOINTS = frozenset(
     {
         ObjectiveEndpoint.PRODUCTIVE_INFECTION,
         ObjectiveEndpoint.PRODUCTIVE_REPLICATION,
-        ObjectiveEndpoint.INCREASED_PRODUCTIVE_EUKARYOTIC_INFECTION_OR_REPLICATION,
+        ObjectiveEndpoint.INCREASED_EUKARYOTIC_REPLICATION,
     }
 )
-_PRODUCTIVE_KINDS = frozenset({ObjectiveKind.PRODUCTIVE_INFECTION, ObjectiveKind.PRODUCTIVE_REPLICATION})
+_REPLICATION_OBJECTIVE_KINDS = frozenset({ObjectiveKind.PRODUCTIVE_INFECTION, ObjectiveKind.PRODUCTIVE_REPLICATION})
 
 
 def _freeze_metadata(value: object) -> object:
@@ -185,16 +183,16 @@ def _serialize_metadata(value: object) -> object:
 
 
 def validate_design_scope(objective: DesignObjective) -> ScopeDecision:
-    """Reject only increased productive infection or replication in eukaryotic cells."""
+    """Reject only increased objectives toward replication within eukaryotic cells."""
     has_eukaryotic_replication_host = HostDomain.EUKARYOTA in objective.replication_host_domains
-    productive_kind = objective.kind in _PRODUCTIVE_KINDS
-    productive_entry = objective.kind is ObjectiveKind.ENTRY and objective.endpoint in _PRODUCTIVE_ENDPOINTS
+    replication_kind = objective.kind in _REPLICATION_OBJECTIVE_KINDS
+    replication_entry = objective.kind is ObjectiveKind.ENTRY and objective.endpoint in _REPLICATION_ENDPOINTS
     if (
         objective.direction is ObjectiveDirection.INCREASE
         and has_eukaryotic_replication_host
-        and (productive_kind or productive_entry)
+        and (replication_kind or replication_entry)
     ):
-        return ScopeDecision(False, ("EUKARYOTIC_PRODUCTIVE_ENDPOINT",))
+        return ScopeDecision(False, ("EUKARYOTIC_REPLICATION_OBJECTIVE",))
     return ScopeDecision(True, ("OBJECTIVE_WITHIN_HOST_SCOPE",))
 
 

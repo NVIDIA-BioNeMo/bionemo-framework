@@ -1,8 +1,39 @@
-# Historical 6 kb GDPO evidence snapshot
+# Historical GDPO evidence snapshots
 
-This checked-in snapshot makes a small set of historical planning facts auditable without the ignored operational logs. Use it only for the recorded Microviridae/PhiX174-like GDPO case; it is neither a target for new runs nor a portable launch config.
+This reference keeps two generations of Microviridae/PhiX174-like GDPO evidence separate: a later operator-reported SFT+RL rerun and an earlier checksum-backed snapshot. Neither is a target for new runs, a portable launch config, or evidence of wet-lab bootability or viability.
 
-## Snapshot provenance
+## Later operator-reported SFT+RL rerun
+
+The later summary was pushed on 2026-08-10 in README commit [`55efb7c2dbe799dfc8b7c67d9517186309c76499`](https://github.com/NVIDIA-BioNeMo/bionemo-recipes/commit/55efb7c2dbe799dfc8b7c67d9517186309c76499). The operator then clarified in the working tree that the new rollout used step `430` and restored the prior step-190 comparison row. The commit is an immutable report, but the raw run manifests are not present in the fetched branch, so these values are not independently checksum-verified here.
+
+| Reported observation                      | Reported result                                                                                                                                                                | Evidence status                                                                                                 |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| SFT split and selection                   | 14,266 train, 100 validation, and 100 test genomes after the reported 99%-identity leakage check; step 5,600 selected with validation loss `0.750670` and test loss `0.798180` | Pushed README report; raw split and metric manifests absent                                                     |
+| RL selection                              | GDPO ran to a 500-step ceiling; step `430` selected                                                                                                                            | Pushed README report plus operator checkpoint-label clarification                                               |
+| Latest target-profile offline Arc rollout | `610/1000` (`61.00%`) with filters 1–6, 8, and 9 enabled and architecture-removal filter 7 disabled                                                                            | Pushed README report and waterfall; raw rollout manifest absent                                                 |
+| Latest all-filter diagnostic branch       | `22/1000` (`2.20%`) with filter 7 also enabled                                                                                                                                 | Pushed README report; raw diagnostic manifest absent                                                            |
+| Publication-era no-RL baseline            | `15/110000` (approximately `0.014%`)                                                                                                                                           | Operator-reported comparison only; its screening pipeline is not directly comparable to the offline Arc profile |
+
+The reported target-profile waterfall is:
+
+```text
+1,000 generated
+  → 998 valid nucleotide
+  → 994 length/GC
+  → 992 nucleotide/ORF
+  → 957 protein/CheckV/GA gates
+  → 815 tropism
+  → 815 representatives at 99% identity
+  → 815 AAI
+  → 698 required genes
+  → 610 synteny/total-gene final passes
+```
+
+Do not merge these later reported values with the checksum-backed snapshot below or interpret the cross-pipeline publication comparison as a controlled RL enrichment estimate. Replace the qualification above only when the actual resolved configs, manifests, checkpoint identity, metrics, and source hashes are archived.
+
+## Checksum-backed step-190 snapshot
+
+### Snapshot provenance
 
 Captured 2026-07-16 at repository revision `99673b047a196352afcbb35e7aa4200127af2616`. Line locators apply only when the source checksum matches.
 

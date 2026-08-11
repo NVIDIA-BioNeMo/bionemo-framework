@@ -3081,10 +3081,10 @@ class DesignScopeValidation:
 
     @property
     def state(self) -> SafetyState:
-        """Map productive eukaryotic objectives to FAIL and evidence errors to INDETERMINATE."""
+        """Map eukaryotic replication objectives to FAIL and evidence errors to INDETERMINATE."""
         if (
             not self.objective_decision.allowed
-            and "EUKARYOTIC_PRODUCTIVE_ENDPOINT" in self.objective_decision.reason_codes
+            and "EUKARYOTIC_REPLICATION_OBJECTIVE" in self.objective_decision.reason_codes
         ):
             return SafetyState.FAIL
         if not self.objective_decision.allowed or not self.host_evidence_decision.allowed:

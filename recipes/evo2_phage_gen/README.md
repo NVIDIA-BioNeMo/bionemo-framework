@@ -2,7 +2,7 @@
 
 This recipe fine-tunes Evo 2 for phage genomes, runs GDPO, and screens generated designs. The result below is the current computational PhiX174 case study; it is not evidence of wet-lab bootability or viability.
 
-## Current agent ran result: PhiX174 SFT+RL case study
+## Current agent-driven result: PhiX174 SFT+RL case study
 
 SFT was performed on the same set of sequences as the original publication, with an added stage to verify that no sequences held-out for validation were 99% or
 more similar to any sequences in the training sets. 14266 genomes were in training, 100 in validation and 100 in test. 12,000 maximum steps were performed, and the checkpoint at
@@ -10,14 +10,16 @@ step 5,600 was chosen by the agent as having the lowest validation loss at 0.750
 the loss reported by the evo2 microviridae model, which may have been overfit by the 12,000th step. A loss in this range however is more in line with validation/test
 set losses reported by the model on other validation sets when training the original 7B model, so this may be a better starting point for RL than the published microviridae checkpoint.
 
-Pre-RL calibration was performed to chose settings for RL. A temperature of 1.0 performed similarly to other settings, so was chosen. We also chose a mix of 50% length 16 prompts, and 50% length 24 prompts.
+Pre-RL calibration was performed to choose settings for RL. A temperature of 1.0 performed similarly to other settings, so was chosen. We also chose a mix of 50% length 16 prompts, and 50% length 24 prompts.
 
-GDPO was ran up to 500 steps, with step 430 chosen as having the lowest RL score.
+GDPO ran for up to 500 steps, with step 430 selected as having the lowest RL score. The latest target-profile rollout passed at 61%; the publication-era screen is shown only for context because it used a different pipeline and is not a controlled enrichment baseline.
 
-| Evaluation                                         | Filter profile                           |             Result |
-| -------------------------------------------------- | ---------------------------------------- | -----------------: |
-| Independent 1,000-design Arc rollout from step 190 | Filters 1–6, 8, and 9; filter 7 disabled | 610/1,000 (61.00%) |
-| Diagnostic branch from the same offline rollout    | Filter 7 also enabled                    |   22/1,000 (2.20%) |
+| Evaluation                                              | Screen                                          |               Result |
+| ------------------------------------------------------- | ----------------------------------------------- | -------------------: |
+| Prior GDPO run: published Microviridae SFT + step 190   | Arc filters 1–6, 8, and 9; filter 7 disabled    |   358/1,000 (35.80%) |
+| Latest SFT+GDPO run: step 430                           | Same target profile                             |   610/1,000 (61.00%) |
+| Latest step-430 diagnostic                              | All Arc filters, including filter 7             |     22/1,000 (2.20%) |
+| Publication baseline: published Microviridae SFT, no RL | Publication-era screen; not directly comparable | 15/110,000 (~0.014%) |
 
 The target profile intentionally disables architecture-removal filter 7 and retains total-gene logic.
 
@@ -36,7 +38,7 @@ Target-profile offline waterfall:
   → 610 synteny/total-gene final passes
 ```
 
-The checked evidence and source hashes are in [historical-evidence.md](.agents/skills/bionemo-phage-design/references/historical-evidence.md). The recorded source revision is `99673b047a196352afcbb35e7aa4200127af2616`.
+The [historical evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md) keeps the latest operator-reported rerun separate from the earlier checksum-backed step-190 snapshot. The older snapshot records source revision `99673b047a196352afcbb35e7aa4200127af2616`.
 
 ## Run the workflow with an agent
 
@@ -204,7 +206,7 @@ evo2_phage_download_sft_data --include-raw
 preprocess_evo2 --config configs/sft_microviridae_preprocess.yaml
 ```
 
-There is not yet a checked-in canonical launcher for the complete paper SFT run, so the main reproduction path above uses the released SFT checkpoint. For a new run, download the training genomes, inspect their tokenized length distribution, and agree on a high-coverage context rule (propose p99.9 or the affordable maximum), including worst-case control/prompt/EOD overhead and required alignment, before selecting the model, effective token batch, and SFT/RL settings. The bundled paper supplement preserves the exact historical configuration.
+The bundled paper supplement preserves the exact historical configuration.
 
 ## Troubleshooting
 
@@ -215,8 +217,8 @@ There is not yet a checked-in canonical launcher for the complete paper SFT run,
 
 ## References
 
-- [Generative design of novel bacteriophages with genome language models](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full)
-- [Checked paper, supplement, and figure assets](.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/)
+- [Final Science publication: *Generative design of novel bacteriophages with genome language models*](https://www.science.org/doi/10.1126/science.aec2657)
+- [Bundled CC BY bioRxiv v1 paper, supplement, figures, and data](.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/) ([bioRxiv source](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full))
 - [Skill validation record](.agents/skills/bionemo-phage-design/assets/VALIDATION.md)
 - [Historical result evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)

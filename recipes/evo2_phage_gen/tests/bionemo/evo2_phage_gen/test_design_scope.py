@@ -49,40 +49,43 @@ def test_productive_prokaryotic_host_objectives_are_allowed():
     assert validate_design_scope(bacteria_and_archaea_host_range).allowed
 
 
-def test_productive_eukaryotic_endpoints_are_rejected():
-    """Increasing eukaryotic productive infection or replication must be blocked."""
-    increase_productive_eukaryotic_infection = DesignObjective(
-        kind=ObjectiveKind.PRODUCTIVE_INFECTION,
+def test_eukaryotic_replication_objectives_are_rejected():
+    """Increasing replication within eukaryotic cells must be blocked."""
+    increase_eukaryotic_replication = DesignObjective(
+        kind=ObjectiveKind.PRODUCTIVE_REPLICATION,
         direction=ObjectiveDirection.INCREASE,
         replication_host_domains=frozenset({HostDomain.EUKARYOTA}),
-        endpoint="productive_infection",
+        endpoint="productive_replication",
     )
-    increase_eukaryotic_entry_for_productive_replication = DesignObjective(
+    increase_eukaryotic_entry_for_replication = DesignObjective(
         kind=ObjectiveKind.ENTRY,
         direction=ObjectiveDirection.INCREASE,
         replication_host_domains=frozenset({HostDomain.EUKARYOTA}),
         endpoint="productive_replication",
     )
 
-    infection_decision = validate_design_scope(increase_productive_eukaryotic_infection)
-    entry_decision = validate_design_scope(increase_eukaryotic_entry_for_productive_replication)
+    replication_decision = validate_design_scope(increase_eukaryotic_replication)
+    entry_decision = validate_design_scope(increase_eukaryotic_entry_for_replication)
 
-    assert not infection_decision.allowed
-    assert infection_decision.reason_codes == ("EUKARYOTIC_PRODUCTIVE_ENDPOINT",)
+    assert not replication_decision.allowed
+    assert replication_decision.reason_codes == ("EUKARYOTIC_REPLICATION_OBJECTIVE",)
     assert not entry_decision.allowed
-    assert entry_decision.reason_codes == ("EUKARYOTIC_PRODUCTIVE_ENDPOINT",)
+    assert entry_decision.reason_codes == ("EUKARYOTIC_REPLICATION_OBJECTIVE",)
 
 
-def test_policy_productive_endpoint_cannot_bypass_entry_scope():
-    """Entry must reject the policy's declared productive eukaryotic endpoint."""
-    policy_productive_endpoint = DesignObjective(
+def test_policy_replication_endpoint_cannot_bypass_entry_scope():
+    """Entry must reject the policy's declared eukaryotic replication endpoint."""
+    policy_replication_endpoint = DesignObjective(
         kind=ObjectiveKind.ENTRY,
         direction=ObjectiveDirection.INCREASE,
         replication_host_domains=frozenset({HostDomain.EUKARYOTA}),
-        endpoint="increased_productive_eukaryotic_infection_or_replication",
+        endpoint="increased_eukaryotic_replication",
     )
 
-    assert not validate_design_scope(policy_productive_endpoint).allowed
+    decision = validate_design_scope(policy_replication_endpoint)
+
+    assert not decision.allowed
+    assert decision.reason_codes == ("EUKARYOTIC_REPLICATION_OBJECTIVE",)
 
 
 def test_unknown_entry_endpoint_is_rejected_at_objective_construction():

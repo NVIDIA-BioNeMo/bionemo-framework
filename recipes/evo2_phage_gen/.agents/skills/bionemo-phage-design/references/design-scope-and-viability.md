@@ -1,6 +1,6 @@
 # Whole-genome design and lifecycle viability
 
-## Keep whole genomes as the default
+## Keep whole genomes as the default, unless a user has a specific list or category of genes they want to optimize, such as receptor binding proteins
 
 Treat each generated candidate as a complete, coherent phage genome and keep the whole genome in
 the mutable design space by default. Similarity to a reference, preservation of synteny, a dominant
@@ -72,8 +72,10 @@ checks:
 For adapted-design work with therapeutic intended use, emit a separate online RL component for each
 applicable design-relevant check that has a defensible measurable proxy. If an item cannot be scored
 from generated sequence or available models, record why and retain it as final hard QC or experimental
-validation rather than pretending the RL score covers it. Base-paper replication retains its
-historical objective set unless the user requests these additions.
+validation rather than pretending the RL score covers it. The current PhiX174 case-study replication
+adds applicable safety components to its existing customized filter profile by default; preserve the
+historical component set and report added components separately rather than comparing changed
+aggregates directly.
 
 Map each applicable item to an online objective, design-time hard QC, experimental characterization,
 or unresolved work; do not collapse them into one learned “safety” score or one multiplicative online
