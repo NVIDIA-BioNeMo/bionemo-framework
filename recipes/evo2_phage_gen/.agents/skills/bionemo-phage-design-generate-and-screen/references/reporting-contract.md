@@ -28,6 +28,11 @@ Lead with requested mode/count and achieved result. State:
 - ranking method and final picks;
 - incomplete tools, approximations, uncertainties, failures, and next decision.
 
+Label these as computational screening results. Computational QC does not establish biological viability,
+productive infection, therapeutic suitability, clinical safety or efficacy, or regulatory acceptability.
+State the remaining phenotypic and wet-lab endpoints plus the expert, biosafety, clinical, and regulatory
+review appropriate to the intended use.
+
 Never report “unique” without naming exact versus clustered, denominator, identity, coverage, and whether clustering occurred before or after QC. Never report a pass rate without its filter-profile ID and source artifact.
 
 ## Reproducibility checks

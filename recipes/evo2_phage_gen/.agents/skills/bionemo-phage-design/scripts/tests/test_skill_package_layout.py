@@ -370,3 +370,33 @@ def test_publication_citation_distinguishes_final_article_from_bundled_preprint(
         "final Science publication",
     ):
         assert marker in controller
+
+
+def test_safeguards_reach_operational_workflows_and_card_license() -> None:
+    skills_root = RECIPE_AGENT_DIR / "skills"
+    controller = (skills_root / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+    design_contract = (
+        skills_root / "bionemo-phage-design" / "references" / "design-scope-and-viability.md"
+    ).read_text(encoding="utf-8")
+    objective_skill = (skills_root / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    screen_skill = (skills_root / "bionemo-phage-design-generate-and-screen" / "SKILL.md").read_text(encoding="utf-8")
+    reporting_contract = (
+        skills_root / "bionemo-phage-design-generate-and-screen" / "references" / "reporting-contract.md"
+    ).read_text(encoding="utf-8")
+    card = (ROOT_AGENT_DIR / "skills" / "bionemo-phage-generation" / "skill-card.md").read_text(encoding="utf-8")
+
+    assert "replication within eukaryotic cells" in controller
+    assert "non-replicative eukaryotic entry or host-range work" in design_contract
+    assert "prohibited endpoint, not a soft penalty" in objective_skill
+    assert "whole-sequence cargo and lysogeny screens" in screen_skill
+    assert "Computational QC does not establish biological viability" in reporting_contract
+    assert "[Apache 2.0](../../../recipes/evo2_phage_gen/LICENSE)" in card
+
+    objective_evals = json.loads(
+        (skills_root / "bionemo-phage-design-plan-rl-objectives" / "evals" / "evals.json").read_text(encoding="utf-8")
+    )
+    assert "bionemo-phage-design-plan-rl-objectives-009-eukaryotic-replication-boundary" in {
+        case["id"] for case in objective_evals["evals"]
+    }

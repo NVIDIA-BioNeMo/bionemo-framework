@@ -30,6 +30,11 @@ genome integrity and downstream lifecycle effects.
 Use preservation requirements as measured rewards, filters, or review criteria rather than as hidden
 edit masks. Target-similarity conditioning steers a model; it does not reduce the design scope.
 
+Reject a requested objective or workflow whose endpoint is increased phage replication within
+eukaryotic cells; treat it as prohibited rather than a tunable penalty. This is not a blanket ban on
+non-replicative eukaryotic entry or host-range work. Route that work through case-specific intended-use,
+evidence, and safety review before planning it.
+
 ## Analyze host range across the infection lifecycle
 
 For an adapted host-range goal, create a coverage table rather than equating host range with

@@ -10,7 +10,7 @@ NVIDIA
 
 ### License/Terms of Use
 
-Apache 2.0
+[Apache 2.0](../../../recipes/evo2_phage_gen/LICENSE)
 
 ## Use Case
 

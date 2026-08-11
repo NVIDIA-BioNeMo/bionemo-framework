@@ -94,6 +94,12 @@ When the request does not clearly state another intended use, resolve adapted de
 therapeutic, record that assumption and its rationale, and expose it for revision. Do not use a null
 category to bypass the applicability review or its default online components.
 
+Before approval, inspect the requested endpoint for replication within eukaryotic cells. Reject that
+endpoint declaratively and record the rejection in the attempt; do not encode it as a reward, soft
+penalty, or unresolved trade-off. A non-replicative eukaryotic entry or host-range proposal is not
+automatically prohibited, but its intended use, evidence, case-specific safety review, and remaining
+validation must be explicit.
+
 Each evidence row records claim, objective/filter IDs, tier, citation/artifact, population/context, assumption, uncertainty, threshold derivation, validation, and owner/status.
 
 Every lifecycle-coverage row records axis, applicability/rationale, target-strain and production-host
