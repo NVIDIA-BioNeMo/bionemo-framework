@@ -90,6 +90,7 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "auto-enables supported authenticated W&B",
         "dependency-aware, resource-admitted execution",
         "bounded autonomy",
+        "durable decision reporting",
     ):
         assert marker in portable_skill
 

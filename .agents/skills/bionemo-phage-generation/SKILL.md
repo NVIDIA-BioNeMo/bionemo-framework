@@ -47,7 +47,7 @@ opts out.
 
 Verify the implementation defaults to dependency-aware, resource-admitted execution, continues
 independent safe work during monitoring, and uses bounded autonomy after plan approval while
-reporting material in-envelope decisions.
+using durable decision reporting for material in-envelope decisions.
 
 Use the recorded absolute recipe root, never this portable skill's installation path.
 
