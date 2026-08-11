@@ -86,6 +86,20 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-007-dag-admission",
+      "prompt": "SFT is running on an eight-GPU host. An approved CPU-compatible RL-objective implementation node is ready now. Later, two requested RL alternatives will each need all eight GPUs. Apply the project dependency graph without oversubscribing resources or turning monitoring into a blocking phase.",
+      "expected_output": "A reconciled admission plan that overlaps safe CPU work, serializes incompatible GPU jobs, and preserves durable reservations and monitoring state.",
+      "assertions": [
+        "The response distinguishes dependency-ready from resource-admissible and refreshes CPU, RAM, GPU, storage, I/O, occupancy, reservations, and write or exclusive-lock conflicts before launch.",
+        "The response admits RL-objective implementation while SFT monitoring remains due-gated when aggregate requests and write scopes fit.",
+        "The two later eight-GPU RL jobs remain independent in the DAG, but only one is admitted; the other is queued with the resource reason and reconsideration trigger.",
+        "Reservations and stable handles are persisted before launch success and released only after facility-native terminal-state reconciliation.",
+        "Each active node keeps independent due times, and a monitor that is not due returns without preventing other ready work."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

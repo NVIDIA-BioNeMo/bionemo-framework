@@ -111,17 +111,30 @@ Each ACTIONS item records id, intent, prerequisites, script path, script/command
 
 Use set -Eeuo pipefail in Bash, quote expansions, absolute paths, and no embedded secrets. Prefer atomic status writes. Never silently overwrite an attempt or duplicate a submission.
 
+## Resource-aware admission control
+
+Consume `planning/DEPENDENCY_GRAPH.yaml` as the launch graph. On every admission cycle:
+
+1. Reconcile durable node and attempt state with facility-native status.
+2. Select nodes whose hard dependencies and gates succeeded (`dependency-ready`).
+3. Refresh capacity, occupancy, reservations, CPU, RAM, GPU, storage/I/O headroom, and write-scope conflicts or exclusive locks.
+4. Admit a highest-priority safe set whose aggregate requests fit (`resource-admissible`); no optimal solver is required.
+5. Persist reservations and stable handles before launch success.
+6. Mark non-fitting ready nodes `queued` with the resource reason. Release reservations only after verified facility-native terminal-state reconciliation; reconsider queued nodes after launch, completion, failure, capacity change, or material plan change.
+
+Keep independent DAG nodes independent: a queued node blocks only its descendants, not safe unrelated work. A due-gated monitor is not a blocking phase.
+
 ## Agent-session continuity
 
-For every long-running stage, choose any environment- or harness-native execution facility whose worker lifetime and stable status/log queries outlive the current agent shell, chat, PTY, and tool call. Scheduler/cloud jobs, harness-managed durable jobs, services, and detached sessions are examples, not requirements. Record the actual lifetime scope. Use `/goal`, `/loop`, recurring monitors, or equivalent harness features when available to invoke due-gated one-tick monitoring and advance the next approved stage after a verified terminal handoff; this coordinates the workflow and is not worker ownership unless documented as such. A PID or lock, shell backgrounding, `nohup`, or `setsid` alone is not proof.
+For every long-running stage, choose any environment- or harness-native execution facility whose worker lifetime and stable status/log queries outlive the current agent shell, chat, PTY, and tool call. Scheduler/cloud jobs, harness-managed durable jobs, services, and detached sessions are examples, not requirements. Record the actual lifetime scope. Use `/goal`, `/loop`, recurring monitors, or equivalent harness features when available to invoke due-gated one-tick monitoring and re-evaluate and admit the safe ready set after a verified terminal handoff; this coordinates the workflow and is not worker ownership unless documented as such. A PID or lock, shell backgrounding, `nohup`, or `setsid` alone is not proof.
 
-Before launch succeeds, persist in `RUN.yaml` and `ACTIONS.yaml`: facility and stable handle, host, lifetime scope, status/log/stop queries, command/config/source/working-directory identity, logs, heartbeat/progress marker, checkpoint/resume state, and restart policy. Re-query the handle and verify it identifies the launched work using facility-appropriate evidence.
+Before launch succeeds, persist the reservation and, in `RUN.yaml` and `ACTIONS.yaml`, the facility and stable handle, host, lifetime scope, status/log/stop queries, command/config/source/working-directory identity, logs, heartbeat/progress marker, checkpoint/resume state, and restart policy. Re-query the handle and verify it identifies the launched work using facility-appropriate evidence.
 
-At every new agent session, read durable project, action, attempt, and monitor state before mutation, then query the facility by handle. Adopt matching live work without duplication; advance completed work; resume or relaunch failed/terminal work only after checkpoint verification; leave unresolved identity untouched. Automatic restart is optional and, when used, must be bounded and invoke an idempotent verified-checkpoint resume path.
+At every new agent session, read durable project, action, attempt, reservation, and monitor state before mutation, then query the facility by handle. Adopt matching live work without duplication; advance completed work; resume or relaunch failed/terminal work only after checkpoint verification; leave unresolved identity untouched. Reconcile terminal state before releasing a reservation, then re-evaluate and admit the safe ready set. Automatic restart is optional and, when used, must be bounded and invoke an idempotent verified-checkpoint resume path.
 
 ## Rate-limited monitoring
 
-A one-tick monitor reads `monitor/state.json` before any scheduler, filesystem, process, or telemetry query. Persist `last_checked_at`, `next_check_at`, `backoff_attempt`, phase, and independent due times for scheduler, logs, disk/checkpoints, and telemetry. Set due times from measured or expected step/event timing, risk, query cost, and the next decision boundary rather than a universal heartbeat. In timerless `/goal` loops, return successfully without querying when not due.
+Each active node retains independent due times. A one-tick monitor reads `monitor/state.json` before any scheduler, filesystem, process, or telemetry query. Persist `last_checked_at`, `next_check_at`, `backoff_attempt`, phase, and independent due times for scheduler, logs, disk/checkpoints, and telemetry. Set due times from measured or expected step/event timing, risk, query cost, and the next decision boundary rather than a universal heartbeat. In timerless `/goal` loops, return successfully without querying when not due; a not-due monitor does not prevent admission of other ready work.
 
 Use phase-aware cadence:
 

@@ -259,6 +259,24 @@ def test_controller_uses_dependency_graph_and_bounded_autonomy() -> None:
         assert marker in contract
 
 
+def test_execution_adapter_uses_resource_aware_admission() -> None:
+    skills_root = RECIPE_AGENT_DIR / "skills"
+    adapter = (skills_root / "bionemo-phage-design-adapt-execution" / "SKILL.md").read_text(encoding="utf-8")
+    contract = (
+        skills_root / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "resource-aware admission control" in adapter
+    for marker in (
+        "dependency-ready",
+        "resource-admissible",
+        "reservations",
+        "write-scope conflicts",
+        "queued",
+    ):
+        assert marker in contract
+
+
 def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
     eval_ids = set()
     eval_text = ""
@@ -271,6 +289,7 @@ def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
     assert "bionemo-phage-design-adapt-execution-005-fresh-runtime-and-wandb" in eval_ids
     assert "bionemo-phage-design-007-resource-aware-dag-autonomy" in eval_ids
     assert "bionemo-phage-design-adapt-execution-006-sandbox-gpu-visibility" in eval_ids
+    assert "bionemo-phage-design-adapt-execution-007-dag-admission" in eval_ids
     assert "bionemo-phage-design-plan-rl-objectives-006-lifecycle-host-range" in eval_ids
     assert "bionemo-phage-design-plan-rl-objectives-007-replication-therapeutic-boundary" in eval_ids
     assert "bionemo-phage-design-implement-rl-objectives-004-therapeutic-reward-support" in eval_ids
