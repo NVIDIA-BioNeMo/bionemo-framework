@@ -8,6 +8,7 @@ results/
 # Local configs
 .gitconfig
 .superpowers
+.worktrees/
 .bash_history
 .vscode-server
 .gnupg
