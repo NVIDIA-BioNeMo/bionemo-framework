@@ -52,6 +52,7 @@ def test_initialize_distributed_process_group_keeps_kernel_assigned_port_reserve
             "port": 0,
             "world_size": 1,
             "is_master": True,
+            "wait_for_workers": False,
         }
     ]
     assert init_process_group_calls == [
@@ -62,3 +63,43 @@ def test_initialize_distributed_process_group_keeps_kernel_assigned_port_reserve
             "world_size": 1,
         }
     ]
+
+
+def test_initialize_distributed_process_group_shares_rank_zero_endpoint(monkeypatch):
+    tcp_store_calls = []
+    init_process_group_calls = []
+
+    class FakeStore:
+        def __init__(self, port):
+            self.port = 41000 if port == 0 else port
+
+    def fake_tcp_store(**kwargs):
+        tcp_store_calls.append(kwargs)
+        return FakeStore(kwargs["port"])
+
+    def fake_init_process_group(**kwargs):
+        init_process_group_calls.append(kwargs)
+
+    monkeypatch.setattr(utils.torch.distributed, "TCPStore", fake_tcp_store)
+    monkeypatch.setattr(utils.torch.distributed, "init_process_group", fake_init_process_group)
+    rendezvous_store = utils.torch.distributed.HashStore()
+
+    with MonkeyPatch.context() as environment:
+        utils._initialize_distributed_process_group(
+            environment,
+            sentinel.backend,
+            rank=0,
+            world_size=2,
+            rendezvous_store=rendezvous_store,
+        )
+        utils._initialize_distributed_process_group(
+            environment,
+            sentinel.backend,
+            rank=1,
+            world_size=2,
+            rendezvous_store=rendezvous_store,
+        )
+
+    assert [call["port"] for call in tcp_store_calls] == [0, 41000]
+    assert [call["is_master"] for call in tcp_store_calls] == [True, False]
+    assert [call["store"].port for call in init_process_group_calls] == [41000, 41000]
