@@ -7,6 +7,21 @@ description: Use when planning or running an Evo 2 phage-design project that may
 
 Coordinate the project; delegate each stage to its owning skill. Keep the workflow reproducible, evidence-backed, and portable.
 
+## Mandatory offline-continuation response
+
+When the user will be offline and an approved plan continues, begin the response with this `DAG and records` checklist, filling in each item:
+
+```text
+## DAG and records
+- Graph: DEPENDENCY_GRAPH.yaml and PLAN.md Mermaid are updated to show ...
+- Active independent work: ...
+- Blocked descendants and gates: ...
+- Resource queue: ...
+- Records: in-envelope decisions/deviations go to planning/DECISIONS.md and root RUNLOG.md; no routine question is needed.
+```
+
+Escalate only when the autonomy envelope is exceeded. Do not omit the checklist because work is awaiting a gate or uses no GPUs.
+
 ## Start with discovery
 
 Before proposing a plan, locate and read every sibling SKILL.md below (in addition to this). Do not rely on descriptions alone.
