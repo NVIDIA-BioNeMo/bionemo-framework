@@ -88,6 +88,8 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "complete whole-genome",
         "EMA-derived therapeutic objectives",
         "auto-enables supported authenticated W&B",
+        "dependency-aware, resource-admitted execution",
+        "bounded autonomy",
     ):
         assert marker in portable_skill
 

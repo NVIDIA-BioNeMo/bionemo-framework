@@ -45,6 +45,10 @@ without reward starvation, and auto-enables supported authenticated W&B telemetr
 opts out.
 ```
 
+Verify the implementation defaults to dependency-aware, resource-admitted execution, continues
+independent safe work during monitoring, and uses bounded autonomy after plan approval while
+reporting material in-envelope decisions.
+
 Use the recorded absolute recipe root, never this portable skill's installation path.
 
 - Codex: start a fresh or reloaded session with its cwd set to the absolute recipe root and invoke `$bionemo-phage-design` with the handoff prompt.
