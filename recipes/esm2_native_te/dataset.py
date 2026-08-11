@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+from functools import partial
 
 import datasets
 import datasets.distributed
@@ -33,6 +34,15 @@ from distributed_config import DistributedConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+def tokenize_function(examples, *, tokenizer, max_seq_length: int):
+    """Tokenize protein sequences in a multiprocessing-safe callable."""
+    return tokenizer(
+        examples["sequence"],
+        truncation=True,
+        max_length=max_seq_length,
+    )
 
 
 def create_tokenized_dataset(
@@ -58,22 +68,16 @@ def create_tokenized_dataset(
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-    def tokenize_function(examples):
-        """Tokenize the protein sequences."""
-        return tokenizer(
-            examples["sequence"],
-            truncation=True,
-            max_length=max_seq_length,
-        )
+    tokenize = partial(tokenize_function, tokenizer=tokenizer, max_seq_length=max_seq_length)
 
     if isinstance(dataset, datasets.Dataset) and use_lazy_tokenization:
         # Using dataset.map on a non-streaming dataset will automatically perform and cache the transform, which can
         # trigger an expensive tokenization.
-        tokenized_dataset = dataset.with_transform(tokenize_function)
+        tokenized_dataset = dataset.with_transform(tokenize)
 
     else:
         tokenized_dataset = dataset.map(
-            tokenize_function,
+            tokenize,
             batched=True,
             remove_columns=dataset.column_names,
         )
@@ -147,6 +151,7 @@ def create_bshd_dataloader(
         batch_size=micro_batch_size,
         collate_fn=data_collator,
         num_workers=num_workers,
+        multiprocessing_context="spawn" if num_workers > 0 else None,
         pin_memory=not use_stateful_dataloader,
     )
 
@@ -224,6 +229,7 @@ def create_thd_dataloader(
         batch_size=None,  # The TokenPackingDataset will handle the batching.
         collate_fn=data_collator,
         num_workers=num_workers,
+        multiprocessing_context="spawn" if num_workers > 0 else None,
         pin_memory=not use_stateful_dataloader,
     )
     return train_dataloader, tokenized_dataset
