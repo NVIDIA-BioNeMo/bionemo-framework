@@ -50,6 +50,14 @@ Use durable files as cross-run memory in this order: current user brief and reco
 
 `planning/DEPENDENCY_GRAPH.yaml` is the durable scheduling source of truth; `planning/PLAN.md` holds its editable Mermaid view.
 
+At top level, the graph requires `schema_version`, `plan_sha256`, `environment_path`,
+`autonomy_envelope`, `resource_pools`, and `nodes`. `plan_sha256` binds the approved graph to the
+corresponding plan revision, and `environment_path` identifies the authoritative current environment
+record. The `autonomy_envelope` records `status` and `approved_at` with its approved intent, ceilings,
+adaptations, retries, reporting, and escalation bounds. `resource_pools` maps every pool name used by
+a node to its capacity and `capacity_source`; an unresolved or stale source leaves that capacity
+unknown.
+
 Each node defines `id`, `owner_skill`, `state`, hard/soft dependencies, `approval_gates`, `resource_pool`, `resource_request`, `write_scope`, `exclusive_locks`, `priority`, `outputs`, and `acceptance_checks`.
 
 Every applicable safety, biological-evidence, approval, lineage, and acceptance gate MUST be a satisfied `hard_dependencies` entry before its node is dependency-ready; `soft_dependencies` inform priority only and never admit a node.

@@ -94,6 +94,16 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
     ):
         assert marker in portable_skill
 
+    handoff_section = portable_skill.split("Build this handoff prompt before changing sessions:", maxsplit=1)[1]
+    handoff_prompt = handoff_section.split("```", maxsplit=2)[1]
+    for marker in (
+        "dependency-aware, resource-admitted execution",
+        "independent safe work during monitoring",
+        "bounded autonomy",
+        "durable decision reporting",
+    ):
+        assert marker in handoff_prompt
+
     portable_evals = json.loads(
         (ROOT_AGENT_DIR / "skills" / "bionemo-phage-generation" / "evals" / "evals.json").read_text(encoding="utf-8")
     )
@@ -258,6 +268,17 @@ def test_controller_uses_dependency_graph_and_bounded_autonomy() -> None:
         "```mermaid",
         "Implement and test RL functions",
         "GPU request: 8",
+    ):
+        assert marker in contract
+
+    for marker in (
+        "`schema_version`",
+        "`plan_sha256`",
+        "`environment_path`",
+        "`status`",
+        "`approved_at`",
+        "`resource_pools`",
+        "`capacity_source`",
     ):
         assert marker in contract
 
