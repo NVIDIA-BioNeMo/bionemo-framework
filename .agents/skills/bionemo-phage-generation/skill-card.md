@@ -14,7 +14,7 @@ Apache 2.0
 
 ## Use Case
 
-For research and engineering teams that need a reproducible whole-genome phage-design workflow: establish a compatible workspace, plan from the target, host, intended use, and evidence, assemble licensed inputs and leakage-controlled training data, train and select lineage-verified checkpoints, design and calibrate objectives, and generate and screen auditable candidates.
+For research and engineering teams that need a reproducible whole-genome, or targeted sub-genome phage-design workflow: establish a compatible workspace, plan from the target, host, intended use, and evidence, assemble licensed inputs and leakage-controlled training data, train and select lineage-verified checkpoints, design and calibrate objectives, and generate and screen auditable candidates.
 
 ### Deployment Geography for Use
 
@@ -44,7 +44,7 @@ Sequence analysis cannot establish production-cell-bank quality, impurities, ste
 
 ### CTXφ illustrative failure route
 
-CTXφ illustrates a known indirect route by which a phage can contribute to human disease: this filamentous phage carries the `ctxA` and `ctxB` cholera-toxin genes and can integrate into the *Vibrio cholerae* chromosome through lysogenic conversion, allowing the toxigenic genotype to be inherited by bacterial descendants. This is not direct phage infection of, or replication within, eukaryotic cells. The case illustrates why toxin-cargo and lysogeny safeguards are paired; it is not presented as the historical source of EMA wording.
+CTXφ illustrates a known indirect route by which a phage can contribute to human disease: this filamentous phage carries the `ctxA` and `ctxB` cholera-toxin genes and can integrate into the *Vibrio cholerae* chromosome through lysogenic conversion, allowing the toxigenic genotype to be inherited by bacterial descendants. This is not direct phage infection of, or replication within, eukaryotic cells. The case illustrates why toxin-cargo and lysogeny safeguards are important.
 
 ### Workflow failure modes and safeguards
 
