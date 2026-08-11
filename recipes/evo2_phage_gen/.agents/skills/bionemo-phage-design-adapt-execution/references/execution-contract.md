@@ -5,15 +5,18 @@
 Record observed values, discovery commands, timestamps, and unresolved fields. Use null plus a reason for unknowns.
 
 ```yaml
-schema_version: 2
+schema_version: 3
 profile: local-gpu        # local-gpu|ssh-gpu|slurm|lepton|manual|hybrid
 harness:
   name: unknown
   recurring_modes: []
 hosts:
-  control: {name: null, role: agent, os: null}
+  control: {name: null, role: agent, os: null}  # control workstation or approved service host
+  login: {name: null, role: submission, policy_source: null}
+  build: {name: null, role: null}
   launch: {name: null, role: null}
   compute: {name: null, role: null}
+  transfer: {name: null, role: null}
 access: {ssh: null, scheduler: null, network_egress: null}
 compute:
   gpus: []                 # model, UUID, memory, utilization, processes, topology
@@ -24,13 +27,20 @@ compute:
   ram_bytes: null
 scheduler:
   type: null
+  policy_sources: []
+  head_login_node_policy: null
   account: null
   partition_or_node_group: null
+  allowed_partitions: []
+  partition_limits: []      # name, account/QOS, node types, GRES, maximum_walltime, preemption
   qos: null
   walltime: null
   job_id: null
 runtime:
-  container: null
+  mode: null                # host-uv|docker|site-container|other
+  already_containerized: null
+  host_uv: {lock_identity: null, environment_path: null}
+  container: {engine: null, base_identity: null, image_digest: null, mount_map: [], gpu_runtime: null}
   modules: []
   recipe_root: null
   build_script: null
@@ -83,11 +93,17 @@ config so launch cannot fail on telemetry, continue with local telemetry, and re
 names tried, sanitized error category, and remediation. Never persist a key or login output that
 contains one.
 
-When reading a schema-1 environment record, treat absent W&B policy/auth fields as unresolved rather
-than as an opt-out. Preserve the old record and emit schema 2 in the new attempt or approved project
-update.
+When reading a schema-1 or schema-2 environment record, treat absent W&B, site-policy, host-role, and
+runtime-boundary fields as unresolved rather than as an opt-out or inherited capability. Preserve the
+old record and emit schema 3 in the new attempt or approved project update.
 
 For each required input, cache, temporary, checkpoint, log, and result path record host/mount, visibility, shared or node-local, durable or ephemeral, readers, writer, free/total bytes, free inodes when relevant, contents, and the timestamp/result of a reversible create-write-fsync-rename-delete probe when it must be writable. Do not infer writability from permission bits alone. Identify one owner for every write/upload and resolve checkpoint durability before launch.
+
+Choose control, login/submission, build, compute, monitor, and transfer placement from current site
+policy and observed mount/network visibility. A control workstation may drive the cluster without
+hosting the worker. Record where environment construction, downloads, preprocessing, training, QC,
+monitoring, and synchronization run; an unspecified role is unresolved, not permission to use a
+head or login node.
 
 ## EXECUTION_PLAN.md
 
@@ -152,9 +168,55 @@ Treat a failed gate, absent process, stale heartbeat, or unchanged progress mark
 
 Confirm intended GPU host with `nvidia-smi` and `hostname`, paths, and session lifetime. Record whether each probe ran in an agent sandbox, container, SSH session, scheduler allocation, or directly on the host. A sandbox-visible GPU failure does not establish a host driver failure: sandboxes may omit GPU devices, NVML access, driver libraries, or accelerator permissions even when the host is healthy. Repeat `hostname`, `nvidia-smi`, `/dev/nvidia*`, and runtime CUDA visibility through a permitted host-visible execution context before diagnosing missing drivers or hardware. If host-visible execution requires elevation, request approval; do not bypass the boundary. Until that comparison exists, keep GPU capacity unresolved and do not install/reload drivers, switch to CPU, reduce the approved GPU topology, or abandon a local-GPU plan based only on the sandbox result. Record both contexts and any mismatch. SSH uses configured aliases and strict failures; never distribute keys/tokens. Treat disconnect recovery separately from training resume.
 
+For local execution, first detect whether the agent is already containerized and whether a usable host
+`uv` environment, Docker engine/daemon, GPU runtime, and durable job facility are actually available.
+Honor an explicit user choice; otherwise choose host-uv or Docker from compatibility, reproducibility,
+isolation, mount, GPU, and recovery evidence and record the rationale. In either boundary, run the
+recipe's `.ci_build.sh` before sourcing `.ci_test_env.sh` from the recipe working directory.
+
+For host-uv, bind the environment to the lock/source identity and keep it project-owned. For Docker,
+record the Dockerfile/build context, pinned base and final image identity, GPU/runtime smoke, UID/GID,
+network policy, and explicit code/data/cache/result mounts; keep credentials out of the image and
+command line. Persist container name/ID plus status/log/attach/stop/recovery commands as the facility
+handle. When already containerized, do not launch nested Docker merely because its CLI exists; require
+verified daemon reachability, mount-path translation, GPU propagation, and user intent or a clear
+compatibility benefit.
+
 ### Slurm
 
-Discover command/site polling policy, account, partition, QOS, GPU GRES, topology, time, modules/container, mounts, and preemption. Submit on login; train/heavy-QC on compute. Record job ID immediately. Resume only complete checkpoints. Assign object-store upload to an approved compute, transfer, or service owner.
+Resolve the current head/login-node policy, user associations, allowed_partitions, account/QOS combinations,
+per-partition `maximum_walltime`, node types/GRES/topology, preemption/signals, egress, modules/container
+mechanism, and shared versus node-local mounts from site documentation, a bounded current query, and
+submission evidence as permitted. A user-provided known-good site script is useful evidence; compare
+its account, directives, modules, mounts, image, and entry point with current policy and help rather
+than treating old syntax as authority. Do not infer permission from a partition merely appearing in
+a global listing.
+
+Prefer the agent/control loop on a control workstation or approved service host. On a strict site,
+the login node performs only bounded policy-permitted submission and targeted status/log queries: no
+`tmux`, environment installation, container build, data/model download, preprocessing, training, QC,
+or broad filesystem work. Place those tasks in approved build, compute, transfer, or service jobs.
+Use a matching pinned base image and the site's current container mechanism. If a project environment
+must live on shared storage, key it by lock/source/base identity, build it once under a lock in a
+staging path, validate it, and use atomic promotion to an immutable consumer path; never let concurrent
+jobs mutate one shared environment. From the recipe working directory, run `.ci_build.sh`, then source
+`.ci_test_env.sh` before resolving entry points.
+
+When a healthy stage cannot fit the discovered walltime, select a site-supported bounded restart
+method. A [Slurm singleton dependency](https://slurm.schedmd.com/sbatch.html#OPT_dependency) serializes
+previously launched jobs with the same job name and user; if used, give each project/stage/attempt a
+unique stable job name, prequeue only the approved number of segments, and record every job ID and
+dependency. Each segment must reconcile predecessor state, accept only a complete unchanged-lineage
+checkpoint, and exit safely rather than duplicate work. Prove the first automatic continuation reads
+the prior segment's checkpoint and produces forward progress plus the next durable checkpoint/artifact
+before relying on the chain. Bound resubmission and checkpoint cadence before walltime; do not
+use one singleton name across distinct DAG stages or combine it blindly with scheduler requeue.
+
+Run resource synchronization as a short shared-disk transfer job on an approved transfer/compute node
+when the login node or training allocation is unsuitable. Record job IDs immediately, resume only
+complete checkpoints, and assign object-store upload to an approved compute, transfer, or service
+owner. Keep `squeue`/`sacct` queries targeted and due-gated; never poll `sinfo` or `squeue` in a tight
+loop.
 
 ### Lepton
 

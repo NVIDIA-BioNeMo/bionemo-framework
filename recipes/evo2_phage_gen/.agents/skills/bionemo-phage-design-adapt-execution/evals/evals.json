@@ -100,6 +100,38 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-008-slurm-site-and-restart-chain",
+      "prompt": "Adapt a multi-week phage SFT job to a Slurm site where the allowed GPU partitions have different walltime limits, the administrators forbid tmux, builds, downloads, and compute on login nodes, and checkpoints live on a shared filesystem. I have an older successful site script. The longest permitted job is shorter than the run, and short transfer jobs can use another node type.",
+      "expected_output": "A site-evidence-based placement and bounded restart plan that keeps the control agent off the login node, verifies current entitlements and mounts, adapts the old script, and proves checkpointed continuation before prequeuing the remaining segments.",
+      "assertions": [
+        "The response discovers current user-allowed partition/account/QOS combinations, maximum walltime and node/GRES options for each, preemption/signals, and site polling/head-node policy; a globally visible partition is not assumed usable.",
+        "It maps control/workstation, login/submission, build, compute, monitor, and transfer roles plus shared/node-local mount visibility, egress, writability, and checkpoint durability before choosing placement.",
+        "It treats the older successful script as site evidence and revalidates its directives, account, modules, mounts, image/container mechanism, recipe revision, and entry point against current policy/help rather than copying it blindly.",
+        "No tmux, environment build/install, container build, download, preprocessing, training, QC, or broad filesystem scan runs on the login node; these move to approved jobs, and scheduler queries remain targeted and due-gated.",
+        "A matching pinned base image and project environment are built in an approved role; a shared environment uses lock/source/base identity, locking, validation, atomic promotion, and immutable consumption rather than concurrent mutation. The recipe runs .ci_build.sh before sourcing .ci_test_env.sh.",
+        "Because the run exceeds walltime, the response uses a site-supported bounded stage-specific singleton chain or a justified current alternative. For singleton it uses one unique project/stage/attempt job name, records every job ID, relies on same-name/same-user serialization, and prevents duplicate or unbounded chains.",
+        "Before prequeuing the full bounded chain, the response verifies that the first segment writes a complete lineage-matching checkpoint and that the first automatic continuation resumes it, makes forward progress, and writes the next durable checkpoint/artifact.",
+        "Resource synchronization runs as a short approved transfer/compute job with verified shared-disk access and its own durable identity, not as heavy login-node work."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-009-local-runtime-selection",
+      "prompt": "Prepare a local GPU phage run without assuming the Codex process environment is the training runtime. The host can use a project uv environment or Docker, the current Python environment has dependency conflicts, and the user prefers a container if Docker and GPU passthrough work. The agent might itself be inside a devcontainer.",
+      "expected_output": "An explicit local runtime decision that detects nesting and available capabilities, honors the container preference when viable, and leaves durable build, mount, launch, attach, monitor, and recovery evidence.",
+      "assertions": [
+        "The response detects the current host/container boundary, project uv state, Docker CLI and daemon access, GPU runtime/passthrough, mount translation, permissions, network, and worker lifetime instead of assuming the agent environment is suitable.",
+        "It honors the user's Docker preference when the preflight succeeds; otherwise it records the bounded failure and selects a verified project-owned host uv environment or leaves the runtime unresolved without silently changing the scientific workload.",
+        "It avoids nested Docker merely because a CLI is visible inside a devcontainer; nesting requires verified daemon reachability, path mapping, GPU propagation, and a user request or clear compatibility benefit.",
+        "The selected boundary runs the recipe's .ci_build.sh before sourcing .ci_test_env.sh from the recipe working directory and pins the source, lock, base image, and final environment/image identity.",
+        "For Docker, the response records build context, base/final image identities, UID/GID, GPU smoke, network policy, explicit code/data/cache/result mounts, and credential-safe injection without baking secrets into the image or command line.",
+        "The response persists the container or host-job stable handle plus status, logs, attach, stop, checkpoint, and recovery commands so monitoring survives the current agent session."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

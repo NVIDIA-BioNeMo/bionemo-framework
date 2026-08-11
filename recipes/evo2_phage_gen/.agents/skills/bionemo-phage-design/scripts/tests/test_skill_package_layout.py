@@ -400,3 +400,36 @@ def test_safeguards_reach_operational_workflows_and_card_license() -> None:
     assert "bionemo-phage-design-plan-rl-objectives-009-eukaryotic-replication-boundary" in {
         case["id"] for case in objective_evals["evals"]
     }
+
+
+def test_execution_adapter_covers_site_aware_slurm_and_local_runtime_choice() -> None:
+    skills_root = RECIPE_AGENT_DIR / "skills"
+    adapter = (skills_root / "bionemo-phage-design-adapt-execution" / "SKILL.md").read_text(encoding="utf-8")
+    contract = (
+        skills_root / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"
+    ).read_text(encoding="utf-8")
+    evals = json.loads(
+        (skills_root / "bionemo-phage-design-adapt-execution" / "evals" / "evals.json").read_text(encoding="utf-8")
+    )
+    eval_ids = {case["id"] for case in evals["evals"]}
+
+    for marker in (
+        "allowed_partitions",
+        "maximum_walltime",
+        "known-good site script",
+        "control workstation",
+        "head/login-node policy",
+        "same job name and user",
+        "first automatic continuation",
+        "shared-disk transfer job",
+        "host-uv",
+        "already containerized",
+        "Docker",
+        "immutable",
+        "atomic promotion",
+    ):
+        assert marker in contract
+    for marker in ("maximum walltimes", "tmux", "bounded stage-specific `singleton` chain", "host `uv`", "Docker"):
+        assert marker in adapter
+    assert "bionemo-phage-design-adapt-execution-008-slurm-site-and-restart-chain" in eval_ids
+    assert "bionemo-phage-design-adapt-execution-009-local-runtime-selection" in eval_ids
