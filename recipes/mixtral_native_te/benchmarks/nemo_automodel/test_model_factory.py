@@ -43,11 +43,35 @@ def test_enable_dense_mxfp8_excludes_lm_head():
 def test_mxfp8_linear_bias_path(monkeypatch):
     module = nn.Linear(32, 32, bias=True)
     module.__class__ = MXFP8Linear
+    call = {}
+
+    def fake_mxfp8_linear(
+        input_hp,
+        weight_hp,
+        kernel_preference,
+        scale_calculation_mode,
+        wgrad_with_hp,
+    ):
+        call.update(
+            kernel_preference=kernel_preference,
+            scale_calculation_mode=scale_calculation_mode,
+            wgrad_with_hp=wgrad_with_hp,
+        )
+        return input_hp @ weight_hp.t()
 
     monkeypatch.setattr(
-        "torchao.prototype.mx_formats.mx_linear._to_mxfp8_then_scaled_mm",
-        lambda input, weight, **kwargs: input @ weight.t(),
+        "torchao.prototype.moe_training.mxfp8_linear._to_mxfp8_then_scaled_mm",
+        fake_mxfp8_linear,
     )
     inputs = torch.randn(2, 32)
 
     torch.testing.assert_close(module(inputs), nn.functional.linear(inputs, module.weight, module.bias))
+
+    from torchao.prototype.mx_formats.config import ScaleCalculationMode
+    from torchao.quantization.quantize_.common import KernelPreference
+
+    assert call == {
+        "kernel_preference": KernelPreference.AUTO,
+        "scale_calculation_mode": ScaleCalculationMode.RCEIL,
+        "wgrad_with_hp": False,
+    }

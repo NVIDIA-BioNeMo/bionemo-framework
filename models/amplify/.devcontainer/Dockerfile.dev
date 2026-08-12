@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:26.06-py3
+FROM nvcr.io/nvidia/pytorch:26.07-py3
 
 # Install xformers and TE manually.
 RUN MAX_JOBS=4 pip --disable-pip-version-check --no-cache-dir install -v git+https://github.com/facebookresearch/xformers.git@v0.0.29.post1#egg=xformers

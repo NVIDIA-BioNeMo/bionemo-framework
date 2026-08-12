@@ -216,13 +216,12 @@ def test_localize_stacked_expert_state_dict():
 
 
 def _fused_mxfp8_available():
-    if not (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10):
+    if not torch.cuda.is_available():
         return False
     os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-    from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as f
+    from modeling_mixtral_te import _ensure_fused_grouped_mlp_registered
 
-    f.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported.cache_clear()
-    return bool(f.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported())
+    return _ensure_fused_grouped_mlp_registered()
 
 
 @pytest.mark.skipif(
@@ -232,7 +231,8 @@ def _fused_mxfp8_available():
 def test_fused_grouped_mlp_runs_and_fires():
     import transformer_engine.common.recipe as te_recipe
     import transformer_engine.pytorch as te
-    from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd
+
+    from modeling_mixtral_te import _fused_grouped_mlp_op_class
 
     os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "0"
     os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
@@ -260,7 +260,7 @@ def test_fused_grouped_mlp_runs_and_fires():
         .to(torch.bfloat16)
     )
 
-    cls = _fwd.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8
+    cls = _fused_grouped_mlp_op_class()
     fired = {"n": 0}
     orig = cls.fuser_forward
 

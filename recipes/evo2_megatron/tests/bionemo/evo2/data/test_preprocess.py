@@ -17,11 +17,13 @@
 # limitations under the License.
 
 
+import random
 from pathlib import Path
 
 import torch
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+from megatron.core.datasets.indexed_dataset import IndexedDataset
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.data.evo2_dataset_provider import DatasetBuildContext, Evo2DatasetProvider
@@ -64,6 +66,15 @@ def create_preprocessing_config(
     return Evo2PreprocessingConfig(**config_dict)
 
 
+def test_preprocessing_context_without_seed_advances_current_random_state() -> None:
+    """An unseeded nested context must consume the enclosing seeded random stream."""
+    with Evo2Preprocessor.preprocessing_context_manager(42):
+        initial_state = random.getstate()
+        with Evo2Preprocessor.preprocessing_context_manager():
+            random.random()
+        assert random.getstate() != initial_state
+
+
 def test_preprocessor_creates_expected_files(tmp_path: Path) -> None:
     """Verifies that preprocessing creates all expected output files."""
     test_fasta_file_path = create_fasta_file(tmp_path / "test.fasta", num_sequences=20, sequence_length=10000)
@@ -86,6 +97,13 @@ def test_preprocessor_creates_expected_files(tmp_path: Path) -> None:
     for file_path in expected_files:
         assert file_path.exists(), f"Expected file {file_path} was not created"
         assert file_path.stat().st_size > 0, f"File {file_path} is empty"
+
+    # The configured seed produces 13/5/2 contigs per split. Reverse-complement expansion creates two indexed
+    # documents per contig.
+    expected_documents_per_split = {"train": 26, "val": 10, "test": 4}
+    for split, expected_documents in expected_documents_per_split.items():
+        dataset_prefix = output_dir / f"{prefix}_nucleotide_fast_tokenizer_256_{split}"
+        assert len(IndexedDataset(str(dataset_prefix))) == expected_documents
 
     # Check that no unexpected files were created
     all_files = [f for f in output_dir.iterdir() if f.is_file()]
@@ -123,17 +141,22 @@ def test_preprocessor_creates_expected_files(tmp_path: Path) -> None:
             tokenizer_model=DEFAULT_HF_TOKENIZER_MODEL_PATH,
         )
     )
+    requested_samples = (int(20 * 0.6), int(20 * 0.2), int(20 * 0.2))
     train_ds, val_ds, test_ds = dataset_provider.build_datasets(
         DatasetBuildContext(
-            tokenizer=tokenizer, train_samples=int(20 * 0.6), valid_samples=int(20 * 0.2), test_samples=int(20 * 0.2)
+            tokenizer=tokenizer,
+            train_samples=requested_samples[0],
+            valid_samples=requested_samples[1],
+            test_samples=requested_samples[2],
         )
     )
     assert train_ds is not None
     assert val_ds is not None
     assert test_ds is not None
-    assert int(20 * 0.6) <= len(train_ds) and len(train_ds) >= len(val_ds)
-    assert int(20 * 0.2) <= len(val_ds)
-    assert int(20 * 0.2) <= len(test_ds)
+    # Megatron rounds each split up to a whole number of epochs, so dataset lengths can exceed the request.
+    assert len(train_ds) >= requested_samples[0]
+    assert len(val_ds) >= requested_samples[1]
+    assert len(test_ds) >= requested_samples[2]
 
     # check that the dataset is correct
     batch = train_ds[0]

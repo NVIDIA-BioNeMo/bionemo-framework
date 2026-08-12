@@ -70,6 +70,8 @@ def test_ops_fused_grouped_mlp_importable():
     from transformer_engine.pytorch.ops import GroupedLinear as OpsGroupedLinear  # noqa: F401
     from transformer_engine.pytorch.ops import Sequential  # noqa: F401
 
+    from modeling_mixtral_te import _fused_grouped_mlp_op_class
+
     swiglu_ok = True
     try:
         from transformer_engine.pytorch.ops import ScaledSwiGLU  # noqa: F401
@@ -79,6 +81,10 @@ def test_ops_fused_grouped_mlp_importable():
         except Exception:
             swiglu_ok = False
     assert swiglu_ok, "Neither ScaledSwiGLU nor SwiGLU is importable from transformer_engine.pytorch.ops"
+    assert _fused_grouped_mlp_op_class().__name__ in {
+        "ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8",
+        "GroupedMLP_CuTeGEMMGLU",
+    }
 
 
 def _assert_same_tolerance_rejects_shifted(reference: torch.Tensor, actual: torch.Tensor) -> None:
@@ -400,13 +406,11 @@ def test_fused_grouped_mlp_mxfp8_matches_bf16_reference():
         out_fused = ffn(xg, split_sizes, probs, split_sizes)
     out_fused.sum().backward()
 
-    # Report whether the CuteDSL fused forward op is the one selected (best-effort; do not fail
-    # the test on this — some TE builds expose is_supported(), others do not).
+    # Report whether the CuteDSL fused op is supported (best-effort; do not fail the test on this).
     try:
-        from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd
+        from modeling_mixtral_te import _fused_grouped_mlp_op_class
 
-        cls = _fwd.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8
-        print("fused_forward_is_supported:", cls.is_supported())
+        print("fused_op_is_supported:", _fused_grouped_mlp_op_class().is_supported())
     except Exception as e:
         print("could not introspect fused forward op:", repr(e))
 

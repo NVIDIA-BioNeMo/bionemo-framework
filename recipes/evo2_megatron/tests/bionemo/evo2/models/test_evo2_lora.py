@@ -34,7 +34,7 @@ import torch.nn as nn
 from bionemo.evo2.models.evo2_lora import Evo2LoRA
 from bionemo.evo2.models.evo2_provider import Hyena1bModelProvider
 
-from ..utils import distributed_model_parallel_state
+from ..utils import distributed_model_parallel_state, distributed_process_group_state
 
 
 _PRE_MLP_NORM_NAME = "pre_mlp_layernorm"
@@ -443,16 +443,22 @@ def _build_pretrain_config(
 
 def _pretrain_base_model(base_dir: Path, *, train_iters: int = 1) -> Path:
     """Train a base model for 1 step and return the checkpoint directory."""
-    from megatron.bridge.training.pretrain import pretrain
-
-    from bionemo.evo2.models.evo2_provider import hyena_forward_step
-
     cfg = _build_pretrain_config(base_dir, train_iters=train_iters)
-    pretrain(cfg, hyena_forward_step)
+    _pretrain_with_reserved_process_group(cfg)
 
     ckpt_parent = base_dir / "evo2" / "checkpoints"
     assert ckpt_parent.exists(), f"Base model checkpoint dir not found at {ckpt_parent}"
     return ckpt_parent
+
+
+def _pretrain_with_reserved_process_group(cfg) -> None:
+    """Run Megatron pretraining without reusing a runner-owned rendezvous port."""
+    from megatron.bridge.training.pretrain import pretrain
+
+    from bionemo.evo2.models.evo2_provider import hyena_forward_step
+
+    with distributed_process_group_state():
+        pretrain(cfg, hyena_forward_step)
 
 
 def _load_dist_checkpoint_keys(ckpt_dir: Path) -> set[str]:
@@ -813,10 +819,6 @@ class TestEvo2LoRAPretrainIntegration:
 
     def test_lora_checkpoint_excludes_frozen_embeddings(self, tmp_path: Path, base_ckpt: Path):
         """LoRA WITHOUT skip_freeze → checkpoint does NOT contain embedding keys."""
-        from megatron.bridge.training.pretrain import pretrain
-
-        from bionemo.evo2.models.evo2_provider import hyena_forward_step
-
         lora_dir = tmp_path / "lora_frozen"
         cfg = _build_pretrain_config(
             lora_dir,
@@ -824,7 +826,7 @@ class TestEvo2LoRAPretrainIntegration:
             skip_freeze=[],
             pretrained_ckpt_dir=str(base_ckpt),
         )
-        pretrain(cfg, hyena_forward_step)
+        _pretrain_with_reserved_process_group(cfg)
 
         ckpt_dir = lora_dir / "evo2" / "checkpoints" / "iter_0000001"
         assert ckpt_dir.exists(), f"Checkpoint not found at {ckpt_dir}"
@@ -857,10 +859,6 @@ class TestEvo2LoRAPretrainIntegration:
         lora_targets: list[str] | None,
     ):
         """LoRA + skip_freeze → checkpoint contains the unfrozen module and its weights changed."""
-        from megatron.bridge.training.pretrain import pretrain
-
-        from bionemo.evo2.models.evo2_provider import hyena_forward_step
-
         lora_dir = tmp_path / f"lora_{skip_freeze[0]}"
         cfg = _build_pretrain_config(
             lora_dir,
@@ -870,7 +868,7 @@ class TestEvo2LoRAPretrainIntegration:
             lora_target_modules=lora_targets,
             pretrained_ckpt_dir=str(base_ckpt),
         )
-        pretrain(cfg, hyena_forward_step)
+        _pretrain_with_reserved_process_group(cfg)
 
         lora_iter1 = lora_dir / "evo2" / "checkpoints" / "iter_0000001"
         assert lora_iter1.exists(), f"LoRA checkpoint not found at {lora_iter1}"

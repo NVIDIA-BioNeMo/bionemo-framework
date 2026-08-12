@@ -70,8 +70,13 @@ class Evo2Preprocessor:
         """Context manager for setting and restoring the random number generator state.
 
         Args:
-            seed (int | None): Seed for the random number generator. Defaults to None.
+            seed (int | None): Seed for an isolated random number generator context. If None, use and advance the
+                current random number generator state. Defaults to None.
         """
+        if seed is None:
+            yield seed
+            return
+
         # Track current state.
         current_state = random.getstate()
         try:

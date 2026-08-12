@@ -39,6 +39,7 @@ from grouped_dcp import (
     save_consolidated,
     save_optimizer_consolidated,
 )
+from modeling_mixtral_te import _ensure_fused_grouped_mlp_registered
 
 
 requires_four_gpu = pytest.mark.skipif(
@@ -58,14 +59,7 @@ DISCRETE_INTER = 256
 
 def _fused_mxfp8_kernel_supported() -> bool:
     os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-    try:
-        from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd
-
-        cls = _fwd.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8
-        cls.is_supported.cache_clear()
-        return bool(cls.is_supported())
-    except Exception:
-        return False
+    return _ensure_fused_grouped_mlp_registered()
 
 
 def _maybe_skip_discrete(quantized: bool) -> None:

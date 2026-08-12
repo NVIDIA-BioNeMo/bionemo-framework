@@ -85,7 +85,7 @@ jobs:
           echo "Recipes to run: $DIRS"
 
           # Attach the same default runner image as the repo-wide recipe lane.
-          IMG="nvcr.io/nvidia/pytorch:26.06-py3"
+          IMG="nvcr.io/nvidia/pytorch:26.07-py3"
           MATRIX=$(echo "$DIRS" | jq -c --arg img "$IMG" \
             'map({dir: ., name: (. | split("/") | last), image: $img})')
           echo "dirs=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -139,7 +139,7 @@ jobs:
             ${{ runner.os }}-huggingface-
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
 

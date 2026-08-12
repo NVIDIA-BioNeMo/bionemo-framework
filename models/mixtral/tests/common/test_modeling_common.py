@@ -233,6 +233,21 @@ class BaseModelTest(ABC):
         """
         return ["bshd"]
 
+    def compare_thd_losses(
+        self,
+        bshd_loss: torch.Tensor,
+        thd_loss: torch.Tensor,
+        input_data_bshd: Dict[str, torch.Tensor],
+    ) -> None:
+        """Compare losses from equivalent BSHD and THD inputs."""
+        tolerances = self.get_tolerances()
+        torch.testing.assert_close(
+            bshd_loss,
+            thd_loss,
+            atol=tolerances.golden_value_loss_atol,
+            rtol=tolerances.golden_value_loss_rtol,
+        )
+
     def verify_model_parameters_initialized_correctly(
         self,
         model: PreTrainedModel,
@@ -756,22 +771,22 @@ class BaseModelTest(ABC):
         model_thd.eval()
         with torch.inference_mode():
             outputs_thd = model_thd(**input_data_thd)
+        thd_loss = outputs_thd.loss.detach().clone()
+        thd_logits = outputs_thd.logits.detach().clone()
+        del model_thd, outputs_thd
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Compare logits
         torch.testing.assert_close(
             bshd_logits,
-            outputs_thd.logits,
+            thd_logits,
             atol=tolerances.golden_value_logits_atol,
             rtol=tolerances.golden_value_logits_rtol,
         )
 
         # Compare losses
-        torch.testing.assert_close(
-            bshd_loss,
-            outputs_thd.loss,
-            atol=tolerances.golden_value_loss_atol,
-            rtol=tolerances.golden_value_loss_rtol,
-        )
+        self.compare_thd_losses(bshd_loss, thd_loss, input_data_bshd)
 
     def test_thd_padding_input_data_equivalence(self):
         """Test that the THD input data is the same before and after padding."""

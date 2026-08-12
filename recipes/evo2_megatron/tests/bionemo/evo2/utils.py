@@ -16,7 +16,6 @@
 """Shared test utilities for evo2 tests."""
 
 import gc
-import socket
 from contextlib import contextmanager
 
 import megatron.core.num_microbatches_calculator
@@ -27,16 +26,43 @@ from pytest import MonkeyPatch
 
 
 DEFAULT_MASTER_ADDR = "localhost"
-DEFAULT_MASTER_PORT = "29500"
 DEFAULT_NCCL_TIMEOUT = "30"  # in seconds
 
 
-def find_free_network_port(address: str = "localhost") -> int:
-    """Find a free port on localhost for distributed testing."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((address, 0))
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return s.getsockname()[1]
+def _initialize_distributed_process_group(
+    context: MonkeyPatch,
+    backend: str,
+    rank: int,
+    world_size: int,
+    rendezvous_store: torch.distributed.Store | None = None,
+) -> None:
+    """Initialize a process group using a TCPStore bound to a kernel-assigned port.
+
+    Rank zero binds an available port atomically, then publishes the selected port
+    through ``rendezvous_store`` for other ranks. Keeping the TCPStore alive and
+    passing it to ``init_process_group`` avoids releasing the port before use.
+    """
+    if world_size > 1 and rendezvous_store is None:
+        raise ValueError("rendezvous_store is required when world_size is greater than one")
+
+    is_master = rank == 0
+    port = 0 if is_master else int(rendezvous_store.get("master_port"))
+    store = torch.distributed.TCPStore(
+        host_name=DEFAULT_MASTER_ADDR,
+        port=port,
+        world_size=world_size,
+        is_master=is_master,
+        wait_for_workers=False,
+    )
+    if is_master and rendezvous_store is not None:
+        rendezvous_store.set("master_port", str(store.port))
+    context.setenv("MASTER_PORT", str(store.port))
+    torch.distributed.init_process_group(
+        backend=backend,
+        store=store,
+        rank=rank,
+        world_size=world_size,
+    )
 
 
 def get_compute_capability() -> tuple[int, int]:
@@ -155,11 +181,38 @@ def clean_parallel_state_context():
 
 
 @contextmanager
+def distributed_process_group_state(
+    rank: int = 0,
+    world_size: int = 1,
+    backend: str = "nccl",
+    rendezvous_store: torch.distributed.Store | None = None,
+):
+    """Initialize a scoped process group without initializing Megatron parallel state."""
+    with MonkeyPatch.context() as context:
+        try:
+            clean_up_distributed_and_parallel_states()
+            context.setenv("MASTER_ADDR", DEFAULT_MASTER_ADDR)
+            context.setenv("NCCL_TIMEOUT", DEFAULT_NCCL_TIMEOUT)
+            context.setenv("RANK", str(rank))
+            _initialize_distributed_process_group(
+                context,
+                backend,
+                rank,
+                world_size,
+                rendezvous_store=rendezvous_store,
+            )
+            yield
+        finally:
+            clean_up_distributed_and_parallel_states()
+
+
+@contextmanager
 def distributed_model_parallel_state(
     seed: int = 42,
     rank: int = 0,
     world_size: int = 1,
     backend: str = "nccl",
+    rendezvous_store: torch.distributed.Store | None = None,
     **initialize_model_parallel_kwargs,
 ):
     """Context manager for torch distributed and parallel state testing.
@@ -173,6 +226,7 @@ def distributed_model_parallel_state(
         rank: Global rank of the current cuda device. Default 0.
         world_size: World size or number of devices. Default 1.
         backend: Backend to torch.distributed.init_process_group. Default 'nccl'.
+        rendezvous_store: Out-of-band store used to share rank zero's TCPStore port.
         **initialize_model_parallel_kwargs: Kwargs passed to initialize_model_parallel.
     """
     with MonkeyPatch.context() as context:
@@ -183,14 +237,16 @@ def distributed_model_parallel_state(
             # distributed and parallel state set up
             if not torch.distributed.is_initialized():
                 context.setenv("MASTER_ADDR", DEFAULT_MASTER_ADDR)
-                free_network_port = find_free_network_port()
-                context.setenv(
-                    "MASTER_PORT", str(free_network_port) if free_network_port is not None else DEFAULT_MASTER_PORT
-                )
                 context.setenv("NCCL_TIMEOUT", DEFAULT_NCCL_TIMEOUT)
                 context.setenv("RANK", str(rank))
 
-                torch.distributed.init_process_group(backend=backend, world_size=world_size)
+                _initialize_distributed_process_group(
+                    context,
+                    backend,
+                    rank,
+                    world_size,
+                    rendezvous_store=rendezvous_store,
+                )
             parallel_state.initialize_model_parallel(**initialize_model_parallel_kwargs)
 
             # tensor parallel random seed set up

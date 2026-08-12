@@ -32,12 +32,25 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch
 import transformers
 from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention.dot_product_attention import utils as te_attention_utils
 from transformer_engine.pytorch.attention.inference import PagedKVCacheManager
 from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding
 from transformers import LlamaConfig, PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.utils.generic import TransformersKwargs
+
+
+def _disable_te_attention_backend_compilation() -> None:
+    """Keep Transformer Engine's runtime attention backend selection out of Dynamo graphs."""
+    # PyTorch 2.13 in NVIDIA PyTorch 26.07 recurses while tracing int() on the pybind enum returned
+    # by Transformer Engine 2.17's get_fused_attn_backend. Backend selection is runtime bookkeeping,
+    # so isolate only that function while leaving the model and TE attention kernels compilable.
+    if not getattr(te_attention_utils.get_attention_backend, "_torchdynamo_disable", False):
+        te_attention_utils.get_attention_backend = torch.compiler.disable(te_attention_utils.get_attention_backend)
+
+
+_disable_te_attention_backend_compilation()
 
 
 AUTO_MAP = {
@@ -110,6 +123,7 @@ class NVLlamaPreTrainedModel(PreTrainedModel):
         self.model.embed_tokens.apply(self._init_weights)
 
         self.model.rotary_emb.inv_freq = LlamaRotaryEmbedding(config=self.model.config).inv_freq.to("cuda")
+        self.model._rotary_inv_freq_needs_init = False
 
         # Meta-device init seems to break weight tying, so we re-tie the weights here.
         self.tie_weights()
@@ -128,6 +142,23 @@ class NVLlamaPreTrainedModel(PreTrainedModel):
             return
 
         super()._init_weights(module)
+
+    def tie_weights(self, *args, **kwargs):
+        """Tie model weights and restore the non-persistent rotary frequency buffer."""
+        super().tie_weights(*args, **kwargs)
+
+        llama_model = getattr(self, "model", self)
+        if not getattr(llama_model, "_rotary_inv_freq_needs_init", False):
+            return
+
+        device = llama_model.embed_tokens.weight.device
+        if device.type != "meta":
+            # Transformers 5 loads checkpoints through a meta-device model. Transformer Engine's
+            # non-persistent inv_freq buffer is therefore materialized without values, so rebuild it
+            # when from_pretrained() performs its final tie_weights() call after loading parameters.
+            with torch.device(device):
+                llama_model.rotary_emb.inv_freq = LlamaRotaryEmbedding(config=llama_model.config).inv_freq
+            llama_model._rotary_inv_freq_needs_init = False
 
     def state_dict(self, *args, **kwargs):
         """Override state_dict to filter out TransformerEngine's _extra_state keys.
@@ -223,6 +254,7 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
         # LlamaRotaryEmbedding.
         self.rotary_emb = RotaryPositionEmbedding(config.hidden_size // config.num_attention_heads)
         self.rotary_emb.inv_freq = LlamaRotaryEmbedding(config=config).inv_freq
+        self._rotary_inv_freq_needs_init = self.rotary_emb.inv_freq.device.type == "meta"
 
         self._fp8_recipe: transformer_engine.common.recipe.Recipe | None = None
         self._fp4_recipe: transformer_engine.common.recipe.Recipe | None = None
