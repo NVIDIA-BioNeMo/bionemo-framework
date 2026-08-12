@@ -16,6 +16,9 @@ permissions:
 jobs:
   TruffleHog:
     runs-on: ubuntu-latest
+    env:
+      TRUFFLEHOG_IMAGE: ghcr.io/trufflesecurity/trufflehog
+      TRUFFLEHOG_VERSION: "3.96.0"
     defaults:
       run:
         shell: bash
@@ -25,14 +28,40 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: TruffleHog OSS
+      - name: Validate TruffleHog scan policy
+        if: github.event_name != 'merge_group'
+        run: python ci/scripts/tests/test_trufflehog_workflow.py
+
+      # This PR's history contains an ordinary test identifier that matches the
+      # Lob detector. The exact file is re-scanned from the current checkout below.
+      - name: TruffleHog history scan
         if: github.event_name != 'merge_group'
         id: trufflehog
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11
         continue-on-error: true
         with:
-          extra_args: --results=verified,unknown
+          version: ${{ env.TRUFFLEHOG_VERSION }}
+          extra_args: >-
+            --results=verified,unknown
+            --exclude-paths=.github/trufflehog-exclude-paths.txt
+
+      - name: TruffleHog current-file scan for history exclusion
+        if: github.event_name != 'merge_group'
+        id: trufflehog_current_file
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            --volume "$PWD:/tmp:ro" \
+            --workdir /tmp \
+            "${TRUFFLEHOG_IMAGE}:${TRUFFLEHOG_VERSION}" \
+            filesystem recipes/evo2_phage_gen/tests/bionemo/evo2_phage_gen/test_sequence_safety.py \
+            --fail \
+            --no-update \
+            --github-actions \
+            --results=verified,unknown
 
       - name: Scan Results Status
-        if: steps.trufflehog.outcome == 'failure'
+        if: >-
+          steps.trufflehog.outcome == 'failure' ||
+          steps.trufflehog_current_file.outcome == 'failure'
         run: exit 1
