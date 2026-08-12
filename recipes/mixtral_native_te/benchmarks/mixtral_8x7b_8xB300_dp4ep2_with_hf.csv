@@ -1,0 +1,4 @@
+dp,ep,precision,token_mb,tokens_per_s_per_gpu,pflops_per_gpu,mfu_pct,step_time_s,mem_gb,last_loss,n_steady,elapsed_s,rc
+1,1,hf_bf16,8192,964,0.0737,2.95,8.499,175.2,0.01,10,0,0
+4,2,bf16,16384,4770,0.3649,14.59,3.433,217.0,8.8,3,0,0
+4,2,fp8,16384,10577,0.809,16.18,1.68,224.0,8.78,3,0,0
