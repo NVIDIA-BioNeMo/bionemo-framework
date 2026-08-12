@@ -21,8 +21,19 @@ uv pip install 'warp-lang<1.13.0'
 pip freeze | grep transformer_engine > pip-constraints.txt
 uv pip install -r build_requirements.txt --no-build-isolation
 
-# 5. Install the recipe with all remaining dependencies, including test extras
+# 5. Install the recipe with all remaining dependencies, including test extras.
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
+
+# causal-conv1d's upstream wheel cache is keyed to a coarse Torch version and
+# can retain an extension built against a different nightly ABI. Bypass both
+# upstream and uv wheels for this package only so it compiles against the
+# active system Torch. Keep the source aligned with [tool.uv.sources].
+CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install \
+    --no-cache \
+    --no-deps \
+    --no-build-isolation \
+    --reinstall-package causal-conv1d \
+    'causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@v1.6.1'
 
 # 6. Upstream NeMo-RL's current pyproject only packages the top-level nemo_rl module.
 # Reinstall the pinned checkout with complete package discovery, then apply and verify this recipe's Evo2 patch.
