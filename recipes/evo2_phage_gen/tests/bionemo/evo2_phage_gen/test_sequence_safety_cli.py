@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behavioral tests for the fail-closed sequence-safety CLI."""
+"""Behavioral tests for the strict sequence-safety CLI."""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ _ADAPTER_POLICIES = {
         "871fdcba5b14c69bb159be508da014eea62f1e1f9dbd395f1c8a31d8797a790b",
     ),
     "toxin": (
-        "toxin-homology-v1",
-        "3f3cff942b398fec1b3db6e78ea4cedaca7f4c47020a603083b28b923e23a73a",
+        "toxin-homology-v2",
+        "faa488a383c36b28695a0e590dade72699f5e84f3c03e7563a2ce470a988de3e",
     ),
     "lysogeny": (
         "phrogs-homology-v1",
@@ -870,6 +870,54 @@ def _normalized_toxin_finding(
         threshold_policy_sha256=_ADAPTER_POLICIES["toxin"][1],
         tool_path=str(tmp_path / "diamond"),
         tool_sha256="2" * 64,
+    )
+
+
+def test_curated_domain_profile_provenance_compares_string_values(tmp_path: Path):
+    """Equivalent profile strings from JSON and the asset manifest need not be the same object."""
+    from bionemo.evo2_phage_gen.sequence_safety_adapters import TOXIN_HOMOLOGY_POLICY_V2
+    from bionemo.evo2_phage_gen.sequence_safety_cli import _validate_finding
+
+    accession = "PF15658.11"
+    observed_profile = ("x" + accession)[1:]
+    expected_profile = ("y" + accession)[1:]
+    assert observed_profile == expected_profile and observed_profile is not expected_profile
+    finding = replace(
+        _normalized_toxin_finding(
+            tmp_path,
+            finding_id="toxin:phage-a__orf0001:PF15658.11",
+            state=SafetyState.INDETERMINATE,
+        ),
+        reason_codes=("TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW",),
+        detector="diamond-curated-toxin-domain",
+        accession=accession,
+        profile=observed_profile,
+        thresholds=TOXIN_HOMOLOGY_POLICY_V2.curated_domain_review.to_dict(),
+    )
+    provenance = {
+        "detector": "diamond-reviewed-toxin",
+        "detector_by_accession": {accession: "diamond-curated-toxin-domain"},
+        "profile": None,
+        "profile_by_accession": {accession: expected_profile},
+        "source_path": finding.source_path,
+        "source_sha256": finding.source_sha256,
+        "tool_version": finding.tool_version,
+        "database_version": finding.database_version,
+        "tool_path": finding.tool_path,
+        "tool_sha256": finding.tool_sha256,
+        "evidence_method": finding.evidence_method,
+        "policy_descriptor": TOXIN_HOMOLOGY_POLICY_V2.to_dict(),
+    }
+
+    assert (
+        _validate_finding(
+            finding.to_dict(),
+            record_id="phage-a",
+            safety_class="toxin",
+            expected_policy=(TOXIN_HOMOLOGY_POLICY_V2.policy_id, TOXIN_HOMOLOGY_POLICY_V2.sha256),
+            provenance=provenance,
+        ).profile
+        == accession
     )
 
 

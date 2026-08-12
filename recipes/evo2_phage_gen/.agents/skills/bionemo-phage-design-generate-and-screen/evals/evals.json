@@ -24,8 +24,8 @@
         "The response freezes checkpoint and calibrated SFT/RL prompt lineage, planning/DESIGN_SPEC.yaml and its hash/approved scope, rollout sampling, independent IDs/seeds with overlap audits, objective/filter versions, tools/models, and source/config hashes before generation.",
         "The final rollout inherits the exact deployed RL prompt strata, mixture weights, and sampling values unless an explicitly justified deviation receives fresh comparable calibration.",
         "The response confirms complete-genome generation under the approved whole-genome scope, rejects an unapproved locus/module restriction, validates whole-genome and lifecycle integrity, applies topology-aware canonicalization, exact-deduplicates before expensive tools, and preserves raw-to-representative mapping.",
-        "The response represents filters 1-6, 8, and 9 as mandatory hard all and the route choice as a nested hard any, with mandatory missing data or tool failure failing closed.",
-        "The response records per-filter waterfall, route overlap and dominance, then clusters passers at 99% identity with declared coverage semantics.",
+        "The response requires filters 1-6, 8, and 9 to all pass and permits either approved route; missing required data or a failed required tool makes the result INDETERMINATE rather than PASS.",
+        "The response records the count remaining after each filter plus route overlap and dominance, then clusters passers at 99% identity with declared coverage semantics.",
         "The response writes ordered intent-named scripts plus raw, canonical, exact-deduplicated, QC-passing, cluster-representative, ranked, rejected, provenance, and summary artifacts.",
         "The response reports the proof-of-concept counts without silently adding filter 7 or conflating them with a different historical profile.",
         "The response keeps whole-sequence cargo and lysogeny screens, strictly lytic evidence, and lifecycle/transduction endpoints separate; it labels computational passers as unvalidated until the required phenotypic, wet-lab, and expert reviews are complete.",
@@ -41,7 +41,7 @@
       "assertions": [
         "The response derives the required runtime suite from all enabled filters, including the newly added capability.",
         "The response pins executable, database/model, and output contracts for this attempt.",
-        "The response behavior-tests representative controls before screening and fails mandatory missing capability closed.",
+        "The response behavior-tests representative controls before screening and marks the run INDETERMINATE when a mandatory capability is missing.",
         "The response does not assume that a prior run's tool list is complete for the new goal."
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",
@@ -65,7 +65,7 @@
     {
       "id": "bionemo-phage-design-generate-and-screen-005-reference-control-panel",
       "prompt": "The safety databases and binaries are prepared and I am ready to screen candidates. Show how you establish that the exact deployed filter still detects known hazards without rejecting well-characterized therapeutic or lytic controls.",
-      "expected_output": "A fail-closed, identity-bound reference-control gate run through the same versioned filter suite before candidate PASS decisions.",
+      "expected_output": "An identity-bound reference-control check run through the same versioned filters; every control must match before any candidate can receive PASS.",
       "assertions": [
         "The response uses the exact accession-version, normalized-sequence digest, length, and topology from configs/phage_safety_reference_controls.yaml, with no network dependency in ordinary unit tests.",
         "CTXphi NC_015209.1 must independently FAIL the lysogeny/integration gate and detect both reviewed toxin targets ctxA/P01555 and ctxB/P01556; INDETERMINATE or either missing target blocks the gate.",

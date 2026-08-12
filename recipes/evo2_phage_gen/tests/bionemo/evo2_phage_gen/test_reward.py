@@ -104,9 +104,12 @@ def _install_synthetic_safety_scan(
     *,
     class_states_by_record: list[dict[str, str]],
     required_by_class: dict[str, bool] | None = None,
+    review_classes_by_record: list[set[str]] | None = None,
 ) -> dict[str, object]:
     """Install a complete synthetic Task 4 scan/validation boundary."""
     required = required_by_class or {"amr": True, "toxin": True, "lysogeny": True}
+    review_classes = review_classes_by_record or [set() for _ in class_states_by_record]
+    assert len(review_classes) == len(class_states_by_record)
     policy_ids = {
         "amr": "synthetic-amr-policy-v1",
         "toxin": "synthetic-toxin-policy-v1",
@@ -137,6 +140,7 @@ def _install_synthetic_safety_scan(
         record_states = []
         all_reasons = []
         for input_index, (record_id, states) in enumerate(zip(headers, class_states_by_record, strict=True)):
+            measured_reviews = review_classes[input_index]
             class_results = []
             attempts = []
             record_reasons = []
@@ -155,6 +159,16 @@ def _install_synthetic_safety_scan(
                             "finding_id": f"synthetic-{safety_class}-{input_index}",
                         }
                     ]
+                elif safety_class in measured_reviews:
+                    reasons = [f"{safety_class.upper()}_SYNTHETIC_REVIEW_HIT"]
+                    findings = [
+                        {
+                            "safety_class": safety_class,
+                            "state": "INDETERMINATE",
+                            "reason_codes": reasons,
+                            "finding_id": f"synthetic-{safety_class}-review-{input_index}",
+                        }
+                    ]
                 else:
                     reasons = [f"{safety_class.upper()}_SYNTHETIC_DETECTOR_FAILURE"]
                     findings = []
@@ -168,7 +182,11 @@ def _install_synthetic_safety_scan(
                         "reason_codes": reasons,
                     }
                 )
-                execution_status = "FAILED" if state == "INDETERMINATE" else "COMPLETED_AND_PARSED"
+                execution_status = (
+                    "FAILED"
+                    if state == "INDETERMINATE" and safety_class not in measured_reviews
+                    else "COMPLETED_AND_PARSED"
+                )
                 attempts.append(
                     {
                         "safety_class": safety_class,
@@ -349,6 +367,51 @@ def _install_synthetic_safety_scan(
     return capture
 
 
+def test_sequence_safety_reward_contract_partial_credit_requires_explicit_review_evidence():
+    from bionemo.evo2_phage_gen.reward import sequence_safety_reward_contract
+
+    class_states = {"amr": "PASS", "toxin": "INDETERMINATE", "lysogeny": "PASS"}
+    required = {"amr": True, "toxin": True, "lysogeny": True}
+
+    review = sequence_safety_reward_contract(
+        class_states=class_states,
+        required_by_class=required,
+        review_eligible_by_class={"amr": False, "toxin": True, "lysogeny": False},
+    )
+    unavailable = sequence_safety_reward_contract(
+        class_states=class_states,
+        required_by_class=required,
+        review_eligible_by_class={"amr": False, "toxin": False, "lysogeny": False},
+    )
+
+    assert review["reward_safety_toxin"] == 0.25
+    assert unavailable["reward_safety_toxin"] == 0.0
+    assert review["safety_gate_state"] == "INDETERMINATE"
+    assert review["safety_gate_pass"] == 0.0
+    assert review["reward_safety_penalty"] == 1.0
+
+
+def test_measured_review_gets_bounded_class_credit_but_cannot_pass_the_safety_gate(tmp_path, monkeypatch):
+    _install_synthetic_safety_scan(
+        monkeypatch,
+        class_states_by_record=[{"amr": "PASS", "toxin": "INDETERMINATE", "lysogeny": "PASS"}],
+        review_classes_by_record=[{"toxin"}],
+    )
+
+    scored = score_nucleotide_metrics(
+        pd.DataFrame({"id_prompt": ["review"], "sequence": ["ACGT" * 1000]}),
+        sequence_safety=_bacterial_safety_config(tmp_path),
+    )
+
+    assert scored["safety_toxin_measurement_available"].tolist() == [1.0]
+    assert scored["safety_toxin_finding_count"].tolist() == [1]
+    assert scored["reward_safety_toxin"].tolist() == [0.25]
+    assert scored["safety_gate_state"].tolist() == ["INDETERMINATE"]
+    assert scored["safety_gate_pass"].tolist() == [0.0]
+    assert scored["reward_safety_penalty"].tolist() == [1.0]
+    assert scored["reward"].tolist() == [0.0]
+
+
 def test_score_nucleotide_metrics_rewards_passing_sequence():
     """Missing mandatory sequence-safety evidence must zero eligibility but retain the historical score."""
     df = pd.DataFrame({"id_prompt": ["pass"], "sequence": ["ACGT" * 1000]})
@@ -411,7 +474,7 @@ def test_malformed_sequence_safety_config_is_explicitly_indeterminate(
     field_name,
     invalid_value,
 ):
-    """Malformed runtime configuration must fail closed before invoking Task 4."""
+    """Malformed runtime configuration must produce no acceptance credit before Task 4 runs."""
     malformed = replace(_bacterial_safety_config(tmp_path), **{field_name: invalid_value})
 
     def unexpected_scan(_argv, *, runtime=None):
@@ -461,7 +524,7 @@ def test_disabled_archaeal_config_keeps_lysogeny_informational_but_gate_ineligib
 
 
 def test_valid_unavailable_config_preserves_strict_lysis_telemetry(tmp_path):
-    """Fail-closed telemetry should retain a structurally valid strict-lysis request."""
+    """Unavailable-scan records should retain a structurally valid strict-lysis request."""
     config = replace(_archaeal_safety_config(tmp_path, strict_lysis=True), enabled=False)
 
     scored = score_nucleotide_metrics(
@@ -1411,8 +1474,8 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     assert scored["required_genes_measurement_available"].tolist() == [1.0, 1.0]
 
 
-def test_external_qc_subprocess_failure_fails_closed(tmp_path, monkeypatch):
-    """Explicit fail-closed mode should zero external rewards without killing offline scoring."""
+def test_external_qc_subprocess_failure_zeros_external_rewards(tmp_path, monkeypatch):
+    """An external-QC subprocess failure should zero its rewards without stopping offline scoring."""
     config_path = tmp_path / "arc_config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -1642,7 +1705,7 @@ def test_average_protein_identity_reward_uses_prefilter_metrics(tmp_path):
 
 
 def test_average_protein_identity_reward_requires_evidence(tmp_path):
-    """High AAI with missing or low gene evidence should fail closed or be fractional."""
+    """High AAI with missing or weak gene evidence should receive zero or fractional credit."""
     run_dir = tmp_path / "arc_run"
     run_dir.mkdir()
     pd.DataFrame(
@@ -1676,7 +1739,7 @@ def test_average_protein_identity_reward_requires_evidence(tmp_path):
 
 
 def test_required_gene_reward_is_fractional_and_evidence_weighted(tmp_path):
-    """Required-gene reward should stay soft and fail closed without evidence."""
+    """Required-gene reward should stay gradual and give no credit without evidence."""
     run_dir = tmp_path / "arc_run"
     run_dir.mkdir()
     pd.DataFrame(

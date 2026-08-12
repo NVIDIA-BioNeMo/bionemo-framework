@@ -828,9 +828,9 @@ class EvalRunnerTests(unittest.TestCase):
         ):
             self.assertIn(marker, text)
 
-    def test_collection_skill_fails_closed_when_prefix_tools_are_unavailable(self) -> None:
+    def test_collection_skill_stops_when_prefix_tools_are_unavailable(self) -> None:
         skill_path = SKILL_ROOT / "bionemo-phage-design-collect-genomes" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8").lower()
+        text = " ".join(skill_path.read_text(encoding="utf-8").lower().split())
         self.assertIn("bounded validation command", text)
         self.assertIn("unverified", text)
 
@@ -869,10 +869,10 @@ class EvalRunnerTests(unittest.TestCase):
     def test_rl_objective_audit_states_telemetry_contract_before_code(self) -> None:
         skill_path = SKILL_ROOT / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md"
         text = skill_path.read_text(encoding="utf-8").lower()
-        self.assertIn("even when the audit stops before code", text)
-        self.assertIn("raw numerator/denominator/support", text)
-        self.assertIn("compares online scoring with final qc", text)
-        self.assertIn("selected owning recipe `src/` and `tests/`", text)
+        self.assertIn("even when this review stops before code", text)
+        self.assertIn("numerator, denominator, observation count", text)
+        self.assertIn("test comparing online scoring with final qc", text)
+        self.assertIn("owning recipe `src/` and `tests/`", text)
         self.assertIn(
             "installed-runtime name/order/dtype/device/shape/reduction checks",
             text,
@@ -882,6 +882,52 @@ class EvalRunnerTests(unittest.TestCase):
             "reward calculation, logging, checkpoint writing, and restart metadata",
             text,
         )
+
+    def test_external_tool_optimization_policy_is_shared_across_sft_rl_and_final_filters(self) -> None:
+        policy_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "resource-and-oom-policy.md"
+        text = " ".join(policy_path.read_text(encoding="utf-8").lower().split())
+        for marker in (
+            "external-tool filtering and scoring",
+            "end-to-end and per-stage timings",
+            "isolated and at the planned concurrency",
+            "total throughput under load",
+            "record workers and per-tool threads",
+            "warm, batched, or persistent",
+            "byte or semantic parity",
+            "do not generalize one tool's result",
+        ):
+            self.assertIn(marker, text)
+
+        anchor = "resource-and-oom-policy.md#external-tool-filtering-and-scoring"
+        for relative_path in (
+            "bionemo-phage-design-prepare-sft/SKILL.md",
+            "bionemo-phage-design-implement-rl-objectives/SKILL.md",
+            "bionemo-phage-design-generate-and-screen/SKILL.md",
+        ):
+            workflow = (SKILL_ROOT / relative_path).read_text(encoding="utf-8").lower()
+            self.assertIn(anchor, workflow)
+
+    def test_gpu_optimization_policy_is_shared_across_sft_rl_and_generation(self) -> None:
+        policy_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "resource-and-oom-policy.md"
+        text = " ".join(policy_path.read_text(encoding="utf-8").lower().split())
+        for marker in (
+            "gpu training, rl, and generation",
+            "memory occupancy is a constraint, not the objective",
+            "stable useful tokens or valid sequences per second",
+            "representative target-length",
+            "memory headroom",
+            "checkpoint and resume",
+        ):
+            self.assertIn(marker, text)
+
+        anchor = "resource-and-oom-policy.md#gpu-training-rl-and-generation"
+        for relative_path in (
+            "bionemo-phage-design-operate-mbridge-sft/SKILL.md",
+            "bionemo-phage-design-operate-nemo-rl/SKILL.md",
+            "bionemo-phage-design-generate-and-screen/SKILL.md",
+        ):
+            workflow = (SKILL_ROOT / relative_path).read_text(encoding="utf-8").lower()
+            self.assertIn(anchor, workflow)
 
     def test_research_packet_requires_complete_objective_portfolio_rows(self) -> None:
         skill_path = SKILL_ROOT / "bionemo-phage-design-research-evidence" / "SKILL.md"

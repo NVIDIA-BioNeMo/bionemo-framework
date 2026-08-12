@@ -107,7 +107,7 @@ context, evidence, implicated genes/modules/motifs or host factors, measurement 
 mode, uncertainty, online objective, final filter, experimental validation, and status. The contract
 is incomplete while an applicable axis is silently absent.
 
-Each online objective records stable ID, goal trace, function/version, biological meaning/proxy status, baseline mapped to 0, target mapped to 1, monotonic clipped formula, units/direction, fail-closed invalid behavior, weight/range/calibration/ablation, matching final filters, and known mismatch.
+Each online objective records a stable ID, the user goal it serves, function/version, biological meaning or proxy status, baseline mapped to 0, target mapped to 1, monotonic clipped formula, units/direction, treatment of invalid inputs, weight/range/calibration/ablation, matching final filters, and known mismatches.
 
 For therapeutic intended use, base `therapeutic_quality.applicability` on the design-relevant parts of
 the EMA draft: [phage seed
@@ -132,13 +132,13 @@ valid, recalibrated partial credit, proposal-distribution work, or a preapproved
 does not authorize dropping the component, weakening final hard QC, or zeroing the entire portfolio
 behind a sequential gate.
 
-For an increasing host-model score `s`, the default anti-score-chasing form is
+For an increasing host-model score `s`, the default bounded form is
 `clip((s - baseline) / (target_threshold - baseline), 0, 1)`. Both anchors must come from held-out,
 deployment-relevant calibration and `target_threshold` must exceed `baseline`; values above the
 accepted threshold stay at 1. Another saturating transform is allowed only with equivalent documented
 anchors and tests.
 
-Each per-objective adversarial row records a concrete shortcut candidate, affected numerator/denominator/support/default or proxy, expected score, biological failure, detection fixture, and mitigation. Include empty/missing/tool-failure, deletion/truncation/duplication, denominator shrinkage, threshold-edge, canonicalization, and support-manipulation cases when applicable. Portfolio rows record the component vector and aggregate for reference, baseline/random, desired, and adversarial designs; correlated/double-counted terms, weight/scale dominance, conflicts, OR dominance, A+B-to-C failure modes, sensitivity/ablation result, and any added guardrail. Do not approve a portfolio when an unintended design ranks with or above the desired target without a recorded resolution.
+Each per-objective counterexample row records a concrete shortcut, the affected numerator, denominator, observation count, default or proxy, expected score, biological failure, detection fixture, and correction. Include empty or missing inputs, tool failure, deletion, truncation, duplication, too few observations, threshold edges, alternate canonical forms, and selective inputs when applicable. Combined-objective rows record every component and the total for reference, baseline/random, desired, and counterexample designs; correlated or double-counted terms, weight or scale dominance, conflicts, one OR branch dominating, combinations that favor the wrong design, sensitivity or ablation results, and any added constraint. Do not approve a set of objectives when an unintended design ranks with or above the desired target without a recorded resolution.
 
 ## Logic
 

@@ -23,7 +23,7 @@ GDPO ran for up to 500 steps, with step 430 selected as having the lowest RL sco
 
 The target profile intentionally disables architecture-removal filter 7 and retains total-gene logic.
 
-Target-profile offline waterfall:
+Target-profile offline filter counts:
 
 ```text
 1,000 generated

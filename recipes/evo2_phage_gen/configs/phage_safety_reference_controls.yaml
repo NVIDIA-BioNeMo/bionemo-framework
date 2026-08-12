@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
-schema_version: 1
-panel_id: phage-sequence-safety-controls-v1
+schema_version: 2
+panel_id: phage-sequence-safety-controls-v2
 sequence_identity:
-  retrieval: exact_ncbi_accession_version
+  retrieval: exact_insdc_accession_version_with_optional_1_based_closed_interval
   normalization: uppercase_sequence_without_whitespace
   digest: sha256
   payload_distribution: accession_and_digest_only
 controls:
   - control_id: ctxphi_hazard
     accession: NC_015209.1
+    sequence_interval: null
     display_name: Vibrio phage CTXphi
     role: positive_hazard
     topology: linear
@@ -42,8 +43,75 @@ controls:
         required_finding_accessions: {}
         minimum_primary_findings: 1
         allow_additional_findings: true
+  - control_id: shiga_toxin_933w_hazard
+    accession: NC_000924.1
+    sequence_interval: null
+    display_name: Escherichia phage 933W (Shiga toxin 2-converting phage)
+    role: positive_hazard
+    topology: linear
+    sequence_length: 61670
+    sequence_sha256: 6f1ba4afd91ef5d5842f1fa660e4270b5b780d418369fe43a7b4605aff524ca4
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_000924.1
+    evidence_urls:
+      - https://pubmed.ncbi.nlm.nih.gov/10074068/
+    expected_aggregate_state: FAIL
+    expected_classes:
+      amr:
+        state: PASS
+        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: FAIL
+        reason_codes: [TOXIN_HIGH_CONFIDENCE_HOMOLOGY]
+        required_finding_accessions:
+          stxA2: P09385
+          stxB2: P09386
+        minimum_primary_findings: 2
+        allow_additional_findings: true
+      lysogeny:
+        state: FAIL
+        reason_codes: [LYSOGENY_HIGH_CONFIDENCE_PROFILE]
+        required_finding_accessions: {}
+        minimum_primary_findings: 1
+        allow_additional_findings: true
+  - control_id: wopip1_latrotoxin_domain_hazard
+    accession: AM999887.1
+    sequence_interval: {start: 246045, end: 312651}
+    display_name: Wolbachia phage WO WOPip1 prophage interval
+    role: positive_review
+    topology: linear
+    sequence_length: 66607
+    sequence_sha256: 161e89b5861d25996ea3e6b062a4fa87b54a09e464d7ed32e042814564a0a431
+    source_url: https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=AM999887.1&db=nuccore&report=fasta&from=246045&to=312651
+    evidence_urls:
+      - https://doi.org/10.1038/ncomms13155
+      - https://www.ncbi.nlm.nih.gov/Structure/cdd/pfam15658
+    expected_aggregate_state: INDETERMINATE
+    expected_classes:
+      amr:
+        state: PASS
+        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: INDETERMINATE
+        reason_codes: [TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW]
+        required_finding_accessions:
+          latrotoxin_C_domain_bearing_WP0292: PF15658.11
+        minimum_primary_findings: 1
+        allow_additional_findings: true
+      lysogeny:
+        state: INDETERMINATE
+        reason_codes: [LYSOGENY_REVIEW_PROFILE]
+        required_finding_accessions: {}
+        minimum_primary_findings: 1
+        allow_additional_findings: true
   - control_id: t7_negative
     accession: NC_001604.1
+    sequence_interval: null
     display_name: Enterobacteria phage T7
     role: negative
     topology: linear
@@ -73,6 +141,7 @@ controls:
         allow_additional_findings: false
   - control_id: phix174_negative
     accession: NC_001422.1
+    sequence_interval: null
     display_name: Escherichia phage phiX174
     role: negative
     topology: circular
@@ -84,6 +153,7 @@ controls:
     expected_classes: *negative_expectations
   - control_id: muddy_negative
     accession: NC_022054.2
+    sequence_interval: null
     display_name: Mycobacterium phage Muddy
     role: negative
     topology: linear

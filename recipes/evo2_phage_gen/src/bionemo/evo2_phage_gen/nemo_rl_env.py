@@ -29,6 +29,7 @@ from bionemo.evo2_phage_gen.design_scope import HostDomain, HostEvidence
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 from bionemo.evo2_phage_gen.reward import (
     REWARD_COMPONENTS,
+    SAFETY_REVIEW_CREDIT,
     SEQUENCE_SAFETY_CLASSES,
     TIMING_COLUMN_PREFIX,
     ExternalQCRewardConfig,
@@ -290,6 +291,11 @@ def _is_exact_binary(value: object) -> bool:
     return _is_exact_finite_real(value) and value in {0.0, 1.0}
 
 
+def _is_positive_integer(value: object) -> bool:
+    """Return whether a value is a positive integer without bool/string coercion."""
+    return _is_exact_finite_real(value) and float(value).is_integer() and value > 0
+
+
 def _qualified_scalar_rewards(scored: pd.DataFrame) -> pd.Series:
     """Return finite [0, 1] scalar rewards backed by exact aggregate safety eligibility."""
     raw_rewards = scored.get("reward", pd.Series(0.0, index=scored.index))
@@ -318,6 +324,17 @@ def _exact_safety_class_support(scored: pd.DataFrame, reward_column: str) -> pd.
     expected_rewards.loc[valid_required] = (
         (required_values.loc[valid_required] == 0.0) | states.loc[valid_required].eq("PASS")
     ).astype(float)
+    measurement_column = f"safety_{safety_class}_measurement_available"
+    finding_count_column = f"safety_{safety_class}_finding_count"
+    if measurement_column in scored and finding_count_column in scored:
+        measured_review = (
+            valid_required
+            & required_values.eq(1.0)
+            & states.eq("INDETERMINATE")
+            & scored[measurement_column].map(_is_exact_one)
+            & scored[finding_count_column].map(_is_positive_integer)
+        )
+        expected_rewards.loc[measured_review] = SAFETY_REVIEW_CREDIT
     return reward_values.map(_is_exact_finite_real) & valid_required & valid_state & reward_values.eq(expected_rewards)
 
 

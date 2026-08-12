@@ -43,7 +43,9 @@ from bionemo.evo2_phage_gen.external_assets import (
     PHROGS_HIGH_CONFIDENCE_TERMS,
     PHROGS_INTEGRATION_EXCISION_CATEGORY,
     PHROGS_REVIEW_TERMS,
+    TOXIN_REFERENCE_CLASSIFICATION_POLICY,
     _parse_amrfinder_database_version,
+    _validate_uniprot_toxin_scope,
     load_phrogs_safety_release,
 )
 from bionemo.evo2_phage_gen.sequence_safety import SafetyClassResult, SafetyFinding, SafetyState
@@ -131,7 +133,7 @@ class ORFArtifacts:
 
 @dataclass(frozen=True)
 class ORFPreparationResult:
-    """Fail-closed result for optional runtime loading of the required predictor."""
+    """Result that becomes INDETERMINATE when the required predictor is unavailable."""
 
     state: SafetyState
     artifacts: ORFArtifacts | None
@@ -482,7 +484,7 @@ def prepare_orf_artifacts_checked(
     predictor: GenePredictor | None = None,
     minimum_fallback_amino_acids: int = 8,
 ) -> ORFPreparationResult:
-    """Map unavailable pyrodigal-gv runtime into the canonical fail-closed state."""
+    """Mark ORF preparation INDETERMINATE when pyrodigal-gv is unavailable."""
     try:
         artifacts = prepare_orf_artifacts(
             genomes,
@@ -909,7 +911,7 @@ def parse_amrfinder_output(
     manifest_section: Mapping[str, object],
     required: bool,
 ) -> AdapterResult:
-    """Parse AMRFinderPlus v4.2.7 output with an exact, fail-closed schema."""
+    """Parse AMRFinderPlus v4.2.7 output; malformed evidence is INDETERMINATE."""
     output_tsv = Path(output_tsv)
     if not output_tsv.is_file():
         return _indeterminate_adapter_result(
@@ -1147,7 +1149,7 @@ def run_amrfinder(
     runner: CommandRunner = subprocess.run,
     timeout: float = 300.0,
 ) -> AdapterResult:
-    """Validate pinned AMRFinder assets, execute combined mode, and parse fail closed."""
+    """Validate pinned AMRFinder assets, execute combined mode, and reject incomplete evidence."""
     try:
         tool_pin, database_path, database_version, runtime_paths = _validate_amrfinder_manifest_section(
             manifest_section
@@ -1279,12 +1281,63 @@ class HomologyBand:
 
 
 @dataclass(frozen=True)
+class FragmentHomologyBand:
+    """Conservative local-alignment thresholds for a substantial toxin fragment."""
+
+    identity: float
+    query_coverage: float
+    reference_coverage: float
+    alignment_length: float
+    evalue: float
+
+    def __post_init__(self) -> None:
+        """Reject nonfinite or nonsensical fragment thresholds."""
+        values = (
+            self.identity,
+            self.query_coverage,
+            self.reference_coverage,
+            self.alignment_length,
+            self.evalue,
+        )
+        if any(type(value) not in {int, float} or not math.isfinite(value) for value in values):
+            raise ValueError("fragment homology thresholds must be finite numbers")
+        if not 0 <= self.identity <= 100:
+            raise ValueError("fragment homology identity threshold must be in [0, 100]")
+        if not 0 <= self.query_coverage <= 100 or not 0 <= self.reference_coverage <= 100:
+            raise ValueError("fragment homology coverage thresholds must be in [0, 100]")
+        if self.alignment_length <= 0 or self.evalue < 0:
+            raise ValueError("fragment alignment length must be positive and E-value nonnegative")
+
+    def matches(self, scores: Mapping[str, float]) -> bool:
+        """Return true only when every local fragment bound is met."""
+        return (
+            scores["identity"] >= self.identity
+            and scores["query_coverage"] >= self.query_coverage
+            and scores["reference_coverage"] >= self.reference_coverage
+            and scores["alignment_length"] >= self.alignment_length
+            and scores["evalue"] <= self.evalue
+        )
+
+    def to_dict(self) -> dict[str, float]:
+        """Serialize the exact fragment-review band."""
+        return {
+            "alignment_length": self.alignment_length,
+            "evalue": self.evalue,
+            "identity": self.identity,
+            "query_coverage": self.query_coverage,
+            "reference_coverage": self.reference_coverage,
+        }
+
+
+@dataclass(frozen=True)
 class HomologyPolicy:
     """Versioned high-confidence and material-review homology bands."""
 
     policy_id: str
     high: HomologyBand
     review: HomologyBand
+    fragment_review: FragmentHomologyBand | None = None
+    curated_domain_review: FragmentHomologyBand | None = None
 
     def __post_init__(self) -> None:
         """Require high-confidence evidence to be at least as strict as review evidence."""
@@ -1300,11 +1353,16 @@ class HomologyPolicy:
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the complete threshold policy in a stable schema."""
-        return {
+        result = {
             "policy_id": self.policy_id,
             "high": self.high.to_dict(),
             "review": self.review.to_dict(),
         }
+        if self.fragment_review is not None:
+            result["fragment_review"] = self.fragment_review.to_dict()
+        if self.curated_domain_review is not None:
+            result["curated_domain_review"] = self.curated_domain_review.to_dict()
+        return result
 
     @property
     def sha256(self) -> str:
@@ -1316,6 +1374,25 @@ TOXIN_HOMOLOGY_POLICY_V1 = HomologyPolicy(
     policy_id="toxin-homology-v1",
     high=HomologyBand(identity=80.0, query_coverage=80.0, reference_coverage=80.0, evalue=1e-10),
     review=HomologyBand(identity=40.0, query_coverage=60.0, reference_coverage=60.0, evalue=1e-5),
+)
+TOXIN_HOMOLOGY_POLICY_V2 = HomologyPolicy(
+    policy_id="toxin-homology-v2",
+    high=HomologyBand(identity=80.0, query_coverage=80.0, reference_coverage=80.0, evalue=1e-10),
+    review=HomologyBand(identity=40.0, query_coverage=60.0, reference_coverage=60.0, evalue=1e-5),
+    fragment_review=FragmentHomologyBand(
+        identity=50.0,
+        query_coverage=70.0,
+        reference_coverage=10.0,
+        alignment_length=50.0,
+        evalue=1e-5,
+    ),
+    curated_domain_review=FragmentHomologyBand(
+        identity=50.0,
+        query_coverage=0.0,
+        reference_coverage=70.0,
+        alignment_length=50.0,
+        evalue=1e-5,
+    ),
 )
 _DIAMOND_COLUMNS = (
     "qseqid",
@@ -1360,14 +1437,124 @@ def build_diamond_command(
     ]
 
 
-def _toxin_file_records(section: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
-    if not isinstance(section.get("uniprot_release"), str) or not section["uniprot_release"]:
+@dataclass(frozen=True)
+class CuratedToxinTarget:
+    """One versioned hazardous-domain target and its evidence action."""
+
+    target_id: str
+    accession: str
+    name: str
+    action: str
+    reason_code: str
+
+
+def _curated_toxin_hazards(section: Mapping[str, object]) -> dict[str, CuratedToxinTarget]:
+    """Validate explicitly curated domain targets and return them by search identifier."""
+    payload = section.get("curated_hazards")
+    if payload is None:
+        return {}
+    if not isinstance(payload, Mapping) or set(payload) != {"set_id", "entries"}:
+        raise AssetProvenanceError("toxin manifest curated_hazards schema mismatch")
+    set_id = payload.get("set_id")
+    entries = payload.get("entries")
+    if set_id != "phage-domain-hazards-v1" or not isinstance(entries, list) or not entries:
+        raise AssetProvenanceError("toxin manifest curated hazard set is unsupported")
+    targets: dict[str, CuratedToxinTarget] = {}
+    expected_keys = {
+        "accession",
+        "name",
+        "action",
+        "reason_code",
+        "source_protein_accession",
+        "source_urls",
+        "source_protein_sequence_sha256",
+        "source_interval",
+        "sequence_sha256",
+        "evidence_urls",
+        "interpretation",
+    }
+    for entry in entries:
+        if not isinstance(entry, Mapping) or set(entry) != expected_keys:
+            raise AssetProvenanceError("toxin manifest curated hazard entry schema mismatch")
+        accession = entry.get("accession")
+        name = entry.get("name")
+        action = entry.get("action")
+        reason_code = entry.get("reason_code")
+        source_protein_accession = entry.get("source_protein_accession")
+        source_urls = entry.get("source_urls")
+        evidence_urls = entry.get("evidence_urls")
+        interpretation = entry.get("interpretation")
+        if (
+            not isinstance(accession, str)
+            or not isinstance(name, str)
+            or not name
+            or action != "REVIEW"
+            or not isinstance(reason_code, str)
+            or not reason_code
+            or not isinstance(source_protein_accession, str)
+            or not source_protein_accession
+            or not isinstance(source_urls, list)
+            or not source_urls
+            or not all(isinstance(url, str) and url.startswith("https://") for url in source_urls)
+            or not isinstance(evidence_urls, list)
+            or not evidence_urls
+            or not all(isinstance(url, str) and url.startswith("https://") for url in evidence_urls)
+            or not isinstance(interpretation, str)
+            or not interpretation
+        ):
+            raise AssetProvenanceError("toxin manifest curated hazard entry is incomplete")
+        interval = entry.get("source_interval")
+        if (
+            not isinstance(interval, Mapping)
+            or set(interval) != {"start", "end"}
+            or type(interval.get("start")) is not int
+            or type(interval.get("end")) is not int
+            or interval["start"] < 1
+            or interval["end"] < interval["start"]
+        ):
+            raise AssetProvenanceError("toxin manifest curated hazard interval is invalid")
+        digests = (entry.get("source_protein_sequence_sha256"), entry.get("sequence_sha256"))
+        if any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):
+            raise AssetProvenanceError("toxin manifest curated hazard digest is invalid")
+        target_id = f"domain|{accession}|{name}"
+        if target_id in targets:
+            raise AssetProvenanceError("toxin manifest curated hazard target is duplicated")
+        targets[target_id] = CuratedToxinTarget(
+            target_id=target_id,
+            accession=accession,
+            name=name,
+            action=action,
+            reason_code=reason_code,
+        )
+    return targets
+
+
+def _toxin_database_version(section: Mapping[str, object]) -> str:
+    """Return the complete reviewed-plus-curated toxin reference identity."""
+    release = section.get("uniprot_release")
+    if not isinstance(release, str) or not release:
         raise AssetProvenanceError("toxin manifest lacks a UniProt release")
+    curated = _curated_toxin_hazards(section)
+    if not curated:
+        return f"UniProt {release}"
+    expected = f"UniProt {release} + phage-domain-hazards-v1"
+    if section.get("reference_version") != expected:
+        raise AssetProvenanceError("toxin manifest reference version omits curated hazards")
+    return expected
+
+
+def _toxin_file_records(section: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    _toxin_database_version(section)
+    if section.get("classification_policy") != TOXIN_REFERENCE_CLASSIFICATION_POLICY:
+        raise AssetProvenanceError("toxin manifest classification policy is unsupported")
     files = section.get("files")
     if not isinstance(files, Mapping):
         raise AssetProvenanceError("toxin manifest lacks file records")
+    roles = ["annotations", "fasta", "diamond_database"]
+    if _curated_toxin_hazards(section):
+        roles.extend(("curated_hazard_fasta", "search_fasta"))
     records: dict[str, Mapping[str, object]] = {}
-    for role in ("annotations", "fasta", "diamond_database"):
+    for role in roles:
         record = files.get(role)
         if not isinstance(record, Mapping):
             raise AssetProvenanceError(f"toxin manifest lacks {role} record")
@@ -1379,14 +1566,20 @@ def _toxin_file_records(section: Mapping[str, object]) -> dict[str, Mapping[str,
     return records
 
 
-def _validate_toxin_assets(section: Mapping[str, object]) -> tuple[Path, set[str]]:
+def _validate_toxin_assets(
+    section: Mapping[str, object],
+) -> tuple[Path, set[str], dict[str, CuratedToxinTarget]]:
     records = _toxin_file_records(section)
     for role, record in records.items():
         path = Path(str(record["path"]))
         if not path.is_file() or _sha256_file(path) != str(record["sha256"]):
             raise AssetProvenanceError(f"toxin {role} path or digest drift")
     accessions = _read_uniprot_accessions(Path(str(records["annotations"]["path"])))
-    return Path(str(records["diamond_database"]["path"])), accessions
+    _validate_uniprot_toxin_scope(Path(str(records["annotations"]["path"])))
+    curated = _curated_toxin_hazards(section)
+    if set(accessions) & {target.accession for target in curated.values()}:
+        raise AssetProvenanceError("curated toxin hazard duplicates a UniProt accession")
+    return Path(str(records["diamond_database"]["path"])), accessions, curated
 
 
 def _read_uniprot_accessions(path: Path) -> set[str]:
@@ -1411,11 +1604,18 @@ def _read_uniprot_accessions(path: Path) -> set[str]:
     return accessions
 
 
-def _canonical_uniprot_accession(target_id: str) -> str:
+def _canonical_toxin_target(
+    target_id: str,
+    *,
+    curated_targets: Mapping[str, CuratedToxinTarget],
+) -> tuple[str, CuratedToxinTarget | None]:
+    curated = curated_targets.get(target_id)
+    if curated is not None:
+        return curated.accession, curated
     parts = target_id.split("|")
     if len(parts) != 3 or parts[0] != "sp" or not parts[1] or not parts[2]:
-        raise ValueError("DIAMOND target is not a canonical reviewed UniProt identifier")
-    return parts[1]
+        raise ValueError("DIAMOND target is not a canonical reviewed or curated hazard identifier")
+    return parts[1], None
 
 
 def _parse_diamond_scores(row: Mapping[str, str]) -> dict[str, float]:
@@ -1447,10 +1647,11 @@ def _toxin_finding(
     scores: Mapping[str, float],
     state: SafetyState,
     reason_code: str,
-    band: HomologyBand,
+    band: HomologyBand | FragmentHomologyBand,
     policy: HomologyPolicy,
     manifest_section: Mapping[str, object],
     tool_pin: ToolPin,
+    curated_target: CuratedToxinTarget | None = None,
 ) -> NormalizedSafetyFinding:
     database_record = _toxin_file_records(manifest_section)["diamond_database"]
     return NormalizedSafetyFinding(
@@ -1458,7 +1659,7 @@ def _toxin_finding(
         state=state,
         reason_codes=(reason_code,),
         finding_id=f"toxin:{record.query_id}:{accession}",
-        detector="diamond-reviewed-toxin",
+        detector="diamond-curated-toxin-domain" if curated_target is not None else "diamond-reviewed-toxin",
         accession=accession,
         query_id=record.query_id,
         sequence_id=record.sequence_id,
@@ -1471,20 +1672,20 @@ def _toxin_finding(
         source_path=str(database_record["path"]),
         source_sha256=str(database_record["sha256"]),
         tool_version=tool_pin.version,
-        database_version=f"UniProt {manifest_section['uniprot_release']}",
+        database_version=_toxin_database_version(manifest_section),
         evidence_path=record.evidence_path,
         evidence_method="diamond-blastp",
         threshold_policy=policy.policy_id,
         threshold_policy_sha256=policy.sha256,
         tool_path=str(tool_pin.path),
         tool_sha256=tool_pin.sha256,
-        profile=None,
+        profile=None if curated_target is None else curated_target.accession,
     )
 
 
 @_bind_result_policy(
-    policy_id=TOXIN_HOMOLOGY_POLICY_V1.policy_id,
-    policy_sha256=TOXIN_HOMOLOGY_POLICY_V1.sha256,
+    policy_id=TOXIN_HOMOLOGY_POLICY_V2.policy_id,
+    policy_sha256=TOXIN_HOMOLOGY_POLICY_V2.sha256,
     policy_kwarg=True,
 )
 def parse_toxin_diamond_output(
@@ -1494,7 +1695,7 @@ def parse_toxin_diamond_output(
     manifest_section: Mapping[str, object],
     tool_pin: ToolPin,
     required: bool,
-    policy: HomologyPolicy = TOXIN_HOMOLOGY_POLICY_V1,
+    policy: HomologyPolicy = TOXIN_HOMOLOGY_POLICY_V2,
 ) -> AdapterResult:
     """Parse normalized DIAMOND output using joint high and review bands."""
     output_tsv = Path(output_tsv)
@@ -1525,7 +1726,11 @@ def parse_toxin_diamond_output(
         )
     try:
         query_records = _query_record_index(artifacts)
-        accessions = _read_uniprot_accessions(Path(str(_toxin_file_records(manifest_section)["annotations"]["path"])))
+        records = _toxin_file_records(manifest_section)
+        accessions = _read_uniprot_accessions(Path(str(records["annotations"]["path"])))
+        curated_targets = _curated_toxin_hazards(manifest_section)
+        if set(accessions) & {target.accession for target in curated_targets.values()}:
+            raise AssetProvenanceError("curated toxin hazard duplicates a UniProt accession")
     except (AssetProvenanceError, KeyError, TypeError, ValueError):
         return _indeterminate_adapter_result(
             "toxin",
@@ -1572,7 +1777,7 @@ def parse_toxin_diamond_output(
                 raw_output_path=output_tsv,
             )
         try:
-            accession = _canonical_uniprot_accession(row["sseqid"])
+            accession, curated_target = _canonical_toxin_target(row["sseqid"], curated_targets=curated_targets)
         except ValueError:
             return _indeterminate_adapter_result(
                 "toxin",
@@ -1580,7 +1785,7 @@ def parse_toxin_diamond_output(
                 reason_code="TOXIN_DIAMOND_MALFORMED_TARGET_ID",
                 raw_output_path=output_tsv,
             )
-        if accession not in accessions:
+        if curated_target is None and accession not in accessions:
             return _indeterminate_adapter_result(
                 "toxin",
                 required=required,
@@ -1596,7 +1801,26 @@ def parse_toxin_diamond_output(
                 reason_code="TOXIN_DIAMOND_INVALID_NUMERIC_VALUE",
                 raw_output_path=output_tsv,
             )
-        if policy.high.matches(scores):
+        if (
+            curated_target is not None
+            and policy.curated_domain_review is not None
+            and policy.curated_domain_review.matches(scores)
+        ):
+            review_findings.append(
+                _toxin_finding(
+                    record=record,
+                    accession=accession,
+                    scores=scores,
+                    state=SafetyState.INDETERMINATE,
+                    reason_code=curated_target.reason_code,
+                    band=policy.curated_domain_review,
+                    policy=policy,
+                    manifest_section=manifest_section,
+                    tool_pin=tool_pin,
+                    curated_target=curated_target,
+                )
+            )
+        elif policy.high.matches(scores):
             high_findings.append(
                 _toxin_finding(
                     record=record,
@@ -1624,13 +1848,27 @@ def parse_toxin_diamond_output(
                     tool_pin=tool_pin,
                 )
             )
+        elif policy.fragment_review is not None and policy.fragment_review.matches(scores):
+            review_findings.append(
+                _toxin_finding(
+                    record=record,
+                    accession=accession,
+                    scores=scores,
+                    state=SafetyState.INDETERMINATE,
+                    reason_code="TOXIN_FRAGMENT_REVIEW_HOMOLOGY",
+                    band=policy.fragment_review,
+                    policy=policy,
+                    manifest_section=manifest_section,
+                    tool_pin=tool_pin,
+                )
+            )
 
     if high_findings:
         state = SafetyState.FAIL
-        reason_codes = ("TOXIN_HIGH_CONFIDENCE_HOMOLOGY",)
+        reason_codes = tuple(dict.fromkeys(reason for finding in high_findings for reason in finding.reason_codes))
     elif review_findings:
         state = SafetyState.INDETERMINATE
-        reason_codes = ("TOXIN_REVIEW_HOMOLOGY",)
+        reason_codes = tuple(dict.fromkeys(reason for finding in review_findings for reason in finding.reason_codes))
     else:
         state = SafetyState.PASS
         reason_codes = ("TOXIN_DIAMOND_MEASURED_NO_REVIEW_HIT",)
@@ -1646,8 +1884,8 @@ _parse_toxin_diamond_output_validated = parse_toxin_diamond_output
 
 
 @_bind_result_policy(
-    policy_id=TOXIN_HOMOLOGY_POLICY_V1.policy_id,
-    policy_sha256=TOXIN_HOMOLOGY_POLICY_V1.sha256,
+    policy_id=TOXIN_HOMOLOGY_POLICY_V2.policy_id,
+    policy_sha256=TOXIN_HOMOLOGY_POLICY_V2.sha256,
     policy_kwarg=True,
 )
 def parse_toxin_diamond_output(
@@ -1657,7 +1895,7 @@ def parse_toxin_diamond_output(
     manifest_section: Mapping[str, object],
     tool_pin: ToolPin,
     required: bool,
-    policy: HomologyPolicy = TOXIN_HOMOLOGY_POLICY_V1,
+    policy: HomologyPolicy = TOXIN_HOMOLOGY_POLICY_V2,
 ) -> AdapterResult:
     """Parse caller-supplied output conservatively; only :func:`run_toxin_diamond` may emit measured PASS."""
     parsed = _parse_toxin_diamond_output_validated(
@@ -1683,8 +1921,8 @@ def _write_normalized_header(output_path: Path, columns: tuple[str, ...], raw_pa
 
 
 @_bind_result_policy(
-    policy_id=TOXIN_HOMOLOGY_POLICY_V1.policy_id,
-    policy_sha256=TOXIN_HOMOLOGY_POLICY_V1.sha256,
+    policy_id=TOXIN_HOMOLOGY_POLICY_V2.policy_id,
+    policy_sha256=TOXIN_HOMOLOGY_POLICY_V2.sha256,
     policy_kwarg=True,
 )
 def run_toxin_diamond(
@@ -1697,11 +1935,11 @@ def run_toxin_diamond(
     required: bool = True,
     runner: CommandRunner = subprocess.run,
     timeout: float = 300.0,
-    policy: HomologyPolicy = TOXIN_HOMOLOGY_POLICY_V1,
+    policy: HomologyPolicy = TOXIN_HOMOLOGY_POLICY_V2,
 ) -> AdapterResult:
     """Validate toxin assets, search primary/fallback proteins, and parse two evidence bands."""
     try:
-        database_path, _ = _validate_toxin_assets(manifest_section)
+        database_path, _, _ = _validate_toxin_assets(manifest_section)
         validate_tool_pin(tool_pin, runner=runner, timeout=timeout)
     except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError):
         return _indeterminate_adapter_result("toxin", required=required, reason_code="TOXIN_ASSET_PROVENANCE_MISMATCH")
@@ -2664,7 +2902,7 @@ def run_phrogs(
     timeout: float = 300.0,
     policy: HomologyPolicy = PHROGS_HOMOLOGY_POLICY_V1,
 ) -> AdapterResult:
-    """Validate a PHROG-identity contract, execute profile search, and parse fail closed."""
+    """Validate PHROG identity, execute profile search, and reject incomplete evidence."""
     try:
         required = _lysogeny_required(host_domain, strict_lysis=strict_lysis)
     except ValueError:

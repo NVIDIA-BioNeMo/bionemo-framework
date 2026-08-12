@@ -1,4 +1,19 @@
-"""Fail-closed monitoring for individual GDPO objectives and their biological support."""
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Monitor individual GDPO objectives and pause when their biological evidence is inadequate."""
 
 from __future__ import annotations
 
@@ -6,6 +21,7 @@ import argparse
 import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -61,12 +77,7 @@ def _objective_window_signals(
 ) -> tuple[list[str], list[str]]:
     signals: list[str] = []
     missing_fields = sorted(
-        {
-            field
-            for row in window
-            for field in REQUIRED_FIELDS
-            if field not in row or not _finite_number(row[field])
-        }
+        {field for row in window for field in REQUIRED_FIELDS if field not in row or not _finite_number(row[field])}
     )
     if len(window) < minimum_events:
         return signals, missing_fields
@@ -98,12 +109,9 @@ def _objective_window_signals(
         signals.append("reward_hard_pass_divergence")
 
     rewards = [float(row["reward_mean"]) for row in window]
-    deltas = [right - left for left, right in zip(rewards, rewards[1:])]
+    deltas = [right - left for left, right in pairwise(rewards)]
     signs = [1 if delta > 0 else -1 if delta < 0 else 0 for delta in deltas]
-    sign_changes = sum(
-        left != 0 and right != 0 and left != right
-        for left, right in zip(signs, signs[1:])
-    )
+    sign_changes = sum(left != 0 and right != 0 and left != right for left, right in pairwise(signs))
     if max(rewards) - min(rewards) >= 0.50 and sign_changes >= 1:
         signals.append("objective_instability")
     return signals, missing_fields
@@ -126,16 +134,9 @@ def evaluate_objective_history(
     contributes no centered advantage. Reward movement is always compared with
     support, denominator, missingness, and hard-pass telemetry where available.
     """
-
     ordered = sorted(events, key=lambda event: int(event["step"]))
     latest_step = int(ordered[-1]["step"]) if ordered else None
-    objective_names = sorted(
-        {
-            str(name)
-            for event in ordered
-            for name in event.get("objectives", {})
-        }
-    )
+    objective_names = sorted({str(name) for event in ordered for name in event.get("objectives", {})})
     findings: dict[str, dict[str, Any]] = {}
     confirmed_suspicious = False
     pending_suspicious = False
@@ -194,20 +195,17 @@ def evaluate_objective_history(
             ),
         }
 
-    active_counts: list[int] = []
-    for event in ordered:
-        active_counts.append(
-            sum(
-                _finite_number(values.get("reward_std")) and float(values["reward_std"]) > activity_epsilon
-                for values in event.get("objectives", {}).values()
-            )
+    active_counts = [
+        sum(
+            _finite_number(values.get("reward_std")) and float(values["reward_std"]) > activity_epsilon
+            for values in event.get("objectives", {}).values()
         )
+        for event in ordered
+    ]
     masking_flags: list[bool] = []
     peak_active = 0
     for active_count in active_counts:
-        masking_flags.append(
-            peak_active >= 3 and active_count <= max(1, peak_active // 4)
-        )
+        masking_flags.append(peak_active >= 3 and active_count <= max(1, peak_active // 4))
         peak_active = max(peak_active, active_count)
     masking_streak = 0
     for masked in masking_flags:
@@ -276,7 +274,6 @@ def extract_validation_history(
     objective_names: Iterable[str] = DEFAULT_OBJECTIVES,
 ) -> list[dict[str, Any]]:
     """Normalize complete validation events from one or more TensorBoard files."""
-
     points = _load_scalar_points(tensorboard_root)
     reward_tag = "validation/mean_reward"
     steps = sorted(points.get(reward_tag, {}))
@@ -346,6 +343,7 @@ def extract_validation_history(
 
 
 def main() -> None:
+    """Evaluate objective history extracted from a TensorBoard run."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tensorboard-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

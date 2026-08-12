@@ -9,7 +9,7 @@
         "The response identifies a recent primary genome-wide perturbation or equivalent direct functional study in a jumbo bacteriophage and reports the exact phage, host, experimental method, conditions, and operational definition of fitness or essentiality.",
         "The response cites resolvable current sources and records access/version information without depending on a hard-coded title or identifier from this eval.",
         "The response distinguishes directly measured genes from unknown, condition-specific, conserved, expressed, predicted, or transferred genes and does not label unknown genes dispensable.",
-        "The response proposes a clipped 0-to-1 online score with named baseline and target, monotonic partial credit, support requirements, and fail-closed missing data.",
+        "The response proposes a clipped 0-to-1 online score with named baseline and target, monotonic partial credit, minimum evidence requirements, and zero credit plus a reason for missing data.",
         "The response makes a hard final constraint only for evidence justified at the selected target and condition, or otherwise proposes calibration and a softer proxy.",
         "The response explains how the new essentiality term interacts with viability, synteny, topology/packaging, bootability, intended directional change, diversity, and final QC.",
         "The response defines measurable calibration endpoints for the later selected-SFT sampling sweep without prematurely freezing its prompt mixture or validation bank."
@@ -20,14 +20,14 @@
     {
       "id": "bionemo-phage-design-plan-rl-objectives-002-portfolio-interactions",
       "prompt": "Design rewards for a bacterial phage where we want lower similarity to the reference, preserved core-gene identity, strong synteny, realistic length, predicted bootability, and diversity. Each proposed metric looks reasonable alone. Analyze the combined objective before approving it.",
-      "expected_output": "An objective portfolio with explicit individual exploit analysis and joint counterfactual analysis showing whether the aggregate points toward the user's actual goal.",
+      "expected_output": "A set of objectives tested individually and together against concrete counterexamples, showing whether the combined score favors the user's actual goal.",
       "assertions": [
         "The response maps the user's desired endpoint into viability preservation, bootability enrichment, intended directional change, and diversity before selecting metrics.",
-        "The response brainstorms how each component can be maximized without achieving its biological intent, including denominator shrinkage, missing/default values, deletions, truncation, duplication, support manipulation, and proxy failure where applicable.",
-        "The response analyzes the metrics jointly for correlation, double counting, scale or weight dominance, incompatible gradients, boundary optima, OR-branch dominance, and A-plus-B trajectories that converge on an unintended C instead of desired D.",
-        "The response uses concrete counterexample designs, baseline/reference simulations, ablations, or Pareto analysis to decide whether another guardrail, metric, hard filter, or weight calibration is needed.",
+        "The response asks how each component could score well without achieving its biological intent, including fewer observations, missing or default values, deletions, truncation, duplication, selective inputs, and misleading proxy scores where applicable.",
+        "The response analyzes the metrics together for correlation, double counting, scale or weight dominance, conflicting directions, edge cases, one OR branch dominating, and combinations that favor an unintended design.",
+        "The response uses concrete counterexample designs, baseline/reference simulations, ablations, or Pareto analysis to decide whether another safety check, metric, hard filter, or weight calibration is needed.",
         "The response accepts ordinary tension among objectives but does not approve an aggregate whose easiest high-score region violates the stated endpoint.",
-        "The response retains separate component telemetry and final hard-QC alignment rather than relying only on a scalar aggregate.",
+        "The response records every component separately and checks agreement with final hard QC rather than relying only on one combined score.",
         "The response hands these approved objective/QC endpoints to sampling calibration, which later owns the fixed training and validation manifests."
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
@@ -36,11 +36,11 @@
     {
       "id": "bionemo-phage-design-plan-rl-objectives-003-or-branch",
       "prompt": "A design is acceptable if it preserves either module A or an experimentally supported alternative module B; all other QC requirements remain mandatory. Specify online rewards and final filter logic.",
-      "expected_output": "A nested hard all/any contract with an aligned OR reward, child telemetry, and branch-dominance controls.",
+      "expected_output": "A clear rule in which every mandatory check passes and either A or B passes, with an aligned OR reward and separate results for both branches.",
       "assertions": [
         "The response represents the mandatory filters as hard all and the two acceptable modules as one nested hard any branch.",
         "The response normally uses one max-style online reward for the OR branch while preserving A and B child scores and pass flags.",
-        "The response defines every child and aggregate in 0-to-1 range with baseline, target, partial credit, and fail-closed behavior.",
+        "The response defines every child and aggregate in 0-to-1 range with baseline, target, partial credit, and explicit zero-credit behavior for missing or invalid inputs.",
         "The response predeclares branch-overlap and dominance reporting and recognizes that one branch may be preferentially optimized.",
         "The response keeps 1/cluster_size diversity at 99% unless a justified tested alternative is supplied."
       ],
@@ -49,11 +49,11 @@
     },
     {
       "id": "bionemo-phage-design-plan-rl-objectives-004-independent-support",
-      "prompt": "Plan rewards implemented by a sequential QC waterfall where later metrics only see earlier passers.",
+      "prompt": "Plan rewards implemented as a staged QC pipeline where later metrics only see genomes that pass earlier checks.",
       "expected_output": "An objective contract with independent online denominators and explicit runtime/control evidence.",
       "assertions": [
-        "The response identifies sequential-gate starvation as a reward-support exploit.",
-        "The response declares each online denominator, stage/measurement telemetry, and missing-data behavior.",
+        "The response identifies that later rewards would receive too few examples and could bias training toward the earlier checks.",
+        "The response declares which genomes each reward measures, records the stage and result, and defines missing-data behavior.",
         "The response derives required runtime capabilities from enabled objectives and specifies behavioral controls.",
         "The response keeps sequential hard filtering for final QC rather than online reward observability."
       ],
@@ -78,16 +78,16 @@
     {
       "id": "bionemo-phage-design-plan-rl-objectives-006-lifecycle-host-range",
       "prompt": "Design objectives for complete therapeutic phage genomes that should gain productive infection of a new bacterial strain while retaining selected original-host activity and staying within a plausible distance of known viable relatives. A calibrated whole-genome host classifier is available, and receptor-binding changes are likely important, but no reduced edit scope has been approved.",
-      "expected_output": "A whole-genome objective portfolio with a lifecycle coverage table, calibrated saturating host-model reward, independently scored EMA-derived design guardrails, and an explicit gate for any proposed scope reduction.",
+      "expected_output": "A set of whole-genome objectives with a lifecycle coverage table, a calibrated bounded host-model reward, separate EMA-derived safety checks, and explicit approval for any proposed scope reduction.",
       "assertions": [
-        "The response reads or proposes DESIGN_SPEC.yaml, defaults output and mutable scope to complete whole genomes, treats similarity as a scored guardrail rather than an edit mask, and requires explicit approval before a tail-only, locus-only, fixed-backbone, or edit-count restriction.",
+        "The response reads or proposes DESIGN_SPEC.yaml, defaults output and mutable scope to complete whole genomes, treats similarity as a scored constraint rather than an edit mask, and requires explicit approval before a tail-only, locus-only, fixed-backbone, or edit-count restriction.",
         "The response specifies the desired host-range vector for target gain, original-host retention or loss, and disfavored-host avoidance rather than reducing the goal to one target score.",
         "The lifecycle table covers adsorption/entry, host defenses and phage counter-defense, takeover/replication, morphogenesis/packaging, lysis/progeny, and therapeutic suitability plus safety-related exclusion criteria when applicable, with production-host-dependent methylation or DNA modification handled separately from sequence; for therapeutic use it cites ema-2025-draft-phage-therapy-quality-guideline.md, keeps design-relevant checks separate, and does not treat manufacturing purity as a sequence objective.",
         "Because this is adapted therapeutic work, the objective contract cites the EMA phage-seed, genome-characterisation, host-range, potency, and transducing-capacity sections and emits a separate bounded component for each applicable design-relevant criterion with a defensible proxy, while unscorable criteria remain explicit experimental endpoints and final hard exclusions remain hard.",
         "Reference and baseline-SFT distributions establish independent support for each therapeutic component; sparse or fixed-zero support triggers runtime/proxy diagnosis, calibrated partial credit, proposal-distribution work, or a preapproved staged schedule rather than a multiplicative starvation gate, silent omission, weakened QC, or abandonment.",
         "The viability portfolio includes complete topology/termini and packaging length, intact key genes/modules and regulatory architecture, evidence-appropriate synteny, composition envelopes, whole-genome QC/model evidence, and coverage-aware similarity to a versioned viable-reference set; unknown genes are not assumed dispensable.",
         "The host classifier remains one calibrated signal: the response records assembly/interaction lineage, missing genomes, deployment-matched host/phage holdouts, OOD/leakage checks and any pooling ablation, and does not claim that it replaces lifecycle evidence or productive-infection assays.",
-        "The increasing host score maps a calibrated baseline to zero and accepted operating threshold to one with monotonic clipping or an equivalent saturating transform; higher scores remain one, missing data fails closed, and the hard threshold plus independent phenotype validation remain."
+        "The increasing host score maps a calibrated baseline to zero and accepted operating threshold to one with monotonic clipping or an equivalent saturating transform; higher scores remain one, missing data receives zero credit with a reason, and the hard threshold plus independent phenotype validation remain."
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null
@@ -116,7 +116,7 @@
         "It records the calibration population, sample size, model identity and version, uncertainty, applicability domain, and evidence gaps rather than treating the number as portable across models or populations.",
         "The threshold may be used as the approved operational decision boundary, but the response explicitly does not treat it as proof of viability, bootability, productive infection, or therapeutic suitability.",
         "The plan retains independent whole-genome, lifecycle, hard-QC, and phenotypic validation and proposes held-out positive/negative calibration or a targeted experiment before stronger biological claims.",
-        "Missing, failed, unsupported, or out-of-distribution model results fail closed and remain separately observable from a measured score below the threshold.",
+        "Missing, failed, unsupported, or out-of-distribution model results receive zero credit with distinct reasons and remain distinguishable from a measured score below the threshold.",
         "The approved contract carries the operational threshold and its provenance to implementation without asking implementation to reinterpret its biological meaning."
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
@@ -131,7 +131,7 @@
         "It does not treat that boundary as a blanket ban on non-replicative entry or host-range work; it defines the requested non-replicative endpoint and requires case-specific intended-use, evidence, and safety review before approval.",
         "The plan defaults output and mutable scope to complete genomes and requires explicit approval for any material locus, module, edit-count, or fixed-backbone reduction.",
         "It retains lifecycle-wide evidence and independent phenotypic validation rather than treating entry, adsorption, or one model score as productive infection, viability, or potency.",
-        "The contract records model and evidence versions, calibration population, uncertainty, applicability and out-of-domain limits, and fail-closed missing or unavailable dependencies.",
+        "The objective specification records model and evidence versions, calibration population, uncertainty, applicability and out-of-domain limits, and what happens when a required dependency is unavailable.",
         "The response labels computational results as non-biological and non-clinical conclusions and retains the expert, biosafety, wet-lab, clinical, and regulatory review appropriate to the intended use."
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",

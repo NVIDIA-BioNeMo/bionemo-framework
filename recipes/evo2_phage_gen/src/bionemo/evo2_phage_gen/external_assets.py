@@ -68,18 +68,35 @@ DEFAULT_AMRFINDER_URL = (
 DEFAULT_AMRFINDER_SHA256 = "68045a8bccdbe3c5dcdf941bebe2352ed419758a9914c41f48f0bbbd6fbade56"
 DEFAULT_PHROGS_ANNOTATION_SHA256 = "502f96101597c21133bcce5711803e0b95e0c162cd4e86425c352549bd95e8c2"
 DEFAULT_UNIPROT_TOXIN_QUERY = (
-    "reviewed:true AND keyword:KW-0800 AND\n(taxonomy_id:2 OR taxonomy_id:2157 OR taxonomy_id:10239)"
+    "reviewed:true AND keyword:KW-0800 AND\n((keyword:KW-0843 AND NOT keyword:KW-0078) OR taxonomy_id:2759)"
 )
 DEFAULT_UNIPROT_TOXIN_ANNOTATIONS_URL = "https://rest.uniprot.org/uniprotkb/stream?" + urlencode(
     {
         "query": DEFAULT_UNIPROT_TOXIN_QUERY,
         "format": "tsv",
-        "fields": "accession,id,protein_name,gene_names,organism_name,organism_id,cc_function",
+        "fields": ("accession,id,protein_name,gene_names,organism_name,organism_id,keywordid,lineage_ids,cc_function"),
     }
 )
 DEFAULT_UNIPROT_TOXIN_FASTA_URL = "https://rest.uniprot.org/uniprotkb/stream?" + urlencode(
     {"query": DEFAULT_UNIPROT_TOXIN_QUERY, "format": "fasta"}
 )
+DEFAULT_WOPIP1_PROTEIN_URLS = (
+    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=protein&id=CAQ54400.1&rettype=fasta&retmode=text",
+    "https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=CAQ54400.1&db=protein&report=fasta&retmode=text",
+)
+DEFAULT_WOPIP1_PROTEIN_SEQUENCE_SHA256 = "8e8eb5098bd972dadd0c94ccbd0718c3ede5e528ac2517c605ece16e9eb08a73"
+DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_INTERVAL = (2571, 2706)
+DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_SEQUENCE_SHA256 = "9da486e50032ff2f89b493049419d7fb9f754f8cc935abb9339f56631dd6a8be"
+CURATED_TOXIN_HAZARD_SET_ID = "phage-domain-hazards-v1"
+TOXIN_REFERENCE_CLASSIFICATION_POLICY = {
+    "policy_id": "human-harm-toxin-reference-v1",
+    "hard_fail_scope": "reviewed_whole_protein_human_harm_or_human_disease_virulence",
+    "fragment_action": "REVIEW",
+    "domain_homology_action": "REVIEW",
+    "antibacterial_only_action": "NON_GATING",
+    "antibacterial_keyword": "KW-0078",
+    "independent_eukaryotic_harm_overrides_antibacterial_exclusion": True,
+}
 PHROGS_INTEGRATION_EXCISION_CATEGORY = "integration and excision"
 PHROGS_HIGH_CONFIDENCE_TERMS = (
     "integrase",
@@ -907,6 +924,63 @@ def _uniprot_tsv_accessions(annotations_path: Path) -> set[str]:
     return accessions
 
 
+def _semicolon_values(value: str) -> set[str]:
+    """Return trimmed nonempty values from a UniProt semicolon-delimited field."""
+    return {item.strip() for item in value.split(";") if item.strip()}
+
+
+def _uniprot_lineage_ids(value: str) -> set[str]:
+    """Parse lineage IDs with or without UniProt's parenthesized rank labels."""
+    if "," in value and ";" in value:
+        raise ValueError("UniProt lineage value mixes delimiters")
+    delimiter = "," if "," in value else ";"
+    values = {item.strip() for item in value.split(delimiter) if item.strip()}
+    lineage_ids = set()
+    for item in values:
+        taxon_id, separator, rank = item.partition(" ")
+        if (
+            not taxon_id.isascii()
+            or not taxon_id.isdecimal()
+            or taxon_id == "0"
+            or (separator and not (rank.startswith("(") and rank.endswith(")")))
+        ):
+            raise ValueError(f"Malformed UniProt lineage value: {item}")
+        lineage_ids.add(taxon_id)
+    return lineage_ids
+
+
+def _validate_uniprot_toxin_scope(annotations_path: Path) -> None:
+    """Require each downloaded protein to match the declarative human-harm scope.
+
+    Antibacterial-only bacteriocins are intentionally non-gating.  A reviewed
+    bacterial/viral toxin is retained only with UniProt virulence evidence,
+    while eukaryotic toxins remain in scope independently of that exclusion.
+    """
+    with Path(annotations_path).open(newline="") as source:
+        reader = csv.DictReader(source, delimiter="\t")
+        lineage_aliases = {
+            "Taxonomic lineage (IDs)",
+            "Taxonomic lineage (Ids)",
+            "Taxonomic lineage IDs",
+        }
+        fieldnames = set(reader.fieldnames or ())
+        lineage_columns = fieldnames & lineage_aliases
+        if not {"Entry", "Keyword ID"}.issubset(fieldnames) or len(lineage_columns) != 1:
+            raise ValueError("UniProt toxin annotations lack keyword or lineage evidence")
+        lineage_column = lineage_columns.pop()
+        for row in reader:
+            accession = row.get("Entry", "").strip()
+            keywords = _semicolon_values(row.get("Keyword ID", ""))
+            lineage_ids = _uniprot_lineage_ids(row.get(lineage_column, ""))
+            in_scope = "KW-0800" in keywords and (
+                "2759" in lineage_ids or ("KW-0843" in keywords and "KW-0078" not in keywords)
+            )
+            if not accession or not in_scope:
+                raise ValueError(
+                    f"UniProt toxin annotation {accession or '<empty>'} is outside the human-harm toxin scope"
+                )
+
+
 def _uniprot_fasta_accessions(fasta_path: Path) -> set[str]:
     """Return canonical accessions from standard UniProt FASTA headers."""
     accessions = set()
@@ -929,6 +1003,102 @@ def _validate_uniprot_accession_parity(annotations_path: Path, fasta_path: Path)
     fasta_accessions = _uniprot_fasta_accessions(fasta_path)
     if annotations_accessions != fasta_accessions:
         raise ValueError("UniProt TSV/FASTA accession sets differ")
+
+
+def _single_protein_fasta_sequence(path: Path, *, accession: str) -> str:
+    """Return one exact protein sequence from a canonical accession-version FASTA."""
+    lines = Path(path).read_text().splitlines()
+    headers = [line for line in lines if line.startswith(">")]
+    if len(headers) != 1 or headers[0][1:].split(maxsplit=1)[0] != accession:
+        raise ValueError(f"Curated hazard FASTA must contain exactly {accession}")
+    sequence = "".join(line.strip() for line in lines if line and not line.startswith(">"))
+    if not sequence or not sequence.isascii() or not sequence.isalpha() or sequence != sequence.upper():
+        raise ValueError(f"Curated hazard FASTA {accession} has an invalid protein sequence")
+    return sequence
+
+
+def _validate_wopip1_curated_hazard(path: Path) -> None:
+    """Authenticate exact accession/version and normalized protein sequence, independent of FASTA wrapping."""
+    sequence = _single_protein_fasta_sequence(path, accession="CAQ54400.1")
+    if hashlib.sha256(sequence.encode()).hexdigest() != DEFAULT_WOPIP1_PROTEIN_SEQUENCE_SHA256:
+        raise ValueError("Curated hazard CAQ54400.1 normalized sequence digest mismatch")
+
+
+def _wopip1_latrotoxin_domain_sequence(path: Path) -> str:
+    """Derive the exact PF15658-aligned WP0292 segment from its authenticated source protein."""
+    sequence = _single_protein_fasta_sequence(path, accession="CAQ54400.1")
+    start, end = DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_INTERVAL
+    if end > len(sequence):
+        raise ValueError("Curated hazard CAQ54400.1 is shorter than its reviewed domain interval")
+    domain = sequence[start - 1 : end]
+    if hashlib.sha256(domain.encode()).hexdigest() != DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_SEQUENCE_SHA256:
+        raise ValueError("Curated PF15658.11 domain sequence digest mismatch")
+    return domain
+
+
+def _prepare_wopip1_curated_hazard(toxin_dir: Path, *, overwrite: bool) -> Path:
+    """Fetch exact CAQ54400.1 from authenticated fallback endpoints and verify sequence identity."""
+    output = Path(toxin_dir) / "curated_hazards" / "CAQ54400.1.faa"
+    if output.exists() and not overwrite:
+        _validate_wopip1_curated_hazard(output)
+        return output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    candidate = output.with_suffix(output.suffix + ".candidate")
+    errors: list[str] = []
+    for url in DEFAULT_WOPIP1_PROTEIN_URLS:
+        try:
+            _download(url, candidate, overwrite=True, insecure=False)
+            _validate_wopip1_curated_hazard(candidate)
+            candidate.replace(output)
+            return output
+        except (OSError, UnicodeError, ValueError) as error:
+            candidate.unlink(missing_ok=True)
+            errors.append(f"{url}: {error}")
+    raise RuntimeError("Cannot authenticate curated hazard CAQ54400.1 from any source: " + "; ".join(errors))
+
+
+def _write_toxin_search_fasta(uniprot_fasta: Path, curated_fasta: Path, output: Path) -> bool:
+    """Materialize reviewed toxins plus a narrowly reviewed hazardous-domain target."""
+    domain = _wopip1_latrotoxin_domain_sequence(curated_fasta)
+    domain_record = f">domain|PF15658.11|Latrotoxin_C\n{domain}\n".encode()
+    combined = uniprot_fasta.read_bytes().rstrip(b"\r\n") + b"\n" + domain_record
+    if output.is_file() and output.read_bytes() == combined:
+        return False
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_bytes(combined)
+    temporary.replace(output)
+    return True
+
+
+def _curated_toxin_hazard_manifest() -> dict:
+    """Return the tracked, exact non-functional-claim metadata for the phage-WO control."""
+    return {
+        "set_id": CURATED_TOXIN_HAZARD_SET_ID,
+        "entries": [
+            {
+                "accession": "PF15658.11",
+                "name": "Latrotoxin_C",
+                "action": "REVIEW",
+                "source_protein_accession": "CAQ54400.1",
+                "source_urls": list(DEFAULT_WOPIP1_PROTEIN_URLS),
+                "source_protein_sequence_sha256": DEFAULT_WOPIP1_PROTEIN_SEQUENCE_SHA256,
+                "source_interval": {
+                    "start": DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_INTERVAL[0],
+                    "end": DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_INTERVAL[1],
+                },
+                "sequence_sha256": DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_SEQUENCE_SHA256,
+                "reason_code": "TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW",
+                "evidence_urls": [
+                    "https://doi.org/10.1038/ncomms13155",
+                    "https://www.ncbi.nlm.nih.gov/Structure/cdd/pfam15658",
+                ],
+                "interpretation": (
+                    "Latrotoxin C-terminal-domain homology; not evidence of intact or functional venom."
+                ),
+            }
+        ],
+    }
 
 
 def _validate_cached_toxin_file(record: object, path: Path, label: str) -> None:
@@ -958,8 +1128,11 @@ def _validate_cached_toxin_reference(
         raise ValueError("Cached toxin files require a prior complete manifest record")
     expected_provenance = {
         "query": DEFAULT_UNIPROT_TOXIN_QUERY,
+        "classification_policy": TOXIN_REFERENCE_CLASSIFICATION_POLICY,
         "annotations_url": annotations_url,
         "fasta_url": fasta_url,
+        "reference_version": f"UniProt {toxin_reference.get('uniprot_release')} + {CURATED_TOXIN_HAZARD_SET_ID}",
+        "curated_hazards": _curated_toxin_hazard_manifest(),
         "license": "CC BY 4.0",
         "attribution": UNIPROT_CC_BY_4_0_ATTRIBUTION,
     }
@@ -978,8 +1151,12 @@ def _validate_cached_toxin_reference(
     files = toxin_reference.get("files")
     if not isinstance(files, dict):
         raise ValueError("Cached toxin manifest lacks file records")
+    curated_hazard_fasta = annotations_path.parent / "curated_hazards" / "CAQ54400.1.faa"
+    search_fasta = annotations_path.parent / "toxin_hazards.faa"
     _validate_cached_toxin_file(files.get("annotations"), annotations_path, "annotations")
     _validate_cached_toxin_file(files.get("fasta"), fasta_path, "FASTA")
+    _validate_cached_toxin_file(files.get("curated_hazard_fasta"), curated_hazard_fasta, "curated hazard FASTA")
+    _validate_cached_toxin_file(files.get("search_fasta"), search_fasta, "combined search FASTA")
     _validate_cached_toxin_file(files.get("diamond_database"), diamond_database, "DIAMOND database")
     return release, release_date, retrieved_at
 
@@ -1037,6 +1214,9 @@ def prepare_toxin_reference(
         overwrite=overwrite,
         insecure=False,
     )
+    curated_hazard_fasta = _prepare_wopip1_curated_hazard(toxin_dir, overwrite=overwrite)
+    search_fasta = toxin_dir / "toxin_hazards.faa"
+    search_fasta_changed = _write_toxin_search_fasta(fasta_path, curated_hazard_fasta, search_fasta)
     diamond_database = toxin_dir / "reviewed_toxins.dmnd"
     annotations_downloaded = bool(annotation_headers)
     fasta_downloaded = bool(fasta_headers)
@@ -1055,13 +1235,14 @@ def prepare_toxin_reference(
             diamond_database=diamond_database,
         )
     _validate_uniprot_accession_parity(annotations_path, fasta_path)
+    _validate_uniprot_toxin_scope(annotations_path)
 
     # Fresh TSV/FASTA bytes require a DIAMOND index built from those same bytes, even
     # when a stale filename happens to exist from an earlier snapshot.
-    if annotations_downloaded or overwrite or not diamond_database.exists():
+    if annotations_downloaded or search_fasta_changed or overwrite or not diamond_database.exists():
         selected_diamond_bin = Path(diamond_bin) if diamond_bin is not None else external_dir / "bin" / "diamond"
         subprocess.run(
-            [str(selected_diamond_bin), "makedb", "--in", str(fasta_path), "--db", str(diamond_database)],
+            [str(selected_diamond_bin), "makedb", "--in", str(search_fasta), "--db", str(diamond_database)],
             check=True,
         )
     if not diamond_database.exists():
@@ -1069,10 +1250,13 @@ def prepare_toxin_reference(
 
     toxin_manifest = {
         "query": DEFAULT_UNIPROT_TOXIN_QUERY,
+        "classification_policy": TOXIN_REFERENCE_CLASSIFICATION_POLICY,
         "annotations_url": annotations_url,
         "fasta_url": fasta_url,
         "retrieved_at": retrieved_at,
         "uniprot_release": uniprot_release,
+        "reference_version": f"UniProt {uniprot_release} + {CURATED_TOXIN_HAZARD_SET_ID}",
+        "curated_hazards": _curated_toxin_hazard_manifest(),
         "license": "CC BY 4.0",
         "attribution": UNIPROT_CC_BY_4_0_ATTRIBUTION,
         "files": {
@@ -1086,9 +1270,19 @@ def prepare_toxin_reference(
                 "role": "reviewed toxin protein sequences",
                 "sha256": _sha256_file(fasta_path),
             },
+            "curated_hazard_fasta": {
+                "path": str(curated_hazard_fasta.resolve()),
+                "role": "exact accession-pinned phage domain-hazard protein sequence",
+                "sha256": _sha256_file(curated_hazard_fasta),
+            },
+            "search_fasta": {
+                "path": str(search_fasta.resolve()),
+                "role": "derived reviewed toxin plus curated phage domain-hazard search FASTA",
+                "sha256": _sha256_file(search_fasta),
+            },
             "diamond_database": {
                 "path": str(diamond_database.resolve()),
-                "role": "DIAMOND index of reviewed toxin proteins",
+                "role": "DIAMOND index of reviewed toxins and curated phage domain hazards",
                 "sha256": _sha256_file(diamond_database),
             },
         },
@@ -1353,7 +1547,7 @@ def _extract_verified_phrogs_safety_profile_archive(
 
 
 def _require_verified_phrogs_profile(profile: object) -> _VerifiedPhrogsProfile:
-    """Return a private archive-extraction capability or fail closed at the public boundary."""
+    """Return a verified archive handle or reject an unverified profile directory."""
     if not isinstance(profile, _VerifiedPhrogsProfile) or profile._authority is not _VERIFIED_PHROGS_PROFILE_AUTHORITY:
         raise RuntimeError(
             "PHROGs safety metadata requires verified PHROGs profile preparation from the pinned archive"
@@ -2311,7 +2505,7 @@ def prepare_arc_evo2_checkout(
 
 
 def _validate_recorded_asset_digest(record: dict, path_field: str, digest_field: str, label: str) -> None:
-    """Fail closed when a staged manifest asset path is missing or changed before publication."""
+    """Reject publication when a staged asset is missing or has changed."""
     path_value = record.get(path_field)
     expected_sha256 = record.get(digest_field)
     if not isinstance(path_value, str) or not path_value:
@@ -2402,10 +2596,13 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         ),
         "toxin_reference": (
             "query",
+            "classification_policy",
             "annotations_url",
             "fasta_url",
             "retrieved_at",
             "uniprot_release",
+            "reference_version",
+            "curated_hazards",
             "files",
         ),
         "phrogs_v4": (
@@ -2429,7 +2626,16 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
     toxin_files = manifest["toxin_reference"]["files"]
     if not isinstance(toxin_files, dict):
         raise RuntimeError("Safety manifest toxin_reference lacks required field files")
-    for file_role in ("annotations", "fasta", "diamond_database"):
+    expected_reference_version = (
+        f"UniProt {manifest['toxin_reference']['uniprot_release']} + {CURATED_TOXIN_HAZARD_SET_ID}"
+    )
+    if manifest["toxin_reference"]["reference_version"] != expected_reference_version:
+        raise RuntimeError("Safety manifest toxin_reference has unsupported reference_version")
+    if manifest["toxin_reference"]["classification_policy"] != TOXIN_REFERENCE_CLASSIFICATION_POLICY:
+        raise RuntimeError("Safety manifest toxin_reference has unsupported classification_policy")
+    if manifest["toxin_reference"]["curated_hazards"] != _curated_toxin_hazard_manifest():
+        raise RuntimeError("Safety manifest toxin_reference has unsupported curated_hazards")
+    for file_role in ("annotations", "fasta", "curated_hazard_fasta", "search_fasta", "diamond_database"):
         file_record = toxin_files.get(file_role)
         if not isinstance(file_record, dict) or not file_record.get("path") or not file_record.get("sha256"):
             raise RuntimeError(f"Safety manifest toxin_reference lacks required fields files.{file_role}")
@@ -2600,7 +2806,7 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
     ):
         _validate_recorded_asset_digest(amrfinder_record, path_field, digest_field, label)
     toxin_record = manifest["toxin_reference"]
-    for file_role in ("annotations", "fasta", "diamond_database"):
+    for file_role in ("annotations", "fasta", "curated_hazard_fasta", "search_fasta", "diamond_database"):
         _validate_recorded_asset_digest(
             toxin_record["files"][file_role],
             "path",

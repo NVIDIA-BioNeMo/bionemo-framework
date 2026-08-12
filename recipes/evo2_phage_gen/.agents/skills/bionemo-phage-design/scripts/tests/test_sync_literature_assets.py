@@ -191,7 +191,7 @@ class ArticleConversionTests(unittest.TestCase):
         self.assertIn("Table S1", converted.supplement_markdown)
         self.assertIn("File S1", converted.supplement_markdown)
 
-    def test_doi_version_and_license_mismatches_fail_closed(self) -> None:
+    def test_doi_version_and_license_mismatches_are_rejected(self) -> None:
         cases = [
             _article_html(doi="10.1234/wrong"),
             _article_html(doi=self.spec.doi, version="v2"),
@@ -383,7 +383,7 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(3, len({row[0] for row in sheet.rows[1:]}))
             self.assertEqual(["0.1", "0.2", "0.3"], [row[30] for row in sheet.rows[1:]])
 
-    def test_missing_formula_cache_fails_closed(self) -> None:
+    def test_missing_formula_cache_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workbook = Path(tmp) / "media-1.xlsx"
             _make_xlsx(workbook, formula_values=False)

@@ -223,13 +223,9 @@ def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_pat
     gbk_dir = tmp_path / "gbk"
     gff_dir.mkdir()
     gbk_dir.mkdir()
-    (gff_dir / "genome_1.gff").write_text(
-        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=major capsid protein\n"
-    )
+    (gff_dir / "genome_1.gff").write_text("contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=major capsid protein\n")
     (gbk_dir / "genome_1.gbk").write_text("LOCUS genome_1\n")
-    sequences = pd.DataFrame(
-        {"id_prompt": ["umi1"], "genome_id": ["genome_1"], "sequence": ["ACGT"]}
-    )
+    sequences = pd.DataFrame({"id_prompt": ["umi1"], "genome_id": ["genome_1"], "sequence": ["ACGT"]})
     metrics_csv = tmp_path / "required.csv"
 
     measured = module.valid_gene_annotations(
@@ -248,7 +244,7 @@ def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_pat
     assert metrics["required_genes_matched_count"].tolist() == [1]
 
 
-def test_patched_arc_synteny_missing_lovis4u_output_fails_closed(tmp_path):
+def test_patched_arc_synteny_missing_lovis4u_output_receives_zero_credit(tmp_path):
     """Missing LoVis4u files should zero synteny metrics instead of aborting RL reward scoring."""
     module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_for_test")
 
@@ -328,7 +324,7 @@ def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_miss
     assert output["missing_synteny_output"].tolist() == [False, True, True]
 
 
-def test_patched_arc_mmseqs_protein_search_fails_closed(tmp_path, monkeypatch):
+def test_patched_arc_mmseqs_protein_search_rejects_missing_output(tmp_path, monkeypatch):
     """Failed MMseqs protein searches should produce an empty hit table for online reward scoring."""
     module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_mmseqs_test")
 

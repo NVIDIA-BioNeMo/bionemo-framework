@@ -4,11 +4,43 @@ This is the single source of volatile memory/parallelism guidance for SFT, RL tr
 
 ## Default utilization objective
 
-After correctness and recoverability pass, tune each stage to maximize stable global valid tokens/sec on representative target-length data. Record device inventory/occupancy, peak allocated and reserved memory, throughput, step-time breakdown, host pressure, and safety margin. Prefer the least model-parallel layout, including pure DP, when it fits and is faster even with smaller per-device microbatches; add TP/PP/CP only for memory or measured throughput. Pure TP is mainly a single-request-latency choice or a fit requirement for long context, model, optimizer, policy/reference, or activation state. Use all approved devices through useful DP or concurrency. Increase microbatch or useful concurrency until the next tested setting fails or loses throughput, then use the highest repeatably stable setting with headroom for validation, checkpointing, and data-length variance. Optimize SFT, RL training, and rollout generation separately; fit or topology in one path is not evidence for another.
+After correctness and recoverability pass, optimize SFT, RL training, generation, and external-tool
+stages separately on representative workloads. A setting that fits or wins in one path is not evidence
+for another. Re-probe after any material model, length, precision, topology, tool, database, kernel,
+endpoint, hardware, or software-revision change.
 
-For CPU/bioinformatics pipelines, bound aggregate process, thread, memory, and I/O demand across the full nested task tree to measured host capacity and stable end-to-end throughput; limiting only outer workers is insufficient.
+### GPU training, RL, and generation
 
-Utilization never outranks full-genome coverage, the approved effective token batch, numerical health, unbiased sampling, checkpoint/resume integrity, or cluster fairness. Re-probe after any model, length, precision, topology, endpoint, kernel, or software-revision change.
+GPU memory occupancy is a constraint, not the objective. On representative target-length inputs, choose
+the topology, precision, microbatch, accumulation, and useful concurrency that maximize stable useful
+tokens or valid sequences per second while preserving numerical behavior, the approved context and
+effective batch, and checkpoint and resume behavior. Record device inventory and occupancy, peak
+allocated and reserved memory, throughput, step-time breakdown, communication, host and I/O pressure,
+and memory headroom. Use available memory productively, but retain headroom for validation,
+checkpointing, data-length variation, and transient allocations.
+
+Prefer the least model-parallel layout, including pure DP, when it fits and is faster; add TP, PP, or CP
+only for fit or measured throughput. Pure TP is mainly a latency choice or a fit requirement. Use all
+approved devices through useful DP or concurrency, sweeping upward until the next setting fails,
+becomes unstable, or loses end-to-end throughput. Select the highest repeatably stable setting, not
+the setting with the fullest memory meter.
+
+### External-tool filtering and scoring
+
+For CPU or accelerated bioinformatics tools, collect end-to-end and per-stage timings on representative
+target-length controls, both isolated and at the planned concurrency, with a small thread sweep when
+useful. Choose record workers and per-tool threads by stable total throughput under load, not CPU
+occupancy or one isolated call. Bound the full nested task tree against CPU, RAM, memory bandwidth,
+GPU, scratch, I/O, database-loading, and concurrent-workload limits; limiting only outer workers is
+insufficient.
+
+Cache identical results by sequence and full tool/asset/policy/parser identity. Prefer warm, batched, or
+persistent processes or containers when supported. Require byte or semantic parity for each accepted
+thread, process, container, or accelerator setting. Do not generalize one tool's result to another
+stage or the whole pipeline: tune each measured bottleneck, then remeasure end to end.
+
+Utilization never outranks full-genome coverage, the approved effective token batch, numerical health,
+unbiased sampling, checkpoint/resume integrity, deterministic record mapping, or cluster fairness.
 
 ## Agree on context from the genome distribution
 

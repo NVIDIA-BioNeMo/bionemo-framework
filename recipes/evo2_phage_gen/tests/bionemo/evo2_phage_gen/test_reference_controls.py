@@ -79,7 +79,7 @@ def _measured_report(control):
         "resolved_profile": {"host_domain": "BACTERIA", "strict_lysis": True},
         "records": [
             {
-                "record_id": control.accession,
+                "record_id": control.record_id,
                 "sequence_length": control.sequence_length,
                 "sequence_sha256": control.sequence_sha256,
                 "circular": control.circular,
@@ -107,7 +107,14 @@ def test_reference_control_panel_pins_exact_immutable_records_and_expectations()
     panel = _panel()
     controls = {control.control_id: control for control in panel.controls}
 
-    assert set(controls) == {"ctxphi_hazard", "t7_negative", "phix174_negative", "muddy_negative"}
+    assert set(controls) == {
+        "ctxphi_hazard",
+        "shiga_toxin_933w_hazard",
+        "wopip1_latrotoxin_domain_hazard",
+        "t7_negative",
+        "phix174_negative",
+        "muddy_negative",
+    }
     assert (controls["ctxphi_hazard"].accession, controls["ctxphi_hazard"].sequence_length) == (
         "NC_015209.1",
         10638,
@@ -117,6 +124,25 @@ def test_reference_control_panel_pins_exact_immutable_records_and_expectations()
         "ctxB": "P01556",
     }
     assert controls["ctxphi_hazard"].expected_classes["lysogeny"].state.value == "FAIL"
+    assert (
+        controls["shiga_toxin_933w_hazard"].accession,
+        controls["shiga_toxin_933w_hazard"].sequence_length,
+    ) == ("NC_000924.1", 61670)
+    assert controls["shiga_toxin_933w_hazard"].expected_classes["toxin"].required_finding_accessions == {
+        "stxA2": "P09385",
+        "stxB2": "P09386",
+    }
+    wopip1 = controls["wopip1_latrotoxin_domain_hazard"]
+    assert wopip1.accession == "AM999887.1"
+    assert wopip1.sequence_interval == (246045, 312651)
+    assert wopip1.record_id == "AM999887.1_246045_312651"
+    assert wopip1.role == "positive_review"
+    assert wopip1.expected_aggregate_state.value == "INDETERMINATE"
+    assert wopip1.expected_classes["toxin"].required_finding_accessions == {
+        "latrotoxin_C_domain_bearing_WP0292": "PF15658.11"
+    }
+    assert wopip1.expected_classes["toxin"].state.value == "INDETERMINATE"
+    assert wopip1.expected_classes["lysogeny"].state.value == "INDETERMINATE"
     assert controls["phix174_negative"].circular is True
     assert controls["muddy_negative"].accession == "NC_022054.2"
     assert all(
@@ -141,7 +167,7 @@ def test_reference_control_gate_accepts_only_the_complete_measured_panel():
     result = validate_reference_control_reports(panel, _reports(panel))
 
     assert result["state"] == "PASS"
-    assert result["panel_id"] == "phage-sequence-safety-controls-v1"
+    assert result["panel_id"] == "phage-sequence-safety-controls-v2"
     assert set(result["controls"]) == {control.control_id for control in panel.controls}
 
 
@@ -157,6 +183,15 @@ def test_reference_control_gate_emits_production_safety_reward_contract():
         "reward_safety_amr": 1.0,
         "reward_safety_toxin": 0.0,
         "reward_safety_lysogeny": 0.0,
+    }
+    assert controls["shiga_toxin_933w_hazard"]["rl_safety"] == controls["ctxphi_hazard"]["rl_safety"]
+    assert controls["wopip1_latrotoxin_domain_hazard"]["rl_safety"] == {
+        "safety_gate_state": "INDETERMINATE",
+        "safety_gate_pass": 0.0,
+        "reward_safety_penalty": 1.0,
+        "reward_safety_amr": 1.0,
+        "reward_safety_toxin": 0.25,
+        "reward_safety_lysogeny": 0.25,
     }
     for control_id in ("t7_negative", "phix174_negative", "muddy_negative"):
         assert controls[control_id]["rl_safety"] == {

@@ -83,7 +83,7 @@ class SFTSafetyError(ValueError):
     """An SFT input cannot cross the immutable-source safety boundary."""
 
     def __init__(self, message: str, *, exit_code: int = 3) -> None:
-        """Attach the fail-closed CLI exit code to a stable diagnostic."""
+        """Attach the CLI exit code for an unaccepted result to a stable diagnostic."""
         super().__init__(message)
         self.exit_code = exit_code
 

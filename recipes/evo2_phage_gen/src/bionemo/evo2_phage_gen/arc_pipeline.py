@@ -202,7 +202,7 @@ PATCHED_LOVIS4U_PARALLEL_CONFIG = """        # Get parallelization settings from
         chunk_size = config.get("lovis4u_chunk_size", config.get("chunk_size", 10))
 """
 ARC_LEGACY_LOVIS4U_COMMAND = """    command = [
-        'lovis4u', 
+        'lovis4u',
 """
 PATCHED_LOVIS4U_COMMAND = """    executable = ['lovis4u']
     if os.environ.get("LOVIS4U_METRICS_ONLY") == "1":
@@ -257,7 +257,7 @@ PATCHED_MMSEQS_PROTEIN_SEARCH_RUN = """    try:
         mmseqs_out = mmseqs_search_proteins(query_fasta, mmseqs_db, results_dir, threads, split, sensitivity)
         hits = parse_mmseqs_results(mmseqs_out)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"MMseqs protein search failed closed with empty {descriptive_prefix} hit table: {e}")
+        print(f"MMseqs protein search produced no usable {descriptive_prefix} hit table: {e}")
         hits = []
     if not hits:
         df = pd.DataFrame(
@@ -523,7 +523,7 @@ def _apply_legacy_string_patches(output_dir: Path) -> None:
     if ARC_LEGACY_LOVIS4U_PDF_COLLECTION in text and PATCHED_LOVIS4U_PDF_COLLECTION not in patched_text:
         missing_patches.append("LoVis4u PDF collection")
     if ARC_LEGACY_MMSEQS_PROTEIN_SEARCH_RUN in text and PATCHED_MMSEQS_PROTEIN_SEARCH_RUN not in patched_text:
-        missing_patches.append("fail-closed MMseqs protein search")
+        missing_patches.append("MMseqs protein search that rejects missing or malformed evidence")
     if ARC_LEGACY_SYNTENY_COUNT_SIGNATURE in text and PATCHED_SYNTENY_COUNT_SIGNATURE not in patched_text:
         missing_patches.append("synteny count reference_gff_path compatibility")
     if ARC_LEGACY_SYNTENY_MISSING_ROOT in text and PATCHED_SYNTENY_MISSING_ROOT not in patched_text:

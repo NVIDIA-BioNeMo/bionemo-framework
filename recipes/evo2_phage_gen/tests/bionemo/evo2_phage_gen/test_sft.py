@@ -1220,7 +1220,7 @@ def test_malformed_or_missing_phix_evidence_maps_to_cli_exit_three(tmp_path: Pat
 
 
 def test_corpus_host_evidence_builder_resolves_accessions_and_requires_supplemental_rows(tmp_path: Path) -> None:
-    """The production builder must emit one ordered fail-closed row without guessing non-accession hosts."""
+    """The production builder must mark one row unresolved rather than guess a non-accession host."""
     source = tmp_path / "source.fna"
     source.write_bytes(b">OQ123456.1 cultured phage\n+!ACGT\n>IMGVR_UViG_1\n+#TGCA\n")
     supplemental_path = tmp_path / "SUPPLEMENTAL_HOST_EVIDENCE.yaml"

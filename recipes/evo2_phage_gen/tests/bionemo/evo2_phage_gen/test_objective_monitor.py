@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 from bionemo.evo2_phage_gen.objective_monitor import evaluate_objective_history
@@ -47,10 +62,7 @@ def test_reward_gain_with_collapsing_support_starts_rebound_window():
 
 
 def test_sustained_reward_support_divergence_pauses_after_rebound_window():
-    history = [
-        _event(step * 10, 0.10 + 0.08 * step, 0.90 - 0.08 * step)
-        for step in range(10)
-    ]
+    history = [_event(step * 10, 0.10 + 0.08 * step, 0.90 - 0.08 * step) for step in range(10)]
 
     result = evaluate_objective_history(history)
 
@@ -72,7 +84,7 @@ def test_reward_and_support_improving_together_continues():
     assert result["objectives"]["protein_hit_count"]["status"] == "healthy"
 
 
-def test_missing_per_objective_telemetry_fails_closed_after_three_events():
+def test_missing_per_objective_metrics_pause_after_three_events():
     history = [
         {"step": step, "aggregate_reward": 5.0, "objectives": {"synteny": {"reward_mean": 0.1}}}
         for step in (10, 20, 30)
@@ -85,10 +97,7 @@ def test_missing_per_objective_telemetry_fails_closed_after_three_events():
 
 
 def test_enabled_objective_with_no_measurements_starts_confirmation_window():
-    history = [
-        _event(step, reward=0.0, support=0.0, std=0.0, pass_rate=0.0)
-        for step in (10, 20, 30)
-    ]
+    history = [_event(step, reward=0.0, support=0.0, std=0.0, pass_rate=0.0) for step in (10, 20, 30)]
 
     result = evaluate_objective_history(history)
 
@@ -99,10 +108,7 @@ def test_enabled_objective_with_no_measurements_starts_confirmation_window():
 
 
 def test_enabled_objective_with_no_measurements_pauses_after_confirmation_window():
-    history = [
-        _event(step * 10, reward=0.0, support=0.0, std=0.0, pass_rate=0.0)
-        for step in range(1, 11)
-    ]
+    history = [_event(step * 10, reward=0.0, support=0.0, std=0.0, pass_rate=0.0) for step in range(1, 11)]
 
     result = evaluate_objective_history(history)
 

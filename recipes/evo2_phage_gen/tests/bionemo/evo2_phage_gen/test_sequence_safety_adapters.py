@@ -30,6 +30,7 @@ from bionemo.evo2_phage_gen.sequence_safety import SafetyFinding, SafetyState
 from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     PHROGS_HOMOLOGY_POLICY_V1,
     TOXIN_HOMOLOGY_POLICY_V1,
+    TOXIN_HOMOLOGY_POLICY_V2,
     GenomeInput,
     HomologyBand,
     HomologyPolicy,
@@ -299,7 +300,7 @@ def test_genome_id_rejects_characters_that_diverge_between_fasta_and_gff_attribu
         GenomeInput(sequence_id="genome:1", sequence="ACG" * 30)
 
 
-def test_missing_pyrodigal_runtime_is_fail_closed_without_import_time_failure(tmp_path, monkeypatch):
+def test_missing_pyrodigal_runtime_is_indeterminate_without_import_time_failure(tmp_path, monkeypatch):
     """An unavailable required predictor must become INDETERMINATE rather than a silent fallback pass."""
 
     def missing_predictor():
@@ -904,8 +905,10 @@ _DIAMOND_HEADER = (
 def _toxin_manifest(tmp_path):
     annotations = tmp_path / "reviewed_toxins.tsv"
     annotations.write_text(
-        "Entry\tEntry Name\tProtein names\tGene Names\tOrganism\tOrganism (ID)\tFunction [CC]\n"
-        "P0C1\tSYN_TOX\tSynthetic toxin control\tsyn\tSynthetic virus\t10239\tSynthetic annotation\n"
+        "Entry\tEntry Name\tProtein names\tGene Names\tOrganism\tOrganism (ID)\tKeyword ID\t"
+        "Taxonomic lineage (IDs)\tFunction [CC]\n"
+        "P0C1\tSYN_TOX\tSynthetic toxin control\tsyn\tSynthetic virus\t10239\tKW-0800; KW-0843\t"
+        "1; 10239\tSynthetic annotation\n"
     )
     fasta = tmp_path / "reviewed_toxins.faa"
     fasta.write_text(">sp|P0C1|SYN_TOX Synthetic toxin control\nMPEPTIDE\n")
@@ -913,6 +916,7 @@ def _toxin_manifest(tmp_path):
     database.write_bytes(b"reviewed-toxin-diamond-db")
     return {
         "uniprot_release": "2026_03",
+        "classification_policy": dict(sequence_safety_adapters.TOXIN_REFERENCE_CLASSIFICATION_POLICY),
         "files": {
             "annotations": {
                 "path": str(annotations),
@@ -1009,8 +1013,8 @@ def test_toxin_header_only_success_is_measured_pass(tmp_path):
 
     assert result.class_result.state is SafetyState.PASS
     assert result.class_result.reason_codes == ("TOXIN_DIAMOND_MEASURED_NO_REVIEW_HIT",)
-    assert result.policy_id == TOXIN_HOMOLOGY_POLICY_V1.policy_id
-    assert result.policy_sha256 == TOXIN_HOMOLOGY_POLICY_V1.sha256
+    assert result.policy_id == TOXIN_HOMOLOGY_POLICY_V2.policy_id
+    assert result.policy_sha256 == TOXIN_HOMOLOGY_POLICY_V2.sha256
 
 
 def test_toxin_high_confidence_joint_thresholds_fail_with_complete_provenance(tmp_path):
@@ -1033,9 +1037,10 @@ def test_toxin_high_confidence_joint_thresholds_fail_with_complete_provenance(tm
     finding = result.class_result.findings[0]
     assert finding.reason_codes == ("TOXIN_HIGH_CONFIDENCE_HOMOLOGY",)
     assert finding.accession == "P0C1"
+    assert finding.detector == "diamond-reviewed-toxin"
     assert finding.evidence_path == "pyrodigal-gv"
-    assert finding.threshold_policy_sha256 == TOXIN_HOMOLOGY_POLICY_V1.sha256
-    assert finding.threshold_policy == "toxin-homology-v1"
+    assert finding.threshold_policy_sha256 == TOXIN_HOMOLOGY_POLICY_V2.sha256
+    assert finding.threshold_policy == "toxin-homology-v2"
     assert finding.thresholds == {
         "evalue": 1e-10,
         "identity": 80.0,
@@ -1047,6 +1052,117 @@ def test_toxin_high_confidence_joint_thresholds_fail_with_complete_provenance(tm
     assert finding.tool_path == str(tool_pin.path)
     assert finding.tool_sha256 == tool_pin.sha256
     assert finding.database_version == "UniProt 2026_03"
+
+
+def test_curated_phage_wo_latrotoxin_domain_homolog_requires_review_without_a_functional_claim(tmp_path):
+    """Exact domain homology must block PASS without asserting functional venom or a hard hazard."""
+    manifest = _toxin_manifest(tmp_path)
+    curated = tmp_path / "curated_hazards.faa"
+    curated.write_text(">domain|PF15658.11|Latrotoxin_C\nMPEPTIDE\n")
+    search_fasta = tmp_path / "toxin_hazards.faa"
+    search_fasta.write_bytes(manifest["files"]["fasta"]["path"].encode())
+    manifest.update(
+        reference_version="UniProt 2026_03 + phage-domain-hazards-v1",
+        curated_hazards={
+            "set_id": "phage-domain-hazards-v1",
+            "entries": [
+                {
+                    "accession": "PF15658.11",
+                    "name": "Latrotoxin_C",
+                    "action": "REVIEW",
+                    "reason_code": "TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW",
+                    "source_protein_accession": "CAQ54400.1",
+                    "source_urls": ["https://www.ncbi.nlm.nih.gov/protein/CAQ54400.1"],
+                    "source_protein_sequence_sha256": (
+                        "8e8eb5098bd972dadd0c94ccbd0718c3ede5e528ac2517c605ece16e9eb08a73"
+                    ),
+                    "source_interval": {"start": 2571, "end": 2706},
+                    "sequence_sha256": "9da486e50032ff2f89b493049419d7fb9f754f8cc935abb9339f56631dd6a8be",
+                    "evidence_urls": ["https://doi.org/10.1038/ncomms13155"],
+                    "interpretation": "Latrotoxin C-terminal-domain homology; not evidence of functional venom.",
+                }
+            ],
+        },
+    )
+    manifest["files"].update(
+        curated_hazard_fasta={
+            "path": str(curated),
+            "sha256": hashlib.sha256(curated.read_bytes()).hexdigest(),
+        },
+        search_fasta={
+            "path": str(search_fasta),
+            "sha256": hashlib.sha256(search_fasta.read_bytes()).hexdigest(),
+        },
+    )
+    output = tmp_path / "toxin.tsv"
+    _write_diamond_output(
+        output,
+        _diamond_row(
+            target_id="domain|PF15658.11|Latrotoxin_C",
+            pident="100",
+            length="136",
+            qlen="2748",
+            slen="136",
+            qcovhsp="4.9",
+            scovhsp="100",
+            evalue="3.20e-85",
+            bitscore="271",
+        ),
+    )
+
+    result = _parse_toxin_diamond_output_validated(
+        output,
+        artifacts=_orf_artifacts(tmp_path),
+        manifest_section=manifest,
+        tool_pin=_diamond_pin(tmp_path),
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW",)
+    finding = result.class_result.findings[0]
+    assert finding.accession == "PF15658.11"
+    assert finding.detector == "diamond-curated-toxin-domain"
+    assert finding.profile == "PF15658.11"
+    assert finding.database_version == "UniProt 2026_03 + phage-domain-hazards-v1"
+    assert "VENOM" not in " ".join(finding.reason_codes)
+
+
+def test_toxin_fragment_of_reviewed_human_harm_reference_is_review_not_pass(tmp_path):
+    """A substantial local toxin fragment must be reviewed without being promoted to a whole-protein FAIL."""
+    output = tmp_path / "toxin.tsv"
+    _write_diamond_output(
+        output,
+        _diamond_row(
+            pident="55.0",
+            length="55",
+            qlen="60",
+            slen="400",
+            qcovhsp="91.667",
+            scovhsp="13.75",
+            evalue="1e-8",
+            bitscore="65.0",
+        ),
+    )
+
+    result = _parse_toxin_diamond_output_validated(
+        output,
+        artifacts=_orf_artifacts(tmp_path),
+        manifest_section=_toxin_manifest(tmp_path),
+        tool_pin=_diamond_pin(tmp_path),
+        required=True,
+        policy=sequence_safety_adapters.TOXIN_HOMOLOGY_POLICY_V2,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("TOXIN_FRAGMENT_REVIEW_HOMOLOGY",)
+    assert result.class_result.findings[0].thresholds == {
+        "alignment_length": 50.0,
+        "evalue": 1e-5,
+        "identity": 50.0,
+        "query_coverage": 70.0,
+        "reference_coverage": 10.0,
+    }
 
 
 def test_toxin_selected_policy_digest_is_bound_to_result_and_finding(tmp_path):
@@ -1243,7 +1359,7 @@ def test_toxin_runner_normalizes_successful_empty_raw_output_to_header_only_pass
         ("missing_output", "TOXIN_DIAMOND_OUTPUT_MISSING"),
     ],
 )
-def test_toxin_runner_fails_closed_for_version_digest_or_output_drift(tmp_path, drift, reason_code):
+def test_toxin_runner_rejects_version_digest_or_output_mismatch(tmp_path, drift, reason_code):
     """Unpinned or unmeasured toxin searches cannot yield a positive safety signal."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _toxin_manifest(tmp_path)
@@ -1278,7 +1394,7 @@ def test_toxin_runner_fails_closed_for_version_digest_or_output_drift(tmp_path, 
         ("timeout", "TOXIN_DIAMOND_EXECUTION_TIMEOUT"),
     ],
 )
-def test_toxin_runner_fails_closed_for_nonzero_exit_and_timeout(tmp_path, failure, reason_code):
+def test_toxin_runner_marks_nonzero_exit_and_timeout_indeterminate(tmp_path, failure, reason_code):
     """A DIAMOND process failure cannot be normalized into a measured no-hit result."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _toxin_manifest(tmp_path)
@@ -1304,7 +1420,7 @@ def test_toxin_runner_fails_closed_for_nonzero_exit_and_timeout(tmp_path, failur
     assert result.class_result.reason_codes == (reason_code,)
 
 
-def test_toxin_runner_fails_closed_for_non_utf_output(tmp_path):
+def test_toxin_runner_marks_non_utf_output_indeterminate(tmp_path):
     """A successful process with undecodable output has not produced measured toxin evidence."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _toxin_manifest(tmp_path)
@@ -1604,7 +1720,7 @@ def test_phrogs_missing_pinned_safety_lookup_counts_is_indeterminate_before_exec
 
 
 def test_phrogs_self_consistent_truncated_safety_lookup_is_indeterminate_before_execution(tmp_path):
-    """A re-digested lookup missing one reviewed profile must still fail closed before MMseqs runs."""
+    """A re-digested lookup missing one reviewed profile must be rejected before MMseqs runs."""
     manifest = _phrogs_manifest(tmp_path)
     lookup_rows = Path(manifest["lookup_path"]).read_text().splitlines(keepends=True)[1:-1]
     _rewrite_phrogs_lookup(
@@ -1783,7 +1899,7 @@ def test_phrogs_commands_use_existing_profile_query_against_created_orf_target_d
     ) == list(commands[-1])
 
 
-def test_current_raw_phrogs_manifest_fails_closed_without_verified_profile_identity(tmp_path):
+def test_current_raw_phrogs_manifest_is_indeterminate_without_verified_profile_identity(tmp_path):
     """Raw protein target IDs must never be guessed into PHROG families."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = {
@@ -1850,7 +1966,7 @@ def test_current_raw_phrogs_manifest_fails_closed_without_verified_profile_ident
         ),
     ],
 )
-def test_phrogs_final_identity_and_pharokka_provenance_contract_is_fail_closed(tmp_path, mutate, reason_code):
+def test_phrogs_final_identity_rejects_pharokka_source_mismatch(tmp_path, mutate, reason_code):
     """The legacy profile source or unverifiable full-profile identity must never execute."""
     manifest = _phrogs_manifest(tmp_path)
     mutate(manifest)
@@ -2158,7 +2274,7 @@ def test_phrogs_runner_accepts_real_mmseqs_commit_style_version(tmp_path):
         ("missing_output", "PHROGS_OUTPUT_MISSING"),
     ],
 )
-def test_phrogs_runner_fails_closed_for_version_digest_or_output_drift(tmp_path, drift, reason_code):
+def test_phrogs_runner_rejects_version_digest_or_output_mismatch(tmp_path, drift, reason_code):
     """A drifted or unmeasured PHROGs search cannot qualify a strict-lytic design."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _phrogs_manifest(tmp_path)
@@ -2195,7 +2311,7 @@ def test_phrogs_runner_fails_closed_for_version_digest_or_output_drift(tmp_path,
         ("non_utf", "PHROGS_PARSER_SCHEMA_MISMATCH"),
     ],
 )
-def test_phrogs_runner_fails_closed_for_execution_or_malformed_output(tmp_path, failure, reason_code):
+def test_phrogs_runner_marks_execution_or_malformed_output_indeterminate(tmp_path, failure, reason_code):
     """A failed process or undecodable MMseqs output cannot become a measured lysogeny PASS."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _phrogs_manifest(tmp_path)

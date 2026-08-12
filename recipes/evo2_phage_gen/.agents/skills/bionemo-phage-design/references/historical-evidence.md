@@ -10,11 +10,11 @@ The later summary was pushed on 2026-08-10 in README commit [`55efb7c2dbe799dfc8
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
 | SFT split and selection                   | 14,266 train, 100 validation, and 100 test genomes after the reported 99%-identity leakage check; step 5,600 selected with validation loss `0.750670` and test loss `0.798180` | Pushed README report; raw split and metric manifests absent                                                     |
 | RL selection                              | GDPO ran to a 500-step ceiling; step `430` selected                                                                                                                            | Pushed README report plus operator checkpoint-label clarification                                               |
-| Latest target-profile offline Arc rollout | `610/1000` (`61.00%`) with filters 1–6, 8, and 9 enabled and architecture-removal filter 7 disabled                                                                            | Pushed README report and waterfall; raw rollout manifest absent                                                 |
+| Latest target-profile offline Arc rollout | `610/1000` (`61.00%`) with filters 1–6, 8, and 9 enabled and architecture-removal filter 7 disabled                                                                            | Pushed README report and per-stage counts; raw rollout manifest absent                                          |
 | Latest all-filter diagnostic branch       | `22/1000` (`2.20%`) with filter 7 also enabled                                                                                                                                 | Pushed README report; raw diagnostic manifest absent                                                            |
 | Publication-era no-RL baseline            | `15/110000` (approximately `0.014%`)                                                                                                                                           | Operator-reported comparison only; its screening pipeline is not directly comparable to the offline Arc profile |
 
-The reported target-profile waterfall is:
+The reported target-profile filter counts are:
 
 ```text
 1,000 generated
@@ -59,7 +59,7 @@ Run IDs, employee-specific telemetry namespaces, local absolute paths, and trans
 
 C1 lines 17–64 records the step ceiling, validation cadence, KL, batches, learning rate, and completion setting. C2 lines 27–51 records Evo2 7B, bf16, the historical sequence setting, and TP2/PP1/CP1. These values describe the checked-in historical configuration; they are not context defaults and do not prove fitness, throughput, checkpoint quality, or hardware portability.
 
-## Interpretation guardrails
+## How to interpret these results
 
 - Keep the 96-design online validation and the offline 1,000-design Arc branches separate in every report.
 - Step 190 is the documented selected checkpoint for this case, not a generic early-stop step. The run was observed through step 250 under a configured 500-step ceiling so later comparable evidence could inform selection.

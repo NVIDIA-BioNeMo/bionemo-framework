@@ -232,25 +232,52 @@ def _mock_verified_phrogs_profile_archive(monkeypatch, external_dir: Path) -> Pa
     return archive_path
 
 
+def _install_curated_toxin_fixture(monkeypatch) -> bytes:
+    """Use a compact exact-accession protein while retaining both digest checks."""
+    payload = b">CAQ54400.1 WP0292\nMPEPTIDE\n"
+    monkeypatch.setattr(
+        external_assets,
+        "DEFAULT_WOPIP1_PROTEIN_SEQUENCE_SHA256",
+        hashlib.sha256(b"MPEPTIDE").hexdigest(),
+    )
+    monkeypatch.setattr(external_assets, "DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_INTERVAL", (1, 8))
+    monkeypatch.setattr(
+        external_assets,
+        "DEFAULT_WOPIP1_LATROTOXIN_DOMAIN_SEQUENCE_SHA256",
+        hashlib.sha256(b"MPEPTIDE").hexdigest(),
+    )
+    return payload
+
+
 def _write_cached_toxin_snapshot(external_dir: Path, manifest_path: Path) -> dict:
     """Create a coherent cache/manifest pair for provenance validation tests."""
     toxin_dir = external_dir / "safety" / "toxins"
     toxin_dir.mkdir(parents=True)
     annotations_path = toxin_dir / "reviewed_toxins.tsv"
     fasta_path = toxin_dir / "reviewed_toxins.faa"
+    curated_path = toxin_dir / "curated_hazards" / "CAQ54400.1.faa"
+    search_path = toxin_dir / "toxin_hazards.faa"
     diamond_path = toxin_dir / "reviewed_toxins.dmnd"
-    annotations_path.write_text("Entry\tProtein names\nP00001\tExample toxin\n")
+    annotations_path.write_text(
+        "Entry\tProtein names\tKeyword ID\tTaxonomic lineage (IDs)\nP00001\tExample toxin\tKW-0800; KW-0843\t1; 2\n"
+    )
     fasta_path.write_text(">sp|P00001|TOX Example toxin\nMPEPTIDE\n")
+    curated_path.parent.mkdir()
+    curated_path.write_text(">CAQ54400.1 WP0292\nMPEPTIDE\n")
+    search_path.write_bytes(fasta_path.read_bytes() + b">domain|PF15658.11|Latrotoxin_C\nMPEPTIDE\n")
     diamond_path.write_text("DIAMOND database\n")
     manifest = {
         "schema_version": 1,
         "toxin_reference": {
             "query": external_assets.DEFAULT_UNIPROT_TOXIN_QUERY,
+            "classification_policy": external_assets.TOXIN_REFERENCE_CLASSIFICATION_POLICY,
             "annotations_url": external_assets.DEFAULT_UNIPROT_TOXIN_ANNOTATIONS_URL,
             "fasta_url": external_assets.DEFAULT_UNIPROT_TOXIN_FASTA_URL,
             "retrieved_at": "2026-01-01T00:00:00Z",
             "uniprot_release": "2026_01",
             "uniprot_release_date": "2026-01-15",
+            "reference_version": "UniProt 2026_01 + phage-domain-hazards-v1",
+            "curated_hazards": external_assets._curated_toxin_hazard_manifest(),
             "license": "CC BY 4.0",
             "attribution": external_assets.UNIPROT_CC_BY_4_0_ATTRIBUTION,
             "files": {
@@ -261,6 +288,14 @@ def _write_cached_toxin_snapshot(external_dir: Path, manifest_path: Path) -> dic
                 "fasta": {
                     "path": str(fasta_path.resolve()),
                     "sha256": hashlib.sha256(fasta_path.read_bytes()).hexdigest(),
+                },
+                "curated_hazard_fasta": {
+                    "path": str(curated_path.resolve()),
+                    "sha256": hashlib.sha256(curated_path.read_bytes()).hexdigest(),
+                },
+                "search_fasta": {
+                    "path": str(search_path.resolve()),
+                    "sha256": hashlib.sha256(search_path.read_bytes()).hexdigest(),
                 },
                 "diamond_database": {
                     "path": str(diamond_path.resolve()),
@@ -306,13 +341,18 @@ def _mock_safety_manifest_section(name: str) -> tuple[str, dict]:
             "toxin_reference",
             {
                 "query": "query",
+                "classification_policy": external_assets.TOXIN_REFERENCE_CLASSIFICATION_POLICY,
                 "annotations_url": "annotations",
                 "fasta_url": "fasta",
                 "retrieved_at": "retrieved",
                 "uniprot_release": "release",
+                "reference_version": "UniProt release + phage-domain-hazards-v1",
+                "curated_hazards": external_assets._curated_toxin_hazard_manifest(),
                 "files": {
                     "annotations": {"path": "annotations", "sha256": "annotations"},
                     "fasta": {"path": "fasta", "sha256": "fasta"},
+                    "curated_hazard_fasta": {"path": "curated", "sha256": "curated"},
+                    "search_fasta": {"path": "search", "sha256": "search"},
                     "diamond_database": {"path": "diamond", "sha256": "diamond"},
                 },
             },
@@ -384,6 +424,8 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
         for role, filename in (
             ("annotations", "reviewed_toxins.tsv"),
             ("fasta", "reviewed_toxins.faa"),
+            ("curated_hazard_fasta", "CAQ54400.1.faa"),
+            ("search_fasta", "toxin_hazards.faa"),
             ("diamond_database", "reviewed_toxins.dmnd"),
         ):
             path = toxin_dir / filename
@@ -393,10 +435,13 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
             "toxin_reference",
             {
                 "query": "query",
+                "classification_policy": external_assets.TOXIN_REFERENCE_CLASSIFICATION_POLICY,
                 "annotations_url": "annotations",
                 "fasta_url": "fasta",
                 "retrieved_at": "retrieved",
                 "uniprot_release": "release",
+                "reference_version": "UniProt release + phage-domain-hazards-v1",
+                "curated_hazards": external_assets._curated_toxin_hazard_manifest(),
                 "files": files,
             },
         )
@@ -828,7 +873,7 @@ def test_validate_staged_safety_manifest_requires_amrfinder_index_and_database_v
 
 
 def test_validate_recorded_asset_digest_rejects_a_tampered_amrfinder_index(tmp_path):
-    """A staged generation must fail closed if its recorded AMRFinder index changes before publish."""
+    """A staged generation must be rejected if its recorded AMRFinder index changes before publish."""
     index_path = tmp_path / "amrfinder_index"
     index_path.write_text("trusted index\n")
     record = {
@@ -957,15 +1002,18 @@ Database version: 2026-08-07.1
     ),
 )
 def test_parse_amrfinder_database_version_rejects_ambiguous_status(output, error):
-    """Missing, duplicate, or empty native database-version fields fail closed."""
+    """Missing, duplicate, or empty native database-version fields are rejected."""
     with pytest.raises(RuntimeError, match=error):
         external_assets._parse_amrfinder_database_version(output)
 
 
 def test_prepare_toxin_reference_records_uniprot_provenance_and_builds_diamond_database(tmp_path, monkeypatch):
     """A reviewed toxin snapshot has release metadata and digests for every generated input."""
-    annotation_payload = b"Entry\tProtein names\nP00001\tExample toxin\n"
+    annotation_payload = (
+        b"Entry\tProtein names\tKeyword ID\tTaxonomic lineage (IDs)\nP00001\tExample toxin\tKW-0800; KW-0843\t1; 2\n"
+    )
     fasta_payload = b">sp|P00001|TOX Example toxin\nMPEPTIDE\n"
+    curated_payload = _install_curated_toxin_fixture(monkeypatch)
     calls = []
 
     class Response(io.BytesIO):
@@ -981,6 +1029,8 @@ def test_prepare_toxin_reference_records_uniprot_provenance_and_builds_diamond_d
 
     def fake_urlopen(url, context=None):
         del context
+        if url in external_assets.DEFAULT_WOPIP1_PROTEIN_URLS:
+            return Response(curated_payload)
         return Response(annotation_payload if "format=tsv" in url else fasta_payload)
 
     def fake_run(cmd, check):
@@ -1000,17 +1050,23 @@ def test_prepare_toxin_reference_records_uniprot_provenance_and_builds_diamond_d
     assert manifest["toxin_reference"]["uniprot_release_date"] == "2026-01-15"
     assert manifest["toxin_reference"]["query"] == DEFAULT_UNIPROT_TOXIN_QUERY
     assert manifest["toxin_reference"]["license"] == "CC BY 4.0"
+    assert manifest["toxin_reference"]["reference_version"] == "UniProt 2026_01 + phage-domain-hazards-v1"
+    assert manifest["toxin_reference"]["curated_hazards"]["entries"][0]["accession"] == "PF15658.11"
     assert (
         manifest["toxin_reference"]["files"]["annotations"]["sha256"] == hashlib.sha256(annotation_payload).hexdigest()
     )
     assert manifest["toxin_reference"]["files"]["fasta"]["sha256"] == hashlib.sha256(fasta_payload).hexdigest()
+    curated_record = manifest["toxin_reference"]["files"]["curated_hazard_fasta"]
+    assert curated_record["sha256"] == hashlib.sha256(curated_payload).hexdigest()
+    search_record = manifest["toxin_reference"]["files"]["search_fasta"]
+    assert Path(search_record["path"]).read_bytes() == (fasta_payload + b">domain|PF15658.11|Latrotoxin_C\nMPEPTIDE\n")
     assert calls == [
         (
             [
                 str(tmp_path / "external" / "bin" / "diamond"),
                 "makedb",
                 "--in",
-                str(tmp_path / "external" / "safety" / "toxins" / "reviewed_toxins.faa"),
+                str(tmp_path / "external" / "safety" / "toxins" / "toxin_hazards.faa"),
                 "--db",
                 str(tmp_path / "external" / "safety" / "toxins" / "reviewed_toxins.dmnd"),
             ],
@@ -1019,14 +1075,50 @@ def test_prepare_toxin_reference_records_uniprot_provenance_and_builds_diamond_d
     ]
 
 
+@pytest.mark.parametrize(
+    ("keyword_ids", "lineage_ids", "accepted"),
+    [
+        ("KW-0800; KW-0843", "2; 1224; 1236", True),
+        ("KW-0078; KW-0800", "2; 1239", False),
+        ("KW-0078; KW-0800", "1; 2759; 33208", True),
+        ("KW-0800", "2; 1224", False),
+    ],
+)
+def test_uniprot_toxin_scope_keeps_human_harm_and_excludes_antibacterial_only_entries(
+    tmp_path, keyword_ids, lineage_ids, accepted
+):
+    """The local snapshot check must enforce host-harm scope independently of protein names."""
+    annotations = tmp_path / "toxins.tsv"
+    annotations.write_text(f"Entry\tKeyword ID\tTaxonomic lineage (IDs)\nP00001\t{keyword_ids}\t{lineage_ids}\n")
+
+    if accepted:
+        external_assets._validate_uniprot_toxin_scope(annotations)
+    else:
+        with pytest.raises(ValueError, match="outside the human-harm toxin scope"):
+            external_assets._validate_uniprot_toxin_scope(annotations)
+
+
+def test_uniprot_toxin_scope_accepts_live_lineage_header_spelling(tmp_path):
+    """UniProt currently spells the return-field label ``Ids`` rather than ``IDs``."""
+    annotations = tmp_path / "toxins.tsv"
+    annotations.write_text(
+        "Entry\tKeyword ID\tTaxonomic lineage (Ids)\nP00001\tKW-0800\t131567 (no rank), 2759 (domain), 33154 (clade)\n"
+    )
+
+    external_assets._validate_uniprot_toxin_scope(annotations)
+
+
 def test_prepare_toxin_reference_rebuilds_diamond_after_a_fresh_uniprot_snapshot(tmp_path, monkeypatch):
     """Fresh TSV/FASTA inputs must never bless a DIAMOND index from an older generation."""
     external_dir = tmp_path / "external"
     stale_database = external_dir / "safety" / "toxins" / "reviewed_toxins.dmnd"
     stale_database.parent.mkdir(parents=True)
     stale_database.write_text("stale DIAMOND database\n")
-    annotation_payload = b"Entry\tProtein names\nP00001\tExample toxin\n"
+    annotation_payload = (
+        b"Entry\tProtein names\tKeyword ID\tTaxonomic lineage (IDs)\nP00001\tExample toxin\tKW-0800; KW-0843\t1; 2\n"
+    )
     fasta_payload = b">sp|P00001|TOX Example toxin\nMPEPTIDE\n"
+    curated_payload = _install_curated_toxin_fixture(monkeypatch)
     calls = []
 
     class Response(io.BytesIO):
@@ -1042,6 +1134,8 @@ def test_prepare_toxin_reference_rebuilds_diamond_after_a_fresh_uniprot_snapshot
 
     def fake_urlopen(url, context=None):
         del context
+        if url in external_assets.DEFAULT_WOPIP1_PROTEIN_URLS:
+            return Response(curated_payload)
         return Response(annotation_payload if "format=tsv" in url else fasta_payload)
 
     def fake_run(cmd, check):
@@ -1059,7 +1153,7 @@ def test_prepare_toxin_reference_rebuilds_diamond_after_a_fresh_uniprot_snapshot
                 str(external_dir / "bin" / "diamond"),
                 "makedb",
                 "--in",
-                str(external_dir / "safety" / "toxins" / "reviewed_toxins.faa"),
+                str(external_dir / "safety" / "toxins" / "toxin_hazards.faa"),
                 "--db",
                 str(stale_database),
             ],
@@ -1073,14 +1167,16 @@ def test_prepare_toxin_reference_rebuilds_diamond_after_a_fresh_uniprot_snapshot
     ("annotation_payload", "fasta_payload", "annotation_release", "fasta_release", "error_match"),
     [
         (
-            b"Entry\tProtein names\nP00001\tExample toxin\n",
+            b"Entry\tProtein names\tKeyword ID\tTaxonomic lineage (IDs)\n"
+            b"P00001\tExample toxin\tKW-0800; KW-0843\t1; 2\n",
             b">sp|P00001|TOX Example toxin\nMPEPTIDE\n",
             "2026_01",
             "2026_02",
             "release",
         ),
         (
-            b"Entry\tProtein names\nP00001\tExample toxin\n",
+            b"Entry\tProtein names\tKeyword ID\tTaxonomic lineage (IDs)\n"
+            b"P00001\tExample toxin\tKW-0800; KW-0843\t1; 2\n",
             b">sp|P00002|OTHER Different toxin\nMPEPTIDE\n",
             "2026_01",
             "2026_01",
@@ -1098,6 +1194,7 @@ def test_prepare_toxin_reference_rejects_mixed_uniprot_snapshot(
     error_match,
 ):
     """TSV and FASTA must be a coherent release with the same accession set."""
+    curated_payload = _install_curated_toxin_fixture(monkeypatch)
 
     class Response(io.BytesIO):
         def __init__(self, payload, release):
@@ -1112,6 +1209,8 @@ def test_prepare_toxin_reference_rejects_mixed_uniprot_snapshot(
 
     def fake_urlopen(url, context=None):
         del context
+        if url in external_assets.DEFAULT_WOPIP1_PROTEIN_URLS:
+            return Response(curated_payload, annotation_release)
         if "format=tsv" in url:
             return Response(annotation_payload, annotation_release)
         return Response(fasta_payload, fasta_release)
@@ -1131,6 +1230,7 @@ def test_prepare_toxin_reference_preserves_verified_cache_retrieval_time(tmp_pat
     """A valid cached snapshot retains its original retrieval timestamp and provenance."""
     external_dir = tmp_path / "external"
     manifest_path = external_dir / "safety" / "asset_manifest.yaml"
+    _install_curated_toxin_fixture(monkeypatch)
     old_manifest = _write_cached_toxin_snapshot(external_dir, manifest_path)
 
     monkeypatch.setattr(
@@ -1155,6 +1255,7 @@ def test_prepare_toxin_reference_rejects_tampered_cached_files(tmp_path, monkeyp
     """Cached files must still match their previously recorded digests and accession parity."""
     external_dir = tmp_path / "external"
     manifest_path = external_dir / "safety" / "asset_manifest.yaml"
+    _install_curated_toxin_fixture(monkeypatch)
     _write_cached_toxin_snapshot(external_dir, manifest_path)
     (external_dir / "safety" / "toxins" / "reviewed_toxins.faa").write_text(">sp|P00002|OTHER\nMPEPTIDE\n")
     monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: pytest.fail("tampered cache downloaded"))
@@ -1176,9 +1277,12 @@ def test_prepare_toxin_reference_rejects_unattributed_override_urls(tmp_path, mo
 
 
 def test_prepare_toxin_reference_keeps_tls_verification_when_global_flag_is_set(tmp_path, monkeypatch):
-    """The PHROGs-only TLS exception must not leak into the UniProt transport."""
-    annotation_payload = b"Entry\tProtein names\nP00001\tExample toxin\n"
+    """The PHROGs-only TLS exception must not leak into toxin transports."""
+    annotation_payload = (
+        b"Entry\tProtein names\tKeyword ID\tTaxonomic lineage (IDs)\nP00001\tExample toxin\tKW-0800; KW-0843\t1; 2\n"
+    )
     fasta_payload = b">sp|P00001|TOX Example toxin\nMPEPTIDE\n"
+    curated_payload = _install_curated_toxin_fixture(monkeypatch)
 
     class Response(io.BytesIO):
         def __init__(self, payload):
@@ -1193,6 +1297,8 @@ def test_prepare_toxin_reference_keeps_tls_verification_when_global_flag_is_set(
 
     def fake_urlopen(url, context=None):
         assert context is None
+        if url in external_assets.DEFAULT_WOPIP1_PROTEIN_URLS:
+            return Response(curated_payload)
         return Response(annotation_payload if "format=tsv" in url else fasta_payload)
 
     def fake_run(cmd, check):
@@ -2091,7 +2197,42 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
     assert external_assets.DEFAULT_AMRFINDER_URL == recipe["amrfinder_plus"]["release_url"]
     assert external_assets.DEFAULT_AMRFINDER_SHA256 == recipe["amrfinder_plus"]["archive_sha256"]
     assert recipe["toxin_reference"]["query"] == DEFAULT_UNIPROT_TOXIN_QUERY
+    assert "NOT keyword:KW-0078" in DEFAULT_UNIPROT_TOXIN_QUERY
+    assert "keyword:KW-0843" in DEFAULT_UNIPROT_TOXIN_QUERY
+    assert "taxonomy_id:2759" in DEFAULT_UNIPROT_TOXIN_QUERY
     assert recipe["toxin_reference"]["license"] == "CC BY 4.0"
+    assert recipe["toxin_reference"]["classification_policy"] == {
+        "policy_id": "human-harm-toxin-reference-v1",
+        "hard_fail_scope": "reviewed_whole_protein_human_harm_or_human_disease_virulence",
+        "fragment_action": "REVIEW",
+        "domain_homology_action": "REVIEW",
+        "antibacterial_only_action": "NON_GATING",
+        "antibacterial_keyword": "KW-0078",
+        "independent_eukaryotic_harm_overrides_antibacterial_exclusion": True,
+    }
+    hazards = recipe["toxin_reference"]["curated_hazards"]
+    assert hazards["set_id"] == "phage-domain-hazards-v1"
+    assert hazards["entries"] == [
+        {
+            "accession": "PF15658.11",
+            "name": "Latrotoxin_C",
+            "action": "REVIEW",
+            "source_urls": [
+                external_assets.DEFAULT_WOPIP1_PROTEIN_URLS[0],
+                external_assets.DEFAULT_WOPIP1_PROTEIN_URLS[1],
+            ],
+            "source_protein_accession": "CAQ54400.1",
+            "source_protein_sequence_sha256": ("8e8eb5098bd972dadd0c94ccbd0718c3ede5e528ac2517c605ece16e9eb08a73"),
+            "source_interval": {"start": 2571, "end": 2706},
+            "sequence_sha256": "9da486e50032ff2f89b493049419d7fb9f754f8cc935abb9339f56631dd6a8be",
+            "reason_code": "TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW",
+            "evidence_urls": [
+                "https://doi.org/10.1038/ncomms13155",
+                "https://www.ncbi.nlm.nih.gov/Structure/cdd/pfam15658",
+            ],
+            "interpretation": "Latrotoxin C-terminal-domain homology; not evidence of intact or functional venom.",
+        }
+    ]
     assert recipe["phrogs_v4"]["annotation_urls"][0].endswith("phrog_annot_v4.tsv")
     assert recipe["phrogs_v4"]["annotation_sha256"] == (
         "502f96101597c21133bcce5711803e0b95e0c162cd4e86425c352549bd95e8c2"
@@ -2326,7 +2467,7 @@ def test_prepare_phrogs_annotation_enforces_the_reviewed_digest_and_scoped_tls_e
 
 
 def test_prepare_external_assets_with_safety_requires_an_authenticated_profile_archive(tmp_path, monkeypatch):
-    """Safety orchestration fails closed before scanner setup when no authenticated archive is cached."""
+    """Scanner setup stops when no authenticated archive is cached."""
     monkeypatch.setattr(
         external_assets,
         "prepare_amrfinder_plus",
@@ -3321,7 +3462,7 @@ def test_cached_phrogs_profile_archive_discovers_authenticated_content_addressed
 
 
 def test_cached_phrogs_profile_archive_rejects_ambiguous_authenticated_entries(tmp_path, monkeypatch):
-    """Multiple independently valid cache identities fail closed instead of selecting by ordering."""
+    """Multiple valid cache identities are rejected instead of selecting one by ordering."""
     external_dir = tmp_path / "external"
     cache_dir = external_dir / "downloads" / "phrogs_safety_profile_archives"
     cache_dir.mkdir(parents=True)

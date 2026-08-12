@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fail-closed command-line boundary for first-order phage sequence filters."""
+"""Command-line interface for first-order phage sequence filters."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ from bionemo.evo2_phage_gen.sequence_safety import (
 )
 from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     PHROGS_HOMOLOGY_POLICY_V1,
-    TOXIN_HOMOLOGY_POLICY_V1,
+    TOXIN_HOMOLOGY_POLICY_V2,
     AdapterResult,
     AssetProvenanceError,
     GenomeInput,
@@ -99,7 +99,7 @@ def _canonical_mapping_sha256(value: Mapping[str, object]) -> str:
 
 _ADAPTER_POLICY_DESCRIPTORS = {
     "amr": _AMRFINDER_POLICY_DESCRIPTOR,
-    "toxin": TOXIN_HOMOLOGY_POLICY_V1.to_dict(),
+    "toxin": TOXIN_HOMOLOGY_POLICY_V2.to_dict(),
     "lysogeny": PHROGS_HOMOLOGY_POLICY_V1.to_dict(),
 }
 _AMRFINDER_POLICY = (
@@ -108,7 +108,7 @@ _AMRFINDER_POLICY = (
 )
 _ADAPTER_POLICIES = {
     "amr": _AMRFINDER_POLICY,
-    "toxin": (TOXIN_HOMOLOGY_POLICY_V1.policy_id, TOXIN_HOMOLOGY_POLICY_V1.sha256),
+    "toxin": (TOXIN_HOMOLOGY_POLICY_V2.policy_id, TOXIN_HOMOLOGY_POLICY_V2.sha256),
     "lysogeny": (PHROGS_HOMOLOGY_POLICY_V1.policy_id, PHROGS_HOMOLOGY_POLICY_V1.sha256),
 }
 _CLAIM_BOUNDARY = {
@@ -177,7 +177,7 @@ class ScannedRecord:
 
 @dataclass(frozen=True)
 class BatchSafetyResult:
-    """Ordered per-record outcomes and their fail-closed batch state."""
+    """Ordered per-record outcomes and the strict combined batch state."""
 
     state: SafetyState
     records: tuple[ScannedRecord, ...]
@@ -558,7 +558,7 @@ def _orf_indeterminate_adapters(
     applicability = _applicability(host_domain, strict_lysis=strict_lysis)
     policy_identities = {
         "amr": _AMRFINDER_POLICY,
-        "toxin": (TOXIN_HOMOLOGY_POLICY_V1.policy_id, TOXIN_HOMOLOGY_POLICY_V1.sha256),
+        "toxin": (TOXIN_HOMOLOGY_POLICY_V2.policy_id, TOXIN_HOMOLOGY_POLICY_V2.sha256),
         "lysogeny": (PHROGS_HOMOLOGY_POLICY_V1.policy_id, PHROGS_HOMOLOGY_POLICY_V1.sha256),
     }
     adapters: dict[str, AdapterResult] = {}
@@ -778,7 +778,7 @@ def _default_adapter_replayer(
             manifest_section=asset_manifest["toxin_reference"],
             tool_pin=diamond_pin,
             required=required,
-            policy=TOXIN_HOMOLOGY_POLICY_V1,
+            policy=TOXIN_HOMOLOGY_POLICY_V2,
         )
     if safety_class == "lysogeny":
         return safety_adapters._parse_phrogs_output_validated(
@@ -1695,17 +1695,25 @@ def _validate_finding(
     ):
         _require_digest(digest, label=f"normalized finding {label}")
     if provenance is not None:
+        detector_by_accession = provenance.get("detector_by_accession", {})
+        if not isinstance(detector_by_accession, Mapping):
+            raise CLIValidationError("normalized finding detector provenance is malformed")
+        profile_by_accession = provenance.get("profile_by_accession", {})
+        if not isinstance(profile_by_accession, Mapping):
+            raise CLIValidationError("normalized finding profile provenance is malformed")
         expected_values = {
-            key: provenance[key]
-            for key in (
-                "detector",
-                "source_path",
-                "source_sha256",
-                "tool_version",
-                "database_version",
-                "tool_path",
-                "tool_sha256",
-            )
+            "detector": detector_by_accession.get(finding.accession, provenance["detector"]),
+            **{
+                key: provenance[key]
+                for key in (
+                    "source_path",
+                    "source_sha256",
+                    "tool_version",
+                    "database_version",
+                    "tool_path",
+                    "tool_sha256",
+                )
+            },
         }
         observed_values = {
             "detector": finding.detector,
@@ -1727,17 +1735,21 @@ def _validate_finding(
         expected_method = provenance.get("evidence_method")
         if expected_method is not None and finding.evidence_method != expected_method:
             raise CLIValidationError("normalized finding evidence method mismatch")
-        expected_profile = provenance.get("profile")
+        expected_profile = profile_by_accession.get(finding.accession, provenance.get("profile"))
         if expected_profile == "ACCESSION":
             if finding.profile != finding.accession:
                 raise CLIValidationError("normalized finding profile identity mismatch")
-        elif finding.profile is not expected_profile:
+        elif finding.profile != expected_profile:
             raise CLIValidationError("normalized finding profile identity mismatch")
         policy_descriptor = provenance["policy_descriptor"]
         if safety_class == "amr" or _VIRULENCE_REASON in finding.reason_codes:
             expected_thresholds: Mapping[str, object] = {}
         elif finding.state is SafetyState.FAIL:
             expected_thresholds = policy_descriptor["high"]
+        elif finding.detector == "diamond-curated-toxin-domain":
+            expected_thresholds = policy_descriptor["curated_domain_review"]
+        elif "TOXIN_FRAGMENT_REVIEW_HOMOLOGY" in finding.reason_codes:
+            expected_thresholds = policy_descriptor["fragment_review"]
         else:
             expected_thresholds = policy_descriptor["review"]
         if dict(finding.thresholds) != dict(expected_thresholds):
@@ -2120,10 +2132,17 @@ def _finding_provenance_contracts(
         },
         "toxin": {
             "detector": "diamond-reviewed-toxin",
+            "detector_by_accession": {
+                target.accession: "diamond-curated-toxin-domain"
+                for target in safety_adapters._curated_toxin_hazards(toxin).values()
+            },
+            "profile_by_accession": {
+                target.accession: target.accession for target in safety_adapters._curated_toxin_hazards(toxin).values()
+            },
             "source_path": _asset_string(toxin_database.get("path"), label="toxin database path"),
             "source_sha256": _require_digest(toxin_database.get("sha256"), label="toxin database SHA-256"),
             "tool_version": diamond.pin.version,
-            "database_version": f"UniProt {_asset_string(toxin.get('uniprot_release'), label='UniProt release')}",
+            "database_version": safety_adapters._toxin_database_version(toxin),
             "tool_path": str(diamond.pin.path),
             "tool_sha256": diamond.pin.sha256,
             "evidence_method": "diamond-blastp",

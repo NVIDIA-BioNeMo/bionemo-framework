@@ -175,7 +175,7 @@ def test_ncbi_resolution_caches_exact_raw_response_and_produces_versioned_eviden
     assert evaluate_host_evidence(row.to_task1_host_evidence()).allowed is True
 
 
-def test_ncbi_resolution_caches_malformed_or_conflicting_evidence_before_failing_closed(tmp_path: Path) -> None:
+def test_ncbi_resolution_caches_malformed_or_conflicting_evidence_before_rejecting_it(tmp_path: Path) -> None:
     """Parser failure or prokaryote/eukaryote conflict must never lose evidence or become eligible."""
     conflicting = _ncbi_dataset_report(
         "NC_9.1",

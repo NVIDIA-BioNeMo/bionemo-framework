@@ -70,7 +70,7 @@ Treat replication as a provenance-pinned case study, not a reason to preserve fl
 
 For adapted-design work with therapeutic intended use, default every applicable, design-relevant [EMA-derived guardrail](references/design-scope-and-viability.md#apply-intended-use-therapeutic-guardrails) with a defensible measurable proxy into its own online RL component and retain the corresponding hard-QC or experimental endpoint. The recipe's default PhiX174 case-study replication is also customized: keep filters 1–6, 8, and 9 enabled, keep filter 7 disabled, and add applicable safety objectives by default. Preserve historical and added component sets separately, and never directly compare aggregate rewards computed from different sets. For explicitly non-therapeutic adapted work, record the intended-use applicability decision. Prevent sparse components from starving the portfolio through independent measurement, calibrated partial credit, and runtime/support diagnosis, never by silently dropping the guardrail.
 
-Use `GDPO` and `1/cluster_size` diversity at 99% by default unless a justified alternative is selected. Keep every reward in [0,1], with documented baseline/chance zero, target one, monotonic partial credit, and fail-closed missing data.
+Use `GDPO` and `1/cluster_size` diversity at 99% by default unless a justified alternative is selected. Keep every reward in [0,1], with documented baseline/chance zero, target one, monotonic partial credit, and zero credit plus a recorded reason for missing or invalid data.
 
 ## Lineage gate for RL
 

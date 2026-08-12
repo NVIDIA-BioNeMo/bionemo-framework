@@ -149,6 +149,9 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
     reward_runtime_contract = (
         skills_root / "bionemo-phage-design-implement-rl-objectives" / "references" / "runtime-contract.md"
     ).read_text(encoding="utf-8")
+    resource_policy = (
+        skills_root / "bionemo-phage-design-adapt-execution" / "references" / "resource-and-oom-policy.md"
+    ).read_text(encoding="utf-8")
     generation_skill = (skills_root / "bionemo-phage-design-generate-and-screen" / "SKILL.md").read_text(
         encoding="utf-8"
     )
@@ -220,10 +223,16 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
         "Low initial reward support alone",
     ):
         assert marker in implementation_skill
-    for marker in ("bounded record workers", "nested oversubscription", "query/target orientation"):
+    for marker in ("external-tool filtering and scoring", "required operation and database layout", "CPU/GPU outputs"):
         assert marker in generation_skill
-    for marker in ("Batch or cache expensive safety features", "deterministic row mapping", "GPU implementation"):
+    for marker in ("external-tool filtering and scoring", "deterministic row mapping", "accelerated implementation"):
         assert marker in reward_runtime_contract
+    for marker in (
+        "record workers and per-tool threads",
+        "full nested task tree",
+        "Do not generalize one tool's result",
+    ):
+        assert marker in resource_policy
     for document in ema_linked_docs:
         assert "ema-2025-draft-phage-therapy-quality-guideline.md" in document
     assert (
@@ -408,7 +417,7 @@ def test_safeguards_reach_operational_workflows_and_card_license() -> None:
     assert "prohibited endpoint, not a soft penalty" in objective_skill
     assert "whole-sequence cargo and lysogeny screens" in screen_skill
     assert "Computational QC does not establish biological viability" in reporting_contract
-    assert "[Apache 2.0](../../../recipes/evo2_phage_gen/LICENSE)" in card
+    assert "[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt)" in card
 
     for marker in (
         "reviewed release descriptor",

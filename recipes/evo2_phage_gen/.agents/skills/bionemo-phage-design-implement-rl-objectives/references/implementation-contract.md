@@ -33,7 +33,7 @@ For each scalar reward or filter:
 2. target maps exactly to `1`;
 3. representative partial values are in order and in range;
 4. below/above-domain inputs clip as declared;
-5. NaN, infinity, malformed, absent, and tool-failure inputs fail closed;
+5. NaN, infinity, malformed, absent, and tool-failure inputs receive zero credit and a recorded reason;
 6. threshold equality and immediate neighbors match the declared comparator;
 7. batch and scalar evaluation agree.
 
@@ -59,9 +59,9 @@ Record every command, exit status, package/runtime versions, source hash, config
 ## Review questions
 
 - Does each emitted value retain the stable ID and high-level goal trace?
-- Can missing external-tool results, empty support, or denominator shrinkage accidentally pass or receive favorable partial credit?
-- Can deletion, truncation, duplication, canonicalization, or a tiny matching subset game a component?
-- Does the aggregate rank desired fixtures above reference, baseline/random, and adversarial counterexamples, and do ablations reveal double counting or dominance?
+- Can missing external-tool results, no observations, or too few observations accidentally pass or receive favorable partial credit?
+- Can deletion, truncation, duplication, alternate canonical forms, or a tiny matching subset make a component score well for the wrong reason?
+- Does the combined score rank desired fixtures above reference, baseline/random, and counterexamples, and do ablations reveal double counting or dominance?
 - Are online and final algorithms identical where promised?
 - Is every approved operational threshold tied to the exact population and model without being promoted to viability or bootability proof?
 - Does the implementation preserve OR children rather than only the max?

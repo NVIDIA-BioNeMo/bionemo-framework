@@ -105,7 +105,7 @@ def test_extract_scored_sequence_keeps_prompt_dna_and_drops_soft_tokens():
     assert extract_scored_sequence(message_log) == "GAGTACGT"
 
 
-def test_score_message_logs_without_safety_config_fails_closed():
+def test_score_message_logs_without_safety_config_returns_zero_reward():
     """A historically passing sequence remains ineligible when safety is not configured."""
     scored = score_message_logs(
         [[{"role": "user", "content": "+~GAGT"}, {"role": "assistant", "content": "ACGT" * 1000}]]
@@ -296,7 +296,7 @@ def test_gdpo_ineligible_nan_biological_objective_is_exactly_zero():
 
 
 @pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), True, "1.0", 1 + 0j])
-def test_gdpo_objectives_fail_closed_for_nonfinite_or_nonexact_values(invalid: object):
+def test_gdpo_objectives_reject_nonfinite_or_nonexact_values(invalid: object):
     """No biological or safety objective may emit coerced, NaN, or infinite values."""
     scored = pd.DataFrame(
         {
@@ -323,7 +323,7 @@ def test_gdpo_objectives_fail_closed_for_nonfinite_or_nonexact_values(invalid: o
 
 
 def test_gdpo_safety_objective_requires_reconciled_class_state_reward_and_required_flag():
-    """Safety signals fail closed unless exact class telemetry proves their value."""
+    """Safety credit requires matching class state, applicability, and numeric reward fields."""
     scored = pd.DataFrame(
         {
             "reward_safety_lysogeny": [1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
@@ -347,8 +347,29 @@ def test_gdpo_safety_objective_requires_reconciled_class_state_reward_and_requir
     assert missing_support["safety_lysogeny"].tolist() == [0.0]
 
 
+def test_gdpo_safety_objective_accepts_partial_credit_only_for_a_measured_review_finding():
+    objective = GDPOObjective(
+        "safety_toxin",
+        ("reward_safety_toxin",),
+        requires_safety_eligibility=False,
+    )
+    scored = pd.DataFrame(
+        {
+            "reward_safety_toxin": [0.25, 0.25, 0.25, 0.0],
+            "safety_toxin_state": ["INDETERMINATE"] * 4,
+            "safety_toxin_required": [1.0] * 4,
+            "safety_toxin_measurement_available": [1.0, 0.0, 1.0, 0.0],
+            "safety_toxin_finding_count": [1, 1, 0, 0],
+        }
+    )
+
+    scores = gdpo_objective_scores_from_scored(scored, (objective,))
+
+    assert scores["safety_toxin"].tolist() == [0.25, 0.0, 0.0, 0.0]
+
+
 @pytest.mark.parametrize("reducer", ["mean", "product", "min"])
-def test_gdpo_reducer_fails_entire_objective_closed_when_any_component_is_invalid(reducer: str):
+def test_gdpo_reducer_zeros_entire_objective_when_any_component_is_invalid(reducer: str):
     """A reducer cannot hide one invalid component by skipping or averaging it."""
     scored = pd.DataFrame(
         {
@@ -584,7 +605,7 @@ def test_phage_qc_metrics_report_safety_states_rewards_and_qualified_full_qc():
     assert metrics["binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.25
 
 
-def test_phage_qc_metrics_fail_closed_when_aggregate_state_is_missing():
+def test_phage_qc_metrics_report_zero_acceptance_when_aggregate_state_is_missing():
     """A numeric gate bit without its exact PASS state cannot qualify a checkpoint metric."""
     scored = pd.DataFrame(
         {
@@ -1058,7 +1079,7 @@ def test_global_post_process_metrics_handles_empty_gdpo_batch_without_actor_cach
     assert not any(key.startswith("gdpo/stale") for key in metrics)
 
 
-def test_global_post_process_metrics_fail_closed_without_rollout_metadata():
+def test_global_post_process_metrics_report_zero_acceptance_without_rollout_metadata():
     """Missing assembled metadata cannot be certified from an actor-local cache."""
     if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
         pytest.skip("NeMo-RL is unavailable")

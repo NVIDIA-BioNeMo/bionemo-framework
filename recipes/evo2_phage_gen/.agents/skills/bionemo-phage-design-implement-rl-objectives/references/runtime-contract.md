@@ -13,11 +13,12 @@ The currently pinned recipe path expects positional reward output shaped `Tensor
 
 Fail before training when any checked name, order, shape, dtype, reduction, or component count differs. Do not truncate, pad, reorder, average, or rename components merely to satisfy the runtime. Update the adapter and tests deliberately, or select a compatible environment.
 
-Batch or cache expensive safety features by sequence plus asset/policy/tool/parser hashes rather than
-launching an unbounded external process per rollout. Admit record workers and per-tool threads against
-the same CPU, RAM, GPU, scratch, and I/O budget, preserving deterministic row mapping and independent
-component telemetry. A GPU implementation is optional and must demonstrate control-panel and numerical
-parity plus a useful deployment-scale speedup; otherwise retain the validated CPU path.
+Apply the central [external-tool filtering and scoring
+policy](../../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md#external-tool-filtering-and-scoring).
+Cache expensive safety features by sequence plus asset/policy/tool/parser hashes rather than launching
+an unbounded process per rollout. Preserve deterministic row mapping and independent component records.
+An accelerated implementation is optional and must demonstrate control-panel and numerical parity plus
+a useful deployment-scale speedup; otherwise retain the validated path.
 
 ## Smoke evidence
 

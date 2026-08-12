@@ -23,7 +23,7 @@ Lead with requested mode/count and achieved result. State:
 - complete-genome output and mutable-scope confirmation, with any approved reduction and its decision record;
 - filter-profile and code/config hashes;
 - uniqueness identity/coverage/topology semantics;
-- per-filter waterfall and OR branch/dominance results;
+- counts remaining after each filter and OR branch/dominance results;
 - accumulation curve, saturation evidence, and conservative yield estimate;
 - ranking method and final picks;
 - incomplete tools, approximations, uncertainties, failures, and next decision.

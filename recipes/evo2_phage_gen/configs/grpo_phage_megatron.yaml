@@ -113,7 +113,7 @@ env:
     weight_synteny: 0.25
     weight_average_protein_identity: 0.25
     weight_required_genes: 0.1
-    # Mandatory fail-closed Task 4 gate for the PhiX/Microviridae bacterial design context.
+    # Mandatory Task 4 check: missing or unresolved safety evidence receives no acceptance credit.
     # Runtime asset and tool-pin files are generated locally and digest-validated before use.
     sequence_safety:
       enabled: true

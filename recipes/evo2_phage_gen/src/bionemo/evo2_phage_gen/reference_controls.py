@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fail-closed reference controls for the sequence-safety workflow."""
+"""Reference controls that must all match their expected sequence-safety outcomes."""
 
 from __future__ import annotations
 
@@ -33,9 +33,9 @@ from bionemo.evo2_phage_gen.sequence_safety import SafetyState
 
 
 _SAFETY_CLASSES = ("amr", "toxin", "lysogeny")
-_CONTROL_ROLES = frozenset({"positive_hazard", "negative"})
+_CONTROL_ROLES = frozenset({"positive_hazard", "positive_review", "negative"})
 _TOPOLOGIES = frozenset({"linear", "circular"})
-_ACCESSION_PATTERN = re.compile(r"^[A-Z]{2}_[0-9]+\.[1-9][0-9]*$")
+_ACCESSION_PATTERN = re.compile(r"^(?:[A-Z]{2}_[0-9]+|[A-Z]{1,4}[0-9]{5,9})\.[1-9][0-9]*$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -88,8 +88,6 @@ class ReferenceClassExpectation:
             "required_finding_accessions",
             MappingProxyType(dict(self.required_finding_accessions)),
         )
-        if self.state not in {SafetyState.PASS, SafetyState.FAIL}:
-            raise ReferenceControlError("reference controls cannot expect INDETERMINATE")
         if not self.reason_codes:
             raise ReferenceControlError("reference class expectations require reason codes")
         if self.minimum_primary_findings < len(self.required_finding_accessions):
@@ -104,6 +102,7 @@ class ReferenceControl:
 
     control_id: str
     accession: str
+    sequence_interval: tuple[int, int] | None
     display_name: str
     role: str
     topology: str
@@ -116,8 +115,19 @@ class ReferenceControl:
 
     def __post_init__(self) -> None:
         """Freeze nested values."""
+        object.__setattr__(
+            self, "sequence_interval", None if self.sequence_interval is None else tuple(self.sequence_interval)
+        )
         object.__setattr__(self, "evidence_urls", tuple(self.evidence_urls))
         object.__setattr__(self, "expected_classes", MappingProxyType(dict(self.expected_classes)))
+
+    @property
+    def record_id(self) -> str:
+        """Return the scanner-safe ID for a complete record or exact source interval."""
+        if self.sequence_interval is None:
+            return self.accession
+        start, end = self.sequence_interval
+        return f"{self.accession}_{start}_{end}"
 
     @property
     def circular(self) -> bool:
@@ -201,6 +211,7 @@ def _parse_control(value: object, *, index: int) -> ReferenceControl:
             {
                 "control_id",
                 "accession",
+                "sequence_interval",
                 "display_name",
                 "role",
                 "topology",
@@ -220,13 +231,29 @@ def _parse_control(value: object, *, index: int) -> ReferenceControl:
     digest = _nonempty_string(payload["sequence_sha256"], name=f"{name}.sequence_sha256")
     length = payload["sequence_length"]
     if not _ACCESSION_PATTERN.fullmatch(accession):
-        raise ReferenceControlError(f"{name}.accession must be an exact RefSeq accession.version")
+        raise ReferenceControlError(f"{name}.accession must be an exact INSDC accession.version")
+    interval_value = payload["sequence_interval"]
+    sequence_interval: tuple[int, int] | None
+    if interval_value is None:
+        sequence_interval = None
+    else:
+        interval = _strict_mapping(
+            interval_value,
+            name=f"{name}.sequence_interval",
+            keys=frozenset({"start", "end"}),
+        )
+        start, end = interval["start"], interval["end"]
+        if type(start) is not int or type(end) is not int or start < 1 or end < start:
+            raise ReferenceControlError(f"{name}.sequence_interval must be a valid one-based closed interval")
+        sequence_interval = (start, end)
     if role not in _CONTROL_ROLES:
         raise ReferenceControlError(f"{name}.role is unsupported")
     if topology not in _TOPOLOGIES:
         raise ReferenceControlError(f"{name}.topology is unsupported")
     if type(length) is not int or length < 1:
         raise ReferenceControlError(f"{name}.sequence_length must be a positive integer")
+    if sequence_interval is not None and length != sequence_interval[1] - sequence_interval[0] + 1:
+        raise ReferenceControlError(f"{name}.sequence_length does not match its exact interval")
     if not _DIGEST_PATTERN.fullmatch(digest):
         raise ReferenceControlError(f"{name}.sequence_sha256 must be a lowercase SHA-256 digest")
     try:
@@ -243,18 +270,24 @@ def _parse_control(value: object, *, index: int) -> ReferenceControl:
         )
         for safety_class in _SAFETY_CLASSES
     }
-    derived_aggregate = (
-        SafetyState.FAIL
-        if any(expectation.state is SafetyState.FAIL for expectation in expected_classes.values())
-        else SafetyState.PASS
-    )
+    if any(expectation.state is SafetyState.FAIL for expectation in expected_classes.values()):
+        derived_aggregate = SafetyState.FAIL
+    elif any(expectation.state is SafetyState.INDETERMINATE for expectation in expected_classes.values()):
+        derived_aggregate = SafetyState.INDETERMINATE
+    else:
+        derived_aggregate = SafetyState.PASS
     if aggregate_state is not derived_aggregate:
         raise ReferenceControlError(f"{name}.expected_aggregate_state conflicts with class expectations")
     if role == "negative" and aggregate_state is not SafetyState.PASS:
         raise ReferenceControlError(f"{name} negative controls must expect PASS")
+    if role == "positive_hazard" and aggregate_state is not SafetyState.FAIL:
+        raise ReferenceControlError(f"{name} positive hazard controls must independently establish FAIL")
+    if role == "positive_review" and aggregate_state is not SafetyState.INDETERMINATE:
+        raise ReferenceControlError(f"{name} positive review controls must establish INDETERMINATE")
     return ReferenceControl(
         control_id=control_id,
         accession=accession,
+        sequence_interval=sequence_interval,
         display_name=_nonempty_string(payload["display_name"], name=f"{name}.display_name"),
         role=role,
         topology=topology,
@@ -268,7 +301,7 @@ def _parse_control(value: object, *, index: int) -> ReferenceControl:
 
 
 def load_reference_control_panel(path: Path) -> ReferenceControlPanel:
-    """Load the exact schema-v1 reference panel without implicit latest-version resolution."""
+    """Load the exact schema-v2 reference panel without implicit latest-version resolution."""
     config_path = Path(path).resolve()
     if config_path.is_symlink() or not config_path.is_file():
         raise ReferenceControlError("reference control config must be a non-symlink regular file")
@@ -282,7 +315,7 @@ def load_reference_control_panel(path: Path) -> ReferenceControlPanel:
         name="reference control config",
         keys=frozenset({"schema_version", "panel_id", "sequence_identity", "controls"}),
     )
-    if payload["schema_version"] != 1:
+    if payload["schema_version"] != 2:
         raise ReferenceControlError("unsupported reference control schema version")
     identity = _strict_mapping(
         payload["sequence_identity"],
@@ -290,13 +323,13 @@ def load_reference_control_panel(path: Path) -> ReferenceControlPanel:
         keys=frozenset({"retrieval", "normalization", "digest", "payload_distribution"}),
     )
     expected_identity = {
-        "retrieval": "exact_ncbi_accession_version",
+        "retrieval": "exact_insdc_accession_version_with_optional_1_based_closed_interval",
         "normalization": "uppercase_sequence_without_whitespace",
         "digest": "sha256",
         "payload_distribution": "accession_and_digest_only",
     }
     if dict(identity) != expected_identity:
-        raise ReferenceControlError("sequence identity policy does not match schema v1")
+        raise ReferenceControlError("sequence identity policy does not match schema v2")
     raw_controls = payload["controls"]
     if not isinstance(raw_controls, list) or not raw_controls:
         raise ReferenceControlError("controls must be a non-empty list")
@@ -305,8 +338,8 @@ def load_reference_control_panel(path: Path) -> ReferenceControlPanel:
     accessions = [control.accession for control in controls]
     if len(ids) != len(set(ids)) or len(accessions) != len(set(accessions)):
         raise ReferenceControlError("control IDs and accessions must be unique")
-    if sum(control.role == "positive_hazard" for control in controls) != 1:
-        raise ReferenceControlError("the panel requires exactly one positive hazard control")
+    if sum(control.role == "positive_hazard" for control in controls) < 1:
+        raise ReferenceControlError("the panel requires at least one positive hazard control")
     if sum(control.role == "negative" for control in controls) < 2:
         raise ReferenceControlError("the panel requires at least two negative controls")
     return ReferenceControlPanel(
@@ -348,7 +381,7 @@ def _validate_control_report(control: ReferenceControl, report: Mapping[str, obj
         raise ReferenceControlError(f"{label} must contain exactly one control record")
     record = records[0]
     identity_checks = (
-        ("record ID", record.get("record_id"), control.accession),
+        ("record ID", record.get("record_id"), control.record_id),
         ("sequence length", record.get("sequence_length"), control.sequence_length),
         ("sequence SHA-256", record.get("sequence_sha256"), control.sequence_sha256),
         ("topology", record.get("circular"), control.circular),
@@ -430,6 +463,10 @@ def _validate_control_report(control: ReferenceControl, report: Mapping[str, obj
     rl_safety = sequence_safety_reward_contract(
         class_states={name: expectation.state.value for name, expectation in control.expected_classes.items()},
         required_by_class=dict.fromkeys(_SAFETY_CLASSES, True),
+        review_eligible_by_class={
+            name: expectation.state is SafetyState.INDETERMINATE and class_summary[name]["primary_finding_count"] > 0
+            for name, expectation in control.expected_classes.items()
+        },
     )
     if rl_safety["safety_gate_state"] != expected_aggregate:
         raise ReferenceControlError(f"{label} RL safety gate conflicts with the hard-filter expectation")
@@ -491,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Revalidate scan manifests and fail closed unless the whole panel passes."""
+    """Revalidate scan manifests and accept only when the whole panel matches."""
     parser = build_parser()
     try:
         args = parser.parse_args(argv)

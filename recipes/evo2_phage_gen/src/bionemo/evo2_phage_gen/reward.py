@@ -54,14 +54,16 @@ ARC_PATH_KEYS = (
 )
 TIMING_COLUMN_PREFIX = "timing/phage_qc/"
 SEQUENCE_SAFETY_CLASSES = ("amr", "toxin", "lysogeny")
+SAFETY_REVIEW_CREDIT = 0.25
 
 
 def sequence_safety_reward_contract(
     *,
     class_states: dict[str, str],
     required_by_class: dict[str, bool],
+    review_eligible_by_class: dict[str, bool] | None = None,
 ) -> dict[str, object]:
-    """Derive the fail-closed RL gate and independent class rewards from measured states."""
+    """Derive the strict acceptance gate and independent class rewards from measured states."""
     expected_classes = set(SEQUENCE_SAFETY_CLASSES)
     if set(class_states) != expected_classes or set(required_by_class) != expected_classes:
         raise ValueError("sequence-safety reward inputs must define every safety class exactly once")
@@ -69,6 +71,16 @@ def sequence_safety_reward_contract(
         raise ValueError("sequence-safety reward input contains an invalid state")
     if not all(type(required) is bool for required in required_by_class.values()):
         raise ValueError("sequence-safety reward applicability must be boolean")
+    review_eligible = (
+        dict.fromkeys(SEQUENCE_SAFETY_CLASSES, False) if review_eligible_by_class is None else review_eligible_by_class
+    )
+    if set(review_eligible) != expected_classes or not all(type(value) is bool for value in review_eligible.values()):
+        raise ValueError("sequence-safety review eligibility must define every class as boolean")
+    if any(
+        review_eligible[name] and (not required_by_class[name] or class_states[name] != "INDETERMINATE")
+        for name in SEQUENCE_SAFETY_CLASSES
+    ):
+        raise ValueError("sequence-safety review credit requires a required INDETERMINATE class")
 
     required_states = [class_states[name] for name in SEQUENCE_SAFETY_CLASSES if required_by_class[name]]
     if not required_states:
@@ -87,7 +99,13 @@ def sequence_safety_reward_contract(
     }
     telemetry.update(
         {
-            f"reward_safety_{name}": float(not required_by_class[name] or class_states[name] == "PASS")
+            f"reward_safety_{name}": (
+                1.0
+                if not required_by_class[name] or class_states[name] == "PASS"
+                else SAFETY_REVIEW_CREDIT
+                if review_eligible[name]
+                else 0.0
+            )
             for name in SEQUENCE_SAFETY_CLASSES
         }
     )
@@ -714,7 +732,7 @@ def binary_full_qc_pass_mask(scored_df: pd.DataFrame, binary_pass: pd.Series) ->
 
 
 def _sequence_safety_required_by_class(config: SequenceSafetyRewardConfig) -> dict[str, bool]:
-    """Mirror Task 4 applicability for fail-closed rows that lack a scan manifest."""
+    """Record Task 4 applicability when a row has no usable scan manifest."""
     lysogeny_required = config.host_domain is not HostDomain.ARCHAEA or config.strict_lysis
     return {"amr": True, "toxin": True, "lysogeny": lysogeny_required}
 
@@ -726,7 +744,7 @@ def _add_unavailable_sequence_safety_rewards(
     required_by_class: dict[str, bool] | None = None,
     strict_lysis: bool = False,
 ) -> pd.DataFrame:
-    """Attach explicit fail-closed telemetry when no trusted scan can be used."""
+    """Record INDETERMINATE states and zero required rewards when no trusted scan can be used."""
     if type(strict_lysis) is not bool:
         raise ValueError("sequence-safety strict_lysis telemetry must be a boolean")
     required_classes = dict.fromkeys(SEQUENCE_SAFETY_CLASSES, True) if required_by_class is None else required_by_class
@@ -801,7 +819,7 @@ def _set_row_values(scored_df: pd.DataFrame, position: int, values: dict[str, ob
 
 
 def _set_unavailable_reason(scored_df: pd.DataFrame, positions: list[int], reason_code: str) -> None:
-    """Set one fail-closed reason consistently on a subset of unqualified records."""
+    """Set one unavailable-evidence reason on a subset of unaccepted records."""
     reasons = json.dumps([reason_code], separators=(",", ":"))
     for position in positions:
         values = {"safety_gate_reason_codes": reasons}
@@ -886,6 +904,7 @@ def _manifest_safety_row(
     required_measurements: list[bool] = []
     class_states_for_reward: dict[str, str] = {}
     required_by_class: dict[str, bool] = {}
+    review_eligible_by_class: dict[str, bool] = {}
     recomputed_reasons: list[str] = []
     for safety_class in SEQUENCE_SAFETY_CLASSES:
         result = class_by_name[safety_class]
@@ -911,6 +930,9 @@ def _manifest_safety_row(
             required_measurements.append(measured)
         class_states_for_reward[safety_class] = class_state
         required_by_class[safety_class] = required
+        review_eligible_by_class[safety_class] = bool(
+            required and class_state == "INDETERMINATE" and measured and findings
+        )
         prefix = f"safety_{safety_class}"
         values.update(
             {
@@ -927,6 +949,7 @@ def _manifest_safety_row(
     reward_contract = sequence_safety_reward_contract(
         class_states=class_states_for_reward,
         required_by_class=required_by_class,
+        review_eligible_by_class=review_eligible_by_class,
     )
     recomputed_state = reward_contract["safety_gate_state"]
     recomputed_reasons = list(dict.fromkeys(recomputed_reasons))

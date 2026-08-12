@@ -24,11 +24,37 @@ toxin_reference:
   provider: UniProtKB/Swiss-Prot
   query: |-
     reviewed:true AND keyword:KW-0800 AND
-    (taxonomy_id:2 OR taxonomy_id:2157 OR taxonomy_id:10239)
+    ((keyword:KW-0843 AND NOT keyword:KW-0078) OR taxonomy_id:2759)
   annotations_url: https://rest.uniprot.org/uniprotkb/stream
   fasta_url: https://rest.uniprot.org/uniprotkb/stream
   license: CC BY 4.0
   attribution: UniProt data are available under the CC BY 4.0 license.
+  classification_policy:
+    policy_id: human-harm-toxin-reference-v1
+    hard_fail_scope: reviewed_whole_protein_human_harm_or_human_disease_virulence
+    fragment_action: REVIEW
+    domain_homology_action: REVIEW
+    antibacterial_only_action: NON_GATING
+    antibacterial_keyword: KW-0078
+    independent_eukaryotic_harm_overrides_antibacterial_exclusion: true
+  curated_hazards:
+    set_id: phage-domain-hazards-v1
+    entries:
+      - accession: PF15658.11
+        name: Latrotoxin_C
+        action: REVIEW
+        source_protein_accession: CAQ54400.1
+        source_urls:
+          - 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=protein&id=CAQ54400.1&rettype=fasta&retmode=text'
+          - 'https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=CAQ54400.1&db=protein&report=fasta&retmode=text'
+        source_protein_sequence_sha256: 8e8eb5098bd972dadd0c94ccbd0718c3ede5e528ac2517c605ece16e9eb08a73
+        source_interval: {start: 2571, end: 2706}
+        sequence_sha256: 9da486e50032ff2f89b493049419d7fb9f754f8cc935abb9339f56631dd6a8be
+        reason_code: TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW
+        evidence_urls:
+          - https://doi.org/10.1038/ncomms13155
+          - https://www.ncbi.nlm.nih.gov/Structure/cdd/pfam15658
+        interpretation: Latrotoxin C-terminal-domain homology; not evidence of intact or functional venom.
 
 phrogs_v4:
   annotation_urls:
