@@ -700,6 +700,36 @@ class EvalRunnerTests(unittest.TestCase):
         ):
             self.assertIn(marker, operation)
 
+    def test_sft_step_ceiling_is_recalibrated_after_collection(self) -> None:
+        controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8").lower()
+        prepare = (SKILL_ROOT / "bionemo-phage-design-prepare-sft" / "SKILL.md").read_text(encoding="utf-8").lower()
+        operate = (
+            (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "SKILL.md").read_text(encoding="utf-8").lower()
+        )
+        operation = (
+            (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "references" / "sft-operation.md")
+            .read_text(encoding="utf-8")
+            .lower()
+        )
+
+        self.assertIn("post-collection training-budget feedback", controller)
+        for text in (prepare, operate, operation):
+            self.assertIn("historical starting hypothesis", text)
+            self.assertIn("not a fixed maximum", text)
+            self.assertIn("above 12,000", text)
+        for marker in (
+            "usable non-padding token mass",
+            "effective non-padding tokens per optimizer step",
+            "target effective exposures",
+            "planned_steps = ceil",
+        ):
+            self.assertIn(marker, operation)
+        self.assertIn("at least 30", operation)
+        self.assertIn("six-event patience", operation)
+        self.assertIn("calibrated ceiling", operate)
+        self.assertNotIn("set at most 12,000 optimizer steps", operate)
+        self.assertNotIn("set a 12,000-step maximum", prepare)
+
     def test_prepare_sft_defines_target_similarity_conditioning(self) -> None:
         skill = (SKILL_ROOT / "bionemo-phage-design-prepare-sft" / "SKILL.md").read_text(encoding="utf-8").lower()
         self.assertIn("target-conditioning.md", skill)
@@ -780,6 +810,23 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertIn("read-only", text)
         lepton = text.split("- **lepton:**", maxsplit=1)[1].split("\n", maxsplit=1)[0]
         self.assertIn("egress", lepton)
+
+    def test_local_docker_credentials_are_optional_and_not_logged(self) -> None:
+        skill_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "SKILL.md"
+        contract_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"
+        text = (skill_path.read_text(encoding="utf-8") + contract_path.read_text(encoding="utf-8")).lower()
+        for marker in (
+            "~/.aws",
+            ".netrc",
+            "read-only",
+            "resolved container user home",
+            "--env wandb_api_key",
+            "never pass name=value",
+            "never bake, copy, or log",
+            "shared or untrusted runner",
+            "does not block the scientific run",
+        ):
+            self.assertIn(marker, text)
 
     def test_collection_skill_fails_closed_when_prefix_tools_are_unavailable(self) -> None:
         skill_path = SKILL_ROOT / "bionemo-phage-design-collect-genomes" / "SKILL.md"
@@ -1496,7 +1543,7 @@ class EvalRunnerTests(unittest.TestCase):
         status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
         self.assertEqual("failed", status["status"])
 
-    def test_assertion_text_mismatch_is_rejected(self) -> None:
+    def test_assertion_text_mismatch_rejected(self) -> None:
         completed, _ = self._run_fake("mismatch")
         self.assertEqual(2, completed.returncode)
         self.assertIn("assertion text/order", completed.stderr)

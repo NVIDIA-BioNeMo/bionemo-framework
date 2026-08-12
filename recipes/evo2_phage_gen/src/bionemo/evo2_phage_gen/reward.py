@@ -56,6 +56,44 @@ TIMING_COLUMN_PREFIX = "timing/phage_qc/"
 SEQUENCE_SAFETY_CLASSES = ("amr", "toxin", "lysogeny")
 
 
+def sequence_safety_reward_contract(
+    *,
+    class_states: dict[str, str],
+    required_by_class: dict[str, bool],
+) -> dict[str, object]:
+    """Derive the fail-closed RL gate and independent class rewards from measured states."""
+    expected_classes = set(SEQUENCE_SAFETY_CLASSES)
+    if set(class_states) != expected_classes or set(required_by_class) != expected_classes:
+        raise ValueError("sequence-safety reward inputs must define every safety class exactly once")
+    if not all(state in {"PASS", "FAIL", "INDETERMINATE"} for state in class_states.values()):
+        raise ValueError("sequence-safety reward input contains an invalid state")
+    if not all(type(required) is bool for required in required_by_class.values()):
+        raise ValueError("sequence-safety reward applicability must be boolean")
+
+    required_states = [class_states[name] for name in SEQUENCE_SAFETY_CLASSES if required_by_class[name]]
+    if not required_states:
+        gate_state = "INDETERMINATE"
+    elif "FAIL" in required_states:
+        gate_state = "FAIL"
+    elif "INDETERMINATE" in required_states:
+        gate_state = "INDETERMINATE"
+    else:
+        gate_state = "PASS"
+    gate_pass = float(gate_state == "PASS")
+    telemetry: dict[str, object] = {
+        "safety_gate_state": gate_state,
+        "safety_gate_pass": gate_pass,
+        "reward_safety_penalty": 1.0 - gate_pass,
+    }
+    telemetry.update(
+        {
+            f"reward_safety_{name}": float(not required_by_class[name] or class_states[name] == "PASS")
+            for name in SEQUENCE_SAFETY_CLASSES
+        }
+    )
+    return telemetry
+
+
 def _attach_timing_columns(scored_df: pd.DataFrame, timings: dict[str, float]) -> pd.DataFrame:
     """Attach batch-level timing values as per-row columns for rollout metric aggregation."""
     for name, value in timings.items():
@@ -830,8 +868,6 @@ def _manifest_safety_row(
     values: dict[str, object] = {
         "safety_scan_record_id": expected_record_id,
         "safety_scan_input_index": expected_input_index,
-        "safety_gate_state": declared_state,
-        "safety_gate_pass": float(declared_state == "PASS"),
         "safety_gate_reason_codes": record_reasons_json,
         "safety_policy_id": policy.get("policy_id"),
         "safety_policy_sha256": policy.get("canonical_sha256"),
@@ -848,7 +884,8 @@ def _manifest_safety_row(
     required_count = 0
     required_pass_count = 0
     required_measurements: list[bool] = []
-    required_states: list[str] = []
+    class_states_for_reward: dict[str, str] = {}
+    required_by_class: dict[str, bool] = {}
     recomputed_reasons: list[str] = []
     for safety_class in SEQUENCE_SAFETY_CLASSES:
         result = class_by_name[safety_class]
@@ -872,7 +909,8 @@ def _manifest_safety_row(
             required_count += 1
             required_pass_count += int(class_state == "PASS")
             required_measurements.append(measured)
-            required_states.append(class_state)
+        class_states_for_reward[safety_class] = class_state
+        required_by_class[safety_class] = required
         prefix = f"safety_{safety_class}"
         values.update(
             {
@@ -884,17 +922,13 @@ def _manifest_safety_row(
                 f"{prefix}_execution_status": execution_status,
                 f"{prefix}_policy_id": attempt.get("policy_id"),
                 f"{prefix}_policy_sha256": attempt.get("policy_sha256"),
-                f"reward_safety_{safety_class}": float(not required or class_state == "PASS"),
             }
         )
-    if not required_states:
-        recomputed_state = "INDETERMINATE"
-    elif "FAIL" in required_states:
-        recomputed_state = "FAIL"
-    elif "INDETERMINATE" in required_states:
-        recomputed_state = "INDETERMINATE"
-    else:
-        recomputed_state = "PASS"
+    reward_contract = sequence_safety_reward_contract(
+        class_states=class_states_for_reward,
+        required_by_class=required_by_class,
+    )
+    recomputed_state = reward_contract["safety_gate_state"]
     recomputed_reasons = list(dict.fromkeys(recomputed_reasons))
     if declared_state != recomputed_state or record_reasons != recomputed_reasons:
         raise ValueError("sequence-safety record aggregate drift")
@@ -905,6 +939,7 @@ def _manifest_safety_row(
     values["safety_gate_measurement_available"] = float(environment_healthy)
     values["safety_required_class_count"] = required_count
     values["safety_required_class_pass_count"] = required_pass_count
+    values.update(reward_contract)
     return values
 
 

@@ -182,6 +182,17 @@ handle. When already containerized, do not launch nested Docker merely because i
 verified daemon reachability, mount-path translation, GPU propagation, and user intent or a clear
 compatibility benefit.
 
+Add credential access only for an approved integration and only on a trusted, single-user execution
+boundary. For requested AWS synchronization, prefer the narrowest needed profile/files; when the
+current client requires it, mount host `~/.aws` read-only into the resolved container user home. For
+W&B, mount an existing `.netrc` read-only into the resolved container user home only after verifying
+its ownership and the `api.wandb.ai` entry. Never use either mount on a shared or untrusted runner,
+and never bake, copy, or log credential files or values. Prefer read-only mounts or runtime secrets.
+If name-only environment passthrough is the supported path, use `--env WANDB_API_KEY`. Never pass name=value,
+enable shell tracing, or dump the environment, and record that environment access may be
+visible through container runtime metadata. Missing AWS or W&B credentials disables only sync or
+remote tracing and does not block the scientific run.
+
 ### Slurm
 
 Resolve the current head/login-node policy, user associations, allowed_partitions, account/QOS combinations,

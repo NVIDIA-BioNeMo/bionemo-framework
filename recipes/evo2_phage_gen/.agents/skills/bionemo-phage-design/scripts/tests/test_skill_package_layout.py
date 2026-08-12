@@ -146,11 +146,18 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
     implementation_skill = (skills_root / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md").read_text(
         encoding="utf-8"
     )
+    reward_runtime_contract = (
+        skills_root / "bionemo-phage-design-implement-rl-objectives" / "references" / "runtime-contract.md"
+    ).read_text(encoding="utf-8")
+    generation_skill = (skills_root / "bionemo-phage-design-generate-and-screen" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    collection_skill = (skills_root / "bionemo-phage-design-collect-genomes" / "SKILL.md").read_text(encoding="utf-8")
     ema_linked_docs = (
         controller,
         (skills_root / "bionemo-phage-design-research-evidence" / "SKILL.md").read_text(encoding="utf-8"),
         objective_skill,
-        (skills_root / "bionemo-phage-design-generate-and-screen" / "SKILL.md").read_text(encoding="utf-8"),
+        generation_skill,
         (skills_root / "bionemo-phage-design-research-evidence" / "references" / "search-protocol.md").read_text(
             encoding="utf-8"
         ),
@@ -182,8 +189,13 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
         "explicitly non-therapeutic project",
         "separate online RL component",
         "current PhiX174 case-study replication",
+        "source-neutral",
+        "natural-origin attestation",
+        "model-generated candidates",
     ):
         assert marker in design_contract
+    for marker in ("source-neutral", "natural-origin attestation", "metagenomic", "generated sequence"):
+        assert marker in collection_skill
     for marker in (
         "Intended-use therapeutic objectives",
         "#phage-seed-lots",
@@ -208,6 +220,10 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
         "Low initial reward support alone",
     ):
         assert marker in implementation_skill
+    for marker in ("bounded record workers", "nested oversubscription", "query/target orientation"):
+        assert marker in generation_skill
+    for marker in ("Batch or cache expensive safety features", "deterministic row mapping", "GPU implementation"):
+        assert marker in reward_runtime_contract
     for document in ema_linked_docs:
         assert "ema-2025-draft-phage-therapy-quality-guideline.md" in document
     assert (
@@ -393,6 +409,23 @@ def test_safeguards_reach_operational_workflows_and_card_license() -> None:
     assert "whole-sequence cargo and lysogeny screens" in screen_skill
     assert "Computational QC does not establish biological viability" in reporting_contract
     assert "[Apache 2.0](../../../recipes/evo2_phage_gen/LICENSE)" in card
+
+    for marker in (
+        "reviewed release descriptor",
+        "persistent content-addressed cache",
+        "implicit `latest`",
+    ):
+        assert marker in controller
+    for marker in (
+        "configs/phage_safety_reference_controls.yaml",
+        "NC_015209.1",
+        "P01555",
+        "P01556",
+        "NC_001604.1",
+        "NC_001422.1",
+        "NC_022054.2",
+    ):
+        assert marker in screen_skill
 
     objective_evals = json.loads(
         (skills_root / "bionemo-phage-design-plan-rl-objectives" / "evals" / "evals.json").read_text(encoding="utf-8")

@@ -25,10 +25,23 @@
       "assertions": [
         "The response distinguishes a new leakage-resistant split from an exact historical split and labels any historical leakage uncertainty.",
         "The response derives context after collection from an agreed high-coverage rule over tokenized genome lengths and does not copy a fixed historical context or token batch.",
-        "The response sets 12,000 optimizer steps as a maximum rather than a target and plans at least 30 validation and recoverable checkpoint opportunities.",
+        "The response treats 12,000 steps as a historical starting hypothesis rather than a fixed maximum, recalibrates the ceiling after collection from usable loss-bearing token mass, intended exposures, and effective batch, and plans at least 30 validation and recoverable checkpoint opportunities.",
         "The response uses one full phage genome per sample, pads shorter genomes to context, and excludes pad tokens from loss.",
         "The response leaves hardware-specific microbatch, accumulation, and model parallelism to the execution and SFT operation skills.",
         "The response exports the exact SFT training-serialization contract needed to calibrate RL prompts."
+      ],
+      "expected_skill": "bionemo-phage-design-prepare-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-prepare-sft-003-large-corpus-budget-feedback",
+      "prompt": "Genome collection yielded 33,000 usable genomes rather than the roughly 10,000 expected. Prepare the SFT handoff without freezing the publication's 12,000-step setting.",
+      "expected_output": "A documented post-collection training-budget decision that can raise the optimizer-step ceiling while retaining comparable validation and noise-tolerant early stopping.",
+      "assertions": [
+        "The response computes a proposed ceiling from usable non-padding token mass, target effective exposures, and a provisional effective non-padding token batch, with arithmetic and uncertainty recorded.",
+        "The response treats 12,000 as historical evidence rather than a fixed maximum and explicitly allows a ceiling above 12,000 when the larger usable corpus warrants it.",
+        "The response requires recalculation after hardware batch resolution and schedules at least 30 comparable validation and recoverable checkpoint opportunities by the chosen ceiling.",
+        "The response keeps the step budget a ceiling rather than a target and preserves noise-tolerant early stopping plus lowest-comparable-validation-loss checkpoint selection."
       ],
       "expected_skill": "bionemo-phage-design-prepare-sft",
       "expected_script": null

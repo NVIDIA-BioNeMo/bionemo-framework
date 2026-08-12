@@ -15,9 +15,10 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +44,7 @@ from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     build_amrfinder_command,
     build_diamond_command,
     build_phrogs_command,
+    build_phrogs_commands,
     parse_amrfinder_output,
     parse_phrogs_output,
     parse_toxin_diamond_output,
@@ -436,6 +438,14 @@ def _orf_artifacts(tmp_path):
 def _amrfinder_manifest(tmp_path):
     binary = tmp_path / "amrfinder"
     binary.write_bytes(b"amrfinder-4.2.7")
+    runtime_dir = tmp_path / "amrfinder-runtime"
+    runtime_dir.mkdir()
+    runtime_paths = {}
+    for executable_name in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
+        executable = runtime_dir / executable_name
+        executable.write_bytes(f"{executable_name}-runtime".encode())
+        executable.chmod(0o755)
+        runtime_paths[executable_name] = executable
     database = tmp_path / "amr-db" / "2026-07-22.1"
     database.mkdir(parents=True)
     (database / "catalog.txt").write_bytes(b"amr-db")
@@ -444,6 +454,14 @@ def _amrfinder_manifest(tmp_path):
         "binary_path": str(binary),
         "binary_sha256": hashlib.sha256(b"amrfinder-4.2.7").hexdigest(),
         "amrfinder_version": "AMRFinderPlus version 4.2.7",
+        **{
+            field: value
+            for executable_name, executable in runtime_paths.items()
+            for field, value in (
+                (f"{executable_name}_path", str(executable)),
+                (f"{executable_name}_sha256", hashlib.sha256(executable.read_bytes()).hexdigest()),
+            )
+        },
         "database_path": str(database),
         "database_version": "2026-07-22.1",
         "database_sha256": hashlib.sha256(b"catalog.txt\0amr-db").hexdigest(),
@@ -690,12 +708,44 @@ def test_amrfinder_runner_validates_versions_and_database_before_search(tmp_path
         threads=3,
         output_tsv=tmp_path / "scan" / "amrfinder.tsv",
     )
-    assert commands[2][1] == {
+    execution_kwargs = dict(commands[2][1])
+    execution_environment = execution_kwargs.pop("env")
+    assert execution_environment["PATH"].split(os.pathsep)[0] == str(Path(manifest["blastp_path"]).parent.resolve())
+    assert execution_kwargs == {
         "check": True,
         "capture_output": True,
         "text": True,
         "timeout": 17.0,
     }
+
+
+def test_amrfinder_runner_accepts_native_multiline_database_version_status(tmp_path):
+    """Native 4.2.7 status output must bind the database version without weakening equality."""
+    artifacts = _orf_artifacts(tmp_path)
+    manifest = _amrfinder_manifest(tmp_path)
+
+    def runner(command, **kwargs):
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, stdout=manifest["amrfinder_version"] + "\n", stderr="")
+        if command[-1] == "--database_version":
+            status = (
+                "Software directory: '/opt/amrfinder/'\n"
+                "Software version: 4.2.7\n"
+                f"Database directory: '{manifest['database_path']}'\n"
+                f"Database version: {manifest['database_version']}\n"
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=status, stderr="")
+        _write_amrfinder_output(Path(command[command.index("-o") + 1]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = run_amrfinder(
+        artifacts,
+        manifest_section=manifest,
+        work_dir=tmp_path / "scan",
+        runner=runner,
+    )
+
+    assert result.class_result.state is SafetyState.PASS
 
 
 def test_amrfinder_database_digest_matches_task2_for_nested_directories(tmp_path):
@@ -743,6 +793,18 @@ def test_amrfinder_database_digest_matches_task2_for_nested_directories(tmp_path
         ),
         (
             lambda manifest: (Path(manifest["database_path"]) / "catalog.txt").write_bytes(b"changed"),
+            "AMRFINDER_ASSET_PROVENANCE_MISMATCH",
+        ),
+        (
+            lambda manifest: Path(manifest["blastp_path"]).write_bytes(b"changed"),
+            "AMRFINDER_ASSET_PROVENANCE_MISMATCH",
+        ),
+        (
+            lambda manifest: Path(manifest["blastx_path"]).unlink(),
+            "AMRFINDER_ASSET_PROVENANCE_MISMATCH",
+        ),
+        (
+            lambda manifest: Path(manifest["hmmsearch_path"]).unlink(),
             "AMRFINDER_ASSET_PROVENANCE_MISMATCH",
         ),
     ],
@@ -1279,24 +1341,63 @@ _PHROGS_HEADER = (
     "bits",
 )
 
-_PHROGS_HIGH_PROFILE_IDS = ("phrog_1", *(f"phrog_{index}" for index in range(4, 60)))
+_PHROGS_SEARCHABLE_HIGH_PROFILE_IDS = ("phrog_1", *(f"phrog_{index}" for index in range(4, 56)))
+_PHROGS_EXCLUDED_HIGH_PROFILE_IDS = ("phrog_49658", "phrog_50550", "phrog_81686", "phrog_87299")
+_PHROGS_HIGH_PROFILE_IDS = (*_PHROGS_SEARCHABLE_HIGH_PROFILE_IDS, *_PHROGS_EXCLUDED_HIGH_PROFILE_IDS)
 _PHROGS_REVIEW_PROFILE_IDS = ("phrog_2", *(f"phrog_{index}" for index in range(60, 111)))
 _PHROGS_FULL_PROFILE_IDS = tuple(f"phrog_{index}" for index in range(1, 111))
 _PHROGS_ANNOTATION_SOURCE_TEXT = (
     "phrog\tcolor\tannot\tcategory\n"
-    + "".join(f"{profile}\tblack\tintegrase\tintegration and excision\n" for profile in _PHROGS_HIGH_PROFILE_IDS)
     + "".join(
-        f"{profile}\tblack\tputative recombinase\tintegration and excision\n" for profile in _PHROGS_REVIEW_PROFILE_IDS
+        f"{profile.removeprefix('phrog_')}\tblack\tintegrase\tintegration and excision\n"
+        for profile in _PHROGS_HIGH_PROFILE_IDS
     )
-    + "phrog_3\tblack\tmajor capsid protein\thead and packaging\n"
+    + "".join(
+        f"{profile.removeprefix('phrog_')}\tblack\tputative recombinase\tintegration and excision\n"
+        for profile in _PHROGS_REVIEW_PROFILE_IDS
+    )
+    + "3\tblack\tmajor capsid protein\thead and packaging\n"
 )
 _PHROGS_TEST_ANNOTATION_SHA256 = hashlib.sha256(_PHROGS_ANNOTATION_SOURCE_TEXT.encode()).hexdigest()
+
+
+def test_phrogs_lookup_accepts_only_exact_additional_high_confidence_annotations(tmp_path):
+    lookup = tmp_path / "lookup.tsv"
+    lookup.write_text(
+        "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
+        "phrog_6488\tanti-repressor\ttranscription regulation\thigh_confidence\tanti-repressor\n"
+    )
+
+    profiles = sequence_safety_adapters._read_phrogs_lookup(lookup)
+
+    assert profiles["phrog_6488"]["confidence"] == "high_confidence"
+
+    lookup.write_text(
+        "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
+        "phrog_6488\tanti-repressor Ant\ttranscription regulation\thigh_confidence\tanti-repressor\n"
+    )
+    with pytest.raises(
+        sequence_safety_adapters.AssetProvenanceError,
+        match="invalid or duplicate profile metadata",
+    ):
+        sequence_safety_adapters._read_phrogs_lookup(lookup)
 
 
 @pytest.fixture(autouse=True)
 def _pin_synthetic_phrogs_annotation_for_adapter_tests(monkeypatch):
     """Use a deterministic local annotation pin; production retains the official PHROGs v4 SHA-256."""
-    monkeypatch.setattr(sequence_safety_adapters, "_PHROGS_ANNOTATION_SHA256", _PHROGS_TEST_ANNOTATION_SHA256)
+    release = replace(
+        sequence_safety_adapters.load_phrogs_safety_release(),
+        annotation_sha256=_PHROGS_TEST_ANNOTATION_SHA256,
+        source_lookup_counts=(109, 57, 52),
+        searchable_lookup_counts=(105, 53, 52),
+        allowed_profile_exclusions=frozenset(_PHROGS_EXCLUDED_HIGH_PROFILE_IDS),
+    )
+    monkeypatch.setattr(
+        sequence_safety_adapters,
+        "load_phrogs_safety_release",
+        lambda *_args, **_kwargs: release,
+    )
 
 
 def _phrogs_manifest(tmp_path):
@@ -1311,7 +1412,7 @@ def _phrogs_manifest(tmp_path):
     lookup_rows = [
         *(
             f"{profile}\tintegrase\tintegration and excision\thigh_confidence\tintegrase\n"
-            for profile in _PHROGS_HIGH_PROFILE_IDS
+            for profile in _PHROGS_SEARCHABLE_HIGH_PROFILE_IDS
         ),
         *(
             f"{profile}\tputative recombinase\tintegration and excision\treview\trecombinase\n"
@@ -1354,6 +1455,7 @@ def _phrogs_manifest(tmp_path):
         profile_id_digest.update(b"\n")
     return {
         "annotation_url": "https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv",
+        "annotation_source_urls": ["https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv"],
         "annotation_sha256": _PHROGS_TEST_ANNOTATION_SHA256,
         "source_path": str(annotation_source),
         "source_sha256": _PHROGS_TEST_ANNOTATION_SHA256,
@@ -1364,10 +1466,16 @@ def _phrogs_manifest(tmp_path):
             "site-specific recombinase",
             "lysogeny repressor",
         ],
+        "additional_high_confidence_annotations": ["anti-repressor", "ci-like repressor"],
         "review_terms": ["recombinase", "repressor", "lysogeny", "integration", "excision"],
         "lookup_path": str(lookup),
         "lookup_sha256": hashlib.sha256(lookup.read_bytes()).hexdigest(),
-        "lookup_counts": {"total": 109, "high_confidence": 57, "review": 52},
+        "source_lookup_counts": {"total": 109, "high_confidence": 57, "review": 52},
+        "lookup_counts": {"total": 105, "high_confidence": 53, "review": 52},
+        "profile_exclusions": {
+            "ids": list(_PHROGS_EXCLUDED_HIGH_PROFILE_IDS),
+            "reason": "absent_from_authenticated_profile_lookup",
+        },
         "profile_database": {
             "path": str(profile_prefix),
             "role": "complete PHROGs v4 MMseqs profile database for identity-bearing lysogeny search",
@@ -1389,8 +1497,15 @@ def _phrogs_manifest(tmp_path):
                 "count": len(_PHROGS_FULL_PROFILE_IDS),
                 "sha256": profile_id_digest.hexdigest(),
             },
+            "release_marker": {
+                "path": str(release_marker.resolve()),
+                "sha256": hashlib.sha256(release_marker.read_bytes()).hexdigest(),
+                "origin": "archive_supplied_canonical_marker",
+                "empty_sentinel": False,
+            },
             "provenance": {
                 "source_url": "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz",
+                "source_urls": ["https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz"],
                 "archive_observed_sha256": archive_sha256,
                 "archive_published_sha256": None,
                 "archive_published_md5": "a63c485241b900a11989bd1821bfbb09",
@@ -1461,7 +1576,8 @@ def _run_phrogs_with_measured_empty_output(tmp_path, manifest):
         commands.append(tuple(command))
         if command[1:] == ["version"]:
             return subprocess.CompletedProcess(command, 0, stdout=tool_pin.version + "\n", stderr="")
-        Path(command[4]).write_text("")
+        if command[1] == "convertalis":
+            Path(command[5]).write_text("")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     result = run_phrogs(
@@ -1494,7 +1610,7 @@ def test_phrogs_self_consistent_truncated_safety_lookup_is_indeterminate_before_
     _rewrite_phrogs_lookup(
         manifest,
         lookup_rows,
-        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
+        lookup_counts={"total": 105, "high_confidence": 53, "review": 52},
     )
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
@@ -1512,7 +1628,7 @@ def test_phrogs_self_consistent_confidence_imbalance_is_indeterminate_before_exe
     _rewrite_phrogs_lookup(
         manifest,
         lookup_rows,
-        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
+        lookup_counts={"total": 105, "high_confidence": 53, "review": 52},
     )
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
@@ -1530,7 +1646,7 @@ def test_phrogs_count_preserving_safety_profile_substitution_is_indeterminate_be
     _rewrite_phrogs_lookup(
         manifest,
         lookup_rows,
-        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
+        lookup_counts={"total": 105, "high_confidence": 53, "review": 52},
     )
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
@@ -1555,9 +1671,36 @@ def test_phrogs_verified_content_addressed_archive_contract_allows_measured_sear
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
 
     assert result.class_result.state is SafetyState.PASS
-    assert len(commands) == 2
+    assert len(commands) == 4
     assert commands[0][1:] == ("version",)
-    assert commands[1][1] == "easy-search"
+    assert [command[1] for command in commands[1:]] == ["createdb", "search", "convertalis"]
+
+
+def test_phrogs_runtime_accepts_authenticated_zero_byte_release_sentinel(tmp_path):
+    """A valid published empty marker must not turn a prepared PHROGs search indeterminate."""
+    manifest = _phrogs_manifest(tmp_path)
+    release_marker = tmp_path / "VERSION_1_8_0"
+    release_marker.write_bytes(b"")
+    marker_record = manifest["profile_database"]["release_marker"]
+    marker_record.update(
+        {
+            "sha256": hashlib.sha256(b"").hexdigest(),
+            "origin": "archive_supplied_empty_sentinel",
+            "empty_sentinel": True,
+        }
+    )
+    tree_files = [Path(path) for path in manifest["profile_database"]["extracted_tree"]["files"]]
+    tree_digest = hashlib.sha256()
+    for path in sorted(tree_files):
+        tree_digest.update(str(path.relative_to(tmp_path)).encode())
+        tree_digest.update(b"\0")
+        tree_digest.update(path.read_bytes())
+    manifest["profile_database"]["extracted_tree"]["sha256"] = tree_digest.hexdigest()
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.PASS
+    assert len(commands) == 4
 
 
 @pytest.mark.parametrize(
@@ -1587,9 +1730,9 @@ def test_phrogs_verified_archive_drift_is_indeterminate_before_execution(tmp_pat
     assert commands == []
 
 
-def test_phrogs_command_uses_profile_query_against_predicted_orf_target(tmp_path):
-    """Reversing the verified profile orientation would destroy the profile-to-lookup identity join."""
-    command = build_phrogs_command(
+def test_phrogs_commands_use_existing_profile_query_against_created_orf_target_database(tmp_path):
+    """Use MMseqs native DB commands so an existing profile DB is never reparsed as FASTA."""
+    commands = build_phrogs_commands(
         mmseqs=Path("/tools/mmseqs"),
         profile_database=Path("/db/phrogs_profile_db"),
         proteins_faa=tmp_path / "proteins.faa",
@@ -1598,18 +1741,46 @@ def test_phrogs_command_uses_profile_query_against_predicted_orf_target(tmp_path
         threads=6,
     )
 
-    assert command == [
-        "/tools/mmseqs",
-        "easy-search",
-        "/db/phrogs_profile_db",
-        str(tmp_path / "proteins.faa"),
-        str(tmp_path / "phrogs.raw.tsv"),
-        str(tmp_path / "tmp"),
-        "--threads",
-        "6",
-        "--format-output",
-        ",".join(_PHROGS_HEADER),
-    ]
+    target_database = tmp_path / "tmp" / "orf-target"
+    result_database = tmp_path / "tmp" / "profile-hits"
+    assert commands == (
+        (
+            "/tools/mmseqs",
+            "createdb",
+            str(tmp_path / "proteins.faa"),
+            str(target_database),
+        ),
+        (
+            "/tools/mmseqs",
+            "search",
+            "/db/phrogs_profile_db",
+            str(target_database),
+            str(result_database),
+            str(tmp_path / "tmp" / "search"),
+            "--threads",
+            "6",
+            "--alignment-mode",
+            "3",
+        ),
+        (
+            "/tools/mmseqs",
+            "convertalis",
+            "/db/phrogs_profile_db",
+            str(target_database),
+            str(result_database),
+            str(tmp_path / "phrogs.raw.tsv"),
+            "--format-output",
+            ",".join(_PHROGS_HEADER),
+        ),
+    )
+    assert build_phrogs_command(
+        mmseqs=Path("/tools/mmseqs"),
+        profile_database=Path("/db/phrogs_profile_db"),
+        proteins_faa=tmp_path / "proteins.faa",
+        output_tsv=tmp_path / "phrogs.raw.tsv",
+        temporary_dir=tmp_path / "tmp",
+        threads=6,
+    ) == list(commands[-1])
 
 
 def test_current_raw_phrogs_manifest_fails_closed_without_verified_profile_identity(tmp_path):
@@ -1926,7 +2097,8 @@ def test_phrogs_runner_validates_contract_and_normalizes_empty_output(tmp_path):
         commands.append((command, kwargs))
         if command[1:] == ["version"]:
             return subprocess.CompletedProcess(command, 0, stdout=tool_pin.version + "\n", stderr="")
-        Path(command[4]).write_text("")
+        if command[1] == "convertalis":
+            Path(command[5]).write_text("")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     result = run_phrogs(
@@ -1942,7 +2114,8 @@ def test_phrogs_runner_validates_contract_and_normalizes_empty_output(tmp_path):
 
     assert result.class_result.state is SafetyState.PASS
     assert Path(result.raw_output_path).read_text() == "\t".join(_PHROGS_HEADER) + "\n"
-    assert commands[1][0] == build_phrogs_command(
+    assert [entry[0][1] for entry in commands[1:]] == ["createdb", "search", "convertalis"]
+    assert commands[-1][0] == build_phrogs_command(
         mmseqs=tool_pin.path,
         profile_database=Path(manifest["profile_database"]["path"]),
         proteins_faa=artifacts.proteins_faa,
@@ -1951,6 +2124,30 @@ def test_phrogs_runner_validates_contract_and_normalizes_empty_output(tmp_path):
         threads=2,
     )
     assert PHROGS_HOMOLOGY_POLICY_V1.policy_id == "phrogs-homology-v1"
+
+
+def test_phrogs_runner_accepts_real_mmseqs_commit_style_version(tmp_path):
+    """The official GPU binary reports a commit-style version whose leading major is still 17."""
+    manifest = _phrogs_manifest(tmp_path)
+    tool_pin = _mmseqs_pin(tmp_path, version="17b688d21dda57fc5f5b7286ecba7ec003d4717f")
+
+    def runner(command, **kwargs):
+        if command[1:] == ["version"]:
+            return subprocess.CompletedProcess(command, 0, stdout=tool_pin.version + "\n", stderr="")
+        if command[1] == "convertalis":
+            Path(command[5]).write_text("")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = run_phrogs(
+        _orf_artifacts(tmp_path),
+        manifest_section=manifest,
+        tool_pin=tool_pin,
+        host_domain=HostDomain.BACTERIA,
+        work_dir=tmp_path / "scan",
+        runner=runner,
+    )
+
+    assert result.class_result.state is SafetyState.PASS
 
 
 @pytest.mark.parametrize(
@@ -2011,7 +2208,8 @@ def test_phrogs_runner_fails_closed_for_execution_or_malformed_output(tmp_path, 
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         if failure == "nonzero":
             raise subprocess.CalledProcessError(2, command, stderr="failed")
-        Path(command[4]).write_bytes(b"\xff\xfe")
+        if command[1] == "convertalis":
+            Path(command[5]).write_bytes(b"\xff\xfe")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     result = run_phrogs(

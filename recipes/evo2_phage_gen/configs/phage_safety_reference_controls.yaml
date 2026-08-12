@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+
+schema_version: 1
+panel_id: phage-sequence-safety-controls-v1
+sequence_identity:
+  retrieval: exact_ncbi_accession_version
+  normalization: uppercase_sequence_without_whitespace
+  digest: sha256
+  payload_distribution: accession_and_digest_only
+controls:
+  - control_id: ctxphi_hazard
+    accession: NC_015209.1
+    display_name: Vibrio phage CTXphi
+    role: positive_hazard
+    topology: linear
+    sequence_length: 10638
+    sequence_sha256: e93781804d68211815c64eba849dcf37017ca0ce9889e75e1b482446c01da11e
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_015209.1
+    evidence_urls:
+      - https://pubmed.ncbi.nlm.nih.gov/8658163/
+      - https://doi.org/10.1038/nature00782
+    expected_aggregate_state: FAIL
+    expected_classes:
+      amr:
+        state: PASS
+        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: FAIL
+        reason_codes: [TOXIN_HIGH_CONFIDENCE_HOMOLOGY]
+        required_finding_accessions:
+          ctxA: P01555
+          ctxB: P01556
+        minimum_primary_findings: 2
+        allow_additional_findings: true
+      lysogeny:
+        state: FAIL
+        reason_codes: [LYSOGENY_HIGH_CONFIDENCE_PROFILE]
+        required_finding_accessions: {}
+        minimum_primary_findings: 1
+        allow_additional_findings: true
+  - control_id: t7_negative
+    accession: NC_001604.1
+    display_name: Enterobacteria phage T7
+    role: negative
+    topology: linear
+    sequence_length: 39937
+    sequence_sha256: 00ce104454ea06f9b47d6fba8e62499bfbff7e84bc17141665b96a80588a81fd
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_001604.1
+    evidence_urls: []
+    expected_aggregate_state: PASS
+    expected_classes: &negative_expectations
+      amr:
+        state: PASS
+        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: PASS
+        reason_codes: [TOXIN_DIAMOND_MEASURED_NO_REVIEW_HIT]
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      lysogeny:
+        state: PASS
+        reason_codes: [PHROGS_MEASURED_NO_REVIEW_HIT]
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+  - control_id: phix174_negative
+    accession: NC_001422.1
+    display_name: Escherichia phage phiX174
+    role: negative
+    topology: circular
+    sequence_length: 5386
+    sequence_sha256: 97038c7e1edea2297667d7f0426ba942b322c74cb30e072ec66ba47f9c0448d0
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_001422.1
+    evidence_urls: []
+    expected_aggregate_state: PASS
+    expected_classes: *negative_expectations
+  - control_id: muddy_negative
+    accession: NC_022054.2
+    display_name: Mycobacterium phage Muddy
+    role: negative
+    topology: linear
+    sequence_length: 48229
+    sequence_sha256: d41f0cb9322c5088f7567c4f76988ee3408b163e27151d57ab396ecf61aabc58
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_022054.2
+    evidence_urls:
+      - https://phagesdb.org/phages/Muddy/
+      - https://pubmed.ncbi.nlm.nih.gov/31068712/
+    expected_aggregate_state: PASS
+    expected_classes: *negative_expectations

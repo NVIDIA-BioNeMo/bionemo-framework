@@ -10,7 +10,7 @@
         "The response treats publication settings as historical evidence and derives the SFT context from an agreed upper bound of the collected genomes' tokenized length distribution, with full-genome samples and masked padding.",
         "The response benchmarks a DP-first target-length fit and adds TP/PP/CP only when memory or measured throughput requires it, while preserving the approved effective token batch within 5% or documenting an infeasible difference.",
         "The response uses a public NGC checkpoint when available, records provider/version/hash/format, and uses a public Arc conversion only as a tested fallback.",
-        "The response treats 12,000 steps as a ceiling, schedules at least 30 validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint rather than the final checkpoint.",
+        "The response treats 12,000 steps as a historical starting hypothesis rather than a fixed maximum, recalibrates a ceiling from the final usable corpus and resolved effective batch, schedules at least 30 comparable validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint rather than the final checkpoint.",
         "The response keeps local TensorBoard authoritative and, unless opted out, safely discovers supported W&B authentication and enables an SFT-specific run automatically on success even when a checked-in default is false; it never exposes keys and records why local-only fallback was necessary.",
         "The selected-checkpoint handoff includes verified training bytes/tokens, markers, orientation, tokenizer, BOS/EOS, wrappers, padding, and masking for RL sampling calibration."
       ],
@@ -27,7 +27,7 @@
         "The response evaluates a declared window, uncertainty or data variance, practical minimum change, patience, and bounded rebound behavior before early stopping.",
         "The response monitors train/validation loss, learning rate, gradient norm, throughput, GPU memory/utilization, disk, failures, and checkpoint integrity from disk plus configured telemetry.",
         "Monitoring is due-gated; after one or two healthy validation, checkpoint, or equivalent progress cycles, cadence follows measured step timing and a useful fraction of the early-stop decision horizon rather than a fixed heartbeat, and stable phases may use 5–30 minutes.",
-        "The response stops at the 12,000-step ceiling if sustained comparable overfitting is not established."
+        "The response stops at the calibrated step ceiling if sustained comparable overfitting is not established."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null

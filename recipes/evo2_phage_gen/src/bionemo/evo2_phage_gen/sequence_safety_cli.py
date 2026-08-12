@@ -30,6 +30,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -302,7 +303,7 @@ def load_safety_asset_manifest(
         name="safety asset manifest top-level",
         keys=frozenset({"schema_version", "recipe", "amrfinder_plus", "toxin_reference", "phrogs_v4"}),
     )
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 2:
         raise CLIValidationError("safety asset manifest has an unsupported schema version")
     recipe = _strict_payload(
         manifest["recipe"],
@@ -479,24 +480,33 @@ def scan_records(
     scanner,
     host_domain: HostDomain,
     strict_lysis: bool = False,
+    max_workers: int = 1,
 ) -> BatchSafetyResult:
-    """Run one isolated adapter bundle per record and retain the input order."""
-    scanned: list[ScannedRecord] = []
-    for input_index, record in enumerate(records):
+    """Run isolated record bundles with bounded concurrency and retain input order."""
+    if type(max_workers) is not int or max_workers < 1:
+        raise CLIValidationError("record workers must be a positive integer")
+
+    def scan_one(indexed_record: tuple[int, FastaRecord]) -> ScannedRecord:
+        input_index, record = indexed_record
         adapters = dict(scanner(record, input_index))
         result = aggregate_adapter_results(
             adapters,
             host_domain=host_domain,
             strict_lysis=strict_lysis,
         )
-        scanned.append(
-            ScannedRecord(
-                input_index=input_index,
-                sequence_id=record.sequence_id,
-                result=result,
-                adapters=adapters,
-            )
+        return ScannedRecord(
+            input_index=input_index,
+            sequence_id=record.sequence_id,
+            result=result,
+            adapters=adapters,
         )
+
+    indexed_records = tuple(enumerate(records))
+    if max_workers == 1:
+        scanned = [scan_one(indexed_record) for indexed_record in indexed_records]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="phage-safety") as executor:
+            scanned = list(executor.map(scan_one, indexed_records))
     states = {record.result.state for record in scanned}
     if SafetyState.FAIL in states:
         state = SafetyState.FAIL
@@ -505,6 +515,38 @@ def scan_records(
     else:
         state = SafetyState.PASS
     return BatchSafetyResult(state=state, records=tuple(scanned))
+
+
+def _available_cpu_slots() -> int:
+    """Return the scheduler/container CPU affinity when available."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def _resolve_record_workers(
+    *,
+    requested: int,
+    record_count: int,
+    tool_threads: int,
+    cpu_slots: int,
+) -> int:
+    """Admit record workers only when their per-tool thread budget fits the CPU allocation."""
+    for name, value in (
+        ("requested record workers", requested),
+        ("record count", record_count),
+        ("tool threads", tool_threads),
+        ("CPU slots", cpu_slots),
+    ):
+        if type(value) is not int or value < 1:
+            raise CLIValidationError(f"{name} must be a positive integer")
+    resolved = min(requested, record_count)
+    if resolved * tool_threads > cpu_slots:
+        raise CLIValidationError(
+            f"record workers ({resolved}) x tool threads ({tool_threads}) exceed available CPU slots ({cpu_slots})"
+        )
+    return resolved
 
 
 def _orf_indeterminate_adapters(
@@ -2258,11 +2300,15 @@ def _validate_scan_manifest_mapping(
     applicability = _applicability(host_domain, strict_lysis=resolved["strict_lysis"])
     if resolved["applicability"] != applicability:
         raise CLIValidationError("class applicability drift")
-    runtime_parameters = _strict_payload(
-        strict["runtime_parameters"],
-        name="runtime_parameters",
-        keys=frozenset({"threads", "timeout_seconds", "circular", "minimum_fallback_amino_acids"}),
+    runtime_parameters = strict["runtime_parameters"]
+    if not isinstance(runtime_parameters, Mapping):
+        raise CLIValidationError("runtime_parameters must be a mapping")
+    legacy_runtime_keys = frozenset({"threads", "timeout_seconds", "circular", "minimum_fallback_amino_acids"})
+    parallel_runtime_keys = legacy_runtime_keys | frozenset(
+        {"record_workers", "maximum_concurrent_tool_threads", "available_cpu_slots"}
     )
+    if frozenset(runtime_parameters) not in {legacy_runtime_keys, parallel_runtime_keys}:
+        raise CLIValidationError("runtime_parameters keys do not match a supported schema")
     if type(runtime_parameters["threads"]) is not int or runtime_parameters["threads"] < 1:
         raise CLIValidationError("runtime threads must be a positive integer")
     if (
@@ -2277,6 +2323,17 @@ def _validate_scan_manifest_mapping(
         or runtime_parameters["minimum_fallback_amino_acids"] != 8
     ):
         raise CLIValidationError("runtime sequence geometry/fallback contract mismatch")
+    if "record_workers" in runtime_parameters:
+        if (
+            type(runtime_parameters["record_workers"]) is not int
+            or runtime_parameters["record_workers"] < 1
+            or type(runtime_parameters["maximum_concurrent_tool_threads"]) is not int
+            or runtime_parameters["maximum_concurrent_tool_threads"]
+            != runtime_parameters["record_workers"] * runtime_parameters["threads"]
+            or type(runtime_parameters["available_cpu_slots"]) is not int
+            or runtime_parameters["available_cpu_slots"] < runtime_parameters["maximum_concurrent_tool_threads"]
+        ):
+            raise CLIValidationError("runtime record-worker resource contract mismatch")
 
     tools = _strict_payload(
         strict["tools"],
@@ -2903,6 +2960,13 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
         input_fasta_path = Path(args.input_fasta).absolute()
         initial_input_sha256 = _sha256_regular_file(input_fasta_path, label="input FASTA")
         records = parse_fasta_records(input_fasta_path)
+        available_cpu_slots = _available_cpu_slots()
+        record_workers = _resolve_record_workers(
+            requested=args.record_workers,
+            record_count=len(records),
+            tool_threads=args.threads,
+            cpu_slots=available_cpu_slots,
+        )
         assets = runtime.asset_loader(Path(args.asset_manifest).absolute())
         diamond = runtime.tool_pin_loader(
             Path(args.diamond_tool_pin).absolute(),
@@ -2943,6 +3007,7 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
             scanner=scan_one,
             host_domain=host_domain,
             strict_lysis=args.strict_lysis,
+            max_workers=record_workers,
         )
         _fsync_owned_regular_files(work_root)
         serialized_records = [
@@ -3023,6 +3088,9 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
                 "timeout_seconds": args.timeout,
                 "circular": not args.linear,
                 "minimum_fallback_amino_acids": 8,
+                "record_workers": record_workers,
+                "maximum_concurrent_tool_threads": record_workers * args.threads,
+                "available_cpu_slots": available_cpu_slots,
             },
             "tools": {
                 "diamond": _tool_manifest_record(diamond),
@@ -3494,6 +3562,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--strict-lysis", action="store_true")
     scan.add_argument("--linear", action="store_true", help="treat every input genome as linear")
     scan.add_argument("--threads", type=int, default=1)
+    scan.add_argument(
+        "--record-workers",
+        type=int,
+        default=1,
+        help="concurrent records; workers x --threads must fit the available CPU allocation",
+    )
     scan.add_argument("--timeout", type=float, default=300.0)
     scan.set_defaults(handler=_run_scan)
 

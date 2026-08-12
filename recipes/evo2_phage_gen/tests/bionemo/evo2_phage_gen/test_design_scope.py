@@ -170,6 +170,25 @@ def test_only_confirmed_versioned_prokaryotic_host_evidence_is_eligible():
     assert evaluate_host_evidence(mixed).allowed
 
 
+@pytest.mark.parametrize(
+    "source",
+    ("RefSeq", "GenBank", "PhagesDB", "metagenomic collection", "model-generated candidate"),
+)
+def test_prokaryotic_host_evidence_is_source_neutral(source):
+    """Traceable origin labels must not act as a natural-origin attestation gate."""
+    evidence = HostEvidence(
+        source=source,
+        source_version="sequence-or-design-manifest-sha256",
+        replication_host_domains=frozenset({HostDomain.BACTERIA}),
+        confirmed=True,
+    )
+
+    decision = evaluate_host_evidence(evidence)
+
+    assert decision.allowed
+    assert decision.reason_codes == ("CONFIRMED_PROKARYOTIC_REPLICATION_HOST",)
+
+
 def test_eukaryotic_or_conflicting_host_evidence_is_not_eligible():
     """A confirmed eukaryotic host or conflict must not enter the design scope."""
     eukaryotic = HostEvidence(

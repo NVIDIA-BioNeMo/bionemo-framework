@@ -667,6 +667,59 @@ def test_scan_records_invokes_adapter_bundle_once_per_record_and_preserves_state
     assert batch.state is SafetyState.INDETERMINATE
 
 
+def test_scan_records_bounds_parallel_workers_and_preserves_input_order(tmp_path: Path):
+    import threading
+
+    from bionemo.evo2_phage_gen.sequence_safety_cli import parse_fasta_records, scan_records
+
+    fasta = tmp_path / "input.fna"
+    fasta.write_bytes(b"".join(f">record-{index}\nATGAAATAG\n".encode() for index in range(4)))
+    records = parse_fasta_records(fasta)
+    lock = threading.Lock()
+    two_workers_entered = threading.Event()
+    active = 0
+    maximum_active = 0
+    entered = 0
+
+    def scanner(record, _input_index):
+        nonlocal active, maximum_active, entered
+        with lock:
+            active += 1
+            entered += 1
+            maximum_active = max(maximum_active, active)
+            if entered == 2:
+                two_workers_entered.set()
+        assert two_workers_entered.wait(timeout=2.0)
+        try:
+            return {
+                "amr": _class_adapter("amr"),
+                "toxin": _class_adapter("toxin"),
+                "lysogeny": _class_adapter("lysogeny"),
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    batch = scan_records(
+        records,
+        scanner=scanner,
+        host_domain=HostDomain.BACTERIA,
+        max_workers=2,
+    )
+
+    assert maximum_active == 2
+    assert [record.sequence_id for record in batch.records] == [f"record-{index}" for index in range(4)]
+
+
+def test_record_worker_budget_rejects_nested_cpu_oversubscription():
+    from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, _resolve_record_workers
+
+    assert _resolve_record_workers(requested=4, record_count=20, tool_threads=4, cpu_slots=16) == 4
+    assert _resolve_record_workers(requested=4, record_count=2, tool_threads=4, cpu_slots=16) == 2
+    with pytest.raises(CLIValidationError, match="CPU slots"):
+        _resolve_record_workers(requested=5, record_count=20, tool_threads=4, cpu_slots=16)
+
+
 def test_serialized_record_materializes_every_adapter_attempt(tmp_path: Path):
     from bionemo.evo2_phage_gen.design_scope import HostEvidence
     from bionemo.evo2_phage_gen.sequence_safety_cli import (
@@ -891,10 +944,10 @@ def test_asset_manifest_wrapper_binds_recipe_digest_and_rejects_unknown_top_leve
     from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, load_safety_asset_manifest
 
     recipe = tmp_path / "phage_safety_assets.yaml"
-    recipe.write_text("schema_version: 1\n")
+    recipe.write_text("schema_version: 2\n")
     recipe_digest = hashlib.sha256(recipe.read_bytes()).hexdigest()
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "recipe": {"path": str(recipe), "sha256": recipe_digest},
         "amrfinder_plus": {},
         "toxin_reference": {},
@@ -913,11 +966,11 @@ def test_asset_manifest_wrapper_binds_recipe_digest_and_rejects_unknown_top_leve
     assert loaded.manifest_sha256 == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     assert validations == [(payload, True)]
 
-    recipe.write_text("schema_version: 2\n")
+    recipe.write_text("schema_version: 1\n")
     with pytest.raises(CLIValidationError, match="recipe digest drift"):
         load_safety_asset_manifest(manifest_path, validator=validator)
 
-    recipe.write_text("schema_version: 1\n")
+    recipe.write_text("schema_version: 2\n")
     payload["unexpected"] = {}
     manifest_path.write_text(json.dumps(payload))
     with pytest.raises(CLIValidationError, match="top-level keys"):
@@ -928,9 +981,9 @@ def test_safety_asset_loader_rejects_manifest_mutation_between_parse_and_return(
     from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, load_safety_asset_manifest
 
     recipe = tmp_path / "phage_safety_assets.yaml"
-    recipe.write_text("schema_version: 1\n")
+    recipe.write_text("schema_version: 2\n")
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "recipe": {"path": str(recipe), "sha256": hashlib.sha256(recipe.read_bytes()).hexdigest()},
         "amrfinder_plus": {},
         "toxin_reference": {},
@@ -956,7 +1009,7 @@ def test_cli_identity_rejects_an_arbitrary_matching_path_and_digest():
         _validate_cli_identity,
     )
 
-    arbitrary = Path("recipes/evo2_phage_gen/pyproject.toml").resolve()
+    arbitrary = Path(__file__).parents[3] / "pyproject.toml"
     with pytest.raises(CLIValidationError, match="CLI source path mismatch"):
         _validate_cli_identity(
             {

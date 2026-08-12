@@ -27,7 +27,19 @@ effective_tokens = global_sequences × sequence_length
 
 Require integer-compatible topology and compare effective tokens with the value approved after context selection. Aim within 5%; if memory or sequence length prevents that, report the achieved value and consequence rather than quietly changing it.
 
-With a 12,000-step ceiling, validation and checkpoint intervals no larger than 400 steps provide at least 30 opportunities. Align saves with validation when possible. Validate only from the explicit validation split; keep test sealed until final evaluation.
+After the final usable split and batch preflight, compute the training-budget proposal with loss-bearing rather than padded volume:
+
+```text
+planned_steps = ceil(
+    target_effective_exposures
+    × usable non-padding token mass
+    / effective non-padding tokens per optimizer step
+)
+```
+
+Define target effective exposures from the approved optimization evidence and objective, then record the inputs, arithmetic, and uncertainty. Treat 12,000 steps as a historical starting hypothesis, not a fixed maximum. A materially larger usable corpus—for example about 33,000 rather than 10,000 genomes—may justify a ceiling above 12,000 when preserving the intended exposure range; heavy redundancy or a smaller corpus may justify less. Recompute if the resolved batch or data mix changes.
+
+Choose validation and checkpoint intervals that provide at least 30 opportunities by the calibrated ceiling and let the six-event patience rule act within a useful exposure-scale decision horizon. Align saves with validation when possible. Validate only from the explicit validation split; keep test sealed until final evaluation.
 
 ## Ordered action trace
 
@@ -54,7 +66,7 @@ Estimate ordinary validation noise robustly after excluding isolated spikes/drop
 3. the latest four comparable losses are worse and their median is at least 1% above the best beyond measured noise; and
 4. the robust training-loss trend over matched recent windows still decreases.
 
-A transient rise or plateau is insufficient. If the latest comparable events show a meaningful rebound—by default recovering at least half of the best-to-trough loss increase and exceeding noise—allow one predeclared confirmation extension of at most two events, never beyond 12,000 steps. A genuine new best resets patience. Always preserve and select the lowest comparable validation-loss checkpoint.
+A transient rise or plateau is insufficient. If the latest comparable events show a meaningful rebound—by default recovering at least half of the best-to-trough loss increase and exceeding noise—allow one predeclared confirmation extension of at most two events, never beyond the calibrated ceiling. A genuine new best resets patience. Always preserve and select the lowest comparable validation-loss checkpoint.
 
 Immediate hazards terminate safely: NaN/Inf, OOM, invalid data, corrupt/incomplete checkpoint, or disk below the safety floor. A changed topology, learning rate, or batch config creates a new attempt rather than silently changing provenance.
 

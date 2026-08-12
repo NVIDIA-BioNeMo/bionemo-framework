@@ -35,6 +35,14 @@ eukaryotic cells; treat it as prohibited rather than a tunable penalty. This is 
 non-replicative eukaryotic entry or host-range work. Route that work through case-specific intended-use,
 evidence, and safety review before planning it.
 
+Keep sequence eligibility source-neutral. Provenance establishes identity and traceability; it is not
+a natural-origin attestation. RefSeq, GenBank, phage databases, metagenomic collections, local
+experiments, and model-generated candidates may all proceed when the applicable sequence, host, and
+safety evidence is present. Generated candidates inherit the approved target replication-host evidence
+from `DESIGN_SPEC.yaml`; never fail them merely because they are generated. Missing evidence may remain
+indeterminate for a decision that actually needs it, but an origin label alone is neither a pass nor a
+failure.
+
 ## Analyze host range across the infection lifecycle
 
 For an adapted host-range goal, create a coverage table rather than equating host range with

@@ -18,6 +18,12 @@ Create `genomes/runs/<attempt>/` under the project result root and read the proj
 3. Discover specialist NCBI, bioRxiv, repository, or life-science skills before generic web/API use. Optional examples are OpenAI's [Life Science Research](https://github.com/openai/plugins/tree/main/plugins/life-science-research) plugin in Codex and Anthropic's [bio-research plugin](https://github.com/anthropics/knowledge-work-plugins) in Claude. Neither is required but these should help greatly so have the user install them or try to install them yourself or at least report their absence; if none fit, warn once and continue with public APIs and bounded search.
 4. Freeze eligibility rules before downloading: taxon and host scope, molecule/completeness, length/ambiguity limits, included record status, exclusions, version policy, and license.
 
+Collection is source-neutral: do not require a natural-origin attestation or categorically reject a
+database, metagenomic, local, or generated sequence because of its origin. Preserve source and host
+metadata separately. Missing host metadata is recorded and stratified—not invented—and is exclusionary
+only when the approved corpus definition actually requires it; conflicting host claims remain
+quarantined.
+
 Use the bounded lookup in `references/collection-contract.md`. Identify through metadata and a capped prefix before transferring large payloads. Never substitute an HTML page, installer, analysis script, or similarly named record for the claimed FASTA.
 
 If the available tools cannot range-fetch and decompress a candidate, emit the exact bounded validation command, mark the biological payload unverified, and stop before download or use. Metadata, MIME, filename, archive size, and a checksum never substitute for content validation.

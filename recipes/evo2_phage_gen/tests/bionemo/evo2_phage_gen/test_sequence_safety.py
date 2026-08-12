@@ -50,7 +50,7 @@ def test_required_indeterminate_dominates_when_no_required_failure_exists():
     assert result.state is SafetyState.INDETERMINATE
 
 
-def test_only_all_required_passes_yield_pass():
+def test_all_required_passes_yield_pass():
     """Optional failures cannot override an all-required-pass outcome."""
     result = GenomeSafetyResult.from_class_results(
         (

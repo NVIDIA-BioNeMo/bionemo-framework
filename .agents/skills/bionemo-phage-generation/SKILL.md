@@ -47,6 +47,10 @@ opts out.
 Verify the implementation defaults to dependency-aware, resource-admitted execution, continues
 independent safe work during monitoring, and uses bounded autonomy after plan approval while
 using durable decision reporting for material in-envelope decisions.
+
+Verify safety assets resolve through reviewed release descriptors and authenticated resumable
+caches, and that the exact deployed filters pass their versioned hazard/negative control panel
+before candidate PASS decisions.
 ```
 
 Use the recorded absolute recipe root, never this portable skill's installation path.

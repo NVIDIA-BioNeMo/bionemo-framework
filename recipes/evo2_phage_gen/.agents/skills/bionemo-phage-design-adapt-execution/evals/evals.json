@@ -127,7 +127,8 @@
         "It honors the user's Docker preference when the preflight succeeds; otherwise it records the bounded failure and selects a verified project-owned host uv environment or leaves the runtime unresolved without silently changing the scientific workload.",
         "It avoids nested Docker merely because a CLI is visible inside a devcontainer; nesting requires verified daemon reachability, path mapping, GPU propagation, and a user request or clear compatibility benefit.",
         "The selected boundary runs the recipe's .ci_build.sh before sourcing .ci_test_env.sh from the recipe working directory and pins the source, lock, base image, and final environment/image identity.",
-        "For Docker, the response records build context, base/final image identities, UID/GID, GPU smoke, network policy, explicit code/data/cache/result mounts, and credential-safe injection without baking secrets into the image or command line.",
+        "For Docker, the response records build context, base/final image identities, UID/GID, GPU smoke, network policy, and explicit code/data/cache/result mounts. Requested AWS sync may use a least-privilege read-only ~/.aws mount and W&B may use a verified read-only .netrc mount into the resolved container user home; neither is used on a shared or untrusted runner.",
+        "If a supported integration requires environment passthrough, the response passes only the variable name, such as --env WANDB_API_KEY, never NAME=value, shell tracing, or environment dumps; credentials are never baked, copied, or logged, and their absence disables only the optional integration rather than the scientific run.",
         "The response persists the container or host-job stable handle plus status, logs, attach, stop, checkpoint, and recovery commands so monitoring survives the current agent session."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",

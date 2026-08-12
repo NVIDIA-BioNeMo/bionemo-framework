@@ -87,6 +87,7 @@ PHROGS_HIGH_CONFIDENCE_TERMS = (
     "site-specific recombinase",
     "lysogeny repressor",
 )
+PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS = ("anti-repressor", "ci-like repressor")
 PHROGS_REVIEW_TERMS = ("recombinase", "repressor", "lysogeny", "integration", "excision")
 PHROGS_PROFILE_DATABASE_NAME = "phrogs_profile_db"
 PHROGS_PROFILE_RELEASE_MARKER = "VERSION_1_8_0"
@@ -137,6 +138,114 @@ class PreparedAsset:
     detail: str
 
 
+@dataclass(frozen=True)
+class PhrogsSafetyRelease:
+    """Reviewed identity and reconciliation contract for one supported Pharokka/PHROGs release."""
+
+    annotation_source_urls: tuple[str, ...]
+    annotation_archive_filename: str
+    annotation_sha256: str
+    profile_source_urls: tuple[str, ...]
+    profile_archive_filename: str
+    archive_published_md5: str
+    archive_published_size: int
+    release: str
+    dataset_release: str
+    doi: str
+    license: str
+    citation: str
+    minimum_mmseqs_version: str
+    built_with_mmseqs_version: str
+    database_name: str
+    release_marker: str
+    release_marker_empty_sentinel_allowed: bool
+    generated_release_marker_content: bytes
+    source_lookup_counts: tuple[int, int, int]
+    searchable_lookup_counts: tuple[int, int, int]
+    allowed_profile_exclusions: frozenset[str]
+
+
+def _release_urls(value: object, *, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"PHROGs safety recipe {field} must be a nonempty URL list")
+    return tuple(value)
+
+
+def _release_lookup_counts(value: object, *, field: str) -> tuple[int, int, int]:
+    if not isinstance(value, dict) or set(value) != {"total", "high_confidence", "review"}:
+        raise ValueError(f"PHROGs safety recipe {field} must contain total/high_confidence/review")
+    counts = (value["total"], value["high_confidence"], value["review"])
+    if any(type(count) is not int or count < 0 for count in counts) or counts[0] != counts[1] + counts[2]:
+        raise ValueError(f"PHROGs safety recipe {field} has inconsistent counts")
+    return counts
+
+
+def load_phrogs_safety_release(recipe_path: Path = DEFAULT_SAFETY_RECIPE_PATH) -> PhrogsSafetyRelease:
+    """Load one reviewed release contract; callers never follow an implicit upstream ``latest``."""
+    recipe_path = Path(recipe_path)
+    recipe = yaml.safe_load(recipe_path.read_text())
+    if not isinstance(recipe, dict) or recipe.get("schema_version") != 2:
+        raise ValueError(f"PHROGs safety recipe must use schema_version 2: {recipe_path}")
+    try:
+        phrogs = recipe["phrogs_v4"]
+        profile = phrogs["profile_database"]
+        reconciliation = phrogs["lookup_reconciliation"]
+        source_counts = _release_lookup_counts(reconciliation["source_counts"], field="source_counts")
+        searchable_counts = _release_lookup_counts(reconciliation["searchable_counts"], field="searchable_counts")
+        exclusions = frozenset(reconciliation["allowed_profile_exclusions"])
+        release = PhrogsSafetyRelease(
+            annotation_source_urls=_release_urls(phrogs["annotation_urls"], field="annotation_urls"),
+            annotation_archive_filename=str(phrogs["annotation_archive_filename"]),
+            annotation_sha256=str(phrogs["annotation_sha256"]).lower(),
+            profile_source_urls=_release_urls(profile["source_urls"], field="profile_database.source_urls"),
+            profile_archive_filename=str(profile["archive_filename"]),
+            archive_published_md5=str(profile["archive_published_md5"]).lower(),
+            archive_published_size=int(profile["archive_published_size"]),
+            release=str(profile["release"]),
+            dataset_release=str(profile["dataset_release"]),
+            doi=str(profile["doi"]),
+            license=str(profile["license"]),
+            citation=str(profile["citation"]),
+            minimum_mmseqs_version=str(profile["minimum_mmseqs_version"]),
+            built_with_mmseqs_version=str(profile["built_with_mmseqs_version"]),
+            database_name=str(profile["database_name"]),
+            release_marker=str(profile["release_marker"]),
+            release_marker_empty_sentinel_allowed=profile["release_marker_empty_sentinel_allowed"] is True,
+            generated_release_marker_content=str(profile["generated_release_marker_content"]).encode(),
+            source_lookup_counts=source_counts,
+            searchable_lookup_counts=searchable_counts,
+            allowed_profile_exclusions=exclusions,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"PHROGs safety recipe is incomplete or malformed: {recipe_path}") from error
+    if (
+        len(release.annotation_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in release.annotation_sha256)
+        or len(release.archive_published_md5) != 32
+        or any(character not in "0123456789abcdef" for character in release.archive_published_md5)
+        or release.archive_published_size <= 0
+    ):
+        raise ValueError(f"PHROGs safety recipe contains an invalid digest or size: {recipe_path}")
+    for name, value in (
+        ("annotation_archive_filename", release.annotation_archive_filename),
+        ("profile_archive_filename", release.profile_archive_filename),
+        ("database_name", release.database_name),
+        ("release_marker", release.release_marker),
+    ):
+        if not value or Path(value).name != value:
+            raise ValueError(f"PHROGs safety recipe {name} must be one safe basename")
+    if not release.generated_release_marker_content or not release.generated_release_marker_content.endswith(b"\n"):
+        raise ValueError("PHROGs generated release marker must be nonempty canonical text ending in a newline")
+    if any(not _is_phrogs_profile_identifier(identifier) for identifier in release.allowed_profile_exclusions):
+        raise ValueError("PHROGs allowed profile exclusions must be canonical phrog_N identifiers")
+    if (
+        len(release.allowed_profile_exclusions)
+        != release.source_lookup_counts[0] - release.searchable_lookup_counts[0]
+    ):
+        raise ValueError("PHROGs lookup counts do not reconcile with the explicit profile exclusions")
+    return release
+
+
 _VERIFIED_PHROGS_PROFILE_AUTHORITY = object()
 
 
@@ -152,6 +261,8 @@ class _VerifiedPhrogsProfile:
     tree_sha256: str
     profile_id_inventory: dict[str, int | str]
     _authority: object
+    release_marker_origin: str = "archive_supplied_canonical_marker"
+    release: PhrogsSafetyRelease | None = None
 
 
 def _sha256_file(path: Path) -> str:
@@ -225,23 +336,55 @@ def _download_with_headers(
     overwrite: bool = False,
     insecure: bool = False,
     expected_sha256: str | None = None,
+    expected_size: int | None = None,
+    expected_md5: str | None = None,
+    resume: bool = False,
 ) -> tuple[Path, dict[str, str]]:
-    """Download a file and retain response headers needed for provenance."""
+    """Download a file, optionally resuming a partial, and verify before promotion."""
     output_path = Path(output_path)
     if output_path.exists() and not overwrite:
         _verify_sha256(output_path, expected_sha256)
+        if expected_size is not None:
+            _verify_file_size(output_path, expected_size)
+        if expected_md5 is not None:
+            _verify_md5(output_path, expected_md5)
         return output_path, {}
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    context = ssl._create_unverified_context() if insecure else None
-    with urllib.request.urlopen(url, context=context) as response, tmp_path.open("wb") as output:
-        shutil.copyfileobj(response, output)
-        headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
-    try:
-        _verify_sha256(tmp_path, expected_sha256)
-    except ValueError:
+    if overwrite:
         tmp_path.unlink(missing_ok=True)
+    resume_from = tmp_path.stat().st_size if resume and tmp_path.is_file() else 0
+    if expected_size is not None and resume_from > expected_size:
+        tmp_path.unlink()
+        resume_from = 0
+    context = ssl._create_unverified_context() if insecure else None
+    headers: dict[str, str] = {}
+    if not (expected_size is not None and resume_from == expected_size):
+        request: str | urllib.request.Request = url
+        if resume_from:
+            request = urllib.request.Request(url, headers={"Range": f"bytes={resume_from}-"})
+        with urllib.request.urlopen(request, context=context) as response:
+            mode = "wb"
+            if resume_from:
+                status = getattr(response, "status", None)
+                content_range = str(response.headers.get("Content-Range", ""))
+                if status == 206 and content_range.startswith(f"bytes {resume_from}-"):
+                    mode = "ab"
+                elif status not in {None, 200}:
+                    raise OSError(f"server rejected byte-range resume for {url}: HTTP {status}")
+            with tmp_path.open(mode) as output:
+                shutil.copyfileobj(response, output)
+            headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+    try:
+        if expected_size is not None:
+            _verify_file_size(tmp_path, expected_size)
+        if expected_md5 is not None:
+            _verify_md5(tmp_path, expected_md5)
+        _verify_sha256(tmp_path, expected_sha256)
+    except (OSError, ValueError):
+        if not resume or expected_size is None or not tmp_path.is_file() or tmp_path.stat().st_size >= expected_size:
+            tmp_path.unlink(missing_ok=True)
         raise
     tmp_path.replace(output_path)
     return output_path, headers
@@ -254,6 +397,9 @@ def _download(
     overwrite: bool = False,
     insecure: bool = False,
     expected_sha256: str | None = None,
+    expected_size: int | None = None,
+    expected_md5: str | None = None,
+    resume: bool = False,
 ) -> Path:
     """Download ``url`` to ``output_path`` unless it already exists."""
     downloaded_path, _ = _download_with_headers(
@@ -262,6 +408,9 @@ def _download(
         overwrite=overwrite,
         insecure=insecure,
         expected_sha256=expected_sha256,
+        expected_size=expected_size,
+        expected_md5=expected_md5,
+        resume=resume,
     )
     return downloaded_path
 
@@ -333,7 +482,7 @@ def prepare_dustmasker(
     overwrite: bool = False,
     insecure_downloads: bool = False,
 ) -> PreparedAsset:
-    """Download and expose the BLAST+ tools needed by QC and AMRFinder updates."""
+    """Download and expose the BLAST+ tools needed by QC and AMRFinder."""
     external_dir = Path(external_dir)
     archive_path = _download(
         blast_plus_url,
@@ -344,9 +493,13 @@ def prepare_dustmasker(
     extracted_dir = _extract_tar(archive_path, external_dir / "tools" / "ncbi-blast-plus", overwrite=overwrite)
     dustmasker_bin = _find_extracted_executable(extracted_dir, "dustmasker")
     makeblastdb_bin = _find_extracted_executable(extracted_dir, "makeblastdb")
+    blastp_bin = _find_extracted_executable(extracted_dir, "blastp")
+    blastx_bin = _find_extracted_executable(extracted_dir, "blastx")
     target_bin_dir = Path(bin_dir) if bin_dir is not None else external_dir / "bin"
     link_path = _link_executable(dustmasker_bin, target_bin_dir / "dustmasker")
     _link_executable(makeblastdb_bin, target_bin_dir / "makeblastdb")
+    _link_executable(blastp_bin, target_bin_dir / "blastp")
+    _link_executable(blastx_bin, target_bin_dir / "blastx")
     return PreparedAsset("dustmasker", link_path, f"downloaded BLAST+ tools from {blast_plus_url}")
 
 
@@ -461,10 +614,10 @@ def _find_extracted_executable(extracted_dir: Path, executable_name: str) -> Pat
 def _read_safety_manifest(manifest_path: Path) -> dict:
     """Read a mutable safety asset manifest, rejecting malformed top-level data."""
     if not manifest_path.exists():
-        return {"schema_version": 1}
+        return {"schema_version": 2}
     manifest = yaml.safe_load(manifest_path.read_text())
     if manifest is None:
-        return {"schema_version": 1}
+        return {"schema_version": 2}
     if not isinstance(manifest, dict):
         raise ValueError(f"Safety manifest must be a mapping: {manifest_path}")
     return manifest
@@ -474,7 +627,7 @@ def _set_safety_manifest_recipe(manifest: dict) -> None:
     """Attach the tracked recipe identity to an in-memory safety manifest."""
     if not DEFAULT_SAFETY_RECIPE_PATH.exists():
         raise FileNotFoundError(f"Safety asset recipe does not exist: {DEFAULT_SAFETY_RECIPE_PATH}")
-    manifest["schema_version"] = 1
+    manifest["schema_version"] = 2
     manifest["recipe"] = {
         "path": str(DEFAULT_SAFETY_RECIPE_PATH),
         "sha256": _sha256_file(DEFAULT_SAFETY_RECIPE_PATH),
@@ -573,6 +726,24 @@ def _resolve_amrfinder_latest_database(requested_database_dir: Path) -> Path:
     return pinned_database_dir
 
 
+def _parse_amrfinder_database_version(output: str) -> str:
+    """Parse AMRFinder's historical scalar or current multi-line database-version output."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("AMRFinder reported no nonempty database version")
+    if len(lines) == 1 and ":" not in lines[0]:
+        return lines[0]
+    version_fields = [line for line in lines if line.startswith("Database version:")]
+    if not version_fields:
+        raise RuntimeError("AMRFinder database-version status is missing a Database version field")
+    if len(version_fields) > 1:
+        raise RuntimeError("AMRFinder database-version status has multiple Database version fields")
+    database_version = version_fields[0].partition(":")[2].strip()
+    if not database_version:
+        raise RuntimeError("AMRFinder database-version status has an empty Database version field")
+    return database_version
+
+
 def prepare_amrfinder_plus(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
@@ -620,13 +791,25 @@ def prepare_amrfinder_plus(
     )
     source_prerequisite_bin_dir = Path(prerequisite_bin_dir) if prerequisite_bin_dir is not None else target_bin_dir
     makeblastdb_source_path = source_prerequisite_bin_dir / "makeblastdb"
+    blastp_source_path = source_prerequisite_bin_dir / "blastp"
+    blastx_source_path = source_prerequisite_bin_dir / "blastx"
     hmmpress_source_path = source_prerequisite_bin_dir / "hmmpress"
+    hmmsearch_source_path = source_prerequisite_bin_dir / "hmmsearch"
     if not makeblastdb_source_path.exists():
         raise FileNotFoundError(f"AMRFinder update requires makeblastdb in {source_prerequisite_bin_dir}")
+    if not blastp_source_path.exists():
+        raise FileNotFoundError(f"AMRFinder scanning requires blastp in {source_prerequisite_bin_dir}")
+    if not blastx_source_path.exists():
+        raise FileNotFoundError(f"AMRFinder combined scanning requires blastx in {source_prerequisite_bin_dir}")
     if not hmmpress_source_path.exists():
         raise FileNotFoundError(f"AMRFinder update requires hmmpress in {source_prerequisite_bin_dir}")
+    if not hmmsearch_source_path.exists():
+        raise FileNotFoundError(f"AMRFinder scanning requires hmmsearch in {source_prerequisite_bin_dir}")
     makeblastdb_path = _copy_executable(makeblastdb_source_path, target_bin_dir / "makeblastdb")
+    blastp_path = _copy_executable(blastp_source_path, target_bin_dir / "blastp")
+    blastx_path = _copy_executable(blastx_source_path, target_bin_dir / "blastx")
     hmmpress_path = _copy_executable(hmmpress_source_path, target_bin_dir / "hmmpress")
+    hmmsearch_path = _copy_executable(hmmsearch_source_path, target_bin_dir / "hmmsearch")
     blast_bin_dir = makeblastdb_path.parent.resolve()
     hmmer_bin_dir = hmmpress_path.parent.resolve()
 
@@ -663,14 +846,13 @@ def prepare_amrfinder_plus(
         raise RuntimeError(
             f"Expected AMRFinderPlus {DEFAULT_AMRFINDER_RELEASE}, but the prepared binary reports: {amrfinder_version}"
         )
-    database_version = subprocess.run(
+    database_version_output = subprocess.run(
         [str(amrfinder_path), "--database", str(pinned_database_dir), "--database_version"],
         check=True,
         capture_output=True,
         text=True,
-    ).stdout.strip()
-    if not database_version:
-        raise RuntimeError("AMRFinder reported no nonempty database version")
+    ).stdout
+    database_version = _parse_amrfinder_database_version(database_version_output)
     if database_version != pinned_database_dir.name:
         raise RuntimeError(
             "AMRFinder reported database version does not match its resolved version directory: "
@@ -693,8 +875,14 @@ def prepare_amrfinder_plus(
             "amrfinder_update_sha256": _sha256_file(amrfinder_update_path),
             "makeblastdb_path": str(makeblastdb_path.resolve()),
             "makeblastdb_sha256": _sha256_file(makeblastdb_path),
+            "blastp_path": str(blastp_path.resolve()),
+            "blastp_sha256": _sha256_file(blastp_path),
+            "blastx_path": str(blastx_path.resolve()),
+            "blastx_sha256": _sha256_file(blastx_path),
             "hmmpress_path": str(hmmpress_path.resolve()),
             "hmmpress_sha256": _sha256_file(hmmpress_path),
+            "hmmsearch_path": str(hmmsearch_path.resolve()),
+            "hmmsearch_sha256": _sha256_file(hmmsearch_path),
             "amrfinder_version": amrfinder_version,
             "database_path": str(pinned_database_dir),
             "database_version": database_version,
@@ -953,13 +1141,18 @@ def _complete_phrogs_sequence_database(sequence_database: Path) -> tuple[str, li
     return digest.hexdigest(), sidecar_paths
 
 
-def _complete_phrogs_profile_database(profile_database: Path) -> tuple[str, list[Path]]:
+def _complete_phrogs_profile_database(
+    profile_database: Path,
+    *,
+    require_release_marker: bool = True,
+    _release: PhrogsSafetyRelease | None = None,
+) -> tuple[str, list[Path]]:
     """Validate and digest the pinned Pharokka PHROGs MMseqs profile database."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     profile_database = Path(profile_database)
-    if profile_database.name != PHROGS_PROFILE_DATABASE_NAME:
+    if profile_database.name != release.database_name:
         raise FileNotFoundError(
-            "PHROGs safety profile database must use the official "
-            f"{PHROGS_PROFILE_DATABASE_NAME} prefix: {profile_database}"
+            f"PHROGs safety profile database must use the official {release.database_name} prefix: {profile_database}"
         )
     if not profile_database.is_file():
         raise FileNotFoundError(f"PHROGs safety profile database is required: {profile_database}")
@@ -972,7 +1165,6 @@ def _complete_phrogs_profile_database(profile_database: Path) -> tuple[str, list
         Path(f"{profile_database}_h.dbtype"),
         Path(f"{profile_database}.lookup"),
         Path(f"{profile_database}.source"),
-        profile_database.parent / PHROGS_PROFILE_RELEASE_MARKER,
     )
     missing_paths = [path for path in required_paths if not path.is_file() or path.stat().st_size == 0]
     if missing_paths:
@@ -980,6 +1172,19 @@ def _complete_phrogs_profile_database(profile_database: Path) -> tuple[str, list
             "PHROGs safety profile database is not a complete MMseqs profile database; missing "
             + ", ".join(str(path) for path in missing_paths)
         )
+    release_marker = profile_database.parent / release.release_marker
+    if require_release_marker:
+        if release_marker.is_symlink() or not release_marker.is_file():
+            raise FileNotFoundError(
+                "PHROGs safety profile database is not a complete MMseqs profile database; "
+                f"release marker is missing or invalid: {release_marker}"
+            )
+        marker_content = release_marker.read_bytes()
+        allowed_marker_contents = {release.generated_release_marker_content}
+        if release.release_marker_empty_sentinel_allowed:
+            allowed_marker_contents.add(b"")
+        if marker_content not in allowed_marker_contents:
+            raise ValueError(f"PHROGs profile release marker has conflicting content: {release_marker}")
     sidecar_paths = sorted(
         path for path in profile_database.parent.glob(f"{profile_database.name}*") if path.is_file()
     )
@@ -999,6 +1204,17 @@ def _is_phrogs_profile_identifier(identifier: str) -> bool:
     prefix = "phrog_"
     suffix = identifier.removeprefix(prefix)
     return identifier.startswith(prefix) and suffix.isascii() and suffix.isdecimal() and not suffix.startswith("0")
+
+
+def _normalize_phrogs_annotation_identifier(identifier: str) -> str:
+    """Normalize only PHROGs' documented positive-decimal source alias to ``phrog_N``."""
+    if identifier != identifier.strip():
+        raise ValueError(f"PHROGs v4 table has a noncanonical PHROG identifier: {identifier!r}")
+    if _is_phrogs_profile_identifier(identifier):
+        return identifier
+    if identifier.isascii() and identifier.isdecimal() and not identifier.startswith("0"):
+        return f"phrog_{identifier}"
+    raise ValueError(f"PHROGs v4 table has a noncanonical PHROG identifier: {identifier!r}")
 
 
 def _phrogs_profile_ids(profile_database: Path) -> set[str]:
@@ -1047,30 +1263,80 @@ def _phrogs_profile_id_inventory(profile_database: Path) -> dict[str, int | str]
     return {"count": len(profile_ids), "sha256": digest.hexdigest()}
 
 
-def _find_phrogs_profile_database(profile_root: Path) -> Path:
+def _find_phrogs_profile_database(
+    profile_root: Path,
+    *,
+    require_release_marker: bool = True,
+    _release: PhrogsSafetyRelease | None = None,
+) -> Path:
     """Locate exactly one complete official PHROGs profile database below an extracted root."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     profile_root = Path(profile_root)
     if not profile_root.is_dir():
         raise FileNotFoundError(f"PHROGs profile database root is required: {profile_root}")
-    candidates = sorted(path for path in profile_root.rglob(PHROGS_PROFILE_DATABASE_NAME) if path.is_file())
+    candidates = sorted(path for path in profile_root.rglob(release.database_name) if path.is_file())
     if len(candidates) != 1:
         raise FileNotFoundError(
             "PHROGs profile database root must contain exactly one official "
-            f"{PHROGS_PROFILE_DATABASE_NAME} prefix: {profile_root}"
+            f"{release.database_name} prefix: {profile_root}"
         )
-    _complete_phrogs_profile_database(candidates[0])
+    _complete_phrogs_profile_database(
+        candidates[0],
+        require_release_marker=require_release_marker,
+        _release=release,
+    )
     return candidates[0]
 
 
-def _extract_verified_phrogs_safety_profile_archive(archive_path: Path, output_dir: Path) -> _VerifiedPhrogsProfile:
+def _ensure_authenticated_phrogs_release_marker(
+    profile_database: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
+) -> str:
+    """Validate an archive marker or materialize the canonical marker after archive authentication."""
+    release = _release if _release is not None else load_phrogs_safety_release()
+    release_marker = Path(profile_database).parent / release.release_marker
+    if release_marker.is_symlink():
+        raise ValueError(f"PHROGs profile release marker must not be a symlink: {release_marker}")
+    if release_marker.exists():
+        if not release_marker.is_file():
+            raise ValueError(f"PHROGs profile release marker must be a regular file: {release_marker}")
+        marker_content = release_marker.read_bytes()
+        if marker_content == b"" and release.release_marker_empty_sentinel_allowed:
+            return "archive_supplied_empty_sentinel"
+        if marker_content == release.generated_release_marker_content:
+            return "archive_supplied_canonical_marker"
+        raise ValueError(f"PHROGs profile release marker has conflicting content: {release_marker}")
+    release_marker.write_bytes(release.generated_release_marker_content)
+    return "locally_materialized_after_archive_verification"
+
+
+def _extract_verified_phrogs_safety_profile_archive(
+    archive_path: Path,
+    output_dir: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
+) -> _VerifiedPhrogsProfile:
     """Cleanly extract the official, size- and MD5-verified Pharokka profile archive."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     archive_path = Path(archive_path)
-    _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
-    _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+    _verify_file_size(archive_path, release.archive_published_size)
+    _verify_md5(archive_path, release.archive_published_md5)
     extracted_dir = _extract_tar(archive_path, output_dir, overwrite=True)
-    profile_database = _find_phrogs_profile_database(extracted_dir)
-    database_sha256, _database_files = _complete_phrogs_profile_database(profile_database)
-    profile_tree_files = _phrogs_profile_tree_files(profile_database)
+    profile_database = _find_phrogs_profile_database(
+        extracted_dir,
+        require_release_marker=False,
+        _release=release,
+    )
+    release_marker_origin = _ensure_authenticated_phrogs_release_marker(
+        profile_database,
+        _release=release,
+    )
+    database_sha256, _database_files = _complete_phrogs_profile_database(
+        profile_database,
+        _release=release,
+    )
+    profile_tree_files = _phrogs_profile_tree_files(profile_database, _release=release)
     profile_root = profile_database.parent
     return _VerifiedPhrogsProfile(
         archive_path=archive_path,
@@ -1081,6 +1347,8 @@ def _extract_verified_phrogs_safety_profile_archive(archive_path: Path, output_d
         tree_sha256=_sha256_file_inventory(profile_root, profile_tree_files),
         profile_id_inventory=_phrogs_profile_id_inventory(profile_database),
         _authority=_VERIFIED_PHROGS_PROFILE_AUTHORITY,
+        release_marker_origin=release_marker_origin,
+        release=release,
     )
 
 
@@ -1093,11 +1361,19 @@ def _require_verified_phrogs_profile(profile: object) -> _VerifiedPhrogsProfile:
     return profile
 
 
-def _phrogs_profile_tree_files(profile_database: Path) -> list[Path]:
+def _phrogs_profile_tree_files(
+    profile_database: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
+) -> list[Path]:
     """Return only the complete pinned PHROGs profile inventory, never bundled unrelated databases."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     profile_database = Path(profile_database)
-    _database_sha256, database_files = _complete_phrogs_profile_database(profile_database)
-    release_marker = profile_database.parent / PHROGS_PROFILE_RELEASE_MARKER
+    _database_sha256, database_files = _complete_phrogs_profile_database(
+        profile_database,
+        _release=release,
+    )
+    release_marker = profile_database.parent / release.release_marker
     return sorted({*database_files, release_marker})
 
 
@@ -1116,12 +1392,21 @@ def _sha256_file_inventory(root: Path, files: list[Path]) -> str:
     return digest.hexdigest()
 
 
-def _snapshot_phrogs_profile_database(profile_database: Path, safety_dir: Path) -> tuple[Path, Path]:
+def _snapshot_phrogs_profile_database(
+    profile_database: Path,
+    safety_dir: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
+) -> tuple[Path, Path]:
     """Copy only the complete PHROGs profile inventory into an unpublished safety generation."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     profile_database = Path(profile_database)
     source_root = profile_database.parent
-    database_sha256, database_files = _complete_phrogs_profile_database(profile_database)
-    source_tree_files = _phrogs_profile_tree_files(profile_database)
+    database_sha256, database_files = _complete_phrogs_profile_database(
+        profile_database,
+        _release=release,
+    )
+    source_tree_files = _phrogs_profile_tree_files(profile_database, _release=release)
     source_tree_sha256 = _sha256_file_inventory(source_root, source_tree_files)
     source_profile_ids = _phrogs_profile_id_inventory(profile_database)
 
@@ -1135,14 +1420,17 @@ def _snapshot_phrogs_profile_database(profile_database: Path, safety_dir: Path) 
         shutil.copy2(source_path, destination_path)
 
     snapshot_database = snapshot_root / profile_database.relative_to(source_root)
-    snapshot_sha256, snapshot_files = _complete_phrogs_profile_database(snapshot_database)
+    snapshot_sha256, snapshot_files = _complete_phrogs_profile_database(
+        snapshot_database,
+        _release=release,
+    )
     if snapshot_sha256 != database_sha256:
         raise RuntimeError("PHROGs safety profile snapshot digest does not match its source")
     if [path.relative_to(snapshot_root) for path in snapshot_files] != [
         path.relative_to(source_root) for path in database_files
     ]:
         raise RuntimeError("PHROGs safety profile snapshot sidecar inventory does not match its source")
-    snapshot_tree_files = _phrogs_profile_tree_files(snapshot_database)
+    snapshot_tree_files = _phrogs_profile_tree_files(snapshot_database, _release=release)
     if [path.relative_to(snapshot_root) for path in snapshot_tree_files] != [
         path.relative_to(source_root) for path in source_tree_files
     ]:
@@ -1159,12 +1447,14 @@ def _publish_phrogs_safety_profile_archive(
     external_dir: Path,
     *,
     _verified_profile: object | None = None,
+    _release: PhrogsSafetyRelease | None = None,
 ) -> Path:
     """Atomically retain a verified Pharokka archive under its observed content digest."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     archive_path = Path(archive_path)
     if _verified_profile is None:
-        _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
-        _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+        _verify_file_size(archive_path, release.archive_published_size)
+        _verify_md5(archive_path, release.archive_published_md5)
         observed_sha256 = _sha256_file(archive_path)
     else:
         verified_profile = _require_verified_phrogs_profile(_verified_profile)
@@ -1190,33 +1480,187 @@ def _publish_phrogs_safety_profile_archive(
     return cache_path
 
 
-def _cached_phrogs_safety_profile_archive(previous_manifest: dict, external_dir: Path) -> Path:
-    """Select a prior manifest's content-addressed archive cache, with a legacy verified-cache fallback."""
+def _cached_phrogs_safety_profile_archive(
+    previous_manifest: dict,
+    external_dir: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
+) -> Path:
+    """Find one archive authenticated by release evidence, including pre-manifest cache entries."""
+    release = _release if _release is not None else load_phrogs_safety_release()
+    external_dir = Path(external_dir)
+    candidates: set[Path] = set()
     try:
         record = previous_manifest["phrogs_v4"]["profile_database"]["provenance"]["verified_archive"]
-        archive_path = Path(record["path"])
-        observed_sha256 = str(record["sha256"])
+        candidates.add(Path(record["path"]))
     except (KeyError, TypeError):
-        archive_path = Path(external_dir) / "downloads" / Path(DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
-        observed_sha256 = ""
-    if not archive_path.is_file() or archive_path.stat().st_size == 0:
-        raise FileNotFoundError(f"PHROGs profile archive cache is required: {archive_path}")
-    actual_sha256 = _sha256_file(archive_path)
-    if observed_sha256 and actual_sha256 != observed_sha256:
-        raise RuntimeError("PHROGs profile archive cache digest does not match the prior trusted manifest")
-    return archive_path
+        pass
+    cache_dir = external_dir / "downloads" / "phrogs_safety_profile_archives"
+    if cache_dir.is_dir():
+        candidates.update(cache_dir.glob("*.tar.gz"))
+    candidates.add(external_dir / "downloads" / release.profile_archive_filename)
+
+    authenticated: list[Path] = []
+    for archive_path in sorted(candidates):
+        if not archive_path.is_file() or archive_path.stat().st_size == 0:
+            continue
+        try:
+            _verify_file_size(archive_path, release.archive_published_size)
+            _verify_md5(archive_path, release.archive_published_md5)
+        except (OSError, ValueError):
+            continue
+        observed_sha256 = _sha256_file(archive_path)
+        if archive_path.parent == cache_dir and archive_path.name != f"{observed_sha256}.tar.gz":
+            continue
+        try:
+            manifest_record = previous_manifest["phrogs_v4"]["profile_database"]["provenance"]["verified_archive"]
+        except (KeyError, TypeError):
+            manifest_record = None
+        is_manifest_archive = isinstance(manifest_record, dict) and archive_path == Path(manifest_record["path"])
+        if is_manifest_archive and str(manifest_record.get("sha256")) != observed_sha256:
+            continue
+        authenticated.append(archive_path)
+    unique_authenticated = sorted(set(authenticated))
+    if len(unique_authenticated) > 1:
+        raise RuntimeError("PHROGs profile archive cache is ambiguous: multiple authenticated entries")
+    if not unique_authenticated:
+        raise FileNotFoundError("No authenticated PHROGs profile archive cache is available")
+    return unique_authenticated[0]
+
+
+def _download_reviewed_phrogs_profile_archive(
+    external_dir: Path,
+    *,
+    overwrite: bool = False,
+    _release: PhrogsSafetyRelease | None = None,
+) -> tuple[Path, str]:
+    """Download one explicitly reviewed source candidate and authenticate its published identity."""
+    release = _release if _release is not None else load_phrogs_safety_release()
+    archive_path = Path(external_dir) / "downloads" / release.profile_archive_filename
+    failures: list[str] = []
+    for source_url in release.profile_source_urls:
+        try:
+            downloaded_path = _download(
+                source_url,
+                archive_path,
+                overwrite=overwrite,
+                insecure=False,
+                expected_size=release.archive_published_size,
+                expected_md5=release.archive_published_md5,
+                resume=True,
+            )
+            _verify_file_size(downloaded_path, release.archive_published_size)
+            _verify_md5(downloaded_path, release.archive_published_md5)
+            return downloaded_path, source_url
+        except (OSError, ValueError) as error:
+            failures.append(f"{source_url}: {error}")
+            archive_path.unlink(missing_ok=True)
+    raise RuntimeError(
+        "No reviewed Pharokka/PHROGs profile source produced the declared archive identity: " + "; ".join(failures)
+    )
+
+
+def _download_reviewed_phrogs_annotation(
+    external_dir: Path,
+    *,
+    insecure_downloads: bool = False,
+    overwrite: bool = False,
+    _release: PhrogsSafetyRelease | None = None,
+) -> tuple[Path, str]:
+    """Fetch the annotation only from reviewed candidates under its exact SHA-256 contract."""
+    release = _release if _release is not None else load_phrogs_safety_release()
+    annotation_path = Path(external_dir) / "phrogs" / release.annotation_archive_filename
+    failures: list[str] = []
+    for source_url in release.annotation_source_urls:
+        try:
+            downloaded_path = _download(
+                source_url,
+                annotation_path,
+                overwrite=overwrite,
+                insecure=insecure_downloads,
+                expected_sha256=release.annotation_sha256,
+            )
+            return downloaded_path, source_url
+        except (OSError, ValueError) as error:
+            failures.append(f"{source_url}: {error}")
+            annotation_path.unlink(missing_ok=True)
+            annotation_path.with_suffix(annotation_path.suffix + ".tmp").unlink(missing_ok=True)
+    raise RuntimeError("No reviewed PHROGs annotation source produced the declared SHA-256: " + "; ".join(failures))
+
+
+def _find_authenticated_phrogs_annotation(
+    extracted_dir: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
+) -> Path:
+    """Locate the digest-pinned annotation table inside an already authenticated archive."""
+    release = _release if _release is not None else load_phrogs_safety_release()
+    candidates = sorted(Path(extracted_dir).rglob(release.annotation_archive_filename))
+    regular_candidates = [
+        path
+        for path in candidates
+        if path.is_file() and not path.is_symlink() and _sha256_file(path) == release.annotation_sha256
+    ]
+    if len(regular_candidates) != 1:
+        raise FileNotFoundError(
+            "Authenticated Pharokka archive must contain exactly one digest-matching "
+            f"{release.annotation_archive_filename}; found {len(regular_candidates)}"
+        )
+    return regular_candidates[0]
+
+
+def _snapshot_phrogs_annotation(
+    annotation_path: Path,
+    safety_dir: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
+) -> Path:
+    """Copy the authenticated PHROGs annotation into an unpublished immutable generation."""
+    release = _release if _release is not None else load_phrogs_safety_release()
+    annotation_path = Path(annotation_path)
+    _verify_sha256(annotation_path, release.annotation_sha256)
+    snapshot_path = Path(safety_dir) / "phrogs" / "snapshot" / release.annotation_archive_filename
+    snapshot_path.parent.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(annotation_path, snapshot_path)
+    _verify_sha256(snapshot_path, release.annotation_sha256)
+    return snapshot_path
+
+
+def _publish_phrogs_legacy_annotation(annotation_path: Path, external_dir: Path) -> Path:
+    """Publish only the authenticated annotation compatibility copy after manifest publication."""
+    annotation_path = Path(annotation_path)
+    destination = Path(external_dir) / "phrogs" / annotation_path.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = destination.parent / f".{destination.name}.{uuid4().hex}.tmp"
+    try:
+        shutil.copy2(annotation_path, temporary_path)
+        expected_sha256 = _sha256_file(annotation_path)
+        if _sha256_file(temporary_path) != expected_sha256:
+            raise RuntimeError("Staged legacy PHROGs annotation digest does not match its safety snapshot")
+        os.replace(temporary_path, destination)
+        if _sha256_file(destination) != expected_sha256:
+            raise RuntimeError("Published legacy PHROGs annotation digest does not match its safety snapshot")
+        return destination
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _publish_phrogs_legacy_profile_database(
     profile_database: Path,
     profile_root: Path,
     external_dir: Path,
+    *,
+    _release: PhrogsSafetyRelease | None = None,
 ) -> Path:
     """Publish an already-validated profile snapshot at the shared legacy PHROGs path."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     profile_database = Path(profile_database)
     profile_root = Path(profile_root)
-    database_sha256, database_files = _complete_phrogs_profile_database(profile_database)
-    source_tree_files = _phrogs_profile_tree_files(profile_database)
+    database_sha256, database_files = _complete_phrogs_profile_database(
+        profile_database,
+        _release=release,
+    )
+    source_tree_files = _phrogs_profile_tree_files(profile_database, _release=release)
     source_tree_sha256 = _sha256_file_inventory(profile_root, source_tree_files)
     source_profile_ids = _phrogs_profile_id_inventory(profile_database)
     relative_profile_path = profile_database.relative_to(profile_root)
@@ -1232,14 +1676,17 @@ def _publish_phrogs_legacy_profile_database(
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, destination_path)
         staged_profile = staging_root / relative_profile_path
-        staged_sha256, staged_files = _complete_phrogs_profile_database(staged_profile)
+        staged_sha256, staged_files = _complete_phrogs_profile_database(
+            staged_profile,
+            _release=release,
+        )
         if staged_sha256 != database_sha256:
             raise RuntimeError("Staged legacy PHROGs profile digest does not match its safety snapshot")
         if [path.relative_to(staging_root) for path in staged_files] != [
             path.relative_to(profile_root) for path in database_files
         ]:
             raise RuntimeError("Staged legacy PHROGs profile sidecar inventory does not match its safety snapshot")
-        staged_tree_files = _phrogs_profile_tree_files(staged_profile)
+        staged_tree_files = _phrogs_profile_tree_files(staged_profile, _release=release)
         if [path.relative_to(staging_root) for path in staged_tree_files] != [
             path.relative_to(profile_root) for path in source_tree_files
         ]:
@@ -1254,14 +1701,17 @@ def _publish_phrogs_legacy_profile_database(
             os.replace(legacy_root, backup_root)
         os.replace(staging_root, legacy_root)
         published_profile = legacy_root / relative_profile_path
-        published_sha256, published_files = _complete_phrogs_profile_database(published_profile)
+        published_sha256, published_files = _complete_phrogs_profile_database(
+            published_profile,
+            _release=release,
+        )
         if published_sha256 != database_sha256:
             raise RuntimeError("Published legacy PHROGs profile digest does not match its safety snapshot")
         if [path.relative_to(legacy_root) for path in published_files] != [
             path.relative_to(profile_root) for path in database_files
         ]:
             raise RuntimeError("Published legacy PHROGs profile sidecar inventory does not match its safety snapshot")
-        published_tree_files = _phrogs_profile_tree_files(published_profile)
+        published_tree_files = _phrogs_profile_tree_files(published_profile, _release=release)
         if [path.relative_to(legacy_root) for path in published_tree_files] != [
             path.relative_to(profile_root) for path in source_tree_files
         ]:
@@ -1409,44 +1859,55 @@ def _prepare_phrogs_safety_metadata(
     *,
     manifest_path: Path | None = None,
     manifest: dict | None = None,
-    annotation_sha256: str | None = DEFAULT_PHROGS_ANNOTATION_SHA256,
+    annotation_sha256: str | None = None,
     annotation_path: Path | None = None,
     sequence_database: Path | None = None,
     profile_database: Path | None = None,
     profile_archive_path: Path | None = None,
-    profile_source_url: str = DEFAULT_PHROGS_SAFETY_PROFILE_URL,
+    profile_source_url: str | None = None,
     profile_archive_observed_sha256: str | None = None,
     profile_retrieved_at: str | None = None,
-    profile_release: str = PHROGS_PROFILE_RELEASE,
-    profile_archive_published_md5: str = DEFAULT_PHROGS_SAFETY_PROFILE_MD5,
-    profile_archive_published_size: int = DEFAULT_PHROGS_SAFETY_PROFILE_SIZE,
-    profile_doi: str = DEFAULT_PHROGS_SAFETY_PROFILE_DOI,
-    profile_license: str = DEFAULT_PHROGS_SAFETY_PROFILE_LICENSE,
-    profile_minimum_mmseqs_version: str = PHROGS_PROFILE_MIN_MMSEQS_VERSION,
-    profile_built_with_mmseqs_version: str = PHROGS_PROFILE_BUILDER_MMSEQS_VERSION,
-    profile_dataset_release: str = PHROGS_PROFILE_DATASET_RELEASE,
+    profile_release: str | None = None,
+    profile_archive_published_md5: str | None = None,
+    profile_archive_published_size: int | None = None,
+    profile_doi: str | None = None,
+    profile_license: str | None = None,
+    profile_minimum_mmseqs_version: str | None = None,
+    profile_built_with_mmseqs_version: str | None = None,
+    profile_dataset_release: str | None = None,
+    profile_release_marker_origin: str = "validated_release_marker",
     safety_dir: Path | None = None,
+    _release: PhrogsSafetyRelease | None = None,
 ) -> PreparedAsset:
     """Build a PHROGs lookup from inputs already authenticated by safety preparation."""
-    if annotation_sha256 is None:
-        raise ValueError("PHROGs annotation digest is required before using its metadata")
+    del sequence_database
+    release = _release if _release is not None else load_phrogs_safety_release()
+    selected_annotation_sha256 = annotation_sha256 or release.annotation_sha256
+    selected_profile_source_url = profile_source_url or release.profile_source_urls[0]
+    selected_profile_release = profile_release or release.release
+    selected_archive_md5 = profile_archive_published_md5 or release.archive_published_md5
+    selected_archive_size = profile_archive_published_size or release.archive_published_size
+    selected_profile_doi = profile_doi or release.doi
+    selected_profile_license = profile_license or release.license
+    selected_minimum_mmseqs_version = profile_minimum_mmseqs_version or release.minimum_mmseqs_version
+    selected_built_with_mmseqs_version = profile_built_with_mmseqs_version or release.built_with_mmseqs_version
+    selected_dataset_release = profile_dataset_release or release.dataset_release
     external_dir = Path(external_dir)
     selected_annotation_path = (
         Path(annotation_path) if annotation_path is not None else external_dir / "phrogs" / "phrog_annot_v4.tsv"
     )
     if not selected_annotation_path.exists():
         raise FileNotFoundError(f"PHROGs v4 annotation table is required: {selected_annotation_path}")
-    source_sha256 = _verify_sha256(selected_annotation_path, annotation_sha256)
-    selected_sequence_database = (
-        Path(sequence_database) if sequence_database is not None else external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
-    )
-    sequence_database_sha256, sequence_database_files = _complete_phrogs_sequence_database(selected_sequence_database)
+    source_sha256 = _verify_sha256(selected_annotation_path, selected_annotation_sha256)
     if profile_database is None:
         raise FileNotFoundError("PHROGs safety profile_database is required for identity-bearing lysogeny search")
     selected_profile_database = Path(profile_database)
-    profile_database_sha256, profile_database_files = _complete_phrogs_profile_database(selected_profile_database)
+    profile_database_sha256, profile_database_files = _complete_phrogs_profile_database(
+        selected_profile_database,
+        _release=release,
+    )
     profile_root = selected_profile_database.parent
-    profile_tree_files = _phrogs_profile_tree_files(selected_profile_database)
+    profile_tree_files = _phrogs_profile_tree_files(selected_profile_database, _release=release)
     profile_id_inventory = _phrogs_profile_id_inventory(selected_profile_database)
     profile_ids = _phrogs_profile_ids(selected_profile_database)
     if not profile_archive_observed_sha256:
@@ -1458,26 +1919,21 @@ def _prepare_phrogs_safety_metadata(
         raise ValueError("PHROGs safety profile archive observed SHA-256 must be a digest")
     if not profile_retrieved_at:
         raise ValueError("PHROGs safety profile retrieval evidence is required for provenance")
-    if profile_source_url != DEFAULT_PHROGS_SAFETY_PROFILE_URL:
-        raise ValueError("PHROGs safety profile source URL must be the pinned Pharokka v1.8.0 release")
-    if profile_release != PHROGS_PROFILE_RELEASE:
-        raise ValueError("PHROGs safety profile release must be the pinned Pharokka v1.8.0 release")
-    if profile_archive_published_md5.lower() != DEFAULT_PHROGS_SAFETY_PROFILE_MD5:
-        raise ValueError("PHROGs safety profile published MD5 must match the pinned Pharokka release")
-    if profile_archive_published_size != DEFAULT_PHROGS_SAFETY_PROFILE_SIZE:
-        raise ValueError("PHROGs safety profile published archive size must match the pinned Pharokka release")
-    if profile_doi != DEFAULT_PHROGS_SAFETY_PROFILE_DOI:
-        raise ValueError("PHROGs safety profile DOI must match the pinned Pharokka release")
-    if profile_license != DEFAULT_PHROGS_SAFETY_PROFILE_LICENSE:
-        raise ValueError("PHROGs safety profile license must match the pinned Pharokka release")
-    if profile_minimum_mmseqs_version != PHROGS_PROFILE_MIN_MMSEQS_VERSION:
-        raise ValueError("PHROGs safety profile MMseqs minimum version must match the pinned profile format")
-    if profile_built_with_mmseqs_version != PHROGS_PROFILE_BUILDER_MMSEQS_VERSION:
-        raise ValueError("PHROGs safety profile MMseqs builder version must match the pinned profile format")
-    if profile_dataset_release != PHROGS_PROFILE_DATASET_RELEASE:
-        raise ValueError("PHROGs safety profile dataset release must be PHROGs v4")
+    expected_identity = (
+        selected_profile_release == release.release
+        and selected_archive_md5.lower() == release.archive_published_md5
+        and selected_archive_size == release.archive_published_size
+        and selected_profile_doi == release.doi
+        and selected_profile_license == release.license
+        and selected_minimum_mmseqs_version == release.minimum_mmseqs_version
+        and selected_built_with_mmseqs_version == release.built_with_mmseqs_version
+        and selected_dataset_release == release.dataset_release
+        and selected_profile_source_url in release.profile_source_urls
+    )
+    if not expected_identity:
+        raise ValueError("PHROGs safety profile provenance does not match the reviewed release contract")
 
-    lookup_rows = []
+    source_lookup_rows = []
     selected_phrogs = set()
     with selected_annotation_path.open(newline="") as source:
         reader = csv.DictReader(source, delimiter="\t")
@@ -1486,49 +1942,69 @@ def _prepare_phrogs_safety_metadata(
             raise ValueError(f"PHROGs v4 table must contain {sorted(required_columns)}: {selected_annotation_path}")
         for row in reader:
             category = row["category"].strip()
-            if category.casefold() != PHROGS_INTEGRATION_EXCISION_CATEGORY.casefold():
+            annotation = row["annot"].strip()
+            normalized_annotation = annotation.casefold()
+            is_integration_category = category.casefold() == PHROGS_INTEGRATION_EXCISION_CATEGORY.casefold()
+            is_additional_high_confidence = normalized_annotation in PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS
+            if not is_integration_category and not is_additional_high_confidence:
                 continue
-            phrog = row["phrog"].strip()
-            if not phrog:
+            source_phrog = row["phrog"]
+            if not source_phrog:
                 raise ValueError(f"PHROGs v4 table has an empty PHROG identifier: {selected_annotation_path}")
-            if not _is_phrogs_profile_identifier(phrog):
-                raise ValueError(
-                    f"PHROGs v4 table has a noncanonical PHROG identifier that cannot join the profile search: {phrog}"
-                )
+            phrog = _normalize_phrogs_annotation_identifier(source_phrog)
             if phrog in selected_phrogs:
                 raise ValueError(f"PHROGs lookup has duplicate PHROG identifier: {phrog}")
             selected_phrogs.add(phrog)
-            annotation = row["annot"].strip()
-            normalized_annotation = annotation.casefold()
             high_confidence_term = next(
                 (term for term in PHROGS_HIGH_CONFIDENCE_TERMS if term in normalized_annotation), None
             )
+            if is_additional_high_confidence:
+                high_confidence_term = normalized_annotation
             review_term = next((term for term in PHROGS_REVIEW_TERMS if term in normalized_annotation), None)
             confidence = "high_confidence" if high_confidence_term is not None else "review"
             matched_term = high_confidence_term or review_term or "integration and excision category"
-            lookup_rows.append([phrog, annotation, category, confidence, matched_term])
-    if not lookup_rows:
+            source_lookup_rows.append([phrog, annotation, category, confidence, matched_term])
+    if not source_lookup_rows:
         raise ValueError("PHROGs integration and excision lookup is empty")
     missing_profile_ids = sorted(selected_phrogs - profile_ids)
-    if missing_profile_ids:
+    normalized_declared_sha256 = selected_annotation_sha256.removeprefix("sha256:").lower()
+
+    def lookup_counts(rows: list[list[str]]) -> tuple[int, int, int]:
+        return (
+            len(rows),
+            sum(row[3] == "high_confidence" for row in rows),
+            sum(row[3] == "review" for row in rows),
+        )
+
+    source_counts = lookup_counts(source_lookup_rows)
+    if normalized_declared_sha256 == release.annotation_sha256:
+        if source_counts != release.source_lookup_counts:
+            raise ValueError(
+                "Reviewed PHROGs source lookup count drift: "
+                f"expected {release.source_lookup_counts}, observed {source_counts}"
+            )
+        if frozenset(missing_profile_ids) != release.allowed_profile_exclusions:
+            raise ValueError("Reviewed PHROGs source/profile reconciliation drift: " + ", ".join(missing_profile_ids))
+    elif missing_profile_ids:
         raise ValueError(
             "PHROGs integration/excision lookup contains IDs absent from the verified profile database: "
             + ", ".join(missing_profile_ids)
+        )
+    lookup_rows = [row for row in source_lookup_rows if row[0] in profile_ids]
+    searchable_counts = lookup_counts(lookup_rows)
+    if (
+        normalized_declared_sha256 == release.annotation_sha256
+        and searchable_counts != release.searchable_lookup_counts
+    ):
+        raise ValueError(
+            "Reviewed PHROGs searchable lookup count drift: "
+            f"expected {release.searchable_lookup_counts}, observed {searchable_counts}"
         )
     if not profile_ids - selected_phrogs:
         raise ValueError(
             "PHROGs safety profile must contain families beyond the pinned safety lookup; "
             "a subset-only profile cannot represent the full PHROGs v4 search scope"
         )
-    normalized_declared_sha256 = annotation_sha256.removeprefix("sha256:").lower()
-    if normalized_declared_sha256 == DEFAULT_PHROGS_ANNOTATION_SHA256:
-        high_confidence_count = sum(row[3] == "high_confidence" for row in lookup_rows)
-        review_count = sum(row[3] == "review" for row in lookup_rows)
-        if (len(lookup_rows), high_confidence_count, review_count) != (109, 57, 52):
-            raise ValueError(
-                "Pinned PHROGs v4 confidence lookup violated expected bounds "
-                f"(109 total, 57 high, 52 review): {(len(lookup_rows), high_confidence_count, review_count)}"
-            )
 
     safety_dir = Path(safety_dir) if safety_dir is not None else external_dir / "safety"
     lookup_path = safety_dir / "phrogs" / "phrogs_integration_excision_v4.tsv"
@@ -1538,25 +2014,30 @@ def _prepare_phrogs_safety_metadata(
         selected_manifest_path,
         "phrogs_v4",
         {
-            "annotation_url": DEFAULT_PHROGS_ANNOTATION_URL,
+            "annotation_url": release.annotation_source_urls[0],
+            "annotation_source_urls": list(release.annotation_source_urls),
             "annotation_sha256": normalized_declared_sha256,
             "source_path": str(selected_annotation_path.resolve()),
             "source_sha256": source_sha256,
             "category": PHROGS_INTEGRATION_EXCISION_CATEGORY,
             "high_confidence_terms": list(PHROGS_HIGH_CONFIDENCE_TERMS),
+            "additional_high_confidence_annotations": list(PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS),
             "review_terms": list(PHROGS_REVIEW_TERMS),
             "lookup_path": str(lookup_path.resolve()),
             "lookup_sha256": _sha256_file(lookup_path),
-            "lookup_counts": {
-                "total": len(lookup_rows),
-                "high_confidence": sum(row[3] == "high_confidence" for row in lookup_rows),
-                "review": sum(row[3] == "review" for row in lookup_rows),
+            "source_lookup_counts": {
+                "total": source_counts[0],
+                "high_confidence": source_counts[1],
+                "review": source_counts[2],
             },
-            "sequence_database": {
-                "path": str(selected_sequence_database.resolve()),
-                "role": "complete PHROGs v4 raw padded sequence database for Arc/QC compatibility only",
-                "sha256": sequence_database_sha256,
-                "files": [str(path.resolve()) for path in sequence_database_files],
+            "lookup_counts": {
+                "total": searchable_counts[0],
+                "high_confidence": searchable_counts[1],
+                "review": searchable_counts[2],
+            },
+            "profile_exclusions": {
+                "ids": missing_profile_ids,
+                "reason": "absent_from_authenticated_profile_lookup",
             },
             "profile_database": {
                 "path": str(selected_profile_database.resolve()),
@@ -1576,20 +2057,27 @@ def _prepare_phrogs_safety_metadata(
                 "query_id_pattern": PHROGS_PROFILE_QUERY_ID_PATTERN,
                 "query_ids_join_lookup": True,
                 "profile_id_inventory": profile_id_inventory,
+                "release_marker": {
+                    "path": str((profile_root / release.release_marker).resolve()),
+                    "sha256": _sha256_file(profile_root / release.release_marker),
+                    "origin": profile_release_marker_origin,
+                    "empty_sentinel": (profile_root / release.release_marker).stat().st_size == 0,
+                },
                 "provenance": {
-                    "source_url": profile_source_url,
+                    "source_url": selected_profile_source_url,
+                    "source_urls": list(release.profile_source_urls),
                     "archive_observed_sha256": normalized_profile_archive_sha256,
                     "archive_published_sha256": None,
-                    "archive_published_md5": profile_archive_published_md5,
-                    "archive_published_size": profile_archive_published_size,
+                    "archive_published_md5": selected_archive_md5,
+                    "archive_published_size": selected_archive_size,
                     "retrieved_at": profile_retrieved_at,
-                    "release": profile_release,
-                    "dataset_release": profile_dataset_release,
-                    "doi": profile_doi,
-                    "license": profile_license,
-                    "citation": PHROGS_PROFILE_SOURCE_CITATION,
-                    "minimum_mmseqs_version": profile_minimum_mmseqs_version,
-                    "built_with_mmseqs_version": profile_built_with_mmseqs_version,
+                    "release": selected_profile_release,
+                    "dataset_release": selected_dataset_release,
+                    "doi": selected_profile_doi,
+                    "license": selected_profile_license,
+                    "citation": release.citation,
+                    "minimum_mmseqs_version": selected_minimum_mmseqs_version,
+                    "built_with_mmseqs_version": selected_built_with_mmseqs_version,
                     **(
                         {
                             "verified_archive": {
@@ -1618,14 +2106,18 @@ def _prepare_verified_phrogs_safety_metadata(
 ) -> PreparedAsset:
     """Build staged PHROGs metadata only from a private verified archive-extraction capability."""
     verified_profile = _require_verified_phrogs_profile(_verified_profile)
+    release = verified_profile.release if verified_profile.release is not None else load_phrogs_safety_release()
     supplied_profile_database = kwargs.pop("profile_database", None)
     selected_profile_database = (
         verified_profile.profile_database if supplied_profile_database is None else Path(supplied_profile_database)
     )
-    selected_database_sha256, _selected_database_files = _complete_phrogs_profile_database(selected_profile_database)
+    selected_database_sha256, _selected_database_files = _complete_phrogs_profile_database(
+        selected_profile_database,
+        _release=release,
+    )
     selected_tree_sha256 = _sha256_file_inventory(
         selected_profile_database.parent,
-        _phrogs_profile_tree_files(selected_profile_database),
+        _phrogs_profile_tree_files(selected_profile_database, _release=release),
     )
     if (
         selected_database_sha256 != verified_profile.database_sha256
@@ -1644,6 +2136,8 @@ def _prepare_verified_phrogs_safety_metadata(
         profile_database=selected_profile_database,
         profile_archive_path=verified_profile.archive_path,
         profile_archive_observed_sha256=verified_profile.observed_archive_sha256,
+        profile_release_marker_origin=verified_profile.release_marker_origin,
+        _release=release,
         **kwargs,
     )
 
@@ -1699,23 +2193,25 @@ def prepare_phrogs_safety_profile_db(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
     overwrite: bool = False,
+    _release: PhrogsSafetyRelease | None = None,
 ) -> PreparedAsset:
     """Prepare the versioned Pharokka PHROGs profile asset required for identity-bearing safety search."""
+    release = _release if _release is not None else load_phrogs_safety_release()
     external_dir = Path(external_dir)
-    archive_path = _download(
-        DEFAULT_PHROGS_SAFETY_PROFILE_URL,
-        external_dir / "downloads" / Path(DEFAULT_PHROGS_SAFETY_PROFILE_URL).name,
+    archive_path, source_url = _download_reviewed_phrogs_profile_archive(
+        external_dir,
         overwrite=overwrite,
-        insecure=False,
+        _release=release,
     )
     verified_profile = _extract_verified_phrogs_safety_profile_archive(
         archive_path,
         external_dir / "phrogs" / "phrogs_mmseqs_db",
+        _release=release,
     )
     return PreparedAsset(
         "phrogs_safety_profile_db",
         verified_profile.extracted_dir,
-        f"{DEFAULT_PHROGS_SAFETY_PROFILE_RELEASE} from {DEFAULT_PHROGS_SAFETY_PROFILE_URL}",
+        f"{release.release} from {source_url}",
     )
 
 
@@ -1724,10 +2220,13 @@ def prepare_phrogs_gpu_sequence_db(
     *,
     bin_dir: Path | None = None,
     phrogs_fasta_url: str = DEFAULT_PHROGS_FASTA_URL,
+    phrogs_fasta_sha256: str | None = None,
     overwrite: bool = False,
     insecure_downloads: bool = False,
 ) -> PreparedAsset:
     """Build a padded GPU-ready MMseqs sequence database from PHROGs FASTA files."""
+    if phrogs_fasta_sha256 is None:
+        raise ValueError("PHROGs FASTA archive digest is required before download")
     external_dir = Path(external_dir)
     phrogs_dir = external_dir / "phrogs"
     archive_path = _download(
@@ -1735,6 +2234,7 @@ def prepare_phrogs_gpu_sequence_db(
         external_dir / "downloads" / Path(phrogs_fasta_url).name,
         overwrite=overwrite,
         insecure=insecure_downloads,
+        expected_sha256=phrogs_fasta_sha256,
     )
     extracted_dir = _extract_tar(archive_path, phrogs_dir / "FAA_phrog", overwrite=overwrite)
     combined_fasta = phrogs_dir / "FAA_phrog_combined.faa"
@@ -1829,18 +2329,25 @@ def _validate_recorded_asset_digest(record: dict, path_field: str, digest_field:
         )
 
 
-def _validate_phrogs_profile_archive_lineage(profile_database: dict) -> None:
+def _validate_phrogs_profile_archive_lineage(
+    profile_database: dict,
+    *,
+    release: PhrogsSafetyRelease | None = None,
+) -> None:
     """Prove a staged profile snapshot came from a clean extraction of its pinned archive cache."""
+    selected_release = release if release is not None else load_phrogs_safety_release()
     provenance = profile_database["provenance"]
     verified_archive = provenance.get("verified_archive")
     archive_path = Path(verified_archive["path"])
     observed_archive_sha256 = provenance["archive_observed_sha256"]
+    if archive_path.is_symlink() or not archive_path.is_file():
+        raise RuntimeError(f"Safety manifest PHROGs verified archive cache is missing or invalid: {archive_path}")
     if _sha256_file(archive_path) != observed_archive_sha256:
         raise RuntimeError("Safety manifest PHROGs verified archive cache digest does not match provenance")
     if verified_archive["sha256"] != observed_archive_sha256:
         raise RuntimeError("Safety manifest PHROGs verified archive cache does not match provenance")
-    _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
-    _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+    _verify_file_size(archive_path, selected_release.archive_published_size)
+    _verify_md5(archive_path, selected_release.archive_published_md5)
 
     profile_path = Path(profile_database["path"])
     extraction_parent = Path(tempfile.mkdtemp(prefix=".phrogs-profile-lineage-", dir=profile_path.parent))
@@ -1848,6 +2355,7 @@ def _validate_phrogs_profile_archive_lineage(profile_database: dict) -> None:
         verified_profile = _extract_verified_phrogs_safety_profile_archive(
             archive_path,
             extraction_parent / "extracted",
+            _release=selected_release,
         )
         extracted_tree = profile_database["extracted_tree"]
         if verified_profile.database_sha256 != profile_database["sha256"]:
@@ -1866,6 +2374,9 @@ def _validate_phrogs_profile_archive_lineage(profile_database: dict) -> None:
 
 def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool = False) -> None:
     """Ensure all scanner sections are present before publishing a new trusted generation."""
+    if manifest.get("schema_version") != 2:
+        raise RuntimeError("Safety manifest must use schema_version 2")
+    release = load_phrogs_safety_release()
     required_fields = {
         "amrfinder_plus": (
             "archive_sha256",
@@ -1877,8 +2388,14 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
             "amrfinder_update_sha256",
             "makeblastdb_path",
             "makeblastdb_sha256",
+            "blastp_path",
+            "blastp_sha256",
+            "blastx_path",
+            "blastx_sha256",
             "hmmpress_path",
             "hmmpress_sha256",
+            "hmmsearch_path",
+            "hmmsearch_sha256",
             "database_path",
             "database_version",
             "database_sha256",
@@ -1891,7 +2408,15 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
             "uniprot_release",
             "files",
         ),
-        "phrogs_v4": ("source_sha256", "lookup_sha256", "sequence_database", "profile_database"),
+        "phrogs_v4": (
+            "annotation_source_urls",
+            "source_sha256",
+            "lookup_sha256",
+            "source_lookup_counts",
+            "lookup_counts",
+            "profile_exclusions",
+            "profile_database",
+        ),
     }
     for section, fields in required_fields.items():
         record = manifest.get(section)
@@ -1908,14 +2433,32 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         file_record = toxin_files.get(file_role)
         if not isinstance(file_record, dict) or not file_record.get("path") or not file_record.get("sha256"):
             raise RuntimeError(f"Safety manifest toxin_reference lacks required fields files.{file_role}")
-    sequence_database = manifest["phrogs_v4"]["sequence_database"]
-    if (
-        not isinstance(sequence_database, dict)
-        or not sequence_database.get("path")
-        or not sequence_database.get("sha256")
+    phrogs_record = manifest["phrogs_v4"]
+    if phrogs_record["annotation_source_urls"] != list(release.annotation_source_urls):
+        raise RuntimeError("Safety manifest phrogs_v4 has unsupported annotation source URLs")
+    for field, expected_counts in (
+        ("source_lookup_counts", release.source_lookup_counts),
+        ("lookup_counts", release.searchable_lookup_counts),
     ):
-        raise RuntimeError("Safety manifest phrogs_v4 lacks required fields sequence_database.path/sha256")
-    profile_database = manifest["phrogs_v4"]["profile_database"]
+        counts = phrogs_record[field]
+        if (
+            not isinstance(counts, dict)
+            or (
+                counts.get("total"),
+                counts.get("high_confidence"),
+                counts.get("review"),
+            )
+            != expected_counts
+        ):
+            raise RuntimeError(f"Safety manifest phrogs_v4 has unsupported {field}")
+    exclusions = phrogs_record["profile_exclusions"]
+    if (
+        not isinstance(exclusions, dict)
+        or exclusions.get("reason") != "absent_from_authenticated_profile_lookup"
+        or frozenset(exclusions.get("ids", ())) != release.allowed_profile_exclusions
+    ):
+        raise RuntimeError("Safety manifest phrogs_v4 has unsupported profile_exclusions")
+    profile_database = phrogs_record["profile_database"]
     if not isinstance(profile_database, dict):
         raise RuntimeError("Safety manifest phrogs_v4 lacks required field profile_database")
     for field in (
@@ -1931,6 +2474,7 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         "query_id_pattern",
         "query_ids_join_lookup",
         "profile_id_inventory",
+        "release_marker",
         "provenance",
     ):
         value = profile_database.get(field)
@@ -1960,11 +2504,31 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         or any(character not in "0123456789abcdef" for character in profile_id_inventory["sha256"])
     ):
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an invalid profile_id_inventory")
+    release_marker = profile_database["release_marker"]
+    if not isinstance(release_marker, dict):
+        raise RuntimeError("Safety manifest phrogs_v4.profile_database lacks release_marker provenance")
+    marker_origin = release_marker.get("origin")
+    if marker_origin not in {
+        "archive_supplied_empty_sentinel",
+        "archive_supplied_canonical_marker",
+        "locally_materialized_after_archive_verification",
+        "validated_release_marker",
+    }:
+        raise RuntimeError("Safety manifest phrogs_v4.profile_database has unsupported release marker origin")
+    if (
+        not isinstance(release_marker.get("path"), str)
+        or not isinstance(release_marker.get("sha256"), str)
+        or len(release_marker["sha256"]) != 64
+        or any(character not in "0123456789abcdef" for character in release_marker["sha256"])
+        or type(release_marker.get("empty_sentinel")) is not bool
+    ):
+        raise RuntimeError("Safety manifest phrogs_v4.profile_database has invalid release marker evidence")
     provenance = profile_database["provenance"]
     if not isinstance(provenance, dict):
         raise RuntimeError("Safety manifest phrogs_v4.profile_database lacks provenance")
     for field in (
         "source_url",
+        "source_urls",
         "archive_observed_sha256",
         "archive_published_md5",
         "archive_published_size",
@@ -1988,25 +2552,27 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         or any(character not in "0123456789abcdef" for character in observed_archive_sha256)
     ):
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an invalid observed archive SHA-256")
-    if provenance["source_url"] != DEFAULT_PHROGS_SAFETY_PROFILE_URL:
+    if provenance["source_urls"] != list(release.profile_source_urls):
+        raise RuntimeError("Safety manifest phrogs_v4.profile_database has unsupported profile source URLs")
+    if provenance["source_url"] not in release.profile_source_urls:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unpinned profile source URL")
-    if provenance["archive_published_md5"] != DEFAULT_PHROGS_SAFETY_PROFILE_MD5:
+    if provenance["archive_published_md5"] != release.archive_published_md5:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unpinned profile archive MD5")
-    if provenance["archive_published_size"] != DEFAULT_PHROGS_SAFETY_PROFILE_SIZE:
+    if provenance["archive_published_size"] != release.archive_published_size:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unpinned profile archive size")
-    if provenance["release"] != PHROGS_PROFILE_RELEASE:
+    if provenance["release"] != release.release:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unsupported profile release")
-    if provenance["dataset_release"] != PHROGS_PROFILE_DATASET_RELEASE:
+    if provenance["dataset_release"] != release.dataset_release:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unsupported PHROGs dataset release")
-    if provenance["doi"] != DEFAULT_PHROGS_SAFETY_PROFILE_DOI:
+    if provenance["doi"] != release.doi:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unsupported profile DOI")
-    if provenance["license"] != DEFAULT_PHROGS_SAFETY_PROFILE_LICENSE:
+    if provenance["license"] != release.license:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unsupported profile license")
-    if provenance["citation"] != PHROGS_PROFILE_SOURCE_CITATION:
+    if provenance["citation"] != release.citation:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unsupported profile citation")
-    if provenance["minimum_mmseqs_version"] != PHROGS_PROFILE_MIN_MMSEQS_VERSION:
+    if provenance["minimum_mmseqs_version"] != release.minimum_mmseqs_version:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unsupported profile MMseqs minimum")
-    if provenance["built_with_mmseqs_version"] != PHROGS_PROFILE_BUILDER_MMSEQS_VERSION:
+    if provenance["built_with_mmseqs_version"] != release.built_with_mmseqs_version:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unsupported profile MMseqs builder")
     verified_archive = provenance.get("verified_archive")
     if (
@@ -2026,7 +2592,10 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         ("amrfinder_index_path", "amrfinder_index_sha256", "AMRFinder index"),
         ("amrfinder_update_path", "amrfinder_update_sha256", "AMRFinder updater"),
         ("makeblastdb_path", "makeblastdb_sha256", "AMRFinder BLAST prerequisite"),
+        ("blastp_path", "blastp_sha256", "AMRFinder BLASTP runtime"),
+        ("blastx_path", "blastx_sha256", "AMRFinder BLASTX runtime"),
         ("hmmpress_path", "hmmpress_sha256", "AMRFinder HMMER prerequisite"),
+        ("hmmsearch_path", "hmmsearch_sha256", "AMRFinder HMMSEARCH runtime"),
         ("database_path", "database_sha256", "AMRFinder database"),
     ):
         _validate_recorded_asset_digest(amrfinder_record, path_field, digest_field, label)
@@ -2040,13 +2609,6 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         )
     _validate_recorded_asset_digest(manifest["phrogs_v4"], "source_path", "source_sha256", "PHROGs source")
     _validate_recorded_asset_digest(manifest["phrogs_v4"], "lookup_path", "lookup_sha256", "PHROGs lookup")
-    sequence_database_path = Path(sequence_database["path"])
-    observed_sequence_database_sha256, _ = _complete_phrogs_sequence_database(sequence_database_path)
-    if observed_sequence_database_sha256 != sequence_database["sha256"]:
-        raise RuntimeError(
-            "Safety manifest PHROGs sequence database digest does not match its staged path: "
-            f"expected {sequence_database['sha256']}, observed {observed_sequence_database_sha256}"
-        )
     profile_database_path = Path(profile_database["path"])
     observed_profile_database_sha256, observed_profile_database_files = _complete_phrogs_profile_database(
         profile_database_path
@@ -2072,7 +2634,19 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         raise RuntimeError("Safety manifest PHROGs profile extracted tree inventory does not match its staged path")
     if profile_id_inventory != _phrogs_profile_id_inventory(profile_database_path):
         raise RuntimeError("Safety manifest PHROGs profile ID inventory does not match its staged path")
-    _validate_phrogs_profile_archive_lineage(profile_database)
+    marker_path = Path(release_marker["path"])
+    if marker_path != profile_root / release.release_marker:
+        raise RuntimeError("Safety manifest PHROGs release marker path does not match its staged profile")
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise RuntimeError("Safety manifest PHROGs release marker is not a regular staged file")
+    marker_content = marker_path.read_bytes()
+    if marker_content not in (b"", release.generated_release_marker_content):
+        raise RuntimeError("Safety manifest PHROGs release marker content is unsupported")
+    if release_marker["empty_sentinel"] != (marker_content == b""):
+        raise RuntimeError("Safety manifest PHROGs release marker empty-sentinel claim is inconsistent")
+    if release_marker["sha256"] != _sha256_file(marker_path):
+        raise RuntimeError("Safety manifest PHROGs release marker digest does not match its staged path")
+    _validate_phrogs_profile_archive_lineage(profile_database, release=release)
 
 
 def _create_safety_generation_dir(external_dir: Path) -> Path:
@@ -2109,6 +2683,7 @@ def prepare_external_assets(
     hmmer_url: str = DEFAULT_HMMER_URL,
     phrogs_mmseqs_url: str = DEFAULT_PHROGS_MMSEQS_URL,
     phrogs_fasta_url: str = DEFAULT_PHROGS_FASTA_URL,
+    phrogs_fasta_sha256: str | None = None,
     arc_evo2_repo_url: str = DEFAULT_ARC_EVO2_REPO_URL,
     arc_evo2_repo_rev: str = DEFAULT_ARC_EVO2_REPO_REV,
     overwrite: bool = False,
@@ -2161,15 +2736,19 @@ def prepare_external_assets(
             )
         )
     safety_generation_dir = _create_safety_generation_dir(external_dir) if with_safety else None
+    phrogs_release = load_phrogs_safety_release() if with_safety else None
+    selected_safety_manifest = (
+        Path(safety_manifest) if safety_manifest is not None else external_dir / "safety" / "asset_manifest.yaml"
+    )
+    previous_manifest = _read_safety_manifest(selected_safety_manifest) if with_safety else {}
     prepared_phrogs_annotation: PreparedAsset | None = None
     prepared_phrogs_profile_database: PreparedAsset | None = None
     prepared_phrogs_sequence_database: PreparedAsset | None = None
     safety_manifest_published = False
     try:
-        if download_phrogs_annotation:
-            phrogs_annotation_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
+        if download_phrogs_annotation and not with_safety:
             prepared_phrogs_annotation = prepare_phrogs_annotation(
-                phrogs_annotation_dir,
+                external_dir,
                 overwrite=overwrite,
                 insecure_downloads=insecure_downloads,
             )
@@ -2183,61 +2762,59 @@ def prepare_external_assets(
                     overwrite=overwrite,
                 )
             )
-        if download_large_databases:
-            phrogs_profile_database_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
-            if safety_generation_dir is not None:
-                prepared_phrogs_profile_database = prepare_phrogs_safety_profile_db(
-                    phrogs_profile_database_dir,
-                    overwrite=overwrite,
-                )
-            else:
-                prepared_phrogs_profile_database = prepare_phrogs_mmseqs_db(
-                    phrogs_profile_database_dir,
-                    phrogs_mmseqs_url=phrogs_mmseqs_url,
-                    overwrite=overwrite,
-                    insecure_downloads=False,
-                )
-            if safety_generation_dir is None:
-                assets.append(prepared_phrogs_profile_database)
-            phrogs_sequence_database_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
-            prepared_phrogs_sequence_database = prepare_phrogs_gpu_sequence_db(
-                phrogs_sequence_database_dir,
-                bin_dir=target_bin_dir,
-                phrogs_fasta_url=phrogs_fasta_url,
+        if download_large_databases and not with_safety:
+            prepared_phrogs_profile_database = prepare_phrogs_mmseqs_db(
+                external_dir,
+                phrogs_mmseqs_url=phrogs_mmseqs_url,
                 overwrite=overwrite,
                 insecure_downloads=False,
             )
-            assets.append(prepared_phrogs_sequence_database)
+            assets.append(prepared_phrogs_profile_database)
+            if phrogs_fasta_sha256 is not None:
+                prepared_phrogs_sequence_database = prepare_phrogs_gpu_sequence_db(
+                    external_dir,
+                    bin_dir=target_bin_dir,
+                    phrogs_fasta_url=phrogs_fasta_url,
+                    phrogs_fasta_sha256=phrogs_fasta_sha256,
+                    overwrite=overwrite,
+                    insecure_downloads=False,
+                )
+                assets.append(prepared_phrogs_sequence_database)
+        if download_large_databases:
             if download_checkv:
                 assets.append(prepare_checkv_database(external_dir, bin_dir=target_bin_dir, overwrite=overwrite))
         if with_safety:
             assert safety_generation_dir is not None
-            selected_safety_manifest = (
-                Path(safety_manifest)
-                if safety_manifest is not None
-                else external_dir / "safety" / "asset_manifest.yaml"
-            )
-            previous_manifest = _read_safety_manifest(selected_safety_manifest)
-            selected_annotation_path = (
-                prepared_phrogs_annotation.path
-                if prepared_phrogs_annotation is not None
-                else external_dir / "phrogs" / "phrog_annot_v4.tsv"
-            )
-            selected_sequence_database = (
-                prepared_phrogs_sequence_database.path
-                if prepared_phrogs_sequence_database is not None
-                else external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
-            )
-            snapshot_annotation_path, snapshot_sequence_database = _snapshot_phrogs_safety_assets(
-                selected_annotation_path,
-                selected_sequence_database,
-                safety_generation_dir,
-            )
-            profile_archive_path = (
-                safety_generation_dir / "downloads" / Path(DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
-                if prepared_phrogs_profile_database is not None
-                else _cached_phrogs_safety_profile_archive(previous_manifest, external_dir)
-            )
+            assert phrogs_release is not None
+            downloaded_profile_archive = False
+            try:
+                profile_archive_path = _cached_phrogs_safety_profile_archive(
+                    previous_manifest,
+                    external_dir,
+                    _release=phrogs_release,
+                )
+            except FileNotFoundError:
+                if not download_large_databases:
+                    raise FileNotFoundError(
+                        "No authenticated PHROGs profile archive cache is available; "
+                        "rerun with --download-large-databases to acquire the reviewed release"
+                    ) from None
+                profile_archive_path, profile_source_url = _download_reviewed_phrogs_profile_archive(
+                    external_dir,
+                    overwrite=overwrite,
+                    _release=phrogs_release,
+                )
+                downloaded_profile_archive = True
+            else:
+                previous_provenance = (
+                    previous_manifest.get("phrogs_v4", {}).get("profile_database", {}).get("provenance", {})
+                )
+                previous_source_url = previous_provenance.get("source_url")
+                profile_source_url = (
+                    previous_source_url
+                    if previous_source_url in phrogs_release.profile_source_urls
+                    else phrogs_release.profile_source_urls[0]
+                )
             profile_retrieved_at = (
                 datetime.fromtimestamp(profile_archive_path.stat().st_mtime, timezone.utc)
                 .isoformat()
@@ -2246,11 +2823,32 @@ def prepare_external_assets(
             verified_profile = _extract_verified_phrogs_safety_profile_archive(
                 profile_archive_path,
                 safety_generation_dir / "phrogs" / "verified_profile_source",
+                _release=phrogs_release,
+            )
+            try:
+                authenticated_annotation_path = _find_authenticated_phrogs_annotation(
+                    verified_profile.extracted_dir,
+                    _release=phrogs_release,
+                )
+            except FileNotFoundError:
+                if not download_phrogs_annotation:
+                    raise
+                authenticated_annotation_path, _annotation_source_url = _download_reviewed_phrogs_annotation(
+                    safety_generation_dir,
+                    insecure_downloads=insecure_downloads,
+                    overwrite=overwrite,
+                    _release=phrogs_release,
+                )
+            snapshot_annotation_path = _snapshot_phrogs_annotation(
+                authenticated_annotation_path,
+                safety_generation_dir,
+                _release=phrogs_release,
             )
             cached_profile_archive_path = _publish_phrogs_safety_profile_archive(
                 profile_archive_path,
                 external_dir,
                 _verified_profile=verified_profile,
+                _release=phrogs_release,
             )
             if _sha256_file(cached_profile_archive_path) != verified_profile.observed_archive_sha256:
                 raise RuntimeError("PHROGs verified archive cache changed after clean extraction")
@@ -2265,26 +2863,23 @@ def prepare_external_assets(
                 tree_sha256=verified_profile.tree_sha256,
                 profile_id_inventory=verified_profile.profile_id_inventory,
                 _authority=_VERIFIED_PHROGS_PROFILE_AUTHORITY,
+                release_marker_origin=verified_profile.release_marker_origin,
+                release=phrogs_release,
             )
             snapshot_profile_database, snapshot_profile_root = _snapshot_phrogs_profile_database(
                 verified_profile.profile_database,
                 safety_generation_dir,
+                _release=phrogs_release,
             )
             shutil.rmtree(verified_profile.extracted_dir)
-            if (
-                prepared_phrogs_profile_database is not None
-                and prepared_phrogs_profile_database.path != verified_profile.extracted_dir
-            ):
-                shutil.rmtree(prepared_phrogs_profile_database.path, ignore_errors=True)
-            if prepared_phrogs_profile_database is not None:
-                assets.append(
-                    PreparedAsset(
-                        "phrogs_safety_profile_db",
-                        snapshot_profile_database,
-                        "immutable PHROGs safety profile snapshot",
-                    )
+            assets.append(
+                PreparedAsset(
+                    "phrogs_safety_profile_db",
+                    snapshot_profile_database,
+                    "immutable PHROGs safety profile snapshot",
                 )
-            staged_manifest: dict = {"schema_version": 1}
+            )
+            staged_manifest: dict = {"schema_version": 2}
             _set_safety_manifest_recipe(staged_manifest)
             generation_bin_dir = safety_generation_dir / "bin"
             assets.append(
@@ -2316,8 +2911,8 @@ def prepare_external_assets(
                     safety_dir=safety_generation_dir,
                     manifest=staged_manifest,
                     annotation_path=snapshot_annotation_path,
-                    sequence_database=snapshot_sequence_database,
                     profile_database=snapshot_profile_database,
+                    profile_source_url=profile_source_url,
                     profile_retrieved_at=profile_retrieved_at,
                     _verified_profile=verified_profile,
                 )
@@ -2325,13 +2920,14 @@ def prepare_external_assets(
             _validate_staged_safety_manifest(staged_manifest, verify_asset_paths=True)
             _write_safety_manifest_atomic(selected_safety_manifest, staged_manifest)
             safety_manifest_published = True
-            if prepared_phrogs_annotation is not None or prepared_phrogs_sequence_database is not None:
-                _publish_phrogs_legacy_assets(snapshot_annotation_path, snapshot_sequence_database, external_dir)
-            if prepared_phrogs_profile_database is not None:
+            if download_phrogs_annotation:
+                _publish_phrogs_legacy_annotation(snapshot_annotation_path, external_dir)
+            if downloaded_profile_archive:
                 _publish_phrogs_legacy_profile_database(
                     snapshot_profile_database,
                     snapshot_profile_root,
                     external_dir,
+                    _release=phrogs_release,
                 )
         return assets
     except Exception:
@@ -2375,6 +2971,11 @@ def main() -> None:
     parser.add_argument("--hmmer-url", default=DEFAULT_HMMER_URL)
     parser.add_argument("--phrogs-mmseqs-url", default=DEFAULT_PHROGS_MMSEQS_URL)
     parser.add_argument("--phrogs-fasta-url", default=DEFAULT_PHROGS_FASTA_URL)
+    parser.add_argument(
+        "--phrogs-fasta-sha256",
+        default=None,
+        help="Declared SHA-256 required before preparing the optional legacy FAA-derived Arc database.",
+    )
     parser.add_argument("--arc-evo2-repo-url", default=DEFAULT_ARC_EVO2_REPO_URL)
     parser.add_argument("--arc-evo2-repo-rev", default=DEFAULT_ARC_EVO2_REPO_REV)
     parser.add_argument("--overwrite", action="store_true")
@@ -2405,6 +3006,7 @@ def main() -> None:
         hmmer_url=args.hmmer_url,
         phrogs_mmseqs_url=args.phrogs_mmseqs_url,
         phrogs_fasta_url=args.phrogs_fasta_url,
+        phrogs_fasta_sha256=args.phrogs_fasta_sha256,
         arc_evo2_repo_url=args.arc_evo2_repo_url,
         arc_evo2_repo_rev=args.arc_evo2_repo_rev,
         overwrite=args.overwrite,
