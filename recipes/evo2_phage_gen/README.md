@@ -215,10 +215,30 @@ The bundled paper supplement preserves the exact historical configuration.
 - If external QC fails, verify the large databases completed successfully and inspect the per-stage logs under the rollout root.
 - If a fresh run selects a checkpoint other than step 190, use that checkpoint for rollout and report its validation evidence. Step 190 is historical context, not a fixed target.
 
-## References
+## Acknowledgements
+
+- [Samuel King (@samhkin)](https://github.com/samhkin) for discussions about the recipe and promising RL filters, including the proposal to test Arc filters 1–6, 8, and 9 as a challenging subset.
+- Jessica Sacher and [Jan Zheng (@janzheng)](https://github.com/janzheng) for introductions to the phage community, discussions that shaped the skill and recipe, and hands-on testing and feedback.
+- [Avery Noonan (@Noonanav)](https://github.com/Noonanav) for discussions about GenoPHI and phage–host interaction models more broadly.
+- Michael Poon and colleagues at [Tabula Bio](https://www.tabulabio.com/) for encouraging support for appropriately scoped design work beyond whole-phage-genome generation.
+- Eric Bastien and Nick Conley of [Locus Biosciences](https://locus-bio.com) for valuable feedback, including the addition of Shiga toxin-converting phage 933W and WOPip1 as positive controls for the safety filters.
+
+## References and background reading
+
+### Publications
 
 - [Final Science publication: *Generative design of novel bacteriophages with genome language models*](https://www.science.org/doi/10.1126/science.aec2657)
+- [Evo 2 publication of record: *Genome modelling and design across all domains of life with Evo 2*](https://doi.org/10.1038/s41586-026-10176-5)
 - [Bundled CC BY bioRxiv v1 paper, supplement, figures, and data](.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/) ([bioRxiv source](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full))
+
+### Books
+
+- Merry Youle, [*Thinking Like a Phage*](https://thinkinglikeaphage.wordpress.com/), for an accessible tour of phage biology.
+- Tom Ireland, [*The Good Virus*](https://www.hachette.co.uk/titles/tom-ireland/the-good-virus/9781529365283/), for the history and future promise of bacteriophage therapy.
+- Steffanie Strathdee and Thomas Patterson, [*The Perfect Predator*](https://theperfectpredator.com/), for the clinical story that helped renew interest in phage therapy.
+
+### Recipe resources
+
 - [Skill validation record](.agents/skills/bionemo-phage-design/assets/VALIDATION.md)
 - [Historical result evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)

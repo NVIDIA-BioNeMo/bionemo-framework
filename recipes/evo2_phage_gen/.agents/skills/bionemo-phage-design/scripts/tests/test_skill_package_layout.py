@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from pathlib import Path
 
 
@@ -45,6 +46,27 @@ def _plugin(agent_dir: Path) -> dict:
     return json.loads((agent_dir / ".codex-plugin" / "plugin.json").read_text())
 
 
+def _reachable_markdown_files(starts: list[Path], *, root: Path) -> set[Path]:
+    linked = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+    reachable = {path.resolve() for path in starts}
+    pending = list(reachable)
+    while pending:
+        source = pending.pop()
+        for raw_target in linked.findall(source.read_text(encoding="utf-8")):
+            target_text = raw_target.split("#", maxsplit=1)[0]
+            if not target_text or "://" in target_text or target_text.startswith("mailto:"):
+                continue
+            target = (source.parent / target_text).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError:
+                continue
+            if target.is_file() and target.suffix == ".md" and target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    return reachable
+
+
 def test_root_agent_package_contains_only_portable_entry_skill() -> None:
     assert _skill_names(ROOT_AGENT_DIR) == {"bionemo-phage-generation"}
     assert _plugin(ROOT_AGENT_DIR)["name"] == "bionemo-phage-generation"
@@ -56,6 +78,14 @@ def test_recipe_agent_package_owns_implementation_skills() -> None:
     assert _plugin(RECIPE_AGENT_DIR)["name"] == "bionemo-phage-design"
     assert (RECIPE_ROOT / "CLAUDE.md").is_symlink()
     assert (RECIPE_ROOT / "CLAUDE.md").readlink() == Path("AGENTS.md")
+
+
+def test_every_bundled_markdown_reference_is_reachable_from_a_skill() -> None:
+    skills_root = RECIPE_AGENT_DIR / "skills"
+    starts = list(skills_root.glob("*/SKILL.md"))
+    reachable = _reachable_markdown_files(starts, root=skills_root.resolve())
+    references = {path.resolve() for path in skills_root.glob("*/references/*.md")}
+    assert references <= reachable, sorted(str(path.relative_to(skills_root)) for path in references - reachable)
 
 
 def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handoff() -> None:
@@ -386,6 +416,12 @@ def test_readme_and_historical_evidence_distinguish_rerun_generations() -> None:
 def test_publication_citation_distinguishes_final_article_from_bundled_preprint() -> None:
     readme = (RECIPE_ROOT / "README.md").read_text(encoding="utf-8")
     controller = (RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+    calibration = (RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design-calibrate-rl-sampling" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    research = (RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design-research-evidence" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
 
     assert "https://www.science.org/doi/10.1126/science.aec2657" in readme
     assert "https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full" in readme
@@ -395,6 +431,15 @@ def test_publication_citation_distinguishes_final_article_from_bundled_preprint(
         "final Science publication",
     ):
         assert marker in controller
+    for marker in (
+        "Before opening any other file in a bundled publication",
+        "Begin every response that uses bundled evidence with a source note",
+        "source version and license",
+        "stable identifier",
+        "publication of record",
+    ):
+        assert marker in research
+    assert "../bionemo-phage-design-research-evidence/SKILL.md#use-bundled-publications" in calibration
 
 
 def test_safeguards_reach_operational_workflows_and_card_license() -> None:

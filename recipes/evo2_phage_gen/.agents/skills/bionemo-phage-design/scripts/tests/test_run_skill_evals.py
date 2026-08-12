@@ -892,8 +892,11 @@ class EvalRunnerTests(unittest.TestCase):
             "isolated and at the planned concurrency",
             "total throughput under load",
             "record workers and per-tool threads",
+            "process or container startup",
             "warm, batched, or persistent",
             "byte or semantic parity",
+            "deterministic input/output mapping",
+            "actual operation and database layout",
             "do not generalize one tool's result",
         ):
             self.assertIn(marker, text)
@@ -906,6 +909,16 @@ class EvalRunnerTests(unittest.TestCase):
         ):
             workflow = (SKILL_ROOT / relative_path).read_text(encoding="utf-8").lower()
             self.assertIn(anchor, workflow)
+
+        execution_skill = (SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "explicitly record the accelerator decision",
+            "actual operation and database layout",
+            "control-panel parity",
+        ):
+            self.assertIn(marker, execution_skill)
 
     def test_gpu_optimization_policy_is_shared_across_sft_rl_and_generation(self) -> None:
         policy_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "resource-and-oom-policy.md"
@@ -928,6 +941,51 @@ class EvalRunnerTests(unittest.TestCase):
         ):
             workflow = (SKILL_ROOT / relative_path).read_text(encoding="utf-8").lower()
             self.assertIn(anchor, workflow)
+
+    def test_behavioral_evals_require_use_of_bundled_docs_and_papers(self) -> None:
+        adapt = json.loads(
+            (SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "evals" / "evals.json").read_text(encoding="utf-8")
+        )["evals"]
+        contention = next(case for case in adapt if case["id"].endswith("external-tool-contention"))
+        contention_requirements = " ".join(contention["assertions"]).lower()
+        self.assertIn("resource-and-oom-policy.md#external-tool-filtering-and-scoring", contention_requirements)
+        self.assertIn("isolated", contention_requirements)
+        self.assertIn("planned concurrency", contention_requirements)
+        self.assertIn("output parity", contention_requirements)
+
+        calibration = json.loads(
+            (SKILL_ROOT / "bionemo-phage-design-calibrate-rl-sampling" / "evals" / "evals.json").read_text(
+                encoding="utf-8"
+            )
+        )["evals"]
+        king = next(case for case in calibration if case["id"].endswith("bundled-king-methods"))
+        king_requirements = " ".join(king["assertions"]).lower()
+        for marker in (
+            "manifest.json",
+            "king-2025-generative-phage-design/supplement.md",
+            "bioRxiv v1".lower(),
+            "1 to 11",
+            "top-k = 4",
+            "top-p = 1",
+        ):
+            self.assertIn(marker, king_requirements)
+
+        research = json.loads(
+            (SKILL_ROOT / "bionemo-phage-design-research-evidence" / "evals" / "evals.json").read_text(
+                encoding="utf-8"
+            )
+        )["evals"]
+        black = next(case for case in research if case["id"].endswith("bundled-black-framework"))
+        black_requirements = " ".join(black["assertions"]).lower()
+        for marker in (
+            "black-2026-design-efficiency/manifest.json",
+            "10.64898/2026.06.12.731871",
+            "evolutionary novelty",
+            "design efficiency",
+            "complete model-scaffold",
+            "transfer",
+        ):
+            self.assertIn(marker, black_requirements)
 
     def test_research_packet_requires_complete_objective_portfolio_rows(self) -> None:
         skill_path = SKILL_ROOT / "bionemo-phage-design-research-evidence" / "SKILL.md"

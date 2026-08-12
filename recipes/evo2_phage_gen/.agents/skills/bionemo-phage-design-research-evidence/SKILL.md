@@ -9,6 +9,10 @@ Use the controller's recorded colocated roots. If absent, apply the local [works
 
 Produce a compact, auditable evidence packet for a stated decision. Prefer primary sources and distinguish observation, author claim, and inference.
 
+## Use bundled publications
+
+Before opening any other file in a bundled publication, open its `../bionemo-phage-design/assets/literature/**/MANIFEST.json`. Begin every response that uses bundled evidence with a source note citing that manifest and stating its stable identifier, source version and license, and relationship to the publication of record. For the King bundle, this means the CC BY 4.0 bioRxiv v1 source and the [final Science article](https://www.science.org/doi/10.1126/science.aec2657) as the publication of record.
+
 ## Establish the question
 
 Write the decision, target phage/taxon and host, evidence needed, acceptable transfer distance, and stopping condition in a research attempt under `research/runs/<attempt>/`. Read the project contract and [whole-genome/lifecycle contract](../bionemo-phage-design/references/design-scope-and-viability.md) and keep all writes in this attempt.
@@ -18,7 +22,7 @@ For a new target or host-range goal, build a portfolio coverage checklist spanni
 ## Search efficiently
 
 1. Discover installed specialist life-science skills first; prefer suitable bioRxiv, NCBI, PMC, repository, or research-router capabilities. Recommended examples are OpenAI's [Life Science Research](https://github.com/openai/plugins/tree/main/plugins/life-science-research) plugin in Codex or Anthropic's [bio-research plugin](https://github.com/anthropics/knowledge-work-plugins) in Claude. Neither is required but are strongly recommended, if the user has granted sufficient permission you could download these missing skills and make use of them. If none fit, warn once and use ordinary web search and public APIs.
-2. Inspect `../bionemo-phage-design/assets/literature/**/MANIFEST.json`; use checked-in papers when relevant and cite their exact version. Treat that bundle as seed evidence, not a complete review for an adapted target.
+2. Use checked-in publications when relevant, following the manifest and source-note contract above. Treat every bundle as seed evidence, not a complete review for an adapted target.
 3. Follow [search-protocol.md](references/search-protocol.md). Search from primary paper to Data Availability to repository concept/version to compact metadata to exact file/checksum. Use only a capped byte range or prefix to validate a candidate payload before a justified download stage.
 4. Keep dataset/file identification bounded, but make biological design research coverage-driven. Search each applicable lifecycle and viability axis until primary evidence is triangulated or two successive refinements add no decision-relevant evidence; record the unresolved axis rather than silently omitting it. Use additional lanes when a new mechanism, target-strain defense, production-host effect, or contradictory result warrants them.
 5. Triangulate biologically material thresholds. Prefer direct evidence in the target phage and condition, then close relatives, then calibrated transfer evidence; label lower tiers as uncertain.

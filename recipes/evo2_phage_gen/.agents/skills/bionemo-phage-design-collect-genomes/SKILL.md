@@ -24,7 +24,7 @@ metadata separately. Missing host metadata is recorded and stratified—not inve
 only when the approved corpus definition actually requires it; conflicting host claims remain
 quarantined.
 
-Use the bounded lookup in `references/collection-contract.md`. Identify through metadata and a capped prefix before transferring large payloads. Never substitute an HTML page, installer, analysis script, or similarly named record for the claimed FASTA.
+Use the bounded lookup in [the collection contract](references/collection-contract.md). Identify through metadata and a capped prefix before transferring large payloads. Never substitute an HTML page, installer, analysis script, or similarly named record for the claimed FASTA.
 
 If the available tools cannot range-fetch and decompress a candidate, emit the exact bounded validation command, mark the biological payload unverified, and stop before download or use. Metadata, MIME, filename, archive size, and a checksum never substitute for content validation.
 

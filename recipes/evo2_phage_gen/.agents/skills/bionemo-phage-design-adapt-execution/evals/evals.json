@@ -133,6 +133,21 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-010-external-tool-contention",
+      "prompt": "Plan one whole-genome safety workflow for SFT corpus filtering, online RL scoring, and final screening. On one host, an MMseqs stage was much faster with more threads when isolated but slowed sharply when many one-thread containers ran together. BLASTX and AMRFinder are still being measured. Choose how to benchmark and admit concurrency without treating the MMseqs observation as a universal setting.",
+      "expected_output": "A shared, measured execution plan that separates tool-stage behavior from end-to-end throughput and selects bounded concurrency only after realistic-load checks.",
+      "assertions": [
+        "The response explicitly uses the bundled resource-and-oom-policy.md#external-tool-filtering-and-scoring contract rather than inventing independent SFT, RL, and final-screen rules.",
+        "It records end-to-end and per-stage timings on representative target-length controls both isolated and at planned concurrency, including startup, database loading, CPU, RAM and memory-bandwidth pressure, scratch, I/O, and any competing workload.",
+        "It benchmarks MMseqs, BLASTX, and AMRFinder independently and does not present the observed MMseqs speedup as decisive for another tool or the whole pipeline.",
+        "It chooses outer record workers times per-tool threads by stable total throughput under load, prevents nested oversubscription, and keeps deterministic input/output mapping.",
+        "It considers warm, batched, persistent, or cached execution when supported and requires exact output parity or a declared semantic/numerical equivalence test for every accepted topology, thread setting, container strategy, or accelerator path.",
+        "GPU use depends on support for the actual operation and database layout plus measured deployment-scale benefit and control-panel parity; a faster isolated microbenchmark alone is insufficient."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

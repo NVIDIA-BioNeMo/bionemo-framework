@@ -29,15 +29,18 @@ the setting with the fullest memory meter.
 
 For CPU or accelerated bioinformatics tools, collect end-to-end and per-stage timings on representative
 target-length controls, both isolated and at the planned concurrency, with a small thread sweep when
-useful. Choose record workers and per-tool threads by stable total throughput under load, not CPU
-occupancy or one isolated call. Bound the full nested task tree against CPU, RAM, memory bandwidth,
-GPU, scratch, I/O, database-loading, and concurrent-workload limits; limiting only outer workers is
-insufficient.
+useful. Include process or container startup, database loading, and cold versus warm cache behavior.
+Choose record workers and per-tool threads by stable total throughput under load, not CPU occupancy or
+one isolated call. Bound the full nested task tree against CPU, RAM, memory bandwidth, GPU, scratch,
+I/O, database-loading, and concurrent-workload limits; limiting only outer workers is insufficient.
+Preserve stable record IDs, ordering, and deterministic input/output mapping under concurrency.
 
 Cache identical results by sequence and full tool/asset/policy/parser identity. Prefer warm, batched, or
 persistent processes or containers when supported. Require byte or semantic parity for each accepted
-thread, process, container, or accelerator setting. Do not generalize one tool's result to another
-stage or the whole pipeline: tune each measured bottleneck, then remeasure end to end.
+thread, process, container, or accelerator setting. Admit a GPU or other accelerated path only when the
+actual operation and database layout are supported, it improves deployment-scale end-to-end throughput,
+and the applicable control panel agrees. Do not generalize one tool's result to another stage or the
+whole pipeline: tune each measured bottleneck, then remeasure end to end.
 
 Utilization never outranks full-genome coverage, the approved effective token batch, numerical health,
 unbiased sampling, checkpoint/resume integrity, deterministic record mapping, or cluster fairness.

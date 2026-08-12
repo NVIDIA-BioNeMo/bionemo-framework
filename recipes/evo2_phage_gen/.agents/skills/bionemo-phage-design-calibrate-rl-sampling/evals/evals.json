@@ -52,6 +52,20 @@
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-005-bundled-king-methods",
+      "prompt": "Using the checked-in publication bundle first, reconstruct the publication-era PhiX174 prompt and temperature sampling experiments well enough to design a current calibration run. Do not assume our selected SFT serialization matches the publication.",
+      "expected_output": "A version-cited methods summary from the bundled paper and supplement, followed by an explicit list of selected-SFT facts that must be revalidated before reuse.",
+      "assertions": [
+        "The response reads bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json before using the content, identifies the bundled CC BY 4.0 bioRxiv v1 source, and distinguishes it from the final Science publication of record.",
+        "It cites the bundled king-2025-generative-phage-design/supplement.md and names the relevant prompt-analysis and sampling-sweep methods rather than attributing details to an unspecified paper.",
+        "It reports prompt lengths 1 to 11 nucleotides, the +∼ fine-tuning prefix, top-k = 4, top-p = 1, approximately 1,000 samples per temperature-prompt cell, and the temperature sweep 0.3, 0.5, 0.7, 0.9, and 1.1.",
+        "It distinguishes the prompt-recall experiment at temperature 1.1 and 6,000 generated nucleotides from the multi-temperature selection sweep and its QC, diversity, and retention analyses.",
+        "It treats these as historical methods evidence, then verifies the selected SFT's actual markers, orientation, tokenizer, BOS/EOS, wrappers, prompt bytes/tokens, and continuation semantics before a fresh compatible calibration."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
     }
   ]
 }

@@ -9,6 +9,8 @@ Use the controller's recorded colocated roots. If absent, apply the local [works
 
 Run a fresh selected-SFT calibration against the approved objective/QC contract before RL. Treat paper settings and prior RL runs as hypotheses, not defaults to copy.
 
+Before using settings from a checked-in paper, follow the research skill's [bundled-publication contract](../bionemo-phage-design-research-evidence/SKILL.md#use-bundled-publications), including its manifest-first source note.
+
 ## Verify prompt compatibility
 
 Reconstruct actual SFT training bytes and token IDs: target-conditioning mapping and assignments, marker or annotation logic, orientation/rotation, tokenizer hash, BOS/EOS, wrappers, padding, masking, and first continuation position. Compare the selected bucket's RL prompt through that boundary byte-for-byte and token-for-token. Use only cues that SFT learned, and carry deliberate SFT protocol deviations into RL. Resolve nonsemantic drift from artifacts; pause only for a biologically or reproducibly material ambiguity.

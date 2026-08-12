@@ -28,6 +28,20 @@
       ],
       "expected_skill": "bionemo-phage-design-research-evidence",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-research-evidence-004-bundled-black-framework",
+      "prompt": "Use the checked-in design-efficiency publication to propose how we should assess whether a phage generation workflow is both effective and genuinely novel. State what the paper does and does not justify transferring to a new, larger phage system.",
+      "expected_output": "A source-versioned capability assessment that separates novelty from efficiency, evaluates the complete workflow, and preserves the publication's empirical limits.",
+      "assertions": [
+        "The response reads bionemo-phage-design/assets/literature/black-2026-design-efficiency/MANIFEST.json and cites the bundled CC BY 4.0 v1 source with DOI 10.64898/2026.06.12.731871.",
+        "It treats evolutionary novelty and design efficiency as separate axes and evaluates the complete model-scaffold, including generation, filtering, ranking, and curation, rather than the raw model alone.",
+        "It explains that functional or biological novelty is not identical to sequence or phylogenetic distance and that efficiency must be compared with explicit baseline generators and functional outcomes.",
+        "It reports the paper's evidence that Evo 2 likelihood predicted viability while correlating with proximity to natural genomes, without converting either association into proof for a new target.",
+        "It retains in vitro validation as the key functional evidence and explicitly limits transfer from compact PhiX174 designs to larger or structurally different phages, proposing new target-matched controls and calibration."
+      ],
+      "expected_skill": "bionemo-phage-design-research-evidence",
+      "expected_script": null
     }
   ]
 }
