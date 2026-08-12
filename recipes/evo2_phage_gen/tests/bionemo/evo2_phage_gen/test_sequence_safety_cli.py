@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behavioral tests for the strict sequence-safety CLI."""
+"""Behavioral tests for the fail-closed sequence-safety CLI."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from bionemo.evo2_phage_gen.sequence_safety_adapters import AdapterResult
 _ADAPTER_POLICIES = {
     "amr": (
         "amrfinder-curated-thresholds-v4.2.7",
-        "871fdcba5b14c69bb159be508da014eea62f1e1f9dbd395f1c8a31d8797a790b",
+        "6140f2a0ddeda5bb6e2fd733d72deeee82282ff58c9de91576d95fab1fa87e3b",
     ),
     "toxin": (
         "toxin-homology-v2",
@@ -326,6 +326,7 @@ def test_default_scan_without_trusted_homology_tool_pins_exits_three(tmp_path: P
 
     manifest = json.loads((output_dir / "manifest.json").read_text())
     assert exit_code == 3
+    assert output_dir.stat().st_mode & 0o777 == 0o755
     assert manifest["manifest_type"] == "sequence_safety_diagnostic"
     assert manifest["aggregate"]["state"] == "INDETERMINATE"
     assert {
@@ -667,59 +668,6 @@ def test_scan_records_invokes_adapter_bundle_once_per_record_and_preserves_state
     assert batch.state is SafetyState.INDETERMINATE
 
 
-def test_scan_records_bounds_parallel_workers_and_preserves_input_order(tmp_path: Path):
-    import threading
-
-    from bionemo.evo2_phage_gen.sequence_safety_cli import parse_fasta_records, scan_records
-
-    fasta = tmp_path / "input.fna"
-    fasta.write_bytes(b"".join(f">record-{index}\nATGAAATAG\n".encode() for index in range(4)))
-    records = parse_fasta_records(fasta)
-    lock = threading.Lock()
-    two_workers_entered = threading.Event()
-    active = 0
-    maximum_active = 0
-    entered = 0
-
-    def scanner(record, _input_index):
-        nonlocal active, maximum_active, entered
-        with lock:
-            active += 1
-            entered += 1
-            maximum_active = max(maximum_active, active)
-            if entered == 2:
-                two_workers_entered.set()
-        assert two_workers_entered.wait(timeout=2.0)
-        try:
-            return {
-                "amr": _class_adapter("amr"),
-                "toxin": _class_adapter("toxin"),
-                "lysogeny": _class_adapter("lysogeny"),
-            }
-        finally:
-            with lock:
-                active -= 1
-
-    batch = scan_records(
-        records,
-        scanner=scanner,
-        host_domain=HostDomain.BACTERIA,
-        max_workers=2,
-    )
-
-    assert maximum_active == 2
-    assert [record.sequence_id for record in batch.records] == [f"record-{index}" for index in range(4)]
-
-
-def test_record_worker_budget_rejects_nested_cpu_oversubscription():
-    from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, _resolve_record_workers
-
-    assert _resolve_record_workers(requested=4, record_count=20, tool_threads=4, cpu_slots=16) == 4
-    assert _resolve_record_workers(requested=4, record_count=2, tool_threads=4, cpu_slots=16) == 2
-    with pytest.raises(CLIValidationError, match="CPU slots"):
-        _resolve_record_workers(requested=5, record_count=20, tool_threads=4, cpu_slots=16)
-
-
 def test_serialized_record_materializes_every_adapter_attempt(tmp_path: Path):
     from bionemo.evo2_phage_gen.design_scope import HostEvidence
     from bionemo.evo2_phage_gen.sequence_safety_cli import (
@@ -873,52 +821,221 @@ def _normalized_toxin_finding(
     )
 
 
-def test_curated_domain_profile_provenance_compares_string_values(tmp_path: Path):
-    """Equivalent profile strings from JSON and the asset manifest need not be the same object."""
-    from bionemo.evo2_phage_gen.sequence_safety_adapters import TOXIN_HOMOLOGY_POLICY_V2
-    from bionemo.evo2_phage_gen.sequence_safety_cli import _validate_finding
+def test_class_results_accept_origin_crossing_finding_for_circular_genome(tmp_path: Path):
+    """A replayed one-copy-unrolled ORF may cross the origin of a circular genome."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import _validate_class_results
 
-    accession = "PF15658.11"
-    observed_profile = ("x" + accession)[1:]
-    expected_profile = ("y" + accession)[1:]
-    assert observed_profile == expected_profile and observed_profile is not expected_profile
+    query_id = "phage-a__sixframe_p2_0001"
     finding = replace(
         _normalized_toxin_finding(
             tmp_path,
-            finding_id="toxin:phage-a__orf0001:PF15658.11",
-            state=SafetyState.INDETERMINATE,
+            finding_id=f"toxin:{query_id}:P09385",
+            start=8,
+            end=13,
         ),
-        reason_codes=("TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW",),
-        detector="diamond-curated-toxin-domain",
-        accession=accession,
-        profile=observed_profile,
-        thresholds=TOXIN_HOMOLOGY_POLICY_V2.curated_domain_review.to_dict(),
+        accession="P09385",
+        query_id=query_id,
+        evidence_path="six-frame-fallback",
     )
-    provenance = {
-        "detector": "diamond-reviewed-toxin",
-        "detector_by_accession": {accession: "diamond-curated-toxin-domain"},
-        "profile": None,
-        "profile_by_accession": {accession: expected_profile},
-        "source_path": finding.source_path,
-        "source_sha256": finding.source_sha256,
-        "tool_version": finding.tool_version,
-        "database_version": finding.database_version,
-        "tool_path": finding.tool_path,
-        "tool_sha256": finding.tool_sha256,
-        "evidence_method": finding.evidence_method,
-        "policy_descriptor": TOXIN_HOMOLOGY_POLICY_V2.to_dict(),
-    }
+    rows = [
+        SafetyClassResult("amr", SafetyState.PASS, True, reason_codes=("NO_HIT",)).to_dict(),
+        SafetyClassResult(
+            "toxin",
+            SafetyState.FAIL,
+            True,
+            findings=(finding,),
+            reason_codes=("TOXIN_HIGH_CONFIDENCE_HOMOLOGY",),
+        ).to_dict(),
+        SafetyClassResult("lysogeny", SafetyState.PASS, True, reason_codes=("NO_HIT",)).to_dict(),
+    ]
 
-    assert (
-        _validate_finding(
-            finding.to_dict(),
-            record_id="phage-a",
-            safety_class="toxin",
-            expected_policy=(TOXIN_HOMOLOGY_POLICY_V2.policy_id, TOXIN_HOMOLOGY_POLICY_V2.sha256),
-            provenance=provenance,
-        ).profile
-        == accession
+    restored, finding_ids = _validate_class_results(
+        rows,
+        record_id="phage-a",
+        applicability={"amr": True, "toxin": True, "lysogeny": True},
+        query_index={
+            query_id: {
+                "start": 8,
+                "end": 13,
+                "strand": "+",
+                "frame": 1,
+                "evidence_path": "six-frame-fallback",
+            }
+        },
+        sequence_length=10,
+        circular=True,
     )
+
+    assert restored[1].findings == (finding,)
+    assert finding_ids == {finding.finding_id}
+
+
+def _normalized_amrfinder_nucleotide_finding(
+    tmp_path: Path,
+    *,
+    sequence: str,
+    start: int = 100,
+    end: int = 120,
+    strand: str = "+",
+):
+    from bionemo.evo2_phage_gen.sequence_safety_adapters import NormalizedSafetyFinding
+
+    strand_label = "p" if strand == "+" else "m"
+    sequence_sha256 = hashlib.sha256(sequence.encode()).hexdigest()
+    query_id = f"phage-a__amrfinder_nt_{strand_label}_{start}_{end}_{sequence_sha256}"
+    frame = (start - 1) % 3 + 1 if strand == "+" else -((len(sequence) - end) % 3 + 1)
+    return NormalizedSafetyFinding(
+        safety_class="amr",
+        state=SafetyState.FAIL,
+        reason_codes=("AMR_DETERMINANT_DETECTED",),
+        finding_id=f"amr:{query_id}:SYN_NT.1",
+        detector="amrfinder-plus",
+        accession="SYN_NT.1",
+        query_id=query_id,
+        sequence_id="phage-a",
+        start=start,
+        end=end,
+        strand=strand,
+        frame=frame,
+        scores={
+            "alignment_length": 7.0,
+            "identity": 99.0,
+            "reference_coverage": 100.0,
+            "reference_length": 7.0,
+            "target_length": 7.0,
+        },
+        thresholds={},
+        source_path=str(tmp_path / "amr-db"),
+        source_sha256="1" * 64,
+        tool_version="AMRFinderPlus version 4.2.7",
+        database_version="2026-08-08",
+        evidence_path="amrfinder-nucleotide-v1",
+        evidence_method="INTERNAL_STOP",
+        threshold_policy=_ADAPTER_POLICIES["amr"][0],
+        threshold_policy_sha256=_ADAPTER_POLICIES["amr"][1],
+        tool_path=str(tmp_path / "amrfinder"),
+        tool_sha256="2" * 64,
+    )
+
+
+def _class_rows_with_amr_finding(finding):
+    return [
+        SafetyClassResult(
+            "amr",
+            SafetyState.FAIL,
+            True,
+            findings=(finding,),
+            reason_codes=("AMR_DETERMINANT_DETECTED",),
+        ).to_dict(),
+        SafetyClassResult("toxin", SafetyState.PASS, True, reason_codes=("NO_HIT",)).to_dict(),
+        SafetyClassResult("lysogeny", SafetyState.PASS, True, reason_codes=("NO_HIT",)).to_dict(),
+    ]
+
+
+def test_class_results_accept_exact_sequence_bound_amrfinder_nucleotide_evidence(tmp_path: Path):
+    """The CLI may accept a non-ORF AMRFinder hit only through its exact nucleotide discriminator."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import _validate_class_results
+
+    sequence = "ACG" * 70
+    finding = _normalized_amrfinder_nucleotide_finding(tmp_path, sequence=sequence)
+
+    restored, finding_ids = _validate_class_results(
+        _class_rows_with_amr_finding(finding),
+        record_id="phage-a",
+        applicability={"amr": True, "toxin": True, "lysogeny": True},
+        query_index={},
+        sequence_length=len(sequence),
+        sequence=sequence,
+    )
+
+    assert restored[0].findings == (finding,)
+    assert finding_ids == {finding.finding_id}
+
+
+@pytest.mark.parametrize(
+    ("mutator", "error_pattern"),
+    [
+        (lambda finding: replace(finding, query_id=finding.query_id + "-forged"), "nucleotide evidence"),
+        (lambda finding: replace(finding, finding_id=finding.finding_id + "-forged"), "nucleotide evidence"),
+        (lambda finding: replace(finding, start=finding.start + 1), "nucleotide evidence"),
+        (lambda finding: replace(finding, frame=2), "nucleotide evidence"),
+        (lambda finding: replace(finding, evidence_method="ALLELEP"), "nucleotide evidence"),
+        (lambda finding: replace(finding, evidence_path="pyrodigal-gv"), "unknown ORF query"),
+    ],
+)
+def test_class_results_reject_forged_amrfinder_nucleotide_findings(tmp_path: Path, mutator, error_pattern):
+    """Coherently serialized findings cannot bypass exact nucleotide evidence replay."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, _validate_class_results
+
+    sequence = "ACG" * 70
+    finding = mutator(_normalized_amrfinder_nucleotide_finding(tmp_path, sequence=sequence))
+
+    with pytest.raises(CLIValidationError, match=error_pattern):
+        _validate_class_results(
+            _class_rows_with_amr_finding(finding),
+            record_id="phage-a",
+            applicability={"amr": True, "toxin": True, "lysogeny": True},
+            query_index={},
+            sequence_length=len(sequence),
+            sequence=sequence,
+        )
+
+
+def test_class_results_reject_amrfinder_nucleotide_finding_bound_to_other_sequence(tmp_path: Path):
+    """A valid-looking coordinate identity must still bind the exact scanned sequence bytes."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, _validate_class_results
+
+    declared_sequence = "ACG" * 70
+    finding = _normalized_amrfinder_nucleotide_finding(tmp_path, sequence=declared_sequence)
+
+    with pytest.raises(CLIValidationError, match="nucleotide evidence"):
+        _validate_class_results(
+            _class_rows_with_amr_finding(finding),
+            record_id="phage-a",
+            applicability={"amr": True, "toxin": True, "lysogeny": True},
+            query_index={},
+            sequence_length=len(declared_sequence),
+            sequence="TCG" * 70,
+        )
+
+
+def test_class_results_reject_coherently_forged_out_of_bounds_amrfinder_nucleotide_finding(tmp_path: Path):
+    """A self-consistent evidence ID cannot make an interval leave the scanned contig."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, _validate_class_results
+
+    sequence = "ACG" * 70
+    finding = _normalized_amrfinder_nucleotide_finding(tmp_path, sequence=sequence, end=len(sequence) + 1)
+
+    with pytest.raises(CLIValidationError, match="coordinates"):
+        _validate_class_results(
+            _class_rows_with_amr_finding(finding),
+            record_id="phage-a",
+            applicability={"amr": True, "toxin": True, "lysogeny": True},
+            query_index={},
+            sequence_length=len(sequence),
+            sequence=sequence,
+        )
+
+
+def test_class_results_reject_missing_amrfinder_nucleotide_source_discriminator(tmp_path: Path):
+    """The explicit nucleotide evidence source cannot be omitted or serialized as blank."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, _validate_class_results
+
+    sequence = "ACG" * 70
+    finding = _normalized_amrfinder_nucleotide_finding(tmp_path, sequence=sequence).to_dict()
+    finding["evidence_path"] = ""
+    rows = _class_rows_with_amr_finding(_normalized_amrfinder_nucleotide_finding(tmp_path, sequence=sequence))
+    rows[0]["findings"] = [finding]
+
+    with pytest.raises(CLIValidationError, match="schema mismatch"):
+        _validate_class_results(
+            rows,
+            record_id="phage-a",
+            applicability={"amr": True, "toxin": True, "lysogeny": True},
+            query_index={},
+            sequence_length=len(sequence),
+            sequence=sequence,
+        )
 
 
 def test_class_result_state_must_follow_finding_precedence(tmp_path: Path):
@@ -1057,7 +1174,7 @@ def test_cli_identity_rejects_an_arbitrary_matching_path_and_digest():
         _validate_cli_identity,
     )
 
-    arbitrary = Path(__file__).parents[3] / "pyproject.toml"
+    arbitrary = Path("recipes/evo2_phage_gen/pyproject.toml").resolve()
     with pytest.raises(CLIValidationError, match="CLI source path mismatch"):
         _validate_cli_identity(
             {
@@ -1210,8 +1327,10 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
     toxin_database.write_bytes(b"toxin-db")
     phrogs_database = tmp_path / "phrogs-profile-db"
     phrogs_database.write_bytes(b"phrogs-db")
+    phrogs_search_database = tmp_path / "phrogs-safety-profile-db"
+    phrogs_search_database.write_bytes(b"phrogs-safety-db")
     asset_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "recipe": {"path": str(recipe), "sha256": hashlib.sha256(recipe.read_bytes()).hexdigest()},
         "amrfinder_plus": {
             "binary_path": str(executable),
@@ -1220,6 +1339,8 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
             "database_path": str(amr_database),
             "database_sha256": "a" * 64,
             "database_version": "amr-db-v1",
+            "blastx_path": str(executable),
+            "hmmsearch_path": str(executable),
         },
         "toxin_reference": {
             "uniprot_release": "2026_01",
@@ -1234,7 +1355,12 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
             "profile_database": {
                 "path": str(phrogs_database),
                 "sha256": hashlib.sha256(phrogs_database.read_bytes()).hexdigest(),
-            }
+                "provenance": {"dataset_release": "PHROGs v4", "release": "Pharokka v1.8.0"},
+            },
+            "search_database": {
+                "path": str(phrogs_search_database),
+                "sha256": hashlib.sha256(phrogs_search_database.read_bytes()).hexdigest(),
+            },
         },
     }
     loaded_assets = LoadedSafetyAssetManifest(
@@ -1362,6 +1488,8 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
                 proteins_faa=artifacts.proteins_faa,
                 proteins_gff=artifacts.proteins_gff,
                 database_dir=Path(asset_manifest["amrfinder_plus"]["database_path"]),
+                blast_bin_dir=Path(asset_manifest["amrfinder_plus"]["blastx_path"]).parent,
+                hmmer_bin_dir=Path(asset_manifest["amrfinder_plus"]["hmmsearch_path"]).parent,
                 threads=threads,
                 output_tsv=raw_paths["amr"],
             ),
@@ -1374,7 +1502,11 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
             ),
             "lysogeny": build_phrogs_command(
                 mmseqs=mmseqs_pin.path,
-                profile_database=Path(asset_manifest["phrogs_v4"]["profile_database"]["path"]),
+                profile_database=Path(
+                    asset_manifest["phrogs_v4"].get(
+                        "search_database", asset_manifest["phrogs_v4"]["profile_database"]
+                    )["path"]
+                ),
                 proteins_faa=artifacts.proteins_faa,
                 output_tsv=raw_paths["lysogeny"],
                 temporary_dir=record_dir / "tmp",
@@ -1437,6 +1569,8 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
         orf_identity_collector=lambda: orf_identity,
         orf_replayer=orf_replayer,
         adapter_replayer=adapter_replayer,
+        phrogs_asset_validator=lambda section: section,
+        phrogs_asset_revalidator=lambda section, context: None,
     )
     output_dir = tmp_path / "scan-output"
     host_evidence = {
@@ -1472,6 +1606,7 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
 
     manifest = json.loads((output_dir / "manifest.json").read_text())
     assert exit_code == 0
+    assert output_dir.stat().st_mode & 0o777 == 0o755
     assert calls == ["phage-a", "phage-b", "phage-c"]
     assert manifest["manifest_type"] == "sequence_safety_scan"
     assert manifest["aggregate"]["state"] == "PASS"
@@ -1723,6 +1858,7 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
         runtime=runtime,
     )
     assert mixed_filter_exit == 2
+    assert mixed_filter_dir.stat().st_mode & 0o777 == 0o755
     source_records = parse_fasta_records(input_fasta)
     assert (mixed_filter_dir / "fail.fna").read_bytes() == source_records[0].original_bytes
     assert (mixed_filter_dir / "indeterminate.fna").read_bytes() == source_records[1].original_bytes

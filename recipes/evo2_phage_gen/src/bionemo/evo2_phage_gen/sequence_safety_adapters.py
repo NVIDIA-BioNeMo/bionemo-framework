@@ -26,7 +26,6 @@ import csv
 import hashlib
 import json
 import math
-import os
 import re
 import shutil
 import subprocess
@@ -39,14 +38,19 @@ from urllib.parse import quote
 
 from bionemo.evo2_phage_gen.design_scope import HostDomain
 from bionemo.evo2_phage_gen.external_assets import (
-    PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS,
+    DEFAULT_PHROGS_ANNOTATION_SHA256,
+    DEFAULT_PHROGS_ANNOTATION_URL,
+    PHROGS_ADDITIONAL_LIFECYCLE_HIGH_CONFIDENCE_TERMS,
     PHROGS_HIGH_CONFIDENCE_TERMS,
     PHROGS_INTEGRATION_EXCISION_CATEGORY,
+    PHROGS_LYSOGENY_SELECTION_SCOPE,
     PHROGS_REVIEW_TERMS,
     TOXIN_REFERENCE_CLASSIFICATION_POLICY,
+    _normalize_phrogs_annotation_identifier,
     _parse_amrfinder_database_version,
+    _validate_amrfinder_runtime_bundle,
+    _validate_phrogs_safety_search_database,
     _validate_uniprot_toxin_scope,
-    load_phrogs_safety_release,
 )
 from bionemo.evo2_phage_gen.sequence_safety import SafetyClassResult, SafetyFinding, SafetyState
 
@@ -133,7 +137,7 @@ class ORFArtifacts:
 
 @dataclass(frozen=True)
 class ORFPreparationResult:
-    """Result that becomes INDETERMINATE when the required predictor is unavailable."""
+    """Fail-closed result for optional runtime loading of the required predictor."""
 
     state: SafetyState
     artifacts: ORFArtifacts | None
@@ -484,7 +488,7 @@ def prepare_orf_artifacts_checked(
     predictor: GenePredictor | None = None,
     minimum_fallback_amino_acids: int = 8,
 ) -> ORFPreparationResult:
-    """Mark ORF preparation INDETERMINATE when pyrodigal-gv is unavailable."""
+    """Map unavailable pyrodigal-gv runtime into the canonical fail-closed state."""
     try:
         artifacts = prepare_orf_artifacts(
             genomes,
@@ -671,6 +675,8 @@ class AdapterResult:
     raw_output_sha256: str | None = None
     policy_id: str | None = None
     policy_sha256: str | None = None
+    shared_execution_id: str | None = None
+    command_output_path: str | None = None
 
     def __post_init__(self) -> None:
         """Freeze command and supplemental finding inventories."""
@@ -680,6 +686,13 @@ class AdapterResult:
             raise ValueError("adapter policy ID and SHA-256 must be recorded together")
         if self.policy_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", self.policy_sha256):
             raise ValueError("adapter policy SHA-256 must be a lowercase digest")
+        if (self.shared_execution_id is None) != (self.command_output_path is None):
+            raise ValueError("shared execution ID and command output path must be recorded together")
+        if self.shared_execution_id is not None:
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", self.shared_execution_id) is None or not self.command:
+                raise ValueError("shared adapter execution identity or command is invalid")
+            if not Path(self.command_output_path).is_absolute():
+                raise ValueError("shared adapter command output path must be absolute")
 
 
 def _bind_result_policy(
@@ -708,6 +721,8 @@ def build_amrfinder_command(
     proteins_faa: Path,
     proteins_gff: Path,
     database_dir: Path,
+    blast_bin_dir: Path,
+    hmmer_bin_dir: Path,
     threads: int,
     output_tsv: Path,
 ) -> list[str]:
@@ -726,6 +741,10 @@ def build_amrfinder_command(
         "--print_node",
         "--database",
         str(database_dir),
+        "--blast_bin",
+        str(blast_bin_dir),
+        "--hmmer_bin",
+        str(hmmer_bin_dir),
         "--threads",
         str(threads),
         "-o",
@@ -765,6 +784,125 @@ _AMRFINDER_NUMERIC_COLUMNS = (
     "% Identity to reference",
     "Alignment length",
 )
+_AMRFINDER_NUCLEOTIDE_EVIDENCE_PATH = "amrfinder-nucleotide-v1"
+_AMRFINDER_NUCLEOTIDE_METHODS = frozenset(
+    {
+        "ALLELEX",
+        "BLASTX",
+        "EXACTX",
+        "INTERNAL_STOP",
+        "PARTIALX",
+        "PARTIAL_CONTIG_ENDX",
+        "POINTX",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _AMRFinderNucleotideRecord:
+    """Exact contig-coordinate evidence for an AMRFinder nucleotide-only row."""
+
+    query_id: str
+    sequence_id: str
+    start: int
+    end: int
+    strand: str
+    frame: int
+    evidence_path: str = _AMRFINDER_NUCLEOTIDE_EVIDENCE_PATH
+
+
+class _AMRFinderNucleotideEvidenceError(ValueError):
+    """A nucleotide-only AMRFinder row cannot be authenticated."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+def _read_amrfinder_nucleotide_contigs(path: Path) -> dict[str, str]:
+    """Read only the exact two-line FASTA emitted by :func:`prepare_orf_artifacts`."""
+    selected = Path(path)
+    if selected.is_symlink() or not selected.is_file():
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_FASTA_MISMATCH")
+    try:
+        payload = selected.read_bytes()
+        text = payload.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_FASTA_MISMATCH") from error
+    if not text.endswith("\n") or "\r" in text:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_FASTA_MISMATCH")
+    lines = text[:-1].split("\n")
+    if not lines or len(lines) % 2:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_FASTA_MISMATCH")
+    contigs: dict[str, str] = {}
+    header_pattern = re.compile(r"^>([A-Za-z0-9_.-]+) circular=(?:true|false)$")
+    for index in range(0, len(lines), 2):
+        match = header_pattern.fullmatch(lines[index])
+        sequence = lines[index + 1]
+        if match is None or not sequence or set(sequence) - set("ACGTN"):
+            raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_FASTA_MISMATCH")
+        sequence_id = match.group(1)
+        if sequence_id in contigs:
+            raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_FASTA_MISMATCH")
+        contigs[sequence_id] = sequence
+    return contigs
+
+
+def _amrfinder_nucleotide_query_id(*, sequence_id: str, sequence: str, start: int, end: int, strand: str) -> str:
+    """Bind a nucleotide evidence identity to exact contig bytes and coordinates."""
+    strand_label = "p" if strand == "+" else "m"
+    sequence_sha256 = hashlib.sha256(sequence.encode()).hexdigest()
+    return f"{sequence_id}__amrfinder_nt_{strand_label}_{start}_{end}_{sequence_sha256}"
+
+
+def _amrfinder_nucleotide_frame(*, start: int, end: int, strand: str, sequence_length: int) -> int:
+    if strand == "+":
+        return (start - 1) % 3 + 1
+    return -((sequence_length - end) % 3 + 1)
+
+
+def _amrfinder_nucleotide_record(
+    row: Mapping[str, str],
+    *,
+    contigs: Mapping[str, str],
+    existing_query_ids: frozenset[str],
+) -> _AMRFinderNucleotideRecord:
+    if row["Method"] not in _AMRFINDER_NUCLEOTIDE_METHODS:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_METHOD_MISMATCH")
+    sequence_id = row["Contig id"]
+    sequence = contigs.get(sequence_id)
+    if sequence is None:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_UNKNOWN_SEQUENCE_ID")
+    try:
+        start = int(row["Start"])
+        end = int(row["Stop"])
+    except (TypeError, ValueError) as error:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_INVALID_NUMERIC_VALUE") from error
+    strand = row["Strand"]
+    if start < 1 or end < start or end > len(sequence) or strand not in {"+", "-"}:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_COORDINATE_MISMATCH")
+    query_id = _amrfinder_nucleotide_query_id(
+        sequence_id=sequence_id,
+        sequence=sequence,
+        start=start,
+        end=end,
+        strand=strand,
+    )
+    if query_id in existing_query_ids:
+        raise _AMRFinderNucleotideEvidenceError("AMRFINDER_NUCLEOTIDE_QUERY_ID_COLLISION")
+    return _AMRFinderNucleotideRecord(
+        query_id=query_id,
+        sequence_id=sequence_id,
+        start=start,
+        end=end,
+        strand=strand,
+        frame=_amrfinder_nucleotide_frame(
+            start=start,
+            end=end,
+            strand=strand,
+            sequence_length=len(sequence),
+        ),
+    )
 
 
 def _class_result(
@@ -852,13 +990,17 @@ _AMRFINDER_POLICY_SHA256 = _canonical_mapping_sha256(
         "curated_identity_threshold_overrides": False,
         "amr_type_action": "FAIL",
         "plus_virulence_action": "SUPPLEMENTAL_TOXIN_EVIDENCE",
+        "nucleotide_only_protein_id": "NA",
+        "nucleotide_only_evidence_path": _AMRFINDER_NUCLEOTIDE_EVIDENCE_PATH,
+        "nucleotide_only_methods": sorted(_AMRFINDER_NUCLEOTIDE_METHODS),
+        "nucleotide_only_binding": "exact_contig_sequence_sha256_coordinates_strand",
     }
 )
 
 
 def _amrfinder_finding(
     row: Mapping[str, str],
-    record: ORFQueryRecord,
+    record: ORFQueryRecord | _AMRFinderNucleotideRecord,
     *,
     safety_class: str,
     state: SafetyState,
@@ -911,7 +1053,7 @@ def parse_amrfinder_output(
     manifest_section: Mapping[str, object],
     required: bool,
 ) -> AdapterResult:
-    """Parse AMRFinderPlus v4.2.7 output; malformed evidence is INDETERMINATE."""
+    """Parse AMRFinderPlus v4.2.7 output with an exact, fail-closed schema."""
     output_tsv = Path(output_tsv)
     if not output_tsv.is_file():
         return _indeterminate_adapter_result(
@@ -939,7 +1081,12 @@ def parse_amrfinder_output(
         )
 
     try:
-        query_records = _query_record_index(artifacts, primary_only=True)
+        all_query_records = _query_record_index(artifacts)
+        query_records = {
+            query_id: record
+            for query_id, record in all_query_records.items()
+            if record.evidence_path == "pyrodigal-gv"
+        }
     except ValueError:
         return _indeterminate_adapter_result(
             "amr", required=required, reason_code="AMRFINDER_DUPLICATE_QUERY_ID", raw_output_path=output_tsv
@@ -947,6 +1094,8 @@ def parse_amrfinder_output(
     amr_findings: list[NormalizedSafetyFinding] = []
     supplemental_findings: list[NormalizedSafetyFinding] = []
     seen_rows: set[tuple[str, ...]] = set()
+    seen_nucleotide_query_ids: set[str] = set()
+    nucleotide_contigs: dict[str, str] | None = None
     for line in noncomment_lines[1:]:
         fields = tuple(line.split("\t"))
         if fields == _AMRFINDER_COLUMNS:
@@ -963,15 +1112,37 @@ def parse_amrfinder_output(
             )
         seen_rows.add(fields)
         row = dict(zip(_AMRFINDER_COLUMNS, fields, strict=True))
-        record = query_records.get(row["Protein id"])
-        if record is None:
-            return _indeterminate_adapter_result(
-                "amr", required=required, reason_code="AMRFINDER_UNKNOWN_QUERY_ID", raw_output_path=output_tsv
-            )
-        if row["Contig id"] != record.sequence_id:
-            return _indeterminate_adapter_result(
-                "amr", required=required, reason_code="AMRFINDER_UNKNOWN_SEQUENCE_ID", raw_output_path=output_tsv
-            )
+        if row["Protein id"] == "NA":
+            try:
+                if nucleotide_contigs is None:
+                    nucleotide_contigs = _read_amrfinder_nucleotide_contigs(artifacts.genomes_fna)
+                record = _amrfinder_nucleotide_record(
+                    row,
+                    contigs=nucleotide_contigs,
+                    existing_query_ids=frozenset(all_query_records),
+                )
+            except _AMRFinderNucleotideEvidenceError as error:
+                return _indeterminate_adapter_result(
+                    "amr", required=required, reason_code=error.reason_code, raw_output_path=output_tsv
+                )
+            if record.query_id in seen_nucleotide_query_ids:
+                return _indeterminate_adapter_result(
+                    "amr",
+                    required=required,
+                    reason_code="AMRFINDER_DUPLICATE_NUCLEOTIDE_EVIDENCE",
+                    raw_output_path=output_tsv,
+                )
+            seen_nucleotide_query_ids.add(record.query_id)
+        else:
+            record = query_records.get(row["Protein id"])
+            if record is None:
+                return _indeterminate_adapter_result(
+                    "amr", required=required, reason_code="AMRFINDER_UNKNOWN_QUERY_ID", raw_output_path=output_tsv
+                )
+            if row["Contig id"] != record.sequence_id:
+                return _indeterminate_adapter_result(
+                    "amr", required=required, reason_code="AMRFINDER_UNKNOWN_SEQUENCE_ID", raw_output_path=output_tsv
+                )
         try:
             start = int(row["Start"])
             stop = int(row["Stop"])
@@ -987,7 +1158,11 @@ def parse_amrfinder_output(
             return _indeterminate_adapter_result(
                 "amr", required=required, reason_code="AMRFINDER_INVALID_NUMERIC_VALUE", raw_output_path=output_tsv
             )
-        if (start, stop, row["Strand"]) != (record.start, record.end, record.strand):
+        if row["Protein id"] != "NA" and (start, stop, row["Strand"]) != (
+            record.start,
+            record.end,
+            record.strand,
+        ):
             return _indeterminate_adapter_result(
                 "amr", required=required, reason_code="AMRFINDER_COORDINATE_MISMATCH", raw_output_path=output_tsv
             )
@@ -1078,24 +1253,32 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_amrfinder_manifest_section(
-    section: Mapping[str, object],
-) -> tuple[ToolPin, Path, str, tuple[Path, ...]]:
+def _validate_amrfinder_tool_directory(section: Mapping[str, object], names: tuple[str, ...], *, label: str) -> Path:
+    """Validate one complete digest-bound helper directory used by AMRFinder."""
+    paths: list[Path] = []
+    for name in names:
+        path_value = section.get(f"{name}_path")
+        digest_value = section.get(f"{name}_sha256")
+        if not isinstance(path_value, str) or not path_value or not isinstance(digest_value, str):
+            raise AssetProvenanceError(f"AMRFinder {label} runtime is incomplete")
+        path = Path(path_value)
+        if path.name != name or not path.is_absolute() or path.is_symlink() or not path.is_file():
+            raise AssetProvenanceError(f"AMRFinder {label} runtime path is invalid: {path}")
+        if not path.stat().st_mode & 0o111 or _sha256_file(path) != digest_value:
+            raise AssetProvenanceError(f"AMRFinder {label} runtime digest or mode drift: {path}")
+        paths.append(path)
+    roots = {path.parent for path in paths}
+    if len(roots) != 1:
+        raise AssetProvenanceError(f"AMRFinder {label} runtime files do not share one directory")
+    return roots.pop()
+
+
+def _validate_amrfinder_manifest_section(section: Mapping[str, object]) -> tuple[ToolPin, Path, str, Path, Path]:
     required_fields = {
         "release",
         "binary_path",
         "binary_sha256",
         "amrfinder_version",
-        "makeblastdb_path",
-        "makeblastdb_sha256",
-        "blastp_path",
-        "blastp_sha256",
-        "blastx_path",
-        "blastx_sha256",
-        "hmmpress_path",
-        "hmmpress_sha256",
-        "hmmsearch_path",
-        "hmmsearch_sha256",
         "database_path",
         "database_version",
         "database_sha256",
@@ -1106,6 +1289,10 @@ def _validate_amrfinder_manifest_section(
         raise AssetProvenanceError("AMRFinder manifest section is incomplete")
     if section["release"] != "amrfinder_v4.2.7":
         raise AssetProvenanceError("AMRFinder manifest release is not amrfinder_v4.2.7")
+    try:
+        _validate_amrfinder_runtime_bundle(section, verify_asset_paths=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise AssetProvenanceError("AMRFinder sibling runtime bundle is invalid") from error
     database_path = Path(str(section["database_path"]))
     observed_database_digest = _sha256_path(database_path)
     if observed_database_digest != str(section["database_sha256"]):
@@ -1113,18 +1300,12 @@ def _validate_amrfinder_manifest_section(
             "AMRFinder database digest drift: "
             f"expected {section['database_sha256']}, observed {observed_database_digest}"
         )
-    runtime_paths = []
-    for executable_name in ("blastp", "blastx", "makeblastdb", "hmmsearch", "hmmpress"):
-        runtime_path = Path(str(section[f"{executable_name}_path"]))
-        if runtime_path.is_symlink() or not runtime_path.is_file() or not (runtime_path.stat().st_mode & 0o111):
-            raise AssetProvenanceError(f"AMRFinder runtime executable is missing or invalid: {executable_name}")
-        observed_runtime_digest = _sha256_file(runtime_path)
-        if observed_runtime_digest != str(section[f"{executable_name}_sha256"]):
-            raise AssetProvenanceError(
-                f"AMRFinder runtime executable digest drift for {executable_name}: "
-                f"expected {section[f'{executable_name}_sha256']}, observed {observed_runtime_digest}"
-            )
-        runtime_paths.append(runtime_path.resolve())
+    blast_bin_dir = _validate_amrfinder_tool_directory(
+        section,
+        ("blastn", "blastp", "blastx", "makeblastdb", "tblastn"),
+        label="BLAST+",
+    )
+    hmmer_bin_dir = _validate_amrfinder_tool_directory(section, ("hmmpress", "hmmsearch"), label="HMMER")
     return (
         ToolPin(
             path=Path(str(section["binary_path"])),
@@ -1134,7 +1315,8 @@ def _validate_amrfinder_manifest_section(
         ),
         database_path,
         str(section["database_version"]),
-        tuple(runtime_paths),
+        blast_bin_dir,
+        hmmer_bin_dir,
     )
 
 
@@ -1149,9 +1331,9 @@ def run_amrfinder(
     runner: CommandRunner = subprocess.run,
     timeout: float = 300.0,
 ) -> AdapterResult:
-    """Validate pinned AMRFinder assets, execute combined mode, and reject incomplete evidence."""
+    """Validate pinned AMRFinder assets, execute combined mode, and parse fail closed."""
     try:
-        tool_pin, database_path, database_version, runtime_paths = _validate_amrfinder_manifest_section(
+        tool_pin, database_path, database_version, blast_bin_dir, hmmer_bin_dir = _validate_amrfinder_manifest_section(
             manifest_section
         )
         validate_tool_pin(tool_pin, runner=runner, timeout=timeout)
@@ -1184,14 +1366,12 @@ def run_amrfinder(
             proteins_faa=artifacts.proteins_faa,
             proteins_gff=artifacts.proteins_gff,
             database_dir=database_path,
+            blast_bin_dir=blast_bin_dir,
+            hmmer_bin_dir=hmmer_bin_dir,
             threads=threads,
             output_tsv=output_tsv,
         )
     )
-    runtime_bin_dirs = list(dict.fromkeys(str(path.parent) for path in runtime_paths))
-    execution_environment = os.environ.copy()
-    inherited_path = execution_environment.get("PATH")
-    execution_environment["PATH"] = os.pathsep.join([*runtime_bin_dirs, *([inherited_path] if inherited_path else [])])
     try:
         runner(
             list(command),
@@ -1199,7 +1379,6 @@ def run_amrfinder(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=execution_environment,
         )
     except subprocess.TimeoutExpired:
         return _indeterminate_adapter_result(
@@ -2053,6 +2232,15 @@ _PHROGS_PROFILE_LICENSE = "CC BY 4.0"
 _PHROGS_PROFILE_CITATION = "Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353)."
 _PHROGS_MINIMUM_MMSEQS_VERSION = "14"
 _PHROGS_BUILT_WITH_MMSEQS_VERSION = "18.8cc5c"
+_PHROGS_ANNOTATION_URL = DEFAULT_PHROGS_ANNOTATION_URL
+_PHROGS_ANNOTATION_SHA256 = DEFAULT_PHROGS_ANNOTATION_SHA256
+_PHROGS_V4_SAFETY_LOOKUP_COUNTS = MappingProxyType(
+    {
+        "total": 109,
+        "high_confidence": 57,
+        "review": 52,
+    }
+)
 
 
 class VerifiedIdentityMappingMissingError(AssetProvenanceError):
@@ -2068,17 +2256,12 @@ def build_phrogs_commands(
     temporary_dir: Path,
     threads: int,
 ) -> tuple[tuple[str, ...], ...]:
-    """Build a native MMseqs profile-query pipeline without reparsing its profile DB as FASTA."""
+    """Build native MMseqs commands with PHROG profiles querying one ORF target database."""
     temporary_dir = Path(temporary_dir)
     target_database = temporary_dir / "orf-target"
     result_database = temporary_dir / "profile-hits"
     return (
-        (
-            str(mmseqs),
-            "createdb",
-            str(proteins_faa),
-            str(target_database),
-        ),
+        (str(mmseqs), "createdb", str(proteins_faa), str(target_database)),
         (
             str(mmseqs),
             "search",
@@ -2113,7 +2296,7 @@ def build_phrogs_command(
     temporary_dir: Path,
     threads: int,
 ) -> list[str]:
-    """Return the output-producing command recorded in the stable scan manifest."""
+    """Return the output-producing command retained for the legacy manifest field."""
     return list(
         build_phrogs_commands(
             mmseqs=mmseqs,
@@ -2143,17 +2326,12 @@ def _digest_file_inventory(files: tuple[Path, ...]) -> str:
     return digest.hexdigest()
 
 
-def _digest_relative_file_inventory(
-    root: Path,
-    files: tuple[Path, ...],
-    *,
-    allowed_empty: frozenset[Path] = frozenset(),
-) -> str:
+def _digest_relative_file_inventory(root: Path, files: tuple[Path, ...]) -> str:
     """Match Task 2's digest for the selected profile tree, excluding bundled databases."""
     digest = hashlib.sha256()
     for path in sorted(files):
-        if not path.is_file() or (path.stat().st_size == 0 and path.resolve() not in allowed_empty):
-            raise AssetProvenanceError(f"profile tree path is missing or empty: {path}")
+        if not path.is_file():
+            raise AssetProvenanceError(f"profile tree path is missing: {path}")
         try:
             relative_path = path.relative_to(root)
         except ValueError as error:
@@ -2218,25 +2396,30 @@ def _read_phrogs_annotation_lookup(path: Path) -> dict[str, Mapping[str, str]]:
                 category = source_row["category"].strip()
                 annotation = source_row["annot"].strip()
                 normalized_annotation = annotation.casefold()
-                is_integration_category = category.casefold() == PHROGS_INTEGRATION_EXCISION_CATEGORY.casefold()
-                is_additional_high_confidence = normalized_annotation in PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS
-                if not is_integration_category and not is_additional_high_confidence:
-                    continue
-                source_profile = source_row["phrog"]
-                if source_profile != source_profile.strip():
-                    raise AssetProvenanceError("PHROGs annotation source contains invalid safety metadata")
-                if re.fullmatch(_PHROGS_QUERY_ID_PATTERN, source_profile):
-                    profile = source_profile
-                elif source_profile.isascii() and source_profile.isdecimal() and not source_profile.startswith("0"):
-                    profile = f"phrog_{source_profile}"
-                else:
-                    raise AssetProvenanceError("PHROGs annotation source contains invalid safety metadata")
-                high_term = next(
-                    (term for term in PHROGS_HIGH_CONFIDENCE_TERMS if term in normalized_annotation),
+                additional_high_term = next(
+                    (
+                        term
+                        for term in PHROGS_ADDITIONAL_LIFECYCLE_HIGH_CONFIDENCE_TERMS
+                        if term in normalized_annotation
+                    ),
                     None,
                 )
-                if is_additional_high_confidence:
-                    high_term = normalized_annotation
+                if (
+                    category.casefold() != PHROGS_INTEGRATION_EXCISION_CATEGORY.casefold()
+                    and additional_high_term is None
+                ):
+                    continue
+                try:
+                    profile = _normalize_phrogs_annotation_identifier(source_row["phrog"])
+                except ValueError as error:
+                    raise AssetProvenanceError("PHROGs annotation source contains invalid safety metadata") from error
+                high_term = (
+                    next(
+                        (term for term in PHROGS_HIGH_CONFIDENCE_TERMS if term in normalized_annotation),
+                        None,
+                    )
+                    or additional_high_term
+                )
                 review_term = next(
                     (term for term in PHROGS_REVIEW_TERMS if term in normalized_annotation),
                     None,
@@ -2276,16 +2459,17 @@ def _read_phrogs_lookup(path: Path) -> dict[str, Mapping[str, str]]:
         row = dict(zip(_PHROGS_LOOKUP_COLUMNS, fields, strict=True))
         profile = row["phrog"]
         normalized_annotation = row["annot"].casefold()
-        is_integration_category = row["category"] == PHROGS_INTEGRATION_EXCISION_CATEGORY
-        is_additional_high_confidence = (
-            normalized_annotation in PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS
+        is_integration_excision = row["category"].casefold() == PHROGS_INTEGRATION_EXCISION_CATEGORY.casefold()
+        is_additional_lifecycle_regulator = (
+            row["category"].casefold() == "transcription regulation"
             and row["confidence"] == "high_confidence"
-            and row["matched_term"] == normalized_annotation
+            and row["matched_term"] in PHROGS_ADDITIONAL_LIFECYCLE_HIGH_CONFIDENCE_TERMS
+            and row["matched_term"] in normalized_annotation
         )
         if (
             not re.fullmatch(_PHROGS_QUERY_ID_PATTERN, profile)
             or profile in profiles
-            or not (is_integration_category or is_additional_high_confidence)
+            or not (is_integration_excision or is_additional_lifecycle_regulator)
             or row["confidence"] not in {"high_confidence", "review"}
             or not row["annot"]
             or not row["matched_term"]
@@ -2307,7 +2491,6 @@ def _validate_phrogs_assets(
     str,
     int,
 ]:
-    release = load_phrogs_safety_release()
     profile_record = section.get("profile_database")
     if not isinstance(profile_record, Mapping):
         raise VerifiedIdentityMappingMissingError("PHROGs manifest lacks a verified identity-bearing profile database")
@@ -2348,7 +2531,6 @@ def _validate_phrogs_assets(
             "query_id_pattern",
             "query_ids_join_lookup",
             "profile_id_inventory",
-            "release_marker",
             "provenance",
         }
     )
@@ -2370,7 +2552,7 @@ def _validate_phrogs_assets(
     ):
         raise AssetProvenanceError("PHROGs profile database path/digest/inventory is incomplete")
     profile_path = Path(path_value)
-    if profile_path.name != release.database_name:
+    if profile_path.name != _PHROGS_PROFILE_DATABASE_NAME:
         raise AssetProvenanceError("PHROGs profile database prefix name is not pinned")
     required_paths = (
         profile_path,
@@ -2396,31 +2578,9 @@ def _validate_phrogs_assets(
             f"PHROGs profile database digest drift: expected {digest_value}, observed {observed_digest}"
         )
 
-    release_marker = profile_path.parent / release.release_marker
-    if release_marker.is_symlink() or not release_marker.is_file():
-        raise AssetProvenanceError("PHROGs profile release marker is missing or invalid")
-    marker_content = release_marker.read_bytes()
-    allowed_marker_contents = {release.generated_release_marker_content}
-    if release.release_marker_empty_sentinel_allowed:
-        allowed_marker_contents.add(b"")
-    if marker_content not in allowed_marker_contents:
-        raise AssetProvenanceError("PHROGs profile release marker has conflicting content")
-    marker_record = profile_record.get("release_marker")
-    if (
-        not isinstance(marker_record, Mapping)
-        or frozenset(marker_record) != {"path", "sha256", "origin", "empty_sentinel"}
-        or marker_record.get("path") != str(release_marker.resolve())
-        or marker_record.get("sha256") != _sha256_file(release_marker)
-        or marker_record.get("empty_sentinel") != (marker_content == b"")
-        or marker_record.get("origin")
-        not in {
-            "archive_supplied_empty_sentinel",
-            "archive_supplied_canonical_marker",
-            "locally_materialized_after_archive_verification",
-            "validated_release_marker",
-        }
-    ):
-        raise AssetProvenanceError("PHROGs profile release marker provenance is invalid")
+    release_marker = profile_path.parent / _PHROGS_PROFILE_RELEASE_MARKER
+    if not release_marker.is_file():
+        raise AssetProvenanceError("PHROGs profile release marker is missing")
     extracted_tree = profile_record.get("extracted_tree")
     if not isinstance(extracted_tree, Mapping) or frozenset(extracted_tree) != {
         "path",
@@ -2434,11 +2594,7 @@ def _validate_phrogs_assets(
         str(path) for path in expected_tree_files
     ]:
         raise AssetProvenanceError("PHROGs profile extracted-tree path or file inventory drift")
-    observed_tree_digest = _digest_relative_file_inventory(
-        profile_root,
-        expected_tree_files,
-        allowed_empty=frozenset({release_marker.resolve()}),
-    )
+    observed_tree_digest = _digest_relative_file_inventory(profile_root, expected_tree_files)
     if extracted_tree.get("sha256") != observed_tree_digest:
         raise AssetProvenanceError("PHROGs profile extracted-tree digest drift")
 
@@ -2450,7 +2606,6 @@ def _validate_phrogs_assets(
     expected_provenance_keys = frozenset(
         {
             "source_url",
-            "source_urls",
             "archive_observed_sha256",
             "archive_published_sha256",
             "archive_published_md5",
@@ -2469,22 +2624,20 @@ def _validate_phrogs_assets(
     if not isinstance(provenance, Mapping) or frozenset(provenance) != expected_provenance_keys:
         raise AssetProvenanceError("PHROGs profile provenance keys do not match the pinned schema")
     expected_provenance = {
-        "source_urls": list(release.profile_source_urls),
+        "source_url": _PHROGS_PROFILE_SOURCE_URL,
         "archive_published_sha256": None,
-        "archive_published_md5": release.archive_published_md5,
-        "archive_published_size": release.archive_published_size,
-        "release": release.release,
-        "dataset_release": release.dataset_release,
-        "doi": release.doi,
-        "license": release.license,
-        "citation": release.citation,
-        "minimum_mmseqs_version": release.minimum_mmseqs_version,
-        "built_with_mmseqs_version": release.built_with_mmseqs_version,
+        "archive_published_md5": _PHROGS_PROFILE_ARCHIVE_MD5,
+        "archive_published_size": _PHROGS_PROFILE_ARCHIVE_SIZE,
+        "release": _PHROGS_PROFILE_RELEASE,
+        "dataset_release": _PHROGS_DATASET_RELEASE,
+        "doi": _PHROGS_PROFILE_DOI,
+        "license": _PHROGS_PROFILE_LICENSE,
+        "citation": _PHROGS_PROFILE_CITATION,
+        "minimum_mmseqs_version": _PHROGS_MINIMUM_MMSEQS_VERSION,
+        "built_with_mmseqs_version": _PHROGS_BUILT_WITH_MMSEQS_VERSION,
     }
     if any(provenance.get(field) != expected for field, expected in expected_provenance.items()):
         raise AssetProvenanceError("PHROGs profile provenance does not match the pinned Pharokka release")
-    if provenance.get("source_url") not in release.profile_source_urls:
-        raise AssetProvenanceError("PHROGs profile provenance uses an unreviewed source URL")
     if (
         not isinstance(provenance.get("archive_observed_sha256"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", str(provenance["archive_observed_sha256"]))
@@ -2515,13 +2668,13 @@ def _validate_phrogs_assets(
         raise AssetProvenanceError("PHROGs verified profile archive path or digest drift")
 
     if (
-        section.get("annotation_url") not in release.annotation_source_urls
-        or section.get("annotation_source_urls") != list(release.annotation_source_urls)
-        or section.get("annotation_sha256") != release.annotation_sha256
-        or section.get("source_sha256") != release.annotation_sha256
+        section.get("annotation_url") != _PHROGS_ANNOTATION_URL
+        or section.get("annotation_sha256") != _PHROGS_ANNOTATION_SHA256
+        or section.get("source_sha256") != _PHROGS_ANNOTATION_SHA256
         or section.get("category") != PHROGS_INTEGRATION_EXCISION_CATEGORY
         or section.get("high_confidence_terms") != list(PHROGS_HIGH_CONFIDENCE_TERMS)
-        or section.get("additional_high_confidence_annotations") != list(PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS)
+        or section.get("additional_high_confidence_terms") != list(PHROGS_ADDITIONAL_LIFECYCLE_HIGH_CONFIDENCE_TERMS)
+        or section.get("selection_scope") != PHROGS_LYSOGENY_SELECTION_SCOPE
         or section.get("review_terms") != list(PHROGS_REVIEW_TERMS)
     ):
         raise AssetProvenanceError("PHROGs annotation provenance does not match the pinned v4 source")
@@ -2529,43 +2682,33 @@ def _validate_phrogs_assets(
     if not isinstance(source_path_value, str) or not source_path_value:
         raise AssetProvenanceError("PHROGs annotation source path is missing")
     source_path = Path(source_path_value)
-    if not source_path.is_file() or _sha256_file(source_path) != release.annotation_sha256:
+    if not source_path.is_file() or _sha256_file(source_path) != _PHROGS_ANNOTATION_SHA256:
         raise AssetProvenanceError("PHROGs annotation source path or digest drift")
     source_profiles = _read_phrogs_annotation_lookup(source_path)
+    source_counts = {
+        "total": len(source_profiles),
+        "high_confidence": sum(row["confidence"] == "high_confidence" for row in source_profiles.values()),
+        "review": sum(row["confidence"] == "review" for row in source_profiles.values()),
+    }
+    if section.get("source_lookup_counts") != source_counts:
+        raise AssetProvenanceError("PHROGs source lookup cardinality does not match the pinned annotation source")
+    unsearchable_ids = [profile for profile in source_profiles if profile not in profile_ids]
+    expected_unsearchable = {
+        "reason": "absent_from_verified_profile_lookup",
+        "count": len(unsearchable_ids),
+        "ids": unsearchable_ids,
+    }
+    if section.get("profile_unsearchable") != expected_unsearchable:
+        raise AssetProvenanceError("PHROGs unsearchable profile audit does not match the pinned source/profile join")
+    expected_profiles = {profile: metadata for profile, metadata in source_profiles.items() if profile in profile_ids}
 
-    def profile_counts(profiles: Mapping[str, Mapping[str, str]]) -> dict[str, int]:
-        return {
-            "total": len(profiles),
-            "high_confidence": sum(row["confidence"] == "high_confidence" for row in profiles.values()),
-            "review": sum(row["confidence"] == "review" for row in profiles.values()),
-        }
-
-    expected_source_counts = dict(
-        zip(("total", "high_confidence", "review"), release.source_lookup_counts, strict=True)
-    )
-    source_lookup_counts = section.get("source_lookup_counts")
-    if (
-        not isinstance(source_lookup_counts, Mapping)
-        or dict(source_lookup_counts) != expected_source_counts
-        or profile_counts(source_profiles) != expected_source_counts
-    ):
-        raise AssetProvenanceError("PHROGs source lookup cardinality does not match the reviewed release")
-    missing_profile_ids = frozenset(source_profiles) - profile_ids
-    exclusions = section.get("profile_exclusions")
-    if (
-        not isinstance(exclusions, Mapping)
-        or frozenset(exclusions) != {"ids", "reason"}
-        or exclusions.get("reason") != "absent_from_authenticated_profile_lookup"
-        or frozenset(exclusions.get("ids", ())) != release.allowed_profile_exclusions
-        or missing_profile_ids != release.allowed_profile_exclusions
-    ):
-        raise AssetProvenanceError("PHROGs source/profile exclusions do not match the reviewed release")
-    expected_profiles = {profile: row for profile, row in source_profiles.items() if profile in profile_ids}
-    expected_searchable_counts = dict(
-        zip(("total", "high_confidence", "review"), release.searchable_lookup_counts, strict=True)
-    )
     lookup_counts = section.get("lookup_counts")
-    if not isinstance(lookup_counts, Mapping) or dict(lookup_counts) != expected_searchable_counts:
+    expected_lookup_counts = {
+        "total": len(expected_profiles),
+        "high_confidence": sum(row["confidence"] == "high_confidence" for row in expected_profiles.values()),
+        "review": sum(row["confidence"] == "review" for row in expected_profiles.values()),
+    }
+    if not isinstance(lookup_counts, Mapping) or dict(lookup_counts) != expected_lookup_counts:
         raise AssetProvenanceError(
             "PHROGs safety lookup cardinality manifest does not match the pinned PHROGs v4 policy"
         )
@@ -2584,25 +2727,104 @@ def _validate_phrogs_assets(
         )
     if profiles != expected_profiles:
         raise AssetProvenanceError("PHROGs safety lookup does not match the pinned annotation source")
-    if profile_counts(profiles) != expected_searchable_counts:
+    observed_lookup_counts = {
+        "total": len(profiles),
+        "high_confidence": sum(row["confidence"] == "high_confidence" for row in profiles.values()),
+        "review": sum(row["confidence"] == "review" for row in profiles.values()),
+    }
+    if observed_lookup_counts != expected_lookup_counts:
         raise AssetProvenanceError("PHROGs safety lookup rows violate the pinned PHROGs v4 cardinality policy")
-    database_version = f"{release.dataset_release} / {release.release}"
+    search_database = section.get("search_database")
+    if search_database is not None:
+        try:
+            _validate_phrogs_safety_search_database(
+                search_database,
+                profile_database=profile_path,
+                safety_lookup=lookup_path,
+                verify_asset_paths=True,
+            )
+        except RuntimeError as error:
+            raise AssetProvenanceError("PHROGs safety search database provenance drift") from error
+        if not isinstance(search_database, Mapping):
+            raise AssetProvenanceError("PHROGs safety search database manifest is invalid")
+        search_path_value = search_database.get("path")
+        search_digest_value = search_database.get("sha256")
+        if not isinstance(search_path_value, str) or not isinstance(search_digest_value, str):
+            raise AssetProvenanceError("PHROGs safety search database identity is incomplete")
+        profile_path = Path(search_path_value)
+        digest_value = search_digest_value
+        profile_ids = frozenset(profiles)
+    database_version = f"{_PHROGS_DATASET_RELEASE} / {_PHROGS_PROFILE_RELEASE}"
     return (
         profile_path,
         str(digest_value),
         profiles,
         profile_ids,
         database_version,
-        int(release.minimum_mmseqs_version),
+        int(_PHROGS_MINIMUM_MMSEQS_VERSION),
     )
+
+
+@dataclass(frozen=True)
+class _ValidatedPhrogsAssets:
+    """One immutable PHROGs asset view reusable inside a bounded scan transaction."""
+
+    manifest_sha256: str
+    profile_path: Path
+    profile_digest: str
+    profiles: Mapping[str, Mapping[str, str]]
+    profile_ids: frozenset[str]
+    database_version: str
+    minimum_mmseqs_major: int
+
+
+def _prepare_validated_phrogs_assets(section: Mapping[str, object]) -> _ValidatedPhrogsAssets:
+    """Authenticate PHROGs once and freeze the identity-bearing view used by a batch."""
+    profile_path, profile_digest, profiles, profile_ids, database_version, minimum_major = _validate_phrogs_assets(
+        section
+    )
+    frozen_profiles = MappingProxyType(
+        {profile: MappingProxyType(dict(metadata)) for profile, metadata in profiles.items()}
+    )
+    return _ValidatedPhrogsAssets(
+        manifest_sha256=_canonical_mapping_sha256(section),
+        profile_path=profile_path,
+        profile_digest=profile_digest,
+        profiles=frozen_profiles,
+        profile_ids=frozenset(profile_ids),
+        database_version=database_version,
+        minimum_mmseqs_major=minimum_major,
+    )
+
+
+def _phrogs_assets_from_validated_context(
+    section: Mapping[str, object],
+    context: _ValidatedPhrogsAssets,
+) -> tuple[Path, str, Mapping[str, Mapping[str, str]], frozenset[str], str, int]:
+    """Resolve a transaction capability only for the exact manifest that created it."""
+    if type(context) is not _ValidatedPhrogsAssets:
+        raise AssetProvenanceError("PHROGs validated asset context has an invalid type")
+    if _canonical_mapping_sha256(section) != context.manifest_sha256:
+        raise AssetProvenanceError("PHROGs manifest changed after batch validation")
+    return (
+        context.profile_path,
+        context.profile_digest,
+        context.profiles,
+        context.profile_ids,
+        context.database_version,
+        context.minimum_mmseqs_major,
+    )
+
+
+def _revalidate_phrogs_assets(section: Mapping[str, object], context: _ValidatedPhrogsAssets) -> None:
+    """Fail closed if any PHROGs identity changed while a batch reused its validated view."""
+    observed = _prepare_validated_phrogs_assets(section)
+    if observed != context:
+        raise AssetProvenanceError("PHROGs assets changed during the batch transaction")
 
 
 def _mmseqs_major(version: str) -> int:
     candidates = re.findall(r"(?<![A-Za-z0-9])(\d+)(?=[.-][A-Za-z0-9])", version)
-    if not candidates:
-        commit_style = re.fullmatch(r"(\d{1,3})[a-f][0-9a-f]{7,}", version)
-        if commit_style is not None:
-            candidates = [commit_style.group(1)]
     if len(candidates) != 1:
         raise AssetProvenanceError(f"cannot parse one MMseqs major version from {version!r}")
     return int(candidates[0])
@@ -2704,6 +2926,7 @@ def parse_phrogs_output(
     host_domain: HostDomain,
     strict_lysis: bool = False,
     policy: HomologyPolicy = PHROGS_HOMOLOGY_POLICY_V1,
+    _validated_assets: _ValidatedPhrogsAssets | None = None,
 ) -> AdapterResult:
     """Parse verified PHROGs profile hits with bacterial/archaeal applicability semantics."""
     try:
@@ -2711,9 +2934,14 @@ def parse_phrogs_output(
     except ValueError:
         return _indeterminate_adapter_result("lysogeny", required=True, reason_code="PHROGS_UNSUPPORTED_HOST_PROFILE")
     try:
-        profile_path, profile_digest, profiles, profile_ids, database_version, _ = _validate_phrogs_assets(
-            manifest_section
-        )
+        if _validated_assets is None:
+            profile_path, profile_digest, profiles, profile_ids, database_version, _ = _validate_phrogs_assets(
+                manifest_section
+            )
+        else:
+            profile_path, profile_digest, profiles, profile_ids, database_version, _ = (
+                _phrogs_assets_from_validated_context(manifest_section, _validated_assets)
+            )
     except VerifiedIdentityMappingMissingError:
         return _indeterminate_adapter_result(
             "lysogeny", required=required, reason_code="PHROGS_VERIFIED_IDENTITY_MAPPING_MISSING"
@@ -2901,14 +3129,21 @@ def run_phrogs(
     runner: CommandRunner = subprocess.run,
     timeout: float = 300.0,
     policy: HomologyPolicy = PHROGS_HOMOLOGY_POLICY_V1,
+    _validated_assets: _ValidatedPhrogsAssets | None = None,
 ) -> AdapterResult:
-    """Validate PHROG identity, execute profile search, and reject incomplete evidence."""
+    """Validate a PHROG-identity contract, execute profile search, and parse fail closed."""
     try:
         required = _lysogeny_required(host_domain, strict_lysis=strict_lysis)
     except ValueError:
         return _indeterminate_adapter_result("lysogeny", required=True, reason_code="PHROGS_UNSUPPORTED_HOST_PROFILE")
     try:
-        profile_path, _, _, _, _, minimum_mmseqs_major = _validate_phrogs_assets(manifest_section)
+        owns_validated_assets = _validated_assets is None
+        validated_assets = (
+            _prepare_validated_phrogs_assets(manifest_section) if owns_validated_assets else _validated_assets
+        )
+        profile_path, _, _, _, _, minimum_mmseqs_major = _phrogs_assets_from_validated_context(
+            manifest_section, validated_assets
+        )
         observed_version = validate_tool_pin(tool_pin, runner=runner, timeout=timeout)
         _validate_mmseqs_compatibility(
             expected_version=tool_pin.version,
@@ -2997,7 +3232,19 @@ def run_phrogs(
         host_domain=host_domain,
         strict_lysis=strict_lysis,
         policy=policy,
+        _validated_assets=validated_assets,
     )
+    if owns_validated_assets:
+        try:
+            _revalidate_phrogs_assets(manifest_section, validated_assets)
+        except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError):
+            return _indeterminate_adapter_result(
+                "lysogeny",
+                required=required,
+                reason_code="PHROGS_ASSET_PROVENANCE_MISMATCH",
+                command=command,
+                raw_output_path=normalized_output,
+            )
     return AdapterResult(
         class_result=parsed.class_result,
         command=command,

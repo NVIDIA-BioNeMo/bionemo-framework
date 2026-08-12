@@ -15,13 +15,11 @@
 
 """Tests for ``bionemo.evo2_phage_gen.external_assets``."""
 
-import csv
 import hashlib
 import io
-import shutil
+import subprocess
 import sys
 import tarfile
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -81,18 +79,70 @@ def _write_multi_executable_tarball(
     return archive_path
 
 
+def _write_amrfinder_runtime(source_root: Path, *, label: str) -> None:
+    """Create the complete sibling runtime expected by AMRFinderPlus 4.2.7."""
+    source_root.mkdir(parents=True)
+    for executable_name in external_assets.AMRFINDER_RUNTIME_EXECUTABLES:
+        executable = source_root / executable_name
+        executable.write_text(f"#!/usr/bin/env bash\n# {label} {executable_name}\n")
+        executable.chmod(0o755)
+    for file_name in external_assets.AMRFINDER_RUNTIME_DATA_FILES:
+        (source_root / file_name).write_text(f"{label} {file_name}\n")
+
+
+def _write_amrfinder_prerequisites(bin_dir: Path, *, label: str = "prerequisite") -> dict[str, Path]:
+    """Create the complete BLAST+/HMMER executable set invoked by AMRFinder."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for name in (
+        *external_assets.AMRFINDER_BLAST_RUNTIME_EXECUTABLES,
+        *external_assets.AMRFINDER_HMMER_RUNTIME_EXECUTABLES,
+    ):
+        path = bin_dir / name
+        path.write_text(f"#!/usr/bin/env bash\n# {label} {name}\n")
+        path.chmod(0o755)
+        paths[name] = path
+    return paths
+
+
 def _write_amrfinder_tarball(tmp_path: Path) -> Path:
     """Create a tiny AMRFinderPlus-like archive for local preparation tests."""
     source_root = tmp_path / "amrfinder_archive_src" / "amrfinder" / "bin"
-    source_root.mkdir(parents=True)
-    for executable_name in ("amrfinder", "amrfinder_index", "amrfinder_update"):
-        executable = source_root / executable_name
-        executable.write_text(f"#!/usr/bin/env bash\n# trusted {executable_name}\n")
-        executable.chmod(0o755)
+    _write_amrfinder_runtime(source_root, label="trusted")
     archive_path = tmp_path / "amrfinder.tar.gz"
     with tarfile.open(archive_path, "w:gz") as archive:
         archive.add(tmp_path / "amrfinder_archive_src", arcname="archive")
     return archive_path
+
+
+def test_amrfinder_source_identity_excludes_path_bearing_generated_indexes(tmp_path):
+    """Dataset identity stays stable when BLAST/HMMER indexes embed random build paths."""
+    database_dirs = [tmp_path / "first" / "2026-08-07.1", tmp_path / "second" / "2026-08-07.1"]
+    for database_dir in database_dirs:
+        database_dir.mkdir(parents=True)
+        (database_dir / "version.txt").write_text("2026-08-07.1\n")
+        (database_dir / "database_format_version.txt").write_text("2026-01-26.1\n")
+        (database_dir / "AMRProt.fa").write_text(">AMR\nMPEPTIDE\n")
+        (database_dir / "AMR.LIB").write_text("HMMER3/f\n")
+        (database_dir / "fam.tsv").write_text("family\tname\n")
+    (database_dirs[0] / "AMRProt.fa.pin").write_bytes(b"/tmp/amrfinder_index.AAAAAA/db")
+    (database_dirs[1] / "AMRProt.fa.pin").write_bytes(b"/tmp/amrfinder_index.BBBBBB/db")
+
+    identities = [external_assets._amrfinder_database_source_identity(path) for path in database_dirs]
+
+    assert identities[0] == identities[1]
+    assert identities[0][1] == ["AMR.LIB", "AMRProt.fa", "database_format_version.txt", "fam.tsv", "version.txt"]
+    assert external_assets._sha256_path(database_dirs[0]) != external_assets._sha256_path(database_dirs[1])
+
+
+def _write_minimal_amrfinder_database_sources(database_dir: Path) -> None:
+    """Materialize the path-independent source subset required by AMRFinder fixtures."""
+    database_dir.mkdir(parents=True, exist_ok=True)
+    (database_dir / "version.txt").write_text(f"{database_dir.name}\n")
+    (database_dir / "database_format_version.txt").write_text("2.0\n")
+    (database_dir / "AMRProt.fa").write_text(">AMR\nMPEPTIDE\n")
+    (database_dir / "AMR.LIB").write_text("HMMER3/f\n")
+    (database_dir / "fam.tsv").write_text("family\tname\n")
 
 
 def _write_mmseqs_padded_database(sequence_database: Path) -> Path:
@@ -115,7 +165,14 @@ def _write_mmseqs_padded_database(sequence_database: Path) -> Path:
 def _write_phrogs_profile_database(
     profile_database: Path,
     *,
-    profile_ids: tuple[str, ...] = ("phrog_1", "phrog_2", "phrog_3", "phrog_4", "phrog_5", "phrog_6"),
+    profile_ids: tuple[str, ...] = (
+        "phrog_1",
+        "phrog_2",
+        "phrog_3",
+        "phrog_4",
+        "phrog_5",
+        "phrog_6",
+    ),
 ) -> Path:
     """Write a complete Pharokka v1.8.0-style PHROGs MMseqs profile database."""
     profile_database.parent.mkdir(parents=True, exist_ok=True)
@@ -149,6 +206,94 @@ def _profile_metadata_kwargs(profile_database: Path, archive_path: Path) -> dict
     }
 
 
+def test_curated_phrogs_search_database_is_exactly_derived_from_policy_and_full_profile(tmp_path):
+    """A smaller search DB is safe only when its selected IDs are exactly the classified policy set."""
+    full = _write_phrogs_profile_database(
+        tmp_path / "full" / external_assets.PHROGS_PROFILE_DATABASE_NAME,
+        profile_ids=("phrog_1", "phrog_2", "phrog_3", "phrog_4"),
+    )
+    policy = tmp_path / "phrogs_policy.tsv"
+    policy.write_text(
+        "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
+        "phrog_3\tthird\tintegration and excision\treview\tintegrase\n"
+        "phrog_1\tfirst\tintegration and excision\thigh_confidence\trecombinase\n"
+    )
+    mmseqs = tmp_path / "mmseqs"
+    mmseqs.write_bytes(b"mmseqs-v15")
+    mmseqs.chmod(0o755)
+    commands = []
+
+    def runner(command, **kwargs):
+        commands.append((command, kwargs))
+        assert command[:2] == [str(mmseqs), "createsubdb"]
+        key_list, source, destination = map(Path, command[2:])
+        assert source == full
+        assert key_list.read_text() == "0\n2\n"
+        destination.write_bytes(b"derived-profile-bytes\n")
+        Path(f"{destination}.dbtype").write_bytes(Path(f"{source}.dbtype").read_bytes())
+        Path(f"{destination}.index").write_text("0\t0\t8\n2\t8\t8\n")
+        for suffix in ("_h", "_h.dbtype", "_h.index", ".lookup", ".source"):
+            Path(f"{destination}{suffix}").symlink_to(Path(f"{source}{suffix}"))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    record = external_assets._prepare_phrogs_safety_search_database(
+        profile_database=full,
+        safety_lookup=policy,
+        output_root=tmp_path / "derived",
+        mmseqs_path=mmseqs,
+        runner=runner,
+    )
+
+    derived = Path(record["path"])
+    assert len(commands) == 1
+    assert record["selected_profile_id_inventory"]["count"] == 2
+    assert Path(record["profile_ids_path"]).read_text() == "phrog_1\nphrog_3\n"
+    assert Path(record["numeric_keys_path"]).read_text() == "0\n2\n"
+    assert all(not path.is_symlink() and path.is_file() for path in map(Path, record["files"]))
+    assert Path(f"{derived}.lookup").read_bytes() == Path(f"{full}.lookup").read_bytes()
+    assert Path(f"{derived}_h").read_bytes() == Path(f"{full}_h").read_bytes()
+    external_assets._validate_phrogs_safety_search_database(
+        record,
+        profile_database=full,
+        safety_lookup=policy,
+        verify_asset_paths=True,
+    )
+
+    derived.write_bytes(b"drift")
+    with pytest.raises(RuntimeError, match="search database digest"):
+        external_assets._validate_phrogs_safety_search_database(
+            record,
+            profile_database=full,
+            safety_lookup=policy,
+            verify_asset_paths=True,
+        )
+
+
+def test_curated_phrogs_search_database_rejects_unknown_or_duplicate_policy_ids(tmp_path):
+    full = _write_phrogs_profile_database(tmp_path / "full" / external_assets.PHROGS_PROFILE_DATABASE_NAME)
+    mmseqs = tmp_path / "mmseqs"
+    mmseqs.write_bytes(b"mmseqs")
+    mmseqs.chmod(0o755)
+    policy = tmp_path / "policy.tsv"
+
+    for rows, message in (
+        (("phrog_1", "phrog_1"), "duplicate"),
+        (("phrog_1", "phrog_999"), "absent"),
+    ):
+        policy.write_text(
+            "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
+            + "".join(f"{profile}\tx\tintegration and excision\treview\tx\n" for profile in rows)
+        )
+        with pytest.raises((RuntimeError, ValueError), match=message):
+            external_assets._prepare_phrogs_safety_search_database(
+                profile_database=full,
+                safety_lookup=policy,
+                output_root=tmp_path / f"derived-{message}",
+                mmseqs_path=mmseqs,
+                runner=lambda *_args, **_kwargs: None,
+            )
+
+
 def _write_phrogs_v4_fixture(annotation_path: Path, *, duplicate: bool = False, empty: bool = False) -> Path:
     """Write a small real-schema PHROGs v4 fixture plus complete raw and profile DBs."""
     annotation_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,12 +301,12 @@ def _write_phrogs_v4_fixture(annotation_path: Path, *, duplicate: bool = False, 
     if not empty:
         rows.extend(
             [
-                "phrog_1\t#000000\tIntegrase\tintegration and excision",
-                "phrog_2\t#000001\tSite-specific recombinase\tintegration and excision",
-                "phrog_3\t#000002\tLysogeny repressor\tintegration and excision",
-                "phrog_4\t#000003\tPutative recombinase\tintegration and excision",
-                "phrog_5\t#000004\tanti-repressor\ttranscription regulation",
-                "phrog_6\t#000005\tTail fiber\tstructural",
+                "1\t#000000\tIntegrase\tintegration and excision",
+                "2\t#000001\tSite-specific recombinase\tintegration and excision",
+                "3\t#000002\tLysogeny repressor\tintegration and excision",
+                "4\t#000003\tPutative recombinase\tintegration and excision",
+                "5\t#000004\tTail fiber\tstructural",
+                "6\t#000005\tAnti-repressor\ttranscription regulation",
             ]
         )
     if duplicate:
@@ -177,30 +322,34 @@ def _write_phrogs_v4_fixture(annotation_path: Path, *, duplicate: bool = False, 
     return _write_mmseqs_padded_database(annotation_path.parent / "phrogs_gpu_seq_db_pad")
 
 
+def _mock_phrogs_search_database_builder(monkeypatch, external_dir: Path) -> None:
+    """Run the real derived-database builder around a tiny deterministic createsubdb boundary."""
+    original_prepare_search_database = external_assets._prepare_phrogs_safety_search_database
+    mmseqs = Path(external_dir) / "bin" / "mmseqs"
+    mmseqs.parent.mkdir(parents=True, exist_ok=True)
+    mmseqs.write_bytes(b"synthetic-mmseqs-createsubdb")
+    mmseqs.chmod(0o755)
+
+    def prepare_search_database(**kwargs):
+        def createsubdb(command, **_run_kwargs):
+            source = Path(command[-2])
+            destination = Path(command[-1])
+            keys = Path(command[-3]).read_text().splitlines()
+            destination.write_bytes(b"synthetic-curated-profile-database\n")
+            Path(f"{destination}.dbtype").write_bytes(Path(f"{source}.dbtype").read_bytes())
+            Path(f"{destination}.index").write_text("".join(f"{key}\t{index}\t1\n" for index, key in enumerate(keys)))
+            for suffix in (".lookup", ".source", "_h", "_h.dbtype", "_h.index"):
+                Path(f"{destination}{suffix}").symlink_to(Path(f"{source}{suffix}"))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        return original_prepare_search_database(**{**kwargs, "mmseqs_path": mmseqs, "runner": createsubdb})
+
+    monkeypatch.setattr(external_assets, "_prepare_phrogs_safety_search_database", prepare_search_database)
+
+
 def _mock_verified_phrogs_profile_archive(monkeypatch, external_dir: Path) -> Path:
     """Emulate the verified Pharokka archive boundary for local safety-orchestration tests."""
     archive_path = Path(external_dir) / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
-    annotation_path = Path(external_dir) / "phrogs" / "phrog_annot_v4.tsv"
-    source_rows = list(csv.DictReader(annotation_path.open(newline=""), delimiter="\t"))
-    selected_rows = [
-        row
-        for row in source_rows
-        if row["category"].casefold() == external_assets.PHROGS_INTEGRATION_EXCISION_CATEGORY
-        or row["annot"].casefold() in external_assets.PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS
-    ]
-    high_count = sum(
-        any(term in row["annot"].casefold() for term in external_assets.PHROGS_HIGH_CONFIDENCE_TERMS)
-        or row["annot"].casefold() in external_assets.PHROGS_ADDITIONAL_HIGH_CONFIDENCE_ANNOTATIONS
-        for row in selected_rows
-    )
-    review_count = len(selected_rows) - high_count
-    release = replace(
-        external_assets.load_phrogs_safety_release(),
-        annotation_sha256=external_assets._sha256_file(annotation_path),
-        source_lookup_counts=(len(selected_rows), high_count, review_count),
-        searchable_lookup_counts=(len(selected_rows), high_count, review_count),
-        allowed_profile_exclusions=frozenset(),
-    )
     original_extract_tar = external_assets._extract_tar
 
     def is_verified_archive(path: Path) -> bool:
@@ -222,13 +371,12 @@ def _mock_verified_phrogs_profile_archive(monkeypatch, external_dir: Path) -> Pa
             return original_extract_tar(path, output_dir, overwrite=overwrite)
         assert overwrite is True
         _write_phrogs_profile_database(Path(output_dir) / "phrogs_profile_db")
-        shutil.copy2(annotation_path, Path(output_dir) / release.annotation_archive_filename)
         return output_dir
 
-    monkeypatch.setattr(external_assets, "load_phrogs_safety_release", lambda *_args, **_kwargs: release)
     monkeypatch.setattr(external_assets, "_verify_file_size", verify_size)
     monkeypatch.setattr(external_assets, "_verify_md5", verify_md5)
     monkeypatch.setattr(external_assets, "_extract_tar", extract_verified_archive)
+    _mock_phrogs_search_database_builder(monkeypatch, external_dir)
     return archive_path
 
 
@@ -267,7 +415,7 @@ def _write_cached_toxin_snapshot(external_dir: Path, manifest_path: Path) -> dic
     search_path.write_bytes(fasta_path.read_bytes() + b">domain|PF15658.11|Latrotoxin_C\nMPEPTIDE\n")
     diamond_path.write_text("DIAMOND database\n")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "toxin_reference": {
             "query": external_assets.DEFAULT_UNIPROT_TOXIN_QUERY,
             "classification_policy": external_assets.TOXIN_REFERENCE_CLASSIFICATION_POLICY,
@@ -322,19 +470,38 @@ def _mock_safety_manifest_section(name: str) -> tuple[str, dict]:
                 "amrfinder_index_sha256": "index",
                 "amrfinder_update_path": "updater",
                 "amrfinder_update_sha256": "updater",
-                "makeblastdb_path": "blast",
-                "makeblastdb_sha256": "blast",
-                "blastp_path": "blastp",
-                "blastp_sha256": "blastp",
-                "blastx_path": "blastx",
-                "blastx_sha256": "blastx",
-                "hmmpress_path": "hmmer",
-                "hmmpress_sha256": "hmmer",
-                "hmmsearch_path": "hmmsearch",
-                "hmmsearch_sha256": "hmmsearch",
+                "runtime_bundle": {
+                    "path": "/amrfinder-runtime",
+                    "sha256": "0" * 64,
+                    "files": [
+                        {
+                            "name": file_name,
+                            "path": f"/amrfinder-runtime/{file_name}",
+                            "sha256": "0" * 64,
+                            "executable": file_name in external_assets.AMRFINDER_RUNTIME_EXECUTABLES,
+                        }
+                        for file_name in sorted(external_assets.AMRFINDER_RUNTIME_FILES)
+                    ],
+                },
+                **{
+                    f"{tool_name}_{field}": f"{tool_name}-{field}"
+                    for tool_name in (
+                        *external_assets.AMRFINDER_BLAST_RUNTIME_EXECUTABLES,
+                        *external_assets.AMRFINDER_HMMER_RUNTIME_EXECUTABLES,
+                    )
+                    for field in ("path", "sha256")
+                },
                 "database_path": "database",
                 "database_version": "version",
                 "database_sha256": "database",
+                "database_source_sha256": "0" * 64,
+                "database_source_files": [
+                    "AMR.LIB",
+                    "AMRProt.fa",
+                    "database_format_version.txt",
+                    "fam.tsv",
+                    "version.txt",
+                ],
             },
         ),
         "toxins": (
@@ -376,22 +543,19 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
     safety_dir.mkdir(parents=True, exist_ok=True)
     if name == "amrfinder":
         bin_dir = safety_dir / "bin"
-        bin_dir.mkdir()
+        _write_amrfinder_runtime(bin_dir, label="mock")
+        prerequisite_paths = _write_amrfinder_prerequisites(bin_dir, label="mock")
         binary_paths = {
             "binary": bin_dir / "amrfinder",
             "index": bin_dir / "amrfinder_index",
             "updater": bin_dir / "amrfinder_update",
-            "blast": bin_dir / "makeblastdb",
-            "blastp": bin_dir / "blastp",
-            "blastx": bin_dir / "blastx",
-            "hmmer": bin_dir / "hmmpress",
-            "hmmsearch": bin_dir / "hmmsearch",
         }
-        for label, path in binary_paths.items():
-            path.write_text(f"{label}\n")
+        staged_runtime = {name: bin_dir / name for name in external_assets.AMRFINDER_RUNTIME_FILES}
         database_path = safety_dir / "amrfinder" / "database" / "2026-01-26.1"
-        database_path.mkdir(parents=True)
-        (database_path / "AMRProt.fa").write_text(">AMR\nMPEPTIDE\n")
+        _write_minimal_amrfinder_database_sources(database_path)
+        database_source_sha256, database_source_files = external_assets._amrfinder_database_source_identity(
+            database_path
+        )
         return (
             "amrfinder_plus",
             {
@@ -402,19 +566,20 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
                 "amrfinder_index_sha256": external_assets._sha256_file(binary_paths["index"]),
                 "amrfinder_update_path": str(binary_paths["updater"]),
                 "amrfinder_update_sha256": external_assets._sha256_file(binary_paths["updater"]),
-                "makeblastdb_path": str(binary_paths["blast"]),
-                "makeblastdb_sha256": external_assets._sha256_file(binary_paths["blast"]),
-                "blastp_path": str(binary_paths["blastp"]),
-                "blastp_sha256": external_assets._sha256_file(binary_paths["blastp"]),
-                "blastx_path": str(binary_paths["blastx"]),
-                "blastx_sha256": external_assets._sha256_file(binary_paths["blastx"]),
-                "hmmpress_path": str(binary_paths["hmmer"]),
-                "hmmpress_sha256": external_assets._sha256_file(binary_paths["hmmer"]),
-                "hmmsearch_path": str(binary_paths["hmmsearch"]),
-                "hmmsearch_sha256": external_assets._sha256_file(binary_paths["hmmsearch"]),
+                "runtime_bundle": external_assets._amrfinder_runtime_bundle_record(staged_runtime),
+                **{
+                    f"{tool_name}_{field}": value
+                    for tool_name, path in prerequisite_paths.items()
+                    for field, value in (
+                        ("path", str(path)),
+                        ("sha256", external_assets._sha256_file(path)),
+                    )
+                },
                 "database_path": str(database_path),
                 "database_version": "2026-01-26.1",
                 "database_sha256": external_assets._sha256_path(database_path),
+                "database_source_sha256": database_source_sha256,
+                "database_source_files": database_source_files,
             },
         )
     if name == "toxins":
@@ -446,7 +611,6 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
             },
         )
     if name == "phrogs":
-        release = external_assets.load_phrogs_safety_release()
         source_path = safety_dir / "phrog_annot_v4.tsv"
         lookup_path = safety_dir / "phrogs_integration_excision_v4.tsv"
         source_path.write_text("source\n")
@@ -459,25 +623,10 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
         return (
             "phrogs_v4",
             {
-                "annotation_source_urls": list(release.annotation_source_urls),
                 "source_path": str(source_path),
                 "source_sha256": external_assets._sha256_file(source_path),
                 "lookup_path": str(lookup_path),
                 "lookup_sha256": external_assets._sha256_file(lookup_path),
-                "source_lookup_counts": {
-                    "total": release.source_lookup_counts[0],
-                    "high_confidence": release.source_lookup_counts[1],
-                    "review": release.source_lookup_counts[2],
-                },
-                "lookup_counts": {
-                    "total": release.searchable_lookup_counts[0],
-                    "high_confidence": release.searchable_lookup_counts[1],
-                    "review": release.searchable_lookup_counts[2],
-                },
-                "profile_exclusions": {
-                    "ids": sorted(release.allowed_profile_exclusions),
-                    "reason": "absent_from_authenticated_profile_lookup",
-                },
                 "sequence_database": {
                     "path": str(sequence_database),
                     "sha256": sequence_database_sha256,
@@ -499,31 +648,20 @@ def _materialize_mock_safety_manifest_section(name: str, safety_dir: Path) -> tu
                     "query_id_pattern": external_assets.PHROGS_PROFILE_QUERY_ID_PATTERN,
                     "query_ids_join_lookup": True,
                     "profile_id_inventory": external_assets._phrogs_profile_id_inventory(profile_database),
-                    "release_marker": {
-                        "path": str(profile_database.parent / release.release_marker),
-                        "sha256": external_assets._sha256_file(profile_database.parent / release.release_marker),
-                        "origin": "validated_release_marker",
-                        "empty_sentinel": False,
-                    },
                     "provenance": {
-                        "source_url": release.profile_source_urls[0],
-                        "source_urls": list(release.profile_source_urls),
+                        "source_url": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
                         "archive_observed_sha256": "0" * 64,
                         "archive_published_sha256": None,
-                        "archive_published_md5": release.archive_published_md5,
-                        "archive_published_size": release.archive_published_size,
+                        "archive_published_md5": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5,
+                        "archive_published_size": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE,
                         "retrieved_at": "2026-08-08T00:00:00Z",
-                        "release": release.release,
-                        "dataset_release": release.dataset_release,
-                        "doi": release.doi,
-                        "license": release.license,
-                        "citation": release.citation,
-                        "minimum_mmseqs_version": release.minimum_mmseqs_version,
-                        "built_with_mmseqs_version": release.built_with_mmseqs_version,
-                        "verified_archive": {
-                            "path": str(safety_dir / "cached-pharokka.tar.gz"),
-                            "sha256": "0" * 64,
-                        },
+                        "release": external_assets.PHROGS_PROFILE_RELEASE,
+                        "dataset_release": external_assets.PHROGS_PROFILE_DATASET_RELEASE,
+                        "doi": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_DOI,
+                        "license": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_LICENSE,
+                        "citation": external_assets.PHROGS_PROFILE_SOURCE_CITATION,
+                        "minimum_mmseqs_version": external_assets.PHROGS_PROFILE_MIN_MMSEQS_VERSION,
+                        "built_with_mmseqs_version": external_assets.PHROGS_PROFILE_BUILDER_MMSEQS_VERSION,
                     },
                 },
             },
@@ -552,25 +690,109 @@ def test_prepare_mmseqs_gpu_extracts_archive_and_links_binary(tmp_path):
 
 
 def test_prepare_dustmasker_extracts_blast_plus_archive_and_links_binary(tmp_path):
-    """A usable BLAST+ archive exposes every AMRFinder preparation and scan dependency."""
+    """A usable BLAST+ archive exposes the complete QC and AMRFinder runtime together."""
     archive_path = _write_multi_executable_tarball(
         tmp_path,
-        ("dustmasker", "makeblastdb", "blastp", "blastx"),
+        ("dustmasker", "makeblastdb", "blastn", "blastp", "blastx", "tblastn"),
         subdir="ncbi-blast/bin",
         archive_name="blast-plus.tar.gz",
     )
 
-    asset = prepare_dustmasker(tmp_path / "external", blast_plus_url=archive_path.as_uri())
+    asset = prepare_dustmasker(
+        tmp_path / "external",
+        blast_plus_url=archive_path.as_uri(),
+        blast_plus_sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+    )
 
     assert asset.path.name == "dustmasker"
     assert asset.path.is_symlink()
     assert asset.path.exists()
     assert (tmp_path / "external" / "bin" / "makeblastdb").is_symlink()
     assert (tmp_path / "external" / "bin" / "makeblastdb").exists()
-    assert (tmp_path / "external" / "bin" / "blastp").is_symlink()
-    assert (tmp_path / "external" / "bin" / "blastp").exists()
-    assert (tmp_path / "external" / "bin" / "blastx").is_symlink()
-    assert (tmp_path / "external" / "bin" / "blastx").exists()
+
+
+@pytest.mark.parametrize(
+    ("machine", "architecture", "archive_sha256", "blastx_sha256"),
+    [
+        (
+            "aarch64",
+            "aarch64",
+            "cb9ac252a1ac8767d90b0bf0a38486f3cb94f71ef9b6b8d194ded19b30250daf",
+            "fe541ee4a2b93b607940c9403bc6ffff7a88b51317c5ff0d14b29a6766eb49c6",
+        ),
+        (
+            "arm64",
+            "aarch64",
+            "cb9ac252a1ac8767d90b0bf0a38486f3cb94f71ef9b6b8d194ded19b30250daf",
+            "fe541ee4a2b93b607940c9403bc6ffff7a88b51317c5ff0d14b29a6766eb49c6",
+        ),
+        (
+            "x86_64",
+            "x86_64",
+            "3888112d8207831aa47371d93583c601f058f88b5db22dc782438b039a3a411b",
+            "0dac09bed17043dfdf93ad71d50e6e177f273d5311897b9e653e45142bb3ef80",
+        ),
+        (
+            "amd64",
+            "x86_64",
+            "3888112d8207831aa47371d93583c601f058f88b5db22dc782438b039a3a411b",
+            "0dac09bed17043dfdf93ad71d50e6e177f273d5311897b9e653e45142bb3ef80",
+        ),
+    ],
+)
+def test_blast_plus_release_selects_pinned_official_archive_for_cpu(
+    machine, architecture, archive_sha256, blastx_sha256
+):
+    """Selecting the wrong archive or BLASTX binary would break or silently change cross-CPU scans."""
+    release = external_assets.resolve_blast_plus_release(machine)
+
+    assert release.version == "2.17.0"
+    assert release.architecture == architecture
+    assert release.archive_sha256 == archive_sha256
+    assert release.blastx_sha256 == blastx_sha256
+    assert release.url.startswith("https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/")
+
+
+def test_blast_plus_release_rejects_unsupported_cpu():
+    """An unknown CPU must fail before downloading or executing an incompatible binary."""
+    with pytest.raises(RuntimeError, match="unsupported CPU architecture"):
+        external_assets.resolve_blast_plus_release("riscv64")
+
+
+def test_prepare_dustmasker_requires_digest_and_exposes_full_amrfinder_blast_runtime(tmp_path):
+    """A custom archive must be pinned and must expose every BLAST executable AMRFinder uses."""
+    archive_path = _write_multi_executable_tarball(
+        tmp_path,
+        ("dustmasker", "makeblastdb", "blastn", "blastp", "blastx", "tblastn"),
+        subdir="ncbi-blast/bin",
+        archive_name="blast-plus.tar.gz",
+    )
+    archive_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+
+    asset = prepare_dustmasker(
+        tmp_path / "external",
+        blast_plus_url=archive_path.as_uri(),
+        blast_plus_sha256=archive_sha256,
+    )
+
+    assert asset.path.name == "dustmasker"
+    for executable in ("dustmasker", "makeblastdb", "blastn", "blastp", "blastx", "tblastn"):
+        exposed = tmp_path / "external" / "bin" / executable
+        assert exposed.is_symlink()
+        assert exposed.exists()
+
+
+def test_prepare_dustmasker_rejects_unpinned_custom_archive(tmp_path):
+    """A caller-selected BLAST archive must never bypass the official release digest pins."""
+    archive_path = _write_multi_executable_tarball(
+        tmp_path,
+        ("dustmasker", "makeblastdb", "blastn", "blastp", "blastx", "tblastn"),
+        subdir="ncbi-blast/bin",
+        archive_name="blast-plus.tar.gz",
+    )
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        prepare_dustmasker(tmp_path / "external", blast_plus_url=archive_path.as_uri())
 
 
 def test_prepare_dustmasker_rejects_blast_archive_without_makeblastdb(tmp_path):
@@ -578,20 +800,11 @@ def test_prepare_dustmasker_rejects_blast_archive_without_makeblastdb(tmp_path):
     archive_path = _write_tarball(tmp_path, executable_name="dustmasker", subdir="ncbi-blast/bin")
 
     with pytest.raises(FileNotFoundError, match="makeblastdb"):
-        prepare_dustmasker(tmp_path / "external", blast_plus_url=archive_path.as_uri())
-
-
-def test_prepare_dustmasker_rejects_blast_archive_without_blastp(tmp_path):
-    """AMRFinder's scanner runtime must never omit the BLASTP executable it invokes."""
-    archive_path = _write_multi_executable_tarball(
-        tmp_path,
-        ("dustmasker", "makeblastdb"),
-        subdir="ncbi-blast/bin",
-        archive_name="blast-plus-no-blastp.tar.gz",
-    )
-
-    with pytest.raises(FileNotFoundError, match="blastp"):
-        prepare_dustmasker(tmp_path / "external", blast_plus_url=archive_path.as_uri())
+        prepare_dustmasker(
+            tmp_path / "external",
+            blast_plus_url=archive_path.as_uri(),
+            blast_plus_sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        )
 
 
 def test_configure_lovis4u_mmseqs_points_lovis4u_at_recipe_binary(tmp_path, monkeypatch):
@@ -659,11 +872,7 @@ def test_prepare_amrfinder_plus_extracts_pinned_archive_links_binary_and_records
     archive_path = _write_amrfinder_tarball(tmp_path)
     external_dir = tmp_path / "external"
     target_bin_dir = external_dir / "bin"
-    for prerequisite in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
-        executable = target_bin_dir / prerequisite
-        executable.parent.mkdir(parents=True, exist_ok=True)
-        executable.write_text("#!/usr/bin/env bash\n")
-        executable.chmod(0o755)
+    _write_amrfinder_prerequisites(target_bin_dir)
     calls = []
 
     def fake_run(cmd, check, capture_output, text):
@@ -671,8 +880,7 @@ def test_prepare_amrfinder_plus_extracts_pinned_archive_links_binary_and_records
         if cmd[0].endswith("amrfinder_update"):
             database_dir = external_dir / "safety" / "amrfinder" / "database"
             version_dir = database_dir / "2026-01-26.1"
-            version_dir.mkdir(parents=True, exist_ok=True)
-            (version_dir / "AMRProt.fa").write_text(">AMR\nMPEPTIDE\n")
+            _write_minimal_amrfinder_database_sources(version_dir)
             (database_dir / "latest").symlink_to(version_dir.name)
             return type("Completed", (), {"stdout": ""})()
         if cmd[-1] == "--version":
@@ -697,6 +905,12 @@ def test_prepare_amrfinder_plus_extracts_pinned_archive_links_binary_and_records
     assert (external_dir / "bin" / "amrfinder_update").is_symlink()
     assert "amrfinder_version: AMRFinderPlus version 4.2.7" in manifest_path.read_text()
     assert "database_version: 2026-01-26.1" in manifest_path.read_text()
+    manifest = yaml.safe_load(manifest_path.read_text())
+    expected_source_sha256, expected_source_files = external_assets._amrfinder_database_source_identity(
+        external_dir / "safety" / "amrfinder" / "database" / "2026-01-26.1"
+    )
+    assert manifest["amrfinder_plus"]["database_source_sha256"] == expected_source_sha256
+    assert manifest["amrfinder_plus"]["database_source_files"] == expected_source_files
     assert f"archive_sha256: {archive_digest}" in manifest_path.read_text()
     assert (
         f"amrfinder_index_sha256: {hashlib.sha256((external_dir / 'bin' / 'amrfinder_index').read_bytes()).hexdigest()}"
@@ -711,19 +925,7 @@ def test_prepare_amrfinder_plus_extracts_pinned_archive_links_binary_and_records
         in manifest_path.read_text()
     )
     assert (
-        f"blastp_sha256: {hashlib.sha256((external_dir / 'bin' / 'blastp').read_bytes()).hexdigest()}"
-        in manifest_path.read_text()
-    )
-    assert (
-        f"blastx_sha256: {hashlib.sha256((external_dir / 'bin' / 'blastx').read_bytes()).hexdigest()}"
-        in manifest_path.read_text()
-    )
-    assert (
         f"hmmpress_sha256: {hashlib.sha256((external_dir / 'bin' / 'hmmpress').read_bytes()).hexdigest()}"
-        in manifest_path.read_text()
-    )
-    assert (
-        f"hmmsearch_sha256: {hashlib.sha256((external_dir / 'bin' / 'hmmsearch').read_bytes()).hexdigest()}"
         in manifest_path.read_text()
     )
     assert calls == [
@@ -756,6 +958,134 @@ def test_prepare_amrfinder_plus_extracts_pinned_archive_links_binary_and_records
     ]
 
 
+def test_prepare_amrfinder_plus_accepts_pinned_source_build_without_release_archive(tmp_path, monkeypatch):
+    """A native source build can seed the same digest-bound database contract on non-x86 hosts."""
+    external_dir = tmp_path / "external"
+    source_bin_dir = tmp_path / "native-amrfinder" / "bin"
+    _write_amrfinder_runtime(source_bin_dir, label="native")
+    target_bin_dir = external_dir / "bin"
+    _write_amrfinder_prerequisites(target_bin_dir)
+
+    def fail_download(*_args, **_kwargs):
+        pytest.fail("a pinned source build must not download or execute the x86 release archive")
+
+    version_dir = external_dir / "safety" / "amrfinder" / "database" / "2026-08-04.1"
+
+    def fake_run(cmd, check, capture_output, text):
+        if cmd[0].endswith("amrfinder_update"):
+            _write_minimal_amrfinder_database_sources(version_dir)
+            (version_dir.parent / "latest").symlink_to(version_dir.name)
+            return type("Completed", (), {"stdout": ""})()
+        if cmd[-1] == "--version":
+            return type("Completed", (), {"stdout": "AMRFinderPlus version 4.2.7\n"})()
+        return type(
+            "Completed",
+            (),
+            {
+                "stdout": (
+                    f"Software directory: '{source_bin_dir}/'\n"
+                    "Software version: 4.2.7\n"
+                    f"Database directory: '{version_dir}'\n"
+                    "Database version: 2026-08-04.1\n"
+                )
+            },
+        )()
+
+    monkeypatch.setattr(external_assets, "_download", fail_download)
+    monkeypatch.setattr("subprocess.run", fake_run)
+    manifest_path = external_dir / "safety" / "asset_manifest.yaml"
+
+    asset = prepare_amrfinder_plus(
+        external_dir,
+        source_bin_dir=source_bin_dir,
+        source_repository="https://github.com/ncbi/amr.git",
+        source_revision="76bf8527b3cabc6a08fdc0e20783e594bba162e3",
+        manifest_path=manifest_path,
+    )
+
+    manifest = yaml.safe_load(manifest_path.read_text())
+    record = manifest["amrfinder_plus"]
+    assert asset.path.read_bytes() == (source_bin_dir / "amrfinder").read_bytes()
+    assert record["acquisition"] == "pinned_source_build"
+    assert record["source_repository"] == "https://github.com/ncbi/amr.git"
+    assert record["source_revision"] == "76bf8527b3cabc6a08fdc0e20783e594bba162e3"
+    assert record["source_binary_sha256"] == hashlib.sha256((source_bin_dir / "amrfinder").read_bytes()).hexdigest()
+    assert record["database_version"] == "2026-08-04.1"
+    assert (target_bin_dir / "fasta_check").read_bytes() == (source_bin_dir / "fasta_check").read_bytes()
+    assert [item["name"] for item in record["runtime_bundle"]["files"]] == sorted(
+        external_assets.AMRFINDER_RUNTIME_FILES
+    )
+    external_assets._validate_amrfinder_runtime_bundle(record, verify_asset_paths=True)
+
+
+def test_prepare_amrfinder_plus_refuses_source_build_missing_runtime_companion(tmp_path, monkeypatch):
+    """The staged scanner must contain the sibling tools invoked by the AMRFinder executable."""
+    source_bin_dir = tmp_path / "native-amrfinder" / "bin"
+    source_bin_dir.mkdir(parents=True)
+    for executable_name in ("amrfinder", "amrfinder_index", "amrfinder_update"):
+        executable = source_bin_dir / executable_name
+        executable.write_text("#!/usr/bin/env bash\n")
+        executable.chmod(0o755)
+    target_bin_dir = tmp_path / "external" / "bin"
+    for executable_name in ("makeblastdb", "hmmpress"):
+        executable = target_bin_dir / executable_name
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text("#!/usr/bin/env bash\n")
+        executable.chmod(0o755)
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: pytest.fail("an incomplete AMRFinder runtime reached execution"),
+    )
+
+    with pytest.raises(FileNotFoundError, match="fasta_check"):
+        prepare_amrfinder_plus(
+            tmp_path / "external",
+            source_bin_dir=source_bin_dir,
+            source_repository="https://github.com/ncbi/amr.git",
+            source_revision="76bf8527b3cabc6a08fdc0e20783e594bba162e3",
+        )
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        "Database version:\n",
+        "Database version: 2026-08-04.1\nDatabase version: 2026-08-05.1\n",
+        "Software version: 4.2.7\n",
+    ),
+)
+def test_amrfinder_database_version_parser_rejects_missing_or_ambiguous_version(output):
+    """AMRFinder status output cannot authorize an absent or ambiguous database identity."""
+    with pytest.raises(RuntimeError, match="database version"):
+        external_assets._parse_amrfinder_database_version(output)
+
+
+@pytest.mark.parametrize(
+    ("source_repository", "source_revision"),
+    ((None, "76bf8527b3cabc6a08fdc0e20783e594bba162e3"), ("https://github.com/ncbi/amr.git", None)),
+)
+def test_prepare_amrfinder_plus_rejects_unpinned_source_build(
+    tmp_path, monkeypatch, source_repository, source_revision
+):
+    """Preinstalled binaries never bypass explicit repository and immutable-revision provenance."""
+    source_bin_dir = tmp_path / "native-amrfinder" / "bin"
+    source_bin_dir.mkdir(parents=True)
+    for executable_name in ("amrfinder", "amrfinder_index", "amrfinder_update"):
+        executable = source_bin_dir / executable_name
+        executable.write_text("#!/usr/bin/env bash\n")
+        executable.chmod(0o755)
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: pytest.fail("unpinned binaries ran"))
+
+    with pytest.raises(ValueError, match="repository and revision"):
+        prepare_amrfinder_plus(
+            tmp_path / "external",
+            source_bin_dir=source_bin_dir,
+            source_repository=source_repository,
+            source_revision=source_revision,
+        )
+
+
 def test_prepare_amrfinder_plus_refuses_to_extract_without_a_digest(tmp_path):
     """The AMRFinder executable must never be extracted from an unpinned archive."""
     archive_path = _write_amrfinder_tarball(tmp_path)
@@ -786,11 +1116,7 @@ def test_prepare_amrfinder_plus_never_reuses_a_tampered_digest_named_extraction(
     archive_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     external_dir = tmp_path / "external"
     target_bin_dir = external_dir / "bin"
-    for prerequisite in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
-        executable = target_bin_dir / prerequisite
-        executable.parent.mkdir(parents=True, exist_ok=True)
-        executable.write_text("#!/usr/bin/env bash\n")
-        executable.chmod(0o755)
+    _write_amrfinder_prerequisites(target_bin_dir)
 
     tampered_bin_dir = (
         external_dir / "safety" / "tools" / f"amrfinder_v4.2.7-{archive_sha256[:16]}" / "attacker" / "bin"
@@ -805,8 +1131,7 @@ def test_prepare_amrfinder_plus_never_reuses_a_tampered_digest_named_extraction(
         if cmd[0].endswith("amrfinder_update"):
             database_dir = external_dir / "safety" / "amrfinder" / "database"
             version_dir = database_dir / "2026-01-26.1"
-            version_dir.mkdir(parents=True)
-            (version_dir / "AMRProt.fa").write_text(">AMR\nMPEPTIDE\n")
+            _write_minimal_amrfinder_database_sources(version_dir)
             (database_dir / "latest").symlink_to(version_dir.name)
             return type("Completed", (), {"stdout": ""})()
         if cmd[-1] == "--version":
@@ -835,11 +1160,7 @@ def test_prepare_amrfinder_plus_refuses_an_archive_missing_amrfinder_index(tmp_p
 
     external_dir = tmp_path / "external"
     target_bin_dir = external_dir / "bin"
-    for prerequisite in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
-        executable = target_bin_dir / prerequisite
-        executable.parent.mkdir(parents=True, exist_ok=True)
-        executable.write_text("#!/usr/bin/env bash\n")
-        executable.chmod(0o755)
+    _write_amrfinder_prerequisites(target_bin_dir)
     monkeypatch.setattr(
         "subprocess.run",
         lambda *_args, **_kwargs: pytest.fail("an archive missing amrfinder_index reached execution"),
@@ -853,7 +1174,16 @@ def test_prepare_amrfinder_plus_refuses_an_archive_missing_amrfinder_index(tmp_p
         )
 
 
-@pytest.mark.parametrize("missing_field", ("amrfinder_index_sha256", "database_version"))
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "amrfinder_index_sha256",
+        "runtime_bundle",
+        "database_version",
+        "database_source_sha256",
+        "database_source_files",
+    ),
+)
 def test_validate_staged_safety_manifest_requires_amrfinder_index_and_database_version(missing_field):
     """A trusted safety generation needs all AMRFinder executable and database provenance."""
     amrfinder_section, amrfinder_record = _mock_safety_manifest_section("amrfinder")
@@ -872,8 +1202,72 @@ def test_validate_staged_safety_manifest_requires_amrfinder_index_and_database_v
         )
 
 
+def test_validate_amrfinder_source_identity_rejects_manifest_drift(tmp_path):
+    """A stable dataset identity cannot be replaced with a caller-authored digest or inventory."""
+    section, record = _materialize_mock_safety_manifest_section("amrfinder", tmp_path)
+    assert section == "amrfinder_plus"
+
+    record["database_source_sha256"] = "f" * 64
+    with pytest.raises(RuntimeError, match="source digest"):
+        external_assets._validate_amrfinder_database_source_identity(record)
+
+    record["database_source_sha256"], record["database_source_files"] = (
+        external_assets._amrfinder_database_source_identity(Path(record["database_path"]))
+    )
+    record["database_source_files"] = [*record["database_source_files"], "forged.tsv"]
+    with pytest.raises(RuntimeError, match="source inventory"):
+        external_assets._validate_amrfinder_database_source_identity(record)
+
+
+def test_validate_staged_safety_manifest_accepts_pinned_amrfinder_source_build(tmp_path):
+    """The complete safety transaction accepts native binaries only with immutable source provenance."""
+    manifest = {"schema_version": 2}
+    for name in ("amrfinder", "toxins", "phrogs"):
+        section, record = _materialize_mock_safety_manifest_section(name, tmp_path / name)
+        manifest[section] = record
+    amrfinder = manifest["amrfinder_plus"]
+    amrfinder.pop("archive_sha256")
+    amrfinder.update(
+        {
+            "acquisition": "pinned_source_build",
+            "source_repository": "https://github.com/ncbi/amr.git",
+            "source_revision": "76bf8527b3cabc6a08fdc0e20783e594bba162e3",
+            "source_binary_sha256": amrfinder["binary_sha256"],
+        }
+    )
+    manifest["phrogs_v4"]["profile_database"]["provenance"]["verified_archive"] = {
+        "path": "archive",
+        "sha256": "0" * 64,
+    }
+
+    external_assets._validate_staged_safety_manifest(manifest)
+
+
+@pytest.mark.parametrize("missing_field", ("source_repository", "source_revision", "source_binary_sha256"))
+def test_validate_staged_safety_manifest_rejects_incomplete_amrfinder_source_provenance(tmp_path, missing_field):
+    """A source-built AMRFinder record fails closed when any immutable lineage field is absent."""
+    manifest = {"schema_version": 2}
+    for name in ("amrfinder", "toxins", "phrogs"):
+        section, record = _materialize_mock_safety_manifest_section(name, tmp_path / name)
+        manifest[section] = record
+    amrfinder = manifest["amrfinder_plus"]
+    amrfinder.pop("archive_sha256")
+    amrfinder.update(
+        {
+            "acquisition": "pinned_source_build",
+            "source_repository": "https://github.com/ncbi/amr.git",
+            "source_revision": "76bf8527b3cabc6a08fdc0e20783e594bba162e3",
+            "source_binary_sha256": amrfinder["binary_sha256"],
+        }
+    )
+    amrfinder.pop(missing_field)
+
+    with pytest.raises(RuntimeError, match=missing_field):
+        external_assets._validate_staged_safety_manifest(manifest)
+
+
 def test_validate_recorded_asset_digest_rejects_a_tampered_amrfinder_index(tmp_path):
-    """A staged generation must be rejected if its recorded AMRFinder index changes before publish."""
+    """A staged generation must fail closed if its recorded AMRFinder index changes before publish."""
     index_path = tmp_path / "amrfinder_index"
     index_path.write_text("trusted index\n")
     record = {
@@ -896,11 +1290,7 @@ def test_prepare_amrfinder_plus_rejects_latest_symlink_escaping_requested_databa
     archive_path = _write_amrfinder_tarball(tmp_path)
     external_dir = tmp_path / "external"
     target_bin_dir = external_dir / "bin"
-    for prerequisite in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
-        executable = target_bin_dir / prerequisite
-        executable.parent.mkdir(parents=True, exist_ok=True)
-        executable.write_text("#!/usr/bin/env bash\n")
-        executable.chmod(0o755)
+    _write_amrfinder_prerequisites(target_bin_dir)
     database_dir = tmp_path / "requested-database"
     external_version_dir = tmp_path / "outside" / "2026-01-26.1"
     external_version_dir.mkdir(parents=True)
@@ -926,11 +1316,7 @@ def test_prepare_amrfinder_plus_rejects_non_symlink_latest_directory(tmp_path, m
     archive_path = _write_amrfinder_tarball(tmp_path)
     external_dir = tmp_path / "external"
     target_bin_dir = external_dir / "bin"
-    for prerequisite in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
-        executable = target_bin_dir / prerequisite
-        executable.parent.mkdir(parents=True, exist_ok=True)
-        executable.write_text("#!/usr/bin/env bash\n")
-        executable.chmod(0o755)
+    _write_amrfinder_prerequisites(target_bin_dir)
     database_dir = tmp_path / "requested-database"
     latest_dir = database_dir / "latest"
     latest_dir.mkdir(parents=True)
@@ -954,11 +1340,7 @@ def test_prepare_amrfinder_plus_rejects_an_empty_database_version(tmp_path, monk
     archive_path = _write_amrfinder_tarball(tmp_path)
     external_dir = tmp_path / "external"
     target_bin_dir = external_dir / "bin"
-    for prerequisite in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
-        executable = target_bin_dir / prerequisite
-        executable.parent.mkdir(parents=True, exist_ok=True)
-        executable.write_text("#!/usr/bin/env bash\n")
-        executable.chmod(0o755)
+    _write_amrfinder_prerequisites(target_bin_dir)
     database_dir = tmp_path / "requested-database"
     version_dir = database_dir / "2026-01-26.1"
     version_dir.mkdir(parents=True)
@@ -980,31 +1362,6 @@ def test_prepare_amrfinder_plus_rejects_an_empty_database_version(tmp_path, monk
             amrfinder_sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
             database_dir=database_dir,
         )
-
-
-def test_parse_amrfinder_database_version_accepts_native_multiline_status():
-    """AMRFinder 4 emits a status block; retain only its unique database version field."""
-    output = """Software directory: '/opt/amrfinder/bin/'
-Software version: 4.2.7
-Database directory: '/data/amrfinder/2026-08-07.1'
-Database version: 2026-08-07.1
-"""
-
-    assert external_assets._parse_amrfinder_database_version(output) == "2026-08-07.1"
-
-
-@pytest.mark.parametrize(
-    "output, error",
-    (
-        ("Software version: 4.2.7\n", "missing"),
-        ("Database version: 1\nDatabase version: 2\n", "multiple"),
-        ("Database version:   \n", "empty"),
-    ),
-)
-def test_parse_amrfinder_database_version_rejects_ambiguous_status(output, error):
-    """Missing, duplicate, or empty native database-version fields are rejected."""
-    with pytest.raises(RuntimeError, match=error):
-        external_assets._parse_amrfinder_database_version(output)
 
 
 def test_prepare_toxin_reference_records_uniprot_provenance_and_builds_diamond_database(tmp_path, monkeypatch):
@@ -1350,25 +1707,73 @@ def test_prepare_phrogs_safety_metadata_splits_real_schema_hits_by_confidence(tm
             "lysogeny repressor",
         ],
         ["phrog_4", "Putative recombinase", "integration and excision", "review", "recombinase"],
-        ["phrog_5", "anti-repressor", "transcription regulation", "high_confidence", "anti-repressor"],
+        ["phrog_6", "Anti-repressor", "transcription regulation", "high_confidence", "anti-repressor"],
     ]
     manifest = yaml.safe_load(manifest_path.read_text())
     assert manifest["phrogs_v4"]["source_sha256"] == hashlib.sha256(annotation_path.read_bytes()).hexdigest()
-    assert "sequence_database" not in manifest["phrogs_v4"]
+    assert manifest["phrogs_v4"]["sequence_database"]["path"] == str(sequence_database.resolve())
+    expected_database_sha256, expected_database_files = external_assets._complete_phrogs_sequence_database(
+        sequence_database
+    )
+    assert manifest["phrogs_v4"]["sequence_database"]["sha256"] == expected_database_sha256
+    assert manifest["phrogs_v4"]["sequence_database"]["files"] == [
+        str(path.resolve()) for path in expected_database_files
+    ]
     assert manifest["phrogs_v4"]["high_confidence_terms"] == [
         "integrase",
         "excisionase",
         "site-specific recombinase",
         "lysogeny repressor",
     ]
-    assert manifest["phrogs_v4"]["additional_high_confidence_annotations"] == [
+    assert manifest["phrogs_v4"]["additional_high_confidence_terms"] == [
         "anti-repressor",
         "ci-like repressor",
     ]
+    assert manifest["phrogs_v4"]["selection_scope"] == (
+        "integration/excision category plus unambiguous lifecycle-regulator annotations"
+    )
+
+
+@pytest.mark.parametrize("identifier", ("0", "01", "phrog_01", "PHROG_1", " 1", "1 ", "-1"))
+def test_phrogs_annotation_identifier_normalization_rejects_noncanonical_aliases(identifier):
+    """Numeric source IDs map exactly once to lookup IDs without permissive aliases."""
+    with pytest.raises(ValueError, match="noncanonical PHROG identifier"):
+        external_assets._normalize_phrogs_annotation_identifier(identifier)
+
+
+def test_pinned_phrogs_pair_records_exact_unsearchable_profile_families():
+    """Known release omissions are explicit; arbitrary annotation/profile drift still fails closed."""
+    missing_ids = ("phrog_49658", "phrog_50550", "phrog_77239", "phrog_81686", "phrog_87299")
+    rows = [["phrog_1", "Integrase", "integration and excision", "high_confidence", "integrase"]]
+    rows.extend(
+        [profile_id, "Integrase", "integration and excision", "high_confidence", "integrase"]
+        for profile_id in missing_ids
+    )
+
+    searchable, excluded = external_assets._reconcile_phrogs_profile_lookup_rows(
+        rows,
+        {"phrog_1", "phrog_2"},
+        annotation_sha256=external_assets.DEFAULT_PHROGS_ANNOTATION_SHA256,
+    )
+
+    assert searchable == [rows[0]]
+    assert excluded == rows[1:]
+    with pytest.raises(ValueError, match="IDs absent"):
+        external_assets._reconcile_phrogs_profile_lookup_rows(
+            [*rows, ["phrog_999", "Integrase", "integration and excision", "high_confidence", "integrase"]],
+            {"phrog_1", "phrog_2"},
+            annotation_sha256=external_assets.DEFAULT_PHROGS_ANNOTATION_SHA256,
+        )
+    with pytest.raises(ValueError, match="IDs absent"):
+        external_assets._reconcile_phrogs_profile_lookup_rows(
+            rows,
+            {"phrog_1", "phrog_2"},
+            annotation_sha256="0" * 64,
+        )
 
 
 def test_prepare_phrogs_safety_metadata_records_profile_identity_search_contract(tmp_path):
-    """PHROGs metadata records the profile-query contract that makes lookup joins meaningful."""
+    """PHROGs metadata records the native profile-query contract and profile lookup join."""
     external_dir = tmp_path / "external"
     annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
     sequence_database = _write_phrogs_v4_fixture(annotation_path)
@@ -1418,7 +1823,6 @@ def test_prepare_phrogs_safety_metadata_records_profile_identity_search_contract
     }
     assert profile_record["provenance"] == {
         "source_url": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
-        "source_urls": [external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL],
         "archive_observed_sha256": external_assets._sha256_file(archive_path),
         "archive_published_sha256": None,
         "archive_published_md5": "a63c485241b900a11989bd1821bfbb09",
@@ -1431,6 +1835,49 @@ def test_prepare_phrogs_safety_metadata_records_profile_identity_search_contract
         "citation": "Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353).",
         "minimum_mmseqs_version": "14",
         "built_with_mmseqs_version": "18.8cc5c",
+    }
+
+
+def test_prepare_phrogs_safety_metadata_publishes_exact_policy_search_database(tmp_path, monkeypatch):
+    """Safety publication derives its smaller search DB from the generated policy lookup."""
+    external_dir = tmp_path / "external"
+    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
+    sequence_database = _write_phrogs_v4_fixture(annotation_path)
+    profile_database = _write_phrogs_profile_database(
+        external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db"
+    )
+    archive_path = external_dir / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+    manifest_path = external_dir / "safety" / "asset_manifest.yaml"
+    mmseqs = external_dir / "bin" / "mmseqs"
+    mmseqs.parent.mkdir(parents=True)
+    mmseqs.write_text("mmseqs-v15\n")
+    mmseqs.chmod(0o755)
+    derived_record = {"schema_version": 1, "path": "derived"}
+    captured = {}
+
+    def fake_prepare(**kwargs):
+        captured.update(kwargs)
+        return derived_record
+
+    monkeypatch.setattr(external_assets, "_prepare_phrogs_safety_search_database", fake_prepare)
+
+    external_assets._prepare_phrogs_safety_metadata(
+        external_dir,
+        manifest_path=manifest_path,
+        annotation_sha256=external_assets._sha256_file(annotation_path),
+        sequence_database=sequence_database,
+        profile_database=profile_database,
+        mmseqs_path=mmseqs,
+        **_profile_metadata_kwargs(profile_database, archive_path),
+    )
+
+    section = yaml.safe_load(manifest_path.read_text())["phrogs_v4"]
+    assert section["search_database"] == derived_record
+    assert captured == {
+        "profile_database": profile_database,
+        "safety_lookup": Path(section["lookup_path"]),
+        "output_root": Path(section["lookup_path"]).parent / "safety_search_database",
+        "mmseqs_path": mmseqs,
     }
 
 
@@ -1567,13 +2014,13 @@ def test_prepare_phrogs_safety_metadata_real_schema_has_bounded_expected_confide
 
 
 def test_prepare_phrogs_safety_metadata_rejects_profile_limited_to_safety_lookup_subset(tmp_path):
-    """The full PHROGs profile must contain families beyond the pinned safety lookup."""
+    """The full PHROGs profile must contain families beyond the pinned 109-style safety lookup."""
     external_dir = tmp_path / "external"
     annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
     sequence_database = _write_phrogs_v4_fixture(annotation_path)
     profile_database = _write_phrogs_profile_database(
         external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db",
-        profile_ids=("phrog_1", "phrog_2", "phrog_3", "phrog_4", "phrog_5"),
+        profile_ids=("phrog_1", "phrog_2", "phrog_3", "phrog_4", "phrog_6"),
     )
     archive_path = external_dir / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
 
@@ -1612,71 +2059,6 @@ def test_complete_phrogs_profile_database_requires_official_pharokka_identity_si
 
     with pytest.raises(FileNotFoundError, match="complete MMseqs profile"):
         external_assets._complete_phrogs_profile_database(profile_database)
-
-
-def test_complete_phrogs_profile_database_accepts_published_empty_release_sentinel(tmp_path):
-    """The authenticated Pharokka archive represents its release marker as a zero-byte sentinel."""
-    profile_database = _write_phrogs_profile_database(tmp_path / "phrogs_profile_db")
-    (profile_database.parent / "VERSION_1_8_0").write_bytes(b"")
-
-    digest, files = external_assets._complete_phrogs_profile_database(profile_database)
-
-    assert len(digest) == 64
-    assert profile_database in files
-
-
-@pytest.mark.parametrize("marker_kind", ("directory", "symlink", "conflicting"))
-def test_complete_phrogs_profile_database_rejects_invalid_release_marker(tmp_path, marker_kind):
-    """Only the published empty sentinel or canonical locally generated marker is accepted."""
-    profile_database = _write_phrogs_profile_database(tmp_path / "phrogs_profile_db")
-    marker = profile_database.parent / "VERSION_1_8_0"
-    marker.unlink()
-    if marker_kind == "directory":
-        marker.mkdir()
-    elif marker_kind == "symlink":
-        target = tmp_path / "outside-marker"
-        target.write_text("1.8.0\n")
-        marker.symlink_to(target)
-    else:
-        marker.write_text("not-the-release\n")
-
-    with pytest.raises((FileNotFoundError, ValueError), match="release marker|complete MMseqs profile"):
-        external_assets._complete_phrogs_profile_database(profile_database)
-
-
-def test_verified_phrogs_extraction_materializes_absent_marker_only_after_archive_checks(tmp_path, monkeypatch):
-    """A local release marker may be derived only after exact archive authentication."""
-    archive_path = tmp_path / "pharokka.tar.gz"
-    archive_path.write_bytes(b"authenticated archive fixture")
-    events = []
-
-    def verify_size(path, expected):
-        events.append("size")
-        assert path == archive_path
-        return expected
-
-    def verify_md5(path, expected):
-        events.append("md5")
-        assert path == archive_path
-        return expected
-
-    def extract_archive(path, output_dir, *, overwrite):
-        events.append("extract")
-        assert path == archive_path
-        assert overwrite is True
-        profile = _write_phrogs_profile_database(Path(output_dir) / "phrogs_profile_db")
-        (profile.parent / "VERSION_1_8_0").unlink()
-        return Path(output_dir)
-
-    monkeypatch.setattr(external_assets, "_verify_file_size", verify_size)
-    monkeypatch.setattr(external_assets, "_verify_md5", verify_md5)
-    monkeypatch.setattr(external_assets, "_extract_tar", extract_archive)
-
-    verified = external_assets._extract_verified_phrogs_safety_profile_archive(archive_path, tmp_path / "extracted")
-
-    assert events == ["size", "md5", "extract"]
-    assert (verified.profile_database.parent / "VERSION_1_8_0").read_bytes() == b"1.8.0\n"
-    assert verified.release_marker_origin == "locally_materialized_after_archive_verification"
 
 
 @pytest.mark.parametrize(
@@ -1742,88 +2124,6 @@ def test_prepare_phrogs_safety_metadata_rejects_annotation_ids_absent_from_profi
         )
 
 
-def test_prepare_phrogs_safety_metadata_normalizes_official_numeric_annotation_ids(tmp_path):
-    """Official PHROGs TSV positive decimal IDs join canonical MMseqs ``phrog_N`` identifiers."""
-    external_dir = tmp_path / "external"
-    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
-    annotation_path.parent.mkdir(parents=True)
-    annotation_path.write_text(
-        "phrog\tcolor\tannot\tcategory\n"
-        "1\t#000000\tIntegrase\tintegration and excision\n"
-        "2\t#000001\tPutative recombinase\tintegration and excision\n"
-    )
-    sequence_database = _write_mmseqs_padded_database(annotation_path.parent / "phrogs_gpu_seq_db_pad")
-    profile_database = _write_phrogs_profile_database(
-        annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db",
-        profile_ids=("phrog_1", "phrog_2", "phrog_3"),
-    )
-    archive_path = external_dir / "downloads" / "pharokka.tar.gz"
-
-    asset = external_assets._prepare_phrogs_safety_metadata(
-        external_dir,
-        annotation_sha256=external_assets._sha256_file(annotation_path),
-        sequence_database=sequence_database,
-        profile_database=profile_database,
-        **_profile_metadata_kwargs(profile_database, archive_path),
-    )
-
-    assert [line.split("\t", 1)[0] for line in asset.path.read_text().splitlines()[1:]] == [
-        "phrog_1",
-        "phrog_2",
-    ]
-
-
-@pytest.mark.parametrize("identifier", ("01", "0", "+1", " 1", "1 ", "PHROG_1"))
-def test_prepare_phrogs_safety_metadata_rejects_noncanonical_numeric_annotation_ids(tmp_path, identifier):
-    """Normalization is limited to positive, unpadded ASCII decimal source IDs."""
-    external_dir = tmp_path / "external"
-    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
-    annotation_path.parent.mkdir(parents=True)
-    annotation_path.write_text(
-        f"phrog\tcolor\tannot\tcategory\n{identifier}\t#000000\tIntegrase\tintegration and excision\n"
-    )
-    sequence_database = _write_mmseqs_padded_database(annotation_path.parent / "phrogs_gpu_seq_db_pad")
-    profile_database = _write_phrogs_profile_database(
-        annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db"
-    )
-    archive_path = external_dir / "downloads" / "pharokka.tar.gz"
-
-    with pytest.raises(ValueError, match="noncanonical"):
-        external_assets._prepare_phrogs_safety_metadata(
-            external_dir,
-            annotation_sha256=external_assets._sha256_file(annotation_path),
-            sequence_database=sequence_database,
-            profile_database=profile_database,
-            **_profile_metadata_kwargs(profile_database, archive_path),
-        )
-
-
-def test_prepare_phrogs_safety_metadata_rejects_numeric_alias_collision(tmp_path):
-    """A numeric and canonical spelling cannot silently collapse to one PHROG family."""
-    external_dir = tmp_path / "external"
-    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
-    annotation_path.parent.mkdir(parents=True)
-    annotation_path.write_text(
-        "phrog\tcolor\tannot\tcategory\n"
-        "1\t#000000\tIntegrase\tintegration and excision\n"
-        "phrog_1\t#000001\tIntegrase\tintegration and excision\n"
-    )
-    sequence_database = _write_mmseqs_padded_database(annotation_path.parent / "phrogs_gpu_seq_db_pad")
-    profile_database = _write_phrogs_profile_database(
-        annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db"
-    )
-    archive_path = external_dir / "downloads" / "pharokka.tar.gz"
-
-    with pytest.raises(ValueError, match="duplicate"):
-        external_assets._prepare_phrogs_safety_metadata(
-            external_dir,
-            annotation_sha256=external_assets._sha256_file(annotation_path),
-            sequence_database=sequence_database,
-            profile_database=profile_database,
-            **_profile_metadata_kwargs(profile_database, archive_path),
-        )
-
-
 def test_snapshot_phrogs_profile_database_copies_only_identity_bearing_profile_inventory(tmp_path):
     """A Pharokka bundle's unrelated CARD/VFDB files cannot enter the PHROGs safety snapshot digest."""
     source_root = tmp_path / "pharokka_bundle"
@@ -1877,7 +2177,7 @@ def test_prepare_phrogs_safety_profile_db_verifies_published_md5_before_extracti
     monkeypatch.setattr(external_assets, "_verify_file_size", lambda *_args, **_kwargs: 656_171_247)
     monkeypatch.setattr(external_assets, "_extract_tar", fail_extract)
 
-    with pytest.raises(RuntimeError, match="MD5 mismatch"):
+    with pytest.raises(ValueError, match="MD5 mismatch"):
         external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external")
 
     assert extract_called is False
@@ -1901,7 +2201,7 @@ def test_prepare_phrogs_safety_profile_db_verifies_published_size_before_extract
     monkeypatch.setattr(external_assets, "_verify_md5", lambda *_args, **_kwargs: pytest.fail("MD5 ran first"))
     monkeypatch.setattr(external_assets, "_extract_tar", fail_extract)
 
-    with pytest.raises(RuntimeError, match="size mismatch"):
+    with pytest.raises(ValueError, match="size mismatch"):
         external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external")
 
     assert extract_called is False
@@ -1933,16 +2233,109 @@ def test_prepare_phrogs_safety_profile_db_cleanly_reextracts_the_verified_archiv
     assert download_calls == [
         (
             external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
-            {
-                "overwrite": False,
-                "insecure": False,
-                "expected_size": 656_171_247,
-                "expected_md5": "a63c485241b900a11989bd1821bfbb09",
-                "resume": True,
-            },
+            {"overwrite": False, "insecure": False},
         )
     ]
     assert extract_overwrite_flags == [True]
+
+
+def test_prepare_phrogs_safety_profile_db_materializes_release_marker_after_archive_verification(
+    tmp_path, monkeypatch
+):
+    """The real archive's absent marker is derived only after its published size and MD5 authenticate it."""
+    events = []
+
+    def fake_download(_url, output_path, **_kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"verified Pharokka archive")
+        return output_path
+
+    def verify_size(_path, _expected_size):
+        events.append("size")
+        return external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE
+
+    def verify_md5(_path, _expected_md5):
+        events.append("md5")
+        return external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5
+
+    def extract_without_marker(_archive_path, output_dir, *, overwrite):
+        assert overwrite is True
+        events.append("extract")
+        profile_database = _write_phrogs_profile_database(output_dir / "phrogs_profile_db")
+        (profile_database.parent / external_assets.PHROGS_PROFILE_RELEASE_MARKER).unlink()
+        return output_dir
+
+    monkeypatch.setattr(external_assets, "_download", fake_download)
+    monkeypatch.setattr(external_assets, "_verify_file_size", verify_size)
+    monkeypatch.setattr(external_assets, "_verify_md5", verify_md5)
+    monkeypatch.setattr(external_assets, "_extract_tar", extract_without_marker)
+
+    asset = external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external")
+
+    marker = asset.path / external_assets.PHROGS_PROFILE_RELEASE_MARKER
+    assert events == ["size", "md5", "extract"]
+    assert marker.read_text() == "1.8.0\n"
+
+
+def test_prepare_phrogs_safety_profile_db_accepts_published_empty_release_sentinel(tmp_path, monkeypatch):
+    """The published Pharokka archive represents its release marker as a zero-byte sentinel."""
+
+    def fake_download(_url, output_path, **_kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"verified Pharokka archive")
+        return output_path
+
+    def extract_with_empty_sentinel(_archive_path, output_dir, *, overwrite):
+        assert overwrite is True
+        profile_database = _write_phrogs_profile_database(output_dir / "phrogs_profile_db")
+        (profile_database.parent / external_assets.PHROGS_PROFILE_RELEASE_MARKER).write_bytes(b"")
+        return output_dir
+
+    monkeypatch.setattr(external_assets, "_download", fake_download)
+    monkeypatch.setattr(
+        external_assets,
+        "_verify_file_size",
+        lambda *_args, **_kwargs: external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE,
+    )
+    monkeypatch.setattr(
+        external_assets, "_verify_md5", lambda *_args, **_kwargs: external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5
+    )
+    monkeypatch.setattr(external_assets, "_extract_tar", extract_with_empty_sentinel)
+
+    asset = external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external")
+
+    marker = asset.path / external_assets.PHROGS_PROFILE_RELEASE_MARKER
+    assert marker.is_file()
+    assert marker.read_bytes() == b""
+
+
+def test_prepare_phrogs_safety_profile_db_rejects_conflicting_archive_release_marker(tmp_path, monkeypatch):
+    """An archive-supplied marker cannot contradict the release bound by URL, size, and MD5."""
+
+    def fake_download(_url, output_path, **_kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"verified Pharokka archive")
+        return output_path
+
+    def extract_with_conflicting_marker(_archive_path, output_dir, *, overwrite):
+        assert overwrite is True
+        profile_database = _write_phrogs_profile_database(output_dir / "phrogs_profile_db")
+        (profile_database.parent / external_assets.PHROGS_PROFILE_RELEASE_MARKER).write_text("9.9.9\n")
+        return output_dir
+
+    monkeypatch.setattr(external_assets, "_download", fake_download)
+    monkeypatch.setattr(
+        external_assets,
+        "_verify_file_size",
+        lambda *_args, **_kwargs: external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE,
+    )
+    monkeypatch.setattr(
+        external_assets, "_verify_md5", lambda *_args, **_kwargs: external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5
+    )
+    monkeypatch.setattr(external_assets, "_extract_tar", extract_with_conflicting_marker)
+
+    with pytest.raises(ValueError, match="release marker"):
+        external_assets.prepare_phrogs_safety_profile_db(tmp_path / "external")
 
 
 def test_staged_safety_manifest_rejects_raw_phrogs_database_without_identity_search_contract(tmp_path):
@@ -2035,7 +2428,7 @@ def test_prepare_external_assets_with_safety_rejects_unverified_reused_pharokka_
         lambda *_args, **_kwargs: pytest.fail("AMRFinder ran before reused Pharokka archive verification"),
     )
 
-    with pytest.raises(FileNotFoundError, match="No authenticated PHROGs profile archive cache"):
+    with pytest.raises(ValueError, match="size mismatch"):
         prepare_external_assets(
             external_dir,
             download_mmseqs=False,
@@ -2059,16 +2452,9 @@ def test_prepare_external_assets_reuses_profile_extracted_from_verified_archive_
         profile_ids=tuple(f"phrog_{index}" for index in range(1, 110)),
     )
     archive_path = external_dir / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
-    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
-    release = replace(
-        external_assets.load_phrogs_safety_release(),
-        annotation_sha256=external_assets._sha256_file(annotation_path),
-        source_lookup_counts=(4, 3, 1),
-        searchable_lookup_counts=(4, 3, 1),
-        allowed_profile_exclusions=frozenset(),
-    )
     verification_calls = []
     extraction_calls = []
+    native_amrfinder_bin_dir = tmp_path / "native-amrfinder" / "bin"
 
     def verify_size(path, expected_size):
         verification_calls.append(("size", path, expected_size))
@@ -2090,7 +2476,6 @@ def test_prepare_external_assets_reuses_profile_extracted_from_verified_archive_
             output_dir / "phrogs_profile_db",
             profile_ids=tuple(f"phrog_{index}" for index in range(1, 111)),
         )
-        shutil.copy2(annotation_path, output_dir / release.annotation_archive_filename)
         return output_dir
 
     def fail_after_profile_snapshot(*_args, **kwargs):
@@ -2098,9 +2483,11 @@ def test_prepare_external_assets_reuses_profile_extracted_from_verified_archive_
         assert "phrog_110" in external_assets._phrogs_profile_ids(snapshot_database)
         assert external_assets._phrogs_profile_id_inventory(snapshot_database)["count"] == 110
         assert shared_profile != snapshot_database
+        assert kwargs["source_bin_dir"] == native_amrfinder_bin_dir
+        assert kwargs["source_repository"] == "https://github.com/ncbi/amr.git"
+        assert kwargs["source_revision"] == "76bf8527b3cabc6a08fdc0e20783e594bba162e3"
         raise RuntimeError("injected failure after verified profile snapshot")
 
-    monkeypatch.setattr(external_assets, "load_phrogs_safety_release", lambda *_args, **_kwargs: release)
     monkeypatch.setattr(external_assets, "_verify_file_size", verify_size)
     monkeypatch.setattr(external_assets, "_verify_md5", verify_md5)
     monkeypatch.setattr(external_assets, "_extract_tar", extract_verified_archive)
@@ -2118,11 +2505,12 @@ def test_prepare_external_assets_reuses_profile_extracted_from_verified_archive_
             download_large_databases=False,
             configure_lovis4u=False,
             with_safety=True,
+            amrfinder_source_bin_dir=native_amrfinder_bin_dir,
+            amrfinder_source_repository="https://github.com/ncbi/amr.git",
+            amrfinder_source_revision="76bf8527b3cabc6a08fdc0e20783e594bba162e3",
         )
 
     assert verification_calls == [
-        ("size", archive_path, external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE),
-        ("md5", archive_path, external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5),
         ("size", archive_path, external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_SIZE),
         ("md5", archive_path, external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5),
     ]
@@ -2155,10 +2543,7 @@ def test_prepare_phrogs_gpu_sequence_db_requests_a_lookup_sidecar(tmp_path, monk
     monkeypatch.setattr(external_assets, "_extract_tar", fake_extract)
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    asset = external_assets.prepare_phrogs_gpu_sequence_db(
-        external_dir,
-        phrogs_fasta_sha256="f" * 64,
-    )
+    asset = external_assets.prepare_phrogs_gpu_sequence_db(external_dir)
     sequence_db = external_dir / "phrogs" / "phrogs_gpu_seq_db"
     padded_db = external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
     assert calls == [
@@ -2197,54 +2582,22 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
     assert external_assets.DEFAULT_AMRFINDER_URL == recipe["amrfinder_plus"]["release_url"]
     assert external_assets.DEFAULT_AMRFINDER_SHA256 == recipe["amrfinder_plus"]["archive_sha256"]
     assert recipe["toxin_reference"]["query"] == DEFAULT_UNIPROT_TOXIN_QUERY
-    assert "NOT keyword:KW-0078" in DEFAULT_UNIPROT_TOXIN_QUERY
-    assert "keyword:KW-0843" in DEFAULT_UNIPROT_TOXIN_QUERY
-    assert "taxonomy_id:2759" in DEFAULT_UNIPROT_TOXIN_QUERY
     assert recipe["toxin_reference"]["license"] == "CC BY 4.0"
-    assert recipe["toxin_reference"]["classification_policy"] == {
-        "policy_id": "human-harm-toxin-reference-v1",
-        "hard_fail_scope": "reviewed_whole_protein_human_harm_or_human_disease_virulence",
-        "fragment_action": "REVIEW",
-        "domain_homology_action": "REVIEW",
-        "antibacterial_only_action": "NON_GATING",
-        "antibacterial_keyword": "KW-0078",
-        "independent_eukaryotic_harm_overrides_antibacterial_exclusion": True,
-    }
-    hazards = recipe["toxin_reference"]["curated_hazards"]
-    assert hazards["set_id"] == "phage-domain-hazards-v1"
-    assert hazards["entries"] == [
-        {
-            "accession": "PF15658.11",
-            "name": "Latrotoxin_C",
-            "action": "REVIEW",
-            "source_urls": [
-                external_assets.DEFAULT_WOPIP1_PROTEIN_URLS[0],
-                external_assets.DEFAULT_WOPIP1_PROTEIN_URLS[1],
-            ],
-            "source_protein_accession": "CAQ54400.1",
-            "source_protein_sequence_sha256": ("8e8eb5098bd972dadd0c94ccbd0718c3ede5e528ac2517c605ece16e9eb08a73"),
-            "source_interval": {"start": 2571, "end": 2706},
-            "sequence_sha256": "9da486e50032ff2f89b493049419d7fb9f754f8cc935abb9339f56631dd6a8be",
-            "reason_code": "TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW",
-            "evidence_urls": [
-                "https://doi.org/10.1038/ncomms13155",
-                "https://www.ncbi.nlm.nih.gov/Structure/cdd/pfam15658",
-            ],
-            "interpretation": "Latrotoxin C-terminal-domain homology; not evidence of intact or functional venom.",
-        }
-    ]
-    assert recipe["phrogs_v4"]["annotation_urls"][0].endswith("phrog_annot_v4.tsv")
+    assert recipe["phrogs_v4"]["annotation_url"].endswith("phrog_annot_v4.tsv")
     assert recipe["phrogs_v4"]["annotation_sha256"] == (
         "502f96101597c21133bcce5711803e0b95e0c162cd4e86425c352549bd95e8c2"
     )
     assert external_assets.DEFAULT_PHROGS_ANNOTATION_SHA256 == recipe["phrogs_v4"]["annotation_sha256"]
     assert recipe["phrogs_v4"]["integration_excision_category"] == "integration and excision"
+    assert recipe["phrogs_v4"]["selection_scope"] == external_assets.PHROGS_LYSOGENY_SELECTION_SCOPE
+    assert recipe["phrogs_v4"]["additional_high_confidence_terms"] == list(
+        external_assets.PHROGS_ADDITIONAL_LIFECYCLE_HIGH_CONFIDENCE_TERMS
+    )
     assert recipe["phrogs_v4"]["citation"]
     assert recipe["phrogs_v4"]["use_terms"]
     profile_recipe = recipe["phrogs_v4"]["profile_database"]
     assert profile_recipe == {
-        "source_urls": [external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL],
-        "archive_filename": "pharokka_v1.8.0_databases.tar.gz",
+        "source_url": external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,
         "release": external_assets.PHROGS_PROFILE_RELEASE,
         "dataset_release": external_assets.PHROGS_PROFILE_DATASET_RELEASE,
         "archive_published_sha256": None,
@@ -2259,10 +2612,7 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
         "citation": external_assets.PHROGS_PROFILE_SOURCE_CITATION,
         "minimum_mmseqs_version": external_assets.PHROGS_PROFILE_MIN_MMSEQS_VERSION,
         "built_with_mmseqs_version": external_assets.PHROGS_PROFILE_BUILDER_MMSEQS_VERSION,
-        "database_name": external_assets.PHROGS_PROFILE_DATABASE_NAME,
         "release_marker": external_assets.PHROGS_PROFILE_RELEASE_MARKER,
-        "release_marker_empty_sentinel_allowed": True,
-        "generated_release_marker_content": "1.8.0\n",
         "search_orientation": "phrog_profile_query_vs_orf_target",
         "search_profile_scope": "full_phrogs_v4_profile_database",
         "lookup_join_policy": "classify_only_profile_ids_present_in_pinned_lookup",
@@ -2280,6 +2630,7 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
         ],
         "units": {"pident": "percent", "qcov": "fraction", "tcov": "fraction"},
         "query_id_pattern": "^phrog_[1-9][0-9]*$",
+        "query_ids_join_lookup": True,
         "required_files": [
             "phrogs_profile_db",
             "phrogs_profile_db.dbtype",
@@ -2299,10 +2650,6 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
         "site-specific recombinase",
         "lysogeny repressor",
     ]
-    assert recipe["phrogs_v4"]["additional_high_confidence_annotations"] == [
-        "anti-repressor",
-        "ci-like repressor",
-    ]
     assert set(recipe["expected_file_roles"]) >= {
         "amrfinder_binary",
         "amrfinder_index",
@@ -2313,130 +2660,6 @@ def test_phage_safety_assets_recipe_pins_scanner_sources_and_expected_roles():
         "phrogs_profile_database",
         "phrogs_lysogeny_table",
     }
-
-
-def test_phrogs_release_contract_is_declarative_and_migratable(tmp_path):
-    """A future reviewed release changes tracked evidence, not hard-coded acquisition logic."""
-    current = external_assets.load_phrogs_safety_release()
-
-    assert current.profile_source_urls == (external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL,)
-    assert current.source_lookup_counts == (140, 88, 52)
-    assert current.searchable_lookup_counts == (135, 83, 52)
-    assert current.allowed_profile_exclusions == frozenset(
-        {"phrog_49658", "phrog_50550", "phrog_77239", "phrog_81686", "phrog_87299"}
-    )
-
-    recipe = yaml.safe_load(external_assets.DEFAULT_SAFETY_RECIPE_PATH.read_text())
-    profile = recipe["phrogs_v4"]["profile_database"]
-    profile["source_urls"] = ["https://example.test/pharokka-v2.tar.gz", "https://mirror.test/pharokka-v2.tar.gz"]
-    profile["release"] = "Pharokka database v2.0.0"
-    profile["release_marker"] = "VERSION_2_0_0"
-    profile["generated_release_marker_content"] = "2.0.0\n"
-    future_recipe = tmp_path / "future-safety-assets.yaml"
-    future_recipe.write_text(yaml.safe_dump(recipe, sort_keys=False))
-
-    future = external_assets.load_phrogs_safety_release(future_recipe)
-
-    assert future.profile_source_urls == (
-        "https://example.test/pharokka-v2.tar.gz",
-        "https://mirror.test/pharokka-v2.tar.gz",
-    )
-    assert future.release == "Pharokka database v2.0.0"
-    assert future.release_marker == "VERSION_2_0_0"
-    assert future.generated_release_marker_content == b"2.0.0\n"
-
-
-def test_verified_phrogs_extraction_uses_the_selected_release_contract(tmp_path, monkeypatch):
-    """A reviewed future archive/marker/database migration does not require code edits."""
-    archive_path = tmp_path / "future-pharokka.tar.gz"
-    archive_path.write_bytes(b"future authenticated archive")
-    release = replace(
-        external_assets.load_phrogs_safety_release(),
-        database_name="future_phrogs_profile_db",
-        release_marker="VERSION_2_0_0",
-        generated_release_marker_content=b"2.0.0\n",
-        archive_published_size=archive_path.stat().st_size,
-        archive_published_md5=external_assets._md5_file(archive_path),
-    )
-
-    def extract_archive(path, output_dir, *, overwrite):
-        assert path == archive_path
-        assert overwrite is True
-        profile = _write_phrogs_profile_database(Path(output_dir) / release.database_name)
-        (profile.parent / "VERSION_1_8_0").unlink()
-        return Path(output_dir)
-
-    monkeypatch.setattr(external_assets, "_extract_tar", extract_archive)
-
-    verified = external_assets._extract_verified_phrogs_safety_profile_archive(
-        archive_path,
-        tmp_path / "extracted",
-        _release=release,
-    )
-
-    assert verified.profile_database.name == release.database_name
-    assert (verified.profile_database.parent / release.release_marker).read_bytes() == b"2.0.0\n"
-    assert verified.release_marker_origin == "locally_materialized_after_archive_verification"
-
-
-def test_staged_safety_manifest_does_not_require_legacy_phrogs_sequence_database(tmp_path):
-    """The unpinned FAA-derived Arc compatibility DB is not a trusted scanner dependency."""
-    manifest = {"schema_version": 2}
-    for name in ("amrfinder", "toxins", "phrogs"):
-        section, record = _materialize_mock_safety_manifest_section(name, tmp_path / "safety")
-        manifest[section] = record
-    manifest["phrogs_v4"].pop("sequence_database")
-
-    external_assets._validate_staged_safety_manifest(manifest)
-
-
-def test_pinned_phrogs_release_records_source_and_searchable_lookup_reconciliation(tmp_path):
-    """The five current source families absent from the profile are explicit, never claimed searched."""
-    external_dir = tmp_path / "external"
-    annotation_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
-    annotation_path.parent.mkdir(parents=True)
-    supported_high = tuple(f"phrog_{index}" for index in range(1, 84))
-    excluded_high = ("phrog_49658", "phrog_50550", "phrog_77239", "phrog_81686", "phrog_87299")
-    supported_review = tuple(f"phrog_{index}" for index in range(1000, 1052))
-    rows = ["phrog\tcolor\tannot\tcategory"]
-    rows.extend(
-        f"{profile.removeprefix('phrog_')}\tblack\tIntegrase\tintegration and excision" for profile in supported_high
-    )
-    rows.extend(
-        f"{profile.removeprefix('phrog_')}\tblack\tIntegrase\tintegration and excision" for profile in excluded_high
-    )
-    rows.extend(
-        f"{profile.removeprefix('phrog_')}\tblack\tPutative recombinase\tintegration and excision"
-        for profile in supported_review
-    )
-    annotation_path.write_text("\n".join(rows) + "\n")
-    profile_database = _write_phrogs_profile_database(
-        annotation_path.parent / "phrogs_mmseqs_db" / "phrogs_profile_db",
-        profile_ids=(*supported_high, *supported_review, "phrog_999999"),
-    )
-    archive_path = external_dir / "downloads" / "pharokka.tar.gz"
-    release = replace(
-        external_assets.load_phrogs_safety_release(),
-        annotation_sha256=external_assets._sha256_file(annotation_path),
-    )
-
-    asset = external_assets._prepare_phrogs_safety_metadata(
-        external_dir,
-        annotation_sha256=release.annotation_sha256,
-        profile_database=profile_database,
-        _release=release,
-        **_profile_metadata_kwargs(profile_database, archive_path),
-    )
-
-    manifest = yaml.safe_load((external_dir / "safety" / "asset_manifest.yaml").read_text())["phrogs_v4"]
-    assert manifest["source_lookup_counts"] == {"total": 140, "high_confidence": 88, "review": 52}
-    assert manifest["lookup_counts"] == {"total": 135, "high_confidence": 83, "review": 52}
-    assert manifest["profile_exclusions"] == {
-        "ids": list(excluded_high),
-        "reason": "absent_from_authenticated_profile_lookup",
-    }
-    emitted_ids = {line.split("\t", 1)[0] for line in asset.path.read_text().splitlines()[1:]}
-    assert emitted_ids == {*supported_high, *supported_review}
 
 
 def test_prepare_phrogs_annotation_enforces_the_reviewed_digest_and_scoped_tls_exception(tmp_path, monkeypatch):
@@ -2466,15 +2689,15 @@ def test_prepare_phrogs_annotation_enforces_the_reviewed_digest_and_scoped_tls_e
     ]
 
 
-def test_prepare_external_assets_with_safety_requires_an_authenticated_profile_archive(tmp_path, monkeypatch):
-    """Scanner setup stops when no authenticated archive is cached."""
+def test_prepare_external_assets_with_safety_requires_a_real_phrogs_search_database(tmp_path, monkeypatch):
+    """Safety orchestration must fail closed before scanner setup without a searchable PHROGs DB."""
     monkeypatch.setattr(
         external_assets,
         "prepare_amrfinder_plus",
         lambda *_args, **_kwargs: pytest.fail("AMRFinder ran before PHROGs DB preflight"),
     )
 
-    with pytest.raises(FileNotFoundError, match="authenticated PHROGs profile archive"):
+    with pytest.raises(FileNotFoundError, match="phrogs_gpu_seq_db_pad"):
         prepare_external_assets(
             tmp_path / "external",
             download_mmseqs=False,
@@ -2535,15 +2758,7 @@ def test_prepare_external_assets_with_safety_prepares_all_safety_assets_after_pr
         with_safety=True,
     )
 
-    assert [asset.name for asset in assets] == [
-        "prodigal",
-        "diamond",
-        "hmmer",
-        "phrogs_safety_profile_db",
-        "amrfinder",
-        "toxins",
-        "phrogs",
-    ]
+    assert [asset.name for asset in assets] == ["prodigal", "diamond", "hmmer", "amrfinder", "toxins", "phrogs"]
     assert calls == ["prodigal", "diamond", "hmmer", "amrfinder", "toxins", "phrogs"]
 
 
@@ -2674,23 +2889,12 @@ def test_safety_failure_preserves_every_digest_referenced_by_the_previous_genera
     old_amrfinder = bin_dir / "amrfinder"
     old_amrfinder_update = bin_dir / "amrfinder_update"
     old_amrfinder_index = bin_dir / "amrfinder_index"
-    makeblastdb = bin_dir / "makeblastdb"
-    blastp = bin_dir / "blastp"
-    blastx = bin_dir / "blastx"
-    hmmpress = bin_dir / "hmmpress"
-    hmmsearch = bin_dir / "hmmsearch"
-    for path in (
-        old_amrfinder,
-        old_amrfinder_update,
-        old_amrfinder_index,
-        makeblastdb,
-        blastp,
-        blastx,
-        hmmpress,
-        hmmsearch,
-    ):
+    for path in (old_amrfinder, old_amrfinder_update, old_amrfinder_index):
         path.write_text(f"old {path.name}\n")
         path.chmod(0o755)
+    prerequisite_paths = _write_amrfinder_prerequisites(bin_dir, label="old")
+    makeblastdb = prerequisite_paths["makeblastdb"]
+    hmmpress = prerequisite_paths["hmmpress"]
     old_database = external_dir / "safety" / "amrfinder" / "database" / "2026-01-01.1"
     old_database.mkdir(parents=True)
     (old_database / "AMRProt.fa").write_text(">old\nMPEPTIDE\n")
@@ -2705,18 +2909,14 @@ def test_safety_failure_preserves_every_digest_referenced_by_the_previous_genera
         old_amrfinder: external_assets._sha256_file(old_amrfinder),
         old_amrfinder_update: external_assets._sha256_file(old_amrfinder_update),
         old_amrfinder_index: external_assets._sha256_file(old_amrfinder_index),
-        makeblastdb: external_assets._sha256_file(makeblastdb),
-        blastp: external_assets._sha256_file(blastp),
-        blastx: external_assets._sha256_file(blastx),
-        hmmpress: external_assets._sha256_file(hmmpress),
-        hmmsearch: external_assets._sha256_file(hmmsearch),
+        **{path: external_assets._sha256_file(path) for path in prerequisite_paths.values()},
         old_database: external_assets._sha256_path(old_database),
         old_toxin_database: external_assets._sha256_file(old_toxin_database),
         old_lookup: external_assets._sha256_file(old_lookup),
     }
     manifest_path = external_dir / "safety" / "asset_manifest.yaml"
     old_manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "amrfinder_plus": {
             "binary_path": str(old_amrfinder.resolve()),
             "binary_sha256": referenced_assets[old_amrfinder],
@@ -2726,14 +2926,8 @@ def test_safety_failure_preserves_every_digest_referenced_by_the_previous_genera
             "amrfinder_update_sha256": referenced_assets[old_amrfinder_update],
             "makeblastdb_path": str(makeblastdb.resolve()),
             "makeblastdb_sha256": referenced_assets[makeblastdb],
-            "blastp_path": str(blastp.resolve()),
-            "blastp_sha256": referenced_assets[blastp],
-            "blastx_path": str(blastx.resolve()),
-            "blastx_sha256": referenced_assets[blastx],
             "hmmpress_path": str(hmmpress.resolve()),
             "hmmpress_sha256": referenced_assets[hmmpress],
-            "hmmsearch_path": str(hmmsearch.resolve()),
-            "hmmsearch_sha256": referenced_assets[hmmsearch],
             "database_path": str(old_database.resolve()),
             "database_sha256": referenced_assets[old_database],
         },
@@ -2768,7 +2962,7 @@ def test_safety_failure_preserves_every_digest_referenced_by_the_previous_genera
         if cmd[0].endswith("amrfinder_update"):
             database_dir = Path(cmd[2])
             version_dir = database_dir / "2026-01-26.1"
-            version_dir.mkdir(parents=True)
+            _write_minimal_amrfinder_database_sources(version_dir)
             (version_dir / "AMRProt.fa").write_text(">new\nMPEPTIDE\n")
             (database_dir / "latest").symlink_to(version_dir.name)
             return type("Completed", (), {"stdout": ""})()
@@ -2809,7 +3003,7 @@ def test_safety_failure_preserves_every_digest_referenced_by_the_previous_genera
 
 
 def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(tmp_path, monkeypatch):
-    """A failed cache-first refresh cannot invalidate prior source, raw, or profile assets."""
+    """A shared-PHROGs overwrite cannot invalidate a prior manifest's source, raw, or profile DB."""
     external_dir = tmp_path / "external"
     source_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
     source_path.parent.mkdir(parents=True)
@@ -2830,7 +3024,7 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
     manifest_path = external_dir / "safety" / "asset_manifest.yaml"
     manifest_path.parent.mkdir()
     old_manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "phrogs_v4": {
             "source_path": str(source_path.resolve()),
             "source_sha256": referenced_assets[source_path],
@@ -2850,26 +3044,42 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
     old_manifest_text = manifest_path.read_text()
     calls = []
 
-    packaged_annotation = b"phrog\tcolor\tannot\tcategory\nphrog_1\tblack\tIntegrase\tintegration and excision\n"
-    release = replace(
-        external_assets.load_phrogs_safety_release(),
-        annotation_sha256=hashlib.sha256(packaged_annotation).hexdigest(),
-    )
+    def rebuild_annotation(prepared_external_dir, **kwargs):
+        assert kwargs["overwrite"] is True
+        calls.append("annotation")
+        rebuilt_source = Path(prepared_external_dir) / "phrogs" / "phrog_annot_v4.tsv"
+        rebuilt_source.parent.mkdir(parents=True, exist_ok=True)
+        rebuilt_source.write_text("new PHROGs annotation\n")
+        return PreparedAsset("phrogs_annotation", rebuilt_source, "rebuilt")
 
-    def download_profile_archive(prepared_external_dir, **kwargs):
+    def rebuild_profile_database(prepared_external_dir, **kwargs):
         assert kwargs["overwrite"] is True
         calls.append("profile")
-        archive_path = Path(prepared_external_dir) / "downloads" / release.profile_archive_filename
+        profile_root = Path(prepared_external_dir) / "phrogs" / "phrogs_mmseqs_db"
+        rebuilt_profile = _write_phrogs_profile_database(profile_root / "phrogs_profile_db")
+        rebuilt_profile.write_bytes(b"new PHROGs profile database\n\0")
+        archive_path = (
+            Path(prepared_external_dir) / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+        )
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         archive_path.write_bytes(b"new PHROGs profile archive\n")
-        return archive_path, release.profile_source_urls[0]
+        return PreparedAsset("phrogs_safety_profile_db", profile_root, "rebuilt")
+
+    def rebuild_sequence_database(prepared_external_dir, **kwargs):
+        assert kwargs["overwrite"] is True
+        calls.append("sequence")
+        rebuilt_database = _write_mmseqs_padded_database(
+            Path(prepared_external_dir) / "phrogs" / "phrogs_gpu_seq_db_pad"
+        )
+        return PreparedAsset("phrogs_gpu_seq_db", rebuilt_database, "rebuilt")
 
     def fail_amrfinder(*_args, **_kwargs):
         calls.append("amrfinder")
         raise RuntimeError("injected AMRFinder failure")
 
-    monkeypatch.setattr(external_assets, "load_phrogs_safety_release", lambda *_args, **_kwargs: release)
-    monkeypatch.setattr(external_assets, "_download_reviewed_phrogs_profile_archive", download_profile_archive)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", rebuild_annotation)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_safety_profile_db", rebuild_profile_database)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_gpu_sequence_db", rebuild_sequence_database)
     monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", fail_amrfinder)
     monkeypatch.setattr(
         external_assets,
@@ -2885,7 +3095,6 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
     def extract_verified_profile(_archive_path, output_dir, *, overwrite):
         assert overwrite is True
         _write_phrogs_profile_database(Path(output_dir) / "phrogs_profile_db")
-        (Path(output_dir) / release.annotation_archive_filename).write_bytes(packaged_annotation)
         return output_dir
 
     monkeypatch.setattr(external_assets, "_extract_tar", extract_verified_profile)
@@ -2907,7 +3116,7 @@ def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(
             overwrite=True,
         )
 
-    assert calls == ["profile", "amrfinder"]
+    assert calls == ["annotation", "profile", "sequence", "amrfinder"]
     assert manifest_path.read_text() == old_manifest_text
     for path, expected_sha256 in referenced_assets.items():
         assert path.exists()
@@ -2968,14 +3177,22 @@ def test_safety_manifest_records_a_generation_owned_phrogs_snapshot(tmp_path, mo
     generation_root = (external_dir / "safety" / "generations").resolve()
     shared_phrogs_dir = (external_dir / "phrogs").resolve()
     snapshot_source_path = Path(phrogs_record["source_path"])
+    snapshot_database_path = Path(phrogs_record["sequence_database"]["path"])
     snapshot_profile_path = Path(phrogs_record["profile_database"]["path"])
 
     assert snapshot_source_path.is_relative_to(generation_root)
+    assert snapshot_database_path.is_relative_to(generation_root)
     assert snapshot_profile_path.is_relative_to(generation_root)
     assert not snapshot_source_path.is_relative_to(shared_phrogs_dir)
+    assert not snapshot_database_path.is_relative_to(shared_phrogs_dir)
     assert not snapshot_profile_path.is_relative_to(shared_phrogs_dir)
-    assert "sequence_database" not in phrogs_record
     assert snapshot_source_path.read_bytes() == source_path.read_bytes()
+    snapshot_database_sha256, snapshot_database_files = external_assets._complete_phrogs_sequence_database(
+        snapshot_database_path
+    )
+    assert snapshot_database_sha256 == phrogs_record["sequence_database"]["sha256"]
+    assert [str(path.resolve()) for path in snapshot_database_files] == phrogs_record["sequence_database"]["files"]
+    assert all(Path(path).is_relative_to(generation_root) for path in phrogs_record["sequence_database"]["files"])
     snapshot_profile_sha256, snapshot_profile_files = external_assets._complete_phrogs_profile_database(
         snapshot_profile_path
     )
@@ -2986,19 +3203,11 @@ def test_safety_manifest_records_a_generation_owned_phrogs_snapshot(tmp_path, mo
 
 
 def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_db(tmp_path, monkeypatch):
-    """One authenticated archive is cached and reused without the optional FAA database."""
+    """Safety preparation retains a verified archive cache for repeat runs without trusting shared profiles."""
     external_dir = tmp_path / "external"
+    _mock_phrogs_search_database_builder(monkeypatch, external_dir)
     original_prepare_metadata = external_assets._prepare_verified_phrogs_safety_metadata
     verification_calls = []
-    download_calls = []
-    packaged_annotation = b"phrog\tcolor\tannot\tcategory\n1\t#000000\tIntegrase\tintegration and excision\n"
-    release = replace(
-        external_assets.load_phrogs_safety_release(),
-        annotation_sha256=hashlib.sha256(packaged_annotation).hexdigest(),
-        source_lookup_counts=(1, 1, 0),
-        searchable_lookup_counts=(1, 1, 0),
-        allowed_profile_exclusions=frozenset(),
-    )
 
     def staged_asset(name):
         def prepare(*_args, **kwargs):
@@ -3008,12 +3217,30 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
 
         return prepare
 
-    def download_profile_archive(prepared_external_dir, **_kwargs):
-        download_calls.append(Path(prepared_external_dir))
-        archive_path = Path(prepared_external_dir) / "downloads" / release.profile_archive_filename
+    def prepare_annotation(prepared_external_dir, **_kwargs):
+        annotation_path = Path(prepared_external_dir) / "phrogs" / "phrog_annot_v4.tsv"
+        annotation_path.parent.mkdir(parents=True, exist_ok=True)
+        annotation_path.write_text(
+            "phrog\tcolor\tannot\tcategory\nphrog_1\t#000000\tIntegrase\tintegration and excision\n"
+        )
+        return PreparedAsset("phrogs_annotation", annotation_path, "prepared")
+
+    def prepare_profile_database(prepared_external_dir, **_kwargs):
+        profile_root = Path(prepared_external_dir) / "phrogs" / "phrogs_mmseqs_db"
+        _write_phrogs_profile_database(profile_root / "phrogs_profile_db")
+        (profile_root / "CARD").write_bytes(b"unrelated Pharokka CARD database")
+        archive_path = (
+            Path(prepared_external_dir) / "downloads" / Path(external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_URL).name
+        )
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         archive_path.write_bytes(b"prepared Pharokka profile archive\n")
-        return archive_path, release.profile_source_urls[0]
+        return PreparedAsset("phrogs_safety_profile_db", profile_root, "prepared")
+
+    def prepare_sequence_database(prepared_external_dir, **_kwargs):
+        sequence_database = _write_mmseqs_padded_database(
+            Path(prepared_external_dir) / "phrogs" / "phrogs_gpu_seq_db_pad"
+        )
+        return PreparedAsset("phrogs_gpu_seq_db", sequence_database, "prepared")
 
     def prepare_snapshot_metadata(*args, **kwargs):
         selected_annotation_path = Path(kwargs["annotation_path"])
@@ -3044,14 +3271,13 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
     def extract_cached_verified_archive(_path, output_dir, *, overwrite):
         assert overwrite is True
         _write_phrogs_profile_database(Path(output_dir) / "phrogs_profile_db")
-        (Path(output_dir) / release.annotation_archive_filename).write_bytes(packaged_annotation)
-        (Path(output_dir) / "CARD").write_bytes(b"unrelated Pharokka CARD database")
         return output_dir
 
-    monkeypatch.setattr(external_assets, "load_phrogs_safety_release", lambda *_args, **_kwargs: release)
     monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", staged_asset("amrfinder"))
     monkeypatch.setattr(external_assets, "prepare_toxin_reference", staged_asset("toxins"))
-    monkeypatch.setattr(external_assets, "_download_reviewed_phrogs_profile_archive", download_profile_archive)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", prepare_annotation)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_safety_profile_db", prepare_profile_database)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_gpu_sequence_db", prepare_sequence_database)
     monkeypatch.setattr(external_assets, "_prepare_verified_phrogs_safety_metadata", prepare_snapshot_metadata)
     monkeypatch.setattr(external_assets, "_verify_file_size", verify_size)
     monkeypatch.setattr(external_assets, "_verify_md5", verify_md5)
@@ -3074,17 +3300,26 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
     manifest = yaml.safe_load((external_dir / "safety" / "asset_manifest.yaml").read_text())
     phrogs_record = manifest["phrogs_v4"]
     snapshot_source_path = Path(phrogs_record["source_path"])
+    snapshot_database_path = Path(phrogs_record["sequence_database"]["path"])
     snapshot_profile_path = Path(phrogs_record["profile_database"]["path"])
     generation_root = (external_dir / "safety" / "generations").resolve()
     shared_phrogs_dir = (external_dir / "phrogs").resolve()
 
     assert snapshot_source_path.is_relative_to(generation_root)
+    assert snapshot_database_path.is_relative_to(generation_root)
     assert snapshot_profile_path.is_relative_to(generation_root)
-    assert "sequence_database" not in phrogs_record
     external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
 
     shared_source_path = shared_phrogs_dir / "phrog_annot_v4.tsv"
+    shared_database_path = shared_phrogs_dir / "phrogs_gpu_seq_db_pad"
     assert shared_source_path.read_bytes() == snapshot_source_path.read_bytes()
+    shared_database_sha256, shared_database_files = external_assets._complete_phrogs_sequence_database(
+        shared_database_path
+    )
+    assert shared_database_sha256 == phrogs_record["sequence_database"]["sha256"]
+    assert [path.name for path in shared_database_files] == [
+        Path(path).name for path in phrogs_record["sequence_database"]["files"]
+    ]
     shared_profile_path = shared_phrogs_dir / "phrogs_mmseqs_db" / "phrogs_profile_db"
     shared_profile_sha256, shared_profile_files = external_assets._complete_phrogs_profile_database(
         shared_profile_path
@@ -3093,7 +3328,6 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
     assert [path.name for path in shared_profile_files] == [
         Path(path).name for path in phrogs_record["profile_database"]["files"]
     ]
-    assert not (snapshot_profile_path.parent / "CARD").exists()
     generation_profile_root = snapshot_profile_path.parent.parent / "phrogs_mmseqs_db"
     assert not generation_profile_root.exists()
     assert not (
@@ -3122,9 +3356,89 @@ def test_safety_large_database_preparation_publishes_snapshot_and_legacy_phrogs_
     assert repeat_profile_path != snapshot_profile_path
     assert cached_archive_path.is_file()
     external_assets._validate_staged_safety_manifest(repeat_manifest, verify_asset_paths=True)
-    assert len(download_calls) == 1
-    assert verification_calls
-    assert {call[0] for call in verification_calls} == {"size", "md5"}
+    assert [call[0] for call in verification_calls] == ["size", "md5"] * 10
+
+
+def test_safety_profile_preparation_can_exclude_unpinned_arc_sequence_database(tmp_path, monkeypatch):
+    """Safety preparation must not require the unrelated, unpinned legacy PHROGs FAA archive."""
+    external_dir = tmp_path / "external"
+    _mock_phrogs_search_database_builder(monkeypatch, external_dir)
+    original_prepare_metadata = external_assets._prepare_verified_phrogs_safety_metadata
+    cached_archive_payload = b"previously authenticated Pharokka profile archive\n"
+    cached_archive_sha256 = hashlib.sha256(cached_archive_payload).hexdigest()
+    cached_archive_path = (
+        external_dir / "downloads" / "phrogs_safety_profile_archives" / f"{cached_archive_sha256}.tar.gz"
+    )
+    cached_archive_path.parent.mkdir(parents=True)
+    cached_archive_path.write_bytes(cached_archive_payload)
+
+    def staged_asset(name):
+        def prepare(*_args, **kwargs):
+            section, record = _materialize_mock_safety_manifest_section(name, Path(kwargs["safety_dir"]))
+            kwargs["manifest"][section] = record
+            return PreparedAsset(name, Path(kwargs["safety_dir"]) / name, name)
+
+        return prepare
+
+    def prepare_annotation(prepared_external_dir, **_kwargs):
+        annotation_path = Path(prepared_external_dir) / "phrogs" / "phrog_annot_v4.tsv"
+        annotation_path.parent.mkdir(parents=True, exist_ok=True)
+        annotation_path.write_text(
+            "phrog\tcolor\tannot\tcategory\nphrog_1\t#000000\tIntegrase\tintegration and excision\n"
+        )
+        return PreparedAsset("phrogs_annotation", annotation_path, "prepared")
+
+    def prepare_profile_database(prepared_external_dir, **kwargs):
+        assert Path(kwargs["verified_archive_path"]) == cached_archive_path
+        profile_root = Path(prepared_external_dir) / "phrogs" / "phrogs_mmseqs_db"
+        _write_phrogs_profile_database(profile_root / "phrogs_profile_db")
+        return PreparedAsset("phrogs_safety_profile_db", profile_root, "prepared")
+
+    def reject_unpinned_sequence_database(*_args, **_kwargs):
+        raise AssertionError("the unpinned legacy PHROGs FAA must not be downloaded for safety")
+
+    def prepare_snapshot_metadata(*args, **kwargs):
+        selected_annotation_path = Path(kwargs["annotation_path"])
+        return original_prepare_metadata(
+            *args,
+            annotation_sha256=external_assets._sha256_file(selected_annotation_path),
+            **kwargs,
+        )
+
+    def extract_cached_verified_archive(_path, output_dir, *, overwrite):
+        assert overwrite is True
+        _write_phrogs_profile_database(Path(output_dir) / "phrogs_profile_db")
+        return output_dir
+
+    monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", staged_asset("amrfinder"))
+    monkeypatch.setattr(external_assets, "prepare_toxin_reference", staged_asset("toxins"))
+    monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", prepare_annotation)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_safety_profile_db", prepare_profile_database)
+    monkeypatch.setattr(external_assets, "prepare_phrogs_gpu_sequence_db", reject_unpinned_sequence_database)
+    monkeypatch.setattr(external_assets, "_prepare_verified_phrogs_safety_metadata", prepare_snapshot_metadata)
+    monkeypatch.setattr(external_assets, "_verify_file_size", lambda _path, expected: expected)
+    monkeypatch.setattr(external_assets, "_verify_md5", lambda _path, expected: expected)
+    monkeypatch.setattr(external_assets, "_extract_tar", extract_cached_verified_archive)
+
+    prepare_external_assets(
+        external_dir,
+        download_mmseqs=False,
+        download_dustmasker=False,
+        download_diamond=False,
+        download_hmmer=False,
+        download_phrogs_annotation=True,
+        download_arc_evo2=False,
+        download_large_databases=True,
+        download_phrogs_sequence_database=False,
+        download_checkv=False,
+        configure_lovis4u=False,
+        with_safety=True,
+    )
+
+    manifest = yaml.safe_load((external_dir / "safety" / "asset_manifest.yaml").read_text())
+    assert "sequence_database" not in manifest["phrogs_v4"]
+    assert Path(manifest["phrogs_v4"]["profile_database"]["path"]).is_file()
+    external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
 
 
 def test_safety_postpublication_legacy_phrogs_failure_retains_published_generation(tmp_path, monkeypatch):
@@ -3143,6 +3457,14 @@ def test_safety_postpublication_legacy_phrogs_failure_retains_published_generati
 
         return prepare
 
+    def prepare_annotation(prepared_external_dir, **_kwargs):
+        annotation_path = Path(prepared_external_dir) / "phrogs" / "phrog_annot_v4.tsv"
+        annotation_path.parent.mkdir(parents=True, exist_ok=True)
+        annotation_path.write_text(
+            "phrog\tcolor\tannot\tcategory\nphrog_1\t#000000\tIntegrase\tintegration and excision\n"
+        )
+        return PreparedAsset("phrogs_annotation", annotation_path, "prepared")
+
     def prepare_snapshot_metadata(*args, **kwargs):
         selected_annotation_path = Path(kwargs["annotation_path"])
         return original_prepare_metadata(
@@ -3156,8 +3478,9 @@ def test_safety_postpublication_legacy_phrogs_failure_retains_published_generati
 
     monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", staged_asset("amrfinder"))
     monkeypatch.setattr(external_assets, "prepare_toxin_reference", staged_asset("toxins"))
+    monkeypatch.setattr(external_assets, "prepare_phrogs_annotation", prepare_annotation)
     monkeypatch.setattr(external_assets, "_prepare_verified_phrogs_safety_metadata", prepare_snapshot_metadata)
-    monkeypatch.setattr(external_assets, "_publish_phrogs_legacy_annotation", fail_legacy_publication)
+    monkeypatch.setattr(external_assets, "_publish_phrogs_legacy_assets", fail_legacy_publication)
 
     with pytest.raises(RuntimeError, match="injected legacy PHROGs publication failure"):
         prepare_external_assets(
@@ -3176,7 +3499,7 @@ def test_safety_postpublication_legacy_phrogs_failure_retains_published_generati
     manifest = yaml.safe_load((external_dir / "safety" / "asset_manifest.yaml").read_text())
     generation_root = (external_dir / "safety" / "generations").resolve()
     assert Path(manifest["phrogs_v4"]["source_path"]).is_relative_to(generation_root)
-    assert "sequence_database" not in manifest["phrogs_v4"]
+    assert Path(manifest["phrogs_v4"]["sequence_database"]["path"]).is_relative_to(generation_root)
     external_assets._validate_staged_safety_manifest(manifest, verify_asset_paths=True)
 
 
@@ -3221,6 +3544,15 @@ def test_write_safety_manifest_commits_when_directory_fsync_fails_after_replace(
 
     assert yaml.safe_load(manifest_path.read_text())["generation"] == "new"
     assert len(fsync_calls) == 2
+
+
+def test_write_safety_manifest_is_readable_outside_the_preparation_container(tmp_path):
+    """Published provenance is non-secret metadata and must survive a container UID mismatch."""
+    manifest_path = tmp_path / "safety" / "asset_manifest.yaml"
+
+    external_assets._write_safety_manifest_atomic(manifest_path, {"schema_version": 1})
+
+    assert manifest_path.stat().st_mode & 0o777 == 0o644
 
 
 def test_main_leaves_safety_manifest_unset_for_custom_external_directory(tmp_path, monkeypatch):
@@ -3381,100 +3713,3 @@ def test_prepare_checkv_database_invokes_checkv_download(tmp_path, monkeypatch):
     assert calls[0][:2] == (["checkv", "download_database", str(tmp_path / "external" / "checkv")], True)
     assert calls[0][2].startswith(str(tmp_path / "external" / "bin"))
     assert asset.path.name == "checkv-db-v1.5"
-
-
-def test_prepare_phrogs_gpu_sequence_db_rejects_unpinned_archive_before_download(tmp_path, monkeypatch):
-    """An observed post-download digest cannot authenticate the legacy PHROGs FAA source."""
-    monkeypatch.setattr(
-        external_assets,
-        "_download",
-        lambda *_args, **_kwargs: pytest.fail("an unpinned PHROGs FAA archive reached transport"),
-    )
-
-    with pytest.raises(ValueError, match="digest"):
-        external_assets.prepare_phrogs_gpu_sequence_db(tmp_path / "external")
-
-
-def test_reviewed_phrogs_archive_resumes_a_persistent_authenticated_partial(tmp_path, monkeypatch):
-    """An interrupted large transfer should resume, then pass the complete release identity checks."""
-    payload = b"reviewed Pharokka archive fixture"
-    release = replace(
-        external_assets.load_phrogs_safety_release(),
-        profile_source_urls=("https://mirror.example/pharokka.tar.gz",),
-        profile_archive_filename="pharokka.tar.gz",
-        archive_published_size=len(payload),
-        archive_published_md5=hashlib.md5(payload, usedforsecurity=False).hexdigest(),
-    )
-    external_dir = tmp_path / "external"
-    partial = external_dir / "downloads" / "pharokka.tar.gz.tmp"
-    partial.parent.mkdir(parents=True)
-    partial.write_bytes(payload[:11])
-    requests = []
-
-    class Response(io.BytesIO):
-        status = 206
-
-        def __init__(self):
-            super().__init__(payload[11:])
-            self.headers = {"Content-Range": f"bytes 11-{len(payload) - 1}/{len(payload)}"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            self.close()
-
-    def urlopen(request, **_kwargs):
-        requests.append(request)
-        assert request.full_url == release.profile_source_urls[0]
-        assert request.get_header("Range") == "bytes=11-"
-        return Response()
-
-    monkeypatch.setattr(external_assets.urllib.request, "urlopen", urlopen)
-
-    archive, source_url = external_assets._download_reviewed_phrogs_profile_archive(
-        external_dir,
-        _release=release,
-    )
-
-    assert source_url == release.profile_source_urls[0]
-    assert archive.read_bytes() == payload
-    assert not partial.exists()
-    assert len(requests) == 1
-
-
-def test_cached_phrogs_profile_archive_discovers_authenticated_content_addressed_entry(tmp_path, monkeypatch):
-    """A downstream failure can resume from a verified cache without a published manifest."""
-    external_dir = tmp_path / "external"
-    payload = b"verified Pharokka archive fixture"
-    digest = hashlib.sha256(payload).hexdigest()
-    cached = external_dir / "downloads" / "phrogs_safety_profile_archives" / f"{digest}.tar.gz"
-    cached.parent.mkdir(parents=True)
-    cached.write_bytes(payload)
-    monkeypatch.setattr(external_assets, "_verify_file_size", lambda *_args: len(payload))
-    monkeypatch.setattr(
-        external_assets,
-        "_verify_md5",
-        lambda *_args: external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5,
-    )
-
-    assert external_assets._cached_phrogs_safety_profile_archive({}, external_dir) == cached
-
-
-def test_cached_phrogs_profile_archive_rejects_ambiguous_authenticated_entries(tmp_path, monkeypatch):
-    """Multiple valid cache identities are rejected instead of selecting one by ordering."""
-    external_dir = tmp_path / "external"
-    cache_dir = external_dir / "downloads" / "phrogs_safety_profile_archives"
-    cache_dir.mkdir(parents=True)
-    for payload in (b"first authenticated fixture", b"second authenticated fixture"):
-        digest = hashlib.sha256(payload).hexdigest()
-        (cache_dir / f"{digest}.tar.gz").write_bytes(payload)
-    monkeypatch.setattr(external_assets, "_verify_file_size", lambda *_args: 1)
-    monkeypatch.setattr(
-        external_assets,
-        "_verify_md5",
-        lambda *_args: external_assets.DEFAULT_PHROGS_SAFETY_PROFILE_MD5,
-    )
-
-    with pytest.raises(RuntimeError, match="ambiguous"):
-        external_assets._cached_phrogs_safety_profile_archive({}, external_dir)

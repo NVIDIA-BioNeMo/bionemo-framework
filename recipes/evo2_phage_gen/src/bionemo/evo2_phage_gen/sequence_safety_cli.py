@@ -77,6 +77,18 @@ from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     run_toxin_diamond,
     validate_tool_pin,
 )
+from bionemo.evo2_phage_gen.sequence_safety_batch import (
+    AMRFINDER_SPLIT_POLICY_ID,
+    AMRFINDER_SPLIT_POLICY_SHA256,
+    DIAMOND_SPLIT_POLICY_ID,
+    DIAMOND_SPLIT_POLICY_SHA256,
+    BatchAdapterExecution,
+    BatchedORFInputs,
+    run_amrfinder_batch,
+    run_toxin_diamond_batch,
+    split_amrfinder_batch_output,
+    split_diamond_batch_output,
+)
 
 
 CLI_ID = "evo2-phage-sequence-safety"
@@ -89,6 +101,10 @@ _AMRFINDER_POLICY_DESCRIPTOR = {
     "curated_identity_threshold_overrides": False,
     "amr_type_action": "FAIL",
     "plus_virulence_action": "SUPPLEMENTAL_TOXIN_EVIDENCE",
+    "nucleotide_only_protein_id": "NA",
+    "nucleotide_only_evidence_path": safety_adapters._AMRFINDER_NUCLEOTIDE_EVIDENCE_PATH,
+    "nucleotide_only_methods": sorted(safety_adapters._AMRFINDER_NUCLEOTIDE_METHODS),
+    "nucleotide_only_binding": "exact_contig_sequence_sha256_coordinates_strand",
 }
 
 
@@ -181,6 +197,14 @@ class BatchSafetyResult:
 
     state: SafetyState
     records: tuple[ScannedRecord, ...]
+
+
+@dataclass(frozen=True)
+class BatchedScanExecution:
+    """Ordered record results plus the real commands shared across each batch."""
+
+    batch: BatchSafetyResult
+    shared_executions: tuple[BatchAdapterExecution, ...]
 
 
 @dataclass(frozen=True)
@@ -751,6 +775,225 @@ def run_default_adapter_bundle(
     }
 
 
+def run_default_batched_adapter_bundles(
+    records: Sequence[FastaRecord],
+    *,
+    work_root: Path,
+    shared_root: Path,
+    asset_manifest: Mapping[str, object],
+    diamond_pin: ToolPin,
+    mmseqs_pin: ToolPin,
+    host_domain: HostDomain,
+    strict_lysis: bool = False,
+    threads: int = 8,
+    batch_size: int = 8,
+    batch_workers: int = 1,
+    phrogs_threads: int = 1,
+    phrogs_workers: int = 8,
+    timeout: float = 300.0,
+    circular: bool = True,
+    orf_generation_identity: Mapping[str, object] | None = None,
+    predictor=None,
+    runner=None,
+    prepare_orfs=prepare_orf_artifacts_checked,
+    amr_batch_adapter=run_amrfinder_batch,
+    toxin_batch_adapter=run_toxin_diamond_batch,
+    phrogs_adapter=run_phrogs,
+    phrogs_asset_validator=safety_adapters._prepare_validated_phrogs_assets,
+    phrogs_asset_revalidator=safety_adapters._revalidate_phrogs_assets,
+) -> BatchedScanExecution:
+    """Run exact independent record parsing around shared AMR/toxin commands and per-record PHROGs."""
+    for label, value in (
+        ("threads", threads),
+        ("batch size", batch_size),
+        ("batch workers", batch_workers),
+        ("PHROGs threads", phrogs_threads),
+        ("PHROGs workers", phrogs_workers),
+    ):
+        if type(value) is not int or value < 1:
+            raise CLIValidationError(f"{label} must be a positive integer")
+    selected_records = tuple(records)
+    if not selected_records:
+        raise CLIValidationError("batched scan requires at least one record")
+    selected_runner = subprocess.run if runner is None else runner
+    record_root = Path(work_root)
+    execution_root = Path(shared_root)
+    if record_root.exists() or record_root.is_symlink() or execution_root.exists() or execution_root.is_symlink():
+        raise CLIValidationError("batched scan output roots must not already exist")
+    record_root.mkdir(parents=True)
+    execution_root.mkdir(parents=True)
+    identity = _default_orf_generation_identity() if orf_generation_identity is None else orf_generation_identity
+    applicability = _applicability(host_domain, strict_lysis=strict_lysis)
+    phrogs_section = asset_manifest.get("phrogs_v4")
+    validated_phrogs_assets = None
+    if isinstance(phrogs_section, Mapping):
+        try:
+            validated_phrogs_assets = phrogs_asset_validator(phrogs_section)
+        except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError):
+            validated_phrogs_assets = None
+    indexed = tuple(enumerate(selected_records))
+    groups = tuple(indexed[start : start + batch_size] for start in range(0, len(indexed), batch_size))
+
+    def run_group(group_item: tuple[int, tuple[tuple[int, FastaRecord], ...]]):
+        group_index, group = group_item
+        adapters_by_index: dict[int, dict[str, AdapterResult]] = {}
+        artifacts_by_record: list[tuple[str, ORFArtifacts]] = []
+        output_roots: dict[str, Path] = {}
+        indices_by_record: dict[str, int] = {}
+        for input_index, record in group:
+            output_dir = record_root / f"{input_index:06d}-{record.sequence_id}"
+            if output_dir.exists() or output_dir.is_symlink():
+                raise CLIValidationError(f"record work directory already exists: {output_dir}")
+            output_dir.mkdir()
+            preparation = prepare_orfs(
+                (GenomeInput(record.sequence_id, record.normalized_sequence, circular=circular),),
+                output_dir,
+                predictor=predictor,
+                minimum_fallback_amino_acids=8,
+            )
+            if preparation.state is not SafetyState.PASS or preparation.artifacts is None:
+                _write_orf_provenance(
+                    output_dir,
+                    artifacts=None,
+                    generation_identity=identity,
+                    preparation_state=SafetyState.INDETERMINATE,
+                    reason_codes=preparation.reason_codes,
+                )
+                adapters_by_index[input_index] = _orf_indeterminate_adapters(
+                    host_domain=host_domain,
+                    strict_lysis=strict_lysis,
+                    reason_codes=tuple(preparation.reason_codes),
+                )
+                continue
+            _write_orf_provenance(output_dir, artifacts=preparation.artifacts, generation_identity=identity)
+            artifacts_by_record.append((record.sequence_id, preparation.artifacts))
+            output_roots[record.sequence_id] = output_dir
+            indices_by_record[record.sequence_id] = input_index
+
+        shared: list[BatchAdapterExecution] = []
+        if artifacts_by_record:
+            missing_sections = tuple(
+                section
+                for section in ("amrfinder_plus", "toxin_reference", "phrogs_v4")
+                if not isinstance(asset_manifest.get(section), Mapping)
+            )
+            if missing_sections:
+                for record_id, _ in artifacts_by_record:
+                    adapters_by_index[indices_by_record[record_id]] = _orf_indeterminate_adapters(
+                        host_domain=host_domain,
+                        strict_lysis=strict_lysis,
+                        reason_codes=("SAFETY_ASSET_MANIFEST_SECTION_MISSING",),
+                    )
+            else:
+                group_id = f"batch-{group_index:06d}"
+                amr_execution = amr_batch_adapter(
+                    tuple(artifacts_by_record),
+                    manifest_section=asset_manifest["amrfinder_plus"],
+                    work_dir=execution_root / f"{group_id}-amr",
+                    record_output_roots=output_roots,
+                    threads=threads,
+                    required=applicability["amr"],
+                    runner=selected_runner,
+                    timeout=timeout,
+                )
+                toxin_execution = toxin_batch_adapter(
+                    tuple(artifacts_by_record),
+                    manifest_section=asset_manifest["toxin_reference"],
+                    tool_pin=diamond_pin,
+                    work_dir=execution_root / f"{group_id}-toxin",
+                    record_output_roots=output_roots,
+                    threads=threads,
+                    required=applicability["toxin"],
+                    runner=selected_runner,
+                    timeout=timeout,
+                )
+                shared.extend((amr_execution, toxin_execution))
+                amr_by_record = dict(amr_execution.record_results)
+                toxin_by_record = dict(toxin_execution.record_results)
+
+                def scan_phrogs(item: tuple[str, ORFArtifacts]) -> tuple[str, AdapterResult]:
+                    record_id, artifacts = item
+                    return (
+                        record_id,
+                        phrogs_adapter(
+                            artifacts,
+                            manifest_section=asset_manifest["phrogs_v4"],
+                            tool_pin=mmseqs_pin,
+                            host_domain=host_domain,
+                            work_dir=output_roots[record_id],
+                            threads=phrogs_threads,
+                            strict_lysis=strict_lysis,
+                            runner=selected_runner,
+                            timeout=timeout,
+                            _validated_assets=validated_phrogs_assets,
+                        ),
+                    )
+
+                if phrogs_workers == 1:
+                    phrogs_results = tuple(scan_phrogs(item) for item in artifacts_by_record)
+                else:
+                    with ThreadPoolExecutor(
+                        max_workers=min(phrogs_workers, len(artifacts_by_record)),
+                        thread_name_prefix=f"{group_id}-phrogs",
+                    ) as executor:
+                        phrogs_results = tuple(executor.map(scan_phrogs, artifacts_by_record))
+                phrogs_by_record = dict(phrogs_results)
+                if not (set(amr_by_record) == set(toxin_by_record) == set(phrogs_by_record) == set(indices_by_record)):
+                    raise CLIValidationError("batched adapter result inventories differ")
+                for record_id in indices_by_record:
+                    adapters_by_index[indices_by_record[record_id]] = {
+                        "amr": amr_by_record[record_id],
+                        "toxin": toxin_by_record[record_id],
+                        "lysogeny": phrogs_by_record[record_id],
+                    }
+
+        scanned: list[ScannedRecord] = []
+        for input_index, record in group:
+            output_dir = record_root / f"{input_index:06d}-{record.sequence_id}"
+            adapters = _trusted_adapter_bundle(adapters_by_index[input_index], record_root=output_dir)
+            result = aggregate_adapter_results(
+                adapters,
+                host_domain=host_domain,
+                strict_lysis=strict_lysis,
+            )
+            scanned.append(
+                ScannedRecord(
+                    input_index=input_index,
+                    sequence_id=record.sequence_id,
+                    result=result,
+                    adapters=adapters,
+                )
+            )
+        return tuple(scanned), tuple(shared)
+
+    group_items = tuple(enumerate(groups))
+    if batch_workers == 1:
+        group_results = tuple(run_group(item) for item in group_items)
+    else:
+        with ThreadPoolExecutor(
+            max_workers=min(batch_workers, len(groups)), thread_name_prefix="safety-batch"
+        ) as executor:
+            group_results = tuple(executor.map(run_group, group_items))
+    scanned_records = tuple(record for scanned, _ in group_results for record in scanned)
+    shared_executions = tuple(execution for _, shared in group_results for execution in shared)
+    if validated_phrogs_assets is not None:
+        try:
+            phrogs_asset_revalidator(phrogs_section, validated_phrogs_assets)
+        except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError) as error:
+            raise CLIValidationError("PHROGs assets changed during batched execution") from error
+    states = {record.result.state for record in scanned_records}
+    if SafetyState.FAIL in states:
+        state = SafetyState.FAIL
+    elif SafetyState.INDETERMINATE in states:
+        state = SafetyState.INDETERMINATE
+    else:
+        state = SafetyState.PASS
+    return BatchedScanExecution(
+        batch=BatchSafetyResult(state=state, records=scanned_records),
+        shared_executions=shared_executions,
+    )
+
+
 def _default_adapter_replayer(
     safety_class: str,
     *,
@@ -762,6 +1005,7 @@ def _default_adapter_replayer(
     host_domain: HostDomain,
     strict_lysis: bool,
     required: bool,
+    _validated_phrogs_assets=None,
 ) -> AdapterResult:
     """Replay the exact Task 3 validated parser for one completed attempt."""
     if safety_class == "amr":
@@ -789,6 +1033,7 @@ def _default_adapter_replayer(
             host_domain=host_domain,
             strict_lysis=strict_lysis,
             policy=PHROGS_HOMOLOGY_POLICY_V1,
+            _validated_assets=_validated_phrogs_assets,
         )
     raise CLIValidationError(f"unsupported adapter replay class: {safety_class}")
 
@@ -829,6 +1074,7 @@ class CLIRuntime:
     """Injectable process boundaries; production defaults remain fully functional."""
 
     record_scanner: Callable[..., Mapping[str, AdapterResult]] = run_default_adapter_bundle
+    batch_scanner: Callable[..., BatchedScanExecution] = run_default_batched_adapter_bundles
     asset_loader: Callable[..., LoadedSafetyAssetManifest] = load_safety_asset_manifest
     tool_pin_loader: Callable[..., LoadedToolPin] = load_tool_pin_file
     clock: Callable[[], datetime] = _utc_now
@@ -836,6 +1082,8 @@ class CLIRuntime:
     orf_identity_collector: Callable[[], Mapping[str, object]] = _default_orf_generation_identity
     orf_replayer: Callable[..., ReplayedORFEvidence] = _default_orf_replayer
     adapter_replayer: Callable[..., AdapterResult] = _default_adapter_replayer
+    phrogs_asset_validator: Callable[..., object] = safety_adapters._prepare_validated_phrogs_assets
+    phrogs_asset_revalidator: Callable[..., None] = safety_adapters._revalidate_phrogs_assets
     command_runner: Callable[..., object] = subprocess.run
     replace: Callable[[Path, Path], object] = os.replace
 
@@ -970,8 +1218,7 @@ def _serialize_adapter_attempt(
         "toxin": "toxin_diamond.raw.tsv",
         "lysogeny": "phrogs.raw.tsv",
     }
-    raw_command_output = _relative_artifact(str(record_root / raw_names[safety_class]), root=root)
-    return {
+    payload = {
         "safety_class": safety_class,
         "execution_status": _adapter_execution_status(adapter),
         "state": adapter.class_result.state.value,
@@ -981,10 +1228,263 @@ def _serialize_adapter_attempt(
         "command_cwd": "@OUTPUT_ROOT",
         "command": _canonicalize_command(adapter.command, root=root),
         "normalized_output": _relative_artifact(adapter.raw_output_path, root=root),
-        "raw_command_output": raw_command_output,
+        "raw_command_output": _relative_artifact(str(record_root / raw_names[safety_class]), root=root),
         "primary_findings": [finding.to_dict() for finding in adapter.class_result.findings],
         "supplemental_findings": [finding.to_dict() for finding in adapter.supplemental_findings],
     }
+    if adapter.shared_execution_id is not None:
+        payload["shared_execution_id"] = adapter.shared_execution_id
+    return payload
+
+
+def _serialize_shared_execution(
+    execution: BatchAdapterExecution,
+    *,
+    root: Path,
+    record_indices: Mapping[str, int],
+) -> dict[str, object]:
+    """Serialize one real shared command separately from its per-record parser results."""
+    if set(record_indices) != set(execution.record_ids):
+        raise CLIValidationError("shared execution record indices do not match its inventory")
+    artifacts = execution.inputs.artifacts
+    input_paths = {
+        role: Path(getattr(artifacts, role))
+        for role in ("genomes_fna", "proteins_faa", "proteins_fna", "proteins_gff", "all_queries_faa")
+    }
+    inputs = {role: _relative_artifact(str(path), root=root) for role, path in input_paths.items()}
+    if any(value is None or not value["owned"] for value in inputs.values()):
+        raise CLIValidationError("shared execution inputs must be owned output artifacts")
+    raw_output = _relative_artifact(
+        None if execution.raw_output_path is None else str(execution.raw_output_path),
+        root=root,
+    )
+    if raw_output is None or not raw_output["owned"]:
+        raise CLIValidationError("completed shared execution output must be an owned artifact")
+    return {
+        "execution_id": execution.batch_id,
+        "safety_class": execution.safety_class,
+        "record_ids": list(execution.record_ids),
+        "record_indices": [record_indices[record_id] for record_id in execution.record_ids],
+        "command_cwd": "@OUTPUT_ROOT",
+        "command": _canonicalize_command(execution.command, root=root),
+        "inputs": inputs,
+        "raw_command_output": raw_output,
+        "split_policy": {
+            "policy_id": execution.split_policy_id,
+            "policy_sha256": execution.split_policy_sha256,
+        },
+    }
+
+
+def _validate_shared_executions(
+    value: object,
+    *,
+    root: Path,
+    input_records: Sequence[FastaRecord],
+    assets: LoadedSafetyAssetManifest,
+    diamond: LoadedToolPin,
+    threads: int,
+    batch_size: int,
+) -> dict[str, dict[str, object]]:
+    """Authenticate each shared command independently from its later per-record parser results."""
+    if not isinstance(value, list):
+        raise CLIValidationError("shared_executions must be a list")
+    expected_ids = [record.sequence_id for record in input_records]
+    validated: dict[str, dict[str, object]] = {}
+    class_groups: set[tuple[str, tuple[int, ...]]] = set()
+    for index, item in enumerate(value):
+        row = _strict_payload(
+            item,
+            name=f"shared_execution[{index}]",
+            keys=frozenset(
+                {
+                    "execution_id",
+                    "safety_class",
+                    "record_ids",
+                    "record_indices",
+                    "command_cwd",
+                    "command",
+                    "inputs",
+                    "raw_command_output",
+                    "split_policy",
+                }
+            ),
+        )
+        execution_id = row["execution_id"]
+        safety_class = row["safety_class"]
+        if not isinstance(execution_id, str) or re.fullmatch(r"[A-Za-z0-9_.-]+", execution_id) is None:
+            raise CLIValidationError("shared execution ID is invalid")
+        if execution_id in validated or safety_class not in {"amr", "toxin"}:
+            raise CLIValidationError("shared execution identity or class is invalid")
+        if row["command_cwd"] != "@OUTPUT_ROOT":
+            raise CLIValidationError("shared execution cwd is invalid")
+        record_ids = _string_list(row["record_ids"], label="shared execution record_ids")
+        record_indices = row["record_indices"]
+        if (
+            not isinstance(record_indices, list)
+            or not record_indices
+            or any(type(item_index) is not int for item_index in record_indices)
+            or record_indices != sorted(set(record_indices))
+            or len(record_indices) > batch_size
+            or len(record_ids) != len(record_indices)
+            or any(item_index < 0 or item_index >= len(input_records) for item_index in record_indices)
+            or record_ids != [expected_ids[item_index] for item_index in record_indices]
+            or len({item_index // batch_size for item_index in record_indices}) != 1
+        ):
+            raise CLIValidationError("shared execution record inventory is invalid")
+        group_key = (str(safety_class), tuple(record_indices))
+        if group_key in class_groups:
+            raise CLIValidationError("duplicate shared execution for one record group and safety class")
+        class_groups.add(group_key)
+        expected_prefix = f"shared-executions/{execution_id}/"
+        inputs = _strict_payload(
+            row["inputs"],
+            name="shared execution inputs",
+            keys=frozenset({"genomes_fna", "proteins_faa", "proteins_fna", "proteins_gff", "all_queries_faa"}),
+        )
+        input_paths: dict[str, Path] = {}
+        for role, artifact in inputs.items():
+            path = _validate_owned_artifact(
+                artifact,
+                root=root,
+                label=f"shared execution {role}",
+                required=True,
+                prefix=expected_prefix + "inputs/",
+            )
+            assert path is not None
+            input_paths[role] = path
+        raw_path = _validate_owned_artifact(
+            row["raw_command_output"],
+            root=root,
+            label="shared execution raw output",
+            required=True,
+            prefix=expected_prefix,
+        )
+        assert raw_path is not None
+        split_policy = _strict_payload(
+            row["split_policy"],
+            name="shared execution split policy",
+            keys=frozenset({"policy_id", "policy_sha256"}),
+        )
+        expected_split = {
+            "amr": {
+                "policy_id": AMRFINDER_SPLIT_POLICY_ID,
+                "policy_sha256": AMRFINDER_SPLIT_POLICY_SHA256,
+            },
+            "toxin": {
+                "policy_id": DIAMOND_SPLIT_POLICY_ID,
+                "policy_sha256": DIAMOND_SPLIT_POLICY_SHA256,
+            },
+        }[str(safety_class)]
+        if dict(split_policy) != expected_split:
+            raise CLIValidationError("shared execution split policy drift")
+        command = _string_list(row["command"], label="shared execution command", unique=False)
+        if safety_class == "amr":
+            section = assets.manifest.get("amrfinder_plus")
+            if not isinstance(section, Mapping):
+                raise CLIValidationError("AMRFinder asset section is missing")
+            expected_command = build_amrfinder_command(
+                amrfinder=Path(_asset_string(section.get("binary_path"), label="AMRFinder binary")),
+                genomes_fna=input_paths["genomes_fna"],
+                proteins_faa=input_paths["proteins_faa"],
+                proteins_gff=input_paths["proteins_gff"],
+                database_dir=Path(_asset_string(section.get("database_path"), label="AMRFinder database")),
+                blast_bin_dir=Path(_asset_string(section.get("blastx_path"), label="AMRFinder BLASTX")).parent,
+                hmmer_bin_dir=Path(_asset_string(section.get("hmmsearch_path"), label="AMRFinder HMM search")).parent,
+                threads=threads,
+                output_tsv=raw_path,
+            )
+        else:
+            toxin = assets.manifest.get("toxin_reference")
+            toxin_files = None if not isinstance(toxin, Mapping) else toxin.get("files")
+            database = None if not isinstance(toxin_files, Mapping) else toxin_files.get("diamond_database")
+            if not isinstance(database, Mapping):
+                raise CLIValidationError("toxin database asset section is missing")
+            expected_command = build_diamond_command(
+                diamond=diamond.pin.path,
+                queries_faa=input_paths["all_queries_faa"],
+                database=Path(_asset_string(database.get("path"), label="toxin database")),
+                output_tsv=raw_path,
+                threads=threads,
+            )
+        if command != _canonicalize_command(expected_command, root=root):
+            raise CLIValidationError("shared execution command drift")
+        validated[execution_id] = {
+            "safety_class": safety_class,
+            "record_ids": tuple(record_ids),
+            "record_indices": tuple(record_indices),
+            "command": tuple(command),
+            "input_paths": input_paths,
+            "raw_path": raw_path,
+        }
+    return validated
+
+
+def _validate_shared_execution_record_bindings(
+    shared_executions: Mapping[str, Mapping[str, object]],
+    *,
+    root: Path,
+    record_artifacts: Mapping[str, ORFArtifacts],
+    record_index: Mapping[str, int],
+) -> None:
+    """Rebuild every combined input and per-record split from authenticated record artifacts."""
+    grouped_classes: dict[tuple[int, ...], set[str]] = {}
+    for execution_id, execution in shared_executions.items():
+        record_ids = tuple(execution["record_ids"])
+        indices = tuple(execution["record_indices"])
+        if any(
+            record_id not in record_artifacts or record_index.get(record_id) != index
+            for record_id, index in zip(record_ids, indices, strict=True)
+        ):
+            raise CLIValidationError("shared execution references a record without measured ORF evidence")
+        grouped_classes.setdefault(indices, set()).add(str(execution["safety_class"]))
+        inputs = execution["input_paths"]
+        assert isinstance(inputs, Mapping)
+        for role in ("genomes_fna", "proteins_faa", "proteins_fna", "all_queries_faa"):
+            expected = b"".join(
+                Path(getattr(record_artifacts[record_id], role)).read_bytes() for record_id in record_ids
+            )
+            if Path(inputs[role]).read_bytes() != expected:
+                raise CLIValidationError(f"shared execution {role} bytes differ from its record inputs")
+        gff_payload = bytearray(b"##gff-version 3\n")
+        for record_id in record_ids:
+            source = record_artifacts[record_id].proteins_gff.read_bytes()
+            header, separator, remainder = source.partition(b"\n")
+            if header != b"##gff-version 3" or separator != b"\n":
+                raise CLIValidationError("record GFF is not canonical during shared execution replay")
+            gff_payload.extend(remainder)
+        if Path(inputs["proteins_gff"]).read_bytes() != bytes(gff_payload):
+            raise CLIValidationError("shared execution GFF bytes differ from its record inputs")
+        query_records = tuple(query for record_id in record_ids for query in record_artifacts[record_id].query_records)
+        batched = BatchedORFInputs(
+            artifacts=ORFArtifacts(
+                genomes_fna=Path(inputs["genomes_fna"]),
+                proteins_faa=Path(inputs["proteins_faa"]),
+                proteins_fna=Path(inputs["proteins_fna"]),
+                proteins_gff=Path(inputs["proteins_gff"]),
+                all_queries_faa=Path(inputs["all_queries_faa"]),
+                query_records=query_records,
+            ),
+            record_ids=record_ids,
+            query_owners=tuple((query.query_id, query.sequence_id) for query in query_records),
+        )
+        with tempfile.TemporaryDirectory(prefix=f"evo2-safety-{execution_id}-split-") as temporary:
+            if execution["safety_class"] == "amr":
+                split = split_amrfinder_batch_output(
+                    Path(execution["raw_path"]), batched=batched, output_root=Path(temporary) / "split"
+                )
+                filename = "amrfinder.tsv"
+            else:
+                split = split_diamond_batch_output(
+                    Path(execution["raw_path"]), batched=batched, output_root=Path(temporary) / "split"
+                )
+                filename = "toxin_diamond.raw.tsv"
+            for record_id, index in zip(record_ids, indices, strict=True):
+                recorded = root / "records" / f"{index:06d}-{record_id}" / filename
+                if split[record_id].read_bytes() != recorded.read_bytes():
+                    raise CLIValidationError("shared execution split differs from recorded per-record evidence")
+    if any(classes != {"amr", "toxin"} for classes in grouped_classes.values()):
+        raise CLIValidationError("shared execution groups must contain exactly AMR and toxin commands")
 
 
 def _record_reason_codes(result: GenomeSafetyResult) -> list[str]:
@@ -1764,6 +2264,8 @@ def _validate_class_results(
     applicability: Mapping[str, bool],
     query_index: Mapping[str, Mapping[str, object]] | None = None,
     sequence_length: int | None = None,
+    sequence: str | None = None,
+    circular: bool = False,
     finding_provenance: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[tuple[SafetyClassResult, ...], set[str]]:
     if not isinstance(value, list) or len(value) != 3:
@@ -1824,10 +2326,42 @@ def _validate_class_results(
             ):
                 raise CLIValidationError("normalized finding coordinates/frame are invalid")
             if sequence_length is not None and (
-                finding.start > sequence_length or finding.end - finding.start + 1 > sequence_length
+                finding.start > sequence_length
+                or (not circular and finding.end > sequence_length)
+                or finding.end - finding.start + 1 > sequence_length
             ):
                 raise CLIValidationError("normalized finding coordinates leave the scanned genome")
-            if query_index is not None:
+            if finding.evidence_path == safety_adapters._AMRFINDER_NUCLEOTIDE_EVIDENCE_PATH:
+                if (
+                    finding.detector != "amrfinder-plus"
+                    or finding.evidence_method not in safety_adapters._AMRFINDER_NUCLEOTIDE_METHODS
+                    or sequence is None
+                    or sequence_length != len(sequence)
+                    or query_index is None
+                    or finding.query_id in query_index
+                ):
+                    raise CLIValidationError("normalized AMRFinder nucleotide evidence provenance mismatch")
+                expected_query_id = safety_adapters._amrfinder_nucleotide_query_id(
+                    sequence_id=record_id,
+                    sequence=sequence,
+                    start=finding.start,
+                    end=finding.end,
+                    strand=finding.strand,
+                )
+                expected_frame = safety_adapters._amrfinder_nucleotide_frame(
+                    start=finding.start,
+                    end=finding.end,
+                    strand=finding.strand,
+                    sequence_length=len(sequence),
+                )
+                expected_finding_id = f"{finding.safety_class}:{expected_query_id}:{finding.accession}"
+                if (
+                    finding.query_id != expected_query_id
+                    or finding.frame != expected_frame
+                    or finding.finding_id != expected_finding_id
+                ):
+                    raise CLIValidationError("normalized AMRFinder nucleotide evidence provenance mismatch")
+            elif query_index is not None:
                 query = query_index.get(finding.query_id)
                 if query is None:
                     raise CLIValidationError("normalized finding references an unknown ORF query")
@@ -1904,6 +2438,7 @@ def _validate_adapter_attempts(
     class_results: tuple[SafetyClassResult, ...],
     expected_tool_paths: Mapping[str, str],
     expected_commands: Mapping[str, Sequence[str]] | None = None,
+    shared_executions: Mapping[str, Mapping[str, object]] | None = None,
     finding_provenance: Mapping[str, Mapping[str, object]] | None = None,
     orf_artifacts: ORFArtifacts | None = None,
     asset_manifest: Mapping[str, object] | None = None,
@@ -1912,6 +2447,7 @@ def _validate_adapter_attempts(
     host_domain: HostDomain | None = None,
     strict_lysis: bool = False,
     adapter_replayer: Callable[..., AdapterResult] | None = None,
+    validated_phrogs_assets=None,
 ) -> None:
     if not isinstance(value, list) or len(value) != 3:
         raise CLIValidationError("adapter_attempts must contain exactly three safety classes")
@@ -1919,25 +2455,28 @@ def _validate_adapter_attempts(
     class_by_name = {result.safety_class: result for result in class_results}
     supplemental_ids: set[str] = set()
     for expected_class, item in zip(("amr", "toxin", "lysogeny"), value, strict=True):
+        base_keys = frozenset(
+            {
+                "safety_class",
+                "execution_status",
+                "state",
+                "reason_codes",
+                "policy_id",
+                "policy_sha256",
+                "command_cwd",
+                "command",
+                "normalized_output",
+                "raw_command_output",
+                "primary_findings",
+                "supplemental_findings",
+            }
+        )
+        item_keys = frozenset(item) if isinstance(item, Mapping) else frozenset()
+        attempt_keys = base_keys | ({"shared_execution_id"} if "shared_execution_id" in item_keys else set())
         attempt = _strict_payload(
             item,
             name=f"{record_id}.{expected_class} adapter attempt",
-            keys=frozenset(
-                {
-                    "safety_class",
-                    "execution_status",
-                    "state",
-                    "reason_codes",
-                    "policy_id",
-                    "policy_sha256",
-                    "command_cwd",
-                    "command",
-                    "normalized_output",
-                    "raw_command_output",
-                    "primary_findings",
-                    "supplemental_findings",
-                }
-            ),
+            keys=frozenset(attempt_keys),
         )
         if attempt["safety_class"] != expected_class:
             raise CLIValidationError("adapter attempt ordering or class mismatch")
@@ -1961,7 +2500,25 @@ def _validate_adapter_attempts(
             raise CLIValidationError("not-started adapter attempt claims a command")
         if attempt["execution_status"] != "NOT_STARTED" and not command:
             raise CLIValidationError("started adapter attempt lacks its command")
-        if expected_commands is not None and command and command != list(expected_commands[expected_class]):
+        shared_execution_id = attempt.get("shared_execution_id")
+        shared_execution = None
+        if shared_execution_id is not None:
+            if (
+                not isinstance(shared_execution_id, str)
+                or shared_executions is None
+                or not isinstance(shared_executions.get(shared_execution_id), Mapping)
+            ):
+                raise CLIValidationError("adapter shared execution identity is invalid")
+            shared_execution = shared_executions[shared_execution_id]
+            if (
+                expected_class not in {"amr", "toxin"}
+                or shared_execution.get("safety_class") != expected_class
+                or record_id not in shared_execution.get("record_ids", ())
+                or input_index not in shared_execution.get("record_indices", ())
+                or command != list(shared_execution.get("command", ()))
+            ):
+                raise CLIValidationError("adapter does not match its shared execution")
+        elif expected_commands is not None and command and command != list(expected_commands[expected_class]):
             raise CLIValidationError("adapter command does not match the exact Task 3 replay command")
         expected_tool_path = expected_tool_paths.get(expected_class)
         if command and expected_tool_path is not None and command[0] != expected_tool_path:
@@ -2059,6 +2616,7 @@ def _validate_adapter_attempts(
                     host_domain=host_domain,
                     strict_lysis=strict_lysis,
                     required=class_result.required,
+                    _validated_phrogs_assets=validated_phrogs_assets,
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as error:
                 raise CLIValidationError(f"{expected_class} parser replay failed: {error}") from error
@@ -2109,6 +2667,10 @@ def _finding_provenance_contracts(
     phrogs_database = phrogs.get("profile_database")
     if not isinstance(toxin_database, Mapping) or not isinstance(phrogs_database, Mapping):
         raise CLIValidationError("finding database provenance is incomplete")
+    phrogs_search_database = phrogs.get("search_database")
+    if phrogs_search_database is not None and not isinstance(phrogs_search_database, Mapping):
+        raise CLIValidationError("PHROGs safety search database provenance is invalid")
+    phrogs_source_database = phrogs_search_database or phrogs_database
     phrogs_provenance = phrogs_database.get("provenance")
     if isinstance(phrogs_provenance, Mapping):
         phrogs_version = (
@@ -2151,8 +2713,8 @@ def _finding_provenance_contracts(
         },
         "lysogeny": {
             "detector": "mmseqs-phrogs-v4",
-            "source_path": _asset_string(phrogs_database.get("path"), label="PHROGs profile path"),
-            "source_sha256": _require_digest(phrogs_database.get("sha256"), label="PHROGs profile SHA-256"),
+            "source_path": _asset_string(phrogs_source_database.get("path"), label="PHROGs profile path"),
+            "source_sha256": _require_digest(phrogs_source_database.get("sha256"), label="PHROGs profile SHA-256"),
             "tool_version": mmseqs.pin.version,
             "database_version": phrogs_version,
             "tool_path": str(mmseqs.pin.path),
@@ -2172,6 +2734,7 @@ def _expected_adapter_commands(
     diamond: LoadedToolPin,
     mmseqs: LoadedToolPin,
     threads: int,
+    phrogs_threads: int | None = None,
 ) -> dict[str, list[str]]:
     """Rebuild the exact Task 3 argv using stable @OUTPUT_ROOT paths."""
     prefix = Path("@OUTPUT_ROOT") / "records" / f"{input_index:06d}-{record_id}"
@@ -2185,13 +2748,15 @@ def _expected_adapter_commands(
     if not isinstance(toxin_section, Mapping) or not isinstance(phrogs_section, Mapping):
         raise CLIValidationError("safety asset manifest sections are incomplete")
     toxin_files = toxin_section.get("files")
-    profile_database = phrogs_section.get("profile_database")
+    profile_database = phrogs_section.get("search_database") or phrogs_section.get("profile_database")
     if not isinstance(toxin_files, Mapping) or not isinstance(toxin_files.get("diamond_database"), Mapping):
         raise CLIValidationError("toxin database provenance is incomplete")
     if not isinstance(profile_database, Mapping):
         raise CLIValidationError("PHROGs profile database provenance is incomplete")
     amrfinder = _asset_string(amr_section.get("binary_path"), label="AMRFinder binary path")
     amr_database = _asset_string(amr_section.get("database_path"), label="AMRFinder database path")
+    blastx = _asset_string(amr_section.get("blastx_path"), label="AMRFinder BLASTX path")
+    hmmsearch = _asset_string(amr_section.get("hmmsearch_path"), label="AMRFinder HMM search path")
     toxin_database = _asset_string(
         toxin_files["diamond_database"].get("path"),
         label="toxin DIAMOND database path",
@@ -2207,6 +2772,8 @@ def _expected_adapter_commands(
             proteins_faa=prefix / "proteins.faa",
             proteins_gff=prefix / "proteins.gff",
             database_dir=Path(amr_database),
+            blast_bin_dir=Path(blastx).parent,
+            hmmer_bin_dir=Path(hmmsearch).parent,
             threads=threads,
             output_tsv=prefix / "amrfinder.tsv",
         ),
@@ -2223,7 +2790,7 @@ def _expected_adapter_commands(
             proteins_faa=prefix / "proteins.faa",
             output_tsv=prefix / "phrogs.raw.tsv",
             temporary_dir=prefix / "tmp",
-            threads=threads,
+            threads=threads if phrogs_threads is None else phrogs_threads,
         ),
     }
 
@@ -2234,7 +2801,7 @@ def _validate_scan_manifest_mapping(
     root: Path,
     runtime: CLIRuntime,
 ) -> SafetyState:
-    expected_top = frozenset(
+    legacy_top = frozenset(
         {
             "schema_version",
             "manifest_type",
@@ -2256,7 +2823,11 @@ def _validate_scan_manifest_mapping(
             "claim_boundary",
         }
     )
-    strict = _strict_payload(manifest, name="scan manifest", keys=expected_top)
+    actual_top = frozenset(manifest) if isinstance(manifest, Mapping) else frozenset()
+    supported_tops = {legacy_top, legacy_top | {"shared_executions"}}
+    if actual_top not in supported_tops:
+        raise CLIValidationError("scan manifest top-level keys do not match a supported schema")
+    strict = _strict_payload(manifest, name="scan manifest", keys=actual_top)
     _validate_json_value(strict, label="scan manifest")
     if (
         type(strict["schema_version"]) is not int
@@ -2272,6 +2843,13 @@ def _validate_scan_manifest_mapping(
     _validate_policy_record(strict["policy"])
     _validate_adapter_policy_records(strict["adapter_policies"])
     assets = _validate_asset_manifest_record(strict["safety_asset_manifest"], runtime=runtime)
+    phrogs_section = assets.manifest.get("phrogs_v4")
+    if not isinstance(phrogs_section, Mapping):
+        raise CLIValidationError("validated safety assets lack the PHROGs section")
+    try:
+        validated_phrogs_assets = runtime.phrogs_asset_validator(phrogs_section)
+    except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError) as error:
+        raise CLIValidationError("PHROGs assets failed transaction validation") from error
 
     input_record = _strict_payload(
         strict["input_fasta"],
@@ -2326,7 +2904,17 @@ def _validate_scan_manifest_mapping(
     parallel_runtime_keys = legacy_runtime_keys | frozenset(
         {"record_workers", "maximum_concurrent_tool_threads", "available_cpu_slots"}
     )
-    if frozenset(runtime_parameters) not in {legacy_runtime_keys, parallel_runtime_keys}:
+    batch_runtime_keys = legacy_runtime_keys | frozenset(
+        {
+            "batch_size",
+            "batch_workers",
+            "phrogs_threads",
+            "phrogs_workers",
+            "maximum_concurrent_tool_threads",
+            "available_cpu_slots",
+        }
+    )
+    if frozenset(runtime_parameters) not in {legacy_runtime_keys, parallel_runtime_keys, batch_runtime_keys}:
         raise CLIValidationError("runtime_parameters keys do not match a supported schema")
     if type(runtime_parameters["threads"]) is not int or runtime_parameters["threads"] < 1:
         raise CLIValidationError("runtime threads must be a positive integer")
@@ -2353,6 +2941,31 @@ def _validate_scan_manifest_mapping(
             or runtime_parameters["available_cpu_slots"] < runtime_parameters["maximum_concurrent_tool_threads"]
         ):
             raise CLIValidationError("runtime record-worker resource contract mismatch")
+    if "batch_size" in runtime_parameters:
+        batch_size = runtime_parameters["batch_size"]
+        batch_workers = runtime_parameters["batch_workers"]
+        phrogs_threads = runtime_parameters["phrogs_threads"]
+        phrogs_workers = runtime_parameters["phrogs_workers"]
+        available_slots = runtime_parameters["available_cpu_slots"]
+        maximum_threads = runtime_parameters["maximum_concurrent_tool_threads"]
+        if (
+            type(batch_size) is not int
+            or batch_size < 2
+            or type(batch_workers) is not int
+            or batch_workers < 1
+            or batch_workers > math.ceil(len(input_records) / batch_size)
+            or type(phrogs_threads) is not int
+            or phrogs_threads < 1
+            or type(phrogs_workers) is not int
+            or phrogs_workers < 1
+            or phrogs_workers > batch_size
+            or type(available_slots) is not int
+            or type(maximum_threads) is not int
+            or maximum_threads
+            != max(batch_workers * runtime_parameters["threads"], batch_workers * phrogs_workers * phrogs_threads)
+            or available_slots < maximum_threads
+        ):
+            raise CLIValidationError("runtime batch resource contract mismatch")
 
     tools = _strict_payload(
         strict["tools"],
@@ -2374,6 +2987,17 @@ def _validate_scan_manifest_mapping(
         raise CLIValidationError("ORF predictor provenance boundary mismatch")
     if not isinstance(strict["environment"], Mapping):
         raise CLIValidationError("environment provenance must be a mapping")
+    shared_executions = _validate_shared_executions(
+        strict.get("shared_executions", []),
+        root=root,
+        input_records=input_records,
+        assets=assets,
+        diamond=diamond_tool,
+        threads=runtime_parameters["threads"],
+        batch_size=runtime_parameters.get("batch_size", 1),
+    )
+    if "batch_size" not in runtime_parameters and shared_executions:
+        raise CLIValidationError("legacy runtime cannot claim shared executions")
 
     rows = strict["records"]
     if not isinstance(rows, list) or len(rows) != len(input_records):
@@ -2381,6 +3005,8 @@ def _validate_scan_manifest_mapping(
     seen_ids: set[str] = set()
     record_states: list[SafetyState] = []
     record_reasons: list[str] = []
+    record_orf_artifacts: dict[str, ORFArtifacts] = {}
+    record_indices: dict[str, int] = {}
     for input_index, (row_value, fasta_record) in enumerate(zip(rows, input_records, strict=True)):
         row = _strict_payload(
             row_value,
@@ -2452,12 +3078,17 @@ def _validate_scan_manifest_mapping(
             measured=measured,
             orf_replayer=runtime.orf_replayer,
         )
+        record_indices[fasta_record.sequence_id] = input_index
+        if orf_provenance.artifacts is not None:
+            record_orf_artifacts[fasta_record.sequence_id] = orf_provenance.artifacts
         class_results, _ = _validate_class_results(
             row["class_results"],
             record_id=fasta_record.sequence_id,
             applicability=applicability,
             query_index=orf_provenance.query_index,
             sequence_length=len(fasta_record.normalized_sequence),
+            sequence=fasta_record.normalized_sequence,
+            circular=runtime_parameters["circular"],
             finding_provenance=finding_provenance,
         )
         state = aggregate_safety_state(class_results)
@@ -2493,7 +3124,9 @@ def _validate_scan_manifest_mapping(
                 diamond=diamond_tool,
                 mmseqs=mmseqs_tool,
                 threads=runtime_parameters["threads"],
+                phrogs_threads=runtime_parameters.get("phrogs_threads"),
             ),
+            shared_executions=shared_executions,
             finding_provenance=finding_provenance,
             orf_artifacts=orf_provenance.artifacts,
             asset_manifest=assets.manifest,
@@ -2502,9 +3135,21 @@ def _validate_scan_manifest_mapping(
             host_domain=host_domain,
             strict_lysis=resolved["strict_lysis"],
             adapter_replayer=runtime.adapter_replayer,
+            validated_phrogs_assets=validated_phrogs_assets,
         )
         record_states.append(state)
         record_reasons.extend(reasons)
+
+    _validate_shared_execution_record_bindings(
+        shared_executions,
+        root=root,
+        record_artifacts=record_orf_artifacts,
+        record_index=record_indices,
+    )
+    try:
+        runtime.phrogs_asset_revalidator(phrogs_section, validated_phrogs_assets)
+    except (AssetProvenanceError, KeyError, OSError, TypeError, ValueError) as error:
+        raise CLIValidationError("PHROGs assets changed during manifest replay") from error
 
     if SafetyState.FAIL in record_states:
         batch_state = SafetyState.FAIL
@@ -2682,7 +3327,7 @@ def _validate_filter_manifest_mapping(
     root: Path,
     runtime: CLIRuntime,
 ) -> SafetyState:
-    expected_top = frozenset(
+    legacy_top = frozenset(
         {
             "schema_version",
             "manifest_type",
@@ -2706,7 +3351,10 @@ def _validate_filter_manifest_mapping(
             "claim_boundary",
         }
     )
-    strict = _strict_payload(manifest, name="filter manifest", keys=expected_top)
+    actual_top = frozenset(manifest) if isinstance(manifest, Mapping) else frozenset()
+    if actual_top not in {legacy_top, legacy_top | {"shared_executions"}}:
+        raise CLIValidationError("filter manifest top-level keys do not match a supported schema")
+    strict = _strict_payload(manifest, name="filter manifest", keys=actual_top)
     _validate_json_value(strict, label="filter manifest")
     if (
         type(strict["schema_version"]) is not int
@@ -2749,6 +3397,8 @@ def _validate_filter_manifest_mapping(
     ):
         if strict[key] != source[key]:
             raise CLIValidationError(f"filter manifest {key} drift from source scan")
+    if strict.get("shared_executions") != source.get("shared_executions"):
+        raise CLIValidationError("filter manifest shared execution drift from source scan")
     if not isinstance(strict["environment"], Mapping):
         raise CLIValidationError("filter environment provenance must be a mapping")
     expected_eligibility = {
@@ -2923,6 +3573,7 @@ def _publish_filter_generation(args: argparse.Namespace, runtime: CLIRuntime) ->
             "tools": source["tools"],
             "environment": environment,
             "records": source["records"],
+            **({"shared_executions": source["shared_executions"]} if "shared_executions" in source else {}),
             "aggregate": source["aggregate"],
             "derivatives": derivative_records,
             "eligibility": {
@@ -2939,6 +3590,7 @@ def _publish_filter_generation(args: argparse.Namespace, runtime: CLIRuntime) ->
             runtime=runtime,
             expected_type="sequence_safety_filter",
         )
+        staging.chmod(0o755)
         _fsync_directory(staging)
         runtime.replace(staging, output_dir)
         published = True
@@ -2980,12 +3632,41 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
         initial_input_sha256 = _sha256_regular_file(input_fasta_path, label="input FASTA")
         records = parse_fasta_records(input_fasta_path)
         available_cpu_slots = _available_cpu_slots()
-        record_workers = _resolve_record_workers(
-            requested=args.record_workers,
-            record_count=len(records),
-            tool_threads=args.threads,
-            cpu_slots=available_cpu_slots,
-        )
+        if type(args.batch_size) is not int or args.batch_size < 1:
+            raise CLIValidationError("batch size must be a positive integer")
+        batch_mode = args.batch_size > 1
+        if batch_mode:
+            for label, value in (
+                ("batch workers", args.batch_workers),
+                ("PHROGs threads", args.phrogs_threads),
+                ("PHROGs workers", args.phrogs_workers),
+            ):
+                if type(value) is not int or value < 1:
+                    raise CLIValidationError(f"{label} must be a positive integer")
+            if args.record_workers != 1:
+                raise CLIValidationError("--record-workers is mutually exclusive with --batch-size > 1")
+            batch_workers = min(args.batch_workers, math.ceil(len(records) / args.batch_size))
+            if args.phrogs_workers > args.batch_size:
+                raise CLIValidationError("PHROGs workers may not exceed the batch size")
+            maximum_concurrent_tool_threads = max(
+                batch_workers * args.threads,
+                batch_workers * args.phrogs_workers * args.phrogs_threads,
+            )
+            if maximum_concurrent_tool_threads > available_cpu_slots:
+                raise CLIValidationError(
+                    "batch topology exceeds the available CPU allocation: "
+                    f"requires {maximum_concurrent_tool_threads}, available {available_cpu_slots}"
+                )
+            record_workers = 1
+        else:
+            record_workers = _resolve_record_workers(
+                requested=args.record_workers,
+                record_count=len(records),
+                tool_threads=args.threads,
+                cpu_slots=available_cpu_slots,
+            )
+            batch_workers = 1
+            maximum_concurrent_tool_threads = record_workers * args.threads
         assets = runtime.asset_loader(Path(args.asset_manifest).absolute())
         diamond = runtime.tool_pin_loader(
             Path(args.diamond_tool_pin).absolute(),
@@ -3002,33 +3683,62 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
         work_root = staging / "records"
         orf_identity = dict(runtime.orf_identity_collector())
 
-        def scan_one(record: FastaRecord, input_index: int) -> Mapping[str, AdapterResult]:
-            adapters = runtime.record_scanner(
-                record,
-                input_index,
+        shared_executions: tuple[BatchAdapterExecution, ...] = ()
+        if batch_mode:
+            batched = runtime.batch_scanner(
+                records,
                 work_root=work_root,
+                shared_root=staging / "shared-executions",
                 asset_manifest=assets.manifest,
                 diamond_pin=diamond.pin,
                 mmseqs_pin=mmseqs.pin,
                 host_domain=host_domain,
                 strict_lysis=args.strict_lysis,
                 threads=args.threads,
+                batch_size=args.batch_size,
+                batch_workers=batch_workers,
+                phrogs_threads=args.phrogs_threads,
+                phrogs_workers=args.phrogs_workers,
                 timeout=args.timeout,
                 circular=not args.linear,
                 orf_generation_identity=orf_identity,
                 runner=runtime.command_runner,
+                phrogs_asset_validator=runtime.phrogs_asset_validator,
+                phrogs_asset_revalidator=runtime.phrogs_asset_revalidator,
             )
-            record_root = work_root / f"{input_index:06d}-{record.sequence_id}"
-            return _trusted_adapter_bundle(adapters, record_root=record_root)
+            batch = batched.batch
+            shared_executions = batched.shared_executions
+        else:
 
-        batch = scan_records(
-            records,
-            scanner=scan_one,
-            host_domain=host_domain,
-            strict_lysis=args.strict_lysis,
-            max_workers=record_workers,
-        )
+            def scan_one(record: FastaRecord, input_index: int) -> Mapping[str, AdapterResult]:
+                adapters = runtime.record_scanner(
+                    record,
+                    input_index,
+                    work_root=work_root,
+                    asset_manifest=assets.manifest,
+                    diamond_pin=diamond.pin,
+                    mmseqs_pin=mmseqs.pin,
+                    host_domain=host_domain,
+                    strict_lysis=args.strict_lysis,
+                    threads=args.threads,
+                    timeout=args.timeout,
+                    circular=not args.linear,
+                    orf_generation_identity=orf_identity,
+                    runner=runtime.command_runner,
+                )
+                record_root = work_root / f"{input_index:06d}-{record.sequence_id}"
+                return _trusted_adapter_bundle(adapters, record_root=record_root)
+
+            batch = scan_records(
+                records,
+                scanner=scan_one,
+                host_domain=host_domain,
+                strict_lysis=args.strict_lysis,
+                max_workers=record_workers,
+            )
         _fsync_owned_regular_files(work_root)
+        if shared_executions:
+            _fsync_owned_regular_files(staging / "shared-executions")
         serialized_records = [
             _serialize_scanned_record(
                 scanned,
@@ -3052,6 +3762,32 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
             raise CLIValidationError("safety asset manifest changed during scan")
         completed_at = _timestamp(runtime.clock())
         source_path = Path(__file__).resolve()
+        serialized_shared_executions = [
+            _serialize_shared_execution(
+                execution,
+                root=staging,
+                record_indices={record.sequence_id: index for index, record in enumerate(records)},
+            )
+            for execution in shared_executions
+        ]
+        runtime_parameters = {
+            "threads": args.threads,
+            "timeout_seconds": args.timeout,
+            "circular": not args.linear,
+            "minimum_fallback_amino_acids": 8,
+            "maximum_concurrent_tool_threads": maximum_concurrent_tool_threads,
+            "available_cpu_slots": available_cpu_slots,
+            **(
+                {
+                    "batch_size": args.batch_size,
+                    "batch_workers": batch_workers,
+                    "phrogs_threads": args.phrogs_threads,
+                    "phrogs_workers": args.phrogs_workers,
+                }
+                if batch_mode
+                else {"record_workers": record_workers}
+            ),
+        }
         manifest: dict[str, object] = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "manifest_type": "sequence_safety_scan",
@@ -3102,15 +3838,7 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
                 "strict_lysis": bool(args.strict_lysis),
                 "applicability": _applicability(host_domain, strict_lysis=args.strict_lysis),
             },
-            "runtime_parameters": {
-                "threads": args.threads,
-                "timeout_seconds": args.timeout,
-                "circular": not args.linear,
-                "minimum_fallback_amino_acids": 8,
-                "record_workers": record_workers,
-                "maximum_concurrent_tool_threads": record_workers * args.threads,
-                "available_cpu_slots": available_cpu_slots,
-            },
+            "runtime_parameters": runtime_parameters,
             "tools": {
                 "diamond": _tool_manifest_record(diamond),
                 "mmseqs": _tool_manifest_record(mmseqs),
@@ -3121,6 +3849,7 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
             },
             "environment": dict(runtime.environment_collector()),
             "records": serialized_records,
+            **({"shared_executions": serialized_shared_executions} if batch_mode else {}),
             "aggregate": {
                 "state": batch.state.value,
                 "reason_codes": list(
@@ -3139,6 +3868,7 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
         )
         for directory in sorted((path for path in staging.rglob("*") if path.is_dir()), reverse=True):
             _fsync_directory(directory)
+        staging.chmod(0o755)
         _fsync_directory(staging)
         runtime.replace(staging, output_dir)
         published = True
@@ -3510,6 +4240,7 @@ def _publish_missing_pin_diagnostic(args: argparse.Namespace, runtime: CLIRuntim
             runtime=runtime,
             expected_type="sequence_safety_diagnostic",
         )
+        staging.chmod(0o755)
         _fsync_directory(staging)
         runtime.replace(staging, output_dir)
         published = True
@@ -3586,6 +4317,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="concurrent records; workers x --threads must fit the available CPU allocation",
+    )
+    scan.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="records per shared AMRFinder/DIAMOND command; values >1 enable verified batching",
+    )
+    scan.add_argument(
+        "--batch-workers",
+        type=int,
+        default=1,
+        help="concurrent batches when --batch-size is greater than one",
+    )
+    scan.add_argument(
+        "--phrogs-threads",
+        type=int,
+        default=1,
+        help="threads per independent per-record PHROGs search in batch mode",
+    )
+    scan.add_argument(
+        "--phrogs-workers",
+        type=int,
+        default=1,
+        help="concurrent independent PHROGs searches inside each batch",
     )
     scan.add_argument("--timeout", type=float, default=300.0)
     scan.set_defaults(handler=_run_scan)

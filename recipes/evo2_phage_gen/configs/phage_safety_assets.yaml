@@ -15,6 +15,10 @@ amrfinder_plus:
   require_recorded_database_version: true
   require_recorded_amrfinder_index: true
   require_contained_latest_symlink: true
+  require_path_independent_source_identity: true
+  source_identity_files: >-
+    nonempty release-defining .fa, .tsv, .txt, and .LIB inputs; generated
+    BLAST/HMMER indexes remain covered by the separate exact database tree hash
   citation: >-
     Feldgarden et al. (2021), AMRFinderPlus and the Reference Gene Catalog
     facilitate examination of the genomic links among antimicrobial resistance,
@@ -57,15 +61,11 @@ toxin_reference:
         interpretation: Latrotoxin C-terminal-domain homology; not evidence of intact or functional venom.
 
 phrogs_v4:
-  annotation_urls:
-    - https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv
-  annotation_archive_filename: phrog_annot_v4.tsv
+  annotation_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv
   annotation_sha256: 502f96101597c21133bcce5711803e0b95e0c162cd4e86425c352549bd95e8c2
   mmseqs_database_url: https://phrogs.lmge.uca.fr/downloads_from_website/phrogs_mmseqs_db.tar.gz
   profile_database:
-    source_urls:
-      - https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz
-    archive_filename: pharokka_v1.8.0_databases.tar.gz
+    source_url: https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz
     release: Pharokka database v1.8.0
     dataset_release: PHROGs v4
     archive_published_sha256: null
@@ -79,16 +79,14 @@ phrogs_v4:
     citation: 'Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353).'
     minimum_mmseqs_version: '14'
     built_with_mmseqs_version: 18.8cc5c
-    database_name: phrogs_profile_db
     release_marker: VERSION_1_8_0
-    release_marker_empty_sentinel_allowed: true
-    generated_release_marker_content: "1.8.0\n"
     search_orientation: phrog_profile_query_vs_orf_target
     search_profile_scope: full_phrogs_v4_profile_database
     lookup_join_policy: classify_only_profile_ids_present_in_pinned_lookup
     output_fields: [query, target, pident, alnlen, qlen, tlen, qcov, tcov, evalue, bits]
     units: {pident: percent, qcov: fraction, tcov: fraction}
     query_id_pattern: ^phrog_[1-9][0-9]*$
+    query_ids_join_lookup: true
     required_files:
       - phrogs_profile_db
       - phrogs_profile_db.dbtype
@@ -100,16 +98,12 @@ phrogs_v4:
       - phrogs_profile_db_h.index
       - VERSION_1_8_0
     require_complete_profile_database: true
-  lookup_reconciliation:
-    source_counts: {total: 140, high_confidence: 88, review: 52}
-    searchable_counts: {total: 135, high_confidence: 83, review: 52}
-    allowed_profile_exclusions:
-      - phrog_49658
-      - phrog_50550
-      - phrog_77239
-      - phrog_81686
-      - phrog_87299
+  sequence_archive_url: https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz
+  sequence_archive_identity_status: unpinned_upstream_content
+  sequence_database_required_for_safety: false
+  sequence_database_use: optional Arc/QC compatibility only; never fetched insecurely without a predeclared content pin
   integration_excision_category: integration and excision
+  selection_scope: integration/excision category plus unambiguous lifecycle-regulator annotations
   citation: >-
     Terzian et al. (2021), PHROG: families of prokaryotic virus proteins
     clustered using remote homology, Nucleic Acids Research 49:D1345-D1353.
@@ -121,7 +115,7 @@ phrogs_v4:
     - excisionase
     - site-specific recombinase
     - lysogeny repressor
-  additional_high_confidence_annotations:
+  additional_high_confidence_terms:
     - anti-repressor
     - ci-like repressor
   review_terms:
@@ -130,15 +124,6 @@ phrogs_v4:
     - lysogeny
     - integration
     - excision
-
-compatibility_assets:
-  phrogs_sequence_database:
-    role: optional Arc/QC raw-sequence compatibility database; not consumed by the safety scanner
-    source_urls:
-      - https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz
-    archive_sha256: null
-    require_declared_sha256: true
-    required_for_safety: false
 
 expected_file_roles:
   amrfinder_binary: AMRFinderPlus executable from the pinned release
@@ -150,4 +135,5 @@ expected_file_roles:
   toxin_diamond_database: DIAMOND index built from the reviewed toxin FASTA snapshot
   phrogs_annotation: PHROGs v4 annotation source table
   phrogs_profile_database: complete PHROGs v4 MMseqs profile database for PHROG-identity safety search
-  phrogs_lysogeny_table: versioned integration/excision PHROG confidence lookup table
+  phrogs_sequence_database: optional Arc/QC sequence-search database, excluded from safety trust without a source pin
+  phrogs_lysogeny_table: versioned PHROG lysogeny-evidence confidence lookup table

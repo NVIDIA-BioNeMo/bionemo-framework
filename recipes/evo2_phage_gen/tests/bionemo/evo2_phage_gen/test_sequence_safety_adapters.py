@@ -15,7 +15,6 @@
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 from dataclasses import FrozenInstanceError, replace
@@ -24,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import bionemo.evo2_phage_gen.external_assets as external_assets
 import bionemo.evo2_phage_gen.sequence_safety_adapters as sequence_safety_adapters
 from bionemo.evo2_phage_gen.design_scope import HostDomain
 from bionemo.evo2_phage_gen.sequence_safety import SafetyFinding, SafetyState
@@ -35,6 +35,7 @@ from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     HomologyBand,
     HomologyPolicy,
     NormalizedSafetyFinding,
+    ORFQueryRecord,
     PredictedGene,
     ToolPin,
     VerifiedIdentityMappingMissingError,
@@ -93,6 +94,8 @@ def test_amrfinder_combined_command_uses_curated_thresholds(tmp_path):
         proteins_faa=tmp_path / "proteins.faa",
         proteins_gff=tmp_path / "proteins.gff",
         database_dir=Path("/db/amrfinder/2026-07-22.1"),
+        blast_bin_dir=Path("/tools/blast"),
+        hmmer_bin_dir=Path("/tools/hmmer"),
         threads=7,
         output_tsv=tmp_path / "amrfinder.tsv",
     )
@@ -111,6 +114,10 @@ def test_amrfinder_combined_command_uses_curated_thresholds(tmp_path):
         "--print_node",
         "--database",
         "/db/amrfinder/2026-07-22.1",
+        "--blast_bin",
+        "/tools/blast",
+        "--hmmer_bin",
+        "/tools/hmmer",
         "--threads",
         "7",
         "-o",
@@ -300,7 +307,7 @@ def test_genome_id_rejects_characters_that_diverge_between_fasta_and_gff_attribu
         GenomeInput(sequence_id="genome:1", sequence="ACG" * 30)
 
 
-def test_missing_pyrodigal_runtime_is_indeterminate_without_import_time_failure(tmp_path, monkeypatch):
+def test_missing_pyrodigal_runtime_is_fail_closed_without_import_time_failure(tmp_path, monkeypatch):
     """An unavailable required predictor must become INDETERMINATE rather than a silent fallback pass."""
 
     def missing_predictor():
@@ -437,36 +444,38 @@ def _orf_artifacts(tmp_path):
 
 
 def _amrfinder_manifest(tmp_path):
-    binary = tmp_path / "amrfinder"
-    binary.write_bytes(b"amrfinder-4.2.7")
-    runtime_dir = tmp_path / "amrfinder-runtime"
-    runtime_dir.mkdir()
+    runtime_root = tmp_path / "amrfinder-runtime"
+    runtime_root.mkdir()
     runtime_paths = {}
-    for executable_name in ("makeblastdb", "blastp", "blastx", "hmmpress", "hmmsearch"):
-        executable = runtime_dir / executable_name
-        executable.write_bytes(f"{executable_name}-runtime".encode())
-        executable.chmod(0o755)
-        runtime_paths[executable_name] = executable
+    for name in external_assets.AMRFINDER_RUNTIME_FILES:
+        path = runtime_root / name
+        path.write_bytes(b"amrfinder-4.2.7" if name == "amrfinder" else f"runtime-{name}".encode())
+        if name in external_assets.AMRFINDER_RUNTIME_EXECUTABLES:
+            path.chmod(0o755)
+        runtime_paths[name] = path
+    binary = runtime_paths["amrfinder"]
     database = tmp_path / "amr-db" / "2026-07-22.1"
     database.mkdir(parents=True)
     (database / "catalog.txt").write_bytes(b"amr-db")
-    return {
+    manifest = {
         "release": "amrfinder_v4.2.7",
         "binary_path": str(binary),
         "binary_sha256": hashlib.sha256(b"amrfinder-4.2.7").hexdigest(),
+        "runtime_bundle": external_assets._amrfinder_runtime_bundle_record(runtime_paths),
         "amrfinder_version": "AMRFinderPlus version 4.2.7",
-        **{
-            field: value
-            for executable_name, executable in runtime_paths.items()
-            for field, value in (
-                (f"{executable_name}_path", str(executable)),
-                (f"{executable_name}_sha256", hashlib.sha256(executable.read_bytes()).hexdigest()),
-            )
-        },
         "database_path": str(database),
         "database_version": "2026-07-22.1",
         "database_sha256": hashlib.sha256(b"catalog.txt\0amr-db").hexdigest(),
     }
+    for tool_name in ("blastn", "blastp", "blastx", "makeblastdb", "tblastn", "hmmpress", "hmmsearch"):
+        tool_path = tmp_path / ("blast" if tool_name.startswith(("blast", "make", "tblast")) else "hmmer") / tool_name
+        tool_path.parent.mkdir(exist_ok=True)
+        payload = f"runtime-{tool_name}".encode()
+        tool_path.write_bytes(payload)
+        tool_path.chmod(0o755)
+        manifest[f"{tool_name}_path"] = str(tool_path)
+        manifest[f"{tool_name}_sha256"] = hashlib.sha256(payload).hexdigest()
+    return manifest
 
 
 def _amrfinder_row(**overrides):
@@ -579,6 +588,200 @@ def test_amrfinder_amr_type_fails_regardless_of_plus_scope_with_normalized_evide
         "tool_sha256": manifest["binary_sha256"],
         "profile": None,
     }
+
+
+def _amrfinder_nucleotide_query_id(*, sequence_id: str, sequence: str, start: int, stop: int, strand: str) -> str:
+    strand_label = "p" if strand == "+" else "m"
+    sequence_sha256 = hashlib.sha256(sequence.encode()).hexdigest()
+    return f"{sequence_id}__amrfinder_nt_{strand_label}_{start}_{stop}_{sequence_sha256}"
+
+
+def test_amrfinder_mixed_protein_and_nucleotide_rows_retain_authenticated_amr_evidence(tmp_path):
+    """A valid nucleotide-only hit must not erase independent protein AMR findings."""
+    artifacts = _orf_artifacts(tmp_path)
+    output = tmp_path / "amrfinder.tsv"
+    nucleotide_row = _amrfinder_row(
+        **{
+            "Protein id": "NA",
+            "Start": "100",
+            "Stop": "120",
+            "Method": "INTERNAL_STOP",
+            "Closest reference accession": "SYN_NT.1",
+        }
+    )
+    _write_amrfinder_output(output, _amrfinder_row(), nucleotide_row)
+
+    result = _parse_amrfinder_output_validated(
+        output,
+        artifacts=artifacts,
+        manifest_section=_amrfinder_manifest(tmp_path),
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.FAIL
+    assert [finding.accession for finding in result.class_result.findings] == ["SYN1", "SYN_NT.1"]
+    nucleotide = result.class_result.findings[1]
+    sequence = "ACG" * 70
+    assert nucleotide.query_id == _amrfinder_nucleotide_query_id(
+        sequence_id="genome_1", sequence=sequence, start=100, stop=120, strand="+"
+    )
+    assert nucleotide.finding_id == f"amr:{nucleotide.query_id}:SYN_NT.1"
+    assert nucleotide.sequence_id == "genome_1"
+    assert (nucleotide.start, nucleotide.end, nucleotide.strand, nucleotide.frame) == (100, 120, "+", 1)
+    assert nucleotide.evidence_path == "amrfinder-nucleotide-v1"
+    assert nucleotide.evidence_method == "INTERNAL_STOP"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason_code"),
+    [
+        ({"Contig id": "GENOME_1"}, "AMRFINDER_UNKNOWN_SEQUENCE_ID"),
+        ({"Start": "0"}, "AMRFINDER_NUCLEOTIDE_COORDINATE_MISMATCH"),
+        ({"Start": "121", "Stop": "120"}, "AMRFINDER_NUCLEOTIDE_COORDINATE_MISMATCH"),
+        ({"Stop": "211"}, "AMRFINDER_NUCLEOTIDE_COORDINATE_MISMATCH"),
+        ({"Start": "one"}, "AMRFINDER_INVALID_NUMERIC_VALUE"),
+        ({"Strand": "."}, "AMRFINDER_NUCLEOTIDE_COORDINATE_MISMATCH"),
+        ({"Method": "ALLELEP"}, "AMRFINDER_NUCLEOTIDE_METHOD_MISMATCH"),
+        ({"Method": ""}, "AMRFINDER_NUCLEOTIDE_METHOD_MISMATCH"),
+    ],
+)
+def test_amrfinder_nucleotide_rows_fail_closed_on_unbound_evidence(tmp_path, overrides, reason_code):
+    """Nucleotide evidence must bind an exact contig, interval, strand, and v4.2.7 method."""
+    artifacts = _orf_artifacts(tmp_path)
+    output = tmp_path / "amrfinder.tsv"
+    row = {
+        "Protein id": "NA",
+        "Start": "100",
+        "Stop": "120",
+        "Method": "INTERNAL_STOP",
+        **overrides,
+    }
+    _write_amrfinder_output(output, _amrfinder_row(**row))
+
+    result = _parse_amrfinder_output_validated(
+        output,
+        artifacts=artifacts,
+        manifest_section=_amrfinder_manifest(tmp_path),
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == (reason_code,)
+
+
+@pytest.mark.parametrize("protein_id", ["", "N/A", "na", " NA"])
+def test_amrfinder_nucleotide_query_aliases_are_not_accepted(tmp_path, protein_id):
+    """Only AMRFinderPlus's literal NA sentinel may select the nucleotide evidence path."""
+    artifacts = _orf_artifacts(tmp_path)
+    output = tmp_path / "amrfinder.tsv"
+    _write_amrfinder_output(
+        output,
+        _amrfinder_row(
+            **{
+                "Protein id": protein_id,
+                "Start": "100",
+                "Stop": "120",
+                "Method": "INTERNAL_STOP",
+            }
+        ),
+    )
+
+    result = _parse_amrfinder_output_validated(
+        output,
+        artifacts=artifacts,
+        manifest_section=_amrfinder_manifest(tmp_path),
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("AMRFINDER_UNKNOWN_QUERY_ID",)
+
+
+@pytest.mark.parametrize(
+    "tampered_fasta",
+    [
+        ">genome_1 alias\n" + "ACG" * 70 + "\n",
+        ">genome_1 circular=true\n" + "ACG" * 70 + "\n>genome_1 circular=false\nACG\n",
+        ">genome_1 circular=true\n" + "ACG" * 69 + "XCG\n",
+    ],
+)
+def test_amrfinder_nucleotide_rows_reject_aliased_duplicate_or_invalid_contig_fasta(tmp_path, tampered_fasta):
+    """The nucleotide row must be authenticated against the canonical generated genome FASTA."""
+    artifacts = _orf_artifacts(tmp_path)
+    artifacts.genomes_fna.write_text(tampered_fasta)
+    output = tmp_path / "amrfinder.tsv"
+    _write_amrfinder_output(
+        output,
+        _amrfinder_row(**{"Protein id": "NA", "Start": "100", "Stop": "120", "Method": "INTERNAL_STOP"}),
+    )
+
+    result = _parse_amrfinder_output_validated(
+        output,
+        artifacts=artifacts,
+        manifest_section=_amrfinder_manifest(tmp_path),
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("AMRFINDER_NUCLEOTIDE_FASTA_MISMATCH",)
+
+
+def test_amrfinder_nucleotide_query_id_collision_is_indeterminate(tmp_path):
+    """A synthetic nucleotide evidence identity may never alias an existing ORF query."""
+    artifacts = _orf_artifacts(tmp_path)
+    sequence = "ACG" * 70
+    query_id = _amrfinder_nucleotide_query_id(
+        sequence_id="genome_1", sequence=sequence, start=100, stop=120, strand="+"
+    )
+    collision = ORFQueryRecord(
+        query_id=query_id,
+        sequence_id="genome_1",
+        start=100,
+        end=120,
+        strand="+",
+        frame=1,
+        nucleotide=sequence[99:120],
+        protein="TYVRVRT",
+        evidence_path="pyrodigal-gv",
+    )
+    artifacts = replace(artifacts, query_records=(*artifacts.query_records, collision))
+    output = tmp_path / "amrfinder.tsv"
+    _write_amrfinder_output(
+        output,
+        _amrfinder_row(**{"Protein id": "NA", "Start": "100", "Stop": "120", "Method": "INTERNAL_STOP"}),
+    )
+
+    result = _parse_amrfinder_output_validated(
+        output,
+        artifacts=artifacts,
+        manifest_section=_amrfinder_manifest(tmp_path),
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("AMRFINDER_NUCLEOTIDE_QUERY_ID_COLLISION",)
+
+
+def test_amrfinder_duplicate_nucleotide_coordinate_identity_is_indeterminate(tmp_path):
+    """Two rows may not claim distinct findings through the same nucleotide evidence identity."""
+    artifacts = _orf_artifacts(tmp_path)
+    output = tmp_path / "amrfinder.tsv"
+    base = {"Protein id": "NA", "Start": "100", "Stop": "120", "Method": "INTERNAL_STOP"}
+    _write_amrfinder_output(
+        output,
+        _amrfinder_row(**base),
+        _amrfinder_row(**{**base, "Closest reference accession": "SYN2"}),
+    )
+
+    result = _parse_amrfinder_output_validated(
+        output,
+        artifacts=artifacts,
+        manifest_section=_amrfinder_manifest(tmp_path),
+        required=True,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("AMRFINDER_DUPLICATE_NUCLEOTIDE_EVIDENCE",)
 
 
 def test_amrfinder_plus_virulence_is_supplemental_toxin_evidence_not_complete_screen(tmp_path):
@@ -706,13 +909,12 @@ def test_amrfinder_runner_validates_versions_and_database_before_search(tmp_path
         proteins_faa=artifacts.proteins_faa,
         proteins_gff=artifacts.proteins_gff,
         database_dir=Path(manifest["database_path"]),
+        blast_bin_dir=Path(manifest["blastx_path"]).parent,
+        hmmer_bin_dir=Path(manifest["hmmsearch_path"]).parent,
         threads=3,
         output_tsv=tmp_path / "scan" / "amrfinder.tsv",
     )
-    execution_kwargs = dict(commands[2][1])
-    execution_environment = execution_kwargs.pop("env")
-    assert execution_environment["PATH"].split(os.pathsep)[0] == str(Path(manifest["blastp_path"]).parent.resolve())
-    assert execution_kwargs == {
+    assert commands[2][1] == {
         "check": True,
         "capture_output": True,
         "text": True,
@@ -720,22 +922,26 @@ def test_amrfinder_runner_validates_versions_and_database_before_search(tmp_path
     }
 
 
-def test_amrfinder_runner_accepts_native_multiline_database_version_status(tmp_path):
-    """Native 4.2.7 status output must bind the database version without weakening equality."""
+def test_amrfinder_runner_accepts_v427_verbose_database_version_output(tmp_path):
+    """The v4.2.7 database-version command emits a labeled report, not a bare version string."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _amrfinder_manifest(tmp_path)
 
-    def runner(command, **kwargs):
+    def runner(command, **_kwargs):
         if command[-1] == "--version":
             return subprocess.CompletedProcess(command, 0, stdout=manifest["amrfinder_version"] + "\n", stderr="")
         if command[-1] == "--database_version":
-            status = (
-                "Software directory: '/opt/amrfinder/'\n"
-                "Software version: 4.2.7\n"
-                f"Database directory: '{manifest['database_path']}'\n"
-                f"Database version: {manifest['database_version']}\n"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "Software directory: '/opt/amrfinder/bin/'\n"
+                    "Software version: 4.2.7\n"
+                    f"Database directory: '{manifest['database_path']}'\n"
+                    f"Database version: {manifest['database_version']}\n"
+                ),
+                stderr="",
             )
-            return subprocess.CompletedProcess(command, 0, stdout=status, stderr="")
         _write_amrfinder_output(Path(command[command.index("-o") + 1]))
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -747,6 +953,7 @@ def test_amrfinder_runner_accepts_native_multiline_database_version_status(tmp_p
     )
 
     assert result.class_result.state is SafetyState.PASS
+    assert result.class_result.reason_codes == ("AMRFINDER_MEASURED_NO_AMR_HIT",)
 
 
 def test_amrfinder_database_digest_matches_task2_for_nested_directories(tmp_path):
@@ -797,11 +1004,7 @@ def test_amrfinder_database_digest_matches_task2_for_nested_directories(tmp_path
             "AMRFINDER_ASSET_PROVENANCE_MISMATCH",
         ),
         (
-            lambda manifest: Path(manifest["blastp_path"]).write_bytes(b"changed"),
-            "AMRFINDER_ASSET_PROVENANCE_MISMATCH",
-        ),
-        (
-            lambda manifest: Path(manifest["blastx_path"]).unlink(),
+            lambda manifest: Path(manifest["blastx_path"]).write_bytes(b"changed"),
             "AMRFINDER_ASSET_PROVENANCE_MISMATCH",
         ),
         (
@@ -828,6 +1031,26 @@ def test_amrfinder_digest_drift_is_indeterminate_without_execution(tmp_path, mut
 
     assert result.class_result.state is SafetyState.INDETERMINATE
     assert result.class_result.reason_codes == (reason_code,)
+
+
+def test_amrfinder_missing_runtime_companion_is_provenance_failure_before_execution(tmp_path):
+    """A missing sibling executable must fail before the scanner command can run."""
+    artifacts = _orf_artifacts(tmp_path)
+    manifest = _amrfinder_manifest(tmp_path)
+    (Path(manifest["runtime_bundle"]["path"]) / "fasta_check").unlink()
+
+    def runner(*_args, **_kwargs):
+        raise AssertionError("an incomplete AMRFinder runtime must not execute")
+
+    result = run_amrfinder(
+        artifacts,
+        manifest_section=manifest,
+        work_dir=tmp_path / "scan",
+        runner=runner,
+    )
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.class_result.reason_codes == ("AMRFINDER_ASSET_PROVENANCE_MISMATCH",)
 
 
 def test_amrfinder_version_drift_is_indeterminate_before_search(tmp_path):
@@ -1457,66 +1680,69 @@ _PHROGS_HEADER = (
     "bits",
 )
 
-_PHROGS_SEARCHABLE_HIGH_PROFILE_IDS = ("phrog_1", *(f"phrog_{index}" for index in range(4, 56)))
-_PHROGS_EXCLUDED_HIGH_PROFILE_IDS = ("phrog_49658", "phrog_50550", "phrog_81686", "phrog_87299")
-_PHROGS_HIGH_PROFILE_IDS = (*_PHROGS_SEARCHABLE_HIGH_PROFILE_IDS, *_PHROGS_EXCLUDED_HIGH_PROFILE_IDS)
+_PHROGS_HIGH_PROFILE_IDS = ("phrog_1", *(f"phrog_{index}" for index in range(4, 60)))
 _PHROGS_REVIEW_PROFILE_IDS = ("phrog_2", *(f"phrog_{index}" for index in range(60, 111)))
 _PHROGS_FULL_PROFILE_IDS = tuple(f"phrog_{index}" for index in range(1, 111))
 _PHROGS_ANNOTATION_SOURCE_TEXT = (
     "phrog\tcolor\tannot\tcategory\n"
+    + "".join(f"{profile}\tblack\tintegrase\tintegration and excision\n" for profile in _PHROGS_HIGH_PROFILE_IDS)
     + "".join(
-        f"{profile.removeprefix('phrog_')}\tblack\tintegrase\tintegration and excision\n"
-        for profile in _PHROGS_HIGH_PROFILE_IDS
+        f"{profile}\tblack\tputative recombinase\tintegration and excision\n" for profile in _PHROGS_REVIEW_PROFILE_IDS
     )
-    + "".join(
-        f"{profile.removeprefix('phrog_')}\tblack\tputative recombinase\tintegration and excision\n"
-        for profile in _PHROGS_REVIEW_PROFILE_IDS
-    )
-    + "3\tblack\tmajor capsid protein\thead and packaging\n"
+    + "phrog_3\tblack\tmajor capsid protein\thead and packaging\n"
 )
 _PHROGS_TEST_ANNOTATION_SHA256 = hashlib.sha256(_PHROGS_ANNOTATION_SOURCE_TEXT.encode()).hexdigest()
 
 
-def test_phrogs_lookup_accepts_only_exact_additional_high_confidence_annotations(tmp_path):
-    lookup = tmp_path / "lookup.tsv"
-    lookup.write_text(
-        "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
-        "phrog_6488\tanti-repressor\ttranscription regulation\thigh_confidence\tanti-repressor\n"
+def test_phrogs_annotation_lookup_includes_unambiguous_lifecycle_regulators_outside_integration_category(tmp_path):
+    """CTX-like anti-repressors are lifecycle evidence even when PHROGs classifies transcriptional function."""
+    source = tmp_path / "phrog_annot_v4.tsv"
+    source.write_text(
+        "phrog\tcolor\tannot\tcategory\n"
+        "1\tblack\tintegrase\tintegration and excision\n"
+        "2\tblack\tanti-repressor\ttranscription regulation\n"
+        "3\tblack\tCI-like repressor\ttranscription regulation\n"
+        "4\tblack\ttranscriptional repressor\ttranscription regulation\n"
+        "5\tblack\tmajor capsid protein\thead and packaging\n"
     )
+
+    profiles = sequence_safety_adapters._read_phrogs_annotation_lookup(source)
+
+    assert set(profiles) == {"phrog_1", "phrog_2", "phrog_3"}
+    assert profiles["phrog_2"]["matched_term"] == "anti-repressor"
+    assert profiles["phrog_2"]["confidence"] == "high_confidence"
+    assert profiles["phrog_3"]["matched_term"] == "ci-like repressor"
+    assert profiles["phrog_3"]["confidence"] == "high_confidence"
+
+
+def test_phrogs_materialized_lookup_accepts_only_declared_lifecycle_regulators_outside_category(tmp_path):
+    """The runtime reader admits the new exact terms without admitting arbitrary out-of-category rows."""
+    lookup = tmp_path / "phrogs_lysogeny.tsv"
+    header = "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
+    integrase = "phrog_1\tintegrase\tintegration and excision\thigh_confidence\tintegrase\n"
+    anti_repressor = "phrog_2\tanti-repressor\ttranscription regulation\thigh_confidence\tanti-repressor\n"
+    lookup.write_text(header + integrase + anti_repressor)
 
     profiles = sequence_safety_adapters._read_phrogs_lookup(lookup)
 
-    assert profiles["phrog_6488"]["confidence"] == "high_confidence"
-
+    assert set(profiles) == {"phrog_1", "phrog_2"}
     lookup.write_text(
-        "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
-        "phrog_6488\tanti-repressor Ant\ttranscription regulation\thigh_confidence\tanti-repressor\n"
+        header + integrase + "phrog_2\tmajor capsid protein\thead and packaging\thigh_confidence\tanti-repressor\n"
     )
-    with pytest.raises(
-        sequence_safety_adapters.AssetProvenanceError,
-        match="invalid or duplicate profile metadata",
-    ):
+    with pytest.raises(sequence_safety_adapters.AssetProvenanceError, match="invalid"):
         sequence_safety_adapters._read_phrogs_lookup(lookup)
 
 
 @pytest.fixture(autouse=True)
 def _pin_synthetic_phrogs_annotation_for_adapter_tests(monkeypatch):
     """Use a deterministic local annotation pin; production retains the official PHROGs v4 SHA-256."""
-    release = replace(
-        sequence_safety_adapters.load_phrogs_safety_release(),
-        annotation_sha256=_PHROGS_TEST_ANNOTATION_SHA256,
-        source_lookup_counts=(109, 57, 52),
-        searchable_lookup_counts=(105, 53, 52),
-        allowed_profile_exclusions=frozenset(_PHROGS_EXCLUDED_HIGH_PROFILE_IDS),
-    )
-    monkeypatch.setattr(
-        sequence_safety_adapters,
-        "load_phrogs_safety_release",
-        lambda *_args, **_kwargs: release,
-    )
+    monkeypatch.setattr(sequence_safety_adapters, "_PHROGS_ANNOTATION_SHA256", _PHROGS_TEST_ANNOTATION_SHA256)
 
 
-def _phrogs_manifest(tmp_path):
+def _phrogs_manifest(tmp_path, *, unsearchable_profile_ids=()):
+    unsearchable = frozenset(unsearchable_profile_ids)
+    if not unsearchable.issubset(_PHROGS_FULL_PROFILE_IDS):
+        raise ValueError("synthetic unsearchable PHROG IDs must exist in the source inventory")
     annotation_source = tmp_path / "phrog_annot_v4.tsv"
     annotation_source.write_text(_PHROGS_ANNOTATION_SOURCE_TEXT)
     archive_payload = b"pinned Pharokka profile archive fixture\n"
@@ -1525,20 +1751,22 @@ def _phrogs_manifest(tmp_path):
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_bytes(archive_payload)
     lookup = tmp_path / "phrogs_integration_excision_v4.tsv"
-    lookup_rows = [
+    source_lookup_rows = [
         *(
             f"{profile}\tintegrase\tintegration and excision\thigh_confidence\tintegrase\n"
-            for profile in _PHROGS_SEARCHABLE_HIGH_PROFILE_IDS
+            for profile in _PHROGS_HIGH_PROFILE_IDS
         ),
         *(
             f"{profile}\tputative recombinase\tintegration and excision\treview\trecombinase\n"
             for profile in _PHROGS_REVIEW_PROFILE_IDS
         ),
     ]
+    lookup_rows = [row for row in source_lookup_rows if row.split("\t", 1)[0] not in unsearchable]
     lookup.write_text("phrog\tannot\tcategory\tconfidence\tmatched_term\n" + "".join(lookup_rows))
     profile_prefix = tmp_path / "phrogs_profile_db"
+    profile_ids = tuple(profile for profile in _PHROGS_FULL_PROFILE_IDS if profile not in unsearchable)
     profile_lookup = "".join(
-        f"{index}\t{profile_id}\t{index}\n" for index, profile_id in enumerate(_PHROGS_FULL_PROFILE_IDS)
+        f"{index}\t{profile_id}\t{index}\n" for index, profile_id in enumerate(profile_ids)
     ).encode()
     profile_files = {
         profile_prefix: b"profile-db",
@@ -1546,7 +1774,7 @@ def _phrogs_manifest(tmp_path):
         Path(f"{profile_prefix}.dbtype"): b"profile-dbtype",
         Path(f"{profile_prefix}.lookup"): profile_lookup,
         Path(f"{profile_prefix}.source"): b"pharokka-v1.8.0\n",
-        Path(f"{profile_prefix}_h"): ("\n".join(_PHROGS_FULL_PROFILE_IDS) + "\n").encode(),
+        Path(f"{profile_prefix}_h"): ("\n".join(profile_ids) + "\n").encode(),
         Path(f"{profile_prefix}_h.index"): b"profile-header-index",
         Path(f"{profile_prefix}_h.dbtype"): b"profile-header-dbtype",
     }
@@ -1566,12 +1794,11 @@ def _phrogs_manifest(tmp_path):
         tree_digest.update(b"\0")
         tree_digest.update(path.read_bytes())
     profile_id_digest = hashlib.sha256()
-    for profile_id in sorted(_PHROGS_FULL_PROFILE_IDS):
+    for profile_id in sorted(profile_ids):
         profile_id_digest.update(profile_id.encode())
         profile_id_digest.update(b"\n")
     return {
         "annotation_url": "https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv",
-        "annotation_source_urls": ["https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv"],
         "annotation_sha256": _PHROGS_TEST_ANNOTATION_SHA256,
         "source_path": str(annotation_source),
         "source_sha256": _PHROGS_TEST_ANNOTATION_SHA256,
@@ -1582,15 +1809,21 @@ def _phrogs_manifest(tmp_path):
             "site-specific recombinase",
             "lysogeny repressor",
         ],
-        "additional_high_confidence_annotations": ["anti-repressor", "ci-like repressor"],
+        "additional_high_confidence_terms": ["anti-repressor", "ci-like repressor"],
+        "selection_scope": "integration/excision category plus unambiguous lifecycle-regulator annotations",
         "review_terms": ["recombinase", "repressor", "lysogeny", "integration", "excision"],
         "lookup_path": str(lookup),
         "lookup_sha256": hashlib.sha256(lookup.read_bytes()).hexdigest(),
+        "lookup_counts": {
+            "total": len(lookup_rows),
+            "high_confidence": sum("\thigh_confidence\t" in row for row in lookup_rows),
+            "review": sum("\treview\t" in row for row in lookup_rows),
+        },
         "source_lookup_counts": {"total": 109, "high_confidence": 57, "review": 52},
-        "lookup_counts": {"total": 105, "high_confidence": 53, "review": 52},
-        "profile_exclusions": {
-            "ids": list(_PHROGS_EXCLUDED_HIGH_PROFILE_IDS),
-            "reason": "absent_from_authenticated_profile_lookup",
+        "profile_unsearchable": {
+            "reason": "absent_from_verified_profile_lookup",
+            "count": len(unsearchable),
+            "ids": sorted(unsearchable),
         },
         "profile_database": {
             "path": str(profile_prefix),
@@ -1610,18 +1843,11 @@ def _phrogs_manifest(tmp_path):
             "query_id_pattern": r"^phrog_[1-9][0-9]*$",
             "query_ids_join_lookup": True,
             "profile_id_inventory": {
-                "count": len(_PHROGS_FULL_PROFILE_IDS),
+                "count": len(profile_ids),
                 "sha256": profile_id_digest.hexdigest(),
-            },
-            "release_marker": {
-                "path": str(release_marker.resolve()),
-                "sha256": hashlib.sha256(release_marker.read_bytes()).hexdigest(),
-                "origin": "archive_supplied_canonical_marker",
-                "empty_sentinel": False,
             },
             "provenance": {
                 "source_url": "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz",
-                "source_urls": ["https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz"],
                 "archive_observed_sha256": archive_sha256,
                 "archive_published_sha256": None,
                 "archive_published_md5": "a63c485241b900a11989bd1821bfbb09",
@@ -1638,6 +1864,32 @@ def _phrogs_manifest(tmp_path):
             },
         },
     }
+
+
+def _attach_curated_phrogs_search_database(tmp_path: Path, manifest: dict) -> Path:
+    """Attach a real derived-search manifest while using a tiny deterministic MMseqs fixture."""
+    full = Path(manifest["profile_database"]["path"])
+    mmseqs = _mmseqs_pin(tmp_path).path
+    mmseqs.chmod(0o755)
+
+    def runner(command, **_kwargs):
+        destination = Path(command[-1])
+        destination.write_bytes(b"curated-profile-db\n")
+        Path(f"{destination}.dbtype").write_bytes(Path(f"{full}.dbtype").read_bytes())
+        Path(f"{destination}.index").write_text("0\t0\t18\n")
+        for suffix in ("_h", "_h.dbtype", "_h.index", ".lookup", ".source"):
+            Path(f"{destination}{suffix}").symlink_to(Path(f"{full}{suffix}"))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    record = external_assets._prepare_phrogs_safety_search_database(
+        profile_database=full,
+        safety_lookup=Path(manifest["lookup_path"]),
+        output_root=tmp_path / "safety_search_database",
+        mmseqs_path=mmseqs,
+        runner=runner,
+    )
+    manifest["search_database"] = record
+    return Path(record["path"])
 
 
 def _mmseqs_pin(tmp_path, *, version="18-8cc5c"):
@@ -1707,6 +1959,70 @@ def _run_phrogs_with_measured_empty_output(tmp_path, manifest):
     return result, commands
 
 
+def test_validated_phrogs_batch_context_reuses_one_validation_and_rechecks_at_end(monkeypatch, tmp_path):
+    """A batch may reuse one immutable PHROGs view only when it is revalidated at its boundary."""
+    profile = tmp_path / "profiles"
+    profile.write_bytes(b"profiles")
+    calls: list[object] = []
+
+    def validate(section):
+        calls.append(section)
+        return (
+            profile,
+            "a" * 64,
+            {"phrog_1": {"confidence": "review"}},
+            frozenset({"phrog_1"}),
+            "PHROGs v4 / Pharokka v1.8.0",
+            15,
+        )
+
+    monkeypatch.setattr(sequence_safety_adapters, "_validate_phrogs_assets", validate)
+    section = {"identity": "pinned"}
+
+    context = sequence_safety_adapters._prepare_validated_phrogs_assets(section)
+    first = sequence_safety_adapters._phrogs_assets_from_validated_context(section, context)
+    second = sequence_safety_adapters._phrogs_assets_from_validated_context(section, context)
+
+    assert first == second
+    assert len(calls) == 1
+    sequence_safety_adapters._revalidate_phrogs_assets(section, context)
+    assert len(calls) == 2
+
+    with pytest.raises(sequence_safety_adapters.AssetProvenanceError, match="manifest changed"):
+        sequence_safety_adapters._phrogs_assets_from_validated_context({"identity": "drifted"}, context)
+
+
+def test_run_phrogs_reuses_validated_batch_context_without_rehashing(monkeypatch, tmp_path):
+    """Execution and parsing share the exact prevalidated PHROGs view inside a batch."""
+    manifest = _phrogs_manifest(tmp_path)
+    context = sequence_safety_adapters._prepare_validated_phrogs_assets(manifest)
+    tool_pin = _mmseqs_pin(tmp_path)
+
+    def reject_revalidation(_section):
+        raise AssertionError("per-record PHROGs asset validation must be skipped inside a batch")
+
+    monkeypatch.setattr(sequence_safety_adapters, "_validate_phrogs_assets", reject_revalidation)
+
+    def runner(command, **_kwargs):
+        if command[1:] == ["version"]:
+            return subprocess.CompletedProcess(command, 0, stdout=tool_pin.version + "\n", stderr="")
+        if command[1] == "convertalis":
+            Path(command[5]).write_text("")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = run_phrogs(
+        _orf_artifacts(tmp_path),
+        manifest_section=manifest,
+        tool_pin=tool_pin,
+        host_domain=HostDomain.BACTERIA,
+        work_dir=tmp_path / "scan",
+        runner=runner,
+        _validated_assets=context,
+    )
+
+    assert result.class_result.state is SafetyState.PASS
+
+
 def test_phrogs_missing_pinned_safety_lookup_counts_is_indeterminate_before_execution(tmp_path):
     """Removing the cardinality pin must not turn an incomplete safety gate into measured PASS."""
     manifest = _phrogs_manifest(tmp_path)
@@ -1720,13 +2036,13 @@ def test_phrogs_missing_pinned_safety_lookup_counts_is_indeterminate_before_exec
 
 
 def test_phrogs_self_consistent_truncated_safety_lookup_is_indeterminate_before_execution(tmp_path):
-    """A re-digested lookup missing one reviewed profile must be rejected before MMseqs runs."""
+    """A re-digested lookup missing one reviewed profile must still fail closed before MMseqs runs."""
     manifest = _phrogs_manifest(tmp_path)
     lookup_rows = Path(manifest["lookup_path"]).read_text().splitlines(keepends=True)[1:-1]
     _rewrite_phrogs_lookup(
         manifest,
         lookup_rows,
-        lookup_counts={"total": 105, "high_confidence": 53, "review": 52},
+        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
     )
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
@@ -1744,7 +2060,7 @@ def test_phrogs_self_consistent_confidence_imbalance_is_indeterminate_before_exe
     _rewrite_phrogs_lookup(
         manifest,
         lookup_rows,
-        lookup_counts={"total": 105, "high_confidence": 53, "review": 52},
+        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
     )
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
@@ -1762,7 +2078,7 @@ def test_phrogs_count_preserving_safety_profile_substitution_is_indeterminate_be
     _rewrite_phrogs_lookup(
         manifest,
         lookup_rows,
-        lookup_counts={"total": 105, "high_confidence": 53, "review": 52},
+        lookup_counts={"total": 109, "high_confidence": 57, "review": 52},
     )
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
@@ -1788,35 +2104,55 @@ def test_phrogs_verified_content_addressed_archive_contract_allows_measured_sear
 
     assert result.class_result.state is SafetyState.PASS
     assert len(commands) == 4
-    assert commands[0][1:] == ("version",)
     assert [command[1] for command in commands[1:]] == ["createdb", "search", "convertalis"]
+    assert commands[0][1:] == ("version",)
 
 
-def test_phrogs_runtime_accepts_authenticated_zero_byte_release_sentinel(tmp_path):
-    """A valid published empty marker must not turn a prepared PHROGs search indeterminate."""
+def test_phrogs_runtime_accepts_published_empty_release_sentinel(tmp_path):
+    """Runtime validation must accept the zero-byte release sentinel shipped by Pharokka v1.8.0."""
     manifest = _phrogs_manifest(tmp_path)
-    release_marker = tmp_path / "VERSION_1_8_0"
-    release_marker.write_bytes(b"")
-    marker_record = manifest["profile_database"]["release_marker"]
-    marker_record.update(
-        {
-            "sha256": hashlib.sha256(b"").hexdigest(),
-            "origin": "archive_supplied_empty_sentinel",
-            "empty_sentinel": True,
-        }
-    )
-    tree_files = [Path(path) for path in manifest["profile_database"]["extracted_tree"]["files"]]
+    profile_record = manifest["profile_database"]
+    marker = Path(profile_record["extracted_tree"]["path"]) / "VERSION_1_8_0"
+    marker.write_bytes(b"")
+    tree_root = marker.parent
+    tree_files = [Path(path) for path in profile_record["extracted_tree"]["files"]]
     tree_digest = hashlib.sha256()
     for path in sorted(tree_files):
-        tree_digest.update(str(path.relative_to(tmp_path)).encode())
+        tree_digest.update(str(path.relative_to(tree_root)).encode())
         tree_digest.update(b"\0")
         tree_digest.update(path.read_bytes())
-    manifest["profile_database"]["extracted_tree"]["sha256"] = tree_digest.hexdigest()
+    profile_record["extracted_tree"]["sha256"] = tree_digest.hexdigest()
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
 
     assert result.class_result.state is SafetyState.PASS
     assert len(commands) == 4
+    assert commands[0][1:] == ("version",)
+    assert [command[1] for command in commands[1:]] == ["createdb", "search", "convertalis"]
+
+
+def test_phrogs_runtime_reconciles_official_numeric_ids_with_recorded_unsearchable_profiles(tmp_path, monkeypatch):
+    """Runtime must reproduce Task 2's numeric-ID normalization and explicit 109-to-105 reconciliation."""
+    missing_ids = ("phrog_4", "phrog_5", "phrog_6", "phrog_7")
+    manifest = _phrogs_manifest(tmp_path, unsearchable_profile_ids=missing_ids)
+    source = Path(manifest["source_path"])
+    lines = source.read_text().splitlines()
+    numeric_rows = []
+    for line in lines[1:]:
+        fields = line.split("\t")
+        fields[0] = fields[0].removeprefix("phrog_")
+        numeric_rows.append("\t".join(fields))
+    source.write_text(lines[0] + "\n" + "\n".join(numeric_rows) + "\n")
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest["annotation_sha256"] = source_sha256
+    manifest["source_sha256"] = source_sha256
+    monkeypatch.setattr(sequence_safety_adapters, "_PHROGS_ANNOTATION_SHA256", source_sha256)
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.PASS
+    assert len(commands) == 4
+    assert [command[1] for command in commands[1:]] == ["createdb", "search", "convertalis"]
 
 
 @pytest.mark.parametrize(
@@ -1899,6 +2235,20 @@ def test_phrogs_commands_use_existing_profile_query_against_created_orf_target_d
     ) == list(commands[-1])
 
 
+def test_phrogs_runner_uses_exact_policy_derived_profile_database_when_published(tmp_path):
+    """A provenance-bound policy subset replaces only the PHROGs query DB, not the record target."""
+    manifest = _phrogs_manifest(tmp_path)
+    derived = _attach_curated_phrogs_search_database(tmp_path, manifest)
+
+    result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
+
+    assert result.class_result.state is SafetyState.PASS
+    assert commands[2][1] == "search"
+    assert commands[2][2] == str(derived)
+    assert commands[3][1] == "convertalis"
+    assert commands[3][2] == str(derived)
+
+
 def test_current_raw_phrogs_manifest_is_indeterminate_without_verified_profile_identity(tmp_path):
     """Raw protein target IDs must never be guessed into PHROG families."""
     artifacts = _orf_artifacts(tmp_path)
@@ -1966,7 +2316,7 @@ def test_current_raw_phrogs_manifest_is_indeterminate_without_verified_profile_i
         ),
     ],
 )
-def test_phrogs_final_identity_rejects_pharokka_source_mismatch(tmp_path, mutate, reason_code):
+def test_phrogs_final_identity_and_pharokka_provenance_contract_is_fail_closed(tmp_path, mutate, reason_code):
     """The legacy profile source or unverifiable full-profile identity must never execute."""
     manifest = _phrogs_manifest(tmp_path)
     mutate(manifest)
@@ -2090,6 +2440,9 @@ def test_phrogs_high_confidence_profile_fails_bacterial_and_mixed_profiles(tmp_p
         finding = result.class_result.findings[0]
         assert finding.reason_codes == ("LYSOGENY_HIGH_CONFIDENCE_PROFILE",)
         assert finding.profile == "phrog_1"
+        assert finding.query_id == "genome_1__orf0001"
+        assert finding.scores["query_coverage"] == 0.9
+        assert finding.scores["reference_coverage"] == 0.85
         assert finding.threshold_policy == "phrogs-homology-v1"
         assert finding.threshold_policy_sha256 == PHROGS_HOMOLOGY_POLICY_V1.sha256
         assert result.policy_sha256 == PHROGS_HOMOLOGY_POLICY_V1.sha256
@@ -2230,8 +2583,7 @@ def test_phrogs_runner_validates_contract_and_normalizes_empty_output(tmp_path):
 
     assert result.class_result.state is SafetyState.PASS
     assert Path(result.raw_output_path).read_text() == "\t".join(_PHROGS_HEADER) + "\n"
-    assert [entry[0][1] for entry in commands[1:]] == ["createdb", "search", "convertalis"]
-    assert commands[-1][0] == build_phrogs_command(
+    assert commands[3][0] == build_phrogs_command(
         mmseqs=tool_pin.path,
         profile_database=Path(manifest["profile_database"]["path"]),
         proteins_faa=artifacts.proteins_faa,
@@ -2242,30 +2594,6 @@ def test_phrogs_runner_validates_contract_and_normalizes_empty_output(tmp_path):
     assert PHROGS_HOMOLOGY_POLICY_V1.policy_id == "phrogs-homology-v1"
 
 
-def test_phrogs_runner_accepts_real_mmseqs_commit_style_version(tmp_path):
-    """The official GPU binary reports a commit-style version whose leading major is still 17."""
-    manifest = _phrogs_manifest(tmp_path)
-    tool_pin = _mmseqs_pin(tmp_path, version="17b688d21dda57fc5f5b7286ecba7ec003d4717f")
-
-    def runner(command, **kwargs):
-        if command[1:] == ["version"]:
-            return subprocess.CompletedProcess(command, 0, stdout=tool_pin.version + "\n", stderr="")
-        if command[1] == "convertalis":
-            Path(command[5]).write_text("")
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    result = run_phrogs(
-        _orf_artifacts(tmp_path),
-        manifest_section=manifest,
-        tool_pin=tool_pin,
-        host_domain=HostDomain.BACTERIA,
-        work_dir=tmp_path / "scan",
-        runner=runner,
-    )
-
-    assert result.class_result.state is SafetyState.PASS
-
-
 @pytest.mark.parametrize(
     ("drift", "reason_code"),
     [
@@ -2274,7 +2602,7 @@ def test_phrogs_runner_accepts_real_mmseqs_commit_style_version(tmp_path):
         ("missing_output", "PHROGS_OUTPUT_MISSING"),
     ],
 )
-def test_phrogs_runner_rejects_version_digest_or_output_mismatch(tmp_path, drift, reason_code):
+def test_phrogs_runner_fails_closed_for_version_digest_or_output_drift(tmp_path, drift, reason_code):
     """A drifted or unmeasured PHROGs search cannot qualify a strict-lytic design."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _phrogs_manifest(tmp_path)
@@ -2311,7 +2639,7 @@ def test_phrogs_runner_rejects_version_digest_or_output_mismatch(tmp_path, drift
         ("non_utf", "PHROGS_PARSER_SCHEMA_MISMATCH"),
     ],
 )
-def test_phrogs_runner_marks_execution_or_malformed_output_indeterminate(tmp_path, failure, reason_code):
+def test_phrogs_runner_fails_closed_for_execution_or_malformed_output(tmp_path, failure, reason_code):
     """A failed process or undecodable MMseqs output cannot become a measured lysogeny PASS."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _phrogs_manifest(tmp_path)
