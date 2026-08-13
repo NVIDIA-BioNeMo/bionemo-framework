@@ -1,0 +1,81 @@
+{
+  "skill_name": "bionemo-phage-generation",
+  "evals": [
+    {
+      "id": "bionemo-phage-generation-001-bootstrap",
+      "prompt": "I am in a neutral directory with no BioNeMo Recipes checkout. Start a BioNeMo Evo 2 phage-generation project and prepare the compatible recipe checkout before any implementation work.",
+      "expected_output": "A portable bootstrap plan that acquires a compatible BioNeMo Recipes checkout and hands implementation work to its recipe-local controller.",
+      "assertions": [
+        "The response clones exactly https://github.com/NVIDIA-BioNeMo/bionemo-recipes rather than deriving a checkout from the installed skill bundle.",
+        "The response defaults to interactive mode unless batch is requested; it preserves any dirty checkout without treating dirtiness alone as a special-branch trigger, reuses an explicit or nearby checkout when VERSION >= 2.4 while recording dirtiness and isolating later mutations, and only after a separate clean checkout of the canonical default revision is shown not to contain recipes/evo2_phage_gen VERSION >= 2.4 uses origin/jstjohn/evo2_phage_gen or a newer compatible revision.",
+        "The response selects recipes/evo2_phage_gen, requires its VERSION to be at least 2.4, and records the repository revision.",
+        "Before selection, the response verifies VERSION >= 2.4, the bionemo-phage-design controller, both required design-scope and EMA references, .codex-plugin/plugin.json named bionemo-phage-design, and .claude-plugin/plugin.json.",
+        "The response resolves and records absolute checkout and recipe roots before implementation work.",
+        "The response discovers bionemo-phage-design from the selected checkout's recipe-local skills and hands off to it."
+      ],
+      "expected_skill": "bionemo-phage-generation",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-generation-002-incompatible-checkout",
+      "prompt": "An explicit BioNeMo Recipes checkout is available, but recipes/evo2_phage_gen/VERSION is below 2.4 and the checkout has local changes. Continue safely so I can start phage generation.",
+      "expected_output": "A safe compatibility plan that preserves the supplied checkout and obtains a separate compatible recipe revision before handoff.",
+      "assertions": [
+        "The response checks recipes/evo2_phage_gen/VERSION and rejects a version below 2.4 for implementation handoff.",
+        "Compatibility requires VERSION >= 2.4, the bionemo-phage-design controller, both required design-scope and EMA references, .codex-plugin/plugin.json named bionemo-phage-design, and .claude-plugin/plugin.json; a version-only match is rejected.",
+        "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the clone source and selects default interactive mode unless batch is requested.",
+        "The response preserves any dirty checkout without reset, overwrite, or destructive cleanup; dirtiness alone does not trigger the special branch, and an explicit or nearby checkout with VERSION >= 2.4 is reused while its dirty state is recorded and later mutations are isolated.",
+        "Only when no compatible checkout exists does the response clone or acquire the canonical default revision in a separate clean checkout and inspect it; it uses origin/jstjohn/evo2_phage_gen or a newer compatible revision only after that canonical default revision is shown not to contain recipes/evo2_phage_gen VERSION >= 2.4.",
+        "The response records the revision and absolute checkout and recipe roots, discovers the local skill, and hands off to bionemo-phage-design."
+      ],
+      "expected_skill": "bionemo-phage-generation",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-generation-003-interactive-handoff",
+      "prompt": "Use the compatible Evo 2 phage-generation checkout I provided to plan a new phage project with me. I want interactive planning and can answer material questions.",
+      "expected_output": "An interactive bootstrap and handoff that leaves recipe-specific planning to the compatible recipe-local controller.",
+      "assertions": [
+        "The response explicitly selects interactive mode as the default.",
+        "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the canonical clone source; it preserves any dirty checkout and reuses an explicit or nearby checkout with VERSION >= 2.4 while recording dirtiness and isolating later mutations, then only when none is compatible inspects a separate clean canonical default checkout and uses origin/jstjohn/evo2_phage_gen or a newer compatible revision only after that default lacks recipes/evo2_phage_gen VERSION >= 2.4.",
+        "The response verifies VERSION >= 2.4, records the repository revision and absolute checkout and recipe roots, and avoids recipe commands or fixed implementation values.",
+        "The response also verifies the bionemo-phage-design controller, both required design-scope and EMA references, .codex-plugin/plugin.json named bionemo-phage-design, and .claude-plugin/plugin.json before treating the checkout as compatible.",
+        "The response reloads or starts the agent from recipes/evo2_phage_gen so its skills are discovered.",
+        "The response directs the agent to read bionemo-phage-design and relevant sibling skills completely before handing off to bionemo-phage-design."
+      ],
+      "expected_skill": "bionemo-phage-generation",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-generation-004-batch-handoff",
+      "prompt": "Use my compatible Evo 2 phage-generation checkout to make a batch plan while I am offline. Infer only what durable records support, then continue with the recipe-local controller.",
+      "expected_output": "A batch bootstrap and handoff that applies reversible defaults but pauses for decisions outside its authority.",
+      "assertions": [
+        "The response explicitly selects batch mode because it was requested.",
+        "The response identifies https://github.com/NVIDIA-BioNeMo/bionemo-recipes as the canonical clone source; it preserves any dirty checkout and reuses an explicit or nearby checkout with VERSION >= 2.4 while recording dirtiness and isolating later mutations, then only when none is compatible inspects a separate clean canonical default checkout and uses origin/jstjohn/evo2_phage_gen or a newer compatible revision only after that default lacks recipes/evo2_phage_gen VERSION >= 2.4.",
+        "The response infers only reversible choices from durable records and stops for missing authority, irreversible risk, or unresolved material biology.",
+        "The response verifies VERSION >= 2.4 and records the repository revision plus absolute checkout and recipe roots before implementation work.",
+        "The response also verifies the bionemo-phage-design controller, both required design-scope and EMA references, .codex-plugin/plugin.json named bionemo-phage-design, and .claude-plugin/plugin.json before treating the checkout as compatible.",
+        "The response discovers the recipe-local bionemo-phage-design skill and hands control to it after reloading or starting the agent from recipes/evo2_phage_gen."
+      ],
+      "expected_skill": "bionemo-phage-generation",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-generation-005-complete-local-handoff",
+      "prompt": "The portable skill is installed by an aggregation service under /srv/skill-aggregation. It acquired /tmp/acquired-bionemo-recipes/recipes/evo2_phage_gen for an interactive PhiX174 replication request. The first candidate has VERSION == 2.4 but no recipe-local controller. Hand off safely after selecting a valid checkout.",
+      "expected_output": "A portable compatibility decision and deterministic absolute-root handoff that carries the original request into a fresh recipe-local session.",
+      "assertions": [
+        "The response treats VERSION == 2.4 with no recipe-local controller as incompatible, preserves that checkout, and continues the ordered clean-checkout acquisition policy without retrofitting it.",
+        "The response verifies the controller SKILL.md, its design-scope-and-viability and cleaned EMA draft references, and required recipe-local manifests, including the Codex manifest named bionemo-phage-design, before selecting a checkout.",
+        "The response keeps the aggregation installation root disjoint from the absolute checkout and recipe roots and records the selected revision.",
+        "The handoff prompt carries interactive mode, the original request and constraints, absolute checkout and recipe roots, selected revision, and generic verification of root RUNLOG initialization, whole-genome/lifecycle scope, explicit approval for scope reduction, applicable EMA-derived therapeutic RL objectives without reward starvation, and default authenticated W&B telemetry.",
+        "The response gives an absolute-root Codex handoff invoking $bionemo-phage-design and an absolute-root Claude handoff using --plugin-dir . and /evo2-phage-gen:bionemo-phage-design.",
+        "The new session verifies and reads only bionemo-phage-design plus the fixed required sibling allowlist from this portable contract, records their paths and hashes, ignores unexpected child skills, and stops with the absolute root and missing or integrity-failed skill; dirty changes to required instruction or plugin files require explicit review and authorization before loading.",
+        "The handoff requires dependency-aware, resource-admitted execution and durable recurring monitoring for every long-running stage through a verified terminal state while independent safe work continues."
+      ],
+      "expected_skill": "bionemo-phage-generation",
+      "expected_script": null
+    }
+  ]
+}

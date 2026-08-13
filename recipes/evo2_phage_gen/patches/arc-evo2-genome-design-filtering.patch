@@ -1,0 +1,746 @@
+--- genome_design_filtering_pipeline.py
++++ genome_design_filtering_pipeline.py
+@@ -291,7 +291,7 @@
+
+ def run_prodigal(input_sequences: str, output_orf_file: str, output_protein_file: str, sequences_df: pd.DataFrame) -> None:
+     """Run Prodigal to identify ORF candidate sequences and replace record IDs with full descriptions."""
+-    cmd = f'/home/samuelking/prodigal/prodigal -i {input_sequences} -d {output_orf_file} -a {output_protein_file} -p meta'
++    cmd = f'prodigal -i {input_sequences} -d {output_orf_file} -a {output_protein_file} -p meta'
+     #cmd = f'/old_home/cirrascale/miniconda3/envs/evo-design/bin/prodigal -i {input_sequences} -d {output_orf_file} -a {output_protein_file} -p meta'
+
+     # Run the command and redirect stdout and stderr to /dev/null
+@@ -622,7 +622,7 @@
+
+ def run_checkv(input_file: str, output_dir: str, num_threads: int=16) -> None:
+     """Run the CheckV to identify viral sequences. Input file is FASTA. Default number of threads is 16."""
+-    env = {**os.environ, 'CHECKVDB': "/large_experiments/hielab/brianhie/dna-gen/checkv/checkv-db-v1.5"}
++    env = os.environ.copy()
+     cmd = ['checkv', 'end_to_end', input_file, output_dir, '-t', str(num_threads)]
+     subprocess.run(cmd, env=env, check=True)
+
+@@ -724,6 +724,11 @@
+     min_pident = min(pident_range)
+     max_pident = max(pident_range)
+
++    if mmseqs_df.empty:
++        sequences_df[f'valid_{descriptive_prefix}_pident'] = False
++        sequences_df[f'{descriptive_prefix}_mmseqs_percent_identity'] = pd.NA
++        return sequences_df[sequences_df[f'valid_{descriptive_prefix}_pident']]
++
+     # Drop the sequences column in mmseqs_df (if any) since we don't want to redundantly add it to sequences_df
+     if 'sequence' in mmseqs_df.columns:
+         mmseqs_df = mmseqs_df.drop(columns=['sequence'])
+@@ -771,6 +776,34 @@
+     ]
+
+     return filtered_df
++
++
++def save_mmseqs_pident_metrics(mmseqs_df: pd.DataFrame, descriptive_prefix: str, sequences_df: pd.DataFrame, output_csv: str) -> None:
++    """Save best-hit percent identity metrics before applying an MMseqs pident filter."""
++    pident_column = f'{descriptive_prefix}_mmseqs_percent_identity'
++    if mmseqs_df.empty:
++        metrics_df = sequences_df[["id_prompt"]].copy()
++        metrics_df[pident_column] = 0.0
++        metrics_df.to_csv(output_csv, index=False)
++        return
++
++    metrics_hits_df = mmseqs_df.copy()
++    if 'sequence' in metrics_hits_df.columns:
++        metrics_hits_df = metrics_hits_df.drop(columns=['sequence'])
++    if 'id_prompt' in metrics_hits_df.columns and not metrics_hits_df.empty and 'ORF' in metrics_hits_df['id_prompt'].iloc[0]:
++        metrics_hits_df['id_prompt'] = metrics_hits_df['id_prompt'].str.split('_').str[:-1].str.join('_')
++        metrics_hits_df = metrics_hits_df.loc[
++            metrics_hits_df.groupby('id_prompt')[pident_column].idxmax()
++        ].reset_index(drop=True)
++
++    for index, row in metrics_hits_df.iterrows():
++        matching_prompt = sequences_df['id_prompt'][sequences_df['id_prompt'].str.contains(row['id_prompt'], regex=False)]
++        if not matching_prompt.empty:
++            metrics_hits_df.at[index, 'id_prompt'] = matching_prompt.values[0]
++
++    metrics_df = pd.merge(sequences_df[["id_prompt"]], metrics_hits_df[["id_prompt", pident_column]], on='id_prompt', how='left')
++    metrics_df[pident_column] = metrics_df[pident_column].fillna(0.0)
++    metrics_df.to_csv(output_csv, index=False)
+
+
+ def calculate_pident_to_ref(query_sequence: str, reference_sequence: str) -> float:
+@@ -926,22 +959,22 @@
+     start_time = time.time()
+     try:
+         with open(log_file, "w") as log:
+-            result = subprocess.run(cmd, shell=True, check=True, stdout=log, stderr=log, text=True)
++            subprocess.run(cmd, shell=True, check=True, stdout=log, stderr=log, text=True)
+     except subprocess.CalledProcessError as e:
+-        print(f"MMseqs2 search failed with error: {e.stderr}")
+-        raise e
++        print(f"MMseqs2 search failed with error: {e}.")
++        raise
+     end_time = time.time()
+     print(f"MMseqs2 search completed in {end_time - start_time:.2f} seconds.")
+
+     if not os.path.isfile(mmseqs_out):
+-        print(f"Output file not found: {mmseqs_out}")
++        raise FileNotFoundError(f"Output file not found: {mmseqs_out}")
+     return mmseqs_out
+
+
+ def parse_mmseqs_results(mmseqs_out):
+     """Parse MMseqs search results including percent identity."""
+     if not os.path.isfile(mmseqs_out):
+-        raise FileNotFoundError(f"Output file not found: {mmseqs_out}")
++        return []
+
+     hits = []
+     with open(mmseqs_out, "r") as f:
+@@ -961,6 +994,9 @@
+             data.append([query, sequences[query], target, evalue, pident])
+
+     df = pd.DataFrame(data, columns=["id_prompt", "sequence", f"{descriptive_prefix}_mmseqs_target", f"{descriptive_prefix}_mmseqs_e_value", f"{descriptive_prefix}_mmseqs_percent_identity"])
++    if df.empty:
++        df.to_csv(output_csv, index=False)
++        return df
+     if only_top_hits==True:
+         df_top_hits = df.loc[df.groupby("id_prompt")[f"{descriptive_prefix}_mmseqs_e_value"].idxmin()]  # Keep only the top hit per query based on e-value
+         df_top_hits.to_csv(output_csv, index=False)
+@@ -1296,7 +1332,7 @@
+     """
+     Adds protein database annotations to MMseqs hits against a given database.
+     The annotation database should be a tsv file and the columns must contain:
+-    - hit_label: The labels used in the MMseqs database
++    - hit_label or phrog: The labels used in the MMseqs database
+     - annot: The desired gene name/descriptor to directly annotate on the gene
+     - category: The broader protein category label to color each gene by
+     """
+@@ -1305,9 +1341,17 @@
+     mmseqs_hits_df = pd.read_csv(mmseqs_hits_file)
+     database_annotation_df = pd.read_csv(database_annotation_file, sep='\t')
+
++    if 'hit_label' in database_annotation_df.columns:
++        database_annotation_df['protein_database_mmseqs_target'] = database_annotation_df['hit_label'].astype(str)
++    elif 'phrog' in database_annotation_df.columns:
++        database_annotation_df['protein_database_mmseqs_target'] = (
++            'phrog_' + database_annotation_df['phrog'].astype(str).str.extract(r'(\d+)', expand=False)
++        )
++    else:
++        raise KeyError("Protein annotation file must contain either 'hit_label' or 'phrog'.")
++
+     # Ensure both target and hit label are treated as strings
+     mmseqs_hits_df['protein_database_mmseqs_target'] = mmseqs_hits_df['protein_database_mmseqs_target'].astype(str)
+-    database_annotation_df['protein_database_mmseqs_target'] = database_annotation_df['hit_label'].astype(str)
+
+     # Merge on 'protein_database_mmseqs_target' to add 'annot' and 'category' columns to the hits dataframe
+     mmseqs_hits_df = mmseqs_hits_df.merge(
+@@ -1529,23 +1573,17 @@
+
+
+ def run_lovis4u_in_conda_env(env_name: str, command: str) -> None:
+-    """
+-    Activate a Conda environment and run a command within it.
+-
+-    Args:
+-        env_name (str): The name of the Conda environment to activate.
+-        command (str): The command to run inside the activated environment.
++    """Run LoVis4u command in the active environment.
++
++    The original Arc script activates a separate conda environment here. The
++    recipe installs LoVis4u into its uv-managed venv, so the active PATH is the
++    reproducible environment boundary.
+     """
+     try:
+-        # Full command to initialize Conda and activate environment before running the given command
+-        full_command = f"""
+-        eval "$(conda shell.bash hook)"
+-        conda activate {env_name}
+-        {command}
+-        """
+-        subprocess.run(full_command, shell=True, executable="/bin/bash", check=True)
++        subprocess.run(command, shell=True, executable="/bin/bash", check=True)
+     except subprocess.CalledProcessError as e:
+-        print(f"Error while running command in Conda environment {env_name}: {e}")
++        print(f"Error while running LoVis4u command with active environment instead of {env_name}: {e}")
++        raise
+
+
+ def move_genetic_architecture_pdfs(genetic_architecture_visualization_results_dir: str,
+@@ -1702,10 +1740,14 @@
+             # Append the result
+             results.append({
+                 "id_prompt": id_prompt,
+-                "average_protein_percent_identity": average_percent_identity
++                "average_protein_percent_identity": average_percent_identity,
++                "average_protein_identity_gene_count": num_entries,
+             })
+
+-    results_df = pd.DataFrame(results)
++    results_df = pd.DataFrame(
++        results,
++        columns=["id_prompt", "average_protein_percent_identity", "average_protein_identity_gene_count"],
++    )
+     latest_results_df = pd.read_csv(results_csv)
+     merged_df = pd.merge(latest_results_df, results_df, on="id_prompt", how="left")
+     merged_df.to_csv(output_csv, index=False)
+@@ -1785,8 +1827,8 @@
+                 if os.path.exists(gbk_path):
+                     files_to_delete.append(gbk_path)  # Delete corresponding GBK if it exists
+
+-    # Convert results to DataFrame
+-    results_df = pd.DataFrame(results)
++    # Convert results to DataFrame. Preserve columns when no GFF rows were found.
++    results_df = pd.DataFrame(results, columns=["id_prompt", "average_protein_percent_identity"])
+
+     # Read the existing results CSV
+     latest_results_df = pd.read_csv(results_csv)
+@@ -1854,14 +1896,20 @@
+                 "total_num_genes": num_genes
+             })
+
+-    # Update and overwrite the csv
+-    results_df = pd.DataFrame(results)
++    # Update and overwrite the csv. Preserve columns when no GFF rows were found.
++    results_df = pd.DataFrame(results, columns=["id_prompt", "total_num_genes"])
+     latest_results_df = pd.read_csv(results_csv)
+     merged_df = pd.merge(latest_results_df, results_df, on="id_prompt", how="left")
+     merged_df.to_csv(results_csv, index=False)
+
+
+-def count_syntenic_genes_all(root_dir: str, gff_dir: str, input_csv: str, output_csv: str) -> None:
++def count_syntenic_genes_all(
++    root_dir: str,
++    gff_dir: str,
++    input_csv: str,
++    output_csv: str,
++    reference_gff_path: str | None = None,
++) -> None:
+     """
+     Counts the number of syntenic genes in MMseqs results from all lovis4u folders and merges the results with an input CSV by mapping to `id_prompt`.
+     Also records non-syntenic genes and their annotations as columns.
+@@ -1948,40 +1996,162 @@
+
+         return syntenic_count, ",".join(sorted(non_syntenic_genes)), ",".join(non_syntenic_annotations)
+
+-    # Check if the root directory exists
+-    if not os.path.exists(root_dir):
+-        print(f"Error: Directory '{root_dir}' does not exist.")
+-        return
++    def read_ordered_gff_products(gff_path: str) -> list[dict]:
++        genes = []
++        with open(gff_path, "r") as gff_file:
++            for line in gff_file:
++                if line.startswith("#"):
++                    continue
++                fields = line.strip().split("\t")
++                if len(fields) < 9 or fields[2] != "CDS":
++                    continue
++
++                attributes = fields[8]
++                gene_id_match = re.search(r"ID=([^;]+)", attributes)
++                product_match = re.search(r"product=([^;]+)", attributes)
++                gene_id = gene_id_match.group(1) if gene_id_match else ""
++                product = product_match.group(1) if product_match else "Unknown gene"
++                if not product or product.lower() == "nan":
++                    product = "Unknown gene"
++                genes.append(
++                    {
++                        "start": int(fields[3]),
++                        "gene_id": gene_id,
++                        "product": product,
++                    }
++                )
++        return sorted(genes, key=lambda gene: gene["start"])
++
++    def lcs_candidate_indices(reference_products: list[str], candidate_products: list[str]) -> set[int]:
++        rows = len(reference_products)
++        cols = len(candidate_products)
++        dp = [[0] * (cols + 1) for _ in range(rows + 1)]
++        for i, reference_product in enumerate(reference_products, start=1):
++            for j, candidate_product in enumerate(candidate_products, start=1):
++                if reference_product == candidate_product:
++                    dp[i][j] = dp[i - 1][j - 1] + 1
++                else:
++                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
++
++        indices = set()
++        i, j = rows, cols
++        while i > 0 and j > 0:
++            if reference_products[i - 1] == candidate_products[j - 1]:
++                indices.add(j - 1)
++                i -= 1
++                j -= 1
++            elif dp[i - 1][j] >= dp[i][j - 1]:
++                i -= 1
++            else:
++                j -= 1
++        return indices
++
++    def best_circular_lcs_candidate_indices(reference_products: list[str], candidate_products: list[str]) -> set[int]:
++        if not reference_products or not candidate_products:
++            return set()
++
++        best_indices = set()
++        rotated_reference = reference_products
++        # Fix one reference origin and test each relative candidate rotation.
++        for candidate_offset in range(len(candidate_products)):
++            rotated_candidate = candidate_products[candidate_offset:] + candidate_products[:candidate_offset]
++            rotated_indices = lcs_candidate_indices(rotated_reference, rotated_candidate)
++            candidate_indices = {
++                (rotated_index + candidate_offset) % len(candidate_products)
++                for rotated_index in rotated_indices
++            }
++            if len(candidate_indices) > len(best_indices):
++                best_indices = candidate_indices
++        return best_indices
++
++    def count_syntenic_genes_from_gff_products(reference_gff_path: str, gff_path: str) -> tuple:
++        reference_genes = read_ordered_gff_products(reference_gff_path)
++        candidate_genes = read_ordered_gff_products(gff_path)
++        reference_products = [gene["product"] for gene in reference_genes]
++        candidate_products = [gene["product"] for gene in candidate_genes]
++        syntenic_gene_indices = best_circular_lcs_candidate_indices(reference_products, candidate_products)
++
++        syntenic_count = len(syntenic_gene_indices)
++        non_syntenic_genes = [
++            gene["gene_id"]
++            for index, gene in enumerate(candidate_genes)
++            if index not in syntenic_gene_indices and gene["gene_id"].startswith("ORF")
++        ]
++        non_syntenic_annotations = [
++            gene["product"]
++            for index, gene in enumerate(candidate_genes)
++            if index not in syntenic_gene_indices and gene["gene_id"].startswith("ORF")
++        ]
++        return syntenic_count, ",".join(non_syntenic_genes), ",".join(non_syntenic_annotations)
++
++    # Load the input CSV before scanning LoVis4u outputs so missing directories can be reported per input genome.
++    input_df = pd.read_csv(input_csv)
++    input_genomes = set(input_df["genome_id"].astype(str)) if "genome_id" in input_df else set()
+
+     syntenic_counts = {}
+     non_syntenic_genes_dict = {}
+     non_syntenic_annotations_dict = {}
+
+     # Iterate through lovis4u subfolders
+-    for subfolder in os.listdir(root_dir):
+-        subfolder_path = os.path.join(root_dir, subfolder)
+-
+-        if os.path.isdir(subfolder_path) and subfolder.startswith("genome_"):
+-            mmseqs_path = os.path.join(subfolder_path, "mmseqs", "mmseqs_clustering.tsv")
+-            genome_name = subfolder
+-            gff_path = os.path.join(gff_dir, f"{genome_name}.gff")
+-
+-            if os.path.exists(mmseqs_path) and os.path.exists(gff_path):
+-                syntenic_count, non_syntenic_genes, non_syntenic_annotations = count_syntenic_genes(mmseqs_path, gff_path)
+-                syntenic_counts[genome_name] = syntenic_count
+-                non_syntenic_genes_dict[genome_name] = non_syntenic_genes
+-                non_syntenic_annotations_dict[genome_name] = non_syntenic_annotations
+-                print(f"Processed {genome_name}: {syntenic_count} syntenic genes, non-syntenic: {non_syntenic_genes}")
+-            else:
+-                print(f"Warning: Required file not found for {genome_name}")
+-
+-    # Load the input CSV
+-    input_df = pd.read_csv(input_csv)
++    missing_synteny_files = []
++    if not os.path.exists(root_dir):
++        print(f"Error: Directory '{root_dir}' does not exist.")
++        missing_synteny_files.extend(
++            (
++                genome_name,
++                os.path.join(root_dir, genome_name, "mmseqs", "mmseqs_clustering.tsv"),
++                os.path.join(gff_dir, f"{genome_name}.gff"),
++            )
++            for genome_name in sorted(input_genomes)
++        )
++    else:
++        for subfolder in os.listdir(root_dir):
++            subfolder_path = os.path.join(root_dir, subfolder)
++
++            if os.path.isdir(subfolder_path) and subfolder.startswith("genome_"):
++                mmseqs_path = os.path.join(subfolder_path, "mmseqs", "mmseqs_clustering.tsv")
++                genome_name = subfolder
++                gff_path = os.path.join(gff_dir, f"{genome_name}.gff")
++
++                if os.path.exists(mmseqs_path) and os.path.exists(gff_path):
++                    syntenic_count, non_syntenic_genes, non_syntenic_annotations = count_syntenic_genes(mmseqs_path, gff_path)
++                    syntenic_counts[genome_name] = syntenic_count
++                    non_syntenic_genes_dict[genome_name] = non_syntenic_genes
++                    non_syntenic_annotations_dict[genome_name] = non_syntenic_annotations
++                    print(f"Processed {genome_name}: {syntenic_count} syntenic genes, non-syntenic: {non_syntenic_genes}")
++                elif reference_gff_path and os.path.exists(reference_gff_path) and os.path.exists(gff_path):
++                    syntenic_count, non_syntenic_genes, non_syntenic_annotations = count_syntenic_genes_from_gff_products(
++                        reference_gff_path,
++                        gff_path,
++                    )
++                    syntenic_counts[genome_name] = syntenic_count
++                    non_syntenic_genes_dict[genome_name] = non_syntenic_genes
++                    non_syntenic_annotations_dict[genome_name] = non_syntenic_annotations
++                    print(
++                        f"Processed {genome_name} with GFF product-order fallback: "
++                        f"{syntenic_count} syntenic genes, non-syntenic: {non_syntenic_genes}"
++                    )
++                else:
++                    missing_synteny_files.append((genome_name, mmseqs_path, gff_path))
++
++    missing_synteny_genomes = input_genomes - set(syntenic_counts)
++    if len(input_df) > 0 and missing_synteny_files:
++        missing_summary = "; ".join(
++            f"{genome_name}: mmseqs={mmseqs_path} exists={os.path.exists(mmseqs_path)}, "
++            f"gff={gff_path} exists={os.path.exists(gff_path)}"
++            for genome_name, mmseqs_path, gff_path in missing_synteny_files
++        )
++        print(
++            "WARNING: Missing LoVis4u synteny output for non-empty synteny input. "
++            "Treating affected genomes as zero-synteny without using the GFF product-order fallback: "
++            f"{missing_summary}"
++        )
+
+     # Map syntenic counts, non-syntenic genes, and annotations to the DataFrame
+     input_df["num_syntenic_genes"] = input_df["genome_id"].map(syntenic_counts).fillna(0).astype(int)
+     input_df["non_syntenic_genes"] = input_df["genome_id"].map(non_syntenic_genes_dict).fillna("")
+     input_df["non_syntenic_annotations"] = input_df["genome_id"].map(non_syntenic_annotations_dict).fillna("")
++    input_df["missing_synteny_output"] = input_df["genome_id"].isin(missing_synteny_genomes)
+
+     # Save the updated DataFrame
+     input_df.to_csv(output_csv, index=False)
+@@ -1995,6 +2165,12 @@
+     Also deletes corresponding GFF, GBK, PDF files and metadata folders for filtered-out genomes.
+     """
+     df = pd.read_csv(input_csv)
++    for column in ("num_syntenic_genes", "total_num_genes"):
++        if column not in df.columns:
++            df[column] = pd.Series(dtype="int64")
++    if df.empty:
++        df.to_csv(output_csv, index=False)
++        return
+
+     syntenic_values = range(syntenic_gene_count_range[0], syntenic_gene_count_range[1] + 1)
+     total_genes_values = range(total_gene_count_range[0], total_gene_count_range[1] + 1)
+@@ -2019,7 +2195,13 @@
+                 print(f"Deleted: {file_path}")
+
+
+-def valid_gene_annotations(input_gff_dir: str, input_gbk_dir: str, required_products: tuple, sequences_df: pd.DataFrame) -> pd.DataFrame:
++def valid_gene_annotations(
++    input_gff_dir: str,
++    input_gbk_dir: str,
++    required_products: tuple,
++    sequences_df: pd.DataFrame,
++    metrics_csv: str = None,
++) -> pd.DataFrame:
+     """
+     Validates gene annotations and deletes files/directories that do not contain the required gene products.
+     Returns a filtered version of the provided DataFrame based on surviving genome_ids.
+@@ -2034,7 +2216,11 @@
+     - pd.DataFrame: Filtered DataFrame based on genome_ids that passed validation.
+     """
+     surviving_genome_ids = set()
++    metrics_rows = []
+     gff_files = glob.glob(os.path.join(input_gff_dir, "*.gff"))
++    id_prompt_by_genome_id = {}
++    if "genome_id" in sequences_df.columns and "id_prompt" in sequences_df.columns:
++        id_prompt_by_genome_id = dict(zip(sequences_df["genome_id"], sequences_df["id_prompt"]))
+
+     for gff_file in gff_files:
+         extracted_products = []
+@@ -2054,6 +2240,20 @@
+                         product = attr.split("=")[1]
+                         extracted_products.append(product)
+
++        matched_required_products = [product for product in required_products if product in extracted_products]
++        metrics_rows.append(
++            {
++                "id_prompt": id_prompt_by_genome_id.get(genome_id, genome_id),
++                "genome_id": genome_id,
++                "required_genes_matched_count": len(matched_required_products),
++                "required_genes_total_count": len(required_products),
++                "required_genes_matched": "|".join(matched_required_products),
++                "required_genes_missing": "|".join(
++                    [product for product in required_products if product not in extracted_products]
++                ),
++            }
++        )
++
+         # Keep if all required products are present
+         if all(product in extracted_products for product in required_products):
+             print(f"Kept: {gff_file}")
+@@ -2071,6 +2271,20 @@
+             if os.path.exists(genome_dir):
+                 shutil.rmtree(genome_dir)
+                 print(f"Deleted directory: {genome_dir}")
++
++    if metrics_csv is not None:
++        metrics_df = pd.DataFrame(
++            metrics_rows,
++            columns=[
++                "id_prompt",
++                "genome_id",
++                "required_genes_matched_count",
++                "required_genes_total_count",
++                "required_genes_matched",
++                "required_genes_missing",
++            ],
++        )
++        metrics_df.to_csv(metrics_csv, index=False)
+
+     # Filter and return DataFrame
+     filtered_df = sequences_df[sequences_df["genome_id"].isin(surviving_genome_ids)].copy()
+@@ -2238,6 +2452,10 @@
+         ### Initialize counts ###
+         filter_counts_df['count_initial_before_orf_metrics'] = len(seq_df)
+         print(f"Initializing ORF filtering. Sequences to filter: {filter_counts_df['count_initial_before_orf_metrics'].values[0]}.")
++        filtered_df = seq_df.copy()
++        if len(filtered_df) == 0:
++            print("No sequences available for ORF filtering; writing empty ORF outputs.")
++            config["prodigal_based_filters"] = False
+
+         ### Run Prodigal to call ORFs ###
+         if config["prodigal_based_filters"] == True:
+@@ -2334,23 +2552,34 @@
+             else:
+                 raise ValueError("Unsupported file format. Please provide a .fna or .fasta file.")
+
++        filtered_df = seq_df.copy()
++        if len(filtered_df) == 0:
++            print("No sequences available for homology filtering; writing empty homology outputs.")
++            config["protein_database_hit_count_filter"] = False
++            config["training_data_sequence_identity_filter"] = False
++            config["checkv_filter"] = False
++            config["reference_genome_sequence_identity_filter"] = False
++            config["genetic_architecture_filter"] = False
++            config["tropism_protein_sequence_identity_filter"] = False
++
+         ### Run orfipy to call ORFs ###
+         # Pseudo-circularize ORFs
+-        print(f"Pseudo-circularizing {len(seq_df)} genomes...")
+-        append_upstream_of_last_frame_stop(seq_fasta, f'{config["results_save_dir"]}/{config["homology_filter_seqs_circular_fasta_file_save_location"]}')
+-        # Call ORFs by orfipy
+-        print(f"Running orfipy on {len(seq_df)} genomes...")
+-        run_orfipy(f'{config["results_save_dir"]}/{config["homology_filter_seqs_circular_fasta_file_save_location"]}',
+-                    config["orfipy_threads"],
+-                    config["orfipy_start_codons"],
+-                    config["orfipy_stop_codons"],
+-                    config["orfipy_strand"],
+-                    config["orfipy_min_max_orf_lengths"][0],
+-                    config["orfipy_min_max_orf_lengths"][1],
+-                    config["results_save_dir"],
+-                    config["orfipy_orfs_file_save_location"],
+-                    config["orfipy_tmp_proteins_file_save_location"],
+-                    config["orfipy_proteins_file_save_location"])
++        if len(filtered_df) > 0:
++            print(f"Pseudo-circularizing {len(seq_df)} genomes...")
++            append_upstream_of_last_frame_stop(seq_fasta, f'{config["results_save_dir"]}/{config["homology_filter_seqs_circular_fasta_file_save_location"]}')
++            # Call ORFs by orfipy
++            print(f"Running orfipy on {len(seq_df)} genomes...")
++            run_orfipy(f'{config["results_save_dir"]}/{config["homology_filter_seqs_circular_fasta_file_save_location"]}',
++                        config["orfipy_threads"],
++                        config["orfipy_start_codons"],
++                        config["orfipy_stop_codons"],
++                        config["orfipy_strand"],
++                        config["orfipy_min_max_orf_lengths"][0],
++                        config["orfipy_min_max_orf_lengths"][1],
++                        config["results_save_dir"],
++                        config["orfipy_orfs_file_save_location"],
++                        config["orfipy_tmp_proteins_file_save_location"],
++                        config["orfipy_proteins_file_save_location"])
+
+         ### Filter by hit counts to protein database ###
+         if config["protein_database_hit_count_filter"] == True:
+@@ -2373,7 +2602,7 @@
+         save_df_as_fasta(filtered_df, f'{config["results_save_dir"]}/{config["homology_filter_seqs_fasta_file_save_location"]}')
+
+         ### Filter by sequence identity to training data genomes ###
+-        if config["training_data_sequence_identity_filter"] == True:
++        if config["training_data_sequence_identity_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by sequence identity to training data genomes in {config['training_data_genomes_fasta']}...")
+             if os.path.exists(f'{config["results_save_dir"]}/{config["mmseqs_training_data_results_dir_save_location"]}'):
+                 shutil.rmtree(f'{config["results_save_dir"]}/{config["mmseqs_training_data_results_dir_save_location"]}')
+@@ -2388,6 +2617,12 @@
+                                       sensitivity=config["mmseqs_training_data_sensitivity"])
+             mmseqs_results_df = convert_m8_to_df(f'{config["results_save_dir"]}/{config["mmseqs_training_data_results_dir_save_location"]}/results_dir/mmseqs_results.m8',
+                                                  'training_data')
++            save_mmseqs_pident_metrics(
++                mmseqs_results_df,
++                "training_data",
++                filtered_df,
++                f'{config["results_save_dir"]}/{config.get("training_data_sequence_identity_metrics_file_save_location", "qc4_training_data_sequence_identity_metrics.csv")}',
++            )
+             filtered_df = valid_mmseqs_pident(mmseqs_results_df, "training_data", config["training_data_sequence_identity_range"], filtered_df)
+             filter_counts['count_training_data_sequence_identity_filter'] = len(filtered_df)
+             print(f"Completed training data sequence identity filtering resulting in {filter_counts['count_training_data_sequence_identity_filter'].values[0]} sequences.")
+@@ -2397,7 +2632,7 @@
+         save_df_as_fasta(filtered_df, f'{config["results_save_dir"]}/{config["homology_filter_seqs_fasta_file_save_location"]}')
+
+         ### Filter by CheckV quality ###
+-        if config["checkv_filter"] == True:
++        if config["checkv_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by CheckV quality with threshold {config['checkv_quality_range']}...")
+             run_checkv(f'{config["results_save_dir"]}/{config["homology_filter_seqs_fasta_file_save_location"]}',
+                        f'{config["results_save_dir"]}/{config["checkv_results_dir_save_location"]}',
+@@ -2410,7 +2645,7 @@
+             filtered_df.to_csv(f'{config["results_save_dir"]}/{config["homology_filter_seqs_csv_file_save_location"]}', index=False)
+
+         ### Filter by sequence identity to reference genome ###
+-        if config["reference_genome_sequence_identity_filter"] == True:
++        if config["reference_genome_sequence_identity_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by sequence identity to reference genome {config['reference_genome_fasta']} with threshold {config['reference_genome_sequence_identity_range']}...")
+             filtered_df = valid_reference_genome_pident(filtered_df, config["reference_genome_fasta"], config["reference_genome_sequence_identity_range"])
+             filter_counts['count_seq_ident_to_reference_genome_filter'] = len(filtered_df)
+@@ -2420,7 +2655,7 @@
+             filtered_df.to_csv(f'{config["results_save_dir"]}/{config["homology_filter_seqs_csv_file_save_location"]}', index=False)
+
+         ### Filter by genetic architecture score ###
+-        if config["genetic_architecture_filter"] == True:
++        if config["genetic_architecture_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by genetic architecture score with threshold {config['genetic_architecture_score_range']} using the reference genome {config['genetic_architecture_reference_genome']}...")
+             filtered_df = valid_genetic_architecture_score(filtered_df,
+                                                            ga.phix174_truth_matrix_blurred_sigma5,
+@@ -2435,7 +2670,7 @@
+             #filtered_df.to_csv(f'{config["results_save_dir"]}/tmp_df_with_arch_scores_before_tropismfilter.csv', index=False) # Used for prompt length sweeps
+
+         ### Filter by sequence identity to tropism protein ###
+-        if config["tropism_protein_sequence_identity_filter"] == True:
++        if config["tropism_protein_sequence_identity_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by sequence identity to tropism protein {config['reference_tropism_protein']} with threshold {config['tropism_protein_sequence_identity_range']}...")
+             mmseqs_results_df = run_mmseqs_search_proteins(query_fasta=f'{config["results_save_dir"]}/{config["orfipy_proteins_file_save_location"]}',
+                                                            mmseqs_db=config["mmseqs_db_tropism_protein"],
+@@ -2497,6 +2732,11 @@
+             else:
+                 raise ValueError("Unsupported file format. Please provide a .fna or .fasta file.")
+         filtered_df = seq_df.copy()
++        if len(filtered_df) == 0:
++            print("No sequences available for diversification filtering; writing empty diversification outputs.")
++            config["mmseqs_clustering_filter"] = False
++            config["mmseqs_reference_genome_sequence_identity_remove_filter"] = False
++            config["genetic_architecture_remove_filter"] = False
+
+         ### Filter by MMseqs clustering ###
+         if config["mmseqs_clustering_filter"] == True:
+@@ -2518,7 +2758,7 @@
+             seq_df = filtered_df.copy()
+
+         ## Filter by MMseqs reference genome sequence identity removal ###
+-        if config["mmseqs_reference_genome_sequence_identity_remove_filter"] == True:
++        if config["mmseqs_reference_genome_sequence_identity_remove_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by MMseqs sequence identity to reference genome {config['reference_genome_fasta']} with remove threshold outside {config['mmseqs_reference_genome_sequence_identity_keep_range']}...")
+             if os.path.exists(f'{config["results_save_dir"]}/{config["mmseqs_reference_genome_results_dir_save_location"]}'):
+                 shutil.rmtree(f'{config["results_save_dir"]}/{config["mmseqs_reference_genome_results_dir_save_location"]}')
+@@ -2533,6 +2773,12 @@
+                                       sensitivity=config["mmseqs_reference_genome_sensitivity"])
+             mmseqs_results_df = convert_m8_to_df(f'{config["results_save_dir"]}/{config["mmseqs_reference_genome_results_dir_save_location"]}/results_dir/mmseqs_results.m8',
+                                                  'reference_genome')
++            save_mmseqs_pident_metrics(
++                mmseqs_results_df,
++                "reference_genome",
++                seq_df,
++                f'{config["results_save_dir"]}/{config.get("reference_genome_sequence_identity_metrics_file_save_location", "qc5_reference_genome_sequence_identity_metrics.csv")}',
++            )
+             filtered_df = valid_mmseqs_pident(mmseqs_results_df, "reference_genome", config["mmseqs_reference_genome_sequence_identity_keep_range"], seq_df)
+             filter_counts['count_mmseqs_reference_genome_sequence_identity_remove_filter'] = len(filtered_df)
+             print(f"Completed MMseqs reference genome sequence identity removal filtering resulting in {filter_counts['count_mmseqs_reference_genome_sequence_identity_remove_filter'].values[0]} sequences.")
+@@ -2541,7 +2787,7 @@
+             filtered_df.to_csv(f'{config["results_save_dir"]}/{config["diversification_filter_seqs_csv_file_save_location"]}', index=False)
+
+         ### Filter by genetic architecture score removal ###
+-        if config["genetic_architecture_remove_filter"] == True:
++        if config["genetic_architecture_remove_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by genetic architecture score with remove threshold {config['genetic_architecture_score_range_to_remove']} using the reference genome {config['genetic_architecture_reference_genome']}...")
+             filtered_df = valid_genetic_architecture_score(filtered_df,
+                                                            ga.phix174_truth_matrix_blurred_sigma5,
+@@ -2570,6 +2816,25 @@
+
+     ### Annotate & visualize genomes ###
+     if config["genetic_architecture_visualization_and_synteny_filtering"] == True:
++        if config["diversification_filtering"] == True:
++            synteny_input_csv = f'{config["results_save_dir"]}/{config["diversification_filter_seqs_csv_file_save_location"]}'
++            synteny_counts_csv = f'{config["results_save_dir"]}/{config["diversification_filter_counts_file_save_location"]}'
++        else:
++            synteny_input_csv = f'{config["results_save_dir"]}/{config["homology_filter_seqs_csv_file_save_location"]}'
++            synteny_counts_csv = f'{config["results_save_dir"]}/{config["homology_filter_counts_file_save_location"]}'
++        if os.path.exists(synteny_input_csv):
++            synteny_preview_df = pd.read_csv(synteny_input_csv)
++            if len(synteny_preview_df) == 0:
++                print("No sequences available for genome visualization and synteny filtering; writing empty synteny outputs.")
++                if os.path.exists(synteny_counts_csv):
++                    synteny_filter_counts = pd.read_csv(synteny_counts_csv)
++                    synteny_filter_counts.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_counts_file_save_location"]}', index=False)
++                synteny_preview_df.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}', index=False)
++                save_df_as_fasta(synteny_preview_df, f'{config["results_save_dir"]}/{config["synteny_filter_seqs_fasta_file_save_location"]}')
++                filtered_df = synteny_preview_df
++                config["genetic_architecture_visualization_and_synteny_filtering"] = False
++
++    if config["genetic_architecture_visualization_and_synteny_filtering"] == True:
+
+         ### Check that ORFs and protein annotations are predicted ###
+         if config["homology_filtering"] == False or config["protein_database_hit_count_filter"] == False:
+@@ -2611,8 +2875,13 @@
+                         output_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}')
+
+         ### Filter by average protein sequence identity ###
+-        if config["average_protein_sequence_identity_filter"] == True:
++        if config["average_protein_sequence_identity_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by average amino acid sequence identity with threshold {config['average_protein_sequence_identity_range']}...")
++            calculate_average_protein_percent_identity(
++                f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
++                f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
++                f'{config["results_save_dir"]}/{config.get("average_protein_sequence_identity_metrics_file_save_location", "qc6_average_protein_sequence_identity_metrics.csv")}',
++            )
+             valid_average_protein_percent_identity(f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
+                                                    f'{config["results_save_dir"]}/{config["gbk_dir_save_location"]}',
+                                                    f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
+@@ -2627,12 +2896,13 @@
+             save_df_as_fasta(filtered_df, f'{config["results_save_dir"]}/{config["synteny_filter_seqs_fasta_file_save_location"]}')
+
+         ### Filter by required genes ###
+-        if config["required_genes_filter"] == True:
++        if config["required_genes_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by required genes filter with required genes {config['required_genes_list']}...")
+             filtered_df = valid_gene_annotations(input_gff_dir=f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
+                                    input_gbk_dir=f'{config["results_save_dir"]}/{config["gbk_dir_save_location"]}',
+                                    required_products=config["required_genes_list"],
+-                                   sequences_df=filtered_df)
++                                   sequences_df=filtered_df,
++                                   metrics_csv=f'{config["results_save_dir"]}/{config.get("required_genes_metrics_file_save_location", "qc6_required_genes_metrics.csv")}')
+             filter_counts['count_required_genes_filter'] = len(filtered_df)
+             print(f"Completed required genes filtering resulting in {filter_counts['count_required_genes_filter'].values[0]} sequences.")
+             # Save checkpoint
+@@ -2641,22 +2911,33 @@
+             save_df_as_fasta(filtered_df, f'{config["results_save_dir"]}/{config["synteny_filter_seqs_fasta_file_save_location"]}')
+
+         ### Visualize genome annotations ###
+-        print("Creating genetic architecture visualizations...")
+-        run_lovis4u_in_conda_env(config["lovis4u_conda_env"],
+-                                 f"python {config['genetic_architecture_visualization_script']} {config['current_config_file']}")
+-        move_genetic_architecture_pdfs(f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
+-                                       f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}')
+-        print("Finished creating genetic architecture visualizations.")
++        if len(filtered_df) > 0:
++            print("Creating genetic architecture visualizations...")
++            run_lovis4u_in_conda_env(config["lovis4u_conda_env"],
++                                     f"python {config['genetic_architecture_visualization_script']} {config['current_config_file']}")
++            if config.get("lovis4u_collect_pdfs", True):
++                move_genetic_architecture_pdfs(f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
++                                               f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_pdf_dir_save_location"]}')
++            else:
++                print("Skipping LoVis4u PDF collection; synteny, AAI, and required-gene metrics do not need copied PDFs.")
++            print("Finished creating genetic architecture visualizations.")
++        else:
++            print("No sequences remain for genetic architecture visualization.")
+
+         ### Filter by synteny to a reference genome ###
+-        if config["syntenic_gene_count_filter"] == True:
++        if config["syntenic_gene_count_filter"] == True and len(filtered_df) > 0:
+             print(f"Filtering by syntenic gene count with syntenic gene count range {config['syntenic_gene_count_range']}, total gene count range {config['total_gene_count_range']}, and syntenic total gene counts removed {config['syntenic_total_gene_count_remove']}...")
+             count_syntenic_genes_all(root_dir=f'{config["results_save_dir"]}/{config["genetic_architecture_visualization_dir_save_location"]}',
+                                      gff_dir=f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
+                                      input_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
+-                                     output_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}')
++                                     output_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
++                                     reference_gff_path=config.get("reference_genome_gff_file_save_location") if config.get("allow_gff_product_order_synteny_fallback", False) else None)
+             count_total_num_genes(f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
+                                   f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}')
++            shutil.copyfile(
++                f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
++                f'{config["results_save_dir"]}/{config.get("synteny_metrics_file_save_location", "qc6_synteny_filter_metrics.csv")}',
++            )
+             valid_syntenic_gene_count(input_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
+                                       output_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
+                                       syntenic_gene_count_range= config["syntenic_gene_count_range"],

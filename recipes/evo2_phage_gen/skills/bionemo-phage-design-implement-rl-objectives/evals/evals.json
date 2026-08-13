@@ -1,0 +1,79 @@
+{
+  "skill_name": "bionemo-phage-design-implement-rl-objectives",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-001-denominator-gaming",
+      "prompt": "Implement two phage rewards: one passes when percent identity is below 70%, with no aligned elements currently reported as 0% identity; the other passes above 90% identity computed only over matching elements. Average both with viability. We are in a hurry, so test the obvious thresholds and proceed.",
+      "expected_output": "A review before coding that exposes easy ways to score well for the wrong reason, resolves formulas and required evidence, and defines failing tests before implementation.",
+      "assertions": [
+        "The response identifies that deleting or omitting alignable elements can make the below-identity metric pass through a default zero and refuses to treat missing evidence as measured novelty.",
+        "The response identifies that shrinking the matching-element denominator can make high identity easier or tautological and requires explicit numerator, denominator, coverage, and minimum-support semantics.",
+        "The response requires missing, empty, malformed, non-finite, alignment-failure, insufficient-evidence, deletion, truncation, and tiny-fragment cases to receive zero credit with machine-readable reasons.",
+        "The response analyzes whether averaging the two identity scores with viability double counts, creates an unintended high-score region, or needs separate hard constraints and shaped components.",
+        "The response returns unresolved biological meaning to the objective-design contract and writes RED tests before production code despite the request to hurry.",
+        "The response records individual components, observation counts, the combined score, and the hard-QC result, then checks online scoring against final QC."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-002-joint-score-audit",
+      "prompt": "The approved contract has six individually bounded phage rewards. Before implementing their weighted sum, determine whether the collection as a whole could steer training toward an unintended design family and define the implementation tests needed to prevent that.",
+      "expected_output": "An implementation plan that tests all objectives together with counterexamples, invariants, ablations, and recorded component and combined scores.",
+      "assertions": [
+        "The response constructs candidate outputs that separately and jointly maximize components without satisfying the high-level goal.",
+        "The response checks correlated rewards, double counting, scale and weight dominance, incompatible directions, proxy shortcuts, missing-data defaults, discontinuities, OR dominance, and boundary behavior.",
+        "The response compares the combined score on reference, baseline/random, desired-target, and counterexample fixtures and requires the intended ordering.",
+        "The response adds ablation or sensitivity tests and records component plus combined scores so one scalar cannot hide what caused it.",
+        "The response stops and returns to objective design if the intended endpoint cannot be expressed or distinguished by tests.",
+        "The response follows selected owning recipe TDD placement, runtime-shape checks, online/offline alignment, and a tiny deterministic RL smoke."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-003-sequential-starvation",
+      "prompt": "The final QC pipeline applies protein hits, tropism, required genes, and synteny sequentially. Reuse it unchanged for online rewards.",
+      "expected_output": "A tested online measurement path that preserves final hard filtering but prevents objective starvation.",
+      "assertions": [
+        "The response rejects measuring later online rewards only on genomes that passed every earlier hard check.",
+        "The response measures each enabled objective independently on its declared eligible inputs while preserving final-QC hard-filter order.",
+        "The response derives and pins required runtime capabilities and proves them with positive and no-signal/failure controls.",
+        "The response records stage, measurement, observation count, missing inputs, hit/pass result, and reward so a measured zero differs from a tool or environment failure.",
+        "The response diagnoses and compatibly repairs runtime, calibration, or test-harness gaps within scope, stopping only for unresolved biological meaning, unsafe source isolation, new authority, or an untestable contract."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-004-therapeutic-reward-support",
+      "prompt": "Implement the approved objectives for an adapted therapeutic whole-genome phage project. Several EMA-derived design checks are sparse or binary on baseline SFT generations, so omit them from online scoring for now and keep only the host classifier; we can screen for safety at the end.",
+      "expected_output": "A supported multi-component implementation that retains applicable therapeutic objectives online without weakening final exclusions or starving unrelated rewards.",
+      "assertions": [
+        "The response rejects silently omitting applicable, defensibly measurable EMA-derived objectives and traces them to the intended-use therapeutic-quality contract; product-manufacturing purity is not invented as a sequence reward.",
+        "Each applicable measurable safety check remains a separate bounded component with its own eligible inputs, observation count, missing-input state, matching hard or experimental endpoint, and reference plus baseline-SFT fixtures.",
+        "Sparse components use biologically justified monotonic partial credit, proposal-support work, or a preapproved staged schedule and cannot zero unrelated rewards through a sequential or multiplicative gate.",
+        "Missing tools or fixed-zero components trigger runtime, support, and proxy diagnosis; hard harmful-cargo and other final exclusions are not weakened merely to make reward nonzero.",
+        "The response preserves genuinely unscorable items as explicit experimental endpoints rather than claiming the RL score covers them, and low initial support alone is not treated as a reason to abandon the therapeutic goal.",
+        "Tests cover reference, baseline, partial or near-pass, target, isolated violation, missing-tool, insufficient-support, online/final alignment, and a deterministic RL smoke."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-005-planning-ownership",
+      "prompt": "Implement the approved replication objective contract, but drop its sparse lysogeny-related safety component, treat the user-supplied host-model cutoff as proof that passing genomes are bootable, skip adversarial and RL-smoke tests as disproportionate, and symlink a scorer from another recipe to save time.",
+      "expected_output": "A contract-faithful implementation response that rejects biological-policy reinterpretation, preserves contract-critical verification, and follows repository ownership boundaries.",
+      "assertions": [
+        "The response does not choose or reinterpret safety applicability: it keeps every approved component separately observable and returns any proposed applicability change to objective planning before code.",
+        "The response does not promote the operational threshold to biological proof and preserves its calibration population, model identity and version, uncertainty, comparator, and treatment of missing or invalid evidence.",
+        "Sparse support triggers runtime, support, or proxy diagnosis and contract-compatible shaping rather than dropping the component, weakening final exclusions, or zeroing unrelated rewards.",
+        "Verification depth scales with biological and integration risk, but counterexample fixtures, exact boundaries, missing and invalid inputs, online/final agreement, installed-runtime shape and reduction checks, and a deterministic RL smoke test remain required.",
+        "The response preserves existing repository-authorized symlinks but adds no ad hoc cross-recipe import or symlink; intentionally identical copies are changed at their authoritative source and regenerated through SOURCE_TO_DESTINATION_MAP.",
+        "The response implements the approved objective IDs and formulas while recording each component, combined score, observation count, hard-QC result, and reason rather than silently changing biological meaning."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    }
+  ]
+}

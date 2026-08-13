@@ -1,0 +1,115 @@
+{
+  "skill_name": "bionemo-phage-design",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-001-interactive-intake",
+      "prompt": "Help me start an adapted Evo 2 phage-design project for a bacterial phage. I have not chosen the exact target, objective, SFT run, or execution settings yet, but I can answer questions as we refine the plan.",
+      "expected_output": "An interactive discovery plan that inspects the system and prior results first, presents a compact initial plan, and asks only biologically or operationally material questions.",
+      "assertions": [
+        "The response treats interactive planning as the default and proposes an initial plan that can be revised with the user before launch.",
+        "The response first inventories sibling skills, repository state, existing result roots, public model access, execution plane, storage/free space/writability, and locally visible GPU count and occupancy when applicable.",
+        "The response identifies the missing target phage, host, desired change, related SFT corpus, SFT reuse decision, RL objectives, final QC, and order or rollout target without inventing them.",
+        "Before any stage attempt, the response proposes the standard gitignored result root and initializes PROJECT.yaml, SUMMARY.md, a project-wide append-only RUNLOG.md, planning/PLAN.md, planning/DESIGN_SPEC.yaml, planning/DEPENDENCY_GRAPH.yaml, and planning/DECISIONS.md; stage logs do not replace the root chronology.",
+        "The response is compact enough to serve as an intake rather than a full run log.",
+        "The response always keeps the selected checkout's colocated recipes/evo2_phage_gen as recipe_root; source mutation may use a user-authorized branch, full-checkout worktree, or copy only when that colocated package remains present."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-002-batch-intake",
+      "prompt": "Use batch mode to make the best complete phage-design plan you can from this checkout while I am offline. Infer reasonable intent from existing project records and prior compatible runs, record uncertainty, and leave executable handoff scripts rather than waiting for answers.",
+      "expected_output": "A best-effort batch plan grounded in durable project records, with assumptions and unresolved blockers made explicit and no silent irreversible choices.",
+      "assertions": [
+        "The response explicitly selects batch mode and does not behave as though interactive questioning will be answered immediately.",
+        "The response treats versioned project files, summaries, decisions, environment records, action ledgers, and verified artifacts as portable memory; proprietary agent memory may be a hint but is not the source of truth.",
+        "The response infers only reversible defaults, records evidence and confidence for inferred intent, and leaves material biological, authority, credential, or destructive choices unresolved.",
+        "The response produces ordered human-runnable scripts and acceptance checks plus a precise handoff for steps it cannot safely execute.",
+        "The response still performs environment, storage, writability, GPU, prior-result, and lineage discovery before sizing or launching work."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-003-slurm-cross-project-sft",
+      "prompt": "Plan RL for a 50 kb bacterial phage from a Slurm login node. A promising SFT checkpoint exists in another result project, the current microbatch OOMs at full length, and this harness re-enters goals without a timer.",
+      "expected_output": "A controller handoff that verifies cross-project SFT and prompt lineage, preserves the full-genome workload while adapting resources, and rate-limits monitoring.",
+      "assertions": [
+        "The response surfaces the external SFT candidate with checkpoint-selection evidence and asks for explicit reuse approval rather than silently selecting it.",
+        "The response requires complete SFT and prompt lineage including project, stage, checkpoint identity/hash, base model, data/split/config hashes, prompt manifest, and selection rationale.",
+        "The response keeps the 50 kb full-genome context and first reduces microbatch while preserving the approved effective token batch through accumulation before escalating parallelism.",
+        "The response uses Slurm submission and attempt-scoped ordered scripts, records the job identity and logs, and avoids compute-heavy work on the login node.",
+        "Before any remote source mutation, the response obtains source-state and ownership confirmation through a user-owned controller, branch, worktree, or copy; scripts and pyproject.toml are not authority, and inability to verify causes a stop and safe handoff.",
+        "The response persists next-check times and returns without scheduler, filesystem, or telemetry queries when a timerless goal re-entry is not due."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-004-unattended-local-replication",
+      "prompt": "Plan a paper replication locally on eight H100s. Keep the historical split sizes, but prevent cluster leakage; after approval I will be offline, so keep it progressing and use W&B if readily available.",
+      "expected_output": "A concise local execution plan that prioritizes cluster-disjoint splits, all approved GPUs, durable bounded supervision, and default authenticated W&B with a non-blocking local fallback.",
+      "assertions": [
+        "The response states the local execution plane and planned eight-GPU topology rather than silently reducing resources to match history.",
+        "The response assigns whole clusters across train, validation, and test; leakage prevention overrides paper-exact membership while retaining requested sizes when feasible.",
+        "The response places selected-SFT sampling calibration after objective/QC definition and before RL, with byte/token compatibility and independent calibration/validation banks.",
+        "The response uses the recipe's customized replication default—filters 1–6, 8, and 9 enabled and filter 7 disabled—with applicable safety objectives enabled by default; it preserves historical and added component sets separately and does not directly compare aggregates built from different components.",
+        "The response selects and verifies a proven agent-independent execution facility, including a harness-native long-running-job facility when available, without mandating one implementation; its worker and stable status/log queries survive agent-session restart.",
+        "The response uses /goal, /loop, recurring monitors, or an equivalent harness feature when available to invoke due-gated monitoring and advance the next approved stage after verified completion, without making the monitor the worker owner.",
+        "The supervisor has bounded no-progress detection, exact-process checks, and in-scope repair/retry rather than waiting indefinitely at a failed gate.",
+        "Unless the user opts out, the response discovers the installed W&B integration and bounded supported authentication through environment-key presence, netrc, existing session/settings, or current login flow; it auto-enables separate SFT, calibration, and RL projects sharing a prefix on success, keeps local telemetry authoritative, never exposes credentials, and records the fallback reason when unavailable.",
+        "The response uses a per-stage topology matrix and prefers pure DP when it fits and improves global throughput, reserving TP for fit, measured throughput, or single-request latency.",
+        "The response forecasts disk from total corpus bases and retained representations plus approximately 91 GB SFT and 78 GB RL full checkpoints, reserves checkpoint-write and transient-QC headroom, and obtains user help or approval for role-based cleanup before launch when capacity is short.",
+        "After genomes are collected, the response proposes p99.9 or the affordable maximum from their tokenized length distribution for agreement, adds worst-case serialization overhead and alignment, and changes the RL length basis only for an explicit expansion or contraction objective."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-005-optional-publication",
+      "prompt": "Plan my phage-design run and publish useful artifacts to gs://lab/phage-y after each stage and each RL validation. Upload only the selected checkpoint for handoff, allow an on-demand snapshot, and verify everything important at the end.",
+      "expected_output": "A controller plan that invokes optional backend-aware artifact publication at decision-relevant moments.",
+      "assertions": [
+        "The response invokes bionemo-phage-design-publish-stage-artifacts because publication was requested.",
+        "The initial plan records destination/backend, private/shared/public access intent, cadence, contents, exclusions, expected sizes, client, and verification.",
+        "Ongoing publication includes settled validation outputs while stage-end publication includes the selected handoff checkpoint and its lineage rather than every checkpoint.",
+        "The response supports a user-requested intermediate snapshot and a final manifest reconciliation with verified destination references.",
+        "Transfer failures use bounded retries and remain visible without blocking an otherwise healthy scientific stage."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-006-whole-genome-host-range-scope",
+      "prompt": "Plan an adapted phage-design project whose goal is productive infection of a new resistant bacterial strain while retaining useful similarity to a viable reference. I have not specified a non-therapeutic use. A host predictor and prior biology make one receptor-binding tail module look especially important, but I have not authorized a regional edit or fixed backbone. The phenotype data come from two related interaction studies, some genomes may be unavailable, and authenticated W&B may already be configured in the session.",
+      "expected_output": "A whole-genome, lifecycle-wide design plan that makes any scope reduction an explicit decision, validates host-model data and reward calibration, preserves viability with multiple signals, and initializes durable provenance and telemetry.",
+      "assertions": [
+        "Because no other intended use was stated, the response provisionally records therapeutic use as a visible, revisable assumption; a later explicit non-therapeutic objective would receive a reasoned applicability review rather than inheriting or dropping the therapy set wholesale.",
+        "The response initializes PROJECT.yaml, SUMMARY.md, root RUNLOG.md, planning/PLAN.md, planning/DESIGN_SPEC.yaml, planning/DEPENDENCY_GRAPH.yaml, and planning/DECISIONS.md before stage attempts and records design-scope and telemetry decisions in the root chronology.",
+        "The response defaults to complete-genome outputs and a whole-genome mutable scope; similarity, synteny, host-range emphasis, metric exclusions, or a promising tail module do not silently become a locus-only edit, and any material scope reduction requires explicit approval with benefits and lifecycle blind spots stated.",
+        "The response covers adsorption and entry, target-strain defenses and phage counter-defense, takeover/replication, morphogenesis/packaging, productive lysis/progeny, and therapeutic suitability plus safety-related exclusion criteria when applicable, including production-host-dependent methylation or DNA modification that sequence alone cannot guarantee; for therapeutic use it cites ema-2025-draft-phage-therapy-quality-guideline.md as the detailed quality reference, applies only design-relevant criteria, and does not turn downstream product-manufacturing controls into sequence rewards.",
+        "Because this is adapted therapeutic work, every applicable EMA-derived design check with a defensible measurable proxy appears as its own bounded online RL component plus aligned hard-QC or experimental evidence; missing or sparse support triggers diagnosis and calibrated shaping rather than silent removal, one multiplicative gate, weakened exclusions, or abandonment.",
+        "The viability contract combines complete topology/termini and packaging-compatible length, intact key genes/modules and regulatory architecture, evidence-appropriate synteny, composition envelopes, calibrated whole-genome QC/models, and coverage-aware similarity to a versioned viable-reference set without using similarity as a hidden edit mask.",
+        "The response maps interaction rows to versioned host/phage assemblies and hashes, reports unavailable genomes and assay/label differences, prevents leakage, compares separate-dataset and harmonized same-taxon pooled models on deployment-matched host/phage holdouts, and does not assume pooling improves performance.",
+        "The host-model reward maps a calibrated negative/baseline point to zero and the accepted held-out operating threshold to one with monotonic clipping or an equivalent saturating transform, so scores above the threshold receive no extra reward; the model remains one signal with hard QC and phenotype validation.",
+        "Unless opted out, the response checks supported W&B authentication without revealing credentials, enables SFT/calibration/RL logging when it succeeds even if a checked-in default is false, and records an actionable local-only fallback reason otherwise."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-007-resource-aware-dag-autonomy",
+      "prompt": "An approved eight-GPU phage plan is active and I will be offline. SFT is healthy and training; its selected checkpoint is not available yet. The RL objective contract is approved, but its reward functions are not implemented. Sampling calibration requires both the selected SFT checkpoint and tested reward functions. I requested two alternative eight-GPU RL runs after calibration on this single eight-GPU host. Keep useful work moving without changing the biological intent or resource ceiling.",
+      "expected_output": "A dependency- and resource-aware continuation that overlaps safe work, queues incompatible GPU jobs, and proceeds autonomously inside the approved envelope.",
+      "assertions": [
+        "The response updates a durable dependency DAG and editable Mermaid view; stage or action numbers are traceability rather than mandatory runtime order.",
+        "While SFT is monitored, the response starts implementation and tests for the already-approved RL objectives; calibration still waits for both tested objectives and the selected SFT checkpoint.",
+        "The two eight-GPU RL alternatives may be dependency-ready together, but admission control reserves the single eight-GPU pool for only one at a time and queues the other with a resource reason.",
+        "A blocked node stalls only its descendants while unrelated safe work continues.",
+        "The response records in-envelope decisions and deviations in DECISIONS.md and RUNLOG.md without routine questions, escalating only for changed biological intent, safety conflict, missing authority, new irreversible action, exhausted recovery, or resource/cost expansion."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    }
+  ]
+}

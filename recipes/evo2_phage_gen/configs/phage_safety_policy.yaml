@@ -1,0 +1,23 @@
+schema_version: 1
+policy_id: phage-sequence-safety-v1
+regulatory_basis:
+  label: EMA-derived sequence-design safety gate
+  source: EMA/CHMP/BWP/1/2024
+  source_status: draft
+  source_status_as_of: 2026-08-07
+  regulatory_compliance_claimed: false
+host_scope:
+  allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
+  disallowed_endpoint: increased_eukaryotic_replication
+required_sequence_classes: [amr, toxin]
+bacterial_replication_profile:
+  required_sequence_classes: [amr, toxin, lysogeny]
+  strict_lytic_required: true
+archaeal_only_profile:
+  required_sequence_classes: [amr, toxin]
+  lysogeny: informational
+failure_policy:
+  missing_required_tool: INDETERMINATE
+  missing_required_database: INDETERMINATE
+  parser_schema_mismatch: INDETERMINATE
+  incomplete_host_evidence: INDETERMINATE
