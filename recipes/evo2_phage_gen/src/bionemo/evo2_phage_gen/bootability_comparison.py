@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Utilities for the one-off PhiX174 likelihood-scorer comparison."""
 
@@ -135,14 +147,14 @@ def prepare_order_audit_cohort(
         )
         for label in ("0", "1")
     }
-    positive_positions = set(
-        np.rint(np.linspace(0, len(rows) - 1, len(by_label["1"]) + 2)[1:-1]).astype(int).tolist()
-    )
+    positive_positions = set(np.rint(np.linspace(0, len(rows) - 1, len(by_label["1"]) + 2)[1:-1]).astype(int).tolist())
     if len(positive_positions) != len(by_label["1"]):
         raise ValueError("could not assign distinct interleaved positions")
     negative_iter = iter(by_label["0"])
     positive_iter = iter(by_label["1"])
-    ordered = [next(positive_iter) if index in positive_positions else next(negative_iter) for index in range(len(rows))]
+    ordered = [
+        next(positive_iter) if index in positive_positions else next(negative_iter) for index in range(len(rows))
+    ]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_rows: list[dict[str, str]] = []
@@ -159,7 +171,7 @@ def prepare_order_audit_cohort(
 
     output_manifest = output_dir / "cohort_manifest.csv"
     partial = Path(f"{output_manifest}.partial")
-    output_fields = fieldnames + ("source_sequence_id",)
+    output_fields = (*fieldnames, "source_sequence_id")
     with partial.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=output_fields, lineterminator="\n")
         writer.writeheader()
@@ -366,9 +378,9 @@ def collect_predict_scores(
     """Join DP-rank outputs and emit one validated score row per manifest sequence."""
     import torch
 
-    index_map = {name: int(index) for name, index in json.loads(
-        (prediction_dir / "seq_idx_map.json").read_text()
-    ).items()}
+    index_map = {
+        name: int(index) for name, index in json.loads((prediction_dir / "seq_idx_map.json").read_text()).items()
+    }
     id_by_index = {index: name for name, index in index_map.items()}
     if len(id_by_index) != len(index_map):
         raise ValueError("seq_idx_map contains duplicate indices")
@@ -527,7 +539,7 @@ def _distribution_summary(values: Sequence[float]) -> dict[str, float | int]:
     if not len(array) or not np.isfinite(array).all():
         raise ValueError("distribution values must be nonempty and finite")
     return {
-        "n": int(len(array)),
+        "n": len(array),
         "mean": float(array.mean()),
         "std": float(array.std(ddof=1)) if len(array) > 1 else 0.0,
         "min": float(array.min()),
@@ -592,9 +604,7 @@ def analyze_model_score_distributions(
     centered_lengths = natural_lengths - natural_lengths.mean()
     centered_scores = natural_scores - natural_scores.mean()
     denominator = float(np.dot(centered_lengths, centered_lengths))
-    slope_per_kb = (
-        float(np.dot(centered_lengths, centered_scores) / denominator * 1000.0) if denominator else 0.0
-    )
+    slope_per_kb = float(np.dot(centered_lengths, centered_scores) / denominator * 1000.0) if denominator else 0.0
     fitted = natural_scores.mean() + slope_per_kb / 1000.0 * centered_lengths
     total_variation = float(np.dot(centered_scores, centered_scores))
     r_squared = 1.0 - float(np.square(natural_scores - fitted).sum()) / total_variation if total_variation else 0.0
@@ -623,11 +633,7 @@ def analyze_model_score_distributions(
         if groups:
             natural_section[output_name] = {
                 group: _distribution_summary(
-                    [
-                        float(row["mean_log_likelihood"])
-                        for row in natural_rows
-                        if row.get(field, "") == group
-                    ]
+                    [float(row["mean_log_likelihood"]) for row in natural_rows if row.get(field, "") == group]
                 )
                 for group in groups
             }
@@ -636,15 +642,11 @@ def analyze_model_score_distributions(
     if counterfactual_rows:
         by_sequence: dict[str, dict[str, float]] = {}
         for row in counterfactual_rows:
-            by_sequence.setdefault(row["base_sequence_id"], {})[row["prompt"]] = float(
-                row["mean_log_likelihood"]
-            )
+            by_sequence.setdefault(row["base_sequence_id"], {})[row["prompt"]] = float(row["mean_log_likelihood"])
         prompts = sorted({row["prompt"] for row in counterfactual_rows} - {"+~"})
         for prompt in prompts:
             deltas = [
-                scores[prompt] - scores["+~"]
-                for scores in by_sequence.values()
-                if prompt in scores and "+~" in scores
+                scores[prompt] - scores["+~"] for scores in by_sequence.values() if prompt in scores and "+~" in scores
             ]
             if deltas:
                 prompt_effects[f"{prompt}-minus-+~"] = _distribution_summary(deltas)
@@ -652,7 +654,7 @@ def analyze_model_score_distributions(
     return {
         "score": "mean_log_likelihood",
         "bootability": {
-            "n": int(len(labels)),
+            "n": len(labels),
             "auc_mean": float(roc_auc_score(labels, mean_scores)),
             "auc_joint": float(roc_auc_score(labels, joint_scores)),
             "average_precision_mean": float(average_precision_score(labels, mean_scores)),
@@ -694,11 +696,7 @@ def analyze_phix174_similar_controls(
         raise ValueError("bootability rows must contain finite scores and labels 0 and 1")
 
     similar_rows = [row for row in natural_rows if row.get("prompt") == prompt]
-    matched_rows = [
-        row
-        for row in similar_rows
-        if length_min <= int(row["length"]) <= length_max
-    ]
+    matched_rows = [row for row in similar_rows if length_min <= int(row["length"]) <= length_max]
     named_complete_rows = [
         row
         for row in matched_rows
@@ -736,14 +734,13 @@ def analyze_phix174_similar_controls(
     threshold_values = {
         "viable_q05": float(np.quantile(viable, 0.05)),
         **{
-            f"viable_median_minus_{multiple}_robust_sd": viable_median - multiple * robust_sd
-            for multiple in (1, 2, 3)
+            f"viable_median_minus_{multiple}_robust_sd": viable_median - multiple * robust_sd for multiple in (1, 2, 3)
         },
     }
 
     def pass_summary(values: np.ndarray, threshold: float) -> dict[str, float | int]:
         passed = int((values >= threshold).sum())
-        n = int(len(values))
+        n = len(values)
         fraction = passed / n
         z = 1.959963984540054
         denominator = 1.0 + z * z / n
@@ -758,11 +755,7 @@ def analyze_phix174_similar_controls(
         }
 
     unique_scores = np.unique(design_scores)
-    candidate_thresholds = (
-        (unique_scores[:-1] + unique_scores[1:]) / 2
-        if len(unique_scores) > 1
-        else unique_scores
-    )
+    candidate_thresholds = (unique_scores[:-1] + unique_scores[1:]) / 2 if len(unique_scores) > 1 else unique_scores
     candidates = []
     for threshold in candidate_thresholds:
         predicted_viable = design_scores >= threshold
@@ -775,9 +768,7 @@ def analyze_phix174_similar_controls(
                 "specificity": specificity,
                 "balanced_accuracy": (sensitivity + specificity) / 2,
                 "youden_j": sensitivity + specificity - 1,
-                "margin_to_nearest_observation": float(
-                    np.min(np.abs(design_scores - threshold))
-                ),
+                "margin_to_nearest_observation": float(np.min(np.abs(design_scores - threshold))),
             }
         )
     separation = max(
@@ -798,15 +789,10 @@ def analyze_phix174_similar_controls(
         "worst_viable": worst_viable,
         "best_nonviable": best_nonviable,
         "overlap": {
-            "nonviable_at_or_above_worst_viable": int(
-                (cohorts["nonviable"] >= worst_viable).sum()
-            ),
+            "nonviable_at_or_above_worst_viable": int((cohorts["nonviable"] >= worst_viable).sum()),
             "viable_at_or_below_best_nonviable": int((viable <= best_nonviable).sum()),
         },
-        "pass": {
-            cohort_name: pass_summary(values, separation_threshold)
-            for cohort_name, values in cohorts.items()
-        },
+        "pass": {cohort_name: pass_summary(values, separation_threshold) for cohort_name, values in cohorts.items()},
     }
 
     return {
@@ -814,10 +800,7 @@ def analyze_phix174_similar_controls(
         "higher_is_better": True,
         "source_prompt": prompt,
         "length_range": [length_min, length_max],
-        "cohorts": {
-            name: _distribution_summary(values)
-            for name, values in cohorts.items()
-        },
+        "cohorts": {name: _distribution_summary(values) for name, values in cohorts.items()},
         "viable_reference": {
             "median": viable_median,
             "mad": viable_mad,
@@ -827,10 +810,7 @@ def analyze_phix174_similar_controls(
         "thresholds": {
             name: {
                 "threshold": threshold,
-                "pass": {
-                    cohort_name: pass_summary(values, threshold)
-                    for cohort_name, values in cohorts.items()
-                },
+                "pass": {cohort_name: pass_summary(values, threshold) for cohort_name, values in cohorts.items()},
             }
             for name, threshold in threshold_values.items()
         },
@@ -842,13 +822,9 @@ def compare_order_audit_scores(
     reordered_rows: Sequence[dict[str, str]],
 ) -> dict:
     """Measure whether changed loader/batch/rank order materially changes scorer discrimination."""
-    original = {
-        row["sequence_id"]: (int(row["label"]), float(row["mean_log_likelihood"]))
-        for row in original_rows
-    }
+    original = {row["sequence_id"]: (int(row["label"]), float(row["mean_log_likelihood"])) for row in original_rows}
     reordered = {
-        row["source_sequence_id"]: (int(row["label"]), float(row["mean_log_likelihood"]))
-        for row in reordered_rows
+        row["source_sequence_id"]: (int(row["label"]), float(row["mean_log_likelihood"])) for row in reordered_rows
     }
     if len(original) != len(original_rows) or len(reordered) != len(reordered_rows):
         raise ValueError("order-audit rows must have unique sequence identifiers")
@@ -868,9 +844,7 @@ def compare_order_audit_scores(
     label_array = np.asarray(labels, dtype=int)
     original_array = np.asarray(original_scores, dtype=float)
     reordered_array = np.asarray(reordered_scores, dtype=float)
-    if set(label_array.tolist()) != {0, 1} or not np.isfinite(
-        np.concatenate((original_array, reordered_array))
-    ).all():
+    if set(label_array.tolist()) != {0, 1} or not np.isfinite(np.concatenate((original_array, reordered_array))).all():
         raise ValueError("order-audit labels and scores are invalid")
 
     deltas = reordered_array - original_array
@@ -881,11 +855,9 @@ def compare_order_audit_scores(
     auc_original = float(roc_auc_score(label_array, original_array))
     auc_reordered = float(roc_auc_score(label_array, reordered_array))
     pearson = float(np.corrcoef(original_array, reordered_array)[0, 1])
-    spearman = float(
-        np.corrcoef(_average_ranks(original_array), _average_ranks(reordered_array))[0, 1]
-    )
+    spearman = float(np.corrcoef(_average_ranks(original_array), _average_ranks(reordered_array))[0, 1])
     return {
-        "n": int(len(label_array)),
+        "n": len(label_array),
         "positive": int(label_array.sum()),
         "negative": int((label_array == 0).sum()),
         "auc_original": auc_original,
@@ -961,6 +933,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run the selected bootability-comparison subcommand."""
     args = _build_parser().parse_args()
     if args.command == "prepare":
         manifest = prepare_bootability_cohort(
@@ -1027,9 +1000,7 @@ def main() -> None:
     if args.command == "analyze":
         bootability_rows = list(csv.DictReader(args.bootability_csv.open()))
         natural_rows = list(csv.DictReader(args.natural_csv.open()))
-        counterfactual_rows = (
-            list(csv.DictReader(args.counterfactual_csv.open())) if args.counterfactual_csv else []
-        )
+        counterfactual_rows = list(csv.DictReader(args.counterfactual_csv.open())) if args.counterfactual_csv else []
         result = analyze_model_score_distributions(
             bootability_rows,
             natural_rows,

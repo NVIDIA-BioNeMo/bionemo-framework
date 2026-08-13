@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import csv
 import json
 from pathlib import Path
@@ -84,7 +99,9 @@ def test_prepare_order_audit_cohort_renames_and_interleaves_labels(tmp_path):
         "nonviable_0000",
         "nonviable_0001",
     }
-    assert [line for line in (tmp_path / "audit" / "cohort_raw.fna").read_text().splitlines() if line.startswith(">")] == [
+    assert [
+        line for line in (tmp_path / "audit" / "cohort_raw.fna").read_text().splitlines() if line.startswith(">")
+    ] == [
         ">orderaudit_0000",
         ">orderaudit_0001",
         ">orderaudit_0002",
@@ -119,15 +136,10 @@ def test_prepare_natural_positive_cohort_is_deterministic_and_preserves_native_p
 
 def test_annotate_natural_sft_membership_joins_payload_hash_and_preserves_order(tmp_path):
     natural_manifest = tmp_path / "natural.csv"
-    natural_manifest.write_text(
-        "sequence_id,sha256,length\n"
-        "natural_00000,aaa,4000\n"
-        "natural_00001,bbb,5000\n"
-    )
+    natural_manifest.write_text("sequence_id,sha256,length\nnatural_00000,aaa,4000\nnatural_00001,bbb,5000\n")
     split_records = tmp_path / "split.jsonl"
     split_records.write_text(
-        '{"payload_sha256":"bbb","split":"validation"}\n'
-        '{"payload_sha256":"aaa","split":"train"}\n'
+        '{"payload_sha256":"bbb","split":"validation"}\n{"payload_sha256":"aaa","split":"train"}\n'
     )
 
     output = annotate_natural_sft_membership(
@@ -188,14 +200,15 @@ def test_paired_stratified_auc_bootstrap_preserves_pairing_and_is_deterministic(
         ([-99.0, -1.0, -2.0, -3.0, -4.0], 2, 4, (-10.0, -2.5, 4)),
     ],
 )
-def test_summarize_sequence_logprobs_excludes_prompt_targets(
-    per_token, prefix_length, sequence_length, expected
-):
-    assert summarize_sequence_logprobs(
-        per_token,
-        prefix_length=prefix_length,
-        sequence_length=sequence_length,
-    ) == expected
+def test_summarize_sequence_logprobs_excludes_prompt_targets(per_token, prefix_length, sequence_length, expected):
+    assert (
+        summarize_sequence_logprobs(
+            per_token,
+            prefix_length=prefix_length,
+            sequence_length=sequence_length,
+        )
+        == expected
+    )
 
 
 def test_collect_predict_scores_joins_dp_ranks_and_preserves_manifest_order(tmp_path):
@@ -282,12 +295,8 @@ def test_analyze_model_score_distributions_reports_length_and_prompt_confounding
 
 
 def test_analyze_phix174_similar_controls_reports_task_slice_and_robust_thresholds():
-    bootability = [
-        {"label": "1", "mean_log_likelihood": str(score)}
-        for score in (-0.4, -0.3, -0.2, -0.1)
-    ] + [
-        {"label": "0", "mean_log_likelihood": str(score)}
-        for score in (-1.0, -0.8, -0.6, -0.2)
+    bootability = [{"label": "1", "mean_log_likelihood": str(score)} for score in (-0.4, -0.3, -0.2, -0.1)] + [
+        {"label": "0", "mean_log_likelihood": str(score)} for score in (-1.0, -0.8, -0.6, -0.2)
     ]
     natural = [
         {

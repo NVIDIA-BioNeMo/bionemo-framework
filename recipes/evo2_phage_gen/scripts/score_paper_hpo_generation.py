@@ -1,4 +1,20 @@
 #!/usr/bin/env python
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Score paper-style Evo2 phage HPO generation outputs.
 
 This script is intentionally resumable and file-oriented so the README can point
@@ -64,8 +80,7 @@ def _load_generation_records(jsonl_path: Path, target_records: int | None) -> tu
             seen_ids.add(record_id)
 
             sequence = (
-                _prompt_nucleotides(record.get("prompt", ""))
-                + _sequence_before_eos(record.get("completion", ""))
+                _prompt_nucleotides(record.get("prompt", "")) + _sequence_before_eos(record.get("completion", ""))
             ).upper()
             rows.append({"id_prompt": record_id, "sequence": sequence})
             if target_records is not None and len(rows) >= target_records:
@@ -86,7 +101,9 @@ def _fasta_record_count(fasta_path: Path) -> int | None:
     return sum(1 for _ in SeqIO.parse(str(fasta_path), "fasta"))
 
 
-def _summarize_cell(cell: str, prompt_len: int | None, temperature: float | None, scored_df: pd.DataFrame) -> dict[str, Any]:
+def _summarize_cell(
+    cell: str, prompt_len: int | None, temperature: float | None, scored_df: pd.DataFrame
+) -> dict[str, Any]:
     records = len(scored_df)
     length_pass = scored_df["genome_length"].between(4000, 6000)
     gc_pass = scored_df["gc_content"].between(30.0, 65.0)
@@ -154,13 +171,16 @@ def _write_markdown_report(summary_df: pd.DataFrame, output_path: Path, target_r
 
 
 def main() -> None:
+    """Score generation outputs and write per-cell summaries."""
     parser = argparse.ArgumentParser(description="Score paper-style HPO generation JSONL outputs")
     parser.add_argument("--run-root", type=Path, required=True, help="Generation run root containing jsonl/")
     parser.add_argument("--jsonl-dir", type=Path, default=None, help="Override JSONL directory")
     parser.add_argument("--fasta-dir", type=Path, default=None, help="Output FASTA directory")
     parser.add_argument("--score-dir", type=Path, default=None, help="Output score directory")
     parser.add_argument("--glob", type=str, default="phix174_prompt*_temp*.jsonl")
-    parser.add_argument("--target-records", type=int, default=1000, help="Unique records to score per cell; <=0 means all")
+    parser.add_argument(
+        "--target-records", type=int, default=1000, help="Unique records to score per cell; <=0 means all"
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 

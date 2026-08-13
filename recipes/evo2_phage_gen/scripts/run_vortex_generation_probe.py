@@ -1,4 +1,20 @@
 #!/usr/bin/env python
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Run a small Arc/Vortex Evo2 generation probe for phage prompts."""
 
 from __future__ import annotations
@@ -25,6 +41,7 @@ def _synchronize_cuda() -> None:
 
 
 def main() -> None:
+    """Run the command-line generation probe."""
     parser = argparse.ArgumentParser(description="Run Arc/Vortex Evo2 generation for a small phage probe")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -49,10 +66,12 @@ def main() -> None:
 
     batch_suffix = f"_batch{args.batch_size}" if args.batch_size != 1 else ""
     jsonl_path = (
-        args.output_dir / f"vortex_prompt{len(prompt_nt)}_temp{args.temperature}_n{args.num_generations}{batch_suffix}.jsonl"
+        args.output_dir
+        / f"vortex_prompt{len(prompt_nt)}_temp{args.temperature}_n{args.num_generations}{batch_suffix}.jsonl"
     )
     fasta_path = (
-        args.output_dir / f"vortex_prompt{len(prompt_nt)}_temp{args.temperature}_n{args.num_generations}{batch_suffix}.fasta"
+        args.output_dir
+        / f"vortex_prompt{len(prompt_nt)}_temp{args.temperature}_n{args.num_generations}{batch_suffix}.fasta"
     )
 
     print(f"loading model {args.model_name} from {args.checkpoint}", flush=True)
@@ -109,9 +128,7 @@ def main() -> None:
             batch_elapsed_s = time.perf_counter() - batch_start
             completions = [str(seq).replace("\n", "").strip().split(maxsplit=1)[0] for seq in seqs]
             batch_completion_tokens = sum(len(completion) for completion in completions)
-            batch_completion_tokens_per_s = (
-                batch_completion_tokens / batch_elapsed_s if batch_elapsed_s > 0 else 0.0
-            )
+            batch_completion_tokens_per_s = batch_completion_tokens / batch_elapsed_s if batch_elapsed_s > 0 else 0.0
 
             for batch_idx, completion in enumerate(completions):
                 idx = generated_count + batch_idx

@@ -1,4 +1,20 @@
 #!/usr/bin/env python
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Summarize paper Sheet 1 candidate metrics from a TSV export.
 
 Sheet 1 is useful for checking final candidate metric ranges, but it is not a
@@ -120,7 +136,9 @@ def _summarize_metrics(df: pd.DataFrame) -> pd.DataFrame:
                 "threshold": spec.threshold,
                 "available_pass_count": int(observed_pass_mask.sum()) if observed_pass_mask is not None else pd.NA,
                 "available_pass_rate": (
-                    float(observed_pass_mask.mean()) if observed_pass_mask is not None and len(observed_pass_mask) else pd.NA
+                    float(observed_pass_mask.mean())
+                    if observed_pass_mask is not None and len(observed_pass_mask)
+                    else pd.NA
                 ),
                 "notes": spec.notes,
             }
@@ -189,6 +207,7 @@ def _write_markdown(
 
 
 def main() -> None:
+    """Summarize candidate metrics from a Sheet 1 TSV export."""
     parser = argparse.ArgumentParser(description="Summarize paper Sheet 1 candidate metrics")
     parser.add_argument("--sheet1-tsv", type=Path, default=Path("dist/sheet_1.tsv"))
     parser.add_argument("--expected-rows", type=int, default=303, help="Expected Sheet 1 data rows; <=0 disables")

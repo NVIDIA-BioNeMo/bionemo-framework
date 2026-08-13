@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import json
 import os
@@ -40,8 +52,7 @@ def test_sampling_sweep_dry_run_materializes_marker_only_parallel_plan(tmp_path:
         "prefix4_temp1.0",
     ]
     marker_only = [
-        json.loads(line)
-        for line in (run_root / "prompts/prefix0_temp0.7_2.jsonl").read_text().splitlines()
+        json.loads(line) for line in (run_root / "prompts/prefix0_temp0.7_2.jsonl").read_text().splitlines()
     ]
     assert marker_only[0] == {"id": "prefix0_temp0.7_0000", "prompt": "+~"}
     assert b"\r" not in (run_root / "cells.tsv").read_bytes()

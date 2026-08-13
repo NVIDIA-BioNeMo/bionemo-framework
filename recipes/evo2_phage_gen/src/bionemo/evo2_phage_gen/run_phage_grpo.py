@@ -156,10 +156,10 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
     """Run GRPO or GDPO with recipe-local Evo2 phage extensions."""
     os.environ.setdefault("NEMO_RL_PY_EXECUTABLES_SYSTEM", "1")
     try:
+        import ray
         from nemo_rl.algorithms.grpo import MasterConfig, async_grpo_train, setup
         from nemo_rl.algorithms.utils import get_tokenizer
         from nemo_rl.data.utils import setup_response_data
-        import ray
         from nemo_rl.distributed.virtual_cluster import init_ray as upstream_init_ray
         from nemo_rl.models.generation import configure_generation_config
         from nemo_rl.utils.config import load_config, parse_hydra_overrides, register_omegaconf_resolvers
