@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 """Selected-SFT temperature and nucleotide-prefix calibration utilities."""
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ from bionemo.evo2_phage_gen.generation import PHIX174_REFERENCE_START
 
 def _format_temperature(value: float) -> str:
     text = f"{float(value):g}"
-    return text if "." in text else f"{text}.0"
+    return text if any(marker in text for marker in ".eE") else f"{text}.0"
 
 
 @dataclass(frozen=True)
@@ -199,20 +196,10 @@ def materialize_sweep(
     jsonl_dir = run_root / "jsonl"
     logs_dir = run_root / "logs"
     runtime_dir = run_root / "runtime"
-    for path in (prompts_dir, jsonl_dir, logs_dir, runtime_dir):
-        path.mkdir(parents=True, exist_ok=True)
-
     cell_rows = []
     for index, cell in enumerate(cells):
         prompt_file = prompts_dir / f"{cell.key}_{num_prompts}.jsonl"
         output_file = jsonl_dir / f"{cell.key}.jsonl"
-        write_cell_prompts(
-            prompt_file,
-            cell=cell,
-            reference_start=reference_start,
-            marker=marker,
-            num_prompts=num_prompts,
-        )
         cell_rows.append(
             {
                 "index": index,
@@ -225,16 +212,6 @@ def materialize_sweep(
         )
 
     cells_path = run_root / "cells.tsv"
-    with cells_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            delimiter="\t",
-            lineterminator="\n",
-            fieldnames=tuple(cell_rows[0]),
-        )
-        writer.writeheader()
-        writer.writerows(cell_rows)
-
     contract = {
         "schema_version": 1,
         "state": "planned",
@@ -263,7 +240,26 @@ def materialize_sweep(
         existing = json.loads(contract_path.read_text())
         if existing != contract:
             raise ValueError(f"existing sweep contract differs: {contract_path}")
-    else:
+    for path in (prompts_dir, jsonl_dir, logs_dir, runtime_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    for cell in cells:
+        write_cell_prompts(
+            prompts_dir / f"{cell.key}_{num_prompts}.jsonl",
+            cell=cell,
+            reference_start=reference_start,
+            marker=marker,
+            num_prompts=num_prompts,
+        )
+    with cells_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            delimiter="\t",
+            lineterminator="\n",
+            fieldnames=tuple(cell_rows[0]),
+        )
+        writer.writeheader()
+        writer.writerows(cell_rows)
+    if not contract_path.exists():
         contract_path.write_text(json.dumps(contract, indent=2) + "\n")
     return contract
 
@@ -298,8 +294,8 @@ def _parse_args() -> argparse.Namespace:
     materialize.add_argument("--gpu-ids", type=int, nargs="+", required=True)
     materialize.add_argument("--tensor-parallel-size", type=int, required=True)
     materialize.add_argument("--target-length", type=int, default=6000)
-    materialize.add_argument("--top-k", type=int, default=4)
-    materialize.add_argument("--top-p", type=float, default=1.0)
+    materialize.add_argument("--top-k", type=int, required=True)
+    materialize.add_argument("--top-p", type=float, required=True)
     materialize.add_argument("--seed", type=int, default=7)
     materialize.add_argument("--prompt-batch-size", type=int, default=16)
     materialize.add_argument("--max-seq-length", type=int, default=10240)

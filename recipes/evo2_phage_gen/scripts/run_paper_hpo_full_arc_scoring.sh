@@ -108,8 +108,9 @@ PY
 
 shopt -s nullglob
 CONFIGS=( "${ARC_CONFIG_DIR}"/${CELL_GLOB%.fasta}.yaml )
-IFS=$'\n' CONFIGS=( $(printf '%s\n' "${CONFIGS[@]}" | sort) )
-unset IFS
+if (( ${#CONFIGS[@]} )); then
+  mapfile -t CONFIGS < <(printf '%s\n' "${CONFIGS[@]}" | sort)
+fi
 if [[ "${#CONFIGS[@]}" -eq 0 ]]; then
   printf 'ERROR: no Arc configs matched %s under %s\n' "${CELL_GLOB%.fasta}.yaml" "${ARC_CONFIG_DIR}" >&2
   exit 2

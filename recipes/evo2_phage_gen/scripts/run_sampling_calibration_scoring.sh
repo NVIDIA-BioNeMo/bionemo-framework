@@ -44,7 +44,7 @@ run_worker() {
   local manifest="${SCORE_ROOT}/logs/worker-${slot}.tsv"
   printf 'cell\tattempt\tstatus\tfinished_at\n' > "${manifest}"
 
-  while IFS=$'\t' read -r cell_index cell _prefix _temperature _prompt_file generation_jsonl; do
+  while IFS=$'\t' read -r -u 3 cell_index cell _prefix _temperature _prompt_file generation_jsonl; do
     [[ "${cell_index}" == "index" ]] && continue
     (( cell_index % WORKERS == slot )) || continue
 
@@ -86,7 +86,7 @@ run_worker() {
       echo "${cell} failed after bounded retries" >&2
       return 1
     fi
-  done < "${GENERATION_ROOT}/cells.tsv"
+  done 3< "${GENERATION_ROOT}/cells.tsv"
 }
 
 pids=()

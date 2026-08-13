@@ -83,6 +83,27 @@ def _disabled_sequence_safety_config(tmp_path: Path) -> SequenceSafetyRewardConf
     )
 
 
+def _new_step_environment(
+    *,
+    reward_output_mode: str,
+    gdpo_objectives: tuple[GDPOObjective, ...],
+) -> tuple[type, object]:
+    """Construct the minimally initialized Ray actor used by step tests."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
+    env = object.__new__(env_cls)
+    env.config = object()
+    env.weights = RewardWeights(valid_nt_chars=1.0)
+    env.external_qc = object()
+    env.mmseqs_cluster_diversity = object()
+    env.sequence_safety = object()
+    env.reward_output_mode = reward_output_mode
+    env.gdpo_objectives = gdpo_objectives
+    return env_cls, env
+
+
 def test_extract_assistant_sequence_concatenates_assistant_messages():
     """Only assistant messages should contribute to generated DNA."""
     message_log = [
@@ -646,18 +667,7 @@ def test_phage_qc_qualified_reward_mean_rejects_out_of_range_values():
 @pytest.mark.parametrize("state", ["FAIL", "INDETERMINATE"])
 def test_grpo_step_uses_final_reward_and_preserves_safety_evidence(monkeypatch, state: str):
     """An ineligible rollout returns zero while retaining historical and safety support telemetry."""
-    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
-        pytest.skip("NeMo-RL is unavailable")
-
-    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
-    env = object.__new__(env_cls)
-    env.config = object()
-    env.weights = RewardWeights(valid_nt_chars=1.0)
-    env.external_qc = object()
-    env.mmseqs_cluster_diversity = object()
-    env.sequence_safety = object()
-    env.reward_output_mode = "scalar"
-    env.gdpo_objectives = ()
+    env_cls, env = _new_step_environment(reward_output_mode="scalar", gdpo_objectives=())
 
     def fake_score_message_logs(
         message_log_batch,
@@ -728,18 +738,7 @@ def test_scalar_step_regates_raw_reward_without_mutating_finite_diagnostics(
     expected_reward: float,
 ):
     """Scalar optimization output requires exact eligibility and a finite raw reward."""
-    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
-        pytest.skip("NeMo-RL is unavailable")
-
-    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
-    env = object.__new__(env_cls)
-    env.config = object()
-    env.weights = RewardWeights(valid_nt_chars=1.0)
-    env.external_qc = object()
-    env.mmseqs_cluster_diversity = object()
-    env.sequence_safety = object()
-    env.reward_output_mode = "scalar"
-    env.gdpo_objectives = ()
+    env_cls, env = _new_step_environment(reward_output_mode="scalar", gdpo_objectives=())
 
     def fake_score_message_logs(*_args, **_kwargs):
         return pd.DataFrame(
@@ -787,18 +786,10 @@ def test_gdpo_step_observation_uses_reconciled_bounded_scalar_reward(
     expected_objective: float,
 ):
     """GDPO observations never expose or format an untrusted raw scalar reward."""
-    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
-        pytest.skip("NeMo-RL is unavailable")
-
-    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
-    env = object.__new__(env_cls)
-    env.config = object()
-    env.weights = RewardWeights(valid_nt_chars=1.0)
-    env.external_qc = object()
-    env.mmseqs_cluster_diversity = object()
-    env.sequence_safety = object()
-    env.reward_output_mode = "gdpo"
-    env.gdpo_objectives = (GDPOObjective("biological", ("reward_biological",)),)
+    env_cls, env = _new_step_environment(
+        reward_output_mode="gdpo",
+        gdpo_objectives=(GDPOObjective("biological", ("reward_biological",)),),
+    )
 
     def fake_score_message_logs(*_args, **_kwargs):
         return pd.DataFrame(

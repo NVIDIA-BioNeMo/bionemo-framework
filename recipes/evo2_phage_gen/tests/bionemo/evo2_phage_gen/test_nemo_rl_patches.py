@@ -28,6 +28,18 @@ import pytest
 from bionemo.evo2_phage_gen import nemo_rl_patches
 
 
+def _patch_nemo_rl_spec(monkeypatch, spec) -> None:
+    """Return the test spec only for NeMo-RL and delegate every other lookup."""
+    original_find_spec = nemo_rl_patches.importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "nemo_rl":
+            return spec
+        return original_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", find_spec)
+
+
 def test_apply_nemo_rl_patch_applies_against_installed_package_root(tmp_path: Path, monkeypatch) -> None:
     """The patch command should run from site-packages, not require a source checkout path."""
     source_root = tmp_path / "site-packages"
@@ -40,7 +52,7 @@ def test_apply_nemo_rl_patch_applies_against_installed_package_root(tmp_path: Pa
     spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
     calls: list[tuple[list[str], Path]] = []
 
-    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+    _patch_nemo_rl_spec(monkeypatch, spec)
 
     def fake_run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         calls.append((args, cwd))
@@ -68,7 +80,7 @@ def test_apply_nemo_rl_patch_reports_already_applied(tmp_path: Path, monkeypatch
     patch_file.write_text("diff --git a/nemo_rl/example.py b/nemo_rl/example.py\n")
     spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
 
-    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+    _patch_nemo_rl_spec(monkeypatch, spec)
 
     def fake_run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         return_code = 0 if "-R" in args else 1
@@ -103,6 +115,26 @@ def test_patch_nemo_rl_packaging_metadata_includes_subpackages(tmp_path: Path) -
     assert 'requires-python = ">=3.10"' in patched
 
 
+@pytest.mark.parametrize(
+    "contents,missing",
+    [
+        ('[project]\nrequires-python = ">=3.13.13,<3.14"\n', "packages"),
+        ('[tool.setuptools]\npackages = ["nemo_rl"]\n', "requires-python"),
+    ],
+)
+def test_patch_nemo_rl_packaging_metadata_requires_expected_anchors(
+    tmp_path: Path, contents: str, missing: str
+) -> None:
+    """Packaging repair must stop when pinned upstream metadata drifts."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(contents)
+
+    with pytest.raises(RuntimeError, match=missing):
+        nemo_rl_patches._patch_nemo_rl_packaging_metadata(tmp_path)
+
+    assert pyproject.read_text() == contents
+
+
 def test_find_cached_nemo_rl_source_rejects_dirty_checkout(tmp_path: Path, monkeypatch) -> None:
     """Repair installs must not reuse uv checkouts that already contain local patch drift."""
     checkout = tmp_path / "cache" / "git-v0" / "checkouts" / "repo" / "rev"
@@ -119,6 +151,8 @@ def test_find_cached_nemo_rl_source_rejects_dirty_checkout(tmp_path: Path, monke
 
 def test_run_patch_uses_real_batch_dry_run(tmp_path: Path) -> None:
     """The maintained check path should use a real noninteractive patch dry-run."""
+    if shutil.which("patch") is None:
+        pytest.skip("patch executable is unavailable")
     source_file = tmp_path / "nemo_rl" / "example.py"
     source_file.parent.mkdir()
     source_file.write_text("old\n")
@@ -147,6 +181,8 @@ def test_run_patch_uses_real_batch_dry_run(tmp_path: Path) -> None:
 
 def test_apply_nemo_rl_patch_is_forward_only_and_idempotent(tmp_path: Path, monkeypatch) -> None:
     """Rerunning the patcher on an already-patched runtime must not reverse the patch."""
+    if shutil.which("patch") is None:
+        pytest.skip("patch executable is unavailable")
     source_root = tmp_path / "site-packages"
     package_dir = source_root / "nemo_rl"
     package_dir.mkdir(parents=True)
@@ -170,7 +206,7 @@ def test_apply_nemo_rl_patch_is_forward_only_and_idempotent(tmp_path: Path, monk
         )
     )
     spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
-    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+    _patch_nemo_rl_spec(monkeypatch, spec)
 
     first_result = nemo_rl_patches.apply_nemo_rl_patch(patch_file)
     second_result = nemo_rl_patches.apply_nemo_rl_patch(patch_file)
@@ -215,6 +251,30 @@ def test_maintained_patch_calls_adapter_generate_worker() -> None:
     assert "return generate_worker(self, data=data, greedy=greedy)" in patch_text
 
 
+def test_maintained_patch_initializes_rollout_timing_for_all_training_paths() -> None:
+    """Both GRPO loops must define timing metrics before conditional rollouts."""
+    patch_text = nemo_rl_patches.DEFAULT_PATCH.read_text()
+
+    assert patch_text.count("rollout_timing_metrics: dict[str, float] = {}") >= 2
+
+
+def test_maintained_patch_uses_stable_multi_environment_metric_names() -> None:
+    """Every metric is task-prefixed when multiple environments emit metrics."""
+    patch_text = nemo_rl_patches.DEFAULT_PATCH.read_text()
+
+    assert "multiple_metric_environments = len(results) > 1" in patch_text
+    assert 'f"{task_name}/{key}" if multiple_metric_environments else key' in patch_text
+
+
+def test_maintained_patch_caches_driver_generation_adapter_and_returns_none_from_refit() -> None:
+    """Generation should reuse its adapter and the no-refit path should honor its annotation."""
+    patch_text = nemo_rl_patches.DEFAULT_PATCH.read_text()
+
+    assert "self._generation_adapter = _load_generation_adapter(self.cfg)" in patch_text
+    assert "adapter = self._generation_adapter" in patch_text
+    assert "return self.generation.prepare_refit_info()" not in patch_text
+
+
 def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Path, monkeypatch) -> None:
     """Runtime verification should prove the installed package matches the maintained patch."""
     patch_file = tmp_path / "evo2.patch"
@@ -226,7 +286,7 @@ def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Pat
     init_file.write_text("")
     spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
 
-    monkeypatch.setattr(nemo_rl_patches.importlib.util, "find_spec", lambda name: spec)
+    _patch_nemo_rl_spec(monkeypatch, spec)
     monkeypatch.setattr(nemo_rl_patches, "assert_nemo_rl_patch_symbols", lambda: None)
 
     calls: list[tuple[list[str], Path]] = []

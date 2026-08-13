@@ -151,10 +151,45 @@ def dustmask_low_complexity_mask(
         return [False] * seq_len
     window = max(3, min(int(window), seq_len))
     mask = [False] * seq_len
+    triplet_count = window - 2
+    counts: dict[str, int] = {}
+    pair_sum = 0
+    invalid_bases = sum(char not in DNA_ALPHABET for char in seq[:window])
+
+    def add_triplet(triplet: str) -> None:
+        nonlocal pair_sum
+        if any(char not in DNA_ALPHABET for char in triplet):
+            return
+        count = counts.get(triplet, 0)
+        pair_sum += count
+        counts[triplet] = count + 1
+
+    def remove_triplet(triplet: str) -> None:
+        nonlocal pair_sum
+        if any(char not in DNA_ALPHABET for char in triplet):
+            return
+        count = counts[triplet]
+        pair_sum -= count - 1
+        if count == 1:
+            del counts[triplet]
+        else:
+            counts[triplet] = count - 1
+
+    for triplet_start in range(triplet_count):
+        add_triplet(seq[triplet_start : triplet_start + 3])
+
+    threshold = float(level)
     for start in range(0, seq_len - window + 1):
-        end = start + window
-        if _dust_window_score(seq[start:end]) >= float(level):
-            mask[start:end] = [True] * window
+        if start:
+            outgoing_base = seq[start - 1]
+            incoming_base = seq[start + window - 1]
+            invalid_bases -= outgoing_base not in DNA_ALPHABET
+            invalid_bases += incoming_base not in DNA_ALPHABET
+            remove_triplet(seq[start - 1 : start + 2])
+            add_triplet(seq[start + window - 3 : start + window])
+        score = 0.0 if invalid_bases else 10.0 * pair_sum / triplet_count
+        if score >= threshold:
+            mask[start : start + window] = [True] * window
     return mask
 
 
@@ -235,31 +270,25 @@ def _parse_dustmasker_interval_output(interval_path: Path, sequence_lengths: lis
         seq_index = int(seq_match.group(1)) if seq_match else current_index
         if seq_index is None or seq_index >= len(sequence_lengths):
             continue
-        coordinate_text = re.sub(r"seq_\d+", "", line)
-        numbers = [int(value) for value in re.findall(r"\d+", coordinate_text)]
-        if len(numbers) < 2:
-            continue
-        intervals_by_index[seq_index].append((numbers[0], numbers[1]))
+        coordinate_text = re.sub(r"seq_\d+", "", line).strip()
+        interval_match = re.fullmatch(r"(-?\d+)\s*-\s*(-?\d+)", coordinate_text)
+        if interval_match is None:
+            raise ValueError(f"invalid dustmasker interval for seq_{seq_index}: {coordinate_text!r}")
+        start, end = (int(value) for value in interval_match.groups())
+        sequence_length = sequence_lengths[seq_index]
+        if start <= 0 or end < start or end > sequence_length:
+            raise ValueError(
+                f"invalid dustmasker interval for seq_{seq_index}: {start} - {end} outside 1 - {sequence_length}"
+            )
+        intervals_by_index[seq_index].append((start, end))
 
     masks = [[False] * seq_len for seq_len in sequence_lengths]
     for seq_index, intervals in enumerate(intervals_by_index):
         seq_len = sequence_lengths[seq_index]
         if seq_len <= 0:
             continue
-        one_based = (
-            intervals
-            and not any(start == 0 for start, _end in intervals)
-            and any(end == seq_len for _start, end in intervals)
-        )
         for start, end in intervals:
-            if one_based:
-                start_idx = max(0, start - 1)
-                end_idx = min(seq_len, end)
-            else:
-                start_idx = max(0, start)
-                end_idx = min(seq_len, end + 1)
-            for position in range(start_idx, max(start_idx, end_idx)):
-                masks[seq_index][position] = True
+            masks[seq_index][start - 1 : end] = [True] * (end - start + 1)
     return masks
 
 

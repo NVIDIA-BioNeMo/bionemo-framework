@@ -24,4 +24,6 @@ cluster/user path.
 For DUST QC, the current `NucleotideQCConfig` default maximum end-mask fraction is `0.9` and the
 configurable `dustmasker_timeout_s` default is 300 seconds. Preserve non-integer level values. A missing
 binary, non-zero process exit, or timeout is explicit failure evidence rather than an unbounded wait or
+an inferred pass.
+
 When interfaces change, update concrete examples here only after checking `pyproject.toml`, `--help`, source, and a smoke run. Keep core skill prose stable. Do not invent generation, QC, monitor, or scheduler commands that the checked-out recipe does not expose.

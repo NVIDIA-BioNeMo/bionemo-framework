@@ -41,6 +41,18 @@
       ],
       "expected_skill": null,
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-collect-genomes-004-type-aware-source-discovery",
+      "prompt": "Find additional complete phage genomes with annotations that can support type-aware corpus filtering, and preserve enough provenance to verify every sequence.",
+      "expected_output": "A bounded source-discovery plan that considers current annotated phage catalogs and independently verifies their sequence and metadata provenance.",
+      "assertions": [
+        "The response considers INPHARED alongside other current primary archives or phage-specific catalogs when its annotations and metadata fit the requested type-aware search.",
+        "The response treats catalog annotations as discovery evidence, verifies source accessions and biological payloads, and records versions, retrieval details, licenses, checksums, eligibility rules, and exclusions.",
+        "The response does not assume that a catalog label is correct or require INPHARED when another verified source better fits the declared scope."
+      ],
+      "expected_skill": "bionemo-phage-design-collect-genomes",
+      "expected_script": null
     }
   ]
 }

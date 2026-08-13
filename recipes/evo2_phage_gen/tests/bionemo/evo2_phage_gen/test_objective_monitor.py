@@ -15,7 +15,12 @@
 
 from __future__ import annotations
 
-from bionemo.evo2_phage_gen.objective_monitor import evaluate_objective_history
+import sys
+
+import pytest
+
+from bionemo.evo2_phage_gen import objective_monitor
+from bionemo.evo2_phage_gen.objective_monitor import evaluate_objective_history, extract_validation_history
 
 
 def _event(
@@ -166,3 +171,33 @@ def test_loss_activity_rebound_clears_pending_masking_signal():
     assert result["reason"] == "individual_objectives_and_support_are_stable"
     assert result["global_signals"] == []
     assert result["global_signal_streaks"]["objective_loss_masking"] == 0
+
+
+def test_extract_validation_history_derives_only_emitted_gdpo_objectives(monkeypatch, tmp_path):
+    points = {
+        "validation/mean_reward": {10: (1.0, 0.5)},
+        "validation/num_sequences": {10: (1.0, 96.0)},
+        "validation/gdpo/tropism_mean": {10: (1.0, 0.25)},
+        "validation/gdpo/tropism_std": {10: (1.0, 0.1)},
+        "validation/gdpo/tropism_nonzero_rate": {10: (1.0, 0.5)},
+        "validation/phage_qc/tropism_measurement_available_rate": {10: (1.0, 0.75)},
+    }
+    monkeypatch.setattr(objective_monitor, "_load_scalar_points", lambda _root: points)
+
+    history = extract_validation_history(tmp_path)
+
+    assert set(history[0]["objectives"]) == {"tropism"}
+
+
+def test_main_rejects_missing_tensorboard_root_before_writing(monkeypatch, tmp_path):
+    output = tmp_path / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["objective-monitor", "--tensorboard-root", str(tmp_path / "missing"), "--output", str(output)],
+    )
+
+    with pytest.raises(SystemExit):
+        objective_monitor.main()
+
+    assert not output.exists()

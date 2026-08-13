@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import shutil
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,8 @@ def check_arc_qc_prerequisites(
 ) -> list[QCPrerequisiteCheck]:
     """Check path and tool prerequisites for the local Arc pipeline config."""
     config = yaml.safe_load(Path(config_path).read_text())
+    if not isinstance(config, Mapping):
+        raise ValueError("Arc QC config must be a mapping")
     search_path = None
     if tool_bin_dir is not None:
         search_path = os.pathsep.join((str(Path(tool_bin_dir).resolve()), os.environ.get("PATH", "")))
@@ -115,7 +118,7 @@ def check_arc_qc_prerequisites(
                 "tropism_mmseqs_db",
                 config,
                 "mmseqs_db_tropism_protein",
-                required=homology_required and bool(config.get("tropism_protein_sequence_identity_filter")),
+                required=tropism_required,
             ),
             _check_path(
                 "training_data_genomes_fasta",

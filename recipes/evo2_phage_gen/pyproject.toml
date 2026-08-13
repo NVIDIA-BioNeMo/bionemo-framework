@@ -129,7 +129,7 @@ evo2_remove_optimizer = "bionemo.evo2.utils.checkpoint.evo2_remove_optimizer:mai
 where = ["src"]
 include = ["bionemo.*"]
 namespaces = true
-exclude = ["test*."]
+exclude = ["test*"]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

@@ -287,6 +287,25 @@ def test_ncbi_resolution_never_infers_host_domain_from_arbitrary_free_text(tmp_p
     assert evaluate_host_evidence(row.to_task1_host_evidence()).allowed is False
 
 
+def test_unparseable_ncbi_response_round_trips_as_unresolved_evidence(tmp_path: Path) -> None:
+    """An unresolved cached response remains valid evidence of a bounded parsing failure."""
+    row = resolve_ncbi_host_evidence(
+        record_id="malformed",
+        header=">NC_10.1 malformed",
+        cache_dir=tmp_path / "cache",
+        fetcher=lambda _accession: b"not-json",
+        clock=lambda: NOW,
+    )
+    table = HostEvidenceTable(table_id="unresolved-v1", created_at=NOW, rows=(row,))
+    table_path = tmp_path / "HOST_EVIDENCE.yaml"
+
+    write_host_evidence_table(table_path, table)
+    loaded = load_host_evidence_table(table_path)
+    validate_host_evidence_artifacts(loaded, table_path=table_path)
+
+    assert loaded.rows[0].reason_codes == ("NCBI_METADATA_UNRESOLVED",)
+
+
 def test_versioned_multi_source_table_round_trips_and_retains_domain_semantics(tmp_path: Path) -> None:
     """Collapsing Archaea or mixed prokaryotic evidence into unknown would wrongly quarantine safe hosts."""
     table = HostEvidenceTable(

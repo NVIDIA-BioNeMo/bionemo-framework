@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import stat
 import tomllib
 from dataclasses import replace
@@ -378,6 +379,32 @@ def _host_row(record_id: str, domain: HostDomain, *, confirmed: bool = True) -> 
 
 
 def _fake_task4_runtime(*, phix_state: str = "PASS", diagnostic_label: str | None = None):
+    def class_results(state: str) -> list[dict[str, object]]:
+        return [
+            {
+                "safety_class": safety_class,
+                "state": "FAIL" if state == "FAIL" and safety_class == "amr" else "PASS",
+                "required": True,
+                "reason_codes": (
+                    ["AMR_DETERMINANT_DETECTED"]
+                    if state == "FAIL" and safety_class == "amr"
+                    else [f"{safety_class.upper()}_MEASURED_PASS"]
+                ),
+                "findings": (
+                    [
+                        {
+                            "state": "FAIL",
+                            "reason_codes": ["AMR_DETERMINANT_DETECTED"],
+                            "detector": "amrfinder-plus",
+                        }
+                    ]
+                    if state == "FAIL" and safety_class == "amr"
+                    else []
+                ),
+            }
+            for safety_class in ("amr", "toxin", "lysogeny")
+        ]
+
     def task4_runner(request: sft.Task4SafetyRequest) -> sft.Task4SafetyArtifacts:
         records = parse_fasta_records(request.input_fasta)
         states = {
@@ -405,7 +432,12 @@ def _fake_task4_runtime(*, phix_state: str = "PASS", diagnostic_label: str | Non
             },
             "resolved_profile": {"host_domain": request.host_domain.value},
             "records": [
-                {"record_id": record.sequence_id, "input_index": index, "state": states[record.sequence_id]}
+                {
+                    "record_id": record.sequence_id,
+                    "input_index": index,
+                    "state": states[record.sequence_id],
+                    "class_results": class_results(states[record.sequence_id]),
+                }
                 for index, record in enumerate(records)
             ],
             "aggregate": {
@@ -460,6 +492,8 @@ def _fake_task4_runtime(*, phix_state: str = "PASS", diagnostic_label: str | Non
             sequence_sha256=hashlib.sha256(b"ACGTACGT").hexdigest(),
             ncbi_sequence_hash="TEST0000",
         ),
+        expected_minimum_genomes=1,
+        expected_preferred_genomes=2,
     )
 
 
@@ -1091,7 +1125,7 @@ def test_parent_manifest_rechecks_bidirectional_source_accession_binding(tmp_pat
         )
 
 
-def test_audit_and_cli_revalidate_phix_host_evidence_raw_artifacts(tmp_path: Path, capsys) -> None:
+def test_audit_and_cli_revalidate_phix_host_evidence_raw_artifacts(tmp_path: Path, caplog, capsys) -> None:
     """Neither direct audit nor its CLI may trust a PhiX row after its cached NCBI response drifts."""
     request, _source = _audit_request(tmp_path)
     row = resolve_ncbi_host_evidence(
@@ -1119,14 +1153,16 @@ def test_audit_and_cli_revalidate_phix_host_evidence_raw_artifacts(tmp_path: Pat
             runtime=_fake_task4_runtime(),
         )
 
-    assert (
-        sft.main(
-            _audit_cli_args(request, phix_table=phix_table, authorization_path=authorization_path),
-            runtime=_fake_task4_runtime(),
+    with caplog.at_level(logging.ERROR, logger=sft.__name__):
+        assert (
+            sft.main(
+                _audit_cli_args(request, phix_table=phix_table, authorization_path=authorization_path),
+                runtime=_fake_task4_runtime(),
+            )
+            == 3
         )
-        == 3
-    )
-    assert "raw response" in capsys.readouterr().err
+    assert "raw response" in caplog.text
+    assert capsys.readouterr().err == ""
 
 
 def test_parent_manifest_revalidates_bound_phix_evidence_table(tmp_path: Path) -> None:
@@ -1201,7 +1237,7 @@ def test_parent_manifest_rejects_boolean_host_evidence_schema_versions(
         )
 
 
-def test_malformed_or_missing_phix_evidence_maps_to_cli_exit_three(tmp_path: Path, capsys) -> None:
+def test_malformed_or_missing_phix_evidence_maps_to_cli_exit_three(tmp_path: Path, caplog, capsys) -> None:
     """Host-evidence validation/configuration errors are indeterminate, never uncaught or biological FAIL."""
     request, _source = _audit_request(tmp_path)
     malformed = tmp_path / "evidence" / "malformed.yaml"
@@ -1209,14 +1245,16 @@ def test_malformed_or_missing_phix_evidence_maps_to_cli_exit_three(tmp_path: Pat
     malformed.write_text("not: [valid")
     authorization_path = _write_upfront_authorization(tmp_path)
 
-    assert (
-        sft.main(
-            _audit_cli_args(request, phix_table=malformed, authorization_path=authorization_path),
-            runtime=_fake_task4_runtime(),
+    with caplog.at_level(logging.ERROR, logger=sft.__name__):
+        assert (
+            sft.main(
+                _audit_cli_args(request, phix_table=malformed, authorization_path=authorization_path),
+                runtime=_fake_task4_runtime(),
+            )
+            == 3
         )
-        == 3
-    )
-    assert "error" in capsys.readouterr().err
+    assert "error" in caplog.text
+    assert capsys.readouterr().err == ""
 
 
 def test_corpus_host_evidence_builder_resolves_accessions_and_requires_supplemental_rows(tmp_path: Path) -> None:
@@ -1267,21 +1305,29 @@ def test_corpus_host_evidence_builder_resolves_accessions_and_requires_supplemen
         )
 
 
-def test_host_evidence_builder_never_leaves_or_clobbers_an_untrusted_output(tmp_path: Path) -> None:
+def test_host_evidence_builder_never_leaves_or_clobbers_an_untrusted_output(tmp_path: Path, monkeypatch) -> None:
     """Post-write reconciliation failure and an existing destination must both remain transaction-safe."""
     source = tmp_path / "source.fna"
     source.write_bytes(b">OQ123456.1 cultured phage\n+!ACGT\n")
     failed_output = tmp_path / "failed.yaml"
 
-    with pytest.raises(sft.SFTSafetyError, match="generated host-evidence table"):
-        sft.prepare_host_evidence_table(
-            source_fasta=source,
-            output_table=failed_output,
-            cache_dir=tmp_path / "bad-cache",
-            table_id="must-not-publish",
-            ncbi_fetcher=lambda _accession: b"{}",
-            clock=lambda: datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc),
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            sft,
+            "validate_host_evidence_artifacts",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                host_evidence_module.HostEvidenceError("forced post-serialization rejection")
+            ),
         )
+        with pytest.raises(sft.SFTSafetyError, match="generated host-evidence table"):
+            sft.prepare_host_evidence_table(
+                source_fasta=source,
+                output_table=failed_output,
+                cache_dir=tmp_path / "bad-cache",
+                table_id="must-not-publish",
+                ncbi_fetcher=lambda _accession: b"{}",
+                clock=lambda: datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc),
+            )
     assert not failed_output.exists()
 
     existing_output = tmp_path / "existing.yaml"
@@ -1989,10 +2035,12 @@ def test_preprocess_entry_point_is_the_safety_validating_wrapper() -> None:
     )
 
 
-def test_malformed_audit_cli_is_indeterminate_not_biological_fail(capsys) -> None:
+def test_malformed_audit_cli_is_indeterminate_not_biological_fail(caplog, capsys) -> None:
     """Usage errors must return three so exit two remains reserved for a trusted biological FAIL."""
-    assert sft.main(["audit-and-filter"]) == 3
-    assert "error" in capsys.readouterr().err
+    with caplog.at_level(logging.ERROR, logger=sft.__name__):
+        assert sft.main(["audit-and-filter"]) == 3
+    assert "error" in caplog.text
+    assert capsys.readouterr().err == ""
 
 
 def test_below_minimum_audit_is_published_but_preprocessing_remains_blocked(tmp_path: Path) -> None:
@@ -2121,3 +2169,145 @@ def test_explicit_count_override_applies_its_authorized_floor() -> None:
         sft.assess_corpus_adequacy(3000, authorization=authorization).state
         is sft.CorpusAdequacy.AUTHORIZED_BELOW_MINIMUM
     )
+
+
+def test_write_safety_filter_report_summarizes_signals_without_sequence_details(tmp_path: Path) -> None:
+    """The post-SFT report must lead with counts and bound evidence-only highlights."""
+    scan_path = tmp_path / "scan" / "manifest.json"
+    scan_path.parent.mkdir()
+    scan = {
+        "manifest_type": "sequence_safety_scan",
+        "records": [
+            {
+                "record_id": "scanner_high",
+                "input_index": 0,
+                "state": "FAIL",
+                "class_results": [
+                    {
+                        "safety_class": "amr",
+                        "state": "FAIL",
+                        "required": True,
+                        "reason_codes": ["AMR_DETERMINANT_DETECTED"],
+                        "findings": [
+                            {
+                                "state": "FAIL",
+                                "reason_codes": ["AMR_DETERMINANT_DETECTED"],
+                                "detector": "amrfinder-plus",
+                                "source_path": "/private/raw/evidence.tsv",
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "record_id": "scanner_elevated",
+                "input_index": 1,
+                "state": "FAIL",
+                "class_results": [
+                    {
+                        "safety_class": "lysogeny",
+                        "state": "FAIL",
+                        "required": True,
+                        "reason_codes": ["LYSOGENY_HIGH_CONFIDENCE_PROFILE"],
+                        "findings": [
+                            {
+                                "state": "FAIL",
+                                "reason_codes": ["LYSOGENY_HIGH_CONFIDENCE_PROFILE"],
+                                "detector": "mmseqs-phrogs-v4",
+                                "evidence_path": "/private/generated/protein.faa",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    scan_path.write_text(json.dumps(scan), encoding="utf-8")
+    validated_manifest = {
+        "source": {"record_count": 3},
+        "curated_output": {"count": 1},
+        "domain_children": [
+            {
+                "label": "bacteria",
+                "scan_manifest": {
+                    "path": str(scan_path),
+                    "sha256": hashlib.sha256(scan_path.read_bytes()).hexdigest(),
+                },
+            }
+        ],
+        "record_decisions": [
+            {
+                "record_id": "record_high",
+                "scanner_record_id": "scanner_high",
+                "safety_state": "FAIL",
+                "eligible_for_sft": False,
+            },
+            {
+                "record_id": "record_elevated",
+                "scanner_record_id": "scanner_elevated",
+                "safety_state": "FAIL",
+                "eligible_for_sft": False,
+            },
+            {
+                "record_id": "record_pass",
+                "scanner_record_id": "scanner_pass",
+                "safety_state": "PASS",
+                "eligible_for_sft": True,
+            },
+        ],
+    }
+    report_path = tmp_path / "artifacts" / "SAFETY_FILTER_REPORT.md"
+
+    result = sft.write_safety_filter_report(
+        tmp_path / "SAFETY_MANIFEST.yaml",
+        report_path,
+        safety_manifest_validator=lambda _path, **_kwargs: validated_manifest,
+        max_highlights=1,
+    )
+
+    report = result.read_text(encoding="utf-8")
+    assert report.startswith("# SFT sequence-safety filter report\n\n## High-level outcome")
+    assert "| Total source records examined | 3 |" in report
+    assert "| Retained for SFT | 1 |" in report
+    assert "| Removed after potential sequence-safety signals | 2 |" in report
+    assert "## Safety-filter waterfall" in report
+    assert "| 3 | Starting set of phage genomes |" in report
+    assert "| 1 | No observed or known safety signals from configured filters |" in report
+    assert "| 2 | Phage genomes failing the sequence-safety filter |" in report
+    assert "| 1 | &emsp;↳ Lysogeny only |" in report
+    assert "| 1 | &emsp;↳ Antibiotic resistance only |" in report
+    assert "| 0 | &emsp;↳ Toxin only |" in report
+    assert "| 0 | &emsp;↳ Toxin + lysogeny |" in report
+    assert "| 0 | &emsp;↳ Antibiotic resistance + lysogeny |" in report
+    assert "| 0 | &emsp;↳ Antibiotic resistance + toxin |" in report
+    assert "| 0 | &emsp;↳ Antibiotic resistance + toxin + lysogeny |" in report
+    assert "| Higher | 1 |" in report
+    assert "| Elevated | 1 |" in report
+    assert "record_high" in report
+    assert "record_elevated" not in report
+    assert "AMR_DETERMINANT_DETECTED" in report
+    assert "amrfinder-plus" in report
+    assert "/private/" not in report
+    assert "not a clinical safety conclusion" in report
+
+
+def test_post_sft_report_cli_writes_a_distinct_artifact(tmp_path):
+    request, _ = _audit_request(tmp_path)
+    runtime = _fake_task4_runtime()
+    assert sft.audit_and_filter(request, runtime=runtime).exit_code == 0
+    report_path = tmp_path / "sft/runs/attempt/artifacts/SAFETY_FILTER_REPORT.md"
+
+    exit_code = sft.main(
+        [
+            "report-safety-filter",
+            "--safety-manifest",
+            str(request.safety_manifest),
+            "--output",
+            str(report_path),
+        ],
+        runtime=runtime,
+    )
+
+    assert exit_code == 0
+    assert report_path.is_file()
+    assert "ba_fail" in report_path.read_text()

@@ -49,7 +49,8 @@ def test_ensure_paper_useful_rl_prompt_files_materializes_openai_jsonl(tmp_path)
     validation_prompts = [record["messages"][0]["content"].removeprefix("+~") for record in validation_records]
 
     assert [len(prompt) for prompt in train_prompts] == [4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11]
-    assert len(validation_prompts) == 64
+    assert paths["validation"].name == "phage_prompts_paper_useful_rl_validation_prompt10_96.jsonl"
+    assert len(validation_prompts) == 96
     assert set(validation_prompts) == {"GAGTTTTATC"}
     assert train_records[0]["messages"] == [
         {"role": "user", "content": "+~GAGT"},

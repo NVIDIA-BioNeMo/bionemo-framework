@@ -81,7 +81,7 @@ def _write_multi_executable_tarball(
 
 def _write_amrfinder_runtime(source_root: Path, *, label: str) -> None:
     """Create the complete sibling runtime expected by AMRFinderPlus 4.2.7."""
-    source_root.mkdir(parents=True)
+    source_root.mkdir(parents=True, exist_ok=True)
     for executable_name in external_assets.AMRFINDER_RUNTIME_EXECUTABLES:
         executable = source_root / executable_name
         executable.write_text(f"#!/usr/bin/env bash\n# {label} {executable_name}\n")
@@ -106,9 +106,13 @@ def _write_amrfinder_prerequisites(bin_dir: Path, *, label: str = "prerequisite"
 
 
 def _write_amrfinder_tarball(tmp_path: Path) -> Path:
-    """Create a tiny AMRFinderPlus-like archive for local preparation tests."""
+    """Create a tiny release-shaped AMRFinderPlus archive for local preparation tests."""
     source_root = tmp_path / "amrfinder_archive_src" / "amrfinder" / "bin"
     _write_amrfinder_runtime(source_root, label="trusted")
+    stx_root = source_root / "stx"
+    stx_root.mkdir()
+    for name in ("stxtyper", "stx.prot"):
+        (source_root / name).replace(stx_root / name)
     archive_path = tmp_path / "amrfinder.tar.gz"
     with tarfile.open(archive_path, "w:gz") as archive:
         archive.add(tmp_path / "amrfinder_archive_src", arcname="archive")
@@ -883,8 +887,8 @@ def test_prepare_hmmer_rejects_archive_without_hmmpress(tmp_path):
         prepare_hmmer(tmp_path / "external", hmmer_url=archive_path.as_uri())
 
 
-def test_prepare_amrfinder_plus_extracts_pinned_archive_links_binary_and_records_versions(tmp_path, monkeypatch):
-    """Safety preparation records AMRFinder and database versions from a local pinned archive."""
+def test_prepare_amrfinder_plus_extracts_pinned_archive_as_self_contained_runtime(tmp_path, monkeypatch):
+    """Safety preparation copies a release-shaped runtime into one immutable sibling directory."""
     archive_path = _write_amrfinder_tarball(tmp_path)
     external_dir = tmp_path / "external"
     target_bin_dir = external_dir / "bin"
@@ -915,10 +919,11 @@ def test_prepare_amrfinder_plus_extracts_pinned_archive_links_binary_and_records
 
     archive_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     assert asset.path.name == "amrfinder"
-    assert asset.path.is_symlink()
+    assert not asset.path.is_symlink()
     assert asset.path.exists()
-    assert (external_dir / "bin" / "amrfinder_index").is_symlink()
-    assert (external_dir / "bin" / "amrfinder_update").is_symlink()
+    runtime_paths = [external_dir / "bin" / name for name in external_assets.AMRFINDER_RUNTIME_FILES]
+    assert all(path.is_file() and not path.is_symlink() for path in runtime_paths)
+    assert {path.parent.resolve() for path in runtime_paths} == {target_bin_dir.resolve()}
     assert "amrfinder_version: AMRFinderPlus version 4.2.7" in manifest_path.read_text()
     assert "database_version: 2026-01-26.1" in manifest_path.read_text()
     manifest = yaml.safe_load(manifest_path.read_text())
@@ -1265,7 +1270,7 @@ def test_validate_staged_safety_manifest_accepts_operator_asserted_amrfinder_sou
     "missing_field", ("provenance_basis", "source_repository", "source_revision", "source_binary_sha256")
 )
 def test_validate_staged_safety_manifest_rejects_incomplete_amrfinder_source_provenance(tmp_path, missing_field):
-    """An operator-attested AMRFinder record fails closed when an asserted lineage field is absent."""
+    """Reject an operator-attested AMRFinder record when an asserted lineage field is absent."""
     manifest = {"schema_version": 3}
     for name in ("amrfinder", "toxins", "phrogs"):
         section, record = _materialize_mock_safety_manifest_section(name, tmp_path / name)
@@ -1763,7 +1768,7 @@ def test_phrogs_annotation_identifier_normalization_rejects_noncanonical_aliases
 
 
 def test_pinned_phrogs_pair_records_exact_unsearchable_profile_families():
-    """Known release omissions are explicit; arbitrary annotation/profile drift still fails closed."""
+    """Known release omissions are explicit; arbitrary annotation/profile drift is still rejected."""
     missing_ids = ("phrog_49658", "phrog_50550", "phrog_77239", "phrog_81686", "phrog_87299")
     rows = [["phrog_1", "Integrase", "integration and excision", "high_confidence", "integrase"]]
     rows.extend(
@@ -2481,6 +2486,10 @@ def test_prepare_external_assets_reuses_profile_extracted_from_verified_archive_
     """A full safety profile must come from the verified archive, not a mutable 109-ID shared tree."""
     external_dir = tmp_path / "external"
     _write_phrogs_v4_fixture(external_dir / "phrogs" / "phrog_annot_v4.tsv")
+    mmseqs = external_dir / "bin" / "mmseqs"
+    mmseqs.parent.mkdir(parents=True)
+    mmseqs.write_text("#!/usr/bin/env bash\n")
+    mmseqs.chmod(0o755)
     shared_profile = _write_phrogs_profile_database(
         external_dir / "phrogs" / "phrogs_mmseqs_db" / "phrogs_profile_db",
         profile_ids=tuple(f"phrog_{index}" for index in range(1, 110)),
@@ -2826,6 +2835,61 @@ def test_prepare_external_assets_with_safety_prepares_all_safety_assets_after_pr
     assert calls == ["prodigal", "diamond", "hmmer", "amrfinder", "toxins", "phrogs"]
 
 
+def test_prepare_external_assets_snapshots_mmseqs_into_safety_generation(tmp_path, monkeypatch):
+    """PHROGs derivation receives a regular generation-owned executable, never the mutable outer link."""
+    external_dir = tmp_path / "external"
+    _write_phrogs_v4_fixture(external_dir / "phrogs" / "phrog_annot_v4.tsv")
+    _mock_verified_phrogs_profile_archive(monkeypatch, external_dir)
+    outer_mmseqs = external_dir / "bin" / "mmseqs"
+    source_mmseqs = external_dir / "tools" / "mmseqs-source"
+    source_mmseqs.parent.mkdir(parents=True, exist_ok=True)
+    outer_mmseqs.replace(source_mmseqs)
+    outer_mmseqs.symlink_to(source_mmseqs)
+
+    monkeypatch.setattr(
+        external_assets,
+        "prepare_pyrodigal_wrapper",
+        lambda *_args, **_kwargs: PreparedAsset("prodigal", tmp_path / "prodigal", "fixture"),
+    )
+
+    def staged_asset(name):
+        def prepare(*_args, **kwargs):
+            section, record = _materialize_mock_safety_manifest_section(name, Path(kwargs["safety_dir"]))
+            kwargs["manifest"][section] = record
+            return PreparedAsset(name, Path(kwargs["safety_dir"]) / name, name)
+
+        return prepare
+
+    observed = {}
+
+    def prepare_phrogs(*_args, **kwargs):
+        mmseqs = Path(kwargs["mmseqs_path"])
+        assert mmseqs.is_file() and not mmseqs.is_symlink()
+        assert mmseqs.is_relative_to((external_dir / "safety" / "generations").resolve())
+        observed["mmseqs_bytes"] = mmseqs.read_bytes()
+        raise RuntimeError("captured generation MMseqs")
+
+    monkeypatch.setattr(external_assets, "prepare_amrfinder_plus", staged_asset("amrfinder"))
+    monkeypatch.setattr(external_assets, "prepare_toxin_reference", staged_asset("toxins"))
+    monkeypatch.setattr(external_assets, "_prepare_verified_phrogs_safety_metadata", prepare_phrogs)
+
+    with pytest.raises(RuntimeError, match="captured generation MMseqs"):
+        prepare_external_assets(
+            external_dir,
+            download_mmseqs=False,
+            download_dustmasker=False,
+            download_diamond=False,
+            download_hmmer=False,
+            download_phrogs_annotation=False,
+            download_arc_evo2=False,
+            configure_lovis4u=False,
+            with_safety=True,
+        )
+
+    assert outer_mmseqs.is_symlink()
+    assert observed["mmseqs_bytes"] == source_mmseqs.read_bytes()
+
+
 def test_prepare_external_assets_with_safety_does_not_leak_insecure_transport_to_amr_or_uniprot(tmp_path, monkeypatch):
     """The global compatibility flag is scoped away from GitHub and UniProt safety assets."""
     calls = {}
@@ -3069,6 +3133,10 @@ def test_safety_failure_preserves_every_digest_referenced_by_the_previous_genera
 def test_safety_overwrite_failure_preserves_previous_phrogs_source_and_database(tmp_path, monkeypatch):
     """A shared-PHROGs overwrite cannot invalidate a prior manifest's source, raw, or profile DB."""
     external_dir = tmp_path / "external"
+    mmseqs = external_dir / "bin" / "mmseqs"
+    mmseqs.parent.mkdir(parents=True)
+    mmseqs.write_text("#!/usr/bin/env bash\n")
+    mmseqs.chmod(0o755)
     source_path = external_dir / "phrogs" / "phrog_annot_v4.tsv"
     source_path.parent.mkdir(parents=True)
     source_path.write_text("old PHROGs annotation\n")

@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 """Build uncertainty-aware, within-setting calibration evidence."""
 
 from __future__ import annotations
@@ -103,8 +100,11 @@ def build_selection_table(
     novelty_summary: Path | None = None,
     bootstrap_seed: int = 174,
     bootstrap_replicates: int = 2000,
+    comparability_margin: float = 0.05,
 ) -> pd.DataFrame:
     """Build the uncertainty-aware selection table across calibration settings."""
+    if not np.isfinite(comparability_margin) or comparability_margin < 0:
+        raise ValueError("comparability_margin must be finite and non-negative")
     rows = [
         summarize_setting(
             path,
@@ -121,9 +121,11 @@ def build_selection_table(
     table["eligible"] = table["metric_environment_ok"] & (table["records"] > 0)
     best_reward = table.loc[table["eligible"], "aggregate_reward_mean"].max()
     best_target = table.loc[table["eligible"], "target_signal_mean"].max()
-    margin = 0.05
-    table["reward_practically_comparable"] = table["aggregate_reward_ci_high"] >= best_reward - margin
-    table["target_signal_practically_comparable"] = table["target_signal_ci_high"] >= best_target - margin
+    table["comparability_margin"] = comparability_margin
+    table["reward_practically_comparable"] = table["aggregate_reward_ci_high"] >= best_reward - comparability_margin
+    table["target_signal_practically_comparable"] = (
+        table["target_signal_ci_high"] >= best_target - comparability_margin
+    )
     table["temperature_1_default_candidate"] = (
         table["eligible"]
         & table["temperature"].eq(1.0)
@@ -140,6 +142,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--bootstrap-seed", type=int, default=174)
     parser.add_argument("--bootstrap-replicates", type=int, default=2000)
+    parser.add_argument("--comparability-margin", type=float, default=0.05)
     return parser.parse_args()
 
 
@@ -151,6 +154,7 @@ def main() -> None:
         novelty_summary=args.novelty_summary,
         bootstrap_seed=args.bootstrap_seed,
         bootstrap_replicates=max(100, args.bootstrap_replicates),
+        comparability_margin=args.comparability_margin,
     )
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     table.to_csv(args.output_csv, index=False)

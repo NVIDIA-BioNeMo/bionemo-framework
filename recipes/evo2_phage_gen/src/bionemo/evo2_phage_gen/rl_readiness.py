@@ -114,9 +114,10 @@ def _module_check(name: str, module_name: str, *, required: bool) -> RLReadiness
     """Create a Python import-spec readiness check without importing the module."""
     try:
         ok = importlib.util.find_spec(module_name) is not None
-    except ModuleNotFoundError:
+        detail = module_name if ok else f"{module_name} not importable"
+    except Exception as error:
         ok = False
-    detail = module_name if ok else f"{module_name} not importable"
+        detail = f"{module_name} import discovery failed: {error}"
     return RLReadinessCheck(name=name, ok=ok, required=required, detail=detail)
 
 
@@ -151,26 +152,27 @@ def _iter_target_values(value: Any) -> list[str]:
 
 def _cuda_device_count() -> int | None:
     """Return CUDA device count, or ``None`` when PyTorch is unavailable."""
-    if importlib.util.find_spec("torch") is None:
+    try:
+        if importlib.util.find_spec("torch") is None:
+            return None
+        import torch
+    except Exception:
         return None
-    import torch
 
     return int(torch.cuda.device_count())
 
 
 def _runtime_checks() -> list[RLReadinessCheck]:
     """Check NeMo-RL runtime imports."""
-    nemo_rl_importable = importlib.util.find_spec("nemo_rl") is not None
+    nemo_rl_check = _module_check("nemo_rl", "nemo_rl", required=True)
     return [
         RLReadinessCheck(
             name="nemo_rl_install",
-            ok=nemo_rl_importable,
+            ok=nemo_rl_check.ok,
             required=True,
-            detail="nemo_rl is installed in the active environment"
-            if nemo_rl_importable
-            else "nemo_rl not importable",
+            detail="nemo_rl is installed in the active environment" if nemo_rl_check.ok else nemo_rl_check.detail,
         ),
-        _module_check("nemo_rl", "nemo_rl", required=True),
+        nemo_rl_check,
         _module_check("ray", "ray", required=True),
         _module_check("grpo_algorithm", "nemo_rl.algorithms.grpo", required=True),
     ]
@@ -187,10 +189,14 @@ def _resolve_run_config(checkpoint_path: str | Path | None) -> Path | None:
         return path / "run_config.yaml"
     latest_path = path / "latest_checkpointed_iteration.txt"
     if latest_path.exists():
-        latest_iteration = int(latest_path.read_text().strip())
-        run_config = path / f"iter_{latest_iteration:07d}" / "run_config.yaml"
-        if run_config.exists():
-            return run_config
+        try:
+            latest_iteration = int(latest_path.read_text().strip())
+        except (OSError, ValueError):
+            latest_iteration = None
+        if latest_iteration is not None:
+            run_config = path / f"iter_{latest_iteration:07d}" / "run_config.yaml"
+            if run_config.exists():
+                return run_config
     iter_run_configs = sorted(path.glob("iter_*/run_config.yaml"))
     return iter_run_configs[-1] if iter_run_configs else None
 
@@ -208,7 +214,18 @@ def _checkpoint_run_config_checks(checkpoint_path: str | Path | None) -> list[RL
     if run_config is None or not run_config.exists():
         return checks
 
-    run_config_data = yaml.safe_load(run_config.read_text())
+    try:
+        run_config_data = yaml.safe_load(run_config.read_text())
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        checks.append(
+            RLReadinessCheck(
+                name="checkpoint_bionemo_targets",
+                ok=False,
+                required=True,
+                detail=f"could not read checkpoint run config {run_config}: {error}",
+            )
+        )
+        return checks
     targets = sorted(
         {
             target
@@ -268,7 +285,7 @@ def _config_checks(
 
     try:
         config = _load_config_with_defaults(config_path)
-    except (TypeError, ValueError) as error:
+    except (OSError, TypeError, UnicodeError, ValueError, yaml.YAMLError) as error:
         checks.append(RLReadinessCheck("grpo_config_parse", ok=False, required=True, detail=str(error)))
         return checks
 
@@ -337,16 +354,28 @@ def _config_checks(
         )
     )
 
-    configured_gpus = int(_nested_get(config, ("cluster", "gpus_per_node"), 1))
-    available_gpus = _cuda_device_count() if expected_gpus is None else expected_gpus
-    checks.append(
-        RLReadinessCheck(
-            name="cuda_gpus",
-            ok=available_gpus is not None and available_gpus >= configured_gpus,
-            required=True,
-            detail=f"available={available_gpus}, required={configured_gpus}",
+    configured_gpus_value = _nested_get(config, ("cluster", "gpus_per_node"), 1)
+    try:
+        configured_gpus = int(configured_gpus_value)
+    except (TypeError, ValueError):
+        checks.append(
+            RLReadinessCheck(
+                name="cuda_gpus",
+                ok=False,
+                required=True,
+                detail=f"cluster.gpus_per_node is not an integer: {configured_gpus_value!r}",
+            )
         )
-    )
+    else:
+        available_gpus = _cuda_device_count() if expected_gpus is None else expected_gpus
+        checks.append(
+            RLReadinessCheck(
+                name="cuda_gpus",
+                ok=available_gpus is not None and available_gpus >= configured_gpus,
+                required=True,
+                detail=f"available={available_gpus}, required={configured_gpus}",
+            )
+        )
 
     model_name = str(_nested_get(config, ("policy", "model_name"), ""))
     needs_adapter = model_name.startswith("bionemo/evo2")

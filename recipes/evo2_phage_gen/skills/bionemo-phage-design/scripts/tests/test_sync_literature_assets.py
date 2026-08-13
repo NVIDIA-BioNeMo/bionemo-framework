@@ -321,6 +321,17 @@ class FetchValidationTests(unittest.TestCase):
 
             self.assertEqual(["https://www.biorxiv.org/content/a"], calls)
 
+    def test_curl_timeout_is_reported_as_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fetcher = sync.Fetcher(sync.DownloadCache(Path(tmp)), offline=False, refresh=True)
+            timeout = subprocess.TimeoutExpired(["curl"], 135)
+            with (
+                mock.patch.object(sync.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch.object(sync.subprocess, "run", side_effect=timeout),
+                self.assertRaisesRegex(sync.RetryableFetchError, "curl timed out"),
+            ):
+                fetcher._curl_download("https://www.biorxiv.org/content/a")
+
     def test_mime_magic_and_size_validation(self) -> None:
         sync.validate_payload(b"\xff\xd8\xffjpeg", "image/jpeg", "jpeg", min_size=4, max_size=100)
         sync.validate_payload(b"GIF89a-data", "image/gif", "gif", min_size=4, max_size=100)
@@ -422,6 +433,10 @@ class FallbackProvenanceTests(unittest.TestCase):
                 expected_equations=0,
                 has_supplement=False,
                 workbook_url=workbook_url,
+                workbook_sha256=hashlib.sha256(workbook).hexdigest(),
+                workbook_size=len(workbook),
+                workbook_expected_rows=302,
+                workbook_expected_columns=33,
             )
 
             class Fetcher:
@@ -439,12 +454,6 @@ class FallbackProvenanceTests(unittest.TestCase):
             )
             with (
                 mock.patch.object(sync, "convert_article", return_value=converted),
-                mock.patch.object(sync, "KING_WORKBOOK_SIZE", len(workbook)),
-                mock.patch.object(
-                    sync,
-                    "KING_WORKBOOK_SHA256",
-                    hashlib.sha256(workbook).hexdigest(),
-                ),
                 mock.patch.object(sync, "_validate_staged", return_value=None),
             ):
                 sync.sync_paper(
@@ -461,6 +470,40 @@ class FallbackProvenanceTests(unittest.TestCase):
             self.assertEqual("explicit-local-fallback:verified-workbook.xlsx", source["url"])
             self.assertNotIn("dist/media-1.xlsx", source["url"])
             self.assertNotIn(str(root), source["url"])
+
+    def test_invalid_article_utf8_has_a_source_validation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            article_url = "https://example.invalid/article"
+            spec = sync.PaperSpec(
+                slug="invalid-utf8",
+                title="Invalid UTF-8",
+                doi="10.0000/invalid",
+                version="v1",
+                license="CC-BY-4.0",
+                article_url=article_url,
+                supplement_url=None,
+                expected_figures=0,
+                expected_figure_files=0,
+                expected_equations=0,
+                has_supplement=False,
+            )
+
+            class Fetcher:
+                def get(self, _url: str) -> sync.Downloaded:
+                    return sync.Downloaded(b"\xff" * 1_100, "text/html", article_url)
+
+            with (
+                mock.patch.object(sync, "validate_payload", return_value=None),
+                self.assertRaisesRegex(sync.SourceValidationError, "not valid UTF-8"),
+            ):
+                sync.sync_paper(
+                    spec,
+                    output_root=Path(tmp) / "output",
+                    fetcher=Fetcher(),
+                    source_overrides={},
+                    fallback_media_1=None,
+                    update=False,
+                )
 
 
 class WorkbookTests(unittest.TestCase):

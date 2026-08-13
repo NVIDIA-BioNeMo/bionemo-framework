@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 """Measure target/SFT copy risk for a calibration sweep."""
 
 from __future__ import annotations
@@ -32,6 +29,8 @@ from bionemo.evo2_phage_gen.qc import save_fasta
 
 
 SEARCH_COLUMNS = ("query", "target", "pident", "qcov", "tcov", "alnlen", "qlen", "tlen", "evalue")
+IUPAC_COMPLEMENT = str.maketrans("ACGTRYSWKMBDHVN", "TGCAYRSWMKVHDBN")
+IUPAC_SYMBOLS = frozenset("ACGTRYSWKMBDHVN")
 
 
 def _least_rotation(sequence: str) -> str:
@@ -62,7 +61,10 @@ def _least_rotation(sequence: str) -> str:
 def canonical_circular_sequence(sequence: str) -> str:
     """Return the rotation- and strand-invariant canonical form of circular DNA."""
     sequence = sequence.upper()
-    reverse_complement = sequence.translate(str.maketrans("ACGT", "TGCA"))[::-1]
+    unsupported = sorted(set(sequence) - IUPAC_SYMBOLS)
+    if unsupported:
+        raise ValueError(f"unsupported IUPAC symbols: {''.join(unsupported)}")
+    reverse_complement = sequence.translate(IUPAC_COMPLEMENT)[::-1]
     return min(_least_rotation(sequence), _least_rotation(reverse_complement))
 
 
@@ -253,6 +255,8 @@ def validate_novelty_file(path: Path, expected_records: int) -> None:
     metrics = pd.read_csv(path)
     if len(metrics) != expected_records:
         raise ValueError(f"{path}: expected {expected_records} records, found {len(metrics)}")
+    if "id_prompt" not in metrics:
+        raise ValueError(f"{path}: missing id_prompt column")
     if metrics["id_prompt"].astype(str).duplicated().any():
         raise ValueError(f"{path}: duplicate id_prompt values")
 

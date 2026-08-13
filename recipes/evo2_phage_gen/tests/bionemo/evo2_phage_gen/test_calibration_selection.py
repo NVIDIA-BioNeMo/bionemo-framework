@@ -16,8 +16,9 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
-from bionemo.evo2_phage_gen.calibration_selection import summarize_setting
+from bionemo.evo2_phage_gen.calibration_selection import build_selection_table, summarize_setting
 
 
 def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
@@ -50,7 +51,7 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
     assert summary["within_setting_99pct_cluster_count"] == 1
     assert summary["within_setting_clusterable_count"] == 2
     assert summary["within_setting_99pct_distinct_rate"] == 0.5
-    assert summary["target_signal_mean"] == 7 / 12
+    assert summary["target_signal_mean"] == pytest.approx(7 / 12)
 
 
 def test_summarize_setting_marks_header_only_scores_ineligible(tmp_path):
@@ -62,3 +63,29 @@ def test_summarize_setting_marks_header_only_scores_ineligible(tmp_path):
     assert summary["records"] == 0
     assert summary["metric_environment_ok"] is False
     assert summary["within_setting_99pct_cluster_count"] == 0
+
+
+def test_build_selection_table_records_configurable_comparability_margin(tmp_path):
+    score_dir = tmp_path / "scores"
+    score_dir.mkdir()
+    frame = pd.DataFrame(
+        {
+            "reward": [0.8],
+            "reward_external_protein_hit_count": [0.8],
+            "reward_external_tropism": [0.8],
+            "reward_external_required_genes": [0.8],
+            "external_qc_tool_succeeded": [1.0],
+            "protein_database_hit_count_measurement_available": [1.0],
+            "tropism_measurement_available": [1.0],
+            "required_genes_measurement_available": [1.0],
+            "synteny_measurement_available": [1.0],
+            "average_protein_identity_measurement_available": [1.0],
+        }
+    )
+    frame.to_csv(score_dir / "prefix4_temp1.0.scores.csv", index=False)
+
+    table = build_selection_table(score_dir, bootstrap_replicates=100, comparability_margin=0.02)
+
+    assert table["comparability_margin"].tolist() == [0.02]
+    with pytest.raises(ValueError, match="comparability_margin"):
+        build_selection_table(score_dir, bootstrap_replicates=100, comparability_margin=-0.01)

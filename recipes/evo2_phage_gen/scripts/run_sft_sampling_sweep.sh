@@ -81,7 +81,7 @@ run_worker() {
   local worker_log="${RUN_ROOT}/logs/worker-${slot}.log"
   printf 'cell\tattempt\tstatus\tfinished_at\n' > "${worker_manifest}"
 
-  while IFS=$'\t' read -r cell_index cell_key prefix_length temperature prompt_file output_file; do
+  while IFS=$'\t' read -r -u 3 cell_index cell_key prefix_length temperature prompt_file output_file; do
     [[ "${cell_index}" == "index" ]] && continue
     (( cell_index % REPLICA_COUNT == slot )) || continue
 
@@ -96,6 +96,10 @@ run_worker() {
     fi
 
     local max_new_tokens=$(( TARGET_LENGTH - prefix_length ))
+    if (( max_new_tokens <= 0 )); then
+      echo "${cell_key}: TARGET_LENGTH=${TARGET_LENGTH} must exceed prefix_length=${prefix_length}" >&2
+      return 2
+    fi
     local attempt=0
     local succeeded=0
     while (( attempt <= MAX_RETRIES )); do
@@ -147,7 +151,7 @@ run_worker() {
       echo "${cell_key} failed after bounded retries" >> "${worker_log}"
       return 1
     fi
-  done < "${RUN_ROOT}/cells.tsv"
+  done 3< "${RUN_ROOT}/cells.tsv"
 }
 
 pids=()

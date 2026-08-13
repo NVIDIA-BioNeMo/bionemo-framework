@@ -74,4 +74,10 @@ Immediate hazards terminate safely: NaN/Inf, OOM, invalid data, corrupt/incomple
 
 An exact resume retains data/split hashes, model and optimizer state, scheduler state, RNG/data-order state when supported, topology-compatible config, and original attempt identity with an appended resume event. Otherwise start a new attempt and label it weights-only or fresh.
 
+For final held-out evaluation in a fresh process, reconstruct an evaluation-only runtime config and
+fresh distributed callbacks. Do not deserialize process-local training, optimizer, or communication
+callbacks from a saved run config. Prove the evaluator first on a validation sentinel without opening
+the sealed test. Permit a same-checkpoint retry only when the failed attempt produced no held-out
+metric or optimizer update and did not mutate the checkpoint or its selection record.
+
 The concise summary reports maximum steps, actual stop/reason, selected checkpoint step/path/artifact/hash, lowest validation loss, comparable events since best, trend/uncertainty evidence, base-model provenance, data/split/config hashes, hardware/effective token batch, telemetry links/logdirs, and why the checkpoint is fit for RL. Keep observations in monitor/events.jsonl and append-only RUNLOG.md.

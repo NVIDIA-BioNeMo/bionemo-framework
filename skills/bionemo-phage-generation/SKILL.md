@@ -54,7 +54,7 @@ absolute recipe root and missing or integrity-failed skill; do not invent implem
 
 Build this handoff prompt before changing sessions:
 
-```
+```text
 Continue the Evo 2 phage-design request in MODE=<interactive|batch>.
 Original request and constraints: <verbatim user request and durable constraints>.
 Selected checkout root: <absolute checkout root>.

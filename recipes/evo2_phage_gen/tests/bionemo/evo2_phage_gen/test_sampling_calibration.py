@@ -13,18 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from bionemo.evo2_phage_gen.sampling_calibration import (
     SweepCell,
+    _format_temperature,
+    _parse_args,
     build_inference_command,
     build_sweep_cells,
+    materialize_sweep,
     partition_gpu_groups,
     validate_cell_output,
     write_cell_prompts,
@@ -40,6 +41,21 @@ def test_build_sweep_cells_includes_marker_only_and_canonical_temperature() -> N
         "prefix0_temp1.0",
         "prefix4_temp1.0",
     ]
+
+
+def test_build_sweep_cells_validates_nonempty_positive_grid() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        build_sweep_cells([], [1.0])
+    with pytest.raises(ValueError, match="non-empty"):
+        build_sweep_cells([0], [])
+    with pytest.raises(ValueError, match="non-negative"):
+        build_sweep_cells([-1], [1.0])
+    with pytest.raises(ValueError, match="positive"):
+        build_sweep_cells([0], [0.0])
+
+
+def test_format_temperature_preserves_numeric_exponent_form() -> None:
+    assert _format_temperature(1e-5) == "1e-05"
 
 
 def test_partition_gpu_groups_prefers_all_available_replicas() -> None:
@@ -119,3 +135,67 @@ def test_validate_cell_output_requires_exact_prompt_ids(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="IDs"):
         validate_cell_output(output, prompts, expected_records=2)
+
+
+def test_materialize_sweep_contract_mismatch_does_not_modify_outputs(tmp_path: Path) -> None:
+    kwargs = {
+        "run_root": tmp_path / "run",
+        "checkpoint": tmp_path / "checkpoint",
+        "prefix_lengths": [0],
+        "temperatures": [0.7],
+        "num_prompts": 1,
+        "reference_start": "GAGT",
+        "marker": "+~",
+        "gpu_ids": [0],
+        "tensor_parallel_size": 1,
+        "target_length": 10,
+        "top_k": 4,
+        "top_p": 1.0,
+        "seed": 7,
+        "prompt_batch_size": 1,
+        "max_seq_length": 16,
+    }
+    materialize_sweep(**kwargs)
+    before = {
+        path.relative_to(kwargs["run_root"]): path.read_bytes()
+        for path in kwargs["run_root"].rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(ValueError, match="contract differs"):
+        materialize_sweep(**{**kwargs, "temperatures": [0.9]})
+
+    after = {
+        path.relative_to(kwargs["run_root"]): path.read_bytes()
+        for path in kwargs["run_root"].rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_materialize_cli_requires_explicit_sampling_parameters(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sampling-calibration",
+            "materialize",
+            "--run-root",
+            "run",
+            "--checkpoint",
+            "checkpoint",
+            "--prefix-lengths",
+            "0",
+            "--temperatures",
+            "1.0",
+            "--num-prompts",
+            "1",
+            "--gpu-ids",
+            "0",
+            "--tensor-parallel-size",
+            "1",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        _parse_args()

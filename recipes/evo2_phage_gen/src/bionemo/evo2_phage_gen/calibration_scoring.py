@@ -72,8 +72,8 @@ BIOLOGY_COLUMNS = (
 
 def _numeric_column(frame: pd.DataFrame, name: str) -> pd.Series:
     if name not in frame:
-        return pd.Series(0.0, index=frame.index, dtype=float)
-    return pd.to_numeric(frame[name], errors="coerce").fillna(0.0)
+        return pd.Series(float("nan"), index=frame.index, dtype=float)
+    return pd.to_numeric(frame[name], errors="coerce")
 
 
 def load_generation_records(path: Path) -> pd.DataFrame:
@@ -96,10 +96,10 @@ def load_generation_records(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def summarize_cell(cell: str, scored: pd.DataFrame) -> dict[str, float | int | str | bool]:
+def summarize_cell(cell: str, scored: pd.DataFrame) -> dict[str, float | int | str | bool | None]:
     """Summarize reward, hard-pass, and support without conflating zeros with missingness."""
     match = CELL_RE.fullmatch(cell)
-    row: dict[str, float | int | str | bool] = {
+    row: dict[str, float | int | str | bool | None] = {
         "cell": cell,
         "prefix_length": int(match.group("prefix")) if match else -1,
         "temperature": float(match.group("temperature")) if match else float("nan"),
@@ -121,7 +121,8 @@ def summarize_cell(cell: str, scored: pd.DataFrame) -> dict[str, float | int | s
         row[f"{column}_mean"] = float(_numeric_column(scored, column).mean())
     for column in BIOLOGY_COLUMNS:
         row[f"{column}_mean"] = float(_numeric_column(scored, column).mean())
-    row["mmseqs_cluster_num_clusters"] = int(_numeric_column(scored, "mmseqs_cluster_num_clusters").max())
+    cluster_count = _numeric_column(scored, "mmseqs_cluster_num_clusters").max()
+    row["mmseqs_cluster_num_clusters"] = int(cluster_count) if pd.notna(cluster_count) else None
     for column in (
         "reward_nucleotide_pass",
         "reward_binary_core_pass",

@@ -58,6 +58,19 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-mbridge-sft-005-fresh-held-out-evaluator",
+      "prompt": "Evaluate the selected SFT checkpoint on the sealed held-out split in a new process. The saved training config contains runtime callbacks created by the original distributed process.",
+      "expected_output": "A fresh evaluation-only runtime that proves itself on validation before one controlled sealed-test evaluation.",
+      "assertions": [
+        "The response reconstructs evaluation-only distributed callbacks instead of deserializing process-local training, optimizer, or communication callbacks from the saved config.",
+        "It proves the fresh evaluator on a validation sentinel before opening the sealed held-out split.",
+        "Evaluation performs no optimizer update and leaves the selected checkpoint and selection record unchanged.",
+        "A same-checkpoint retry is allowed only when the failed attempt produced no held-out metric or optimizer update and mutated neither the checkpoint nor its selection record."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
+      "expected_script": null
     }
   ]
 }

@@ -18,7 +18,14 @@ import re
 from pathlib import Path
 
 
-REPO_ROOT = next(parent for parent in Path(__file__).resolve().parents if (parent / ".git").exists())
+def _find_repo_root(path: Path) -> Path:
+    for parent in path.resolve().parents:
+        if (parent / ".git").exists():
+            return parent
+    raise RuntimeError(f"could not locate repository root containing .git above {path}")
+
+
+REPO_ROOT = _find_repo_root(Path(__file__))
 ROOT_AGENT_DIR = REPO_ROOT / ".agents"
 ROOT_SKILLS_DIR = REPO_ROOT / "skills"
 RECIPE_ROOT = REPO_ROOT / "recipes" / "evo2_phage_gen"
@@ -328,7 +335,7 @@ def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
 
 
 def test_controller_uses_dependency_graph_and_bounded_autonomy() -> None:
-    skills_root = RECIPE_AGENT_DIR / "skills"
+    skills_root = RECIPE_SKILLS_DIR
     controller = (skills_root / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
     contract = (skills_root / "bionemo-phage-design" / "references" / "project-contract.md").read_text(
         encoding="utf-8"
@@ -363,7 +370,7 @@ def test_controller_uses_dependency_graph_and_bounded_autonomy() -> None:
 
 
 def test_execution_adapter_uses_resource_aware_admission() -> None:
-    skills_root = RECIPE_AGENT_DIR / "skills"
+    skills_root = RECIPE_SKILLS_DIR
     adapter = (skills_root / "bionemo-phage-design-adapt-execution" / "SKILL.md").read_text(encoding="utf-8")
     contract = (
         skills_root / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"
@@ -383,7 +390,7 @@ def test_execution_adapter_uses_resource_aware_admission() -> None:
 def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
     eval_ids = set()
     eval_text = ""
-    for eval_path in sorted((RECIPE_AGENT_DIR / "skills").glob("*/evals/evals.json")):
+    for eval_path in sorted(RECIPE_SKILLS_DIR.glob("*/evals/evals.json")):
         payload = json.loads(eval_path.read_text(encoding="utf-8"))
         eval_ids.update(case["id"] for case in payload["evals"])
         eval_text += json.dumps(payload)
@@ -414,7 +421,7 @@ def test_behavioral_evals_cover_scope_runlog_and_wandb_regressions() -> None:
 def test_readme_and_historical_evidence_distinguish_rerun_generations() -> None:
     readme = (RECIPE_ROOT / "README.md").read_text(encoding="utf-8")
     historical_evidence = (
-        RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design" / "references" / "historical-evidence.md"
+        RECIPE_SKILLS_DIR / "bionemo-phage-design" / "references" / "historical-evidence.md"
     ).read_text(encoding="utf-8")
 
     for marker in (
@@ -442,13 +449,11 @@ def test_readme_and_historical_evidence_distinguish_rerun_generations() -> None:
 
 def test_publication_citation_distinguishes_final_article_from_bundled_preprint() -> None:
     readme = (RECIPE_ROOT / "README.md").read_text(encoding="utf-8")
-    controller = (RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
-    calibration = (RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design-calibrate-rl-sampling" / "SKILL.md").read_text(
+    controller = (RECIPE_SKILLS_DIR / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+    calibration = (RECIPE_SKILLS_DIR / "bionemo-phage-design-calibrate-rl-sampling" / "SKILL.md").read_text(
         encoding="utf-8"
     )
-    research = (RECIPE_AGENT_DIR / "skills" / "bionemo-phage-design-research-evidence" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    research = (RECIPE_SKILLS_DIR / "bionemo-phage-design-research-evidence" / "SKILL.md").read_text(encoding="utf-8")
 
     assert "https://www.science.org/doi/10.1126/science.aec2657" in readme
     assert "https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full" in readme
@@ -470,7 +475,7 @@ def test_publication_citation_distinguishes_final_article_from_bundled_preprint(
 
 
 def test_safeguards_reach_operational_workflows_and_card_license() -> None:
-    skills_root = RECIPE_AGENT_DIR / "skills"
+    skills_root = RECIPE_SKILLS_DIR
     controller = (skills_root / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
     design_contract = (
         skills_root / "bionemo-phage-design" / "references" / "design-scope-and-viability.md"
@@ -519,7 +524,7 @@ def test_safeguards_reach_operational_workflows_and_card_license() -> None:
 
 
 def test_execution_adapter_covers_site_aware_slurm_and_local_runtime_choice() -> None:
-    skills_root = RECIPE_AGENT_DIR / "skills"
+    skills_root = RECIPE_SKILLS_DIR
     adapter = (skills_root / "bionemo-phage-design-adapt-execution" / "SKILL.md").read_text(encoding="utf-8")
     contract = (
         skills_root / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"

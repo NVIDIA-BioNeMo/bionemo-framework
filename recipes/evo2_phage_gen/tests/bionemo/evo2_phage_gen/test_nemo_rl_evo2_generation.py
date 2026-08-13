@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,7 @@ from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
     Evo2GenerationResult,
     Evo2MegatronGenerationAdapter,
     _PromptTokenProxy,
+    resume_generation_call_offset,
     should_use_evo2_native_batched_generation,
 )
 
@@ -99,12 +101,13 @@ def test_should_use_evo2_native_batched_generation_requires_evo2_batch_and_model
     assert not should_use_evo2_native_batched_generation(cfg, non_evo2_model, batch_size=8)
 
 
-def test_evo2_adapter_rng_seed_advances_and_records_trace(capsys):
+def test_evo2_adapter_rng_seed_advances_and_records_trace(caplog, capsys):
     adapter = Evo2MegatronGenerationAdapter({"seed": 17, "seed_stride": 101})
     worker = SimpleNamespace(rank=0, cfg={"generation": {"mcore_generation_config": {}}})
 
-    assert adapter._next_seed(worker) == 17
-    assert adapter._next_seed(worker) == 118
+    with caplog.at_level(logging.INFO, logger=evo2_generation.__name__):
+        assert adapter._next_seed(worker) == 17
+        assert adapter._next_seed(worker) == 118
     assert worker._evo2_generation_rng_trace == [
         {
             "rank": 0,
@@ -131,13 +134,14 @@ def test_evo2_adapter_rng_seed_advances_and_records_trace(capsys):
             "seed_stride": 101,
         },
     ]
-    trace_lines = capsys.readouterr().out.strip().splitlines()
+    trace_lines = caplog.messages
     assert len(trace_lines) == 2
     for line, expected in zip(trace_lines, worker._evo2_generation_rng_trace, strict=True):
         assert line.startswith("EVO2_SEED_TRACE ")
         payload = line.removeprefix("EVO2_SEED_TRACE ")
         assert json.loads(payload) == expected
         assert payload == json.dumps(expected, sort_keys=True)
+    assert capsys.readouterr().out == ""
 
 
 def test_evo2_adapter_rng_seed_continues_from_configured_call_offset():
@@ -162,10 +166,7 @@ def test_evo2_adapter_rng_seed_continues_from_configured_call_offset():
 def test_evo2_resume_call_offset_counts_prior_train_and_validation_generations(
     completed_steps, val_period, val_at_start, expected
 ):
-    offset_fn = getattr(evo2_generation, "resume_generation_call_offset", None)
-
-    assert offset_fn is not None
-    assert offset_fn(completed_steps, val_period=val_period, val_at_start=val_at_start) == expected
+    assert resume_generation_call_offset(completed_steps, val_period=val_period, val_at_start=val_at_start) == expected
 
 
 def test_evo2_adapter_shares_tp_seed_and_separates_dp_and_successive_calls():
@@ -225,6 +226,8 @@ def test_evo2_adapter_broadcasts_implicit_base_seed_from_model_parallel_leader(m
     monkeypatch.setattr(parallel_state, "get_data_parallel_world_size", lambda: 1)
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: current_tp_rank["value"])
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_pipeline_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "get_context_parallel_rank", lambda: 0)
     monkeypatch.setattr(parallel_state, "get_model_parallel_group", lambda: model_parallel_group)
     monkeypatch.setattr(parallel_state, "get_model_parallel_src_rank", lambda: 0)
     monkeypatch.setattr(parallel_state, "get_context_parallel_world_size", lambda: 1)
@@ -292,6 +295,8 @@ def test_evo2_adapter_broadcasts_implicit_base_seed_across_model_and_context_par
     monkeypatch.setattr(parallel_state, "get_data_parallel_world_size", lambda: 2)
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: current["mp"])
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_pipeline_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "get_context_parallel_rank", lambda: current["cp"])
     monkeypatch.setattr(parallel_state, "get_model_parallel_group", _model_group)
     monkeypatch.setattr(
         parallel_state,
@@ -677,6 +682,7 @@ def test_megatron_generation_shards_adapter_input_across_dp_and_gathers_in_order
     }
     generation._owns_policy = False
     generation._policy = SimpleNamespace(worker_group=worker_group)
+    generation._generation_adapter = _load_generation_adapter(generation.cfg)
     data = BatchedDataDict(
         {
             "input_ids": torch.tensor([[1, 2], [3, 4], [5, 6], [7, 8]]),
@@ -768,6 +774,7 @@ def test_megatron_generation_balances_uneven_dp_shards_without_empty_replicas():
     }
     generation._owns_policy = False
     generation._policy = SimpleNamespace(worker_group=worker_group)
+    generation._generation_adapter = _load_generation_adapter(generation.cfg)
     data = BatchedDataDict(
         {
             "input_ids": torch.tensor([[0, 10], [1, 11], [2, 12], [3, 13], [4, 14]]),

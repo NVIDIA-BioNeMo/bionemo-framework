@@ -16,6 +16,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -30,6 +31,7 @@ def test_sampling_sweep_dry_run_materializes_marker_only_parallel_plan(tmp_path:
     env = {
         **os.environ,
         "SOURCE_ENV": "0",
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
         "DRY_RUN": "1",
         "RECIPE_ROOT": str(RECIPE_ROOT),
         "RUN_ROOT": str(run_root),
@@ -57,3 +59,11 @@ def test_sampling_sweep_dry_run_materializes_marker_only_parallel_plan(tmp_path:
     assert marker_only[0] == {"id": "prefix0_temp0.7_0000", "prompt": "+~"}
     assert b"\r" not in (run_root / "cells.tsv").read_bytes()
     assert (run_root / "DRY_RUN_COMPLETE").is_file()
+
+
+def test_sampling_workers_use_dedicated_input_and_guard_token_budget() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "read -r -u 3 cell_index" in script
+    assert 'done 3< "${RUN_ROOT}/cells.tsv"' in script
+    assert "if (( max_new_tokens <= 0 )); then" in script

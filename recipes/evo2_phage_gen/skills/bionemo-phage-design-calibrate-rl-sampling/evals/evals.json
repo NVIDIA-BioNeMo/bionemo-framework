@@ -61,7 +61,7 @@
       "assertions": [
         "The response reads bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json before using the content, identifies the bundled CC BY 4.0 bioRxiv v1 source, and distinguishes it from the final Science publication of record.",
         "It cites the bundled king-2025-generative-phage-design/supplement.md and names the relevant prompt-analysis and sampling-sweep methods rather than attributing details to an unspecified paper.",
-        "It reports prompt lengths 1 to 11 nucleotides, the +∼ fine-tuning prefix, top-k = 4, top-p = 1, approximately 1,000 samples per temperature-prompt cell, and the temperature sweep 0.3, 0.5, 0.7, 0.9, and 1.1.",
+        "It reports prompt lengths 1 to 11 nucleotides, the +~ fine-tuning prefix, top-k = 4, top-p = 1, approximately 1,000 samples per temperature-prompt cell, and the temperature sweep 0.3, 0.5, 0.7, 0.9, and 1.1.",
         "It distinguishes the prompt-recall experiment at temperature 1.1 and 6,000 generated nucleotides from the multi-temperature selection sweep and its QC, diversity, and retention analyses.",
         "It treats these as historical methods evidence, then verifies the selected SFT's actual markers, orientation, tokenizer, BOS/EOS, wrappers, prompt bytes/tokens, and continuation semantics before a fresh compatible calibration."
       ],

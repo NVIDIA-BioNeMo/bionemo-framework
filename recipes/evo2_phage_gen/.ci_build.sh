@@ -17,8 +17,12 @@ source .venv/bin/activate
 # 3. Pin warp-lang<1.13.0 (subquadratic-ops-torch 0.2.0 uses wp.context removed in 1.13)
 uv pip install 'warp-lang<1.13.0'
 
-# 4. Install build requirements and pin transformer_engine
-pip freeze | grep transformer_engine > pip-constraints.txt
+# 4. Install build requirements and pin transformer_engine. An image without
+# Transformer Engine intentionally produces an empty constraints file.
+if ! pip freeze | grep -E '^transformer[-_]engine([= @]|$)' > pip-constraints.txt; then
+    : > pip-constraints.txt
+    echo "transformer-engine is not installed; continuing with an empty pip-constraints.txt" >&2
+fi
 uv pip install -r build_requirements.txt --no-build-isolation
 
 # 5. Install the recipe with all remaining dependencies, including test extras.

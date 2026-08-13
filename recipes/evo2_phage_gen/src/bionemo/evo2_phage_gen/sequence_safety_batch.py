@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import unquote
 
-from bionemo.evo2_phage_gen.sequence_safety import SafetyState
 from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     _AMRFINDER_COLUMNS,
     _AMRFINDER_POLICY_ID,
@@ -124,8 +123,6 @@ class BatchAdapterExecution:
             raise ValueError("batch execution status is invalid")
         if self.execution_status == "NOT_STARTED" and (self.command or self.raw_output_path is not None):
             raise ValueError("not-started batch execution cannot claim a command or output")
-        if self.execution_status == "FAILED" and not self.command:
-            raise ValueError("failed batch execution must record its attempted command")
         if self.execution_status == "COMPLETED_AND_PARSED" and (not self.command or self.raw_output_path is None):
             raise ValueError("completed batch execution must record its command and raw output")
 
@@ -140,8 +137,8 @@ def _read_regular_bytes(path: Path, *, label: str) -> bytes:
         raise BatchSafetyError(f"cannot read {label}: {error}") from error
 
 
-def _parse_exact_fasta(path: Path, *, label: str) -> tuple[tuple[str, str], ...]:
-    payload = _read_regular_bytes(path, label=label)
+def _parse_exact_fasta_bytes(payload: bytes, *, label: str) -> tuple[tuple[str, str], ...]:
+    """Parse one already-read canonical FASTA payload."""
     try:
         text = payload.decode("ascii")
     except UnicodeError as error:
@@ -172,6 +169,11 @@ def _parse_exact_fasta(path: Path, *, label: str) -> tuple[tuple[str, str], ...]
     if len(identifiers) != len(set(identifiers)):
         raise BatchSafetyError(f"{label} contains duplicate FASTA identifiers")
     return tuple(records)
+
+
+def _parse_exact_fasta(path: Path, *, label: str) -> tuple[tuple[str, str], ...]:
+    """Read and parse one canonical FASTA file."""
+    return _parse_exact_fasta_bytes(_read_regular_bytes(path, label=label), label=label)
 
 
 def _validate_gff(
@@ -219,9 +221,10 @@ def _require_file_matches_records(
     label: str,
 ) -> bytes:
     expected_tuple = tuple(expected)
-    if _parse_exact_fasta(path, label=label) != expected_tuple:
+    payload = _read_regular_bytes(path, label=label)
+    if _parse_exact_fasta_bytes(payload, label=label) != expected_tuple:
         raise BatchSafetyError(f"{label} differs from the ORF query inventory")
-    return _read_regular_bytes(path, label=label)
+    return payload
 
 
 def materialize_batched_orf_inputs(
@@ -262,13 +265,13 @@ def materialize_batched_orf_inputs(
                 raise BatchSafetyError("batch query identity is duplicated")
             seen_queries.update(query_ids)
             primary = tuple(query for query in queries if query.evidence_path == "pyrodigal-gv")
-            genome_records = _parse_exact_fasta(artifacts.genomes_fna, label=f"{record_id} genomes FASTA")
+            genome_label = f"{record_id} genomes FASTA"
+            genome_payload = _read_regular_bytes(artifacts.genomes_fna, label=genome_label)
+            genome_records = _parse_exact_fasta_bytes(genome_payload, label=genome_label)
             if len(genome_records) != 1 or genome_records[0][0] != record_id:
                 raise BatchSafetyError(f"{record_id} genome FASTA record identity is invalid")
             sequence_length = len(genome_records[0][1])
-            combined_payloads["genomes_fna"].extend(
-                _read_regular_bytes(artifacts.genomes_fna, label=f"{record_id} genomes FASTA")
-            )
+            combined_payloads["genomes_fna"].extend(genome_payload)
             combined_payloads["proteins_faa"].extend(
                 _require_file_matches_records(
                     artifacts.proteins_faa,
@@ -513,16 +516,9 @@ def _amrfinder_execution(
     command: tuple[str, ...],
     raw_output: Path | None,
     results: tuple[tuple[str, AdapterResult], ...],
+    execution_status: str | None = None,
 ) -> BatchAdapterExecution:
-    execution_status = (
-        "NOT_STARTED"
-        if not command
-        else (
-            "FAILED"
-            if any(result.class_result.state is SafetyState.INDETERMINATE for _, result in results)
-            else "COMPLETED_AND_PARSED"
-        )
-    )
+    execution_status = execution_status or ("COMPLETED_AND_PARSED" if command else "NOT_STARTED")
     command_output_path = str((raw_output or work_dir / "amrfinder.raw.tsv").absolute())
     bound_results = tuple(
         (
@@ -601,6 +597,7 @@ def run_amrfinder_batch(
             batched=batched,
             command=(),
             raw_output=None,
+            execution_status="FAILED",
             results=_amrfinder_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -635,6 +632,7 @@ def run_amrfinder_batch(
             batched=batched,
             command=command,
             raw_output=raw_output if raw_output.is_file() else None,
+            execution_status="FAILED",
             results=_amrfinder_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -649,6 +647,7 @@ def run_amrfinder_batch(
             batched=batched,
             command=command,
             raw_output=raw_output if raw_output.is_file() else None,
+            execution_status="FAILED",
             results=_amrfinder_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -663,6 +662,7 @@ def run_amrfinder_batch(
             batched=batched,
             command=command,
             raw_output=None,
+            execution_status="FAILED",
             results=_amrfinder_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -725,6 +725,7 @@ def run_amrfinder_batch(
             batched=batched,
             command=command,
             raw_output=raw_output,
+            execution_status="FAILED",
             results=_amrfinder_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -781,16 +782,9 @@ def _toxin_execution(
     command: tuple[str, ...],
     raw_output: Path | None,
     results: tuple[tuple[str, AdapterResult], ...],
+    execution_status: str | None = None,
 ) -> BatchAdapterExecution:
-    execution_status = (
-        "NOT_STARTED"
-        if not command
-        else (
-            "FAILED"
-            if any(result.class_result.state is SafetyState.INDETERMINATE for _, result in results)
-            else "COMPLETED_AND_PARSED"
-        )
-    )
+    execution_status = execution_status or ("COMPLETED_AND_PARSED" if command else "NOT_STARTED")
     command_output_path = str((raw_output or work_dir / "toxin_diamond.raw.tsv").absolute())
     bound_results = tuple(
         (
@@ -851,6 +845,7 @@ def run_toxin_diamond_batch(
             batched=batched,
             command=(),
             raw_output=None,
+            execution_status="FAILED",
             results=_toxin_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -875,6 +870,7 @@ def run_toxin_diamond_batch(
             batched=batched,
             command=command,
             raw_output=raw_output if raw_output.is_file() else None,
+            execution_status="FAILED",
             results=_toxin_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -889,6 +885,7 @@ def run_toxin_diamond_batch(
             batched=batched,
             command=command,
             raw_output=raw_output if raw_output.is_file() else None,
+            execution_status="FAILED",
             results=_toxin_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -903,6 +900,7 @@ def run_toxin_diamond_batch(
             batched=batched,
             command=command,
             raw_output=None,
+            execution_status="FAILED",
             results=_toxin_indeterminate_results(
                 batched.record_ids,
                 required=required,
@@ -974,6 +972,7 @@ def run_toxin_diamond_batch(
             batched=batched,
             command=command,
             raw_output=raw_output,
+            execution_status="FAILED",
             results=_toxin_indeterminate_results(
                 batched.record_ids,
                 required=required,

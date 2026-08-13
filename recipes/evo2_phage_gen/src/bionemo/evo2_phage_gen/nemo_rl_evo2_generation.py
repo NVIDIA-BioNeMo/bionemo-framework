@@ -18,11 +18,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 
 def resume_generation_call_offset(completed_steps: int, *, val_period: int, val_at_start: bool) -> int:
@@ -238,10 +242,11 @@ def generate_evo2_native_batched(
     for result in native_results:
         generated_tokens = _native_generated_token_ids(result)
         generated_log_probs = list(result.generated_log_probs or [])
-        assert len(generated_tokens) == len(generated_log_probs), (
-            "Evo2 native generation returned mismatched token/log-prob lengths: "
-            f"{len(generated_tokens)} tokens != {len(generated_log_probs)} log-probs"
-        )
+        if len(generated_tokens) != len(generated_log_probs):
+            raise ValueError(
+                "Evo2 native generation returned mismatched token/log-prob lengths: "
+                f"{len(generated_tokens)} tokens != {len(generated_log_probs)} log-probs"
+            )
         results.append(
             Evo2GenerationResult(
                 prompt_tokens=torch.tensor(
@@ -392,7 +397,8 @@ class Evo2MegatronGenerationAdapter:
         }
         trace.append(trace_item)
         setattr(worker, "_evo2_generation_rng_trace", trace[-100:])
-        print(f"EVO2_SEED_TRACE {json.dumps(trace_item, sort_keys=True)}", flush=True)
+        if self._is_model_parallel_leader():
+            logger.info("EVO2_SEED_TRACE %s", json.dumps(trace_item, sort_keys=True))
         return seed
 
     def generate_worker(
@@ -524,10 +530,7 @@ class Evo2MegatronGenerationAdapter:
                 )
             setattr(worker, "_evo2_generation_timing", timing)
             if self._is_model_parallel_leader():
-                print(
-                    " ".join(f"{key}={value:.6f}" for key, value in timing.items()),
-                    flush=True,
-                )
+                logger.info("%s", " ".join(f"{key}={value:.6f}" for key, value in timing.items()))
         return worker._parse_result_to_batched_data_dict(data, result)
 
     def finish_worker(self, worker: Any) -> None:

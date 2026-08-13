@@ -536,6 +536,10 @@ def build_commands(
         "--disallowedTools",
         "Edit,Write,NotebookEdit",
     ]
+    claude_schema = json.loads(grade_schema.read_text(encoding="utf-8"))
+    if not isinstance(claude_schema, dict):
+        raise EvalError("grade schema must be a JSON object")
+    claude_schema.pop("$schema", None)
     grading = [
         *common,
         "--output-format",
@@ -544,7 +548,7 @@ def build_commands(
         "--tools",
         "",
         "--json-schema",
-        json.dumps(json.loads(grade_schema.read_text(encoding="utf-8")), separators=(",", ":")),
+        json.dumps(claude_schema, separators=(",", ":")),
     ]
     if model:
         generation.extend(["--model", model])

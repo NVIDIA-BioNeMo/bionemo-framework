@@ -88,9 +88,19 @@ def test_external_qc_checker_allows_missing_optional_external_tools(tmp_path):
     assert any(check.name == "phrogs_mmseqs_db" and not check.required and not check.ok for check in checks)
 
 
+@pytest.mark.parametrize("payload", ["", "- one\n- two\n", "42\n"])
+def test_external_qc_checker_rejects_non_mapping_yaml(tmp_path, payload):
+    """Empty, sequence, and scalar YAML cannot be interpreted as Arc configuration."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(payload)
+
+    with pytest.raises(ValueError, match="mapping"):
+        check_arc_qc_prerequisites(config_path)
+
+
 def test_external_qc_checker_requires_enabled_stage_inputs(tmp_path, monkeypatch):
     """Enabling homology should promote MMseqs databases to required checks."""
-    monkeypatch.setattr("shutil.which", lambda _tool: None)
+    monkeypatch.setattr("shutil.which", lambda *_args, **_kwargs: None)
     checks = check_arc_qc_prerequisites(
         _write_config(tmp_path, homology_filtering=True),
         genetic_architecture_import_fasta=_write_import_fasta(tmp_path),
@@ -125,7 +135,7 @@ def test_external_qc_checker_uses_explicit_run_tool_directory(tmp_path, monkeypa
 
 def test_external_qc_checker_requires_lovis4u_for_visualization_stage(tmp_path, monkeypatch):
     """The exact Arc visualization/synteny stage needs LoVis4u on PATH."""
-    monkeypatch.setattr("shutil.which", lambda _tool: None)
+    monkeypatch.setattr("shutil.which", lambda *_args, **_kwargs: None)
     checks = check_arc_qc_prerequisites(
         _write_config(tmp_path, genetic_architecture_visualization_and_synteny_filtering=True),
         genetic_architecture_import_fasta=_write_import_fasta(tmp_path),

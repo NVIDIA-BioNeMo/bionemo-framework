@@ -73,3 +73,10 @@ def test_validate_score_file_requires_complete_unique_ids(tmp_path):
 
     with pytest.raises(ValueError, match="duplicate"):
         validate_score_file(path, expected_records=2)
+
+
+def test_summarize_cell_preserves_missing_metrics_and_empty_cluster_count():
+    summary = summarize_cell("prefix0_temp1.0", pd.DataFrame(index=[]))
+
+    assert pd.isna(summary["reward_valid_nt_chars_mean"])
+    assert summary["mmseqs_cluster_num_clusters"] is None

@@ -24,6 +24,7 @@ import pytest
 
 from bionemo.evo2_phage_gen.qc import (
     NucleotideQCConfig,
+    _parse_dustmasker_interval_output,
     add_nucleotide_metrics,
     apply_nucleotide_qc,
     calculate_dustmask_metrics,
@@ -147,12 +148,12 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     """When enabled, nucleotide metrics should call NCBI dustmasker once per batch."""
     calls = []
 
-    def fake_run(args, check, capture_output, text, timeout):
-        calls.append((args, check, capture_output, text, timeout))
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
         output_path = args[args.index("-out") + 1]
-        Path(output_path).write_text(">seq_0\n0 - 79\n>seq_1\n320 - 399\n")
+        Path(output_path).write_text(">seq_0\n1 - 80\n>seq_1\n321 - 400\n")
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("bionemo.evo2_phage_gen.qc.subprocess.run", fake_run)
     df = pd.DataFrame(
         {
             "id_prompt": ["left", "right"],
@@ -177,7 +178,7 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     assert calls[0][0][0] == "fake-dustmasker"
     assert calls[0][0][calls[0][0].index("-outfmt") + 1] == "interval"
     assert calls[0][0][calls[0][0].index("-level") + 1] == "20.5"
-    assert calls[0][4] == 17.5
+    assert calls[0][1]["timeout"] == 17.5
     assert scored["dustmask_left_end_masked_fraction"].tolist() == [0.8, 0.0]
     assert scored["dustmask_right_end_masked_fraction"].tolist() == [0.0, 0.8]
     assert scored["dustmask_end_pass"].tolist() == [True, True]
@@ -196,7 +197,7 @@ def test_external_dustmasker_failures_are_bounded_and_wrapped(monkeypatch, error
     def fail(*_args, **_kwargs):
         raise error
 
-    monkeypatch.setattr("subprocess.run", fail)
+    monkeypatch.setattr("bionemo.evo2_phage_gen.qc.subprocess.run", fail)
     frame = pd.DataFrame({"id_prompt": ["candidate"], "sequence": ["ACGT" * 100]})
 
     with pytest.raises(RuntimeError, match="dustmasker execution failed"):
@@ -204,3 +205,15 @@ def test_external_dustmasker_failures_are_bounded_and_wrapped(monkeypatch, error
             frame,
             NucleotideQCConfig(dustmask_filter=True, dustmask_use_external=True),
         )
+
+
+@pytest.mark.parametrize(
+    "interval",
+    ["0 - 4", "4 - 3", "1 - 5", "-1 - 2", "not-an-interval"],
+)
+def test_dustmasker_intervals_reject_invalid_one_based_coordinates(tmp_path, interval):
+    interval_path = tmp_path / "dustmasker.interval"
+    interval_path.write_text(f">seq_0\n{interval}\n")
+
+    with pytest.raises(ValueError, match="invalid dustmasker interval"):
+        _parse_dustmasker_interval_output(interval_path, [4])

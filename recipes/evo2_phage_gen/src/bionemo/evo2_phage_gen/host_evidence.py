@@ -464,12 +464,6 @@ def validate_host_evidence_artifacts(table: HostEvidenceTable, *, table_path: st
         if row.evidence_source == "NCBI_DATASETS":
             if row.accession is None:
                 raise HostEvidenceError(f"NCBI row {row.record_id} lacks an accession")
-            try:
-                expected = _parse_ncbi_response(raw, accession=row.accession)
-            except HostEvidenceError as error:
-                raise HostEvidenceError(
-                    f"cached NCBI response does not reconcile with row {row.record_id}: {error}"
-                ) from error
             observed = (
                 row.normalized_host_domain,
                 row.confirmed,
@@ -477,6 +471,27 @@ def validate_host_evidence_artifacts(table: HostEvidenceTable, *, table_path: st
                 row.evidence_version,
                 row.reason_codes,
             )
+            if "NCBI_METADATA_UNRESOLVED" in row.reason_codes:
+                unresolved = (
+                    HostDomain.UNKNOWN,
+                    False,
+                    f"accession:{row.accession}",
+                    NCBI_RESOLVER_VERSION,
+                    ("NCBI_METADATA_UNRESOLVED",),
+                )
+                if observed != unresolved:
+                    raise HostEvidenceError(f"unresolved NCBI row does not reconcile for {row.record_id}")
+                try:
+                    _parse_ncbi_response(raw, accession=row.accession)
+                except HostEvidenceError:
+                    continue
+                raise HostEvidenceError(f"cached unresolved NCBI response now parses for {row.record_id}")
+            try:
+                expected = _parse_ncbi_response(raw, accession=row.accession)
+            except HostEvidenceError as error:
+                raise HostEvidenceError(
+                    f"cached NCBI response does not reconcile with row {row.record_id}: {error}"
+                ) from error
             if observed != expected:
                 raise HostEvidenceError(f"cached NCBI response does not reconcile with row {row.record_id}")
 

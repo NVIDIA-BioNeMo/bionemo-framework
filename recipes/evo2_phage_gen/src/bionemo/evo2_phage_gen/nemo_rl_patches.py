@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import importlib
 import importlib.util
+import logging
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+
+logger = logging.getLogger(__name__)
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PATCH = RECIPE_ROOT / "patches" / "nemo-rl-evo2-mbridge-grpo.patch"
@@ -118,8 +121,13 @@ def assert_nemo_rl_patch_runtime(patch_path: Path = DEFAULT_PATCH) -> None:
 def _nemo_rl_source_pin() -> tuple[str, str]:
     """Read the pinned NeMo-RL source URL and revision from this recipe."""
     pyproject = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
-    source = pyproject["tool"]["uv"]["sources"]["nemo-rl"]
-    return source["git"], source["rev"]
+    try:
+        source = pyproject["tool"]["uv"]["sources"]["nemo-rl"]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError("recipe pyproject.toml is missing the NeMo-RL source pin") from error
+    if not isinstance(source, dict) or not source.get("git") or not source.get("rev"):
+        raise RuntimeError("NeMo-RL source pin must define nonempty git and rev values")
+    return str(source["git"]), str(source["rev"])
 
 
 def _is_complete_nemo_rl_install() -> bool:
@@ -215,8 +223,14 @@ def _patch_nemo_rl_packaging_metadata(source_root: Path) -> None:
     """Patch upstream packaging metadata so setuptools includes all ``nemo_rl`` subpackages."""
     pyproject_path = source_root / "pyproject.toml"
     text = pyproject_path.read_text()
-    text = text.replace('packages = ["nemo_rl"]', 'packages = { find = { include = ["nemo_rl*"] } }')
-    text = text.replace('requires-python = ">=3.13.13,<3.14"', 'requires-python = ">=3.10"')
+    replacements = (
+        ('packages = ["nemo_rl"]', 'packages = { find = { include = ["nemo_rl*"] } }'),
+        ('requires-python = ">=3.13.13,<3.14"', 'requires-python = ">=3.10"'),
+    )
+    for old, new in replacements:
+        if old not in text:
+            raise RuntimeError(f"cannot patch NeMo-RL packaging metadata; expected text is missing: {old}")
+        text = text.replace(old, new, 1)
     pyproject_path.write_text(text)
 
 
@@ -269,6 +283,7 @@ def apply_nemo_rl_patch(patch_path: Path = DEFAULT_PATCH, *, check_only: bool = 
 
 def main() -> None:
     """CLI entry point for patching an installed NeMo-RL package."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description="Apply Evo2 phage NeMo-RL integration patch")
     parser.add_argument("--patch", type=Path, default=DEFAULT_PATCH)
     parser.add_argument("--check", action="store_true", help="Only check whether the patch can be applied")
@@ -297,7 +312,7 @@ def main() -> None:
     print(apply_nemo_rl_patch(args.patch, check_only=args.check))
     if args.verify_runtime:
         assert_nemo_rl_patch_runtime(args.patch)
-        print(f"verified patched nemo-rl runtime with patch SHA256 {patch_sha256(args.patch)}")
+        logger.info("verified patched nemo-rl runtime with patch SHA256 %s", patch_sha256(args.patch))
 
 
 if __name__ == "__main__":

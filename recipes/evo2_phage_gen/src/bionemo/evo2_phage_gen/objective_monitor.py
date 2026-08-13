@@ -25,6 +25,8 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 DEFAULT_OBJECTIVES = (
     "valid_nt_chars",
@@ -269,12 +271,47 @@ def _scalar(points: Mapping[str, Mapping[int, tuple[float, float]]], tag: str, s
     return None if record is None else float(record[1])
 
 
+def _emitted_objective_names(points: Mapping[str, object]) -> tuple[str, ...]:
+    prefix = "validation/gdpo/"
+    suffixes = ("_mean", "_std", "_min", "_max", "_nonzero_rate")
+    names = set()
+    for tag in points:
+        if not tag.startswith(prefix):
+            continue
+        metric_name = tag[len(prefix) :]
+        for suffix in suffixes:
+            if metric_name.endswith(suffix):
+                names.add(metric_name[: -len(suffix)])
+                break
+    return tuple(sorted(name for name in names if name))
+
+
+def _configured_objective_names(path: Path) -> tuple[str, ...]:
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, Mapping):
+        raise ValueError(f"{path}: resolved config must be a mapping")
+    env = loaded.get("env")
+    phage_qc = env.get("phage_qc") if isinstance(env, Mapping) else None
+    objectives = phage_qc.get("gdpo_objectives") if isinstance(phage_qc, Mapping) else None
+    if not isinstance(objectives, list) or not objectives:
+        raise ValueError(f"{path}: missing resolved env.phage_qc.gdpo_objectives")
+    names = tuple(
+        str(objective.get("name"))
+        for objective in objectives
+        if isinstance(objective, Mapping) and isinstance(objective.get("name"), str) and objective["name"]
+    )
+    if len(names) != len(objectives) or len(set(names)) != len(names):
+        raise ValueError(f"{path}: GDPO objective names must be non-empty and unique")
+    return names
+
+
 def extract_validation_history(
     tensorboard_root: Path,
-    objective_names: Iterable[str] = DEFAULT_OBJECTIVES,
+    objective_names: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize complete validation events from one or more TensorBoard files."""
     points = _load_scalar_points(tensorboard_root)
+    selected_objectives = tuple(objective_names) if objective_names is not None else _emitted_objective_names(points)
     reward_tag = "validation/mean_reward"
     steps = sorted(points.get(reward_tag, {}))
     events: list[dict[str, Any]] = []
@@ -283,7 +320,7 @@ def extract_validation_history(
         if denominator is None:
             continue
         objectives: dict[str, Any] = {}
-        for name in objective_names:
+        for name in selected_objectives:
             prefix = f"validation/gdpo/{name}"
             values: dict[str, Any] = {
                 "reward_mean": _scalar(points, f"{prefix}_mean", step),
@@ -346,13 +383,22 @@ def main() -> None:
     """Evaluate objective history extracted from a TensorBoard run."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tensorboard-root", type=Path, required=True)
+    parser.add_argument("--config", type=Path, help="Resolved GDPO config used to select emitted objectives")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history-output", type=Path)
     parser.add_argument("--minimum-events", type=int, default=3)
     parser.add_argument("--audit-confirmation-events", type=int, default=8)
     args = parser.parse_args()
 
-    history = extract_validation_history(args.tensorboard_root)
+    if not args.tensorboard_root.is_dir():
+        parser.error(f"tensorboard root is not a directory: {args.tensorboard_root}")
+    try:
+        objective_names = _configured_objective_names(args.config) if args.config is not None else None
+        history = extract_validation_history(args.tensorboard_root, objective_names)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        parser.error(str(error))
+    if not history:
+        parser.error(f"no usable validation events under {args.tensorboard_root}")
     report = evaluate_objective_history(
         history,
         minimum_events=args.minimum_events,
@@ -360,10 +406,10 @@ def main() -> None:
     )
     report["tensorboard_root"] = str(args.tensorboard_root.resolve())
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2) + "\n")
+    args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if args.history_output:
         args.history_output.parent.mkdir(parents=True, exist_ok=True)
-        args.history_output.write_text(json.dumps(history, indent=2) + "\n")
+        args.history_output.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

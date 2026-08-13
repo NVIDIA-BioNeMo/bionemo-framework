@@ -161,6 +161,30 @@ def test_materialize_batched_orf_inputs_rejects_record_and_query_identity_drift(
         materialize_batched_orf_inputs((("record-a", drifted),), tmp_path / "batch")
 
 
+def test_materialize_batched_orf_inputs_reads_each_input_once(tmp_path: Path, monkeypatch):
+    """Validation and concatenation must use the same immutable input bytes."""
+    artifacts = _artifacts(tmp_path, "record-a", "ATGAAATAG")
+    original_read = sequence_safety_batch._read_regular_bytes
+    calls: dict[Path, int] = {}
+
+    def tracked_read(path, *, label):
+        selected = Path(path)
+        calls[selected] = calls.get(selected, 0) + 1
+        return original_read(selected, label=label)
+
+    monkeypatch.setattr(sequence_safety_batch, "_read_regular_bytes", tracked_read)
+
+    materialize_batched_orf_inputs((("record-a", artifacts),), tmp_path / "batch")
+
+    assert calls == {
+        artifacts.genomes_fna: 1,
+        artifacts.proteins_faa: 1,
+        artifacts.proteins_fna: 1,
+        artifacts.all_queries_faa: 1,
+        artifacts.proteins_gff: 1,
+    }
+
+
 def test_split_amrfinder_batch_output_is_byte_exact_for_protein_and_nucleotide_rows(tmp_path: Path):
     first = _artifacts(tmp_path, "record-a", "ATGAAATAG")
     second = _artifacts(tmp_path, "record-b", "ATGCCCTAG")
@@ -549,8 +573,8 @@ def test_default_batched_scan_preserves_record_order_and_runs_independent_phrogs
     ]
 
 
-def test_asset_failure_shared_execution_serializes_as_not_started(tmp_path: Path):
-    """An INDETERMINATE asset error must remain publishable without fabricated command output."""
+def test_asset_failure_shared_execution_serializes_as_failed(tmp_path: Path):
+    """A provenance error must remain publishable as a failed shared execution."""
     from bionemo.evo2_phage_gen.sequence_safety_cli import _serialize_shared_execution
 
     first = _artifacts(tmp_path, "record-a", "ATGAAATAG")
@@ -569,16 +593,65 @@ def test_asset_failure_shared_execution_serializes_as_not_started(tmp_path: Path
         record_output_roots=record_roots,
     )
 
-    assert execution.execution_status == "NOT_STARTED"
+    assert execution.execution_status == "FAILED"
     assert all(result.shared_execution_id == execution.batch_id for _, result in execution.record_results)
     payload = _serialize_shared_execution(
         execution,
         root=tmp_path,
         record_indices={"record-a": 0, "record-b": 1},
     )
-    assert payload["execution_status"] == "NOT_STARTED"
+    assert payload["execution_status"] == "FAILED"
     assert payload["command"] == []
     assert payload["raw_command_output"] is None
+
+    toxin_execution = run_toxin_diamond_batch(
+        (("record-a", first), ("record-b", second)),
+        manifest_section={},
+        tool_pin=ToolPin(tmp_path / "diamond", "a" * 64, "diamond"),
+        work_dir=tmp_path / "shared-executions" / "toxin-0000",
+        record_output_roots=record_roots,
+    )
+    assert toxin_execution.execution_status == "FAILED"
+
+
+@pytest.mark.parametrize(
+    ("safety_class", "factory", "raw_name"),
+    [
+        ("amr", sequence_safety_batch._amrfinder_indeterminate_results, "amrfinder.raw.tsv"),
+        ("toxin", sequence_safety_batch._toxin_indeterminate_results, "toxin_diamond.raw.tsv"),
+    ],
+)
+def test_completed_batch_keeps_execution_status_when_record_evidence_is_indeterminate(
+    tmp_path: Path, safety_class, factory, raw_name
+):
+    """A parsed record-level uncertainty must not relabel a successful shared command."""
+    artifacts = _artifacts(tmp_path, "record-a", "ATGAAATAG")
+    work_dir = tmp_path / f"{safety_class}-execution"
+    batched = materialize_batched_orf_inputs((("record-a", artifacts),), work_dir / "inputs")
+    raw_output = work_dir / raw_name
+    raw_output.write_text("parsed output\n")
+    command = (f"{safety_class}-tool",)
+    results = factory(
+        batched.record_ids,
+        required=True,
+        reason_code=f"{safety_class.upper()}_CONTENT_UNCLASSIFIED",
+        command=command,
+        raw_output_path=raw_output,
+    )
+    execution_factory = (
+        sequence_safety_batch._amrfinder_execution if safety_class == "amr" else sequence_safety_batch._toxin_execution
+    )
+
+    execution = execution_factory(
+        work_dir=work_dir,
+        batched=batched,
+        command=command,
+        raw_output=raw_output,
+        results=results,
+    )
+
+    assert execution.execution_status == "COMPLETED_AND_PARSED"
+    assert execution.record_results[0][1].class_result.state is SafetyState.INDETERMINATE
 
 
 def test_started_batch_failure_without_output_serializes_as_failed(tmp_path: Path, monkeypatch):

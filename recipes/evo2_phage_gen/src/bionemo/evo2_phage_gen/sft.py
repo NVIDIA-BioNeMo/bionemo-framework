@@ -21,6 +21,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -57,6 +58,9 @@ from bionemo.evo2_phage_gen.sequence_safety_cli import (
 from bionemo.evo2_phage_gen.sequence_safety_cli import (
     main as sequence_safety_main,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
@@ -166,7 +170,7 @@ class CorpusCountAuthorization:
             raise SFTSafetyError("authorization timestamp must be RFC3339 UTC")
         try:
             authorized_at = datetime.fromisoformat(
-                timestamp[:-1] + "+00:00"  # noqa: FURB162  # Python 3.10 datetime.fromisoformat does not accept Z
+                timestamp[:-1] + "+00:00"  # noqa: FURB162  # Python 3.10 does not accept Z
             )
         except ValueError as error:
             raise SFTSafetyError("authorization timestamp must be RFC3339 UTC") from error
@@ -415,6 +419,8 @@ class SFTAuditRuntime:
     clock: Callable[[], datetime]
     expected_source_identity: SFTSourceIdentity = PRODUCTION_SFT_SOURCE_IDENTITY
     expected_phix_identity: PhiXReferenceIdentity = PRODUCTION_PHIX_REFERENCE_IDENTITY
+    expected_minimum_genomes: int = MINIMUM_SFT_GENOMES
+    expected_preferred_genomes: int = PREFERRED_SFT_GENOMES
 
 
 @dataclass(frozen=True)
@@ -1188,7 +1194,7 @@ def _parse_manifest_timestamp(value: object, *, label: str) -> datetime:
         raise SFTSafetyError(f"{label} must be RFC3339 UTC")
     try:
         parsed = datetime.fromisoformat(
-            value[:-1] + "+00:00"  # noqa: FURB162  # Python 3.10 datetime.fromisoformat does not accept Z
+            value[:-1] + "+00:00"  # noqa: FURB162  # Python 3.10 does not accept Z
         )
     except ValueError as error:
         raise SFTSafetyError(f"{label} must be RFC3339 UTC") from error
@@ -1627,6 +1633,26 @@ def validate_safety_manifest(
     if require_ready and completion != "READY":
         raise SFTSafetyError("SFT blocked without user permission for the below-minimum corpus count")
     return manifest
+
+
+def write_safety_filter_report(
+    safety_manifest: str | Path,
+    output: str | Path,
+    *,
+    safety_manifest_validator: Callable[..., Mapping[str, object]] = validate_safety_manifest,
+    max_highlights: int = 10,
+) -> Path:
+    """Write a distinct post-SFT report from authenticated safety-filter manifests."""
+    from bionemo.evo2_phage_gen.sft_safety_report import (
+        write_safety_filter_report as _write_safety_filter_report,
+    )
+
+    return _write_safety_filter_report(
+        safety_manifest,
+        output,
+        safety_manifest_validator=safety_manifest_validator,
+        max_highlights=max_highlights,
+    )
 
 
 def _delegate_shared_preprocess(batch: list[dict[str, object]]) -> None:
@@ -2792,7 +2818,7 @@ def host_evidence_main(
         print(output)
         return 0
     except (SFTSafetyError, HostEvidenceError, OSError) as error:
-        print(f"evo2_phage_prepare_sft_host_evidence: error: {error}", file=sys.stderr)
+        logger.error("evo2_phage_prepare_sft_host_evidence: error: %s", error)
         return 3
 
 
@@ -2843,8 +2869,16 @@ def _audit_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _safety_report_parser() -> argparse.ArgumentParser:
+    parser = _SFTArgumentParser(description="Report the completed SFT sequence-safety filter outcome")
+    parser.add_argument("--safety-manifest", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--max-highlights", type=int, default=10)
+    return parser
+
+
 def main(argv: Sequence[str] | None = None, *, runtime: SFTAuditRuntime | None = None) -> int:
-    """Download immutable source data or run the complete Task 4-gated SFT audit."""
+    """Download, audit, or report the Task 4-gated SFT data-preparation stage."""
     values = list(sys.argv[1:] if argv is None else argv)
     try:
         if values and values[0] == "audit-and-filter":
@@ -2868,6 +2902,35 @@ def main(argv: Sequence[str] | None = None, *, runtime: SFTAuditRuntime | None =
                 runtime=runtime,
             )
             return result.exit_code
+        if values and values[0] == "report-safety-filter":
+            args = _safety_report_parser().parse_args(values[1:])
+            selected_validator: Callable[..., Mapping[str, object]] = validate_safety_manifest
+            if runtime is not None:
+
+                def runtime_validator(
+                    path: str | Path,
+                    *,
+                    require_ready: bool = True,
+                ) -> Mapping[str, object]:
+                    return validate_safety_manifest(
+                        path,
+                        task4_manifest_validator=runtime.task4_manifest_validator,
+                        require_ready=require_ready,
+                        expected_minimum_genomes=runtime.expected_minimum_genomes,
+                        expected_preferred_genomes=runtime.expected_preferred_genomes,
+                        expected_source_identity=runtime.expected_source_identity,
+                        expected_phix_identity=runtime.expected_phix_identity,
+                    )
+
+                selected_validator = runtime_validator
+            report = write_safety_filter_report(
+                args.safety_manifest,
+                args.output,
+                safety_manifest_validator=selected_validator,
+                max_highlights=args.max_highlights,
+            )
+            print(_recipe_relative(report))
+            return 0
         if values and values[0] == "download":
             values = values[1:]
         parser = _SFTArgumentParser(description="Download immutable Zenodo Microviridae SFT FASTA files")
@@ -2878,10 +2941,10 @@ def main(argv: Sequence[str] | None = None, *, runtime: SFTAuditRuntime | None =
             print(_recipe_relative(path))
         return 0
     except SFTSafetyError as error:
-        print(f"evo2_phage_download_sft_data: error: {error}", file=sys.stderr)
+        logger.error("evo2_phage_download_sft_data: error: %s", error)
         return error.exit_code
     except (HostEvidenceError, OSError) as error:
-        print(f"evo2_phage_download_sft_data: error: {error}", file=sys.stderr)
+        logger.error("evo2_phage_download_sft_data: error: %s", error)
         return 3
 
 

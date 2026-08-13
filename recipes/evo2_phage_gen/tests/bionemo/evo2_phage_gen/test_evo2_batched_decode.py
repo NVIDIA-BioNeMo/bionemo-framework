@@ -220,7 +220,15 @@ def test_batched_hyena_binding_normalizes_reverse_contiguous_slots():
     assert request_slots.tolist() == [4, 5, 6, 7]
     assert context.mamba_metadata.request_to_mamba_state_idx.tolist() == [4, 5, 6, 7]
     assert len(packed_dicts) == 3
-    context.fir_filter_state_dict[id(conv_owner)] = torch.ones(4, 2, 2)
-    context.iir_filter_state_dict[id(ssm_owner)] = torch.ones(4, 3, 2)
-    assert context.fir_filter_state_dict[id(conv_owner)].shape == (4, 2, 2)
-    assert context.iir_filter_state_dict[id(ssm_owner)].shape == (4, 3, 2)
+    fir_seed = torch.arange(16, dtype=torch.float32).reshape(4, 2, 2)
+    iir_seed = torch.arange(24, dtype=torch.float32).reshape(4, 3, 2)
+
+    context.fir_filter_state_dict[id(conv_owner)] = fir_seed
+    context.iir_filter_state_dict[id(ssm_owner)] = iir_seed
+
+    fir_view = context.mamba_conv_states[0, 4:8]
+    iir_view = context.mamba_ssm_states[0, 4:8, :3, :2]
+    assert context.fir_filter_state_dict[id(conv_owner)].data_ptr() == fir_view.data_ptr()
+    assert context.iir_filter_state_dict[id(ssm_owner)].data_ptr() == iir_view.data_ptr()
+    torch.testing.assert_close(fir_view, fir_seed)
+    torch.testing.assert_close(iir_view, iir_seed)

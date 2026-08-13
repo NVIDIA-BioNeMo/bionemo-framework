@@ -45,6 +45,19 @@
       ],
       "expected_skill": "bionemo-phage-design-prepare-sft",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-prepare-sft-004-post-filter-safety-report",
+      "prompt": "The SFT sequence-safety filter has reached a verified terminal state. Finish the data-preparation handoff.",
+      "expected_output": "A separate, bounded safety-filter report produced after SFT data preparation.",
+      "assertions": [
+        "A separate sub-agent reads only authenticated safety manifests and writes a distinct report artifact after the preparation phase completes.",
+        "The report includes a compact waterfall from the starting set through records without observed signals and total filter failures, with indented mutually exclusive failing-class combinations that reconcile to the failure total.",
+        "Highlights are bounded and use stable record IDs, finding classes, normalized reason codes, and concise tool evidence without nucleotide or protein sequences.",
+        "The report describes potential sequence-safety signals and does not present them as clinical conclusions."
+      ],
+      "expected_skill": "bionemo-phage-design-prepare-sft",
+      "expected_script": null
     }
   ]
 }

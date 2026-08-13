@@ -98,4 +98,4 @@ NVIDIA believes Trustworthy AI is a shared responsibility and we have establishe
 
 (For Release on NVIDIA Platforms Only)
 
-Please report quality, risk, security vulnerabilities or NVIDIA AI Concerns [here](https://app.intigriti.com/programs/nvidia/nvidiavdp/detail).
+Please report quality, risk, security vulnerabilities or NVIDIA AI Concerns through the [NVIDIA vulnerability disclosure program](https://app.intigriti.com/programs/nvidia/nvidiavdp/detail).

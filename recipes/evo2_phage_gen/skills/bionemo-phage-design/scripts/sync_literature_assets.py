@@ -49,8 +49,6 @@ from typing import Callable, ClassVar, Iterator, Sequence
 
 
 CONVERTER_VERSION = "2"
-KING_WORKBOOK_SHA256 = "3cd26d4cca8bc1273a863c4b2304e755635fe0c7bed46308f54029b88f063fc9"
-KING_WORKBOOK_SIZE = 1_094_903
 ALLOWED_HOSTS = frozenset({"biorxiv.org", "www.biorxiv.org"})
 USER_AGENT = "Mozilla/5.0 (compatible; phage-design-literature-sync/1.0; +https://agentskills.io/)"
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
@@ -110,6 +108,10 @@ class PaperSpec:
     expected_equations: int
     has_supplement: bool
     workbook_url: str | None = None
+    workbook_sha256: str | None = None
+    workbook_size: int | None = None
+    workbook_expected_rows: int | None = None
+    workbook_expected_columns: int | None = None
     equation_tex: tuple[str, ...] = ()
 
 
@@ -130,6 +132,10 @@ PAPERS: dict[str, PaperSpec] = {
             "https://www.biorxiv.org/content/biorxiv/early/2025/09/17/"
             "2025.09.12.675911/DC1/embed/media-1.xlsx?download=true"
         ),
+        workbook_sha256="3cd26d4cca8bc1273a863c4b2304e755635fe0c7bed46308f54029b88f063fc9",
+        workbook_size=1_094_903,
+        workbook_expected_rows=302,
+        workbook_expected_columns=33,
     ),
     "black-2026-design-efficiency": PaperSpec(
         slug="black-2026-design-efficiency",
@@ -857,7 +863,10 @@ class Fetcher:
                     "%{http_code}\t%{url_effective}\t%{content_type}",
                     current_url,
                 ]
-                completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=135)
+                try:
+                    completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=135)
+                except subprocess.TimeoutExpired as error:
+                    raise RetryableFetchError(f"curl timed out for {current_url}") from error
                 if completed.returncode != 0:
                     raise RetryableFetchError(f"curl transport failed for {current_url}: {completed.stderr.strip()}")
                 fields = completed.stdout.rsplit("\t", 2)
@@ -1216,6 +1225,25 @@ def _kind_for_media(item: MediaItem) -> str:
     return "jpeg" if item.kind == "figure" else "gif"
 
 
+def _workbook_contract(spec: PaperSpec) -> tuple[str, int, int, int]:
+    """Return one paper's complete pinned workbook contract."""
+    if (
+        not spec.workbook_sha256
+        or spec.workbook_size is None
+        or spec.workbook_expected_rows is None
+        or spec.workbook_expected_columns is None
+    ):
+        raise SourceValidationError(f"{spec.slug}: workbook source has an incomplete pinned contract")
+    if spec.workbook_size <= 0 or spec.workbook_expected_rows <= 0 or spec.workbook_expected_columns <= 0:
+        raise SourceValidationError(f"{spec.slug}: workbook contract values must be positive")
+    return (
+        spec.workbook_sha256,
+        spec.workbook_size,
+        spec.workbook_expected_rows,
+        spec.workbook_expected_columns,
+    )
+
+
 def _validate_staged(root: Path, spec: PaperSpec) -> None:
     errors = check_asset_tree(root)
     if errors:
@@ -1235,13 +1263,16 @@ def _validate_staged(root: Path, spec: PaperSpec) -> None:
     if not spec.has_supplement and not (root / "NO_SUPPLEMENT.md").is_file():
         raise SourceValidationError(f"{spec.slug}: missing NO_SUPPLEMENT.md")
     if spec.workbook_url:
+        expected_sha256, expected_size, expected_rows, expected_columns = _workbook_contract(spec)
         workbook = root / "supplementary" / "media-1.xlsx"
         data = workbook.read_bytes() if workbook.is_file() else b""
-        if len(data) != KING_WORKBOOK_SIZE or _sha256(data) != KING_WORKBOOK_SHA256:
-            raise SourceValidationError("official media-1.xlsx hash/size does not match the pinned v1 workbook")
+        if len(data) != expected_size or _sha256(data) != expected_sha256:
+            raise SourceValidationError(f"{spec.slug}: workbook hash/size does not match its pinned source")
         sheet = read_xlsx_sheet(workbook, "Sheet 1")
-        if len(sheet.rows) != 303 or any(len(row) != 33 for row in sheet.rows):
-            raise SourceValidationError("official media-1.xlsx Sheet 1 must contain 302 data rows and 33 columns")
+        if len(sheet.rows) != expected_rows + 1 or any(len(row) != expected_columns for row in sheet.rows):
+            raise SourceValidationError(
+                f"{spec.slug}: workbook Sheet 1 must contain {expected_rows} data rows and {expected_columns} columns"
+            )
 
 
 def sync_paper(
@@ -1257,7 +1288,11 @@ def sync_paper(
     article_url = source_overrides.get("article_url", spec.article_url)
     article = fetcher.get(article_url)
     validate_payload(article.data, article.content_type, "html", min_size=1_000, max_size=10_000_000)
-    converted = convert_article(article.data.decode("utf-8"), spec)
+    try:
+        article_html = article.data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SourceValidationError(f"{spec.slug}: article HTML is not valid UTF-8") from error
+    converted = convert_article(article_html, spec)
     if len([item for item in converted.media if item.kind == "figure"]) != spec.expected_figure_files:
         raise SourceValidationError(f"{spec.slug}: converted figure-file count differs from pinned source")
     if len([item for item in converted.media if item.kind == "equation"]) != spec.expected_equations:
@@ -1303,6 +1338,7 @@ def sync_paper(
                 }
             )
         if spec.workbook_url:
+            expected_sha256, expected_size, _expected_rows, _expected_columns = _workbook_contract(spec)
             workbook_url = source_overrides.get("workbook_url", spec.workbook_url)
             try:
                 workbook = fetcher.get(workbook_url)
@@ -1314,8 +1350,8 @@ def sync_paper(
                     raise
                 workbook_data = fallback_media_1.read_bytes()
                 workbook_source = f"explicit-local-fallback:{fallback_media_1.name}"
-            if len(workbook_data) != KING_WORKBOOK_SIZE or _sha256(workbook_data) != KING_WORKBOOK_SHA256:
-                raise SourceValidationError("media-1.xlsx differs from the official pinned v1 hash/size")
+            if len(workbook_data) != expected_size or _sha256(workbook_data) != expected_sha256:
+                raise SourceValidationError(f"{spec.slug}: workbook differs from its pinned hash/size")
             workbook_path = staged / "supplementary" / "media-1.xlsx"
             workbook_path.parent.mkdir(parents=True, exist_ok=True)
             workbook_path.write_bytes(workbook_data)
@@ -1324,8 +1360,8 @@ def sync_paper(
                     "role": "supplementary-workbook",
                     "url": workbook_source,
                     "output": "supplementary/media-1.xlsx",
-                    "sha256": KING_WORKBOOK_SHA256,
-                    "size": KING_WORKBOOK_SIZE,
+                    "sha256": expected_sha256,
+                    "size": expected_size,
                 }
             )
         metadata: dict[str, object] = {

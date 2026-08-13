@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from bionemo.evo2_phage_gen.lovis4u_metrics import _cluster_command_with_threads
+from bionemo.evo2_phage_gen.lovis4u_metrics import _cluster_command_with_threads, _ThreadedSubprocess
 
 
 def test_cluster_command_applies_tunable_threads_only_to_cluster():
@@ -29,3 +29,23 @@ def test_cluster_command_preserves_explicit_threads():
     command = ["mmseqs", "cluster", "query", "result", "tmp", "--threads", "4"]
 
     assert _cluster_command_with_threads(command, 8) == command
+
+
+def test_threaded_subprocess_proxy_delegates_without_mutating_wrapped_module():
+    calls = []
+
+    class Wrapped:
+        PIPE = object()
+
+        @staticmethod
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            return "completed"
+
+    proxy = _ThreadedSubprocess(Wrapped, 6)
+
+    assert proxy.run(["mmseqs", "cluster", "query", "result", "tmp"], check=True) == "completed"
+    assert calls == [(["mmseqs", "cluster", "query", "result", "tmp", "--threads", "6"], {"check": True})]
+    assert proxy.PIPE is Wrapped.PIPE
+    assert Wrapped.run(["mmseqs", "createdb"], check=False) == "completed"
+    assert calls[-1][0] == ["mmseqs", "createdb"]

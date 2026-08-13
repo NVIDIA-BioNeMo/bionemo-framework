@@ -20,6 +20,8 @@ loss_fn:
 checkpointing:
   enabled: true
   checkpoint_dir: "data/checkpoints/phage_grpo"
+  metric_name: "train:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"
+  higher_is_better: true
   pretrained_checkpoint:
     path: "data/checkpoints/evo2_7b_microviridae_mbridge"
     format: "megatron_bridge"

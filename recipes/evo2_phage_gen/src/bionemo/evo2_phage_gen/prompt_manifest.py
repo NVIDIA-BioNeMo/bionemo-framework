@@ -71,7 +71,7 @@ def _prompt_from_record(record: dict[str, Any]) -> str:
 def prompt_file_manifest(path: Path) -> dict[str, Any]:
     """Build a secure manifest for one prompt JSONL."""
     records = []
-    with Path(path).open() as handle:
+    with Path(path).open(encoding="utf-8") as handle:
         for line_index, raw_line in enumerate(handle):
             stripped = raw_line.strip()
             if not stripped:
@@ -161,7 +161,7 @@ def main() -> None:
         wandb_run_id=args.wandb_run_id,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -16,7 +16,6 @@
 """Tests for ``bionemo.evo2_phage_gen.arc_pipeline``."""
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import pandas as pd
@@ -57,7 +56,7 @@ from bionemo.evo2_phage_gen.arc_pipeline import (
 from bionemo.evo2_phage_gen.external_qc import ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA
 
 
-def _load_prepared_arc_pipeline(tmp_path: Path, module_name: str):
+def _load_prepared_arc_pipeline(tmp_path: Path, module_name: str, monkeypatch):
     """Prepare Arc into tmp_path and import the patched pipeline module from there."""
     if not DEFAULT_ARC_PIPELINE_SOURCE_DIR.exists() or not DEFAULT_PHIX174_FASTA.exists():
         pytest.skip("Arc source assets are not available")
@@ -68,15 +67,12 @@ def _load_prepared_arc_pipeline(tmp_path: Path, module_name: str):
         phix174_fasta=DEFAULT_PHIX174_FASTA,
     )
     pipeline_path = workdir / "genome_design_filtering_pipeline.py"
-    sys.path.insert(0, str(pipeline_path.parent))
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, pipeline_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        sys.path.pop(0)
+    monkeypatch.syspath_prepend(str(pipeline_path.parent))
+    spec = importlib.util.spec_from_file_location(module_name, pipeline_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_lovis4u_runtime_patch_matches_pinned_source_trailing_whitespace(tmp_path):
@@ -141,6 +137,12 @@ def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
     assert PATCHED_EMPTY_HOMOLOGY_GUARD in pipeline_text
     assert PATCHED_EMPTY_DIVERSIFICATION_GUARD in pipeline_text
     assert PATCHED_EMPTY_SYNTENY_GUARD in pipeline_text
+    assert "if os.path.exists(synteny_counts_csv):" in pipeline_text
+    assert "synteny_filter_counts = pd.read_csv(synteny_counts_csv)" in pipeline_text
+    assert not any(
+        line.strip().startswith("filter_counts = pd.read_csv(synteny_counts_csv)")
+        for line in pipeline_text.splitlines()
+    )
     visualization_text = (tmp_path / "patched" / "genetic_architecture_visualization.py").read_text()
     assert ARC_LEGACY_LOVIS4U_PARALLEL_CONFIG not in visualization_text
     assert PATCHED_LOVIS4U_PARALLEL_CONFIG in visualization_text
@@ -222,15 +224,28 @@ def test_prepare_arc_pipeline_workdir_applies_maintained_patch(tmp_path):
     assert 'config.get("lovis4u_mmseqs_threads")' in visualization_text
 
 
+def test_maintained_arc_patch_rotates_only_candidate_and_guards_empty_synteny_counts() -> None:
+    """Circular LCS work stays bounded and empty synteny output tolerates absent counts."""
+    patch_text = DEFAULT_ARC_PIPELINE_PATCH.read_text()
+    helper = patch_text.split("+    def best_circular_lcs_candidate_indices", 1)[1].split(
+        "+    def count_syntenic_genes_from_gff_products", 1
+    )[0]
+
+    assert "reference_offset" not in helper
+    assert "for candidate_offset in range(len(candidate_products))" in helper
+    assert "if os.path.exists(synteny_counts_csv):" in patch_text
+    assert "synteny_filter_counts = pd.read_csv(synteny_counts_csv)" in patch_text
+
+
 def test_maintained_patch_honors_lovis4u_pdf_collection_flag():
     patch_text = DEFAULT_ARC_PIPELINE_PATCH.read_text()
     assert '+            if config.get("lovis4u_collect_pdfs", True):' in patch_text
     assert "Skipping LoVis4u PDF collection" in patch_text
 
 
-def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_path):
+def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_path, monkeypatch):
     """Online rewards should measure required genes without starving later objectives."""
-    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_measurement_test")
+    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_measurement_test", monkeypatch)
     gff_dir = tmp_path / "gff"
     gbk_dir = tmp_path / "gbk"
     gff_dir.mkdir()
@@ -256,9 +271,9 @@ def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_pat
     assert metrics["required_genes_matched_count"].tolist() == [1]
 
 
-def test_patched_arc_synteny_missing_lovis4u_output_receives_zero_credit(tmp_path):
+def test_patched_arc_synteny_missing_lovis4u_output_receives_zero_credit(tmp_path, monkeypatch):
     """Missing LoVis4u files should zero synteny metrics instead of aborting RL reward scoring."""
-    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_for_test")
+    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_for_test", monkeypatch)
 
     metadata_dir = tmp_path / "metadata"
     gff_dir = tmp_path / "gff"
@@ -286,9 +301,9 @@ def test_patched_arc_synteny_missing_lovis4u_output_receives_zero_credit(tmp_pat
     assert output["missing_synteny_output"].tolist() == [True]
 
 
-def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_missing_outputs(tmp_path):
+def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_missing_outputs(tmp_path, monkeypatch):
     """LoVis4u consumer should score real clustering output and mark missing artifacts per input."""
-    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_contract_test")
+    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_contract_test", monkeypatch)
 
     metadata_dir = tmp_path / "metadata"
     gff_dir = tmp_path / "gff"
@@ -338,7 +353,7 @@ def test_patched_arc_synteny_producer_consumer_contract_tracks_positive_and_miss
 
 def test_patched_arc_mmseqs_protein_search_rejects_missing_output(tmp_path, monkeypatch):
     """Failed MMseqs protein searches should produce an empty hit table for online reward scoring."""
-    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_mmseqs_test")
+    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_mmseqs_test", monkeypatch)
 
     query_fasta = tmp_path / "query.fasta"
     query_fasta.write_text(">umi1_ORF.1\nM\n")
@@ -365,7 +380,7 @@ def test_patched_arc_mmseqs_protein_search_rejects_missing_output(tmp_path, monk
 
 def test_patched_arc_mmseqs_protein_search_allows_successful_empty_hits(tmp_path, monkeypatch):
     """A successful MMseqs run with no hits should still produce an empty hit table."""
-    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_empty_mmseqs_test")
+    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_empty_mmseqs_test", monkeypatch)
     query_fasta = tmp_path / "query.fasta"
     query_fasta.write_text(">umi1_ORF.1\nM\n")
     mmseqs_db = tmp_path / "mmseqs_db"

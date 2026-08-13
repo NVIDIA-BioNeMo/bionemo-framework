@@ -282,7 +282,7 @@ The biological activity of the phage consists in its ability to propagate in bac
 bacterial pathogen and subsequently to release the newly formed phage particles from the bacterial
 cell, constituting the phage lytic activity. This activity should be measured by determination of
 the infectious phage titre by a double layer plaque assay or any other suitable method in a defined
-bacterial strain (see Ph.Eur. general chapter 2.7.38[^i]).
+bacterial strain (see Ph.Eur. general chapter 2.7.38[^ph-eur-2738]).
 
 If the mechanism of action involves activity towards bacterial biofilms, this should be investigated
 and data presented.
@@ -366,7 +366,7 @@ active substance.
 Potency refers to the infectious titre of the phage and is commonly determined using a plaque assay,
 which is also used to assess phage quantity. Potency is typically expressed in plaque forming units
 (PFU) per mL. Further guidance on phage potency testing is provided in Ph.Eur. general chapter
-2.7.38[^ii].
+2.7.38[^ph-eur-2738].
 
 #### Aggregation
 
@@ -522,7 +522,7 @@ where appropriate.
 For multiphage products, potency should be determined for each individual phage component (i.e.
 active substance), unless otherwise justified. For this, separate plaque-based assays should be
 performed using bacterial strains not susceptible to any other phages in the combination. Further
-guidance on phage potency testing is provided in Ph.Eur. general chapter 2.7.38[^iii].
+guidance on phage potency testing is provided in Ph.Eur. general chapter 2.7.38[^ph-eur-2738].
 
 Microbiological quality should be determined depending on the route of the administration of the
 finished product. Analytical methods should be described, and corresponding summary of validation
@@ -658,7 +658,7 @@ by phage particle.
   https://eur-lex.europa.eu/eli/dir/2001/83/oj/eng
 
 - EMA Guideline on process validation for the manufacture of biotechnology-derived active substances
-  and data to be provided in the regulatory submission (EMA/CHMP/QWP/BWP/259165/2019). Available at:
+  and data to be provided in the regulatory submission (EMA/CHMP/BWP/187338/2014). Available at:
   https://www.ema.europa.eu/en/process-validation-manufacture-biotechnology-derived-active-substances-data-be-provided-regulatory-submission-scientific-guideline
 
 - EMA BWP Questions and answers for biological medicinal products. Available at:
@@ -703,18 +703,9 @@ by phage particle.
 
 - Ph.Eur. General chapter on “Pyrogenicity” (5.1.13).
 
-- Ph.Eur. General chapter on “Bacteriophage potency determination” (2.7.38[^iv]).
+- Ph.Eur. General chapter on “Bacteriophage potency determination” (2.7.38[^ph-eur-2738]).
 
 - Ph. Eur. General chapter on “Phage therapy medicinal products (5.31)
 
-\[^i\]: Ph. Eur. general chapter 2.7.38 is in preparation. The draft has been made available for
-public comments in Pharmeuropa Online, issue 37.2.
-
-\[^ii\]: Ph. Eur. general chapter 2.7.38 is in preparation. The draft has been made available for
-public comments in Pharmeuropa Online, issue 37.2.
-
-\[^iii\]: Ph. Eur. general chapter 2.7.38 is in preparation. The draft has been made available for
-public comments in Pharmeuropa Online, issue 37.2.
-
-\[^iv\]: Ph. Eur. general chapter 2.7.38 is in preparation. The draft has been made available for
+\[^ph-eur-2738\]: Ph. Eur. general chapter 2.7.38 is in preparation. The draft has been made available for
 public comments in Pharmeuropa Online, issue 37.2.

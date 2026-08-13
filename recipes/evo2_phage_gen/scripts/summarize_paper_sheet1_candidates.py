@@ -55,7 +55,7 @@ METRIC_SPECS = (
     MetricSpec("reference_genome_percent_identity", "reported metric; not in current full-Arc run config", None, None),
     MetricSpec("architecture_similarity_score", "homology keep: 0-10; diversification removes 0.9-1.1", 0, 10),
     MetricSpec("tropism_protein_mmseqs_percent_identity", "60-100%", 60.0, 100.0),
-    MetricSpec("average_protein_percent_identity", "0-95%", 0, 95.0),
+    MetricSpec("average_protein_percent_identity", "<95%", 0, 95.0, upper_inclusive=False),
     MetricSpec("num_syntenic_genes", "10-12 syntenic genes in local synteny config", 10, 12),
     MetricSpec("total_num_genes", "10-12 total genes in local synteny config", 10, 12),
 )

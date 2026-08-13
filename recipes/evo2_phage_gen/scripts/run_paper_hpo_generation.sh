@@ -55,6 +55,12 @@ PROMPT_DIR="${RUN_ROOT}/prompts"
 JSONL_DIR="${RUN_ROOT}/jsonl"
 LOG_DIR="${RUN_ROOT}/logs"
 MANIFEST="${RUN_ROOT}/hpo_generation_manifest.tsv"
+INFER_SCRIPT="${REPO_ROOT}/recipes/evo2_megatron/src/bionemo/evo2/run/infer.py"
+
+if [[ ! -f "${INFER_SCRIPT}" ]]; then
+  printf 'ERROR: inference script not found: %s\n' "${INFER_SCRIPT}" >&2
+  exit 2
+fi
 
 mkdir -p "${PROMPT_DIR}" "${JSONL_DIR}" "${LOG_DIR}"
 
@@ -98,6 +104,11 @@ for temp in ${TEMPERATURES}; do
     log="${LOG_DIR}/phix174_prompt${prompt_len}_temp${temp}.infer.log"
     max_new_tokens=$((TARGET_LENGTH - prompt_len))
 
+    if [[ ! -f "${prompt_file}" ]]; then
+      printf 'ERROR: prompt file not found: %s\n' "${prompt_file}" >&2
+      exit 2
+    fi
+
     if (( max_new_tokens <= 0 )); then
       printf 'ERROR: TARGET_LENGTH=%s must exceed prompt_len=%s\n' "${TARGET_LENGTH}" "${prompt_len}" >&2
       exit 2
@@ -124,7 +135,7 @@ for temp in ${TEMPERATURES}; do
       --nproc_per_node "${NPROC_PER_NODE}" \
       --nnodes 1 \
       --master_port "${MASTER_PORT}" \
-      recipes/evo2_megatron/src/bionemo/evo2/run/infer.py \
+      "${INFER_SCRIPT}" \
       --ckpt-dir "${CKPT_DIR}" \
       --prompt-file "${prompt_file}" \
       --max-new-tokens "${max_new_tokens}" \

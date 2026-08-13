@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 from types import SimpleNamespace
 
 import torch
@@ -51,8 +48,16 @@ def test_phage_prompt_data_processor_tokenizes_openai_user_message_without_chat_
     assert message["content"] == "ACGT"
     assert torch.equal(message["token_ids"], torch.tensor([65, 67, 71, 84], dtype=torch.long))
     assert output["extra_env_info"] == {
-        "prompt": "ACGT",
         "prompt_nt_length": 4,
-        "prompt_prefix": "ACGT",
         "prompt_index": 3,
     }
+
+
+def test_phage_prompt_data_processor_recomputes_length_after_truncation():
+    output = phage_prompt_data_processor(
+        {"prompt": "ACGTACGT"}, SimpleNamespace(prompt=None), _Tokenizer(), max_seq_length=3, idx=0
+    )
+
+    assert output["length"] == 3
+    assert output["message_log"][0]["token_ids"].shape == (3,)
+    assert output["loss_multiplier"] == 0.0

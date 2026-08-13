@@ -158,8 +158,22 @@
       "expected_output": "A recurring heartbeat that tracks the task through a verified terminal state.",
       "assertions": [
         "The response applies the same heartbeat requirement to every long-running or background task, regardless of workload type.",
-        "It records a stable job handle, status and log checks, a progress marker, and the next due check, then continues monitoring until verified terminal success or failure.",
+        "It records a stable job handle, status and log checks, separate progress and completion markers, and the next due check, then keeps a bounded finalization heartbeat through verified terminal success or failure.",
         "It reports staleness or failure promptly and advances dependent work only after the terminal state is verified."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-012-portable-runtime-build",
+      "prompt": "Prepare this recipe on a non-x86 GPU host whose architecture is not covered by the tested lock/build matrix. Some Python dependencies may need source builds, and earlier retries modified one environment in place.",
+      "expected_output": "A reproducible architecture-aware build preflight that pins source-build inputs, uses immutable attempts, and proves the runtime before promotion.",
+      "assertions": [
+        "The response resolves every dependency in a disposable pinned runtime and does not infer compatibility from a successful build on another architecture.",
+        "It prefers authenticated compatible wheels and, for each source build, inspects metadata and build hooks while pinning source or artifact identity plus compiler, system libraries, and explicit build requirements in a reviewed architecture-specific constraints or lock artifact.",
+        "Each repair is a new immutable build attempt rather than another mutation of the failed environment, and the promoted runtime retains logs and complete provenance.",
+        "The response proves imports, entry-point --help, and representative CPU/GPU behavior before the full workflow uses the runtime.",
+        "Any Git ownership exception is scoped to the exact verified checkout and runtime; host-global Git configuration is not changed as a container workaround."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null

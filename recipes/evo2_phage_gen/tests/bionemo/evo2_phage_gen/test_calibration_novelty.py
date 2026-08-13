@@ -24,6 +24,7 @@ from bionemo.evo2_phage_gen.calibration_novelty import (
     canonical_circular_sequence,
     normalize_prompted_fasta,
     summarize_novelty,
+    validate_novelty_file,
 )
 
 
@@ -34,6 +35,15 @@ def test_canonical_circular_sequence_handles_rotation_and_reverse_complement():
 
     assert canonical_circular_sequence(sequence) == canonical_circular_sequence(rotated)
     assert canonical_circular_sequence(sequence) == canonical_circular_sequence(reverse_complement)
+
+
+def test_canonical_circular_sequence_complements_iupac_symbols():
+    sequence = "ACGTRYSWKMBDHVN"
+    reverse_complement = "NBDHVKMWSRYACGT"
+
+    assert canonical_circular_sequence(sequence) == canonical_circular_sequence(reverse_complement)
+    with pytest.raises(ValueError, match="unsupported IUPAC"):
+        canonical_circular_sequence("ACGTZ")
 
 
 def test_normalize_prompted_fasta_strips_control_tokens_and_rejects_non_dna(tmp_path):
@@ -83,3 +93,11 @@ def test_top_hits_preserves_prefixed_schema_without_hits(tmp_path, create_file):
         "id_prompt",
         *(f"target_{column}" for column in SEARCH_COLUMNS if column != "query"),
     ]
+
+
+def test_validate_novelty_file_requires_id_prompt(tmp_path):
+    path = tmp_path / "novelty.csv"
+    pd.DataFrame({"cell": ["prefix0_temp1.0"]}).to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="missing id_prompt column"):
+        validate_novelty_file(path, expected_records=1)

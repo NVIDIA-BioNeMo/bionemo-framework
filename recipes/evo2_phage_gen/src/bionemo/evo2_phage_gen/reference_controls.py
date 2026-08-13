@@ -22,10 +22,10 @@ import hashlib
 import json
 import re
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Sequence
 
 import yaml
 
@@ -302,9 +302,10 @@ def _parse_control(value: object, *, index: int) -> ReferenceControl:
 
 def load_reference_control_panel(path: Path) -> ReferenceControlPanel:
     """Load the exact schema-v2 reference panel without implicit latest-version resolution."""
-    config_path = Path(path).resolve()
-    if config_path.is_symlink() or not config_path.is_file():
+    supplied_path = Path(path)
+    if supplied_path.is_symlink() or not supplied_path.is_file():
         raise ReferenceControlError("reference control config must be a non-symlink regular file")
+    config_path = supplied_path.resolve()
     payload_bytes = config_path.read_bytes()
     try:
         loaded = yaml.safe_load(payload_bytes)
@@ -545,10 +546,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.output is None:
             print(serialized, end="")
         else:
-            args.output.write_text(serialized)
+            args.output.write_text(serialized, encoding="utf-8")
         return 0
     except (OSError, RuntimeError, TypeError, ValueError) as error:
-        parser._print_message(f"{parser.prog}: error: {error}\n", sys.stderr)
+        sys.stderr.write(f"{parser.prog}: error: {error}\n")
         return 3
 
 

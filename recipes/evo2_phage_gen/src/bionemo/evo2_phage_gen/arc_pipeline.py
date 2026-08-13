@@ -178,8 +178,9 @@ PATCHED_EMPTY_SYNTENY_GUARD = """    ### Annotate & visualize genomes ###
             synteny_preview_df = pd.read_csv(synteny_input_csv)
             if len(synteny_preview_df) == 0:
                 print("No sequences available for genome visualization and synteny filtering; writing empty synteny outputs.")
-                filter_counts = pd.read_csv(synteny_counts_csv)
-                filter_counts.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_counts_file_save_location"]}', index=False)
+                if os.path.exists(synteny_counts_csv):
+                    synteny_filter_counts = pd.read_csv(synteny_counts_csv)
+                    synteny_filter_counts.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_counts_file_save_location"]}', index=False)
                 synteny_preview_df.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}', index=False)
                 save_df_as_fasta(synteny_preview_df, f'{config["results_save_dir"]}/{config["synteny_filter_seqs_fasta_file_save_location"]}')
                 filtered_df = synteny_preview_df

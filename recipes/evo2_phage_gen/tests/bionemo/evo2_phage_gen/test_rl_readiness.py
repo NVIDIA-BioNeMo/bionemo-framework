@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+from bionemo.evo2_phage_gen import rl_readiness
 from bionemo.evo2_phage_gen.rl_readiness import check_rl_readiness
 
 
@@ -160,3 +161,70 @@ def test_rl_readiness_rejects_non_colocated_megatron_topology(tmp_path):
 
     assert not topology_check.ok
     assert topology_check.required
+
+
+def test_module_check_reports_find_spec_errors(monkeypatch):
+    """Import-discovery failures should become diagnostic results."""
+    monkeypatch.setattr(
+        rl_readiness.importlib.util,
+        "find_spec",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("bad spec")),
+    )
+
+    check = rl_readiness._module_check("ray", "ray", required=True)
+
+    assert not check.ok
+    assert "bad spec" in check.detail
+
+
+def test_cuda_device_count_reports_import_discovery_errors(monkeypatch):
+    """CUDA discovery should return unknown instead of aborting readiness."""
+    monkeypatch.setattr(
+        rl_readiness.importlib.util,
+        "find_spec",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("bad spec")),
+    )
+
+    assert rl_readiness._cuda_device_count() is None
+
+
+def test_rl_readiness_falls_back_when_latest_iteration_tracker_is_invalid(tmp_path):
+    """A bad tracker should not hide a valid iteration run configuration."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    checkpoint_root = Path(config["checkpointing"]["pretrained_checkpoint"]["path"])
+    (checkpoint_root / "latest_checkpointed_iteration.txt").write_text("not-an-integer\n")
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["checkpoint_run_config"].ok
+    assert by_name["checkpoint_bionemo_targets"].ok
+
+
+def test_rl_readiness_reports_invalid_checkpoint_yaml(tmp_path):
+    """Malformed checkpoint metadata should produce a failed check."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    checkpoint_root = Path(config["checkpointing"]["pretrained_checkpoint"]["path"])
+    (checkpoint_root / "iter_0000001" / "run_config.yaml").write_text(": invalid\n")
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    by_name = {check.name: check for check in checks}
+
+    assert not by_name["checkpoint_bionemo_targets"].ok
+    assert "could not read" in by_name["checkpoint_bionemo_targets"].detail
+
+
+def test_rl_readiness_reports_invalid_gpu_count(tmp_path):
+    """A non-integer GPU count should become a failed CUDA diagnostic."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    config["cluster"]["gpus_per_node"] = "many"
+    config_path.write_text(yaml.safe_dump(config))
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    cuda_check = {check.name: check for check in checks}["cuda_gpus"]
+
+    assert not cuda_check.ok
+    assert "gpus_per_node" in cuda_check.detail

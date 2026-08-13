@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
 
 import yaml
 
@@ -213,6 +213,15 @@ def _json_safe(value: object) -> object:
     return value
 
 
+def _plain(value: object) -> object:
+    """Recursively convert immutable policy values into JSON-native containers."""
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_plain(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class PhageSafetyPolicy:
     """Validated schema-version-one policy with deterministic serialization."""
@@ -240,24 +249,24 @@ class PhageSafetyPolicy:
 
     def to_dict(self) -> dict[str, object]:
         """Return the normalized schema-version-one policy mapping."""
+        host_scope = _plain(self.host_scope)
+        bacterial_profile = _plain(self.bacterial_replication_profile)
+        archaeal_profile = _plain(self.archaeal_only_profile)
+        assert isinstance(host_scope, dict)
+        assert isinstance(bacterial_profile, dict)
+        assert isinstance(archaeal_profile, dict)
+        host_scope["allowed_replication_host_domains"] = sorted(host_scope["allowed_replication_host_domains"])
+        bacterial_profile["required_sequence_classes"] = sorted(bacterial_profile["required_sequence_classes"])
+        archaeal_profile["required_sequence_classes"] = sorted(archaeal_profile["required_sequence_classes"])
         return {
             "schema_version": self.schema_version,
             "policy_id": self.policy_id,
-            "regulatory_basis": dict(self.regulatory_basis),
-            "host_scope": {
-                **dict(self.host_scope),
-                "allowed_replication_host_domains": sorted(self.host_scope["allowed_replication_host_domains"]),
-            },
+            "regulatory_basis": _plain(self.regulatory_basis),
+            "host_scope": host_scope,
             "required_sequence_classes": list(self.required_sequence_classes),
-            "bacterial_replication_profile": {
-                **dict(self.bacterial_replication_profile),
-                "required_sequence_classes": sorted(self.bacterial_replication_profile["required_sequence_classes"]),
-            },
-            "archaeal_only_profile": {
-                **dict(self.archaeal_only_profile),
-                "required_sequence_classes": sorted(self.archaeal_only_profile["required_sequence_classes"]),
-            },
-            "failure_policy": dict(self.failure_policy),
+            "bacterial_replication_profile": bacterial_profile,
+            "archaeal_only_profile": archaeal_profile,
+            "failure_policy": _plain(self.failure_policy),
         }
 
     @property

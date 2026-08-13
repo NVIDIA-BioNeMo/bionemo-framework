@@ -49,4 +49,11 @@ Do not confuse observation cadence with validation cadence. A cheap log-health c
 
 Keep monitor/state.json current and append monitor/events.jsonl. Each validation event includes step/time, checkpoint hash, primary and tie-break values, uncertainty, validation-manifest hash, prompt strata, exact denominator/filter profile, reward components, counts remaining after each hard filter, OR branches, diversity, KL/entropy, lengths/invalids, system health, data source, comparability flag/reason, and best/stop decision.
 
+Keep separate latest-observed and latest-complete validation cursors. A validation file seen before its
+checkpoint or required metrics settle is a partial observation: emit it as such, revisit the same step,
+and never consume it for selection or suppress its later complete event. After a resume produces more
+than one artifact for a step, use the newest complete artifact bound to the current attempt and record
+the superseded paths. Treat normal worker exit followed by checkpoint verification, selection,
+hashing, promotion, or reporting as bounded finalization with its own heartbeat rather than as a stall.
+
 If continuous automation is unavailable, emit a repeatable one-tick script and handoff stating next_check_at. Never invent a nonexistent CLI.

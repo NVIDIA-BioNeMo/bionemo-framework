@@ -37,6 +37,12 @@ review appropriate to the intended use.
 
 Never report “unique” without naming exact versus clustered, denominator, identity, coverage, and whether clustering occurred before or after QC. Never report a pass rate without its filter-profile ID and source artifact.
 
+Treat each producer's `OUTPUTS.yaml` and record manifest as the interface to the next stage. Resolve the
+declared paths and exact record identities rather than guessing from filename prefixes, broad globs,
+hardware-specific directory names, or empty pre-created directories. Validate the expected set before
+consumption, and publish the terminal completion marker only after the stable report bundle is
+promoted.
+
 ## Reproducibility checks
 
 Before completion, verify counts reconcile across manifests; every selected sequence maps to one raw generation and one passing canonical representative; every final pick satisfies the approved complete-genome/lifecycle integrity contract; all required tools and shared executions are `COMPLETED_AND_PARSED`; scanner manifest validation/replay and all six controls match; hashes match; rerunning canonicalization/filter aggregation produces identical results; and final picks contain no duplicate cluster representatives.

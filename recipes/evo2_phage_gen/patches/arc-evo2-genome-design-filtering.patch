@@ -278,17 +278,17 @@
 +            return set()
 +
 +        best_indices = set()
-+        for reference_offset in range(len(reference_products)):
-+            rotated_reference = reference_products[reference_offset:] + reference_products[:reference_offset]
-+            for candidate_offset in range(len(candidate_products)):
-+                rotated_candidate = candidate_products[candidate_offset:] + candidate_products[:candidate_offset]
-+                rotated_indices = lcs_candidate_indices(rotated_reference, rotated_candidate)
-+                candidate_indices = {
-+                    (rotated_index + candidate_offset) % len(candidate_products)
-+                    for rotated_index in rotated_indices
-+                }
-+                if len(candidate_indices) > len(best_indices):
-+                    best_indices = candidate_indices
++        rotated_reference = reference_products
++        # Fix one reference origin and test each relative candidate rotation.
++        for candidate_offset in range(len(candidate_products)):
++            rotated_candidate = candidate_products[candidate_offset:] + candidate_products[:candidate_offset]
++            rotated_indices = lcs_candidate_indices(rotated_reference, rotated_candidate)
++            candidate_indices = {
++                (rotated_index + candidate_offset) % len(candidate_products)
++                for rotated_index in rotated_indices
++            }
++            if len(candidate_indices) > len(best_indices):
++                best_indices = candidate_indices
 +        return best_indices
 +
 +    def count_syntenic_genes_from_gff_products(reference_gff_path: str, gff_path: str) -> tuple:
@@ -645,7 +645,7 @@
              print(f"Filtering by genetic architecture score with remove threshold {config['genetic_architecture_score_range_to_remove']} using the reference genome {config['genetic_architecture_reference_genome']}...")
              filtered_df = valid_genetic_architecture_score(filtered_df,
                                                             ga.phix174_truth_matrix_blurred_sigma5,
-@@ -2570,6 +2816,24 @@
+@@ -2570,6 +2816,25 @@
 
      ### Annotate & visualize genomes ###
      if config["genetic_architecture_visualization_and_synteny_filtering"] == True:
@@ -659,8 +659,9 @@
 +            synteny_preview_df = pd.read_csv(synteny_input_csv)
 +            if len(synteny_preview_df) == 0:
 +                print("No sequences available for genome visualization and synteny filtering; writing empty synteny outputs.")
-+                filter_counts = pd.read_csv(synteny_counts_csv)
-+                filter_counts.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_counts_file_save_location"]}', index=False)
++                if os.path.exists(synteny_counts_csv):
++                    synteny_filter_counts = pd.read_csv(synteny_counts_csv)
++                    synteny_filter_counts.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_counts_file_save_location"]}', index=False)
 +                synteny_preview_df.to_csv(f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}', index=False)
 +                save_df_as_fasta(synteny_preview_df, f'{config["results_save_dir"]}/{config["synteny_filter_seqs_fasta_file_save_location"]}')
 +                filtered_df = synteny_preview_df

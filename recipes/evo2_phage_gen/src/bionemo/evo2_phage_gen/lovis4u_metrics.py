@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from typing import Any
 
 import lovis4u
 
@@ -29,6 +30,22 @@ def _cluster_command_with_threads(command: Sequence[str], threads: int | None) -
     if threads is not None and len(updated) > 1 and updated[1] == "cluster" and "--threads" not in updated:
         updated.extend(["--threads", str(threads)])
     return updated
+
+
+class _ThreadedSubprocess:
+    """Delegate subprocess attributes while adapting only MMseqs cluster calls."""
+
+    def __init__(self, wrapped: Any, threads: int | None):
+        self._wrapped = wrapped
+        self._threads = threads
+
+    def run(self, command: Sequence[str], *args: Any, **kwargs: Any) -> Any:
+        """Run one command with the configured cluster thread override."""
+        return self._wrapped.run(_cluster_command_with_threads(command, self._threads), *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate constants and helpers to the wrapped subprocess module."""
+        return getattr(self._wrapped, name)
 
 
 def main() -> None:
@@ -47,12 +64,8 @@ def main() -> None:
     if threads is not None and threads < 1:
         raise ValueError("LOVIS4U_MMSEQS_THREADS must be positive")
 
-    original_run = lovis4u.DataProcessing.subprocess.run
-
-    def run_with_threads(command, *args, **kwargs):
-        return original_run(_cluster_command_with_threads(command, threads), *args, **kwargs)
-
-    lovis4u.DataProcessing.subprocess.run = run_with_threads
+    original_subprocess = lovis4u.DataProcessing.subprocess
+    lovis4u.DataProcessing.subprocess = _ThreadedSubprocess(original_subprocess, threads)
     try:
         loci = lovis4u.DataProcessing.Loci(parameters=parameters)
         if parameters.args["gff"]:
@@ -65,7 +78,7 @@ def main() -> None:
             raise ValueError("Phage synteny scoring requires LoVis4u MMseqs clustering")
         loci.mmseqs_cluster()
     finally:
-        lovis4u.DataProcessing.subprocess.run = original_run
+        lovis4u.DataProcessing.subprocess = original_subprocess
 
 
 if __name__ == "__main__":

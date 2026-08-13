@@ -12,7 +12,8 @@ set losses reported by the model on other validation sets when training the orig
 
 Pre-RL calibration was performed to choose settings for RL. A temperature of 1.0 performed similarly to other settings, so was chosen. We also chose a mix of 50% length 16 prompts, and 50% length 24 prompts.
 
-GDPO ran for up to 500 steps, with step 430 selected as having the lowest RL score. The latest target-profile rollout passed at 61%; the publication-era screen is shown only for context because it used a different pipeline and is not a controlled enrichment baseline.
+GDPO ran for 500 steps. Step 430 was selected because it had the highest
+`val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate`. The latest target-profile rollout passed at 61%; the publication-era screen is shown only for context because it used a different pipeline and is not a controlled enrichment baseline.
 
 | Evaluation                                              | Screen                                          |               Result |
 | ------------------------------------------------------- | ----------------------------------------------- | -------------------: |

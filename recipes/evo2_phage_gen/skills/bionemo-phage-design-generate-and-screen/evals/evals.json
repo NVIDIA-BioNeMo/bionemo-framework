@@ -29,7 +29,8 @@
         "The response writes ordered intent-named scripts plus raw, canonical, exact-deduplicated, QC-passing, cluster-representative, ranked, rejected, provenance, and summary artifacts.",
         "The response reports the proof-of-concept counts without silently adding filter 7 or conflating them with a different historical profile.",
         "The response keeps whole-sequence cargo and lysogeny screens, strictly lytic evidence, and lifecycle/transduction endpoints separate; it labels computational passers as unvalidated until the required phenotypic, wet-lab, and expert reviews are complete.",
-        "Any unattended stage chain is single-instance, atomically stateful, tolerant of transient reads, heartbeat-visible, bounded-retry, and resumable."
+        "Any unattended stage chain is single-instance, atomically stateful, tolerant of transient reads, heartbeat-visible, bounded-retry, and resumable.",
+        "Each downstream stage consumes declared paths and exact record identities from the producer's OUTPUTS.yaml and record manifest rather than guessing from filename prefixes, broad globs, hardware-specific directories, or empty pre-created directories."
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",
       "expected_script": null

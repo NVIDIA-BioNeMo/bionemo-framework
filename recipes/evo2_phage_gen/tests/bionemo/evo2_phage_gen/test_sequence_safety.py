@@ -17,6 +17,8 @@
 
 import hashlib
 import json
+from dataclasses import replace
+from types import MappingProxyType
 
 import pytest
 
@@ -110,6 +112,19 @@ failure_policy:
     expected_json = json.dumps(policy.to_dict(), sort_keys=True, separators=(",", ":"))
     assert policy.canonical_json == expected_json
     assert policy.sha256 == hashlib.sha256(expected_json.encode()).hexdigest()
+
+    nested_policy = replace(
+        policy,
+        failure_policy=MappingProxyType(
+            {
+                **dict(policy.failure_policy),
+                "nested": MappingProxyType({"states": ("PASS", "INDETERMINATE")}),
+            }
+        ),
+    )
+    assert json.loads(nested_policy.canonical_json)["failure_policy"]["nested"] == {
+        "states": ["PASS", "INDETERMINATE"]
+    }
 
     policy_path.write_text(policy_path.read_text().replace("[toxin, amr]", "[toxin, novel_class]"))
     with pytest.raises(ValueError, match="unknown required sequence class"):

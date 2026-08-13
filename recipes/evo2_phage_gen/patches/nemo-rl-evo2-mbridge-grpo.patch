@@ -2,6 +2,14 @@ diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
 index e5647bae7..b8603d049 100644
 --- a/nemo_rl/algorithms/grpo.py
 +++ b/nemo_rl/algorithms/grpo.py
+@@ -2088,6 +2088,7 @@ def grpo_train(
+             # A central place to store logging data that won't be deleted until the loop ends
+             metrics_logging_data = dict()
+             metrics = dict()
++            rollout_timing_metrics: dict[str, float] = {}
+
+             if master_config.data["use_multiple_dataloader"]:
+                 print(
 @@ -2247,6 +2247,7 @@ def grpo_train(
                              policy_generation.get_logger_metrics()
                          )
@@ -124,7 +132,15 @@ index e5647bae7..b8603d049 100644
      validation_time = timing_metrics.get("total_validation_time", 0)
 
      # Print summary of validation results
-@@ -3554,6 +3596,7 @@ def async_grpo_train(
+@@ -3485,6 +3527,7 @@ def async_grpo_train(
+     # Main training loop
+     try:
+         while step < master_config.grpo["max_num_steps"]:
++            rollout_timing_metrics: dict[str, float] = {}
+             print(
+                 f"\n{'=' * 25} Step {step + 1}/{master_config.grpo['max_num_steps']} {'=' * 25}"
+             )
+@@ -3554,6 +3597,7 @@ def async_grpo_train(
                          for k, v in t["rollout_metrics"].items():
                              per_group_metrics.setdefault(k, []).append(v)
                      rollout_metrics = aggregate_rollout_metrics(per_group_metrics)
@@ -132,7 +148,7 @@ index e5647bae7..b8603d049 100644
 
                  # Enforce fixed training batch: num_prompts_per_step * num_generations_per_prompt
                  expected_batch_size = (
-@@ -4035,6 +4078,7 @@ def async_grpo_train(
+@@ -4035,6 +4079,7 @@ def async_grpo_train(
              timing_metrics: dict[str, float] = timer.get_timing_metrics(
                  reduction_op="sum"
              )
@@ -140,7 +156,7 @@ index e5647bae7..b8603d049 100644
 
              # Add buffer stats
              buffer_size_current = ray.get(replay_buffer.size.remote())
-@@ -4082,9 +4126,7 @@ def async_grpo_train(
+@@ -4082,9 +4127,7 @@ def async_grpo_train(
              print("\n⏱️  Timing:")
              total_time = timing_metrics.get("total_step_time", 0)
              print(f"  • Total step time: {total_time:.2f}s")
@@ -155,7 +171,7 @@ diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
 index 44a11cddd..c12ec4e1d 100644
 --- a/nemo_rl/experience/rollouts.py
 +++ b/nemo_rl/experience/rollouts.py
-@@ -571,6 +571,38 @@ def calculate_rewards(
+@@ -571,6 +571,40 @@ def calculate_rewards(
      )
 
 
@@ -183,10 +199,12 @@ index 44a11cddd..c12ec4e1d 100644
 +    metrics: dict[str, Any] = {}
 +    if not futures:
 +        return metrics
-+    for task_name, result in zip(future_task_names, ray.get(futures), strict=False):
++    results = list(zip(future_task_names, ray.get(futures), strict=False))
++    multiple_metric_environments = len(results) > 1
++    for task_name, result in results:
 +        _, env_metrics = result
 +        for key, value in env_metrics.items():
-+            metric_key = key if key not in metrics else f"{task_name}/{key}"
++            metric_key = f"{task_name}/{key}" if multiple_metric_environments else key
 +            metrics[metric_key] = value
 +    return metrics
 +
@@ -266,6 +284,14 @@ index b8c2a4f2b..b4a218eb5 100644
  class MegatronGeneration(GenerationInterface):
      """Generation interface backed by Megatron (colocated or non-colocated)."""
 
+@@ -91,6 +120,7 @@ class MegatronGeneration(GenerationInterface):
+         # `self._policy_config` keeps a reference to the full PolicyConfig.
+         self._policy_config = config
+         self.cfg: MCoreGenerationConfig = config["generation"]
++        self._generation_adapter = _load_generation_adapter(self.cfg)
+         # Populated after the first prepare_for_generation (which starts the HTTP server).
+         self.dp_openai_server_base_urls: list[Optional[str]] = []
+
 @@ -167,9 +196,9 @@ class MegatronGeneration(GenerationInterface):
      ) -> BatchedDataDict[GenerationOutputSpec]:
          """Generate a batch of data using the Megatron generation backend.
@@ -283,7 +309,7 @@ index b8c2a4f2b..b4a218eb5 100644
          Returns:
              BatchedDataDict conforming to GenerationOutputSpec.
          """
-+        adapter = _load_generation_adapter(self.cfg)
++        adapter = self._generation_adapter
 +        if adapter is not None and _adapter_requires_all_workers(adapter, self.cfg):
 +            worker_group = self._policy.worker_group
 +            dp_size = worker_group.sharding_annotations.get_axis_size(
@@ -681,7 +707,7 @@ index e517e0298..84ef1f1b0 100644
 +        if generation.get("backend") == "megatron" and colocated is not False:
 +            self.refit_param_info_mcore = []
 +            self.refit_conversion_tasks = []
-+            return {}
++            return None
 +
          self.refit_param_info_mcore = self._calculate_refit_param_info()
 

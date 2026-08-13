@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import pprint
 from pathlib import Path
@@ -25,10 +26,12 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 
+logger = logging.getLogger(__name__)
+
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 PAPER_RL_PROMPT_FILENAMES = {
     "phage_prompts_paper_useful_rl.jsonl",
-    "phage_prompts_paper_useful_rl_validation_prompt10.jsonl",
+    "phage_prompts_paper_useful_rl_validation_prompt10_96.jsonl",
 }
 
 
@@ -93,21 +96,20 @@ def _ensure_prompt_data_files(config) -> None:
 
     data_dir = missing_paths[0].parent
     written_paths = ensure_paper_useful_rl_prompt_files(data_dir)
-    print("Materialized missing paper-useful RL prompt data:")
+    logger.info("Materialized missing paper-useful RL prompt data:")
     for path in written_paths.values():
-        print(f"  {path}")
+        logger.info("  %s", path)
 
 
-def _select_grpo_trainer(master_config, algorithm: str):
-    dp_cfg = master_config.data_plane or {}
-    if dp_cfg.get("enabled", False):
+def _select_grpo_trainer(*, data_plane_enabled: bool, algorithm: str):
+    if data_plane_enabled:
         from nemo_rl.algorithms.grpo_sync import grpo_train_sync
 
-        print(f"Running synchronous {algorithm.upper()} training (TransferQueue)")
+        logger.info("Running synchronous %s training (TransferQueue)", algorithm.upper())
         return grpo_train_sync
     from nemo_rl.algorithms.grpo import grpo_train
 
-    print(f"Running synchronous {algorithm.upper()} training (legacy)")
+    logger.info("Running synchronous %s training (legacy)", algorithm.upper())
     return grpo_train
 
 
@@ -155,6 +157,7 @@ def _init_ray(upstream_init_ray, ray_module, *, include_dashboard: bool, num_cpu
 def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algorithm: str = "config") -> None:
     """Run GRPO or GDPO with recipe-local Evo2 phage extensions."""
     os.environ.setdefault("NEMO_RL_PY_EXECUTABLES_SYSTEM", "1")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
         import ray
         from nemo_rl.algorithms.grpo import MasterConfig, async_grpo_train, setup
@@ -173,29 +176,28 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
 
     from bionemo.evo2_phage_gen.nemo_rl_patches import assert_nemo_rl_patch_runtime, patch_sha256
 
-    print(f"Using NeMo-RL Evo2 patch SHA256: {patch_sha256()}")
+    logger.info("Using NeMo-RL Evo2 patch SHA256: %s", patch_sha256())
     assert_nemo_rl_patch_runtime()
     _register_recipe_extensions()
     register_omegaconf_resolvers()
     args, overrides = _parse_args(default_config, default_algorithm)
     config = load_config(args.config)
-    print(f"Loaded configuration from: {args.config}")
+    logger.info("Loaded configuration from: %s", args.config)
     if overrides:
-        print(f"Overrides: {overrides}")
+        logger.info("Overrides: %s", overrides)
         config = parse_hydra_overrides(config, overrides)
     config, algorithm = _apply_algorithm_override(config, args.algorithm)
     _ensure_prompt_data_files(config)
-    print(f"Using RL algorithm frontend: {algorithm.upper()}")
+    logger.info("Using RL algorithm frontend: %s", algorithm.upper())
 
     config = MasterConfig(**OmegaConf.to_container(config, resolve=True))
-    print("Applied CLI overrides")
-    print("Final config:")
-    pprint.pprint(config)
+    logger.info("Applied CLI overrides")
+    logger.info("Final config:\n%s", pprint.pformat(config))
 
     config.logger["log_dir"] = get_next_experiment_dir(config.logger["log_dir"])
-    print(f"Using log directory: {config.logger['log_dir']}")
+    logger.info("Using log directory: %s", config.logger["log_dir"])
     if config.checkpointing["enabled"]:
-        print(f"Using checkpoint directory: {config.checkpointing['checkpoint_dir']}")
+        logger.info("Using checkpoint directory: %s", config.checkpointing["checkpoint_dir"])
 
     include_ray_dashboard = os.environ.get("NEMO_RL_RAY_DASHBOARD", "0").lower() in {"1", "true", "yes"}
     ray_num_cpus = int(os.environ["NEMO_RL_RAY_NUM_CPUS"]) if os.environ.get("NEMO_RL_RAY_NUM_CPUS") else None
@@ -214,7 +216,8 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
 
     dataset, val_dataset, task_to_env, val_task_to_env = setup_response_data(tokenizer, config.data, config.env)
     dp_cfg = config.data_plane or {}
-    if dp_cfg.get("enabled", False):
+    data_plane_enabled = bool(dp_cfg.get("enabled", False))
+    if data_plane_enabled:
         from nemo_rl.models.policy.tq_policy import TQPolicy
 
         def policy_factory(**kwargs):
@@ -231,7 +234,7 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
         dataloader,
         val_dataloader,
         loss_fn,
-        logger,
+        experiment_logger,
         checkpointer,
         grpo_state,
         master_config,
@@ -239,7 +242,7 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
 
     if "async_grpo" in config.grpo and config.grpo["async_grpo"]["enabled"]:
         async_config = config.grpo["async_grpo"]
-        print(f"Running async {algorithm.upper()} training")
+        logger.info("Running async %s training", algorithm.upper())
         async_grpo_train(
             policy=policy,
             policy_generation=policy_generation,
@@ -249,14 +252,14 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
             loss_fn=loss_fn,
             task_to_env=task_to_env,
             val_task_to_env=val_task_to_env,
-            logger=logger,
+            logger=experiment_logger,
             checkpointer=checkpointer,
             grpo_save_state=grpo_state,
             master_config=master_config,
             max_trajectory_age_steps=async_config["max_trajectory_age_steps"],
         )
     else:
-        trainer = _select_grpo_trainer(master_config, algorithm)
+        trainer = _select_grpo_trainer(data_plane_enabled=data_plane_enabled, algorithm=algorithm)
         trainer(
             policy,
             policy_generation,

@@ -163,6 +163,16 @@ For Slurm, prefer targeted squeue -j JOB_ID while active and sacct -j JOB_ID for
 
 Treat a failed gate, absent process, stale heartbeat, or unchanged progress marker beyond its declared bound as actionable—not as healthy waiting. Monitor through verified terminal success or failure. Capture exit status, final progress and output markers, logs, and an actionable error; perform only a provenance-recorded bounded repair or resume, preserve only verified completed outputs, and prove progress on a bounded unit before continuing remaining work. Atomically advance or write an explicit terminal state and reconcile reservations and dependent DAG nodes. Never leave a supervisor logically active with no worker and no scheduled action.
 
+Track observed progress separately from completed progress. A partial artifact or event may be recorded,
+but it must not advance the completed cursor or prevent a later complete observation of the same unit.
+When several artifacts claim the same unit after a resume, select the newest complete artifact bound to
+the current attempt and retain the others as superseded evidence.
+
+Represent post-worker work as an explicit `finalizing` phase. If the worker exits normally while a
+recorded supervisor is still hashing, validating, promoting, reporting, or publishing outputs, keep
+that supervisor heartbeat and a bounded finalization deadline active. Do not classify the stage as
+failed or relaunch it until finalization reaches a verified terminal state or exceeds that deadline.
+
 ## Profile gates
 
 ### Local GPU and SSH
@@ -174,6 +184,16 @@ For local execution, first detect whether the agent is already containerized and
 Honor an explicit user choice; otherwise choose host-uv or Docker from compatibility, reproducibility,
 isolation, mount, GPU, and recovery evidence and record the rationale. In either boundary, run the
 recipe's `.ci_build.sh` before sourcing `.ci_test_env.sh` from the recipe working directory.
+
+On an architecture not covered by the recipe's tested lock/build matrix, resolve every dependency in
+a disposable pinned runtime before the full build. Prefer authenticated compatible wheels. When a
+source build is required, inspect its declared metadata and build hooks, pin the source or artifact
+identity, and record the compiler, system libraries, and explicit build requirements in a reviewed
+architecture-specific constraints or lock artifact. Start each repair as a new immutable build
+attempt rather than accumulating ad hoc mutations in one environment. Prove imports, entry-point
+`--help`, and a representative CPU/GPU smoke before promotion. Success on another architecture is not
+evidence that this build works. Keep any Git ownership exception local to the exact verified checkout
+and runtime; do not change host-global Git configuration as a container workaround.
 
 For host-uv, bind the environment to the lock/source identity and keep it project-owned. For Docker,
 record the Dockerfile/build context, pinned base and final image identity, GPU/runtime smoke, dedicated

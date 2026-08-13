@@ -28,7 +28,7 @@ DEFAULT_PROMPT_LENGTHS = tuple(range(1, 12))
 DEFAULT_PROMPT_PREFIX = "+~"
 PAPER_USEFUL_RL_PROMPT_LENGTHS = (4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11)
 PAPER_USEFUL_RL_VALIDATION_PROMPT_LENGTH = 10
-PAPER_USEFUL_RL_VALIDATION_RECORDS = 64
+PAPER_USEFUL_RL_VALIDATION_RECORDS = 96
 DNA_ALPHABET = frozenset("ACGTacgt")
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 
@@ -73,7 +73,7 @@ def ensure_paper_useful_rl_prompt_files(
     data_dir = data_dir or RECIPE_ROOT / "data"
     prompts_by_length = phix174_prompts(prompt_lengths=sorted(set(PAPER_USEFUL_RL_PROMPT_LENGTHS)))
     train_path = data_dir / "phage_prompts_paper_useful_rl.jsonl"
-    validation_path = data_dir / "phage_prompts_paper_useful_rl_validation_prompt10.jsonl"
+    validation_path = data_dir / "phage_prompts_paper_useful_rl_validation_prompt10_96.jsonl"
 
     if overwrite or not train_path.exists():
         train_prompts = [prompts_by_length[prompt_len] for prompt_len in PAPER_USEFUL_RL_PROMPT_LENGTHS]

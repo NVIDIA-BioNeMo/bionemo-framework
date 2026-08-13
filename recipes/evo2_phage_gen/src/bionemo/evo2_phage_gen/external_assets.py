@@ -974,7 +974,7 @@ def prepare_amrfinder_plus(
         staged_runtime = _stage_amrfinder_runtime(
             {name: _find_extracted_file(extracted_dir, name) for name in AMRFINDER_RUNTIME_FILES},
             target_bin_dir,
-            link=True,
+            link=False,
         )
         amrfinder_path = staged_runtime["amrfinder"]
         amrfinder_index_path = staged_runtime["amrfinder_index"]
@@ -3485,6 +3485,10 @@ def prepare_external_assets(
                     insecure_downloads=False,
                 )
             )
+            generation_mmseqs_path = _copy_executable(
+                target_bin_dir / "mmseqs",
+                generation_bin_dir / "mmseqs",
+            )
             assets.append(
                 _prepare_verified_phrogs_safety_metadata(
                     external_dir,
@@ -3494,7 +3498,7 @@ def prepare_external_assets(
                     sequence_database=snapshot_sequence_database,
                     include_sequence_database=False,
                     profile_database=snapshot_profile_database,
-                    mmseqs_path=target_bin_dir / "mmseqs",
+                    mmseqs_path=generation_mmseqs_path,
                     profile_retrieved_at=profile_retrieved_at,
                     _verified_profile=verified_profile,
                 )

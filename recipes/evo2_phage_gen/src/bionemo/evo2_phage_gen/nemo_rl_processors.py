@@ -63,14 +63,13 @@ def phage_prompt_data_processor(
     if length >= max_seq_length:
         token_ids = token_ids[: min(4, max_seq_length)]
         loss_multiplier = 0.0
+    length = int(token_ids.shape[0])
 
     output: DatumSpec = {
         "message_log": [{"role": "user", "content": prompt, "token_ids": token_ids}],
         "length": length,
         "extra_env_info": {
-            "prompt": prompt,
             "prompt_nt_length": len(prompt_nucleotides),
-            "prompt_prefix": prompt,
             "prompt_index": idx,
         },
         "loss_multiplier": loss_multiplier,

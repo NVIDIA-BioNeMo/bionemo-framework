@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
-
 from __future__ import annotations
 
 import os
@@ -61,3 +58,10 @@ def test_scoring_script_creates_root_before_generation_validation_redirect(tmp_p
     assert completed.returncode == 42
     assert (score_root / "generation-validation.json").read_text() == '{"validated": true}\n'
     assert not Path(f"{score_root}.generation-validation.json").exists()
+
+
+def test_scoring_workers_use_dedicated_input_descriptor() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "read -r -u 3 cell_index" in script
+    assert 'done 3< "${GENERATION_ROOT}/cells.tsv"' in script

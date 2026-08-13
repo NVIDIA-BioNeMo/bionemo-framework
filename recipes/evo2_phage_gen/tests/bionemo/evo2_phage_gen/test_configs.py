@@ -15,17 +15,34 @@
 
 """Tests for recipe configuration files."""
 
-import json
 import tomllib
 from pathlib import Path
 
 import yaml
 
-from bionemo.evo2_phage_gen.generation import ensure_paper_useful_rl_prompt_files
-from bionemo.evo2_phage_gen.rl_readiness import _load_config_with_defaults
-
 
 RECIPE_ROOT = Path(__file__).parents[3]
+
+
+def test_config_directory_contains_only_supported_runtime_configs():
+    """The public config directory should expose only supported end-to-end runtime inputs."""
+    config_dir = RECIPE_ROOT / "configs"
+    expected = {
+        "arc_genome_design_filtering_local.yaml",
+        "gdpo_phage_megatron.yaml",
+        "grpo_phage_megatron.yaml",
+        "nemo_rl_defaults/grpo_math_1B.yaml",
+        "nemo_rl_defaults/grpo_math_1B_megatron.yaml",
+        "phage_safety_assets.yaml",
+        "phage_safety_policy.yaml",
+        "phage_safety_reference_controls.yaml",
+        "sft_microviridae_dataset.yaml",
+        "sft_microviridae_preprocess.yaml",
+    }
+
+    actual = {path.relative_to(config_dir).as_posix() for path in config_dir.rglob("*.yaml")}
+
+    assert actual == expected
 
 
 def test_arc_genome_design_filtering_local_config_is_safe_by_default():
@@ -42,21 +59,6 @@ def test_arc_genome_design_filtering_local_config_is_safe_by_default():
     assert config["reference_tropism_protein"].endswith(
         "data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta"
     )
-
-
-def test_arc_curated_smoke_config_targets_bundled_candidates():
-    """The curated smoke config should run only Arc's dependency-light nucleotide stage."""
-    config_path = RECIPE_ROOT / "configs" / "arc_genome_design_filtering_curated_smoke.yaml"
-    config = yaml.safe_load(config_path.read_text())
-
-    assert config["evo_gen_seqs_fasta_file_save_location"].endswith(
-        "data/external/arc_evo2/phage_gen/data/all_generated_phages.fasta"
-    )
-    assert config["nucleotide_filtering"] is True
-    assert config["orf_filtering"] is False
-    assert config["homology_filtering"] is False
-    assert config["diversification_filtering"] is False
-    assert config["genetic_architecture_visualization_and_synteny_filtering"] is False
 
 
 def test_docs_and_configs_do_not_use_stale_workspace_paths():
@@ -107,154 +109,6 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert mcore_generation_config["max_requests"] >= generation_batch_size
     assert mcore_generation_config["prompt_batch_size"] == generation_batch_size
     assert "evo2_batched_decode_size" not in mcore_generation_config
-
-
-def test_grpo_rl100_config_targets_best_paper_region():
-    """The 100-step RL config should use the best downstream HPO prompt region."""
-    config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron_rl100.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    prompt_path = RECIPE_ROOT / config["data"]["train"]["data_path"]
-    validation_path = RECIPE_ROOT / config["data"]["validation"]["data_path"]
-    generation_config = config["policy"]["generation"]
-
-    ensure_paper_useful_rl_prompt_files(RECIPE_ROOT / "data")
-    assert prompt_path.exists()
-    assert validation_path.exists()
-    prompts = [
-        json.loads(line)["messages"][0]["content"].removeprefix("+~")
-        for line in prompt_path.read_text().splitlines()
-        if line.strip()
-    ]
-    validation_prompts = [
-        json.loads(line)["messages"][0]["content"].removeprefix("+~")
-        for line in validation_path.read_text().splitlines()
-        if line.strip()
-    ]
-    assert [len(prompt) for prompt in prompts] == [4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11]
-    assert len(validation_prompts) == 64
-    assert {len(prompt) for prompt in validation_prompts} == {10}
-    assert config["data"]["validation"]["env_name"] == "phage_qc"
-    assert config["grpo"]["max_num_epochs"] >= config["grpo"]["max_num_steps"]
-    assert config["grpo"]["max_num_steps"] == 100
-    assert config["grpo"]["num_generations_per_prompt"] == 96
-    assert config["grpo"]["val_period"] == 10
-    assert config["grpo"]["val_at_start"] is True
-    assert config["grpo"]["val_at_end"] is True
-    assert config["grpo"]["val_batch_size"] == 96
-    assert config["grpo"]["max_val_samples"] == 96
-    assert config["policy"]["generation_batch_size"] == 96
-    assert generation_config["max_new_tokens"] == 5989
-    assert generation_config["temperature"] == 1.0
-    assert generation_config["top_k"] == 4
-    assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 1.0
-    assert config["env"]["phage_qc"]["dustmask_filter"] is True
-    assert config["env"]["phage_qc"]["dustmask_end_window"] == 200
-    assert config["env"]["phage_qc"]["weight_dustmask_end"] == 1.0
-    for removed_weight in [
-        "weight_orf",
-        "weight_coding_density",
-        "weight_genetic_architecture",
-        "weight_checkv",
-        "weight_training_data_identity",
-        "weight_reference_genome_identity",
-        "weight_mmseqs_clustering",
-        "weight_diversity",
-    ]:
-        assert removed_weight not in config["env"]["phage_qc"]
-    assert config["env"]["phage_qc"]["external_qc"]["enabled"] is True
-    assert config["env"]["phage_qc"]["external_qc"]["enable_tropism"] is True
-    assert config["env"]["phage_qc"]["external_qc"]["enable_synteny"] is True
-    assert config["env"]["phage_qc"]["external_qc"]["synteny_mode"] == "full"
-    for removed_flag in [
-        "checkv_db_path",
-        "enable_orf",
-        "enable_coding_density",
-        "enable_genetic_architecture",
-        "enable_checkv",
-        "enable_training_data_identity",
-        "enable_reference_genome_identity",
-        "enable_mmseqs_clustering",
-        "enable_diversity",
-    ]:
-        assert removed_flag not in config["env"]["phage_qc"]["external_qc"]
-    assert config["env"]["phage_qc"]["external_qc"]["enable_average_protein_identity"] is True
-    assert config["env"]["phage_qc"]["external_qc"]["enable_required_genes"] is True
-    assert config["env"]["phage_qc"]["weight_synteny"] == 0.25
-    assert config["env"]["phage_qc"]["weight_average_protein_identity"] == 0.25
-    assert config["env"]["phage_qc"]["weight_required_genes"] == 0.1
-    assert config["env"]["phage_qc"]["external_qc"]["required_genes_evidence_target"] == 9.0
-    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_parallel_jobs"] == 12
-    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_collect_pdfs"] is False
-    assert config["logger"]["wandb_enabled"] is True
-    assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
-    assert config["logger"]["wandb"]["name"] == "grpo-phage-rl100-full-qc-batched96"
-    mcore_generation_config = generation_config["mcore_generation_config"]
-    assert mcore_generation_config["prompt_batch_size"] == 96
-    assert mcore_generation_config["max_requests"] == 96
-    assert mcore_generation_config["enable_chunked_prefill"] is False
-    assert (
-        mcore_generation_config["generation_adapter"]
-        == "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
-    )
-
-    arc_config = yaml.safe_load((RECIPE_ROOT / "configs" / "arc_genome_design_filtering_local.yaml").read_text())
-    assert arc_config["training_data_sequence_identity_filter"] is False
-    assert arc_config["training_data_sequence_identity_range"] == [0, 98.9]
-    assert arc_config["genetic_architecture_filter"] is False
-    assert arc_config["mmseqs_reference_genome_sequence_identity_remove_filter"] is False
-    assert arc_config["genetic_architecture_remove_filter"] is False
-    assert arc_config["mmseqs_reference_genome_sequence_identity_keep_range"] == [0, 98.9]
-    assert arc_config["syntenic_gene_count_range"] == [10, 12]
-    assert arc_config["total_gene_count_range"] == [10, 12]
-    assert arc_config["syntenic_total_gene_count_remove"] == [[11, 11]]
-    assert arc_config["required_genes_evidence_target"] == 9.0
-    assert arc_config["lovis4u_parallel_jobs"] == 12
-    assert arc_config["lovis4u_chunk_size"] == 12
-    assert arc_config["lovis4u_collect_pdfs"] is False
-    assert arc_config["allow_gff_product_order_synteny_fallback"] is False
-
-
-def test_grpo_rl500_config_extends_current_full_qc_rollout():
-    """The 500-step config should directly carry the current full-QC rollout settings."""
-    config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron_rl500.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    generation_config = config["policy"]["generation"]
-    mcore_generation_config = generation_config["mcore_generation_config"]
-
-    assert config["defaults"] == "grpo_phage_megatron.yaml"
-    assert config["grpo"]["max_num_epochs"] == 500
-    assert config["grpo"]["num_generations_per_prompt"] == 96
-    assert config["grpo"]["max_num_steps"] == 500
-    assert config["grpo"]["val_batch_size"] == 96
-    assert config["grpo"]["max_val_samples"] == 96
-    assert config["grpo"]["val_at_start"] is True
-    assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
-    assert config["policy"]["train_global_batch_size"] == 96
-    assert config["policy"]["generation_batch_size"] == 96
-    assert generation_config["max_new_tokens"] == 5989
-    assert generation_config["temperature"] == 1.0
-    assert generation_config["top_k"] == 4
-    assert mcore_generation_config["prompt_batch_size"] == 96
-    assert mcore_generation_config["max_requests"] == 96
-    assert (
-        mcore_generation_config["generation_adapter"]
-        == "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
-    )
-    assert mcore_generation_config["generation_adapter_config"]["seed"] == 42
-    assert config["data"]["train"]["data_path"] == "data/phage_prompts_paper_useful_rl.jsonl"
-    assert config["data"]["validation"]["data_path"] == "data/phage_prompts_paper_useful_rl_validation_prompt10.jsonl"
-    assert config["env"]["phage_qc"]["weight_synteny"] == 0.25
-    assert config["env"]["phage_qc"]["weight_average_protein_identity"] == 0.25
-    assert config["env"]["phage_qc"]["weight_required_genes"] == 0.1
-    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_parallel_jobs"] == 12
-    assert config["env"]["phage_qc"]["external_qc"]["lovis4u_collect_pdfs"] is False
-    assert config["env"]["phage_qc"]["dustmask_filter"] is True
-    assert config["env"]["phage_qc"]["weight_dustmask_end"] == 1.0
-    assert config["logger"]["log_dir"] == "data/checkpoints/phage_grpo_logs_rl500"
-    assert config["logger"]["wandb_enabled"] is True
-    assert config["logger"]["wandb"]["project"] == "evo2_phage_design_rl_focused_qc"
-    assert config["logger"]["wandb"]["name"] == "grpo-phage-rl500-full-qc-batched96"
-    assert config["checkpointing"]["checkpoint_dir"] == "data/checkpoints/phage_grpo_rl500_round2"
 
 
 def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
@@ -341,7 +195,9 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
 
 
 def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():
-    """Base, smoke, and diagnostic overlays must not silently lose the mandatory safety gate."""
+    """Supported GRPO and GDPO configs must keep the mandatory safety gate."""
+    from bionemo.evo2_phage_gen.rl_readiness import _load_config_with_defaults
+
     config_dir = RECIPE_ROOT / "configs"
     config_paths = sorted({*config_dir.glob("grpo_phage*.yaml"), *config_dir.glob("gdpo_phage*.yaml")})
     assert config_paths
@@ -385,141 +241,6 @@ def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():
                     config_path.name,
                     name,
                 )
-
-
-def test_gdpo_tp1dp2_smoke_uses_local_decode_48_but_training_microbatch_1():
-    """The DP smoke should split decode 48/48 without repeating the MBS48 OOM."""
-    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron_gdpo12_tp1dp2_mbs1_smoke.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    policy = config["policy"]
-    mcore_generation_config = policy["generation"]["mcore_generation_config"]
-
-    assert config["defaults"] == "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
-    assert policy["train_global_batch_size"] == 96
-    assert policy["generation_batch_size"] == 96
-    assert policy["train_micro_batch_size"] == 1
-    assert policy["logprob_batch_size"] == 1
-    assert policy["megatron_cfg"]["tensor_model_parallel_size"] == 1
-    assert mcore_generation_config["max_requests"] == 48
-    assert mcore_generation_config["prompt_batch_size"] == 48
-    output_paths = [
-        config["checkpointing"]["checkpoint_dir"],
-        config["env"]["phage_qc"]["external_qc"]["work_dir"],
-        config["env"]["phage_qc"]["mmseqs_cluster_diversity"]["work_dir"],
-        config["logger"]["log_dir"],
-    ]
-    assert all("tp1dp2_finalpatch_mbs1_gdpo12_smoke" in path for path in output_paths)
-    assert config["checkpointing"]["pretrained_checkpoint"]["path"] == (
-        "data/checkpoints/evo2_7b_microviridae_mbridge"
-    )
-
-
-def test_gdpo_tp2dp1_smoke_uses_full_96_request_collective_and_isolated_output_paths():
-    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron_gdpo12_tp2dp1_dpgenfix_smoke.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    policy = config["policy"]
-    mcore_generation_config = policy["generation"]["mcore_generation_config"]
-
-    assert config["defaults"] == "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
-    assert policy["train_global_batch_size"] == 96
-    assert policy["generation_batch_size"] == 96
-    assert policy["train_micro_batch_size"] == 1
-    assert policy["logprob_batch_size"] == 1
-    assert policy["megatron_cfg"]["tensor_model_parallel_size"] == 2
-    assert mcore_generation_config["max_requests"] == 96
-    assert mcore_generation_config["prompt_batch_size"] == 96
-    output_paths = [
-        config["checkpointing"]["checkpoint_dir"],
-        config["env"]["phage_qc"]["external_qc"]["work_dir"],
-        config["env"]["phage_qc"]["mmseqs_cluster_diversity"]["work_dir"],
-        config["logger"]["log_dir"],
-    ]
-    assert all("tp2dp1_dpgenfix_gdpo12_smoke" in path for path in output_paths)
-    assert config["checkpointing"]["pretrained_checkpoint"]["path"] == (
-        "data/checkpoints/evo2_7b_microviridae_mbridge"
-    )
-
-
-def test_gdpo_tp2dp4_smoke_uses_all_eight_gpus_and_local_decode_24():
-    """TP2 x DP4 should shard each 96-sample rollout into four 24-row replicas."""
-    config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron_gdpo12_tp2dp4_mbs1_smoke.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    policy = config["policy"]
-    mcore_generation_config = policy["generation"]["mcore_generation_config"]
-
-    assert config["defaults"] == "gdpo_phage_megatron_gdpo12_batched96_smoke.yaml"
-    assert config["cluster"] == {"gpus_per_node": 8, "num_nodes": 1}
-    assert policy["train_global_batch_size"] == 96
-    assert policy["generation_batch_size"] == 96
-    assert policy["train_micro_batch_size"] == 1
-    assert policy["logprob_batch_size"] == 1
-    assert policy["megatron_cfg"]["tensor_model_parallel_size"] == 2
-    assert mcore_generation_config["max_requests"] == 24
-    assert mcore_generation_config["prompt_batch_size"] == 24
-    output_paths = [
-        config["checkpointing"]["checkpoint_dir"],
-        config["env"]["phage_qc"]["external_qc"]["work_dir"],
-        config["env"]["phage_qc"]["mmseqs_cluster_diversity"]["work_dir"],
-        config["logger"]["log_dir"],
-    ]
-    assert all("tp2dp4_mbs1_gdpo12_smoke" in path for path in output_paths)
-    assert config["checkpointing"]["pretrained_checkpoint"]["path"] == (
-        "data/checkpoints/evo2_7b_microviridae_mbridge"
-    )
-
-
-def test_grpo_diagnostic_config_keeps_full_length_scoring_but_smaller_rollouts():
-    """The diagnostic RL config should be faster while preserving full-length QC scoring."""
-    config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron_diagnostic.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    generation_config = config["policy"]["generation"]
-
-    assert config["grpo"]["max_num_steps"] == 2
-    assert config["grpo"]["num_generations_per_prompt"] == 8
-    assert config["policy"]["train_global_batch_size"] == 8
-    assert generation_config["max_new_tokens"] == 5990
-    assert generation_config["temperature"] == 1.0
-    assert generation_config["top_k"] is None
-    assert config["checkpointing"]["enabled"] is False
-
-
-def test_grpo_batched_diagnostic_config_uses_batched_evo2_generation():
-    """The batched diagnostic should exercise the non-serial Evo2 generation path."""
-    config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron_batched_diagnostic.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
-
-    assert config["grpo"]["max_num_steps"] == 1
-    assert config["grpo"]["num_generations_per_prompt"] == 8
-    assert config["policy"]["generation_batch_size"] == 8
-    assert config["policy"]["train_global_batch_size"] == 8
-    assert mcore_generation_config["prompt_batch_size"] == 8
-    assert mcore_generation_config["max_requests"] == 8
-    assert mcore_generation_config["enable_chunked_prefill"] is False
-    assert (
-        mcore_generation_config["generation_adapter"]
-        == "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
-    )
-    assert config["checkpointing"]["enabled"] is False
-
-
-def test_grpo_batched_no_cg_diagnostic_disables_cuda_graphs():
-    """The no-CG diagnostic should isolate batched generation from CUDA graph warmup."""
-    config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron_batched_no_cg_diagnostic.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
-
-    assert config["policy"]["generation_batch_size"] == 8
-    assert mcore_generation_config["prompt_batch_size"] == 8
-    assert mcore_generation_config["max_requests"] == 8
-    assert mcore_generation_config["enable_chunked_prefill"] is False
-    assert (
-        mcore_generation_config["generation_adapter"]
-        == "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
-    )
-    assert mcore_generation_config["cuda_graph_impl"] == "none"
-    assert mcore_generation_config["inference_cuda_graph_scope"] == "none"
-    assert mcore_generation_config["use_cuda_graphs_for_non_decode_steps"] is False
 
 
 def test_report_runtime_declares_tabulate_dependency():

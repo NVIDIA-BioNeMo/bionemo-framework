@@ -26,6 +26,7 @@ def test_causal_conv1d_extension_imports_with_active_torch():
         check=False,
         capture_output=True,
         text=True,
+        timeout=60,
     )
 
     assert result.returncode == 0, result.stderr

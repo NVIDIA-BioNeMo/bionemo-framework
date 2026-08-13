@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -32,12 +33,13 @@ from typing import Any
 import pandas as pd
 from Bio import SeqIO
 
-from bionemo.evo2_phage_gen.qc import save_fasta, trim_at_first_eos
+from bionemo.evo2_phage_gen.qc import NucleotideQCConfig, save_fasta, trim_at_first_eos
 from bionemo.evo2_phage_gen.reward import score_nucleotide_metrics
 
 
 DNA_ALPHABET = frozenset("ACGTacgt")
 CELL_RE = re.compile(r"phix174_prompt(?P<prompt_len>\d+)_temp(?P<temperature>[0-9.]+)$")
+logger = logging.getLogger(__name__)
 
 
 def _sequence_before_eos(sequence: Any) -> str:
@@ -102,12 +104,19 @@ def _fasta_record_count(fasta_path: Path) -> int | None:
 
 
 def _summarize_cell(
-    cell: str, prompt_len: int | None, temperature: float | None, scored_df: pd.DataFrame
+    cell: str,
+    prompt_len: int | None,
+    temperature: float | None,
+    scored_df: pd.DataFrame,
+    config: NucleotideQCConfig,
 ) -> dict[str, Any]:
     records = len(scored_df)
-    length_pass = scored_df["genome_length"].between(4000, 6000)
-    gc_pass = scored_df["gc_content"].between(30.0, 65.0)
-    homopolymer_pass = scored_df["max_nt_homopolymer_length"] <= 10
+    length_pass = scored_df["genome_length"].between(config.genome_length_min, config.genome_length_max)
+    gc_pass = scored_df["gc_content"].between(config.gc_content_min, config.gc_content_max)
+    homopolymer_pass = scored_df["max_nt_homopolymer_length"].between(
+        config.homopolymer_min,
+        config.homopolymer_max,
+    )
     return {
         "cell": cell,
         "prompt_len": prompt_len,
@@ -130,7 +139,12 @@ def _summarize_cell(
     }
 
 
-def _write_markdown_report(summary_df: pd.DataFrame, output_path: Path, target_records: int | None) -> None:
+def _write_markdown_report(
+    summary_df: pd.DataFrame,
+    output_path: Path,
+    target_records: int | None,
+    config: NucleotideQCConfig,
+) -> None:
     total_records = int(summary_df["records"].sum()) if not summary_df.empty else 0
     total_pass = int(summary_df["nucleotide_pass"].sum()) if not summary_df.empty else 0
     overall_rate = total_pass / total_records if total_records else 0.0
@@ -142,7 +156,11 @@ def _write_markdown_report(summary_df: pd.DataFrame, output_path: Path, target_r
         f"- Scored records: {total_records}",
         f"- Target records per cell: {target_records if target_records is not None else 'all unique records'}",
         f"- Nucleotide pass: {total_pass} / {total_records} = {overall_rate:.4f}",
-        "- Filters: valid A/C/G/T, 4000-6000 bp, 30-65% GC, max homopolymer <= 10",
+        (
+            f"- Filters: valid A/C/G/T, {config.genome_length_min}-{config.genome_length_max} bp, "
+            f"{config.gc_content_min:g}-{config.gc_content_max:g}% GC, "
+            f"homopolymer {config.homopolymer_min}-{config.homopolymer_max}"
+        ),
         "",
         "## Best Cells",
         "",
@@ -172,6 +190,7 @@ def _write_markdown_report(summary_df: pd.DataFrame, output_path: Path, target_r
 
 def main() -> None:
     """Score generation outputs and write per-cell summaries."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Score paper-style HPO generation JSONL outputs")
     parser.add_argument("--run-root", type=Path, required=True, help="Generation run root containing jsonl/")
     parser.add_argument("--jsonl-dir", type=Path, default=None, help="Override JSONL directory")
@@ -189,6 +208,7 @@ def main() -> None:
     fasta_dir = args.fasta_dir or run_root / "fasta"
     score_dir = args.score_dir or run_root / "scores"
     target_records = None if args.target_records <= 0 else args.target_records
+    qc_config = NucleotideQCConfig()
 
     fasta_dir.mkdir(parents=True, exist_ok=True)
     score_dir.mkdir(parents=True, exist_ok=True)
@@ -219,10 +239,10 @@ def main() -> None:
         else:
             sequences_df, stats = _load_generation_records(jsonl_path, target_records)
             save_fasta(sequences_df, fasta_path)
-            scored_df = score_nucleotide_metrics(sequences_df)
+            scored_df = score_nucleotide_metrics(sequences_df, config=qc_config)
             scored_df.to_csv(score_path, index=False)
 
-        row = _summarize_cell(cell, prompt_len, temperature, scored_df)
+        row = _summarize_cell(cell, prompt_len, temperature, scored_df, qc_config)
         row.update(stats)
         row["jsonl"] = str(jsonl_path)
         row["fasta"] = str(fasta_path)
@@ -233,11 +253,12 @@ def main() -> None:
     summary_path = score_dir / f"hpo_nucleotide_summary_{suffix}.csv"
     report_path = score_dir / f"hpo_nucleotide_summary_{suffix}.md"
     summary_df.to_csv(summary_path, index=False)
-    _write_markdown_report(summary_df, report_path, target_records)
+    _write_markdown_report(summary_df, report_path, target_records, qc_config)
 
-    print(f"summary_csv: {summary_path}")
-    print(f"summary_md: {report_path}")
-    print(
+    logger.info("summary_csv: %s", summary_path)
+    logger.info("summary_md: %s", report_path)
+    logger.info(
+        "\n%s",
         summary_df[
             [
                 "prompt_len",
@@ -250,7 +271,7 @@ def main() -> None:
                 "homopolymer_pass_rate",
                 "median_max_homopolymer",
             ]
-        ].to_string(index=False)
+        ].to_string(index=False),
     )
 
 

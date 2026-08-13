@@ -58,6 +58,7 @@ class GDPOObjective:
             raise TypeError("GDPO objective requires_safety_eligibility must be a boolean.")
 
 
+TIMING_COLUMN_ROOT_PREFIX = TIMING_COLUMN_PREFIX.partition("/")[0] + "/"
 TIMING_METRIC_MARKER_PREFIX = "__timing__/"
 
 
@@ -552,7 +553,7 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
     for column in sorted(str(column) for column in scored.columns if str(column).startswith(TIMING_COLUMN_PREFIX)):
         mean_value = _mean_numeric(scored, column)
         if mean_value is not None:
-            timing_name = column[len("timing/") :]
+            timing_name = column.removeprefix(TIMING_COLUMN_ROOT_PREFIX)
             metrics[f"{TIMING_METRIC_MARKER_PREFIX}{timing_name}"] = mean_value
 
     for component in REWARD_COMPONENTS:
@@ -890,11 +891,9 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 phase_start = time.perf_counter()
                 objective_scores = gdpo_objective_scores_from_scored(scored, self.gdpo_objectives)
                 gdpo_objectives_s = time.perf_counter() - phase_start
-                self._last_gdpo_objective_scores = objective_scores
                 rewards = torch.tensor(objective_scores.to_numpy(dtype=float), dtype=torch.float32).cpu()
             else:
                 gdpo_objectives_s = 0.0
-                self._last_gdpo_objective_scores = pd.DataFrame()
                 rewards = torch.tensor(qualified_scalar_rewards.tolist(), dtype=torch.float32).cpu()
 
             env_step_end_unix_s = time.time()
@@ -908,7 +907,6 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             for name, value in env_step_timings.items():
                 scored[f"{TIMING_COLUMN_PREFIX}{name}"] = float(value)
 
-            self._last_scored = scored
             scored_records = _scored_records(scored)
             returned_metadata = []
             for item, scored_record in zip(metadata, scored_records, strict=True):
