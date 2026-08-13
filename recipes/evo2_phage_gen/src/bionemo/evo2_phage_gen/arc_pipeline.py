@@ -30,6 +30,9 @@ DEFAULT_PHIX174_FASTA = RECIPE_ROOT / "data" / "external" / "arc_evo2" / "phage_
 DEFAULT_ARC_PIPELINE_PATCH = RECIPE_ROOT / "patches" / "arc-evo2-genome-design-filtering.patch"
 ARC_EVO2_GIT_URL = "https://github.com/ArcInstitute/evo2.git"
 ARC_EVO2_REV = "53f195997257c56c00e5ef8d33a54f5baad143a6"
+ARC_LEGACY_GENETIC_ARCHITECTURE_IMPORT_FASTA = (
+    "/large_storage/hielab/samuelking/phage_design/data/phix174_only/microviridae_genomes_NC_001422_1.fna"
+)
 ARC_LEGACY_PRODIGAL_CMD = (
     "cmd = f'/home/samuelking/prodigal/prodigal -i {input_sequences} "
     "-d {output_orf_file} -a {output_protein_file} -p meta'"
@@ -201,9 +204,7 @@ PATCHED_LOVIS4U_PARALLEL_CONFIG = """        # Get parallelization settings from
         max_workers = config.get("lovis4u_parallel_jobs", config.get("n_parallel_jobs", None))
         chunk_size = config.get("lovis4u_chunk_size", config.get("chunk_size", 10))
 """
-ARC_LEGACY_LOVIS4U_COMMAND = """    command = [
-        'lovis4u',
-"""
+ARC_LEGACY_LOVIS4U_COMMAND = "    command = [\n        'lovis4u', \n"
 PATCHED_LOVIS4U_COMMAND = """    executable = ['lovis4u']
     if os.environ.get("LOVIS4U_METRICS_ONLY") == "1":
         executable = [sys.executable, "-m", "bionemo.evo2_phage_gen.lovis4u_metrics"]
@@ -635,11 +636,16 @@ def prepare_arc_pipeline_workdir(
 
     genetic_architecture_path = output_dir / "genetic_architecture.py"
     text = genetic_architecture_path.read_text()
-    patched_text = text.replace(ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA, str(phix174_fasta))
+    patched_text = text
+    for source_path in (
+        ARC_LEGACY_GENETIC_ARCHITECTURE_IMPORT_FASTA,
+        ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA,
+    ):
+        patched_text = patched_text.replace(source_path, str(phix174_fasta))
     if patched_text == text:
         raise ValueError(
             f"Did not find expected legacy PhiX174 path in {genetic_architecture_path}: "
-            f"{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"
+            f"{ARC_LEGACY_GENETIC_ARCHITECTURE_IMPORT_FASTA}"
         )
     genetic_architecture_path.write_text(patched_text)
 

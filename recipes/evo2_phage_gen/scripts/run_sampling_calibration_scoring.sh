@@ -28,13 +28,14 @@ if [[ "${SOURCE_ENV}" == "1" ]]; then
   source "${RECIPE_ROOT}/.ci_test_env.sh"
 fi
 
+mkdir -p "${SCORE_ROOT}"
 jq -e '.status == "passed" and .scoring_allowed == true' "${PREFLIGHT_JSON}" >/dev/null
 [[ -f "${GENERATION_ROOT}/SUCCEEDED" ]] || {
   echo "Generation is not complete: ${GENERATION_ROOT}/SUCCEEDED is absent" >&2
   exit 2
 }
 python -m bionemo.evo2_phage_gen.sampling_calibration validate-all --run-root "${GENERATION_ROOT}" \
-  > "${SCORE_ROOT}.generation-validation.json"
+  > "${SCORE_ROOT}/generation-validation.json"
 
 mkdir -p "${SCORE_ROOT}/csv" "${SCORE_ROOT}/logs" "${SCORE_ROOT}/work"
 

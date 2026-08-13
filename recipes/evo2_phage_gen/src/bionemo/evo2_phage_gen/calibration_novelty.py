@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
 
 """Measure target/SFT copy risk for a calibration sweep."""
 
@@ -45,6 +60,7 @@ def _least_rotation(sequence: str) -> str:
 
 
 def canonical_circular_sequence(sequence: str) -> str:
+    """Return the rotation- and strand-invariant canonical form of circular DNA."""
     sequence = sequence.upper()
     reverse_complement = sequence.translate(str.maketrans("ACGT", "TGCA"))[::-1]
     return min(_least_rotation(sequence), _least_rotation(reverse_complement))
@@ -140,8 +156,9 @@ def _run_search(
 
 def _top_hits(path: Path, prefix: str) -> pd.DataFrame:
     if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame(columns=["id_prompt"])
-    hits = pd.read_csv(path, sep="\t", header=None, names=SEARCH_COLUMNS)
+        hits = pd.DataFrame(columns=SEARCH_COLUMNS)
+    else:
+        hits = pd.read_csv(path, sep="\t", header=None, names=SEARCH_COLUMNS)
     for column in ("pident", "qcov", "tcov", "alnlen", "qlen", "tlen", "evalue"):
         hits[column] = pd.to_numeric(hits[column], errors="coerce")
     hits = hits.sort_values(["query", "pident", "qcov", "alnlen"], ascending=[True, False, False, False])
@@ -164,6 +181,7 @@ def measure_novelty(
     output_csv: Path,
     threads: int,
 ) -> pd.DataFrame:
+    """Measure exact and near-copy novelty against target and SFT references."""
     sweep = _load_sweep(generation_root)
     work_dir.mkdir(parents=True, exist_ok=True)
     attempt_dir = work_dir / f"attempt_{uuid.uuid4().hex}"
@@ -198,10 +216,7 @@ def measure_novelty(
     )
 
     target_hashes = {canonical_circular_sequence(sequence) for sequence in _read_fasta_sequences(reference_fasta)}
-    sft_hashes = {
-        canonical_circular_sequence(sequence)
-        for sequence in _read_fasta_sequences(sft_payload_fasta)
-    }
+    sft_hashes = {canonical_circular_sequence(sequence) for sequence in _read_fasta_sequences(sft_payload_fasta)}
     canonical = sweep["sequence"].map(canonical_circular_sequence)
     metrics = sweep[["id_prompt", "cell"]].copy()
     metrics["exact_target_circular_or_revcomp"] = canonical.isin(target_hashes).astype(float)
@@ -216,6 +231,7 @@ def measure_novelty(
 
 
 def summarize_novelty(metrics: pd.DataFrame) -> pd.DataFrame:
+    """Summarize exact- and near-copy rates for each calibration cell."""
     rows = []
     for cell, group in metrics.groupby("cell", sort=True):
         rows.append(
@@ -233,6 +249,7 @@ def summarize_novelty(metrics: pd.DataFrame) -> pd.DataFrame:
 
 
 def validate_novelty_file(path: Path, expected_records: int) -> None:
+    """Validate the novelty record count and unique prompt identifiers."""
     metrics = pd.read_csv(path)
     if len(metrics) != expected_records:
         raise ValueError(f"{path}: expected {expected_records} records, found {len(metrics)}")
@@ -261,6 +278,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the novelty measurement, validation, or summarization command."""
     args = _parse_args()
     if args.command == "measure":
         measure_novelty(

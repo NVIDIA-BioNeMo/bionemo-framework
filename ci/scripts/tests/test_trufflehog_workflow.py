@@ -29,7 +29,7 @@ class TruffleHogWorkflowTests(unittest.TestCase):
     def test_lob_shaped_test_names_are_absent_from_current_sources(self) -> None:
         paths = (
             FALSE_POSITIVE_PATH,
-            Path("recipes/evo2_phage_gen/.agents/skills/bionemo-phage-design/scripts/tests/test_run_skill_evals.py"),
+            Path("recipes/evo2_phage_gen/skills/bionemo-phage-design/scripts/tests/test_run_skill_evals.py"),
         )
 
         for path in paths:

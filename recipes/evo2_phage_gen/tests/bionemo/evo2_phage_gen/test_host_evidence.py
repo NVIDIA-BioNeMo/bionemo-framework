@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from bionemo.evo2_phage_gen.host_evidence import (
     HostEvidenceError,
     HostEvidenceTable,
     HostEvidenceTableRow,
+    _default_ncbi_fetcher,
     extract_accession,
     load_host_evidence_table,
     resolve_ncbi_host_evidence,
@@ -144,6 +146,61 @@ def _row(
 def test_extract_accession_uses_accession_bearing_header_tokens(header: str, expected: str | None) -> None:
     """Removing accession recognition must prevent NCBI-backed evidence resolution."""
     assert extract_accession(header) == expected
+
+
+class _Response:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+def test_default_ncbi_fetcher_retries_transient_errors_with_bounded_backoff(monkeypatch) -> None:
+    attempts: list[str] = []
+    sleeps: list[float] = []
+
+    def urlopen(request, *, timeout):
+        attempts.append(request.full_url)
+        assert timeout == 60
+        if len(attempts) < 3:
+            raise urllib.error.URLError("temporary failure")
+        return _Response(b"resolved")
+
+    monkeypatch.setattr(host_evidence_module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    assert _default_ncbi_fetcher("NC_001422.1") == b"resolved"
+    assert len(attempts) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [urllib.error.URLError("offline"), TimeoutError("timed out")],
+    ids=["url-error", "timeout"],
+)
+def test_default_ncbi_fetcher_wraps_exhausted_transport_errors(monkeypatch, error) -> None:
+    attempts = 0
+
+    def urlopen(_request, *, timeout):
+        nonlocal attempts
+        attempts += 1
+        assert timeout == 60
+        raise error
+
+    monkeypatch.setattr(host_evidence_module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    with pytest.raises(HostEvidenceError, match="cannot fetch NCBI metadata for NC_001422.1"):
+        _default_ncbi_fetcher("NC_001422.1")
+    assert attempts == 3
 
 
 def test_ncbi_resolution_caches_exact_raw_response_and_produces_versioned_evidence(tmp_path: Path) -> None:

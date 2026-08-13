@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
 
 import json
 from pathlib import Path
@@ -28,7 +43,16 @@ def test_build_sweep_cells_includes_marker_only_and_canonical_temperature() -> N
 
 
 def test_partition_gpu_groups_prefers_all_available_replicas() -> None:
-    assert partition_gpu_groups(list(range(8)), tensor_parallel_size=1) == [(0,), (1,), (2,), (3,), (4,), (5,), (6,), (7,)]
+    assert partition_gpu_groups(list(range(8)), tensor_parallel_size=1) == [
+        (0,),
+        (1,),
+        (2,),
+        (3,),
+        (4,),
+        (5,),
+        (6,),
+        (7,),
+    ]
     assert partition_gpu_groups(list(range(8)), tensor_parallel_size=2) == [(0, 1), (2, 3), (4, 5), (6, 7)]
     with pytest.raises(ValueError, match="divisible"):
         partition_gpu_groups([0, 1, 2], tensor_parallel_size=2)
@@ -60,10 +84,14 @@ def test_build_inference_command_preserves_total_target_length(tmp_path: Path) -
         master_port=29551,
         prompt_batch_size=16,
         max_seq_length=10240,
+        top_k=17,
+        top_p=0.85,
     )
 
     assert command[command.index("--max-new-tokens") + 1] == "5976"
     assert command[command.index("--temperature") + 1] == "1.0"
+    assert command[command.index("--top-k") + 1] == "17"
+    assert command[command.index("--top-p") + 1] == "0.85"
     assert command[command.index("--tensor-parallel-size") + 1] == "1"
     assert "--strict-generation" in command
 

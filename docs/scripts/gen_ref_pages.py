@@ -77,8 +77,8 @@ def _rewrite_relative_links(
       are rewritten relative to the generated ``main/recipes/`` docs tree.
     * Paths from imported READMEs to examples, notebooks, and assets are
       rewritten to the generated docs locations where those files are copied.
-    * Hidden recipe paths, which are not published in the docs tree, are
-      rewritten to their canonical GitHub locations.
+    * Hidden recipe paths and canonical skill trees, which are not published in the docs tree,
+      are rewritten to their canonical GitHub locations.
 
     All other relative links (e.g. to ``ci/scripts/``) are left untouched.
 
@@ -180,7 +180,8 @@ def _rewrite_relative_links(
                 except ValueError:
                     continue
 
-                if any(part.startswith(".") for part in rel_to_recipe_root.parts):
+                is_skill_tree = len(rel_to_recipe_root.parts) >= 2 and rel_to_recipe_root.parts[1] == "skills"
+                if is_skill_tree or any(part.startswith(".") for part in rel_to_recipe_root.parts):
                     repo_rel = resolved.relative_to(root).as_posix()
                     github_base = GITHUB_TREE_BASE if trailing_slash or resolved.is_dir() else GITHUB_BLOB_BASE
                     return f"{github_base}/{repo_rel}" + suffix

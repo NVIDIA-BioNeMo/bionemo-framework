@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behavioral tests for the fail-closed sequence-safety CLI."""
+"""Behavioral tests for the sequence-safety CLI's explicit PASS, FAIL, and INDETERMINATE states."""
 
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ from bionemo.evo2_phage_gen.sequence_safety_adapters import AdapterResult
 
 _ADAPTER_POLICIES = {
     "amr": (
-        "amrfinder-curated-thresholds-v4.2.7",
-        "6140f2a0ddeda5bb6e2fd733d72deeee82282ff58c9de91576d95fab1fa87e3b",
+        "amrfinder-curated-thresholds-v4.2.7-r2",
+        "d290384e1e9e4cc2d939555b60703a559d447576f39aa9207cf87e176306c581",
     ),
     "toxin": (
         "toxin-homology-v2",
@@ -77,6 +77,27 @@ failure_policy:
 """
     )
     return path
+
+
+@pytest.mark.parametrize(
+    ("option", "values"),
+    (
+        ("--batch-workers", (2, 1, 1)),
+        ("--phrogs-threads", (1, 2, 1)),
+        ("--phrogs-workers", (1, 1, 2)),
+    ),
+)
+def test_batch_only_options_require_batch_mode(option, values):
+    """Batch topology settings must never be silently ignored at batch size one."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, _validate_batch_only_options
+
+    with pytest.raises(CLIValidationError, match=option):
+        _validate_batch_only_options(
+            batch_size=1,
+            batch_workers=values[0],
+            phrogs_threads=values[1],
+            phrogs_workers=values[2],
+        )
 
 
 def _class_adapter(
@@ -888,7 +909,7 @@ def _normalized_amrfinder_nucleotide_finding(
         safety_class="amr",
         state=SafetyState.FAIL,
         reason_codes=("AMR_DETERMINANT_DETECTED",),
-        finding_id=f"amr:{query_id}:SYN_NT.1",
+        finding_id=f"amr:{query_id}:SYN_NT.1:0123456789abcdef",
         detector="amrfinder-plus",
         accession="SYN_NT.1",
         query_id=query_id,
@@ -1109,10 +1130,10 @@ def test_asset_manifest_wrapper_binds_recipe_digest_and_rejects_unknown_top_leve
     from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, load_safety_asset_manifest
 
     recipe = tmp_path / "phage_safety_assets.yaml"
-    recipe.write_text("schema_version: 2\n")
+    recipe.write_text("schema_version: 3\n")
     recipe_digest = hashlib.sha256(recipe.read_bytes()).hexdigest()
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "recipe": {"path": str(recipe), "sha256": recipe_digest},
         "amrfinder_plus": {},
         "toxin_reference": {},
@@ -1135,7 +1156,7 @@ def test_asset_manifest_wrapper_binds_recipe_digest_and_rejects_unknown_top_leve
     with pytest.raises(CLIValidationError, match="recipe digest drift"):
         load_safety_asset_manifest(manifest_path, validator=validator)
 
-    recipe.write_text("schema_version: 2\n")
+    recipe.write_text("schema_version: 3\n")
     payload["unexpected"] = {}
     manifest_path.write_text(json.dumps(payload))
     with pytest.raises(CLIValidationError, match="top-level keys"):
@@ -1146,9 +1167,9 @@ def test_safety_asset_loader_rejects_manifest_mutation_between_parse_and_return(
     from bionemo.evo2_phage_gen.sequence_safety_cli import CLIValidationError, load_safety_asset_manifest
 
     recipe = tmp_path / "phage_safety_assets.yaml"
-    recipe.write_text("schema_version: 2\n")
+    recipe.write_text("schema_version: 3\n")
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "recipe": {"path": str(recipe), "sha256": hashlib.sha256(recipe.read_bytes()).hexdigest()},
         "amrfinder_plus": {},
         "toxin_reference": {},
@@ -1174,7 +1195,7 @@ def test_cli_identity_rejects_an_arbitrary_matching_path_and_digest():
         _validate_cli_identity,
     )
 
-    arbitrary = Path("recipes/evo2_phage_gen/pyproject.toml").resolve()
+    arbitrary = Path(__file__).resolve().parents[3] / "pyproject.toml"
     with pytest.raises(CLIValidationError, match="CLI source path mismatch"):
         _validate_cli_identity(
             {
@@ -1330,7 +1351,7 @@ def test_scan_cli_runs_each_record_and_atomically_publishes_a_provenance_manifes
     phrogs_search_database = tmp_path / "phrogs-safety-profile-db"
     phrogs_search_database.write_bytes(b"phrogs-safety-db")
     asset_payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "recipe": {"path": str(recipe), "sha256": hashlib.sha256(recipe.read_bytes()).hexdigest()},
         "amrfinder_plus": {
             "binary_path": str(executable),

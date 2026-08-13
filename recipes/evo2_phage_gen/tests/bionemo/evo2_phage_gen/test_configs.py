@@ -16,6 +16,7 @@
 """Tests for recipe configuration files."""
 
 import json
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -478,7 +479,7 @@ def test_grpo_diagnostic_config_keeps_full_length_scoring_but_smaller_rollouts()
     assert config["policy"]["train_global_batch_size"] == 8
     assert generation_config["max_new_tokens"] == 5990
     assert generation_config["temperature"] == 1.0
-    assert generation_config["top_k"] == 4
+    assert generation_config["top_k"] is None
     assert config["checkpointing"]["enabled"] is False
 
 
@@ -519,3 +520,27 @@ def test_grpo_batched_no_cg_diagnostic_disables_cuda_graphs():
     assert mcore_generation_config["cuda_graph_impl"] == "none"
     assert mcore_generation_config["inference_cuda_graph_scope"] == "none"
     assert mcore_generation_config["use_cuda_graphs_for_non_decode_steps"] is False
+
+
+def test_report_runtime_declares_tabulate_dependency():
+    """Installed report commands must include pandas' Markdown-table backend."""
+    config = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
+
+    assert "tabulate" in config["project"]["dependencies"]
+
+
+def test_recipe_docker_context_excludes_generated_assets_and_runs_nonroot():
+    """The recipe build context must exclude generated assets and drop root after build."""
+    ignore_path = RECIPE_ROOT / ".dockerignore"
+    assert ignore_path.is_file()
+    patterns = set(ignore_path.read_text().splitlines())
+    assert {
+        "data/checkpoints",
+        "data/external",
+        "data/arc_pipeline_patched",
+        "dist",
+    } <= patterns
+
+    dockerfile = (RECIPE_ROOT / "Dockerfile").read_text()
+    assert "useradd" in dockerfile
+    assert "\nUSER bionemo\n" in dockerfile

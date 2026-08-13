@@ -71,6 +71,7 @@ dependencies = [
     "checkv",
     "lovis4u",
     "openpyxl",
+    "tabulate",
     "orfipy",
     "pandas",
     "plotly",

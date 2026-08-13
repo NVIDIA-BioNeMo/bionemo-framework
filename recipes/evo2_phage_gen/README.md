@@ -38,7 +38,7 @@ Target-profile offline filter counts:
   → 610 synteny/total-gene final passes
 ```
 
-The [historical evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md) keeps the latest operator-reported rerun separate from the earlier checksum-backed step-190 snapshot. The older snapshot records source revision `99673b047a196352afcbb35e7aa4200127af2616`.
+The [historical evidence](skills/bionemo-phage-design/references/historical-evidence.md) keeps the latest operator-reported rerun separate from the earlier checksum-backed step-190 snapshot. The older snapshot records source revision `99673b047a196352afcbb35e7aa4200127af2616`.
 
 ## Run the workflow with an agent
 
@@ -56,12 +56,12 @@ codex \
   'Use $bionemo-phage-design in interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
 ```
 
-The recipe-local skill bundle includes a validated [Codex plugin manifest](.agents/.codex-plugin/plugin.json). Other Agent Skills-compatible harnesses can start from [the implementation controller skill](.agents/skills/bionemo-phage-design/SKILL.md).
+The recipe-local skill bundle includes a validated [Codex plugin manifest](.codex-plugin/plugin.json). Other Agent Skills-compatible harnesses can start from [the implementation controller skill](skills/bionemo-phage-design/SKILL.md).
 
 With Claude Code, run the following from `recipes/evo2_phage_gen` to load the recipe-local plugin:
 
 ```bash
-claude --plugin-dir .agents \
+claude --plugin-dir . \
   '/evo2-phage-gen:bionemo-phage-design Use interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
 ```
 
@@ -211,7 +211,7 @@ The bundled paper supplement preserves the exact historical configuration.
 ## Troubleshooting
 
 - If an entrypoint is missing, rerun `.ci_build.sh`, source `.ci_test_env.sh`, and check `pyproject.toml` plus `<command> --help`.
-- If GDPO runs out of memory, lower the microbatch first while preserving the effective global batch; see the [resource and OOM guide](.agents/skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md).
+- If GDPO runs out of memory, lower the microbatch first while preserving the effective global batch; see the [resource and OOM guide](skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md).
 - If external QC fails, verify the large databases completed successfully and inspect the per-stage logs under the rollout root.
 - If a fresh run selects a checkpoint other than step 190, use that checkpoint for rollout and report its validation evidence. Step 190 is historical context, not a fixed target.
 
@@ -229,7 +229,7 @@ The bundled paper supplement preserves the exact historical configuration.
 
 - [Final Science publication: *Generative design of novel bacteriophages with genome language models*](https://www.science.org/doi/10.1126/science.aec2657)
 - [Evo 2 publication of record: *Genome modelling and design across all domains of life with Evo 2*](https://doi.org/10.1038/s41586-026-10176-5)
-- [Bundled CC BY bioRxiv v1 paper, supplement, figures, and data](.agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/) ([bioRxiv source](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full))
+- [Bundled CC BY bioRxiv v1 paper, supplement, figures, and data](skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/) ([bioRxiv source](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full))
 
 ### Books
 
@@ -239,8 +239,8 @@ The bundled paper supplement preserves the exact historical configuration.
 
 ### Recipe resources
 
-- [Skill validation record](.agents/skills/bionemo-phage-design/assets/VALIDATION.md)
-- [Historical result evidence](.agents/skills/bionemo-phage-design/references/historical-evidence.md)
+- [Skill validation record](skills/bionemo-phage-design/assets/VALIDATION.md)
+- [Historical result evidence](skills/bionemo-phage-design/references/historical-evidence.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)
 - [Recipe commands and dependency pins](pyproject.toml)
 - [Evo 2 model and checkpoint notes](../evo2_megatron/README.md)

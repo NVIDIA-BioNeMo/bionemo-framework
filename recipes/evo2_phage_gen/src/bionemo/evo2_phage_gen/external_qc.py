@@ -26,10 +26,10 @@ from typing import Any
 import yaml
 
 
-ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA = (
-    "/large_storage/hielab/samuelking/phage_design/data/phix174_only/microviridae_genomes_NC_001422_1.fna"
-)
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
+ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA = str(
+    RECIPE_ROOT / "data" / "external" / "arc_evo2" / "phage_gen" / "data" / "NC_001422_1.fna"
+)
 DEFAULT_CHECKV_DB = RECIPE_ROOT / "data" / "external" / "checkv" / "checkv-db-v1.5"
 
 

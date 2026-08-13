@@ -92,11 +92,11 @@ from bionemo.evo2_phage_gen.sequence_safety_batch import (
 
 
 CLI_ID = "evo2-phage-sequence-safety"
-CLI_VERSION = "1"
-MANIFEST_SCHEMA_VERSION = 1
+CLI_VERSION = "2"
+MANIFEST_SCHEMA_VERSION = 2
 _VIRULENCE_REASON = "AMRFINDER_PLUS_VIRULENCE_SUPPLEMENTAL"
 _AMRFINDER_POLICY_DESCRIPTOR = {
-    "policy_id": "amrfinder-curated-thresholds-v4.2.7",
+    "policy_id": "amrfinder-curated-thresholds-v4.2.7-r2",
     "amrfinder_release": "amrfinder_v4.2.7",
     "curated_identity_threshold_overrides": False,
     "amr_type_action": "FAIL",
@@ -105,6 +105,7 @@ _AMRFINDER_POLICY_DESCRIPTOR = {
     "nucleotide_only_evidence_path": safety_adapters._AMRFINDER_NUCLEOTIDE_EVIDENCE_PATH,
     "nucleotide_only_methods": sorted(safety_adapters._AMRFINDER_NUCLEOTIDE_METHODS),
     "nucleotide_only_binding": "exact_contig_sequence_sha256_coordinates_strand",
+    "nucleotide_finding_identity": "full_normalized_amrfinder_row_sha256_prefix",
 }
 
 
@@ -327,7 +328,7 @@ def load_safety_asset_manifest(
         name="safety asset manifest top-level",
         keys=frozenset({"schema_version", "recipe", "amrfinder_plus", "toxin_reference", "phrogs_v4"}),
     )
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 2:
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 3:
         raise CLIValidationError("safety asset manifest has an unsupported schema version")
     recipe = _strict_payload(
         manifest["recipe"],
@@ -547,6 +548,25 @@ def _available_cpu_slots() -> int:
         return max(1, len(os.sched_getaffinity(0)))
     except (AttributeError, OSError):
         return max(1, os.cpu_count() or 1)
+
+
+def _validate_batch_only_options(
+    *,
+    batch_size: int,
+    batch_workers: int,
+    phrogs_threads: int,
+    phrogs_workers: int,
+) -> None:
+    """Reject topology values that have no effect outside verified batch mode."""
+    if batch_size != 1:
+        return
+    for option, value in (
+        ("--batch-workers", batch_workers),
+        ("--phrogs-threads", phrogs_threads),
+        ("--phrogs-workers", phrogs_workers),
+    ):
+        if value != 1:
+            raise CLIValidationError(f"{option} requires --batch-size greater than one")
 
 
 def _resolve_record_workers(
@@ -1258,11 +1278,12 @@ def _serialize_shared_execution(
         None if execution.raw_output_path is None else str(execution.raw_output_path),
         root=root,
     )
-    if raw_output is None or not raw_output["owned"]:
-        raise CLIValidationError("completed shared execution output must be an owned artifact")
+    if raw_output is not None and not raw_output["owned"]:
+        raise CLIValidationError("shared execution output must be an owned artifact")
     return {
         "execution_id": execution.batch_id,
         "safety_class": execution.safety_class,
+        "execution_status": execution.execution_status,
         "record_ids": list(execution.record_ids),
         "record_indices": [record_indices[record_id] for record_id in execution.record_ids],
         "command_cwd": "@OUTPUT_ROOT",
@@ -1300,6 +1321,7 @@ def _validate_shared_executions(
                 {
                     "execution_id",
                     "safety_class",
+                    "execution_status",
                     "record_ids",
                     "record_indices",
                     "command_cwd",
@@ -1316,6 +1338,9 @@ def _validate_shared_executions(
             raise CLIValidationError("shared execution ID is invalid")
         if execution_id in validated or safety_class not in {"amr", "toxin"}:
             raise CLIValidationError("shared execution identity or class is invalid")
+        execution_status = row["execution_status"]
+        if execution_status not in {"NOT_STARTED", "FAILED", "COMPLETED_AND_PARSED"}:
+            raise CLIValidationError("shared execution status is invalid")
         if row["command_cwd"] != "@OUTPUT_ROOT":
             raise CLIValidationError("shared execution cwd is invalid")
         record_ids = _string_list(row["record_ids"], label="shared execution record_ids")
@@ -1353,14 +1378,18 @@ def _validate_shared_executions(
             )
             assert path is not None
             input_paths[role] = path
+        completed = execution_status == "COMPLETED_AND_PARSED"
         raw_path = _validate_owned_artifact(
             row["raw_command_output"],
             root=root,
             label="shared execution raw output",
-            required=True,
+            required=completed,
             prefix=expected_prefix,
         )
-        assert raw_path is not None
+        expected_raw_path = (
+            root / expected_prefix / ("amrfinder.raw.tsv" if safety_class == "amr" else "toxin_diamond.raw.tsv")
+        )
+        command_output_path = raw_path if raw_path is not None else expected_raw_path
         split_policy = _strict_payload(
             row["split_policy"],
             name="shared execution split policy",
@@ -1392,7 +1421,7 @@ def _validate_shared_executions(
                 blast_bin_dir=Path(_asset_string(section.get("blastx_path"), label="AMRFinder BLASTX")).parent,
                 hmmer_bin_dir=Path(_asset_string(section.get("hmmsearch_path"), label="AMRFinder HMM search")).parent,
                 threads=threads,
-                output_tsv=raw_path,
+                output_tsv=command_output_path,
             )
         else:
             toxin = assets.manifest.get("toxin_reference")
@@ -1404,13 +1433,16 @@ def _validate_shared_executions(
                 diamond=diamond.pin.path,
                 queries_faa=input_paths["all_queries_faa"],
                 database=Path(_asset_string(database.get("path"), label="toxin database")),
-                output_tsv=raw_path,
+                output_tsv=command_output_path,
                 threads=threads,
             )
-        if command != _canonicalize_command(expected_command, root=root):
+        if execution_status == "NOT_STARTED" and command:
+            raise CLIValidationError("not-started shared execution claims a command")
+        if execution_status != "NOT_STARTED" and command != _canonicalize_command(expected_command, root=root):
             raise CLIValidationError("shared execution command drift")
         validated[execution_id] = {
             "safety_class": safety_class,
+            "execution_status": execution_status,
             "record_ids": tuple(record_ids),
             "record_indices": tuple(record_indices),
             "command": tuple(command),
@@ -1455,6 +1487,8 @@ def _validate_shared_execution_record_bindings(
             gff_payload.extend(remainder)
         if Path(inputs["proteins_gff"]).read_bytes() != bytes(gff_payload):
             raise CLIValidationError("shared execution GFF bytes differ from its record inputs")
+        if execution["execution_status"] != "COMPLETED_AND_PARSED":
+            continue
         query_records = tuple(query for record_id in record_ids for query in record_artifacts[record_id].query_records)
         batched = BatchedORFInputs(
             artifacts=ORFArtifacts(
@@ -2354,11 +2388,13 @@ def _validate_class_results(
                     strand=finding.strand,
                     sequence_length=len(sequence),
                 )
-                expected_finding_id = f"{finding.safety_class}:{expected_query_id}:{finding.accession}"
+                expected_finding_prefix = f"{finding.safety_class}:{expected_query_id}:{finding.accession}:"
+                finding_row_digest = finding.finding_id.removeprefix(expected_finding_prefix)
                 if (
                     finding.query_id != expected_query_id
                     or finding.frame != expected_frame
-                    or finding.finding_id != expected_finding_id
+                    or not finding.finding_id.startswith(expected_finding_prefix)
+                    or re.fullmatch(r"[0-9a-f]{16}", finding_row_digest) is None
                 ):
                     raise CLIValidationError("normalized AMRFinder nucleotide evidence provenance mismatch")
             elif query_index is not None:
@@ -2514,6 +2550,7 @@ def _validate_adapter_attempts(
                 expected_class not in {"amr", "toxin"}
                 or shared_execution.get("safety_class") != expected_class
                 or record_id not in shared_execution.get("record_ids", ())
+                or attempt["execution_status"] != shared_execution.get("execution_status")
                 or input_index not in shared_execution.get("record_indices", ())
                 or command != list(shared_execution.get("command", ()))
             ):
@@ -3635,6 +3672,12 @@ def _publish_scan_generation(args: argparse.Namespace, runtime: CLIRuntime) -> t
         if type(args.batch_size) is not int or args.batch_size < 1:
             raise CLIValidationError("batch size must be a positive integer")
         batch_mode = args.batch_size > 1
+        _validate_batch_only_options(
+            batch_size=args.batch_size,
+            batch_workers=args.batch_workers,
+            phrogs_threads=args.phrogs_threads,
+            phrogs_workers=args.phrogs_workers,
+        )
         if batch_mode:
             for label, value in (
                 ("batch workers", args.batch_workers),

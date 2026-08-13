@@ -533,7 +533,7 @@ def test_amrfinder_header_only_success_is_measured_pass(tmp_path):
     assert result.class_result.state is SafetyState.PASS
     assert result.class_result.reason_codes == ("AMRFINDER_MEASURED_NO_AMR_HIT",)
     assert result.supplemental_findings == ()
-    assert result.policy_id == "amrfinder-curated-thresholds-v4.2.7"
+    assert result.policy_id == "amrfinder-curated-thresholds-v4.2.7-r2"
     assert len(result.policy_sha256) == 64
 
 
@@ -582,7 +582,7 @@ def test_amrfinder_amr_type_fails_regardless_of_plus_scope_with_normalized_evide
         "database_version": "2026-07-22.1",
         "evidence_path": "pyrodigal-gv",
         "evidence_method": "ALLELE",
-        "threshold_policy": "amrfinder-curated-thresholds-v4.2.7",
+        "threshold_policy": "amrfinder-curated-thresholds-v4.2.7-r2",
         "threshold_policy_sha256": result.policy_sha256,
         "tool_path": manifest["binary_path"],
         "tool_sha256": manifest["binary_sha256"],
@@ -625,7 +625,9 @@ def test_amrfinder_mixed_protein_and_nucleotide_rows_retain_authenticated_amr_ev
     assert nucleotide.query_id == _amrfinder_nucleotide_query_id(
         sequence_id="genome_1", sequence=sequence, start=100, stop=120, strand="+"
     )
-    assert nucleotide.finding_id == f"amr:{nucleotide.query_id}:SYN_NT.1"
+    finding_prefix = f"amr:{nucleotide.query_id}:SYN_NT.1:"
+    assert nucleotide.finding_id.startswith(finding_prefix)
+    assert len(nucleotide.finding_id.removeprefix(finding_prefix)) == 16
     assert nucleotide.sequence_id == "genome_1"
     assert (nucleotide.start, nucleotide.end, nucleotide.strand, nucleotide.frame) == (100, 120, "+", 1)
     assert nucleotide.evidence_path == "amrfinder-nucleotide-v1"
@@ -762,15 +764,21 @@ def test_amrfinder_nucleotide_query_id_collision_is_indeterminate(tmp_path):
     assert result.class_result.reason_codes == ("AMRFINDER_NUCLEOTIDE_QUERY_ID_COLLISION",)
 
 
-def test_amrfinder_duplicate_nucleotide_coordinate_identity_is_indeterminate(tmp_path):
-    """Two rows may not claim distinct findings through the same nucleotide evidence identity."""
+def test_amrfinder_distinct_same_locus_nucleotide_rows_have_unique_findings(tmp_path):
+    """Pinned v4.2.7 emits distinct POINTX mutations at one locus and accession."""
     artifacts = _orf_artifacts(tmp_path)
     output = tmp_path / "amrfinder.tsv"
-    base = {"Protein id": "NA", "Start": "100", "Stop": "120", "Method": "INTERNAL_STOP"}
+    base = {
+        "Protein id": "NA",
+        "Start": "1",
+        "Stop": "210",
+        "Method": "POINTX",
+        "Closest reference accession": "WP_089631889.1",
+    }
     _write_amrfinder_output(
         output,
-        _amrfinder_row(**base),
-        _amrfinder_row(**{**base, "Closest reference accession": "SYN2"}),
+        _amrfinder_row(**{**base, "Element symbol": "nfsA_K141Ter"}),
+        _amrfinder_row(**{**base, "Element symbol": "nfsA_R15C"}),
     )
 
     result = _parse_amrfinder_output_validated(
@@ -780,8 +788,66 @@ def test_amrfinder_duplicate_nucleotide_coordinate_identity_is_indeterminate(tmp
         required=True,
     )
 
-    assert result.class_result.state is SafetyState.INDETERMINATE
-    assert result.class_result.reason_codes == ("AMRFINDER_DUPLICATE_NUCLEOTIDE_EVIDENCE",)
+    assert result.class_result.state is SafetyState.FAIL
+    assert len(result.class_result.findings) == 2
+    assert len({finding.finding_id for finding in result.class_result.findings}) == 2
+    assert len({finding.query_id for finding in result.class_result.findings}) == 1
+
+
+def test_amrfinder_pointn_nucleotide_row_is_supported(tmp_path):
+    """The pinned v4.2.7 POINTN method is valid nucleotide-only AMR evidence."""
+    artifacts = _orf_artifacts(tmp_path)
+    output = tmp_path / "amrfinder.tsv"
+    _write_amrfinder_output(
+        output,
+        _amrfinder_row(
+            **{
+                "Protein id": "NA",
+                "Start": "1",
+                "Stop": "210",
+                "Method": "POINTN",
+            }
+        ),
+    )
+
+    result = _parse_amrfinder_output_validated(
+        output, artifacts=artifacts, manifest_section=_amrfinder_manifest(tmp_path), required=True
+    )
+
+    assert result.class_result.state is SafetyState.FAIL
+    assert result.class_result.findings[0].evidence_method == "POINTN"
+
+
+def test_amrfinder_complete_row_allows_schema_defined_na_scores(tmp_path):
+    """Pinned v4.2.7 COMPLETE operon rows legitimately omit reference length and coverage."""
+    artifacts = _orf_artifacts(tmp_path)
+    output = tmp_path / "amrfinder.tsv"
+    _write_amrfinder_output(
+        output,
+        _amrfinder_row(
+            **{
+                "Protein id": "NA",
+                "Start": "100",
+                "Stop": "210",
+                "Scope": "plus",
+                "Type": "VIRULENCE",
+                "Method": "COMPLETE",
+                "Reference sequence length": "NA",
+                "% Coverage of reference": "NA",
+            }
+        ),
+    )
+
+    result = _parse_amrfinder_output_validated(
+        output, artifacts=artifacts, manifest_section=_amrfinder_manifest(tmp_path), required=True
+    )
+
+    assert result.class_result.state is SafetyState.PASS
+    assert len(result.supplemental_findings) == 1
+    finding = result.supplemental_findings[0]
+    assert finding.evidence_method == "COMPLETE"
+    assert "reference_length" not in finding.scores
+    assert "reference_coverage" not in finding.scores
 
 
 def test_amrfinder_plus_virulence_is_supplemental_toxin_evidence_not_complete_screen(tmp_path):
@@ -1692,6 +1758,8 @@ _PHROGS_ANNOTATION_SOURCE_TEXT = (
     + "phrog_3\tblack\tmajor capsid protein\thead and packaging\n"
 )
 _PHROGS_TEST_ANNOTATION_SHA256 = hashlib.sha256(_PHROGS_ANNOTATION_SOURCE_TEXT.encode()).hexdigest()
+_PHROGS_TEST_ARCHIVE_PAYLOAD = b"pinned Pharokka profile archive fixture\n"
+_PHROGS_TEST_ARCHIVE_SHA256 = hashlib.sha256(_PHROGS_TEST_ARCHIVE_PAYLOAD).hexdigest()
 
 
 def test_phrogs_annotation_lookup_includes_unambiguous_lifecycle_regulators_outside_integration_category(tmp_path):
@@ -1734,9 +1802,10 @@ def test_phrogs_materialized_lookup_accepts_only_declared_lifecycle_regulators_o
 
 
 @pytest.fixture(autouse=True)
-def _pin_synthetic_phrogs_annotation_for_adapter_tests(monkeypatch):
-    """Use a deterministic local annotation pin; production retains the official PHROGs v4 SHA-256."""
+def _pin_synthetic_phrogs_sources_for_adapter_tests(monkeypatch):
+    """Use deterministic local pins; production retains the official PHROGs digests."""
     monkeypatch.setattr(sequence_safety_adapters, "_PHROGS_ANNOTATION_SHA256", _PHROGS_TEST_ANNOTATION_SHA256)
+    monkeypatch.setattr(sequence_safety_adapters, "_PHROGS_PROFILE_ARCHIVE_SHA256", _PHROGS_TEST_ARCHIVE_SHA256)
 
 
 def _phrogs_manifest(tmp_path, *, unsearchable_profile_ids=()):
@@ -1745,8 +1814,8 @@ def _phrogs_manifest(tmp_path, *, unsearchable_profile_ids=()):
         raise ValueError("synthetic unsearchable PHROG IDs must exist in the source inventory")
     annotation_source = tmp_path / "phrog_annot_v4.tsv"
     annotation_source.write_text(_PHROGS_ANNOTATION_SOURCE_TEXT)
-    archive_payload = b"pinned Pharokka profile archive fixture\n"
-    archive_sha256 = hashlib.sha256(archive_payload).hexdigest()
+    archive_payload = _PHROGS_TEST_ARCHIVE_PAYLOAD
+    archive_sha256 = _PHROGS_TEST_ARCHIVE_SHA256
     archive_path = tmp_path / "downloads" / "phrogs_safety_profile_archives" / f"{archive_sha256}.tar.gz"
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_bytes(archive_payload)
@@ -1849,6 +1918,7 @@ def _phrogs_manifest(tmp_path, *, unsearchable_profile_ids=()):
             "provenance": {
                 "source_url": "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz",
                 "archive_observed_sha256": archive_sha256,
+                "archive_expected_sha256": archive_sha256,
                 "archive_published_sha256": None,
                 "archive_published_md5": "a63c485241b900a11989bd1821bfbb09",
                 "archive_published_size": 656171247,
@@ -2036,7 +2106,7 @@ def test_phrogs_missing_pinned_safety_lookup_counts_is_indeterminate_before_exec
 
 
 def test_phrogs_self_consistent_truncated_safety_lookup_is_indeterminate_before_execution(tmp_path):
-    """A re-digested lookup missing one reviewed profile must still fail closed before MMseqs runs."""
+    """A re-digested lookup missing one reviewed profile must return INDETERMINATE before MMseqs runs."""
     manifest = _phrogs_manifest(tmp_path)
     lookup_rows = Path(manifest["lookup_path"]).read_text().splitlines(keepends=True)[1:-1]
     _rewrite_phrogs_lookup(
@@ -2091,14 +2161,6 @@ def test_phrogs_count_preserving_safety_profile_substitution_is_indeterminate_be
 def test_phrogs_verified_content_addressed_archive_contract_allows_measured_search(tmp_path):
     """The finalized Task-2 archive evidence must validate before MMseqs can produce measured PASS."""
     manifest = _phrogs_manifest(tmp_path)
-    archive_payload = b"verified Pharokka profile archive fixture\n"
-    archive_sha256 = hashlib.sha256(archive_payload).hexdigest()
-    archive_path = tmp_path / "downloads" / "phrogs_safety_profile_archives" / f"{archive_sha256}.tar.gz"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_path.write_bytes(archive_payload)
-    provenance = manifest["profile_database"]["provenance"]
-    provenance["archive_observed_sha256"] = archive_sha256
-    provenance["verified_archive"] = {"path": str(archive_path.resolve()), "sha256": archive_sha256}
 
     result, commands = _run_phrogs_with_measured_empty_output(tmp_path, manifest)
 

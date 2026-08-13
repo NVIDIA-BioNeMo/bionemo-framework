@@ -23,7 +23,7 @@ policy:
     max_new_tokens: 5990
     temperature: 1.0
     top_p: 1.0
-    top_k: 4
+    top_k: null
 
 logger:
   log_dir: "data/checkpoints/phage_grpo_logs_diagnostic"

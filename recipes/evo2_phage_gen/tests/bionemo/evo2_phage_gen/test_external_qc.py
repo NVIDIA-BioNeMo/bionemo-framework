@@ -20,7 +20,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bionemo.evo2_phage_gen.external_qc import check_arc_qc_prerequisites, main
+from bionemo.evo2_phage_gen.external_qc import (
+    ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA,
+    RECIPE_ROOT,
+    check_arc_qc_prerequisites,
+    main,
+)
 
 
 def _write_config(tmp_path: Path, **overrides) -> Path:
@@ -61,6 +66,14 @@ def _write_import_fasta(tmp_path: Path) -> Path:
     import_fasta = tmp_path / "legacy_import_phiX174.fna"
     import_fasta.write_text(">NC_001422.1\nACGT\n")
     return import_fasta
+
+
+def test_external_qc_default_import_fasta_is_recipe_local():
+    """The portable prerequisite default must not retain Arc's author-specific cluster path."""
+    expected = RECIPE_ROOT / "data" / "external" / "arc_evo2" / "phage_gen" / "data" / "NC_001422_1.fna"
+
+    assert Path(ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA) == expected
+    assert Path(ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA).is_relative_to(RECIPE_ROOT)
 
 
 def test_external_qc_checker_allows_missing_optional_external_tools(tmp_path):

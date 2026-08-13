@@ -137,7 +137,7 @@ class ORFArtifacts:
 
 @dataclass(frozen=True)
 class ORFPreparationResult:
-    """Fail-closed result for optional runtime loading of the required predictor."""
+    """INDETERMINATE result when the required predictor cannot be loaded."""
 
     state: SafetyState
     artifacts: ORFArtifacts | None
@@ -488,7 +488,7 @@ def prepare_orf_artifacts_checked(
     predictor: GenePredictor | None = None,
     minimum_fallback_amino_acids: int = 8,
 ) -> ORFPreparationResult:
-    """Map unavailable pyrodigal-gv runtime into the canonical fail-closed state."""
+    """Map unavailable pyrodigal-gv runtime into the canonical INDETERMINATE state."""
     try:
         artifacts = prepare_orf_artifacts(
             genomes,
@@ -689,8 +689,8 @@ class AdapterResult:
         if (self.shared_execution_id is None) != (self.command_output_path is None):
             raise ValueError("shared execution ID and command output path must be recorded together")
         if self.shared_execution_id is not None:
-            if re.fullmatch(r"[A-Za-z0-9_.-]+", self.shared_execution_id) is None or not self.command:
-                raise ValueError("shared adapter execution identity or command is invalid")
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", self.shared_execution_id) is None:
+                raise ValueError("shared adapter execution identity is invalid")
             if not Path(self.command_output_path).is_absolute():
                 raise ValueError("shared adapter command output path must be absolute")
 
@@ -791,9 +791,11 @@ _AMRFINDER_NUCLEOTIDE_METHODS = frozenset(
         "BLASTX",
         "EXACTX",
         "INTERNAL_STOP",
+        "COMPLETE",
         "PARTIALX",
         "PARTIAL_CONTIG_ENDX",
         "POINTX",
+        "POINTN",
     }
 )
 
@@ -982,7 +984,7 @@ def _finite_number(value: str) -> float:
     return number
 
 
-_AMRFINDER_POLICY_ID = "amrfinder-curated-thresholds-v4.2.7"
+_AMRFINDER_POLICY_ID = "amrfinder-curated-thresholds-v4.2.7-r2"
 _AMRFINDER_POLICY_SHA256 = _canonical_mapping_sha256(
     {
         "policy_id": _AMRFINDER_POLICY_ID,
@@ -994,6 +996,7 @@ _AMRFINDER_POLICY_SHA256 = _canonical_mapping_sha256(
         "nucleotide_only_evidence_path": _AMRFINDER_NUCLEOTIDE_EVIDENCE_PATH,
         "nucleotide_only_methods": sorted(_AMRFINDER_NUCLEOTIDE_METHODS),
         "nucleotide_only_binding": "exact_contig_sequence_sha256_coordinates_strand",
+        "nucleotide_finding_identity": "full_normalized_amrfinder_row_sha256_prefix",
     }
 )
 
@@ -1010,11 +1013,23 @@ def _amrfinder_finding(
     accession = row["Closest reference accession"]
     if accession in {"", "NA"}:
         accession = row["HMM accession"]
+    finding_id = f"{safety_class}:{record.query_id}:{accession}"
+    if isinstance(record, _AMRFinderNucleotideRecord):
+        row_sha256 = hashlib.sha256("\t".join(row[column] for column in _AMRFINDER_COLUMNS).encode()).hexdigest()
+        finding_id = f"{finding_id}:{row_sha256[:16]}"
+    score_columns = {
+        "alignment_length": "Alignment length",
+        "identity": "% Identity to reference",
+        "reference_coverage": "% Coverage of reference",
+        "reference_length": "Reference sequence length",
+        "target_length": "Target length",
+    }
+    scores = {score: _finite_number(row[column]) for score, column in score_columns.items() if row[column] != "NA"}
     return NormalizedSafetyFinding(
         safety_class=safety_class,
         state=state,
         reason_codes=(reason_code,),
-        finding_id=f"{safety_class}:{record.query_id}:{accession}",
+        finding_id=finding_id,
         detector="amrfinder-plus",
         accession=accession,
         query_id=record.query_id,
@@ -1023,13 +1038,7 @@ def _amrfinder_finding(
         end=record.end,
         strand=record.strand,
         frame=record.frame,
-        scores={
-            "alignment_length": _finite_number(row["Alignment length"]),
-            "identity": _finite_number(row["% Identity to reference"]),
-            "reference_coverage": _finite_number(row["% Coverage of reference"]),
-            "reference_length": _finite_number(row["Reference sequence length"]),
-            "target_length": _finite_number(row["Target length"]),
-        },
+        scores=scores,
         thresholds={},
         source_path=str(manifest_section["database_path"]),
         source_sha256=str(manifest_section["database_sha256"]),
@@ -1053,7 +1062,7 @@ def parse_amrfinder_output(
     manifest_section: Mapping[str, object],
     required: bool,
 ) -> AdapterResult:
-    """Parse AMRFinderPlus v4.2.7 output with an exact, fail-closed schema."""
+    """Parse AMRFinderPlus v4.2.7 output with an exact schema that rejects unsupported rows."""
     output_tsv = Path(output_tsv)
     if not output_tsv.is_file():
         return _indeterminate_adapter_result(
@@ -1094,7 +1103,6 @@ def parse_amrfinder_output(
     amr_findings: list[NormalizedSafetyFinding] = []
     supplemental_findings: list[NormalizedSafetyFinding] = []
     seen_rows: set[tuple[str, ...]] = set()
-    seen_nucleotide_query_ids: set[str] = set()
     nucleotide_contigs: dict[str, str] | None = None
     for line in noncomment_lines[1:]:
         fields = tuple(line.split("\t"))
@@ -1125,14 +1133,6 @@ def parse_amrfinder_output(
                 return _indeterminate_adapter_result(
                     "amr", required=required, reason_code=error.reason_code, raw_output_path=output_tsv
                 )
-            if record.query_id in seen_nucleotide_query_ids:
-                return _indeterminate_adapter_result(
-                    "amr",
-                    required=required,
-                    reason_code="AMRFINDER_DUPLICATE_NUCLEOTIDE_EVIDENCE",
-                    raw_output_path=output_tsv,
-                )
-            seen_nucleotide_query_ids.add(record.query_id)
         else:
             record = query_records.get(row["Protein id"])
             if record is None:
@@ -1147,10 +1147,20 @@ def parse_amrfinder_output(
             start = int(row["Start"])
             stop = int(row["Stop"])
             for column in _AMRFINDER_NUMERIC_COLUMNS:
+                if row[column] == "NA":
+                    if row["Method"] == "COMPLETE" and column in {
+                        "Reference sequence length",
+                        "% Coverage of reference",
+                    }:
+                        continue
+                    raise ValueError(f"unexpected missing value in {column}")
                 number = _finite_number(row[column])
                 if number < 0:
                     raise ValueError(f"negative value in {column}")
-            if not 0 <= _finite_number(row["% Coverage of reference"]) <= 100:
+            if (
+                row["% Coverage of reference"] != "NA"
+                and not 0 <= _finite_number(row["% Coverage of reference"]) <= 100
+            ):
                 raise ValueError("reference coverage outside percent range")
             if not 0 <= _finite_number(row["% Identity to reference"]) <= 100:
                 raise ValueError("identity outside percent range")
@@ -1331,7 +1341,7 @@ def run_amrfinder(
     runner: CommandRunner = subprocess.run,
     timeout: float = 300.0,
 ) -> AdapterResult:
-    """Validate pinned AMRFinder assets, execute combined mode, and parse fail closed."""
+    """Validate pinned AMRFinder assets and return INDETERMINATE when evidence is unresolved."""
     try:
         tool_pin, database_path, database_version, blast_bin_dir, hmmer_bin_dir = _validate_amrfinder_manifest_section(
             manifest_section
@@ -2225,6 +2235,7 @@ _PHROGS_PROFILE_ROLE = "complete PHROGs v4 MMseqs profile database for identity-
 _PHROGS_PROFILE_SOURCE_URL = "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz"
 _PHROGS_PROFILE_ARCHIVE_MD5 = "a63c485241b900a11989bd1821bfbb09"
 _PHROGS_PROFILE_ARCHIVE_SIZE = 656_171_247
+_PHROGS_PROFILE_ARCHIVE_SHA256 = "d3c1de69c3ee00583fd8c2a3292766d61175403daad4e254376984a5c579df3f"
 _PHROGS_PROFILE_RELEASE = "Pharokka database v1.8.0"
 _PHROGS_DATASET_RELEASE = "PHROGs v4"
 _PHROGS_PROFILE_DOI = "10.5281/zenodo.17110353"
@@ -2608,6 +2619,7 @@ def _validate_phrogs_assets(
             "source_url",
             "archive_observed_sha256",
             "archive_published_sha256",
+            "archive_expected_sha256",
             "archive_published_md5",
             "archive_published_size",
             "retrieved_at",
@@ -2626,6 +2638,7 @@ def _validate_phrogs_assets(
     expected_provenance = {
         "source_url": _PHROGS_PROFILE_SOURCE_URL,
         "archive_published_sha256": None,
+        "archive_expected_sha256": _PHROGS_PROFILE_ARCHIVE_SHA256,
         "archive_published_md5": _PHROGS_PROFILE_ARCHIVE_MD5,
         "archive_published_size": _PHROGS_PROFILE_ARCHIVE_SIZE,
         "release": _PHROGS_PROFILE_RELEASE,
@@ -2643,6 +2656,7 @@ def _validate_phrogs_assets(
         or not re.fullmatch(r"[0-9a-f]{64}", str(provenance["archive_observed_sha256"]))
         or not isinstance(provenance.get("retrieved_at"), str)
         or not provenance["retrieved_at"]
+        or provenance.get("archive_observed_sha256") != _PHROGS_PROFILE_ARCHIVE_SHA256
     ):
         raise AssetProvenanceError("PHROGs profile retrieval provenance is invalid")
     verified_archive = provenance.get("verified_archive")
@@ -2817,7 +2831,7 @@ def _phrogs_assets_from_validated_context(
 
 
 def _revalidate_phrogs_assets(section: Mapping[str, object], context: _ValidatedPhrogsAssets) -> None:
-    """Fail closed if any PHROGs identity changed while a batch reused its validated view."""
+    """Reject the batch if any PHROGs identity changed while it reused a validated view."""
     observed = _prepare_validated_phrogs_assets(section)
     if observed != context:
         raise AssetProvenanceError("PHROGs assets changed during the batch transaction")
@@ -3131,7 +3145,7 @@ def run_phrogs(
     policy: HomologyPolicy = PHROGS_HOMOLOGY_POLICY_V1,
     _validated_assets: _ValidatedPhrogsAssets | None = None,
 ) -> AdapterResult:
-    """Validate a PHROG-identity contract, execute profile search, and parse fail closed."""
+    """Validate PHROGs assets and return INDETERMINATE when execution or parsing is unresolved."""
     try:
         required = _lysogeny_required(host_domain, strict_lysis=strict_lysis)
     except ValueError:

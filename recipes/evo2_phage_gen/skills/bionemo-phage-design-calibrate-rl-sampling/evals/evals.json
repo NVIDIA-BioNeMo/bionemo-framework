@@ -1,0 +1,72 @@
+{
+  "skill_name": "bionemo-phage-design-calibrate-rl-sampling",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-001-format",
+      "prompt": "The paper used +~ and 1-11 PhiX bases, but our selected SFT preprocessing may differ. Build the RL sampling sweep.",
+      "expected_output": "A selected-SFT byte/token audit followed by a fresh, compatible sweep rather than blind paper reuse.",
+      "assertions": [
+        "The response verifies actual SFT marker, annotation, orientation, BOS/EOS, wrapper, tokenizer, and continuation semantics before generating prompts.",
+        "The response carries deliberate SFT deviations into RL and does not add unseen prompt cues.",
+        "The response freezes byte/token prompt evidence and keeps calibration separate from RL validation.",
+        "The response freezes top_k and top_p per sweep and passes those same values into every materialized inference command; historical top-k=4/top-p=1 evidence is not silently imposed on a different contract, while GRPO training diagnostics retain their resolved no-top-k policy."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-002-selection",
+      "prompt": "One cell has maximum QC but nearly copies the reference; another has slightly lower QC with target retention, changed synteny, and many clusters. Pick RL settings. Temperature 1.0 is competitive.",
+      "expected_output": "An uncertainty-aware quality-diversity distribution that rejects copying and prefers temperature 1.0 when comparable.",
+      "assertions": [
+        "The response rejects a copying cell despite its raw QC lead.",
+        "The response ranks settings using clustering performed independently within each setting and uses cross-setting clustering only to assess a proposed mixture or final order.",
+        "The response selects the shortest target-retaining prompt stratum plus complementary Pareto strata only when supported, rather than taking noisy scalar leaders.",
+        "The response prefers temperature 1.0 unless another temperature is materially better beyond uncertainty.",
+        "The response limits chosen prefix strata and weights to homogeneous decode microbatches that tile the selected DP/TP topology, verifies no fallback, and reuses deployed weights in fixed validation and final rollout."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-003-topology-restart",
+      "prompt": "Eight GPUs are available. TP2 works, pure DP might fit and be faster. The new sweep changes the RL prefix distribution after a paused checkpoint.",
+      "expected_output": "A full-length topology benchmark and a fresh SFT-anchored RL attempt for the changed sampling contract.",
+      "assertions": [
+        "The response benchmarks a bounded set of feasible TP/DP layouts at full generation length and chooses global valid-token throughput rather than assuming TP2.",
+        "The response uses all approved GPUs when useful.",
+        "The response prefers pure DP for many independent generations when it fits, and reserves pure TP for fit requirements or measured single-request latency.",
+        "The response does not exact-resume incompatible RL state and instead initializes a new attempt from selected non-RL SFT."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-004-metric-preflight",
+      "prompt": "Generation is running, but required-gene and synteny scores were previously fixed at zero and MMseqs is only in a run-specific bin directory. Score the sweep now.",
+      "expected_output": "Generation may continue, but scoring waits for an exact capability-derived behavioral preflight.",
+      "assertions": [
+        "The response derives required tools, databases, models, and outputs from enabled objectives instead of using a fixed universal checklist.",
+        "The response pins the run-specific environment, scores the target phage with every enabled metric measurable, reasons objective-specific expected directions without requiring every score to be 1.0, and runs no-signal/failure controls.",
+        "The response distinguishes a measured biological zero from missing telemetry and refuses sweep selection until unexplained flat zeros are resolved.",
+        "The response requires later online objectives to be measured independently rather than starved by earlier gates."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-005-bundled-king-methods",
+      "prompt": "Using the checked-in publication bundle first, reconstruct the publication-era PhiX174 prompt and temperature sampling experiments well enough to design a current calibration run. Do not assume our selected SFT serialization matches the publication.",
+      "expected_output": "A version-cited methods summary from the bundled paper and supplement, followed by an explicit list of selected-SFT facts that must be revalidated before reuse.",
+      "assertions": [
+        "The response reads bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json before using the content, identifies the bundled CC BY 4.0 bioRxiv v1 source, and distinguishes it from the final Science publication of record.",
+        "It cites the bundled king-2025-generative-phage-design/supplement.md and names the relevant prompt-analysis and sampling-sweep methods rather than attributing details to an unspecified paper.",
+        "It reports prompt lengths 1 to 11 nucleotides, the +∼ fine-tuning prefix, top-k = 4, top-p = 1, approximately 1,000 samples per temperature-prompt cell, and the temperature sweep 0.3, 0.5, 0.7, 0.9, and 1.1.",
+        "It distinguishes the prompt-recall experiment at temperature 1.1 and 6,000 generated nucleotides from the multi-temperature selection sweep and its QC, diversity, and retention analyses.",
+        "It treats these as historical methods evidence, then verifies the selected SFT's actual markers, orientation, tokenizer, BOS/EOS, wrappers, prompt bytes/tokens, and continuation semantics before a fresh compatible calibration."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    }
+  ]
+}

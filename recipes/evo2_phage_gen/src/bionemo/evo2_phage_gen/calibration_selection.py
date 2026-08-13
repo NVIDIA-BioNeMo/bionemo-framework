@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
 
 """Build uncertainty-aware, within-setting calibration evidence."""
 
@@ -31,6 +46,7 @@ def _bootstrap_mean(values: np.ndarray, seed: int, replicates: int) -> tuple[flo
 
 
 def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replicates: int = 2000) -> dict:
+    """Summarize one scored calibration setting with bootstrap uncertainty."""
     scored = pd.read_csv(path)
     cell = path.name.removesuffix(".scores.csv")
     match = CELL_RE.fullmatch(cell)
@@ -49,21 +65,17 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
         "aggregate_reward": _numeric(scored, "reward"),
         "target_signal": target_signal,
         "full_qc": _numeric(scored, "reward_binary_full_qc_pass"),
-        "full_qc_cluster_deduplicated": _numeric(
-            scored, "reward_binary_full_qc_cluster_deduplicated_pass"
-        ),
+        "full_qc_cluster_deduplicated": _numeric(scored, "reward_binary_full_qc_cluster_deduplicated_pass"),
     }
+    cluster_count = _numeric(scored, "mmseqs_cluster_num_clusters").max()
     row: dict[str, float | int | str | bool] = {
         "cell": cell,
         "prefix_length": int(match.group("prefix")) if match else -1,
         "temperature": float(match.group("temperature")) if match else float("nan"),
         "records": len(scored),
-        "metric_environment_ok": bool(
-            len(scored)
-            and (_numeric(scored, "external_qc_tool_succeeded") == 1.0).all()
-        ),
+        "metric_environment_ok": bool(len(scored) and (_numeric(scored, "external_qc_tool_succeeded") == 1.0).all()),
         "all_external_measurements_available_rate": float(support.mean()),
-        "within_setting_99pct_cluster_count": int(_numeric(scored, "mmseqs_cluster_num_clusters").max()),
+        "within_setting_99pct_cluster_count": int(cluster_count) if pd.notna(cluster_count) else 0,
         "within_setting_clusterable_count": int(_numeric(scored, "mmseqs_cluster_valid_for_clustering").sum()),
     }
     clusterable = max(1, int(row["within_setting_clusterable_count"]))
@@ -92,6 +104,7 @@ def build_selection_table(
     bootstrap_seed: int = 174,
     bootstrap_replicates: int = 2000,
 ) -> pd.DataFrame:
+    """Build the uncertainty-aware selection table across calibration settings."""
     rows = [
         summarize_setting(
             path,
@@ -131,6 +144,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Build and write the calibration selection table from CLI arguments."""
     args = _parse_args()
     table = build_selection_table(
         args.score_dir,

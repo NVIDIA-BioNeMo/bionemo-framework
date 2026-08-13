@@ -20,9 +20,9 @@ repos:
     rev: v2.3.0
     hooks:
       - id: end-of-file-fixer
-        exclude: ^recipes/evo2_phage_gen/\.agents/skills/bionemo-phage-design/assets/literature/
+        exclude: ^recipes/evo2_phage_gen/skills/bionemo-phage-design/assets/literature/
       - id: trailing-whitespace
-        exclude: ^recipes/evo2_phage_gen/\.agents/skills/bionemo-phage-design/assets/literature/
+        exclude: ^recipes/evo2_phage_gen/skills/bionemo-phage-design/assets/literature/
       - id: check-yaml
         exclude: "mkdocs.yml"
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -36,7 +36,7 @@ repos:
     rev: 0.7.22             # Use the latest stable version
     hooks:
       - id: mdformat
-        exclude: ^recipes/evo2_phage_gen/\.agents/skills/bionemo-phage-design/assets/literature/
+        exclude: ^recipes/evo2_phage_gen/skills/bionemo-phage-design/assets/literature/
         additional_dependencies:
         - mdformat-tables
         - mdformat-gfm

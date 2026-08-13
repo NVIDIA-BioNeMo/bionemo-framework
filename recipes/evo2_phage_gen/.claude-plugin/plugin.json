@@ -1,0 +1,9 @@
+{
+  "name": "evo2-phage-gen",
+  "description": "Recipe-local skills for reproducible whole-genome, lifecycle-aware Evo 2 phage design.",
+  "version": "0.2.0",
+  "author": {
+    "name": "BioNeMo Recipes contributors"
+  },
+  "skills": ["./skills/"]
+}

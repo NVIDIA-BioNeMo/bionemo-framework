@@ -44,11 +44,13 @@ from bionemo.evo2_phage_gen.arc_pipeline import (
     PATCHED_EMPTY_HOMOLOGY_GUARD,
     PATCHED_EMPTY_ORF_GUARD,
     PATCHED_EMPTY_SYNTENY_GUARD,
+    PATCHED_LOVIS4U_COMMAND,
     PATCHED_LOVIS4U_CONDA_WRAPPER,
     PATCHED_LOVIS4U_PARALLEL_CONFIG,
     PATCHED_LOVIS4U_PDF_COLLECTION,
     PATCHED_MMSEQS_EMPTY_GUARD,
     PATCHED_PRODIGAL_CMD,
+    _apply_lovis4u_runtime_patches,
     _assert_arc_source_revision,
     prepare_arc_pipeline_workdir,
 )
@@ -75,6 +77,16 @@ def _load_prepared_arc_pipeline(tmp_path: Path, module_name: str):
         return module
     finally:
         sys.path.pop(0)
+
+
+def test_lovis4u_runtime_patch_matches_pinned_source_trailing_whitespace(tmp_path):
+    """The pinned Arc source has a trailing space after the LoVis4u executable."""
+    visualization_path = tmp_path / "genetic_architecture_visualization.py"
+    visualization_path.write_text("    command = [\n        'lovis4u', \n        '-gff', input_gff_dir,\n    ]\n")
+
+    _apply_lovis4u_runtime_patches(tmp_path)
+
+    assert PATCHED_LOVIS4U_COMMAND in visualization_path.read_text()
 
 
 def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):

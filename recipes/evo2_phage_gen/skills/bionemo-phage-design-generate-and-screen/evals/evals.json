@@ -1,0 +1,98 @@
+{
+  "skill_name": "bionemo-phage-design-generate-and-screen",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-generate-and-screen-001-order-target",
+      "prompt": "I want to order 100 bacterial-phage designs from the selected RL checkpoint. Decide how many sequences to generate, deduplicate them at 99%, apply all approved QC, and rank the final candidates if defensible.",
+      "expected_output": "An adaptive rollout plan driven by a compatible pilot, conservative post-QC yield, saturation, and the requested order count rather than a fixed large generation count.",
+      "assertions": [
+        "The response runs or reuses a compatible 1,000-design pilot with identical checkpoint, calibrated sampling lineage, prompts, canonicalization, filters, tools, and clustering profile before forecasting yield.",
+        "The response estimates conservative post-hard-QC and post-99%-cluster yield with uncertainty and monitors accumulation and saturation across additional 1,000-design batches.",
+        "The response targets roughly three times the order count when meaningful ranking exists or 1.25 times otherwise, stopping for reserve, saturation, or budget and asking before expensive scaling.",
+        "The response does not use the historical 358/1000 result as a universal forecast and does not hard-code 10,000 generations for a 100-order request.",
+        "The response ranks only passing unique representatives with predeclared defensible scores and never lets ranking override hard QC or uniqueness.",
+        "The response benchmarks rollout topology at full length, preferring DP replicas for global throughput when the model fits and using TP only when fit, measured throughput, or latency requires it."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-002-nested-qc",
+      "prompt": "Generate a 1,000-design proof-of-concept rollout. Filters 1 through 6, 8, and 9 are mandatory; another requirement can pass through either route A or route B. Produce an auditable final manifest.",
+      "expected_output": "A deterministic generation, canonicalization, deduplication, nested all/any QC, clustering, and reporting pipeline.",
+      "assertions": [
+        "The response freezes checkpoint and calibrated SFT/RL prompt lineage, planning/DESIGN_SPEC.yaml and its hash/approved scope, rollout sampling, independent IDs/seeds with overlap audits, objective/filter versions, tools/models, and source/config hashes before generation.",
+        "The final rollout inherits the exact deployed RL prompt strata, mixture weights, and sampling values unless an explicitly justified deviation receives fresh comparable calibration.",
+        "The response confirms complete-genome generation under the approved whole-genome scope, rejects an unapproved locus/module restriction, validates whole-genome and lifecycle integrity, applies topology-aware canonicalization, exact-deduplicates before expensive tools, and preserves raw-to-representative mapping.",
+        "The response requires filters 1-6, 8, and 9 to all pass and permits either approved route; missing required data or a failed required tool makes the result INDETERMINATE rather than PASS.",
+        "The response records the count remaining after each filter plus route overlap and dominance, then clusters passers at 99% identity with declared coverage semantics.",
+        "The response writes ordered intent-named scripts plus raw, canonical, exact-deduplicated, QC-passing, cluster-representative, ranked, rejected, provenance, and summary artifacts.",
+        "The response reports the proof-of-concept counts without silently adding filter 7 or conflating them with a different historical profile.",
+        "The response keeps whole-sequence cargo and lysogeny screens, strictly lytic evidence, and lifecycle/transduction endpoints separate; it labels computational passers as unvalidated until the required phenotypic, wet-lab, and expert reviews are complete.",
+        "Any unattended stage chain is single-instance, atomically stateful, tolerant of transient reads, heartbeat-visible, bounded-retry, and resumable."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-003-runtime-suite",
+      "prompt": "Run final screening for a new phage goal whose approved filters add a tool not used in prior runs.",
+      "expected_output": "A filter-derived, pinned, behavior-tested runtime instead of a fixed legacy tool checklist.",
+      "assertions": [
+        "The response derives the required runtime suite from all enabled filters, including the newly added capability.",
+        "The response pins executable, database/model, and output contracts for this attempt.",
+        "The response behavior-tests representative controls before screening and marks the run INDETERMINATE when a mandatory capability is missing.",
+        "The response does not assume that a prior run's tool list is complete for the new goal.",
+        "For Arc prerequisites it resolves the recipe-relative data/external/arc_evo2/phage_gen/data/NC_001422_1.fna default or an explicit --genetic-architecture-import-fasta override rather than a cluster-specific path.",
+        "For DUST QC it records NucleotideQCConfig's 0.9 maximum end-mask fraction and configurable dustmasker timeout default of 300 seconds, preserving float level values and treating missing, non-zero, or timed-out external execution as explicit failure evidence."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-004-authenticated-asset-failover",
+      "prompt": "Stage 3 sequence safety needs the pinned PHROGs v4 MMseqs profile, while an older Arc compatibility path can optionally use the raw FAA-derived sequence database. Prepare the trusted safety assets without silently mixing those contracts.",
+      "expected_output": "An authenticated PHROGs preparation decision that puts the pinned reviewed profile in the trusted safety generation and keeps the optional unpinned raw-FAA compatibility database outside it.",
+      "assertions": [
+        "The response resolves the Pharokka v1.8.0 Zenodo record 17110353 profile release and required MMseqs interface rather than trusting one URL, and authenticates the archive with expected SHA-256 d3c1de69c3ee00583fd8c2a3292766d61175403daad4e254376984a5c579df3f plus published MD5 and size during download, extraction, cache reuse, manifest loading, and runtime validation.",
+        "The response never disables TLS silently; insecure transport is allowed when bytes match an independently obtained trusted signature or strong cryptographic digest, or after explicit informed user authorization that records the transport risk and reduced provenance assurance. A checksum obtained only through the same broken endpoint is not independent authentication.",
+        "The response treats an exact mirror and a derived profile/consensus database differently and does not substitute the latter when every raw FAA sequence is required.",
+        "For the safety consumer, the response stages the pinned profile automatically with --with-safety, validates archive structure and an MMseqs open/search smoke, and atomically publishes only after safety manifest schema 3 is complete.",
+        "The raw FAA-derived sequence database is downloaded only when --download-phrogs-sequence-database is explicit, is never required by ordinary --with-safety, and remains outside the trusted safety generation and manifest.",
+        "The response uses authenticated resumable cache downloads, records source candidates and failures, and blocks candidate PASS when no authenticated interface-compatible safety profile exists.",
+        "The response treats configs/phage_safety_assets.yaml as the reviewed metadata mirror of code-enforced release descriptors and requires the code constants, YAML mirror, exact-match tests, and skill guidance to change together.",
+        "The current version is a reviewed release descriptor, not a permanent upstream latest; a future release or location is added as a new evidence-backed descriptor and must pass comparable validation before selection."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-005-reference-control-panel",
+      "prompt": "The safety databases and binaries are prepared and I am ready to screen candidates. Show how you establish that the exact deployed filter still detects known hazards without rejecting well-characterized therapeutic or lytic controls.",
+      "expected_output": "An identity-bound reference-control check run through the same versioned filters; every control must match before any candidate can receive PASS.",
+      "assertions": [
+        "The response uses the exact accession-version, normalized-sequence digest, length, and topology from configs/phage_safety_reference_controls.yaml, with no network dependency in ordinary unit tests.",
+        "CTXphi NC_015209.1 must independently FAIL lysogeny/integration and detect ctxA/P01555 plus ctxB/P01556; Shiga toxin phage 933W NC_000924.1 must independently FAIL lysogeny/integration and detect both reviewed stxA2 and stxB2 targets from the versioned control config. INDETERMINATE or a missing required target blocks either gate.",
+        "WOPip1 AM999887.1 interval 246045-312651 must remain the exact expected INDETERMINATE review control with PF15658.11 latrotoxin-domain and lysogeny-review evidence; it must not be relabeled PASS or FAIL.",
+        "T7 NC_001604.1, phiX174 NC_001422.1, and Muddy NC_022054.2 must each produce measured PASS/no-review-hit outcomes without toxin or lysogeny findings.",
+        "All six controls use the same tools, databases, policies, parser versions, and single-record or accepted batch topology as candidate screening; any identity drift, missing report, false negative, false positive, unexpected state, or unmeasured result blocks candidate PASS promotion.",
+        "The response states that passing this panel is software sensitivity/specificity evidence only, not biological, therapeutic, clinical, or regulatory validation."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-006-amrfinder-nucleotide-evidence",
+      "prompt": "A pinned AMRFinderPlus v4.2.7 combined scan reports two protein AMR hits and one AMR row whose Protein id is literal NA but whose contig, coordinates, strand, and method are present. Decide how final hard QC should handle this output and what must be authenticated.",
+      "expected_output": "A mixed-evidence decision that blocks PASS when required evidence is unresolved, preserves protein findings, and accepts the literal NA row only through exact versioned nucleotide provenance.",
+      "assertions": [
+        "The response does not discard the literal Protein id=NA row or invalidate independent authenticated protein findings merely because the nucleotide-only row lacks a protein query ID.",
+        "The response accepts the nucleotide-only row only after binding exact generated contig bytes and ID, ordered in-bounds coordinates, strand, and an allowed pinned v4.2.7 nucleotide method through an explicit evidence-source discriminator.",
+        "The response treats aliases, malformed or out-of-bounds coordinates, unsupported or missing method/source, exact duplicate normalized rows, evidence-identity collisions, or provenance mismatch as INDETERMINATE rather than a measured no-hit pass; distinct authenticated same-locus nucleotide rows remain separate findings with normalized-row digests.",
+        "The response preserves the pinned policy/tool/database/source identities and requires parser/manifest replay before the evidence can affect hard QC."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    }
+  ]
+}

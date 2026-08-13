@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fail-closed, record-preserving batch inputs and output splitters for safety tools."""
+"""Record-preserving batch inputs and output splitters that block PASS on unresolved evidence."""
 
 from __future__ import annotations
 
@@ -21,11 +21,12 @@ import hashlib
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import unquote
 
+from bionemo.evo2_phage_gen.sequence_safety import SafetyState
 from bionemo.evo2_phage_gen.sequence_safety_adapters import (
     _AMRFINDER_COLUMNS,
     _AMRFINDER_POLICY_ID,
@@ -109,6 +110,7 @@ class BatchAdapterExecution:
     split_policy_id: str
     split_policy_sha256: str
     record_results: tuple[tuple[str, AdapterResult], ...]
+    execution_status: str = "COMPLETED_AND_PARSED"
 
     def __post_init__(self) -> None:
         """Reject ambiguous execution, input, split, or per-record identities."""
@@ -118,6 +120,14 @@ class BatchAdapterExecution:
             raise ValueError("batch result order differs from its record inventory")
         if (self.raw_output_path is None) != (self.raw_output_sha256 is None):
             raise ValueError("batch raw-output path and digest must be recorded together")
+        if self.execution_status not in {"NOT_STARTED", "FAILED", "COMPLETED_AND_PARSED"}:
+            raise ValueError("batch execution status is invalid")
+        if self.execution_status == "NOT_STARTED" and (self.command or self.raw_output_path is not None):
+            raise ValueError("not-started batch execution cannot claim a command or output")
+        if self.execution_status == "FAILED" and not self.command:
+            raise ValueError("failed batch execution must record its attempted command")
+        if self.execution_status == "COMPLETED_AND_PARSED" and (not self.command or self.raw_output_path is None):
+            raise ValueError("completed batch execution must record its command and raw output")
 
 
 def _read_regular_bytes(path: Path, *, label: str) -> bytes:
@@ -504,6 +514,29 @@ def _amrfinder_execution(
     raw_output: Path | None,
     results: tuple[tuple[str, AdapterResult], ...],
 ) -> BatchAdapterExecution:
+    execution_status = (
+        "NOT_STARTED"
+        if not command
+        else (
+            "FAILED"
+            if any(result.class_result.state is SafetyState.INDETERMINATE for _, result in results)
+            else "COMPLETED_AND_PARSED"
+        )
+    )
+    command_output_path = str((raw_output or work_dir / "amrfinder.raw.tsv").absolute())
+    bound_results = tuple(
+        (
+            record_id,
+            replace(
+                result,
+                shared_execution_id=work_dir.name,
+                raw_output_path=result.raw_output_path if execution_status == "COMPLETED_AND_PARSED" else None,
+                raw_output_sha256=result.raw_output_sha256 if execution_status == "COMPLETED_AND_PARSED" else None,
+                command_output_path=command_output_path,
+            ),
+        )
+        for record_id, result in results
+    )
     return BatchAdapterExecution(
         batch_id=work_dir.name,
         safety_class="amr",
@@ -514,7 +547,8 @@ def _amrfinder_execution(
         raw_output_sha256=None if raw_output is None else _sha256_file(raw_output),
         split_policy_id=AMRFINDER_SPLIT_POLICY_ID,
         split_policy_sha256=AMRFINDER_SPLIT_POLICY_SHA256,
-        record_results=results,
+        record_results=bound_results,
+        execution_status=execution_status,
     )
 
 
@@ -555,6 +589,7 @@ def run_amrfinder_batch(
             raise BatchSafetyError("AMRFinder database version changed before batch execution")
     except (
         BatchSafetyError,
+        AssetProvenanceError,
         KeyError,
         OSError,
         TypeError,
@@ -636,25 +671,33 @@ def run_amrfinder_batch(
                 raw_output_path=raw_output,
             ),
         )
+    promoted_paths: list[Path] = []
     try:
         split_paths = split_amrfinder_batch_output(
             raw_output,
             batched=batched,
             output_root=execution_root / "split",
         )
-        record_results: list[tuple[str, AdapterResult]] = []
         artifacts_by_id = dict(selected)
+        destinations: dict[str, Path] = {}
+        parsed_by_id: dict[str, AdapterResult] = {}
         for record_id in batched.record_ids:
             destination = output_roots[record_id] / "amrfinder.tsv"
             if destination.exists() or destination.is_symlink():
                 raise BatchSafetyError(f"record AMRFinder output already exists: {destination}")
-            split_paths[record_id].replace(destination)
-            parsed = _parse_amrfinder_output_validated(
-                destination,
+            destinations[record_id] = destination
+            parsed_by_id[record_id] = _parse_amrfinder_output_validated(
+                split_paths[record_id],
                 artifacts=artifacts_by_id[record_id],
                 manifest_section=manifest_section,
                 required=required,
             )
+        record_results: list[tuple[str, AdapterResult]] = []
+        for record_id in batched.record_ids:
+            destination = destinations[record_id]
+            split_paths[record_id].replace(destination)
+            promoted_paths.append(destination)
+            parsed = parsed_by_id[record_id]
             record_results.append(
                 (
                     record_id,
@@ -662,8 +705,8 @@ def run_amrfinder_batch(
                         class_result=parsed.class_result,
                         supplemental_findings=parsed.supplemental_findings,
                         command=command,
-                        raw_output_path=parsed.raw_output_path,
-                        raw_output_sha256=parsed.raw_output_sha256,
+                        raw_output_path=str(destination),
+                        raw_output_sha256=_sha256_file(destination),
                         policy_id=parsed.policy_id,
                         policy_sha256=parsed.policy_sha256,
                         shared_execution_id=execution_root.name,
@@ -674,7 +717,9 @@ def run_amrfinder_batch(
         for record_id in batched.record_ids:
             (execution_root / "split" / record_id).rmdir()
         (execution_root / "split").rmdir()
-    except (BatchSafetyError, OSError, TypeError, ValueError):
+    except (BatchSafetyError, KeyError, OSError, TypeError, ValueError):
+        for promoted_path in promoted_paths:
+            promoted_path.unlink(missing_ok=True)
         return _amrfinder_execution(
             work_dir=execution_root,
             batched=batched,
@@ -737,6 +782,29 @@ def _toxin_execution(
     raw_output: Path | None,
     results: tuple[tuple[str, AdapterResult], ...],
 ) -> BatchAdapterExecution:
+    execution_status = (
+        "NOT_STARTED"
+        if not command
+        else (
+            "FAILED"
+            if any(result.class_result.state is SafetyState.INDETERMINATE for _, result in results)
+            else "COMPLETED_AND_PARSED"
+        )
+    )
+    command_output_path = str((raw_output or work_dir / "toxin_diamond.raw.tsv").absolute())
+    bound_results = tuple(
+        (
+            record_id,
+            replace(
+                result,
+                shared_execution_id=work_dir.name,
+                command_output_path=command_output_path,
+                raw_output_path=result.raw_output_path if execution_status == "COMPLETED_AND_PARSED" else None,
+                raw_output_sha256=result.raw_output_sha256 if execution_status == "COMPLETED_AND_PARSED" else None,
+            ),
+        )
+        for record_id, result in results
+    )
     return BatchAdapterExecution(
         batch_id=work_dir.name,
         safety_class="toxin",
@@ -747,7 +815,8 @@ def _toxin_execution(
         raw_output_sha256=None if raw_output is None else _sha256_file(raw_output),
         split_policy_id=DIAMOND_SPLIT_POLICY_ID,
         split_policy_sha256=DIAMOND_SPLIT_POLICY_SHA256,
-        record_results=results,
+        record_results=bound_results,
+        execution_status=execution_status,
     )
 
 
@@ -842,29 +911,42 @@ def run_toxin_diamond_batch(
                 raw_output_path=raw_output,
             ),
         )
+    promoted_paths: list[Path] = []
     try:
         split_paths = split_diamond_batch_output(
             raw_output,
             batched=batched,
             output_root=execution_root / "split",
         )
-        record_results: list[tuple[str, AdapterResult]] = []
         artifacts_by_id = dict(selected)
+        destinations: dict[str, tuple[Path, Path]] = {}
+        normalized_split_paths: dict[str, Path] = {}
+        parsed_by_id: dict[str, AdapterResult] = {}
         for record_id in batched.record_ids:
             raw_destination = output_roots[record_id] / "toxin_diamond.raw.tsv"
             normalized_destination = output_roots[record_id] / "toxin_diamond.tsv"
             if any(path.exists() or path.is_symlink() for path in (raw_destination, normalized_destination)):
                 raise BatchSafetyError(f"record toxin output already exists for {record_id}")
-            split_paths[record_id].replace(raw_destination)
-            _write_normalized_header(normalized_destination, _DIAMOND_COLUMNS, raw_destination)
-            parsed = _parse_toxin_diamond_output_validated(
-                normalized_destination,
+            destinations[record_id] = (raw_destination, normalized_destination)
+            normalized_split_path = split_paths[record_id].with_name("toxin_diamond.tsv")
+            normalized_split_paths[record_id] = normalized_split_path
+            _write_normalized_header(normalized_split_path, _DIAMOND_COLUMNS, split_paths[record_id])
+            parsed_by_id[record_id] = _parse_toxin_diamond_output_validated(
+                normalized_split_path,
                 artifacts=artifacts_by_id[record_id],
                 manifest_section=manifest_section,
                 tool_pin=tool_pin,
                 required=required,
                 policy=TOXIN_HOMOLOGY_POLICY_V2,
             )
+        record_results: list[tuple[str, AdapterResult]] = []
+        for record_id in batched.record_ids:
+            raw_destination, normalized_destination = destinations[record_id]
+            split_paths[record_id].replace(raw_destination)
+            promoted_paths.append(raw_destination)
+            normalized_split_paths[record_id].replace(normalized_destination)
+            promoted_paths.append(normalized_destination)
+            parsed = parsed_by_id[record_id]
             record_results.append(
                 (
                     record_id,
@@ -872,8 +954,8 @@ def run_toxin_diamond_batch(
                         class_result=parsed.class_result,
                         supplemental_findings=parsed.supplemental_findings,
                         command=command,
-                        raw_output_path=parsed.raw_output_path,
-                        raw_output_sha256=parsed.raw_output_sha256,
+                        raw_output_path=str(normalized_destination),
+                        raw_output_sha256=_sha256_file(normalized_destination),
                         policy_id=parsed.policy_id,
                         policy_sha256=parsed.policy_sha256,
                         shared_execution_id=execution_root.name,
@@ -884,7 +966,9 @@ def run_toxin_diamond_batch(
         for record_id in batched.record_ids:
             (execution_root / "split" / record_id).rmdir()
         (execution_root / "split").rmdir()
-    except (BatchSafetyError, OSError, TypeError, ValueError):
+    except (BatchSafetyError, KeyError, OSError, TypeError, ValueError):
+        for promoted_path in promoted_paths:
+            promoted_path.unlink(missing_ok=True)
         return _toxin_execution(
             work_dir=execution_root,
             batched=batched,

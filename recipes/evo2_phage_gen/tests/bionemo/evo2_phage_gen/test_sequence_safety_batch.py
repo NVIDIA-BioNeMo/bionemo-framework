@@ -547,3 +547,119 @@ def test_default_batched_scan_preserves_record_order_and_runs_independent_phrogs
         ("before", {}),
         ("after", {}, validated_context),
     ]
+
+
+def test_asset_failure_shared_execution_serializes_as_not_started(tmp_path: Path):
+    """An INDETERMINATE asset error must remain publishable without fabricated command output."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import _serialize_shared_execution
+
+    first = _artifacts(tmp_path, "record-a", "ATGAAATAG")
+    second = _artifacts(tmp_path, "record-b", "ATGCCCTAG")
+    record_roots = {
+        record_id: tmp_path / "records" / f"{index:06d}-{record_id}"
+        for index, record_id in enumerate(("record-a", "record-b"))
+    }
+    for root in record_roots.values():
+        root.mkdir(parents=True)
+
+    execution = run_amrfinder_batch(
+        (("record-a", first), ("record-b", second)),
+        manifest_section={},
+        work_dir=tmp_path / "shared-executions" / "amr-0000",
+        record_output_roots=record_roots,
+    )
+
+    assert execution.execution_status == "NOT_STARTED"
+    assert all(result.shared_execution_id == execution.batch_id for _, result in execution.record_results)
+    payload = _serialize_shared_execution(
+        execution,
+        root=tmp_path,
+        record_indices={"record-a": 0, "record-b": 1},
+    )
+    assert payload["execution_status"] == "NOT_STARTED"
+    assert payload["command"] == []
+    assert payload["raw_command_output"] is None
+
+
+def test_started_batch_failure_without_output_serializes_as_failed(tmp_path: Path, monkeypatch):
+    """A failed command with no output must retain its command and a nullable raw artifact."""
+    from bionemo.evo2_phage_gen.sequence_safety_cli import _serialize_shared_execution
+
+    first = _artifacts(tmp_path, "record-a", "ATGAAATAG")
+    second = _artifacts(tmp_path, "record-b", "ATGCCCTAG")
+    record_roots = {record_id: tmp_path / "records" / record_id for record_id in ("record-a", "record-b")}
+    for root in record_roots.values():
+        root.mkdir(parents=True)
+    pin = ToolPin(tmp_path / "amrfinder", "a" * 64, "4.2.7")
+    monkeypatch.setattr(
+        sequence_safety_batch,
+        "_validate_amrfinder_manifest_section",
+        lambda _section: (pin, tmp_path / "database", "2026-08-08", tmp_path / "blast", tmp_path / "hmmer"),
+    )
+    monkeypatch.setattr(sequence_safety_batch, "validate_tool_pin", lambda *_args, **_kwargs: pin.version)
+    monkeypatch.setattr(sequence_safety_batch, "_parse_amrfinder_database_version", lambda _value: "2026-08-08")
+
+    def runner(command, **_kwargs):
+        if "--database_version" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="2026-08-08", stderr="")
+        raise subprocess.CalledProcessError(1, command)
+
+    execution = run_amrfinder_batch(
+        (("record-a", first), ("record-b", second)),
+        manifest_section={},
+        work_dir=tmp_path / "shared-executions" / "amr-0000",
+        record_output_roots=record_roots,
+        runner=runner,
+    )
+    payload = _serialize_shared_execution(
+        execution,
+        root=tmp_path,
+        record_indices={"record-a": 0, "record-b": 1},
+    )
+
+    assert execution.execution_status == "FAILED"
+    assert payload["execution_status"] == "FAILED"
+    assert payload["command"]
+    assert payload["raw_command_output"] is None
+
+
+def test_amrfinder_batch_parse_failure_promotes_no_record_outputs(tmp_path: Path, monkeypatch):
+    """Parsing must succeed for every split before any record artifact is published."""
+    first = _artifacts(tmp_path, "record-a", "ATGAAATAG")
+    second = _artifacts(tmp_path, "record-b", "ATGCCCTAG")
+    record_roots = {record_id: tmp_path / "records" / record_id for record_id in ("record-a", "record-b")}
+    for root in record_roots.values():
+        root.mkdir(parents=True)
+    pin = ToolPin(tmp_path / "amrfinder", "a" * 64, "4.2.7")
+    monkeypatch.setattr(
+        sequence_safety_batch,
+        "_validate_amrfinder_manifest_section",
+        lambda _section: (pin, tmp_path / "database", "2026-08-08", tmp_path / "blast", tmp_path / "hmmer"),
+    )
+    monkeypatch.setattr(sequence_safety_batch, "validate_tool_pin", lambda *_args, **_kwargs: pin.version)
+    monkeypatch.setattr(sequence_safety_batch, "_parse_amrfinder_database_version", lambda _value: "2026-08-08")
+
+    def runner(command, **_kwargs):
+        if "--database_version" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="2026-08-08", stderr="")
+        output = Path(command[command.index("-o") + 1])
+        output.write_text(
+            "\t".join(_AMRFINDER_HEADER)
+            + "\n"
+            + _amrfinder_row(protein_id="record-a__orf0001", contig_id="record-a")
+            + "\n"
+            + _amrfinder_row(protein_id="record-b__orf0001", contig_id="record-b", method="UNSUPPORTED")
+            + "\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    execution = run_amrfinder_batch(
+        (("record-a", first), ("record-b", second)),
+        manifest_section={},
+        work_dir=tmp_path / "shared-executions" / "amr-0000",
+        record_output_roots=record_roots,
+        runner=runner,
+    )
+
+    assert execution.execution_status == "FAILED"
+    assert all(not (root / "amrfinder.tsv").exists() for root in record_roots.values())

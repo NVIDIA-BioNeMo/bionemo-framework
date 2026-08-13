@@ -16,9 +16,11 @@
 """Tests for ``bionemo.evo2_phage_gen.qc``."""
 
 import random
+import subprocess
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from bionemo.evo2_phage_gen.qc import (
     NucleotideQCConfig,
@@ -128,12 +130,25 @@ def test_dustmask_fallback_flags_low_complexity_sequence_ends():
     assert not metrics.end_pass
 
 
+def test_dustmask_fallback_default_matches_qc_config_threshold(monkeypatch):
+    """The public helper and config-driven path must share the 0.9 end threshold."""
+    monkeypatch.setattr(
+        "bionemo.evo2_phage_gen.qc.dustmask_low_complexity_mask",
+        lambda _sequence, **_kwargs: [False] * 20 + [True] * 80,
+    )
+
+    metrics = calculate_dustmask_metrics("A" * 100, end_window=100)
+
+    assert metrics.max_end_masked_fraction == 0.8
+    assert metrics.end_pass
+
+
 def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeypatch):
     """When enabled, nucleotide metrics should call NCBI dustmasker once per batch."""
     calls = []
 
-    def fake_run(args, check, capture_output, text):
-        calls.append((args, check, capture_output, text))
+    def fake_run(args, check, capture_output, text, timeout):
+        calls.append((args, check, capture_output, text, timeout))
         output_path = args[args.index("-out") + 1]
         Path(output_path).write_text(">seq_0\n0 - 79\n>seq_1\n320 - 399\n")
 
@@ -150,6 +165,8 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
         NucleotideQCConfig(
             dustmask_filter=True,
             dustmasker_bin="fake-dustmasker",
+            dustmask_level=20.5,
+            dustmasker_timeout_s=17.5,
             dustmask_use_external=True,
             dustmask_end_window=100,
             dustmask_max_end_fraction=0.9,
@@ -159,6 +176,31 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     assert len(calls) == 1
     assert calls[0][0][0] == "fake-dustmasker"
     assert calls[0][0][calls[0][0].index("-outfmt") + 1] == "interval"
+    assert calls[0][0][calls[0][0].index("-level") + 1] == "20.5"
+    assert calls[0][4] == 17.5
     assert scored["dustmask_left_end_masked_fraction"].tolist() == [0.8, 0.0]
     assert scored["dustmask_right_end_masked_fraction"].tolist() == [0.0, 0.8]
     assert scored["dustmask_end_pass"].tolist() == [True, True]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("dustmasker not found"),
+        subprocess.CalledProcessError(2, ["dustmasker"]),
+        subprocess.TimeoutExpired(["dustmasker"], 300),
+    ],
+    ids=["missing", "nonzero", "timeout"],
+)
+def test_external_dustmasker_failures_are_bounded_and_wrapped(monkeypatch, error):
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr("subprocess.run", fail)
+    frame = pd.DataFrame({"id_prompt": ["candidate"], "sequence": ["ACGT" * 100]})
+
+    with pytest.raises(RuntimeError, match="dustmasker execution failed"):
+        add_nucleotide_metrics(
+            frame,
+            NucleotideQCConfig(dustmask_filter=True, dustmask_use_external=True),
+        )

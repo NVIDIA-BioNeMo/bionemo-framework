@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import pandas as pd
@@ -36,3 +51,14 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
     assert summary["within_setting_clusterable_count"] == 2
     assert summary["within_setting_99pct_distinct_rate"] == 0.5
     assert summary["target_signal_mean"] == 7 / 12
+
+
+def test_summarize_setting_marks_header_only_scores_ineligible(tmp_path):
+    path = tmp_path / "prefix0_temp0.7.scores.csv"
+    pd.DataFrame(columns=["reward", "mmseqs_cluster_num_clusters"]).to_csv(path, index=False)
+
+    summary = summarize_setting(path, bootstrap_replicates=100)
+
+    assert summary["records"] == 0
+    assert summary["metric_environment_ok"] is False
+    assert summary["within_setting_99pct_cluster_count"] == 0

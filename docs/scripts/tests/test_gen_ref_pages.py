@@ -33,33 +33,33 @@ gen_ref_pages = importlib.import_module("docs.scripts.gen_ref_pages")
     ("target", "expected"),
     [
         (
-            ".agents/skills/bionemo-phage-design/references/historical-evidence.md",
+            "skills/bionemo-phage-design/references/historical-evidence.md",
             "https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/recipes/demo/"
-            ".agents/skills/bionemo-phage-design/references/historical-evidence.md",
+            "skills/bionemo-phage-design/references/historical-evidence.md",
         ),
         (
-            ".agents/skills/bionemo-phage-design/SKILL.md",
+            "skills/bionemo-phage-design/SKILL.md",
             "https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/recipes/demo/"
-            ".agents/skills/bionemo-phage-design/SKILL.md",
+            "skills/bionemo-phage-design/SKILL.md",
         ),
         (
-            ".agents/skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md",
+            "skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md",
             "https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/recipes/demo/"
-            ".agents/skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md",
+            "skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md",
         ),
         (
-            ".agents/skills/bionemo-phage-design/assets/VALIDATION.md",
+            "skills/bionemo-phage-design/assets/VALIDATION.md",
             "https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main/recipes/demo/"
-            ".agents/skills/bionemo-phage-design/assets/VALIDATION.md",
+            "skills/bionemo-phage-design/assets/VALIDATION.md",
         ),
         (
-            ".agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/",
+            "skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/",
             "https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main/recipes/demo/"
-            ".agents/skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design",
+            "skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design",
         ),
     ],
 )
-def test_hidden_recipe_links_target_github(target: str, expected: str, tmp_path: Path) -> None:
+def test_unpublished_recipe_skill_links_target_github(target: str, expected: str, tmp_path: Path) -> None:
     root = tmp_path
     source = root / "recipes" / "demo" / "README.md"
     target_path = source.parent / target

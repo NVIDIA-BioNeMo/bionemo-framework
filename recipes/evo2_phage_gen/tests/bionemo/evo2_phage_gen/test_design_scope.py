@@ -88,6 +88,57 @@ def test_policy_replication_endpoint_cannot_bypass_entry_scope():
     assert decision.reason_codes == ("EUKARYOTIC_REPLICATION_OBJECTIVE",)
 
 
+def test_policy_replication_endpoint_cannot_hide_behind_inconsistent_fields():
+    """The explicit eukaryotic-replication endpoint is sufficient to reject an increase."""
+    disguised = DesignObjective(
+        kind=ObjectiveKind.PERSISTENCE,
+        direction=ObjectiveDirection.INCREASE,
+        replication_host_domains=frozenset({HostDomain.BACTERIA}),
+        endpoint="increased_eukaryotic_replication",
+    )
+
+    decision = validate_design_scope(disguised)
+
+    assert not decision.allowed
+    assert decision.reason_codes == ("EUKARYOTIC_REPLICATION_OBJECTIVE",)
+
+
+def test_objective_coerces_raw_kind_and_direction_before_validation_and_serialization():
+    """Deserialized enum values must retain the same safety semantics as enum instances."""
+    objective = DesignObjective(
+        kind="productive_replication",
+        direction="increase",
+        replication_host_domains=frozenset({HostDomain.EUKARYOTA}),
+        endpoint="productive_replication",
+    )
+
+    assert objective.to_dict()["kind"] == "productive_replication"
+    assert objective.to_dict()["direction"] == "increase"
+    assert not validate_design_scope(objective).allowed
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("kind", "unsupported_kind", "unsupported objective kind"),
+        ("direction", "sideways", "unsupported objective direction"),
+    ],
+)
+def test_objective_rejects_unsupported_raw_enum_values(field, value, message):
+    values = {
+        "kind": ObjectiveKind.ENTRY,
+        "direction": ObjectiveDirection.EVALUATE,
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        DesignObjective(
+            **values,
+            replication_host_domains=frozenset({HostDomain.BACTERIA}),
+            endpoint="mammalian_noninfectivity",
+        )
+
+
 def test_unknown_entry_endpoint_is_rejected_at_objective_construction():
     """Unvalidated endpoint strings cannot silently acquire scope semantics."""
     with pytest.raises(ValueError, match="unsupported design endpoint"):

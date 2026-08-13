@@ -23,6 +23,8 @@ import os
 import re
 import stat
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -513,8 +515,16 @@ def _cache_raw_response(cache_dir: Path, accession: str, raw: bytes) -> Path:
 def _default_ncbi_fetcher(accession: str) -> bytes:
     url = f"https://api.ncbi.nlm.nih.gov/datasets/v2alpha/virus/accession/{accession}/dataset_report"
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()
+    last_error: urllib.error.URLError | TimeoutError | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except (urllib.error.URLError, TimeoutError) as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(2**attempt)
+    raise HostEvidenceError(f"cannot fetch NCBI metadata for {accession} after 3 attempts") from last_error
 
 
 def _reject_json_constant(value: str) -> object:

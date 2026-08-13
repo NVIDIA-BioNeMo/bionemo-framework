@@ -1,9 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
 from bionemo.evo2_phage_gen.calibration_novelty import (
+    SEARCH_COLUMNS,
+    _top_hits,
     canonical_circular_sequence,
     normalize_prompted_fasta,
     summarize_novelty,
@@ -51,3 +68,18 @@ def test_summarize_novelty_reports_copy_rates():
 
     assert summary["exact_target_copy_rate"] == 0.5
     assert summary["sft_near_copy_rate"] == 1.0
+
+
+@pytest.mark.parametrize("create_file", [False, True], ids=["missing", "empty"])
+def test_top_hits_preserves_prefixed_schema_without_hits(tmp_path, create_file):
+    path = tmp_path / "hits.m8"
+    if create_file:
+        path.touch()
+
+    hits = _top_hits(path, "target")
+
+    assert hits.empty
+    assert list(hits.columns) == [
+        "id_prompt",
+        *(f"target_{column}" for column in SEARCH_COLUMNS if column != "query"),
+    ]

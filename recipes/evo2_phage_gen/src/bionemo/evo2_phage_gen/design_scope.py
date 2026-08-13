@@ -85,12 +85,27 @@ class DesignObjective:
     endpoint: ObjectiveEndpoint
 
     def __post_init__(self) -> None:
-        """Normalize replication-host domains to an immutable set."""
-        object.__setattr__(self, "replication_host_domains", frozenset(self.replication_host_domains))
+        """Normalize serialized enum values and replication-host domains."""
+        try:
+            object.__setattr__(self, "kind", ObjectiveKind(self.kind))
+        except ValueError as error:
+            raise ValueError(f"unsupported objective kind: {self.kind}") from error
+        try:
+            object.__setattr__(self, "direction", ObjectiveDirection(self.direction))
+        except ValueError as error:
+            raise ValueError(f"unsupported objective direction: {self.direction}") from error
         try:
             object.__setattr__(self, "endpoint", ObjectiveEndpoint(self.endpoint))
         except ValueError as error:
             raise ValueError(f"unsupported design endpoint: {self.endpoint}") from error
+        try:
+            object.__setattr__(
+                self,
+                "replication_host_domains",
+                frozenset(HostDomain(domain) for domain in self.replication_host_domains),
+            )
+        except ValueError as error:
+            raise ValueError(f"unsupported replication host domain in {self.replication_host_domains}") from error
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the structured objective for a provenance record."""
@@ -187,10 +202,10 @@ def validate_design_scope(objective: DesignObjective) -> ScopeDecision:
     has_eukaryotic_replication_host = HostDomain.EUKARYOTA in objective.replication_host_domains
     replication_kind = objective.kind in _REPLICATION_OBJECTIVE_KINDS
     replication_entry = objective.kind is ObjectiveKind.ENTRY and objective.endpoint in _REPLICATION_ENDPOINTS
-    if (
-        objective.direction is ObjectiveDirection.INCREASE
-        and has_eukaryotic_replication_host
-        and (replication_kind or replication_entry)
+    explicit_eukaryotic_replication_endpoint = objective.endpoint is ObjectiveEndpoint.INCREASED_EUKARYOTIC_REPLICATION
+    if objective.direction is ObjectiveDirection.INCREASE and (
+        explicit_eukaryotic_replication_endpoint
+        or (has_eukaryotic_replication_host and (replication_kind or replication_entry))
     ):
         return ScopeDecision(False, ("EUKARYOTIC_REPLICATION_OBJECTIVE",))
     return ScopeDecision(True, ("OBJECTIVE_WITHIN_HOST_SCOPE",))

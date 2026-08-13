@@ -55,6 +55,7 @@ DEFAULT_PHROGS_FASTA_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/FA
 DEFAULT_PHROGS_SAFETY_PROFILE_URL = "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz"
 DEFAULT_PHROGS_SAFETY_PROFILE_MD5 = "a63c485241b900a11989bd1821bfbb09"
 DEFAULT_PHROGS_SAFETY_PROFILE_SIZE = 656_171_247
+DEFAULT_PHROGS_SAFETY_PROFILE_SHA256 = "d3c1de69c3ee00583fd8c2a3292766d61175403daad4e254376984a5c579df3f"
 DEFAULT_PHROGS_SAFETY_PROFILE_RELEASE = "Pharokka database v1.8.0"
 DEFAULT_PHROGS_SAFETY_PROFILE_DOI = "10.5281/zenodo.17110353"
 DEFAULT_PHROGS_SAFETY_PROFILE_LICENSE = "CC BY 4.0"
@@ -256,6 +257,19 @@ def resolve_blast_plus_release(machine: str | None = None) -> BlastPlusRelease:
     return _BLAST_PLUS_RELEASES[architecture]
 
 
+def validate_safety_toolchain_architecture(machine: str | None = None) -> str:
+    """Reject CPUs without a complete, pinned native sequence-safety toolchain."""
+    selected_machine = (machine or platform.machine()).strip().lower()
+    architecture = _BLAST_PLUS_ARCHITECTURE_ALIASES.get(selected_machine)
+    if architecture != "x86_64":
+        raise RuntimeError(
+            "The full sequence-safety toolchain is currently supported only on x86_64; "
+            f"{selected_machine or '<empty>'} has a pinned BLAST+ release but not pinned native "
+            "AMRFinderPlus, HMMER, DIAMOND, and MMseqs2 assets."
+        )
+    return architecture
+
+
 _VERIFIED_PHROGS_PROFILE_AUTHORITY = object()
 
 
@@ -377,23 +391,55 @@ def _download_with_headers(
     overwrite: bool = False,
     insecure: bool = False,
     expected_sha256: str | None = None,
+    expected_size: int | None = None,
+    expected_md5: str | None = None,
+    resume: bool = False,
 ) -> tuple[Path, dict[str, str]]:
-    """Download a file and retain response headers needed for provenance."""
+    """Download a file, optionally resuming a partial, and verify before promotion."""
     output_path = Path(output_path)
     if output_path.exists() and not overwrite:
         _verify_sha256(output_path, expected_sha256)
+        if expected_size is not None:
+            _verify_file_size(output_path, expected_size)
+        if expected_md5 is not None:
+            _verify_md5(output_path, expected_md5)
         return output_path, {}
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    context = ssl._create_unverified_context() if insecure else None
-    with urllib.request.urlopen(url, context=context) as response, tmp_path.open("wb") as output:
-        shutil.copyfileobj(response, output)
-        headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
-    try:
-        _verify_sha256(tmp_path, expected_sha256)
-    except ValueError:
+    if overwrite:
         tmp_path.unlink(missing_ok=True)
+    resume_from = tmp_path.stat().st_size if resume and tmp_path.is_file() else 0
+    if expected_size is not None and resume_from > expected_size:
+        tmp_path.unlink()
+        resume_from = 0
+    context = ssl._create_unverified_context() if insecure else None
+    headers: dict[str, str] = {}
+    if not (expected_size is not None and resume_from == expected_size):
+        request: str | urllib.request.Request = url
+        if resume_from:
+            request = urllib.request.Request(url, headers={"Range": f"bytes={resume_from}-"})
+        with urllib.request.urlopen(request, context=context) as response:
+            mode = "wb"
+            if resume_from:
+                status = getattr(response, "status", None)
+                content_range = str(response.headers.get("Content-Range", ""))
+                if status == 206 and content_range.startswith(f"bytes {resume_from}-"):
+                    mode = "ab"
+                elif status not in {None, 200}:
+                    raise OSError(f"server rejected byte-range resume for {url}: HTTP {status}")
+            with tmp_path.open(mode) as output:
+                shutil.copyfileobj(response, output)
+            headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+    try:
+        if expected_size is not None:
+            _verify_file_size(tmp_path, expected_size)
+        if expected_md5 is not None:
+            _verify_md5(tmp_path, expected_md5)
+        _verify_sha256(tmp_path, expected_sha256)
+    except (OSError, ValueError):
+        if not resume or expected_size is None or not tmp_path.is_file() or tmp_path.stat().st_size >= expected_size:
+            tmp_path.unlink(missing_ok=True)
         raise
     tmp_path.replace(output_path)
     return output_path, headers
@@ -406,6 +452,9 @@ def _download(
     overwrite: bool = False,
     insecure: bool = False,
     expected_sha256: str | None = None,
+    expected_size: int | None = None,
+    expected_md5: str | None = None,
+    resume: bool = False,
 ) -> Path:
     """Download ``url`` to ``output_path`` unless it already exists."""
     downloaded_path, _ = _download_with_headers(
@@ -414,6 +463,9 @@ def _download(
         overwrite=overwrite,
         insecure=insecure,
         expected_sha256=expected_sha256,
+        expected_size=expected_size,
+        expected_md5=expected_md5,
+        resume=resume,
     )
     return downloaded_path
 
@@ -713,10 +765,10 @@ def _amrfinder_runtime_bundle_record(staged: Mapping[str, Path]) -> dict[str, ob
 def _read_safety_manifest(manifest_path: Path) -> dict:
     """Read a mutable safety asset manifest, rejecting malformed top-level data."""
     if not manifest_path.exists():
-        return {"schema_version": 2}
+        return {"schema_version": 3}
     manifest = yaml.safe_load(manifest_path.read_text())
     if manifest is None:
-        return {"schema_version": 2}
+        return {"schema_version": 3}
     if not isinstance(manifest, dict):
         raise ValueError(f"Safety manifest must be a mapping: {manifest_path}")
     return manifest
@@ -726,7 +778,7 @@ def _set_safety_manifest_recipe(manifest: dict) -> None:
     """Attach the tracked recipe identity to an in-memory safety manifest."""
     if not DEFAULT_SAFETY_RECIPE_PATH.exists():
         raise FileNotFoundError(f"Safety asset recipe does not exist: {DEFAULT_SAFETY_RECIPE_PATH}")
-    manifest["schema_version"] = 2
+    manifest["schema_version"] = 3
     manifest["recipe"] = {
         "path": str(DEFAULT_SAFETY_RECIPE_PATH),
         "sha256": _sha256_file(DEFAULT_SAFETY_RECIPE_PATH),
@@ -864,14 +916,19 @@ def prepare_amrfinder_plus(
     overwrite: bool = False,
     insecure_downloads: bool = False,
 ) -> PreparedAsset:
-    """Prepare a digest-pinned AMRFinderPlus release and resolved custom database."""
+    """Prepare AMRFinderPlus and a resolved custom database.
+
+    A caller-supplied source runtime is byte-bound, but its repository and
+    revision are operator attestations because this API does not inspect a
+    source checkout or reproduce the build.
+    """
     del insecure_downloads
     external_dir = Path(external_dir)
     safety_dir = Path(safety_dir) if safety_dir is not None else external_dir / "safety"
     target_bin_dir = Path(bin_dir) if bin_dir is not None else external_dir / "bin"
     if source_bin_dir is not None:
         if not source_repository or not source_revision:
-            raise ValueError("AMRFinder source builds require both repository and revision provenance")
+            raise ValueError("AMRFinder source builds require operator-attested repository and revision")
         normalized_revision = source_revision.lower()
         if len(normalized_revision) != 40 or any(
             character not in "0123456789abcdef" for character in normalized_revision
@@ -888,7 +945,8 @@ def prepare_amrfinder_plus(
         amrfinder_index_path = staged_runtime["amrfinder_index"]
         amrfinder_update_path = staged_runtime["amrfinder_update"]
         acquisition = {
-            "acquisition": "pinned_source_build",
+            "acquisition": "operator_asserted_source_build",
+            "provenance_basis": "operator_asserted_repository_revision_and_binary_digest",
             "source_repository": source_repository,
             "source_revision": normalized_revision,
             "source_binary_sha256": _sha256_file(source_amrfinder_path),
@@ -1872,6 +1930,7 @@ def _extract_verified_phrogs_safety_profile_archive(archive_path: Path, output_d
     archive_path = Path(archive_path)
     _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
     _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+    observed_archive_sha256 = _verify_sha256(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SHA256)
     extracted_dir = _extract_tar(archive_path, output_dir, overwrite=True)
     _materialize_verified_phrogs_release_marker(extracted_dir)
     profile_database = _find_phrogs_profile_database(extracted_dir)
@@ -1880,7 +1939,7 @@ def _extract_verified_phrogs_safety_profile_archive(archive_path: Path, output_d
     profile_root = profile_database.parent
     return _VerifiedPhrogsProfile(
         archive_path=archive_path,
-        observed_archive_sha256=_sha256_file(archive_path),
+        observed_archive_sha256=observed_archive_sha256,
         extracted_dir=extracted_dir,
         profile_database=profile_database,
         database_sha256=database_sha256,
@@ -1891,7 +1950,7 @@ def _extract_verified_phrogs_safety_profile_archive(archive_path: Path, output_d
 
 
 def _require_verified_phrogs_profile(profile: object) -> _VerifiedPhrogsProfile:
-    """Return a private archive-extraction capability or fail closed at the public boundary."""
+    """Return a private archive-extraction capability or reject the operation at the public boundary."""
     if not isinstance(profile, _VerifiedPhrogsProfile) or profile._authority is not _VERIFIED_PHROGS_PROFILE_AUTHORITY:
         raise RuntimeError(
             "PHROGs safety metadata requires verified PHROGs profile preparation from the pinned archive"
@@ -1971,12 +2030,14 @@ def _publish_phrogs_safety_profile_archive(
     if _verified_profile is None:
         _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
         _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
-        observed_sha256 = _sha256_file(archive_path)
+        observed_sha256 = _verify_sha256(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SHA256)
     else:
         verified_profile = _require_verified_phrogs_profile(_verified_profile)
         if archive_path != verified_profile.archive_path:
             raise RuntimeError("PHROGs verified archive cache source does not match verified preparation")
         observed_sha256 = verified_profile.observed_archive_sha256
+        if observed_sha256 != DEFAULT_PHROGS_SAFETY_PROFILE_SHA256:
+            raise RuntimeError("PHROGs verified archive does not match the reviewed SHA-256")
     cache_path = Path(external_dir) / "downloads" / "phrogs_safety_profile_archives" / f"{observed_sha256}.tar.gz"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     if not cache_path.exists():
@@ -2010,10 +2071,11 @@ def _discover_pinned_phrogs_safety_profile_archive(external_dir: Path) -> Path |
             continue
         try:
             _verify_file_size(candidate, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
+            _verify_sha256(candidate, DEFAULT_PHROGS_SAFETY_PROFILE_SHA256)
             _verify_md5(candidate, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
         except (OSError, ValueError):
             continue
-        if _sha256_file(candidate) != digest_name:
+        if digest_name != DEFAULT_PHROGS_SAFETY_PROFILE_SHA256:
             raise RuntimeError("PHROGs safety profile cache filename does not match its content digest")
         matches.append(candidate)
     if len(matches) > 1:
@@ -2034,7 +2096,9 @@ def _cached_phrogs_safety_profile_archive(previous_manifest: dict, external_dir:
         observed_sha256 = ""
     if not archive_path.is_file() or archive_path.stat().st_size == 0:
         raise FileNotFoundError(f"PHROGs profile archive cache is required: {archive_path}")
-    actual_sha256 = _sha256_file(archive_path)
+    _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
+    _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+    actual_sha256 = _verify_sha256(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SHA256)
     if observed_sha256 and actual_sha256 != observed_sha256:
         raise RuntimeError("PHROGs profile archive cache digest does not match the prior trusted manifest")
     return archive_path
@@ -2159,9 +2223,9 @@ def _snapshot_phrogs_safety_assets(
 
 def _publish_phrogs_legacy_assets(
     annotation_path: Path,
-    sequence_database: Path,
+    sequence_database: Path | None,
     external_dir: Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path | None]:
     """Publish a verified immutable PHROGs snapshot at the legacy external path.
 
     This compatibility copy is deliberately made only after the safety manifest
@@ -2170,9 +2234,12 @@ def _publish_phrogs_legacy_assets(
     manifest.
     """
     annotation_path = Path(annotation_path)
-    sequence_database = Path(sequence_database)
     annotation_sha256 = _sha256_file(annotation_path)
-    database_sha256, database_files = _complete_phrogs_sequence_database(sequence_database)
+    selected_sequence_database = Path(sequence_database) if sequence_database is not None else None
+    database_sha256 = ""
+    database_files: list[Path] = []
+    if selected_sequence_database is not None:
+        database_sha256, database_files = _complete_phrogs_sequence_database(selected_sequence_database)
     expected_database_names = [path.name for path in database_files]
 
     legacy_dir = Path(external_dir) / "phrogs"
@@ -2184,8 +2251,12 @@ def _publish_phrogs_legacy_assets(
         for database_file in database_files:
             shutil.copy2(database_file, staging_dir / database_file.name)
 
-        staged_database_path = staging_dir / sequence_database.name
-        staged_database_sha256, staged_database_files = _complete_phrogs_sequence_database(staged_database_path)
+        staged_database_path = (
+            staging_dir / selected_sequence_database.name if selected_sequence_database is not None else None
+        )
+        staged_database_sha256, staged_database_files = ("", [])
+        if staged_database_path is not None:
+            staged_database_sha256, staged_database_files = _complete_phrogs_sequence_database(staged_database_path)
         if _sha256_file(staged_annotation_path) != annotation_sha256:
             raise RuntimeError("Staged legacy PHROGs annotation digest does not match its safety snapshot")
         if staged_database_sha256 != database_sha256:
@@ -2195,14 +2266,16 @@ def _publish_phrogs_legacy_assets(
 
         for staged_path in (staged_annotation_path, *staged_database_files):
             os.replace(staged_path, legacy_dir / staged_path.name)
-        for stale_path in legacy_dir.glob(f"{sequence_database.name}*"):
+        for stale_path in legacy_dir.glob(f"{selected_sequence_database.name}*") if selected_sequence_database else ():
             if stale_path.name not in expected_database_names and (stale_path.is_file() or stale_path.is_symlink()):
                 stale_path.unlink()
 
         legacy_annotation_path = legacy_dir / annotation_path.name
-        legacy_database_path = legacy_dir / sequence_database.name
         if _sha256_file(legacy_annotation_path) != annotation_sha256:
             raise RuntimeError("Published legacy PHROGs annotation digest does not match its safety snapshot")
+        if selected_sequence_database is None:
+            return legacy_annotation_path, None
+        legacy_database_path = legacy_dir / selected_sequence_database.name
         legacy_database_sha256, legacy_database_files = _complete_phrogs_sequence_database(legacy_database_path)
         if legacy_database_sha256 != database_sha256:
             raise RuntimeError("Published legacy PHROGs database digest does not match its safety snapshot")
@@ -2243,6 +2316,7 @@ def _write_phrogs_lookup(lookup_path: Path, rows: list[list[str]]) -> None:
 def _prepare_phrogs_safety_metadata(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
+    profile_archive_expected_sha256: str = DEFAULT_PHROGS_SAFETY_PROFILE_SHA256,
     manifest_path: Path | None = None,
     manifest: dict | None = None,
     annotation_sha256: str | None = DEFAULT_PHROGS_ANNOTATION_SHA256,
@@ -2306,6 +2380,11 @@ def _prepare_phrogs_safety_metadata(
         character not in "0123456789abcdef" for character in normalized_profile_archive_sha256
     ):
         raise ValueError("PHROGs safety profile archive observed SHA-256 must be a digest")
+    normalized_profile_archive_expected_sha256 = profile_archive_expected_sha256.removeprefix("sha256:").lower()
+    if normalized_profile_archive_expected_sha256 != DEFAULT_PHROGS_SAFETY_PROFILE_SHA256:
+        raise ValueError("PHROGs safety profile expected SHA-256 must match the reviewed archive")
+    if normalized_profile_archive_sha256 != normalized_profile_archive_expected_sha256:
+        raise ValueError("PHROGs safety profile observed SHA-256 must match the separately reviewed expected SHA-256")
     if not profile_retrieved_at:
         raise ValueError("PHROGs safety profile retrieval evidence is required for provenance")
     if profile_source_url != DEFAULT_PHROGS_SAFETY_PROFILE_URL:
@@ -2469,6 +2548,7 @@ def _prepare_phrogs_safety_metadata(
                 "provenance": {
                     "source_url": profile_source_url,
                     "archive_observed_sha256": normalized_profile_archive_sha256,
+                    "archive_expected_sha256": normalized_profile_archive_expected_sha256,
                     "archive_published_sha256": None,
                     "archive_published_md5": profile_archive_published_md5,
                     "archive_published_size": profile_archive_published_size,
@@ -2599,6 +2679,10 @@ def prepare_phrogs_safety_profile_db(
             external_dir / "downloads" / Path(DEFAULT_PHROGS_SAFETY_PROFILE_URL).name,
             overwrite=overwrite,
             insecure=False,
+            expected_sha256=DEFAULT_PHROGS_SAFETY_PROFILE_SHA256,
+            expected_size=DEFAULT_PHROGS_SAFETY_PROFILE_SIZE,
+            expected_md5=DEFAULT_PHROGS_SAFETY_PROFILE_MD5,
+            resume=True,
         )
     else:
         archive_path = Path(verified_archive_path)
@@ -2606,6 +2690,7 @@ def prepare_phrogs_safety_profile_db(
             raise FileNotFoundError(f"PHROGs verified archive cache is required: {archive_path}")
         _verify_file_size(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SIZE)
         _verify_md5(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_MD5)
+        _verify_sha256(archive_path, DEFAULT_PHROGS_SAFETY_PROFILE_SHA256)
     verified_profile = _extract_verified_phrogs_safety_profile_archive(
         archive_path,
         external_dir / "phrogs" / "phrogs_mmseqs_db",
@@ -2709,7 +2794,7 @@ def prepare_arc_evo2_checkout(
 
 
 def _validate_recorded_asset_digest(record: dict, path_field: str, digest_field: str, label: str) -> None:
-    """Fail closed when a staged manifest asset path is missing or changed before publication."""
+    """Reject publication when a staged manifest asset path is missing or changed."""
     path_value = record.get(path_field)
     expected_sha256 = record.get(digest_field)
     if not isinstance(path_value, str) or not path_value:
@@ -2803,6 +2888,11 @@ def _validate_phrogs_profile_archive_lineage(profile_database: dict) -> None:
     verified_archive = provenance.get("verified_archive")
     archive_path = Path(verified_archive["path"])
     observed_archive_sha256 = provenance["archive_observed_sha256"]
+    expected_archive_sha256 = provenance["archive_expected_sha256"]
+    if expected_archive_sha256 != DEFAULT_PHROGS_SAFETY_PROFILE_SHA256:
+        raise RuntimeError("Safety manifest PHROGs expected archive SHA-256 is not pinned")
+    if observed_archive_sha256 != expected_archive_sha256:
+        raise RuntimeError("Safety manifest PHROGs observed archive SHA-256 differs from its expected digest")
     if _sha256_file(archive_path) != observed_archive_sha256:
         raise RuntimeError("Safety manifest PHROGs verified archive cache digest does not match provenance")
     if verified_archive["sha256"] != observed_archive_sha256:
@@ -2834,8 +2924,8 @@ def _validate_phrogs_profile_archive_lineage(profile_database: dict) -> None:
 
 def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool = False) -> None:
     """Ensure all scanner sections are present before publishing a new trusted generation."""
-    if manifest.get("schema_version") != 2:
-        raise RuntimeError("Safety manifest must use schema_version 2")
+    if manifest.get("schema_version") != 3:
+        raise RuntimeError("Safety manifest must use schema_version 3")
     required_fields = {
         "amrfinder_plus": (
             "binary_path",
@@ -2916,10 +3006,12 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
     if acquisition == "release_archive":
         if not amrfinder_record.get("archive_sha256"):
             raise RuntimeError("Safety manifest amrfinder_plus lacks required field archive_sha256")
-    elif acquisition == "pinned_source_build":
-        for field in ("source_repository", "source_revision", "source_binary_sha256"):
+    elif acquisition == "operator_asserted_source_build":
+        for field in ("provenance_basis", "source_repository", "source_revision", "source_binary_sha256"):
             if not amrfinder_record.get(field):
                 raise RuntimeError(f"Safety manifest amrfinder_plus lacks required field {field}")
+        if amrfinder_record["provenance_basis"] != "operator_asserted_repository_revision_and_binary_digest":
+            raise RuntimeError("Safety manifest amrfinder_plus has unsupported source-build provenance_basis")
         source_revision = amrfinder_record["source_revision"]
         if (
             not isinstance(source_revision, str)
@@ -2997,6 +3089,7 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         "source_url",
         "archive_observed_sha256",
         "archive_published_md5",
+        "archive_expected_sha256",
         "archive_published_size",
         "retrieved_at",
         "release",
@@ -3018,6 +3111,11 @@ def _validate_staged_safety_manifest(manifest: dict, *, verify_asset_paths: bool
         or any(character not in "0123456789abcdef" for character in observed_archive_sha256)
     ):
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an invalid observed archive SHA-256")
+    expected_archive_sha256 = provenance["archive_expected_sha256"]
+    if expected_archive_sha256 != DEFAULT_PHROGS_SAFETY_PROFILE_SHA256:
+        raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unpinned expected archive SHA-256")
+    if observed_archive_sha256 != expected_archive_sha256:
+        raise RuntimeError("Safety manifest phrogs_v4.profile_database observed archive SHA-256 differs from expected")
     if provenance["source_url"] != DEFAULT_PHROGS_SAFETY_PROFILE_URL:
         raise RuntimeError("Safety manifest phrogs_v4.profile_database has an unpinned profile source URL")
     if provenance["archive_published_md5"] != DEFAULT_PHROGS_SAFETY_PROFILE_MD5:
@@ -3153,7 +3251,7 @@ def prepare_external_assets(
     download_phrogs_annotation: bool = True,
     download_arc_evo2: bool = True,
     download_large_databases: bool = False,
-    download_phrogs_sequence_database: bool = True,
+    download_phrogs_sequence_database: bool = False,
     download_checkv: bool = True,
     configure_lovis4u: bool = True,
     with_safety: bool = False,
@@ -3175,6 +3273,8 @@ def prepare_external_assets(
 ) -> list[PreparedAsset]:
     """Prepare external assets for Arc's phage QC pipeline."""
     external_dir = Path(external_dir)
+    if with_safety:
+        validate_safety_toolchain_architecture()
     target_bin_dir = Path(bin_dir) if bin_dir is not None else external_dir / "bin"
     assets = [prepare_pyrodigal_wrapper(target_bin_dir)]
     mmseqs_asset = None
@@ -3226,6 +3326,10 @@ def prepare_external_assets(
     prepared_phrogs_profile_archive: Path | None = None
     prepared_phrogs_sequence_database: PreparedAsset | None = None
     safety_manifest_published = False
+    selected_safety_manifest = (
+        Path(safety_manifest) if safety_manifest is not None else external_dir / "safety" / "asset_manifest.yaml"
+    )
+    previous_manifest = _read_safety_manifest(selected_safety_manifest) if safety_generation_dir is not None else None
     try:
         if download_phrogs_annotation:
             phrogs_annotation_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
@@ -3244,12 +3348,19 @@ def prepare_external_assets(
                     overwrite=overwrite,
                 )
             )
-        if download_large_databases:
+        if download_large_databases or safety_generation_dir is not None:
             phrogs_profile_database_dir = safety_generation_dir if safety_generation_dir is not None else external_dir
             if safety_generation_dir is not None:
-                reusable_profile_archive = (
-                    None if overwrite else _discover_pinned_phrogs_safety_profile_archive(external_dir)
-                )
+                reusable_profile_archive = None
+                if not overwrite:
+                    assert previous_manifest is not None
+                    try:
+                        reusable_profile_archive = _cached_phrogs_safety_profile_archive(
+                            previous_manifest,
+                            external_dir,
+                        )
+                    except FileNotFoundError:
+                        pass
                 prepared_phrogs_profile_database = prepare_phrogs_safety_profile_db(
                     phrogs_profile_database_dir,
                     overwrite=overwrite,
@@ -3267,10 +3378,8 @@ def prepare_external_assets(
                 )
             if safety_generation_dir is None:
                 assets.append(prepared_phrogs_profile_database)
-            if download_phrogs_sequence_database:
-                phrogs_sequence_database_dir = (
-                    safety_generation_dir if safety_generation_dir is not None else external_dir
-                )
+            if download_large_databases and download_phrogs_sequence_database:
+                phrogs_sequence_database_dir = external_dir
                 prepared_phrogs_sequence_database = prepare_phrogs_gpu_sequence_db(
                     phrogs_sequence_database_dir,
                     bin_dir=target_bin_dir,
@@ -3279,31 +3388,19 @@ def prepare_external_assets(
                     insecure_downloads=False,
                 )
                 assets.append(prepared_phrogs_sequence_database)
-            if download_checkv:
+            if download_large_databases and download_checkv:
                 assets.append(prepare_checkv_database(external_dir, bin_dir=target_bin_dir, overwrite=overwrite))
         if with_safety:
             assert safety_generation_dir is not None
-            selected_safety_manifest = (
-                Path(safety_manifest)
-                if safety_manifest is not None
-                else external_dir / "safety" / "asset_manifest.yaml"
-            )
-            previous_manifest = _read_safety_manifest(selected_safety_manifest)
+            assert previous_manifest is not None
             selected_annotation_path = (
                 prepared_phrogs_annotation.path
                 if prepared_phrogs_annotation is not None
                 else external_dir / "phrogs" / "phrog_annot_v4.tsv"
             )
-            selected_sequence_database = None
-            if download_phrogs_sequence_database:
-                selected_sequence_database = (
-                    prepared_phrogs_sequence_database.path
-                    if prepared_phrogs_sequence_database is not None
-                    else external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
-                )
             snapshot_annotation_path, snapshot_sequence_database = _snapshot_phrogs_safety_assets(
                 selected_annotation_path,
-                selected_sequence_database,
+                None,
                 safety_generation_dir,
             )
             profile_archive_path = (
@@ -3359,7 +3456,7 @@ def prepare_external_assets(
                         "immutable PHROGs safety profile snapshot",
                     )
                 )
-            staged_manifest: dict = {"schema_version": 2}
+            staged_manifest: dict = {"schema_version": 3}
             _set_safety_manifest_recipe(staged_manifest)
             generation_bin_dir = safety_generation_dir / "bin"
             assets.append(
@@ -3395,7 +3492,7 @@ def prepare_external_assets(
                     manifest=staged_manifest,
                     annotation_path=snapshot_annotation_path,
                     sequence_database=snapshot_sequence_database,
-                    include_sequence_database=download_phrogs_sequence_database,
+                    include_sequence_database=False,
                     profile_database=snapshot_profile_database,
                     mmseqs_path=target_bin_dir / "mmseqs",
                     profile_retrieved_at=profile_retrieved_at,
@@ -3405,10 +3502,12 @@ def prepare_external_assets(
             _validate_staged_safety_manifest(staged_manifest, verify_asset_paths=True)
             _write_safety_manifest_atomic(selected_safety_manifest, staged_manifest)
             safety_manifest_published = True
-            if snapshot_sequence_database is not None and (
-                prepared_phrogs_annotation is not None or prepared_phrogs_sequence_database is not None
-            ):
-                _publish_phrogs_legacy_assets(snapshot_annotation_path, snapshot_sequence_database, external_dir)
+            if prepared_phrogs_annotation is not None:
+                _publish_phrogs_legacy_assets(
+                    snapshot_annotation_path,
+                    None,
+                    external_dir,
+                )
             if prepared_phrogs_profile_database is not None:
                 _publish_phrogs_legacy_profile_database(
                     snapshot_profile_database,
@@ -3440,9 +3539,9 @@ def main() -> None:
         "--download-large-databases", action="store_true", help="Also download PHROGs MMseqs DB and CheckV DB"
     )
     parser.add_argument(
-        "--skip-phrogs-sequence-database",
+        "--download-phrogs-sequence-database",
         action="store_true",
-        help="Do not fetch the optional raw-FAA Arc/QC database; the pinned safety profile is still prepared",
+        help="Fetch the optional unpinned raw-FAA Arc/QC compatibility database outside the safety bundle",
     )
     parser.add_argument("--skip-checkv", action="store_true", help="Do not download/build the CheckV database")
     parser.add_argument(
@@ -3487,7 +3586,7 @@ def main() -> None:
         download_phrogs_annotation=not args.skip_phrogs_annotation,
         download_arc_evo2=not args.skip_arc_evo2,
         download_large_databases=args.download_large_databases,
-        download_phrogs_sequence_database=not args.skip_phrogs_sequence_database,
+        download_phrogs_sequence_database=args.download_phrogs_sequence_database,
         download_checkv=not args.skip_checkv,
         configure_lovis4u=not args.skip_lovis4u_config,
         with_safety=args.with_safety,

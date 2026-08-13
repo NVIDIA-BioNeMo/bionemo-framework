@@ -52,6 +52,7 @@ class NucleotideQCConfig:
     dustmask_filter: bool = False
     dustmasker_bin: str = "dustmasker"
     dustmask_use_external: bool = True
+    dustmasker_timeout_s: float = 300.0
     dustmask_window: int = 64
     dustmask_level: float = 20.0
     dustmask_end_window: int = 200
@@ -163,30 +164,14 @@ def calculate_dustmask_metrics(
     window: int = 64,
     level: float = 20.0,
     end_window: int = 200,
-    max_end_fraction: float = 0.5,
+    max_end_fraction: float = 0.9,
 ) -> DustmaskMetrics:
     """Calculate DUST-style low-complexity metrics, emphasizing sequence ends."""
     mask = dustmask_low_complexity_mask(sequence, window=window, level=level)
-    seq_len = len(mask)
-    if seq_len == 0:
-        return DustmaskMetrics(0, 0.0, 0, 0.0, 0, 0.0, 0.0, True)
-
-    end_len = max(1, min(int(end_window), seq_len))
-    masked_bases = int(sum(mask))
-    left_end_masked_bases = int(sum(mask[:end_len]))
-    right_end_masked_bases = int(sum(mask[-end_len:]))
-    left_end_fraction = left_end_masked_bases / end_len
-    right_end_fraction = right_end_masked_bases / end_len
-    max_end_masked_fraction = max(left_end_fraction, right_end_fraction)
-    return DustmaskMetrics(
-        masked_bases=masked_bases,
-        masked_fraction=masked_bases / seq_len,
-        left_end_masked_bases=left_end_masked_bases,
-        left_end_masked_fraction=left_end_fraction,
-        right_end_masked_bases=right_end_masked_bases,
-        right_end_masked_fraction=right_end_fraction,
-        max_end_masked_fraction=max_end_masked_fraction,
-        end_pass=max_end_masked_fraction <= float(max_end_fraction),
+    return _dustmask_metrics_from_mask(
+        mask,
+        end_window=end_window,
+        max_end_fraction=max_end_fraction,
     )
 
 
@@ -194,7 +179,7 @@ def _dustmask_metrics_from_mask(
     mask: list[bool],
     *,
     end_window: int = 200,
-    max_end_fraction: float = 0.5,
+    max_end_fraction: float = 0.9,
 ) -> DustmaskMetrics:
     """Summarize an already-computed low-complexity mask."""
     seq_len = len(mask)
@@ -287,6 +272,27 @@ def _resolve_recipe_tool_path(executable: str) -> str:
     return str(recipe_path if recipe_path.exists() else path)
 
 
+def _run_dustmasker(
+    command: list[str],
+    *,
+    check: bool,
+    capture_output: bool,
+    text: bool,
+    timeout: float,
+) -> None:
+    """Run dustmasker with a finite timeout and one stable error contract."""
+    try:
+        subprocess.run(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"dustmasker execution failed: {error}") from error
+
+
 def calculate_dustmasker_metrics(
     sequences_df: pd.DataFrame,
     config: NucleotideQCConfig,
@@ -297,7 +303,7 @@ def calculate_dustmasker_metrics(
         input_fasta = tmp_dir / "input.fasta"
         interval_output = tmp_dir / "dustmasker.interval"
         sequence_lengths = _write_dustmasker_input(sequences_df, input_fasta)
-        subprocess.run(
+        _run_dustmasker(
             [
                 _resolve_recipe_tool_path(config.dustmasker_bin),
                 "-in",
@@ -309,11 +315,12 @@ def calculate_dustmasker_metrics(
                 "-window",
                 str(int(config.dustmask_window)),
                 "-level",
-                str(int(config.dustmask_level)),
+                f"{float(config.dustmask_level):g}",
             ],
             check=True,
             capture_output=True,
             text=True,
+            timeout=float(config.dustmasker_timeout_s),
         )
         masks = _parse_dustmasker_interval_output(interval_output, sequence_lengths)
     return [

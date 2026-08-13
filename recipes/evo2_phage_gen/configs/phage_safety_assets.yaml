@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
-# Tracked recipe for material that is generated under data/external/safety/.
+# Reviewed metadata mirror for material generated under data/external/safety/.
+# Runtime preparation is driven by the typed release descriptors in
+# external_assets.py; focused tests require this mirror to match them exactly.
 # The generated asset_manifest.yaml records observed versions, release headers,
 # retrieval times, and SHA-256 digests; it is intentionally not committed.
-schema_version: 2
+schema_version: 3
 runtime_manifest: data/external/safety/asset_manifest.yaml
 
 amrfinder_plus:
@@ -69,11 +71,13 @@ phrogs_v4:
     release: Pharokka database v1.8.0
     dataset_release: PHROGs v4
     archive_published_sha256: null
+    archive_expected_sha256: d3c1de69c3ee00583fd8c2a3292766d61175403daad4e254376984a5c579df3f
     archive_published_md5: a63c485241b900a11989bd1821bfbb09
     archive_published_size: 656171247
     archive_digest_provenance: >-
-      verify the published MD5 and size before extraction; record observed SHA-256
-      at preparation; no published SHA-256 is asserted
+      verify the separately reviewed expected SHA-256 plus the published MD5 and
+      size before extraction; record the matching observed SHA-256 at preparation;
+      no source-published SHA-256 is asserted
     doi: 10.5281/zenodo.17110353
     license: CC BY 4.0
     citation: 'Pharokka database v1.8.0 (DOI: 10.5281/zenodo.17110353).'

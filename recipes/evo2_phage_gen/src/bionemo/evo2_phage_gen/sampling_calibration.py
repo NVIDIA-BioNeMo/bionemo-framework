@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
 
 """Selected-SFT temperature and nucleotide-prefix calibration utilities."""
 
@@ -29,6 +44,7 @@ class SweepCell:
 
     @property
     def key(self) -> str:
+        """Return the stable identifier for this calibration cell."""
         return f"prefix{self.prefix_length}_temp{_format_temperature(self.temperature)}"
 
 
@@ -76,10 +92,7 @@ def write_cell_prompts(
     prompt = f"{marker}{reference_start[: cell.prefix_length]}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        "".join(
-            json.dumps({"id": f"{cell.key}_{index:04d}", "prompt": prompt}) + "\n"
-            for index in range(num_prompts)
-        )
+        "".join(json.dumps({"id": f"{cell.key}_{index:04d}", "prompt": prompt}) + "\n" for index in range(num_prompts))
     )
     return path
 
@@ -97,6 +110,8 @@ def build_inference_command(
     master_port: int,
     prompt_batch_size: int,
     max_seq_length: int,
+    top_k: int,
+    top_p: float,
 ) -> list[str]:
     """Build one strict target-total-length Evo2 inference command."""
     max_new_tokens = target_length - cell.prefix_length
@@ -120,9 +135,9 @@ def build_inference_command(
         "--temperature",
         _format_temperature(cell.temperature),
         "--top-k",
-        "4",
+        str(int(top_k)),
         "--top-p",
-        "1.0",
+        str(float(top_p)),
         "--seed",
         str(seed),
         "--tensor-parallel-size",
@@ -300,6 +315,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the sampling calibration materialization or validation command."""
     args = _parse_args()
     if args.command == "materialize":
         contract = materialize_sweep(
