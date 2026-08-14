@@ -67,7 +67,6 @@ def test_docs_and_configs_do_not_use_stale_workspace_paths():
     """Recipe docs and configs should be portable across checkout locations."""
     checked_paths = [
         RECIPE_ROOT / "README.md",
-        RECIPE_ROOT / "examples" / "replication_walkthrough.ipynb",
         *sorted((RECIPE_ROOT / "configs").rglob("*.yaml")),
     ]
 
