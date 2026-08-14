@@ -1,0 +1,26 @@
+{
+  "name": "bionemo-phage-generation",
+  "version": "0.1.0",
+  "description": "Portable bootstrap and planning for BioNeMo phage generation.",
+  "author": {
+    "name": "BioNeMo Recipes contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "BioNeMo Phage Generation",
+    "shortDescription": "Bootstrap and plan BioNeMo phage generation.",
+    "longDescription": "Locate a compatible Evo 2 phage-generation recipe and hand off a traceable whole-genome, lifecycle-aware design request before recipe-local implementation work.",
+    "developerName": "BioNeMo Recipes contributors",
+    "category": "Science",
+    "capabilities": [
+      "Bootstrap",
+      "Interactive planning",
+      "Batch planning"
+    ],
+    "defaultPrompt": [
+      "Locate a compatible Evo 2 phage-generation recipe checkout.",
+      "Start interactive planning for a whole-genome, lifecycle-aware BioNeMo phage-generation project.",
+      "Prepare a batch phage-generation plan from durable project records."
+    ]
+  }
+}

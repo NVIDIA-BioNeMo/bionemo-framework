@@ -1,0 +1,9 @@
+{
+  "name": "bionemo-phage-generation",
+  "description": "Portable bootstrap for traceable whole-genome BioNeMo phage design.",
+  "version": "0.1.0",
+  "author": {
+    "name": "BioNeMo Recipes contributors"
+  },
+  "skills": ["./skills/"]
+}
