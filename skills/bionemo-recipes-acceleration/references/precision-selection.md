@@ -5,7 +5,7 @@ of how much of the measured GEMM speedup will actually survive to end-to-end tra
 
 ## Phase 2: what the hardware probe tells you
 
-`assets/probe_hardware.py` delegates entirely to Transformer Engine rather than doing its own
+`scripts/probe_hardware.py` delegates entirely to Transformer Engine rather than doing its own
 compute-capability arithmetic. This mirrors `$BIONEMO_RECIPES/models/esm2/tests/common/fixtures.py::_check_recipe_support`:
 
 | Recipe                 | Support check                           |
@@ -57,7 +57,7 @@ for the report, not a reason to emit legacy code silently.
 
 The tool is Transformer Engine's own `benchmarks/gemm/benchmark_gemm.py`, documented at
 <https://nvidia.github.io/TransformerEngine/examples/gemm_profiling/gemm_profiling.html>. It ships in
-the TE **source tree**, not the pip wheel — `assets/run_gemm_benchmark.py` searches for it and, if
+the TE **source tree**, not the pip wheel — `scripts/run_gemm_benchmark.py` searches for it and, if
 absent, shallow-clones TE at the installed version tag into `.bionemo-accel/`.
 
 Nothing in this repo does this job. `$BIONEMO_RECIPES/recipes/fp8_analysis/analyze_and_create_heatmap.py` is often

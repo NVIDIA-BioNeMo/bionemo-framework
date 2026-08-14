@@ -1,7 +1,10 @@
 # Sequence packing (THD)
 
 Phase 4, Depths A and B only. Depth C cannot do this — THD attention requires a
-`te.TransformerLayer`.
+`te.TransformerLayer`. Depth B-postnorm is possible in principle — `te.MultiheadAttention` accepts
+`qkv_format` — but the geneformer reference hardcodes `"bshd"`, so there is no worked example to
+copy; treat it as unvalidated and say so. Depth B-encdec should default to BSHD, because packing
+across a cross-attention boundary is untested in this repo.
 
 Packing removes padding waste. On variable-length biological sequences this is often a larger win
 than FP8, and unlike FP8 it is numerically lossless — `test_golden_values_thd` in the shared harness

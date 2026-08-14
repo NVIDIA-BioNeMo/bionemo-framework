@@ -99,6 +99,31 @@ generation and KV-cache tests, which stay dormant otherwise.
 
 Worked example to copy the shape from: `$BIONEMO_RECIPES/models/llama3/tests/test_modeling_llama_te.py`.
 
+### When the target has no HF counterpart
+
+Some targets have no upstream HF model to convert from or compare against — a natively-TE model, a
+custom research codebase, or a model whose inputs are continuous values rather than tokens and whose
+heads are task-specific (expression, classification, multi-task regression). The conversion and
+round-trip tests are meaningless there, but the rest of the harness is not. Do **not** skip Tier 2
+wholesale; follow `$BIONEMO_RECIPES/models/codonfm/tests/test_modeling_codonfm_te.py`, which solves
+exactly this:
+
+- `get_hf_to_te_converter()` / `get_te_to_hf_converter()` return identity —
+  `lambda model, **kwargs: model`.
+- `get_upstream_model_class()` self-references the ported class.
+- `get_tokenizer()` may return `None` when the target's tokenizer is not a `PreTrainedTokenizer`.
+- `@pytest.mark.skip` the four conversion tests (`test_convert_hf_to_te`, `test_convert_te_to_hf`,
+  `test_convert_te_to_hf_roundtrip`, `test_convert_config`) with the reason spelled out, plus the
+  THD-padding tests if the tokenizer cannot produce packed input.
+- Replace the HF-reference golden values with a **checked-in baseline**: a
+  `golden_state_dict.safetensors` and `golden_values.json` produced once by a
+  `generate_golden_values.py`, then asserted against on every run. This is what preserves the
+  regression signal after the HF comparison is gone — the codonfm test directory ships all three
+  files.
+
+The baseline must be generated from the *original, unported* model, so generate it before Phase 4
+touches anything. Every skip goes in the report.
+
 ### What you get for free
 
 - **Golden values** — `test_golden_values` (TE vs HF reference in bf16),

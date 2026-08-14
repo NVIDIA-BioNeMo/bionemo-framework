@@ -1,19 +1,57 @@
 # Transformer Engine conversion
 
-Phase 4. Pick one of three depths based on what the target code already has, then follow the
-matching reference implementation exactly. Do not blend depths.
+Phase 4. Pick one depth based on what the target code already has, then follow the matching
+reference implementation exactly. Do not blend depths.
 
 ## Choosing the depth
 
-| Condition                                                                          | Depth                         |
-| ---------------------------------------------------------------------------------- | ----------------------------- |
-| Code already constructs `te.TransformerLayer`                                      | **A** — config layer only     |
-| HF-style transformer blocks, no TE                                                 | **B** — full port + converter |
-| Block cannot become a `TransformerLayer`, but has clean `nn.Linear` / norm sub-ops | **C** — kernel swaps only     |
+| Condition                                                                | Depth                             |
+| ------------------------------------------------------------------------ | --------------------------------- |
+| Code already constructs `te.TransformerLayer`                            | **A** — config layer only         |
+| HF-style transformer blocks, pre-norm, no TE                             | **B** — full port + converter     |
+| HF-style transformer blocks, post-norm, no TE                            | **B-postnorm** — hand-built block |
+| Two stacks with cross-attention (T5-style)                               | **B-encdec** — two TE stacks      |
+| Block cannot become a TE layer, but has clean `nn.Linear` / norm sub-ops | **C** — kernel swaps only         |
 
-Depth C is reachable only when Phase 1 produced a match on the three required rubric axes but the
-block has a structural quirk (an extra gate, an unusual residual) that `te.TransformerLayer` cannot
-express. If Phase 1 hard-stopped, there is no Depth C fallback — you are not here.
+Depth C is the landing spot for a target that passed Phase 1 but whose block has a structural quirk
+(an extra gate, an unusual residual, exotic MoE routing) that no TE layer can express. It is a real
+outcome, not a consolation prize: the report says plainly that no TE transformer block was
+substituted, and lists exactly which architecture-agnostic wins were applied. Only the three
+out-of-scope families in `references/architecture-matching.md` produce no port at all.
+
+### Depth B-postnorm
+
+`te.TransformerLayer` is pre-norm. When the target applies LayerNorm *after* the residual add, do
+not try to configure your way out of it — assemble the block by hand, exactly as
+`$BIONEMO_RECIPES/models/geneformer/src/geneformer/modeling_bert_te.py::TEBertLayer` does:
+`te.MultiheadAttention` with `input_layernorm=False`, a `te.LayerNorm` after the attention residual,
+`te.Linear` → activation → `te.Linear` for the MLP, and a second `te.LayerNorm` after the MLP
+residual.
+
+Two traps:
+
+- **`input_layernorm=False` is load-bearing.** Leave it at the default and you get a pre-norm block
+  wearing post-norm parameter names, which passes a smoke test and fails golden values.
+- **Parameter naming must match the converter.** Geneformer names them `layernorm`,
+  `layernorm_mlp.fc1`, `layernorm_mlp.activation`, `layernorm_mlp.fc2`, `layernorm_mlp.layer_norm`
+  precisely so `$BIONEMO_RECIPES/models/geneformer/src/geneformer/convert.py` can map HF BERT
+  checkpoints onto it. Pick names before you write the converter, not after.
+
+### Depth B-encdec
+
+Build the encoder stack as in Depth B, then the decoder stack with `layer_type="decoder"` — TE adds
+an `inter_attention` cross-attention block after self-attn and takes `encoder_output` and
+`enc_dec_attn_mask` in the forward. See
+`$BIONEMO_RECIPES/recipes/codonfm_ptl_te/src/models/components/encodon_te_layer.py` for the
+construction and the forward signature.
+
+Set `self_attn_mask_type` causal on the decoder and `enc_dec_attn_mask_type` for the cross path. The
+converter needs a hand-written transform for `inter_attention` — Q comes from the decoder hidden
+states and KV from the encoder output, so `$BIONEMO_RECIPES/models/esm2/convert.py::_pack_qkv_weight`
+does not apply unchanged. No in-repo model exercises this path, so Tier 1 parity is the primary
+proof and every gap goes in the report.
+
+Depth C is specified in full under "Depth C — targeted kernel swaps" below.
 
 ______________________________________________________________________
 
@@ -231,19 +269,24 @@ ______________________________________________________________________
 
 ## Depth C — targeted kernel swaps
 
-Apply only these, and only where the shapes are compatible:
+The fallback when the block has a quirk no TE layer can express. Apply only these, and only where
+the shapes are compatible:
 
 - `nn.Linear` → `transformer_engine.pytorch.Linear`
 - `LayerNorm` immediately followed by `Linear` → `transformer_engine.pytorch.LayerNormLinear`
 - `LayerNorm` + two-layer MLP → `transformer_engine.pytorch.LayerNormMLP`
 - `torch.optim.Adam*` → `transformer_engine.pytorch.optimizers.FusedAdam`
 
+Also available, and architecture-agnostic: `torch.compile` on the model or step function, and
+AMP/BF16 autocast if the loop is still FP32.
+
 Wrap the forward in a single outer `transformer_engine.pytorch.autocast(enabled=True, recipe=...)`.
 
-State the explicitly-not-applied list in the report: fused QKV, THD sequence packing, and
-`quantized_model_init` all require a `TransformerLayer` and are unavailable at this depth. Expect a
-materially smaller speedup than the GEMM benchmark suggests, because only the swapped projections
-are affected.
+Validation is Tier 1 only. State the explicitly-not-applied list in the report: fused QKV, THD
+sequence packing, and `quantized_model_init` all require a `TransformerLayer` and are unavailable at
+this depth. Name the structural quirk that blocked a deeper port, and do not present the result as a
+full FP8 port. Expect a materially smaller speedup than the GEMM benchmark suggests, because only
+the swapped projections are affected.
 
 ______________________________________________________________________
 

@@ -5,13 +5,14 @@ description: >-
   following the patterns proven in BioNeMo Recipes: FP8/MXFP8/NVFP4 quantization recipes, fused
   TransformerLayer, THD sequence packing, and quantized_model_init. Measures precision choice with
   TE's GEMM benchmark and validates the port with the BioNeMo BaseModelTest harness. Hard-stops
-  with a report when no BioNeMo reference architecture matches. Do NOT use for genomics pipeline
-  acceleration — use genomics-workflow-acceleration.
+  with a report only for architectures with no TE analogue — diffusion, GNN/equivariant, and
+  state-space models. Do NOT use for genomics pipeline acceleration — use
+  genomics-workflow-acceleration.
 license: Apache-2.0 AND CC-BY-4.0
 compatibility: "torch>=2.4; transformer_engine[pytorch]>=2.0; CUDA GPU (Hopper or newer for FP8)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   author: Zoey Zhang <zozhang@nvidia.com>
   domain: model-training
   tags:
@@ -117,8 +118,10 @@ resolves and verifies this variable before any other step.
 
 ## Guardrails
 
-1. **Match before you modify.** Phase 1 gates everything. No reference architecture match → write
-   report and stop. Do not partial-port.
+1. **Match before you modify.** Phase 1 decides the reference and the depth before any edit. An
+   architecture with no TE analogue → write the report and stop. A weak-but-workable match is not a
+   stop: port at the depth the block supports (down to Depth C kernel swaps) and state the
+   limitation. What is never acceptable is a port presented as validated when it is not.
 2. **Never modify the BioNeMo Recipes repository** (`$BIONEMO_RECIPES`). It is a read-only
    reference. All edits land in the target codebase, on a new branch.
 3. **Low precision ships disabled.** Generate FP8/FP4 configs with `enabled: false` — the user
@@ -136,16 +139,8 @@ resolves and verifies this variable before any other step.
 | Phase 4 — rewrite depth, converter, autocast, quantized_model_init  | `references/te-conversion.md`         |
 | Phase 4 — THD packing, cu_seqlens, DataCollatorWithFlattening       | `references/sequence-packing.md`      |
 | Phase 5 — tiered validation, BaseModelTest hooks, CI reproduction   | `references/validation.md`            |
-| Phase 2 — hardware and TE version probe                             | `scripts/probe_hardware.py`           |
-| Phase 3 — GEMM benchmark wrapper                                    | `scripts/run_gemm_benchmark.py`       |
-| Phase 5 — parity check scaffold (write to target repo)              | `assets/parity_check.py.tmpl`         |
-| Phase 5 — BaseModelTest subclass scaffold (write to target repo)    | `assets/test_modeling_ported.py.tmpl` |
-| Phase 5 — pytest conftest scaffold (write to target repo)           | `assets/conftest.py.tmpl`             |
-| Phase 6 — acceleration report scaffold (write to target repo)       | `assets/ACCELERATION_REPORT.md.tmpl`  |
 
 Load a reference file once when entering the relevant phase. Do not load all of them upfront.
-The `assets/` files are code scaffolds written into the target repo during Phases 5–6, not loaded
-for reading — open them only when generating the corresponding output file.
 
 ## Instructions
 
@@ -157,9 +152,13 @@ Trainer / Accelerate / Lightning / Megatron); whether TE is already imported; mo
 `.bionemo-accel/inventory.json`. Add `.bionemo-accel/` to the target's `.gitignore`.
 
 **Phase 1 — Architecture match, or hard stop.** Read `references/architecture-matching.md`. Score
-the target against the four supported families (encoder/MLM, causal LM dense, MoE, genomics LM).
-Require a high-confidence match on attention pattern, normalization, and MLP form. Write
-`.bionemo-accel/match.json`; or write the hard-stop `ACCELERATION_REPORT.md` and exit.
+the target on the six rubric axes against the reference menu (encoder/MLM pre-norm and post-norm,
+causal LM dense, MoE, genomics LM, encoder–decoder). **Attention pattern is the only required
+match** — the other five axes select the reference and the port depth, and each mismatch is
+recorded as a caveat. Write `.bionemo-accel/match.json`, noting which reference each piece of the
+port comes from. Hard-stop only for diffusion, GNN/equivariant, or state-space architectures, an
+attention-pattern mismatch, an unlocatable model definition, or no runnable forward pass; then
+write the hard-stop `ACCELERATION_REPORT.md` and exit.
 
 **Phase 2 — Hardware and TE probe.** Run:
 
@@ -185,7 +184,8 @@ means suspected kernel fallback, not no benefit.
 
 **Phase 4 — Rewrite.** Read `references/te-conversion.md` and `references/sequence-packing.md`.
 Create branch `bionemo-accel/<family>` in the target repo. Apply Depth A (already TE), B (full
-port + converter), or C (kernel swaps only) at the depth warranted by the code.
+port + converter), B-postnorm (hand-built block), B-encdec (two TE stacks), or C (kernel swaps
+only) at the depth warranted by the code.
 
 **Phase 5 — Validate.** Read `references/validation.md`. Generate `parity_check.py` from
 `assets/parity_check.py.tmpl` (Tier 1, always); generate `tests/test_modeling_ported.py` and
@@ -222,8 +222,9 @@ Phases 3–6 always re-run.
   attention is xfailed. Sequence packing still works via flash_attn.
 - **sm_80 (A100).** Fused THD attention is xfailed; packing works via flash_attn.
 - **mFSDP + quantized_model_init.** Xfailed (BIONEMO-3012). Do not enable with megatron-fsdp.
-- **MoE.** Only straightforward top-k routing matches the Mixtral reference. Exotic routing is a
-  hard stop.
+- **MoE.** Only straightforward top-k routing matches the Mixtral reference. Exotic routing (expert
+  choice, soft MoE) is not a hard stop — port the attention and norm layers, leave the router
+  alone, and say so in the report.
 
 ## Validation
 
@@ -307,7 +308,7 @@ All artifacts are written into the **target repo**, never into `$BIONEMO_RECIPES
 | `tests/test_modeling_ported.py` | 5 | Depth B only | BaseModelTest harness subclass for the ported model |
 | `tests/conftest.py` | 5 | Depth B only | pytest plugin registration (`pytest_plugins = ["tests.common.fixtures"]`) |
 | `ACCELERATION_REPORT.md` | 6 | Always | Final report: measured speedups, one-line FP8 enable config, limitations |
-| `ACCELERATION_REPORT.md` (hard stop) | 1 | On no match | Architecture rejection reason; no other files written or modified |
+| `ACCELERATION_REPORT.md` (hard stop) | 1 | On out-of-scope architecture | Rejection reason (no TE analogue, attention-pattern mismatch, or no runnable forward pass); no other files written or modified |
 
 **Branch:** `bionemo-accel/<family>` is created in the target repo on a successful port (e.g. `bionemo-accel/encoder-mlm`, `bionemo-accel/causal-lm-dense`).
 
@@ -315,7 +316,7 @@ All artifacts are written into the **target repo**, never into `$BIONEMO_RECIPES
 
 | Error / Symptom | Cause | Solution |
 | --- | --- | --- |
-| Hard stop at Phase 1 | Architecture is not one of the four supported families | Read `references/architecture-matching.md`; no partial port is attempted — report names the disqualifying axis |
+| Hard stop at Phase 1 | Architecture has no TE analogue (diffusion, GNN/equivariant, state-space), attention pattern mismatches, or no forward pass can be run | Read `references/architecture-matching.md`. An advisory-axis mismatch alone is never a stop — it selects the reference and depth instead |
 | `Could not find benchmarks/gemm/benchmark_gemm.py` | TE pip wheel does not include source; no NGC container or local checkout found | Pass `--te-source <path>`, set `TE_SOURCE_DIR`, or add `--allow-clone` |
 | GEMM speedup near 1.0× | Silent kernel fallback to a lower-precision kernel | Re-run with `--verbose-kernels`; confirm expected dispatch in `NVTE_LOG_LEVEL=1` output before concluding there is no benefit |
 | `torch not importable` after install | Script ran in the wrong Python environment | Verify `which python` inside your training venv/conda env; re-run `probe_hardware.py` in that environment |

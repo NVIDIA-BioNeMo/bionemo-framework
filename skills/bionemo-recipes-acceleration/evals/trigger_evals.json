@@ -11,6 +11,10 @@
   {"query": "use FusedAdam from Transformer Engine in my optimizer", "should_trigger": true},
   {"query": "measure GEMM speedup for my 7B LLM at FP8 vs BF16 on B200", "should_trigger": true},
   {"query": "replace nn.Linear with te.Linear and wrap in te.autocast", "should_trigger": true},
+  {"query": "convert my T5 encoder-decoder to Transformer Engine", "should_trigger": true},
+  {"query": "accelerate scGPT fine-tuning with Transformer Engine", "should_trigger": true},
+  {"query": "add FP8 to my single-cell foundation model encoder", "should_trigger": true},
+  {"query": "my BERT-style encoder is post-norm with a ReLU MLP, can you port it to TE", "should_trigger": true},
   {"query": "accelerate my Nextflow variant-calling pipeline with Parabricks", "should_trigger": false},
   {"query": "speed up my diffusion model for protein structure generation", "should_trigger": false},
   {"query": "add FP8 to my equivariant GNN network", "should_trigger": false},
@@ -19,6 +23,5 @@
   {"query": "run pbrun deepvariant on my WGS data faster", "should_trigger": false},
   {"query": "predict protein structure with Boltz2", "should_trigger": false},
   {"query": "generate drug-like molecules with GenMol", "should_trigger": false},
-  {"query": "serve my model with vLLM for faster inference", "should_trigger": false},
-  {"query": "convert my T5 encoder-decoder to Transformer Engine", "should_trigger": false}
+  {"query": "serve my model with vLLM for faster inference", "should_trigger": false}
 ]
