@@ -50,6 +50,10 @@ Some model and recipe files are intentionally duplicated. Keep the mapping in
 - If adding, moving, or deleting an intentionally copied file or directory, update
   `SOURCE_TO_DESTINATION_MAP` in `ci/scripts/check_copied_files.py` in the same change.
 
+- Directory mappings are exact recursive mirrors. Running the script with `--fix` replaces each
+  destination directory with a fresh copy of its source, removing stale files left by moves,
+  deletions, or refactors. Do not keep destination-only files inside a mapped directory.
+
 - Do not hand-edit destination copies that contain a copied-file notice; change the source and
   regenerate the destinations with the script.
 
