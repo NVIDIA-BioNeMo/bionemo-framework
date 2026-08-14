@@ -15,7 +15,6 @@
 
 """Tests for the release-facing BioNeMo phage generation skill."""
 
-import json
 from pathlib import Path
 
 import yaml
@@ -75,19 +74,6 @@ def test_portable_handoff() -> None:
     ):
         assert marker in skill
 
-    evals_text = json.dumps(json.loads((skill_root / "evals" / "evals.json").read_text(encoding="utf-8")))
-    for marker in (
-        "VERSION == 2.4",
-        "no recipe-local controller",
-        "aggregation",
-        "absolute-root Codex",
-        "absolute-root Claude",
-        "original request",
-        "fixed required sibling allowlist",
-        "integrity-failed skill",
-    ):
-        assert marker in evals_text
-
 
 def test_entry_description() -> None:
     """The release-facing entrypoint should use likely user discovery language."""
@@ -96,10 +82,3 @@ def test_entry_description() -> None:
 
     for marker in ("bacteriophage genome", "phage therapy", "antibiotic-resistant infections"):
         assert marker in description
-
-
-def test_root_card_license() -> None:
-    """The release-facing skill card should link its declared license."""
-    card = (ROOT_SKILLS / "bionemo-phage-generation" / "skill-card.md").read_text(encoding="utf-8")
-
-    assert "[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt)" in card

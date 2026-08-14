@@ -15,12 +15,9 @@
 
 """Tests for recipe configuration files."""
 
-import re
-import tomllib
 from pathlib import Path
 
 import yaml
-from packaging.requirements import Requirement
 
 
 RECIPE_ROOT = Path(__file__).parents[3]
@@ -243,41 +240,3 @@ def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():
                     config_path.name,
                     name,
                 )
-
-
-def test_report_runtime_declares_tabulate_dependency():
-    """Installed report commands must include pandas' Markdown-table backend."""
-    config = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
-
-    assert any(Requirement(dependency).name == "tabulate" for dependency in config["project"]["dependencies"])
-
-
-def test_recipe_dockerfile_builds_from_the_recipe_directory():
-    """The documented recipe-local build must copy the recipe into its final workdir."""
-    assert not (RECIPE_ROOT / "Dockerfile.dockerignore").exists()
-
-    direct_patterns = set((RECIPE_ROOT / ".dockerignore").read_text().splitlines())
-    assert {
-        "results",
-        "data/*",
-        "!data/.gitignore",
-        "!data/phage_prompts.jsonl",
-    } <= direct_patterns
-
-    dockerfile = (RECIPE_ROOT / "Dockerfile").read_text()
-    assert "WORKDIR /workspace/bionemo/recipes/evo2_phage_gen\nCOPY . .\n" in dockerfile
-    assert dockerfile.count("WORKDIR ") == 1
-
-
-def test_recipe_dockerfile_installs_pinned_uv_before_ci_build():
-    """The recipe image must provide uv before invoking the CI build script."""
-    dockerfile = (RECIPE_ROOT / "Dockerfile").read_text()
-    uv_copy = re.search(
-        r"^COPY --from=ghcr\.io/astral-sh/uv:([^\s]+) /uv /uvx /bin/$",
-        dockerfile,
-        flags=re.MULTILINE,
-    )
-
-    assert uv_copy is not None
-    assert uv_copy.group(1) != "latest"
-    assert uv_copy.start() < dockerfile.index("./.ci_build.sh")

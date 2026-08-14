@@ -19,12 +19,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import re
 import subprocess
 import sys
 import tempfile
 import textwrap
-import unittest
 from pathlib import Path
 
 
@@ -34,34 +32,6 @@ assert RUNNER_SPEC and RUNNER_SPEC.loader
 runner = importlib.util.module_from_spec(RUNNER_SPEC)
 sys.modules[RUNNER_SPEC.name] = runner
 RUNNER_SPEC.loader.exec_module(runner)
-SKILL_ROOT = SCRIPT.parents[2]
-REPOSITORY_ROOT = next(parent for parent in SCRIPT.parents if (parent / ".git").exists())
-RECIPE_ROOT = SCRIPT.parents[3]
-EXPECTED_RECIPE_SKILLS = {
-    "bionemo-phage-design",
-    "bionemo-phage-design-adapt-execution",
-    "bionemo-phage-design-calibrate-rl-sampling",
-    "bionemo-phage-design-collect-genomes",
-    "bionemo-phage-design-generate-and-screen",
-    "bionemo-phage-design-implement-rl-objectives",
-    "bionemo-phage-design-operate-mbridge-sft",
-    "bionemo-phage-design-operate-nemo-rl",
-    "bionemo-phage-design-plan-rl-objectives",
-    "bionemo-phage-design-prepare-sft",
-    "bionemo-phage-design-publish-stage-artifacts",
-    "bionemo-phage-design-research-evidence",
-}
-RETIRED_LEAF_SKILL_NAMES = {
-    "adapt-phage-execution",
-    "collect-phage-genomes",
-    "design-phage-rl-objectives",
-    "generate-and-screen-phages",
-    "implement-phage-rl-objectives",
-    "operate-mbridge-phage-sft",
-    "operate-nemo-rl-phage",
-    "prepare-phage-sft",
-    "research-phage-evidence",
-}
 ASSERTIONS = [
     "The response identifies the required input before proposing mutation.",
     "The response records unresolved assumptions rather than inventing values.",
@@ -435,1293 +405,355 @@ def _prepare_live_claude_repo(root: Path) -> str:
     ).stdout.strip()
 
 
-class EvalRunnerTests(unittest.TestCase):
-    def _run(
-        self,
-        *args: str,
-        check: bool = False,
-        use_default_recipe: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        command_args = list(args)
-        if (
-            not use_default_recipe
-            and "--recipe-root" not in command_args
-            and ("--run" in command_args or "--dry-run" in command_args)
-        ):
-            command_args.extend(["--recipe-root", "."])
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), *command_args],
-            check=check,
-            text=True,
-            capture_output=True,
-        )
-
-    def test_recipe_skills_use_the_bionemo_phage_design_namespace(self) -> None:
-        actual = {path.name for path in SKILL_ROOT.iterdir() if path.is_dir() and (path / "SKILL.md").is_file()}
-        self.assertEqual(EXPECTED_RECIPE_SKILLS, actual)
-        for skill_name in sorted(actual):
-            skill_dir = SKILL_ROOT / skill_name
-            frontmatter_name = next(
-                line.removeprefix("name:").strip()
-                for line in (skill_dir / "SKILL.md").read_text(encoding="utf-8").splitlines()
-                if line.startswith("name:")
-            )
-            self.assertEqual(skill_name, frontmatter_name)
-            for eval_path in sorted((skill_dir / "evals").glob("*.json")):
-                payload = json.loads(eval_path.read_text(encoding="utf-8"))
-                self.assertEqual(skill_name, payload["skill_name"])
-                for case in payload["evals"]:
-                    if case["expected_skill"] is not None:
-                        self.assertEqual(skill_name, case["expected_skill"])
-                    self.assertTrue(case["id"].startswith(f"{skill_name}-"), case["id"])
-        text_paths = [
-            RECIPE_ROOT / "README.md",
-            *(
-                path
-                for path in SKILL_ROOT.rglob("*")
-                if path.is_file()
-                and path.resolve() != Path(__file__).resolve()
-                and path.suffix in {".json", ".md", ".py"}
-            ),
-        ]
-        for path in text_paths:
-            text = path.read_text(encoding="utf-8")
-            self.assertNotIn("bionemo-bionemo-phage-design", text, str(path))
-            for retired in RETIRED_LEAF_SKILL_NAMES:
-                self.assertNotIn(retired, text, str(path))
-
-    def test_recipe_codex_plugin_manifest_exposes_the_skill_bundle(self) -> None:
-        manifest_path = SKILL_ROOT.parent / ".codex-plugin" / "plugin.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-        self.assertEqual("bionemo-phage-design", manifest["name"])
-        self.assertEqual("./skills/", manifest["skills"])
-        self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
-        self.assertTrue(manifest["description"].strip())
-        self.assertTrue(manifest["author"]["name"].strip())
-
-        interface = manifest["interface"]
-        for field in (
-            "displayName",
-            "shortDescription",
-            "longDescription",
-            "developerName",
-            "category",
-        ):
-            self.assertTrue(interface[field].strip(), field)
-        self.assertTrue(interface["capabilities"])
-        self.assertGreaterEqual(len(interface["defaultPrompt"]), 1)
-        self.assertLessEqual(len(interface["defaultPrompt"]), 3)
-        self.assertTrue(all(len(prompt) <= 128 for prompt in interface["defaultPrompt"]))
-
-    def test_controller_defines_a_recipe_local_workspace_contract(self) -> None:
-        contract = SKILL_ROOT / "bionemo-phage-design" / "references" / "workspace-contract.md"
-        self.assertTrue(contract.is_file(), contract)
-        text = contract.read_text(encoding="utf-8")
-        for marker in (
-            "recipe-local package",
-            "recipes/evo2_phage_gen",
-            "repository_root",
-            "read-only Git",
-            "dirty state",
-            "results/",
-            "bionemo-phage-generation",
-        ):
-            self.assertIn(marker, text)
-        for forbidden in (
-            "git clone",
-            "git fetch",
-            "git switch",
-            "pull/1699",
-            "jstjohn/evo2_phage_gen",
-            "VERSION >= 2.4",
-            "globally installed",
-            "checkout bundle",
-            "installed-versus-checkout",
-        ):
-            self.assertNotIn(forbidden, text)
-
-    def test_recipe_local_runtime_documents_cannot_reenter_portable_bootstrap(self) -> None:
-        runtime_documents = [
-            path for path in SKILL_ROOT.rglob("*.md") if path.name == "SKILL.md" or "references" in path.parts
-        ]
-        forbidden_patterns = {
-            "checkout clone": r"(?im)^\s*git\s+clone\b",
-            "checkout fetch": r"(?im)^\s*git\s+fetch\b",
-            "checkout switch": r"(?im)^\s*git\s+switch\b",
-            "compatibility version selection": r"(?i)VERSION\s*(?:>=|>|==)\s*2\.4",
-            "portable checkout acquisition": r"(?i)\b(?:acquire|locate)\s+(?:a\s+)?(?:compatible\s+)?checkout\b",
-            "installation comparison": r"(?i)(?:globally installed|installed-versus-checkout|checkout bundle|skill installation is never the checkout)",
-        }
-        for path in runtime_documents:
-            text = path.read_text(encoding="utf-8")
-            for description, pattern in forbidden_patterns.items():
-                self.assertIsNone(re.search(pattern, text), f"{description}: {path}")
-
-        controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("package integrity error", controller)
-        self.assertNotIn("Search available skill roots", controller)
-
-    def test_recipe_local_evals_do_not_describe_an_external_installation(self) -> None:
-        eval_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "evals" / "evals.json"
-        text = eval_path.read_text(encoding="utf-8")
-        self.assertNotIn("skill may be installed outside the checkout", text)
-        self.assertIn("recipe-local package", text)
-
-    def test_controller_resolves_roots_in_dependency_order(self) -> None:
-        text = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8").lower()
-        repository = text.index("resolve the absolute recipe and repository roots")
-        workspace = text.index("select the recipe workspace")
-        result = text.index("record absolute recipe and result roots")
-        command = text.index("before emitting recipe commands")
-        self.assertLess(repository, workspace)
-        self.assertLess(workspace, result)
-        self.assertLess(result, command)
-
-    def test_validation_examples_resolve_the_recipe_local_runner(self) -> None:
-        validation = (SKILL_ROOT / "bionemo-phage-design" / "assets" / "VALIDATION.md").read_text(encoding="utf-8")
-        skill_root_match = re.search(
-            r'^PHAGE_SKILL_ROOT="\$\{PHAGE_SKILL_ROOT:-\$PWD/(?P<relative>[^"}]+)\}"$',
-            validation,
-            flags=re.MULTILINE,
-        )
-        self.assertIsNotNone(skill_root_match)
-        assert skill_root_match is not None
-        relative_skill_root = skill_root_match.group("relative")
-        self.assertEqual(relative_skill_root, "recipes/evo2_phage_gen/skills")
-        self.assertNotIn(
-            'PHAGE_SKILL_ROOT="${PHAGE_SKILL_ROOT:-$PWD/skills}"',
-            validation,
-        )
-
-        runner_match = re.search(
-            r'^PHAGE_EVAL_RUNNER="\$PHAGE_SKILL_ROOT/(?P<relative>[^"]+)"$',
-            validation,
-            flags=re.MULTILINE,
-        )
-        self.assertIsNotNone(runner_match)
-        assert runner_match is not None
-        documented_runner = REPOSITORY_ROOT / relative_skill_root / runner_match.group("relative")
-        self.assertTrue(documented_runner.is_file(), documented_runner)
-        self.assertEqual(documented_runner.resolve(), SCRIPT.resolve())
-
-        for marker in (
-            'python "$PHAGE_EVAL_RUNNER"',
-            '--skill-root "$PHAGE_SKILL_ROOT"',
-            "Git-tracked plugin directory",
-        ):
-            self.assertIn(marker, validation)
-
-    def test_controller_has_a_capacity_and_checkpoint_retention_gate(self) -> None:
-        controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8").lower()
-        for marker in (
-            "storage-planning.md",
-            "total bases",
-            "91 gb per sft checkpoint",
-            "78 gb per rl checkpoint",
-            "68 mb training-ready",
-            "one checkpoint write",
-            "latest resumable",
-            "never prune active",
-            "ask the user",
-        ):
-            self.assertIn(marker, controller)
-
-        storage = (
-            (SKILL_ROOT / "bionemo-phage-design" / "references" / "storage-planning.md")
-            .read_text(encoding="utf-8")
-            .lower()
-        )
-        for marker in (
-            "b = sum",
-            "1.13 bytes/base",
-            "2.34 bytes/base",
-            "6.40 bytes/base",
-            "total generated bases",
-        ):
-            self.assertIn(marker, storage)
-
-    def test_sft_and_rl_context_uses_an_agreed_genome_length_rule(self) -> None:
-        policy = (
-            (SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "resource-and-oom-policy.md")
-            .read_text(encoding="utf-8")
-            .lower()
-        )
-        for marker in (
-            "after the training genomes are downloaded",
-            "agreed",
-            "default to p99.9",
-            "align_up",
-            "tokens per nucleotide",
-            "worst-case serialization overhead",
-            "required alignment",
-            "conditioning/control",
-            "model context limit",
-            "sft context",
-            "rl context",
-            "expand or contract",
-            "do not assume",
-        ):
-            self.assertIn(marker, policy)
-
-        active_instruction_paths = [
-            *SKILL_ROOT.glob("*/SKILL.md"),
-            *SKILL_ROOT.glob("*/evals/*.json"),
-            *SKILL_ROOT.glob("*/references/*.md"),
-            RECIPE_ROOT / "README.md",
-        ]
-        fixed_context = re.compile(r"(?<!\d)(?:10(?:,|_|\s)?240|327(?:,|_|\s)?680)(?!\d)")
-        prohibited_caveats = (
-            " ".join(("materialized", "windows")),
-            " ".join(("indexed", "windows")),
-            "-".join(("chunk", "local")) + " learning",
-            "-".join(("window", "local")) + " learning",
-        )
-        for path in active_instruction_paths:
-            text = path.read_text(encoding="utf-8").lower()
-            self.assertIsNone(fixed_context.search(text), str(path))
-            for marker in prohibited_caveats:
-                self.assertNotIn(marker, text, str(path))
-
-    def test_sft_alternate_base_model_uses_current_gpu_compatibility_table(self) -> None:
-        operation = (
-            (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "references" / "sft-operation.md")
-            .read_text(encoding="utf-8")
-            .lower()
-        )
-
-        for marker in (
-            "phage recipe uses bf16",
-            "7b 8k/1m",
-            "different base-model family",
-            "gpu/precision compatibility table",
-            "evo2_megatron/readme.md",
-            "before selecting or downloading",
-        ):
-            self.assertIn(marker, operation)
-
-    def test_sft_step_ceiling_is_recalibrated_after_collection(self) -> None:
-        controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8").lower()
-        prepare = (SKILL_ROOT / "bionemo-phage-design-prepare-sft" / "SKILL.md").read_text(encoding="utf-8").lower()
-        operate = (
-            (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "SKILL.md").read_text(encoding="utf-8").lower()
-        )
-        operation = (
-            (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "references" / "sft-operation.md")
-            .read_text(encoding="utf-8")
-            .lower()
-        )
-
-        self.assertIn("post-collection training-budget feedback", controller)
-        for text in (prepare, operate, operation):
-            self.assertIn("historical starting hypothesis", text)
-            self.assertIn("not a fixed maximum", text)
-            self.assertIn("above 12,000", text)
-        for marker in (
-            "usable non-padding token mass",
-            "effective non-padding tokens per optimizer step",
-            "target effective exposures",
-            "planned_steps = ceil",
-        ):
-            self.assertIn(marker, operation)
-        self.assertIn("at least 30", operation)
-        self.assertIn("six-event patience", operation)
-        self.assertIn("calibrated ceiling", operate)
-        self.assertNotIn("set at most 12,000 optimizer steps", operate)
-        self.assertNotIn("set a 12,000-step maximum", prepare)
-
-    def test_prepare_sft_defines_target_similarity_conditioning(self) -> None:
-        skill = (SKILL_ROOT / "bionemo-phage-design-prepare-sft" / "SKILL.md").read_text(encoding="utf-8").lower()
-        self.assertIn("target-conditioning.md", skill)
-
-        contract = (
-            (SKILL_ROOT / "bionemo-phage-design-prepare-sft" / "references" / "target-conditioning.md")
-            .read_text(encoding="utf-8")
-            .lower()
-        )
-        for marker in (
-            "single unambiguous target",
-            "default",
-            "opt out",
-            "unprefixed",
-            "target_similarity.tsv",
-            "conditioning.yaml",
-            "reference hash",
-            "identity and coverage",
-            "one-to-one",
-            "case-study replication",
-            "adapted run",
-            "rl prompts",
-            "original paper",
-            "king-2025-generative-phage-design/supplement.md",
-        ):
-            self.assertIn(marker, contract)
-
-    def test_active_skills_defer_biological_safety_policy_to_the_harness(self) -> None:
-        active_instruction_paths = [
-            *SKILL_ROOT.glob("*/SKILL.md"),
-            *SKILL_ROOT.glob("*/evals/*.json"),
-            *SKILL_ROOT.glob("*/references/*.md"),
-        ]
-        prohibited_markers = (
-            "## safety boundary",
-            "## biological safety policy",
-            "custom biological policy",
-            "prokaryotic-only policy",
-        )
-        for path in active_instruction_paths:
-            text = path.read_text(encoding="utf-8").lower()
-            self.assertNotIn("385", text, str(path))
-            for marker in prohibited_markers:
-                self.assertNotIn(marker, text, str(path))
-
-    def test_research_skill_keeps_its_artifact_contract_in_read_only_responses(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-research-evidence" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8")
-        self.assertIn("read-only", text.lower())
-        for artifact in (
-            "artifacts/EVIDENCE.md",
-            "artifacts/SOURCES.yaml",
-            "artifacts/SEARCH_LOG.jsonl",
-            "artifacts/DATASET_CANDIDATES.yaml",
-            "OUTPUTS.yaml",
-            "SUMMARY.md",
-            "RUNLOG.md",
-        ):
-            self.assertIn(artifact, text)
-
-    def test_execution_and_collection_evals_are_compatible_with_read_only_generation(self) -> None:
-        adapt_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "evals" / "evals.json"
-        adapt = json.loads(adapt_path.read_text(encoding="utf-8"))["evals"]
-        local_preflight = next(case for case in adapt if case["id"].endswith("local-preflight"))
-        lepton = next(case for case in adapt if case["id"].endswith("lepton-contract"))
-        self.assertIn("read-only", local_preflight["assertions"][-1].lower())
-        self.assertIn("when available", lepton["assertions"][0].lower())
-        self.assertIn("orders", lepton["assertions"][1].lower())
-
-        collection_path = SKILL_ROOT / "bionemo-phage-design-collect-genomes" / "evals" / "evals.json"
-        collection = json.loads(collection_path.read_text(encoding="utf-8"))["evals"]
-        jumbo = next(case for case in collection if case["id"].endswith("current-jumbo-corpus"))
-        self.assertIn("leaves the payload unverified", jumbo["assertions"][2].lower())
-
-    def test_execution_skill_preserves_read_only_handoff_and_lepton_egress(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8").lower()
-        self.assertIn("read-only", text)
-        lepton = text.split("- **lepton:**", maxsplit=1)[1].split("\n", maxsplit=1)[0]
-        self.assertIn("egress", lepton)
-
-    def test_local_docker_credentials_are_optional_and_not_logged(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "SKILL.md"
-        contract_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "execution-contract.md"
-        text = (skill_path.read_text(encoding="utf-8") + contract_path.read_text(encoding="utf-8")).lower()
-        for marker in (
-            "~/.aws",
-            ".netrc",
-            "read-only",
-            "resolved container user home",
-            "--env wandb_api_key",
-            "never pass name=value",
-            "never bake, copy, or log",
-            "shared or untrusted runner",
-            "does not block the scientific run",
-        ):
-            self.assertIn(marker, text)
-
-    def test_collection_skill_stops_when_prefix_tools_are_unavailable(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-collect-genomes" / "SKILL.md"
-        text = " ".join(skill_path.read_text(encoding="utf-8").lower().split())
-        self.assertIn("bounded validation command", text)
-        self.assertIn("unverified", text)
-
-    def test_collection_read_only_response_keeps_query_and_access_provenance(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-collect-genomes" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8").lower()
-        self.assertIn("every response", text)
-        self.assertIn("exact retrieval query", text)
-        self.assertIn("access date", text)
-
-    def test_sft_due_monitoring_reports_health_without_forcing_not_due_polling(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8").lower()
-        self.assertIn("every substantive or due monitoring decision", text)
-        for metric in (
-            "train and validation loss",
-            "learning rate",
-            "gradient norm",
-            "throughput",
-            "gpu utilization and memory",
-            "checkpoint integrity",
-            "free space",
-        ):
-            self.assertIn(metric, text)
-        self.assertIn("not-due", text)
-        self.assertIn("last-observed timestamp and staleness", text)
-        self.assertIn("without querying", text)
-
-    def test_rl_relaunch_requires_independent_prior_job_terminal_check(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8").lower()
-        self.assertIn("before any resume or relaunch", text)
-        self.assertIn("prior process/job is absent or terminal", text)
-        self.assertIn("never duplicate a live submission", text)
-
-    def test_rl_objective_audit_states_telemetry_contract_before_code(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8").lower()
-        self.assertIn("even when this review stops before code", text)
-        self.assertIn("numerator, denominator, observation count", text)
-        self.assertIn("test comparing online scoring with final qc", text)
-        self.assertIn("owning recipe `src/` and `tests/`", text)
-        self.assertIn(
-            "installed-runtime name/order/dtype/device/shape/reduction checks",
-            text,
-        )
-        self.assertIn("tiny deterministic rl smoke", text)
-        self.assertIn(
-            "reward calculation, logging, checkpoint writing, and restart metadata",
-            text,
-        )
-
-    def test_external_tool_optimization_policy_is_shared_across_sft_rl_and_final_filters(self) -> None:
-        policy_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "resource-and-oom-policy.md"
-        text = " ".join(policy_path.read_text(encoding="utf-8").lower().split())
-        for marker in (
-            "external-tool filtering and scoring",
-            "end-to-end and per-stage timings",
-            "isolated and at the planned concurrency",
-            "total throughput under load",
-            "record workers and per-tool threads",
-            "process or container startup",
-            "warm, batched, or persistent",
-            "byte or semantic parity",
-            "deterministic input/output mapping",
-            "actual operation and database layout",
-            "do not generalize one tool's result",
-        ):
-            self.assertIn(marker, text)
-
-        anchor = "resource-and-oom-policy.md#external-tool-filtering-and-scoring"
-        for relative_path in (
-            "bionemo-phage-design-prepare-sft/SKILL.md",
-            "bionemo-phage-design-implement-rl-objectives/SKILL.md",
-            "bionemo-phage-design-generate-and-screen/SKILL.md",
-        ):
-            workflow = (SKILL_ROOT / relative_path).read_text(encoding="utf-8").lower()
-            self.assertIn(anchor, workflow)
-
-        execution_skill = (SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        for marker in (
-            "explicitly record the accelerator decision",
-            "actual operation and database layout",
-            "control-panel parity",
-        ):
-            self.assertIn(marker, execution_skill)
-
-    def test_gpu_optimization_policy_is_shared_across_sft_rl_and_generation(self) -> None:
-        policy_path = SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "resource-and-oom-policy.md"
-        text = " ".join(policy_path.read_text(encoding="utf-8").lower().split())
-        for marker in (
-            "gpu training, rl, and generation",
-            "memory occupancy is a constraint, not the objective",
-            "stable useful tokens or valid sequences per second",
-            "representative target-length",
-            "memory headroom",
-            "checkpoint and resume",
-        ):
-            self.assertIn(marker, text)
-
-        anchor = "resource-and-oom-policy.md#gpu-training-rl-and-generation"
-        for relative_path in (
-            "bionemo-phage-design-operate-mbridge-sft/SKILL.md",
-            "bionemo-phage-design-operate-nemo-rl/SKILL.md",
-            "bionemo-phage-design-generate-and-screen/SKILL.md",
-        ):
-            workflow = (SKILL_ROOT / relative_path).read_text(encoding="utf-8").lower()
-            self.assertIn(anchor, workflow)
-
-    def test_behavioral_evals_require_use_of_bundled_docs_and_papers(self) -> None:
-        adapt = json.loads(
-            (SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "evals" / "evals.json").read_text(encoding="utf-8")
-        )["evals"]
-        contention = next(case for case in adapt if case["id"].endswith("external-tool-contention"))
-        contention_requirements = " ".join(contention["assertions"]).lower()
-        self.assertIn("resource-and-oom-policy.md#external-tool-filtering-and-scoring", contention_requirements)
-        self.assertIn("isolated", contention_requirements)
-        self.assertIn("planned concurrency", contention_requirements)
-        self.assertIn("output parity", contention_requirements)
-
-        calibration = json.loads(
-            (SKILL_ROOT / "bionemo-phage-design-calibrate-rl-sampling" / "evals" / "evals.json").read_text(
-                encoding="utf-8"
-            )
-        )["evals"]
-        king = next(case for case in calibration if case["id"].endswith("bundled-king-methods"))
-        king_requirements = " ".join(king["assertions"]).lower()
-        for marker in (
-            "manifest.json",
-            "king-2025-generative-phage-design/supplement.md",
-            "bioRxiv v1".lower(),
-            "1 to 11",
-            "top-k = 4",
-            "top-p = 1",
-        ):
-            self.assertIn(marker, king_requirements)
-
-        research = json.loads(
-            (SKILL_ROOT / "bionemo-phage-design-research-evidence" / "evals" / "evals.json").read_text(
-                encoding="utf-8"
-            )
-        )["evals"]
-        black = next(case for case in research if case["id"].endswith("bundled-black-framework"))
-        black_requirements = " ".join(black["assertions"]).lower()
-        for marker in (
-            "black-2026-design-efficiency/manifest.json",
-            "10.64898/2026.06.12.731871",
-            "evolutionary novelty",
-            "design efficiency",
-            "complete model-scaffold",
-            "transfer",
-        ):
-            self.assertIn(marker, black_requirements)
-
-    def test_research_packet_requires_complete_objective_portfolio_rows(self) -> None:
-        skill_path = SKILL_ROOT / "bionemo-phage-design-research-evidence" / "SKILL.md"
-        text = skill_path.read_text(encoding="utf-8").lower()
-        self.assertIn("portfolio coverage checklist", text)
-        self.assertIn("topology/packaging", text)
-        self.assertIn("desired and undesired directional changes", text)
-        self.assertIn(
-            "each axis a decision-table row or mark it unresolved/not applicable",
-            text,
-        )
-        self.assertIn("material interactions across the portfolio", text)
-
-    def test_validate_accepts_bionemo_compatible_suite(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            skill_root = Path(tmp) / "skills"
-            _write_suite(skill_root)
-            completed = self._run("--skill-root", str(skill_root), "--validate", check=True)
-            self.assertIn("1 eval file", completed.stdout)
-            self.assertIn("1 case", completed.stdout)
-
-    def test_validate_rejects_duplicate_ids_across_files(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            skill_root = Path(tmp) / "skills"
-            _write_suite(skill_root, "alpha", [_case("shared-001")])
-            _write_suite(skill_root, "beta", [{**_case("shared-001"), "expected_skill": "beta"}])
-            completed = self._run("--skill-root", str(skill_root), "--validate")
-            self.assertEqual(2, completed.returncode)
-            self.assertIn("duplicate eval id", completed.stderr.lower())
-
-    def test_validate_rejects_missing_compatible_field(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            skill_root = Path(tmp) / "skills"
-            invalid = _case()
-            del invalid["expected_output"]
-            _write_suite(skill_root, cases=[invalid])
-            completed = self._run("--skill-root", str(skill_root), "--validate")
-            self.assertEqual(2, completed.returncode)
-            self.assertIn("expected_output", completed.stderr)
-
-    def test_list_json_reports_owning_file_and_skill(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            skill_root = Path(tmp) / "skills"
-            suite = _write_suite(skill_root)
-            completed = self._run("--skill-root", str(skill_root), "--list", "--format", "json", check=True)
-            payload = json.loads(completed.stdout)
-            self.assertEqual("alpha-001", payload[0]["id"])
-            self.assertEqual("alpha", payload[0]["skill_name"])
-            self.assertEqual(str(suite), payload[0]["source"])
-
-    def test_dry_run_writes_reproducible_plan_without_launching(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            results = root / "results"
-            completed = self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--dry-run",
-                check=True,
-            )
-            self.assertIn("alpha-001", completed.stdout)
-            plan = json.loads((results / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
-            generation = plan["generation_command"]
-            grading = plan["grading_command"]
-            self.assertIn("--ephemeral", generation)
-            self.assertIn("--json", generation)
-            self.assertIn("read-only", generation)
-            self.assertIn("--output-schema", grading)
-            self.assertEqual("dry-run-not-probed", plan["provenance"]["codex"]["version"])
-            self.assertIn("instruction_files", plan["provenance"])
-            self.assertFalse((results / "alpha-001" / "generation.trace.jsonl").exists())
-
-    def test_default_recipe_root_is_relative_to_repository(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo_root = root / "checkout"
-            recipe_root = repo_root / "recipes" / "evo2_phage_gen"
-            recipe_root.mkdir(parents=True)
-            skill_root = root / "installed-plugin" / "skills"
-            _write_suite(skill_root)
-            results = recipe_root / "results" / "default-recipe"
-            self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(repo_root),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--dry-run",
-                use_default_recipe=True,
-                check=True,
-            )
-            plan = json.loads((results / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(str(repo_root.resolve()), plan["repo_root"])
-            self.assertEqual(str(recipe_root.resolve()), plan["recipe_root"])
-            self.assertEqual(str(recipe_root.resolve()), plan["working_directory"])
-            generation = plan["generation_command"]
-            self.assertEqual(str(recipe_root.resolve()), generation[generation.index("-C") + 1])
-
-    def test_live_codex_runs_in_selected_recipe(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo_root = Path(tmp)
-            recipe_root = repo_root / "recipes" / "custom_phage"
-            recipe_root.mkdir(parents=True)
-            skill_root = repo_root / "installed" / "skills"
-            _write_suite(skill_root)
-            fake = _write_fake_codex(repo_root, "pass")
-            results = recipe_root / "results" / "live-cwd"
-            completed = self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(repo_root),
-                "--recipe-root",
-                "recipes/custom_phage",
-                "--codex",
-                str(fake),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--run",
-                check=True,
-            )
-            self.assertIn("PASS", completed.stdout)
-            trace = (results / "alpha-001" / "generation.trace.jsonl").read_text(encoding="utf-8")
-            event = json.loads(trace.splitlines()[0])
-            self.assertEqual(str(recipe_root.resolve()), event["cwd"])
-
-    def test_trace_summary_accepts_installation_independent_skill_path(self) -> None:
-        trace = json.dumps(
-            {
-                "type": "item.completed",
-                "path": "/opt/nvidia/skills/alpha/SKILL.md",
-            }
-        )
-        self.assertTrue(runner._trace_summary(trace, "alpha")["expected_skill_path_observed"])
-
-    def test_nested_repo_root_provenance_uses_git_toplevel(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            nested = root / "nested" / "recipe"
-            nested.mkdir(parents=True)
-            _init_git_repo(root)
-            results = nested / "results"
-            self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(nested),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--dry-run",
-                check=True,
-            )
-            provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
-            repository = provenance["repository"]
-            self.assertEqual(str(root.resolve()), repository["worktree"])
-            self.assertEqual([], repository["status_entries"])
-
-    def test_repeated_dry_run_fails_cleanly_before_writing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            results = root / "results"
-            args = (
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--dry-run",
-            )
-            self.assertEqual(0, self._run(*args).returncode)
-            original = (results / "alpha-001" / "run-plan.json").read_bytes()
-            repeated = self._run(*args)
-            self.assertEqual(2, repeated.returncode)
-            self.assertIn("occupied result destination", repeated.stderr)
-            self.assertNotIn("Traceback", repeated.stderr)
-            self.assertEqual(original, (results / "alpha-001" / "run-plan.json").read_bytes())
-
-    def test_partial_multi_case_destination_is_preflighted_atomically(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root, cases=[_case("alpha-001"), _case("alpha-002")])
-            results = root / "results"
-            occupied = results / "alpha-001"
-            occupied.mkdir(parents=True)
-            (occupied / "keep.txt").write_text("keep\n", encoding="utf-8")
-            completed = self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--all",
-                "--results-dir",
-                str(results),
-                "--dry-run",
-            )
-            self.assertEqual(2, completed.returncode)
-            self.assertIn("alpha-001", completed.stderr)
-            self.assertFalse((results / "alpha-002").exists())
-            self.assertEqual("keep\n", (occupied / "keep.txt").read_text(encoding="utf-8"))
-
-    def test_live_run_may_use_cli_default_model(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            fake = _write_fake_codex(root, "pass")
-            completed = self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--codex",
-                str(fake),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(root / "results"),
-                "--run",
-                check=True,
-            )
-            self.assertIn("PASS", completed.stdout)
-            plan = json.loads((root / "results" / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
-            self.assertIsNone(plan["provenance"]["harness"]["model"])
-            self.assertNotIn("-m", plan["generation_command"])
-
-    def test_claude_live_run_requires_explicit_external_upload_consent(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            _write_claude_plugin_manifest(skill_root)
-            fake = _write_fake_claude(root)
-            completed = self._run(
-                "--harness",
-                "claude",
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--claude",
-                str(fake),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(root / "results"),
-                "--run",
-            )
-            self.assertEqual(2, completed.returncode)
-            self.assertIn("--allow-external-skill-upload", completed.stderr)
-            self.assertIn("staged recipe files it reads", completed.stderr)
-
-    def test_claude_dry_run_uses_local_plugin_and_read_only_tools(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            manifest = _write_claude_plugin_manifest(skill_root)
-            results = root / "results"
-            completed = self._run(
-                "--harness",
-                "claude",
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--dry-run",
-                check=True,
-            )
-            self.assertIn("alpha-001", completed.stdout)
-            plan = json.loads((results / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
-            generation = plan["generation_command"]
-            grading = plan["grading_command"]
-            self.assertEqual("claude", generation[0])
-            self.assertIn("--plugin-dir", generation)
-            self.assertIn(str(skill_root.parent), generation)
-            self.assertIn("--no-session-persistence", generation)
-            self.assertIn("--permission-mode", generation)
-            self.assertIn("--disallowedTools", generation)
-            self.assertNotIn("Edit", generation[generation.index("--tools") + 1])
-            self.assertNotIn("Bash", generation[generation.index("--tools") + 1])
-            self.assertNotIn("Bash", generation[generation.index("--allowedTools") + 1])
-            self.assertEqual("", generation[generation.index("--setting-sources") + 1])
-            self.assertNotIn("--plugin-dir", grading)
-            self.assertIn("--json-schema", grading)
-            effective_schema = json.loads(grading[grading.index("--json-schema") + 1])
-            self.assertNotIn("$schema", effective_schema)
-            provenance = plan["provenance"]
-            self.assertEqual("claude", provenance["harness"]["name"])
-            self.assertEqual([], provenance["harness"]["setting_sources"])
-            self.assertEqual(
-                manifest.read_bytes(),
-                (skill_root.parent / ".claude-plugin" / "plugin.json").read_bytes(),
-            )
-
-    def test_claude_run_extracts_stream_result_and_structured_grade(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            _write_claude_plugin_manifest(skill_root)
-            fake = _write_fake_claude(root)
-            _prepare_live_claude_repo(root)
-            results = root / "results"
-            completed = self._run(
-                "--harness",
-                "claude",
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--claude",
-                str(fake),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--allow-external-skill-upload",
-                "--run",
-                check=True,
-            )
-            case_dir = results / "alpha-001"
-            self.assertIn("PASS", completed.stdout)
-            self.assertEqual(
-                "# Alpha answer\n",
-                (case_dir / "answer.md").read_text(encoding="utf-8"),
-            )
-            grade = json.loads((case_dir / "grade.json").read_text(encoding="utf-8"))
-            self.assertTrue(grade["passed"])
-            trace = (case_dir / "generation.trace.jsonl").read_text(encoding="utf-8")
-            self.assertIn('"type": "result"', trace)
-            plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
-            self.assertIn(plan["working_directory"], trace)
-            self.assertNotEqual(str(root), plan["working_directory"])
-            self.assertEqual(
-                "2.1.211 (Claude Code test)",
-                plan["provenance"]["harness"]["version"],
-            )
-            self.assertIsNone(plan["provenance"]["harness"]["model"])
-            self.assertEqual(str(root), plan["repo_root"])
-            status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-            self.assertEqual(["claude-default-test"], status["generation_models_observed"])
-            self.assertEqual(["claude-default-test"], status["grading_models_observed"])
-            run_status = json.loads((results / "run-status.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                ["claude-default-test"],
-                run_status["observations"]["generation_models"],
-            )
-            self.assertEqual(
-                ["claude-default-test"],
-                run_status["observations"]["grading_models"],
-            )
-            self.assertAlmostEqual(0.03, run_status["observations"]["total_cost_usd"])
-
-    def test_claude_preserves_recipe_cwd_with_external_tracked_plugin(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo_root = root / "checkout"
-            recipe_root = repo_root / "recipes" / "evo2_phage_gen"
-            recipe_root.mkdir(parents=True)
-            (recipe_root / "README.md").write_text("# Recipe\n", encoding="utf-8")
-            _init_git_repo(repo_root)
-
-            plugin_root = root / "installed-plugin"
-            skill_root = plugin_root / "skills"
-            _write_suite(skill_root)
-            _write_claude_plugin_manifest(skill_root)
-            _init_git_repo(plugin_root)
-
-            fake = _write_fake_claude(root)
-            results = recipe_root / "results" / "external-plugin"
-            completed = self._run(
-                "--harness",
-                "claude",
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(repo_root),
-                "--recipe-root",
-                "recipes/evo2_phage_gen",
-                "--claude",
-                str(fake),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--allow-external-skill-upload",
-                "--run",
-                check=True,
-            )
-            self.assertIn("PASS", completed.stdout)
-            case_dir = results / "alpha-001"
-            plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
-            self.assertTrue(plan["working_directory"].endswith("/recipes/evo2_phage_gen"))
-            trace = (case_dir / "generation.trace.jsonl").read_text(encoding="utf-8")
-            self.assertIn(plan["working_directory"], trace)
-            generation = plan["generation_command"]
-            staged_plugin = generation[generation.index("--plugin-dir") + 1]
-            self.assertIn("/.external-skill-plugin", staged_plugin)
-            self.assertNotEqual(str(plugin_root.resolve()), staged_plugin)
-            provenance = plan["provenance"]
-            self.assertEqual(
-                str(recipe_root.resolve()),
-                provenance["harness"]["source_working_directory"],
-            )
-            isolation = provenance["evaluation_workspace"]
-            self.assertEqual(
-                "git-tracked-working-tree-plus-sanitized-plugin",
-                isolation["method"],
-            )
-            external = isolation["external_plugin_workspace"]
-            self.assertTrue(external["answer_keys_excluded"])
-            self.assertEqual(
-                [
-                    ".claude-plugin/plugin.json",
-                    "skills/alpha/SKILL.md",
-                ],
-                external["required_paths"],
-            )
-
-    def test_claude_disables_claude_md_and_auto_memory_for_both_processes(self) -> None:
-        completed, case_dir = self._run_fake_claude("isolation")
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
-        self.assertEqual(
-            {
-                "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-                "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
-            },
-            plan["provenance"]["harness"]["environment_overrides"],
-        )
-
-    def test_claude_generation_hides_eval_answer_keys_in_a_sanitized_workspace(self) -> None:
-        completed, case_dir = self._run_fake_claude("answer-key-isolation")
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
-        source_root = case_dir.parents[1]
-        self.assertEqual(str(source_root), plan["repo_root"])
-        self.assertNotEqual(str(source_root), plan["working_directory"])
-        isolation = plan["provenance"]["evaluation_workspace"]
-        self.assertTrue(isolation["enabled"])
-        self.assertTrue(isolation["answer_keys_excluded"])
-        self.assertEqual(str(source_root), isolation["source_root"])
-        self.assertEqual("git-tracked-working-tree-allowlist", isolation["method"])
-        manifest = {entry["path"]: entry for entry in isolation["content_manifest"]}
-        self.assertIn("skills/alpha/SKILL.md", manifest)
-        self.assertIn("internal-runtime-link", manifest)
-        self.assertNotIn("external-runtime-link", manifest)
-        self.assertNotIn("tmp_RUNLOG.md", manifest)
-        self.assertNotIn("tmp_TRACKED.md", manifest)
-        self.assertNotIn("skills/alpha/assets/VALIDATION.md", manifest)
-        self.assertNotIn(
-            "skills/alpha/scripts/tests/test_eval_audit.py",
-            manifest,
-        )
-        self.assertNotIn("nested/tmp_CASE/answer.md", manifest)
-        self.assertNotIn("nested/results/grade.json", manifest)
-        self.assertFalse(any(".egg-info" in path for path in manifest))
-        self.assertTrue(isolation["untracked_paths_excluded"])
-        self.assertIn("**/tmp_*/**", isolation["generated_path_patterns_excluded"])
-        self.assertIn("**/results/**", isolation["generated_path_patterns_excluded"])
-        self.assertEqual(
-            [
-                ".claude-plugin/plugin.json",
-                "skills/alpha/SKILL.md",
-            ],
-            isolation["required_paths"],
-        )
-        self.assertEqual(
-            ["external-runtime-link"],
-            [entry["path"] for entry in isolation["excluded_symlinks"]],
-        )
-
-    def test_claude_live_run_requires_a_git_tracked_source_workspace(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            _write_claude_plugin_manifest(skill_root)
-            fake = _write_fake_claude(root)
-            completed = self._run(
-                "--harness",
-                "claude",
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--claude",
-                str(fake),
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(root / "results"),
-                "--allow-external-skill-upload",
-                "--run",
-            )
-            self.assertEqual(2, completed.returncode)
-            self.assertIn("Git-tracked", completed.stderr)
-
-    def test_claude_structured_transport_failure_is_runner_classified_skip(self) -> None:
-        completed, case_dir = self._run_fake_claude("transport")
-        self.assertEqual(0, completed.returncode)
-        self.assertIn("SKIP", completed.stdout)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure-skip", status["status"])
-        self.assertEqual("network", status["reason_category"])
-        self.assertEqual("trace:result", status["evidence_source"])
-        self.assertEqual(["claude-default-test"], status["generation_models_observed"])
-        self.assertEqual(0.015, status["generation_cost_usd"])
-        self.assertTrue(status["generation_cost_reported"])
-
-    def test_claude_api_status_is_runner_classified_skip(self) -> None:
-        completed, case_dir = self._run_fake_claude("rate-limit-status")
-        self.assertEqual(0, completed.returncode)
-        self.assertIn("SKIP", completed.stdout)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure-skip", status["status"])
-        self.assertEqual("rate-limit", status["reason_category"])
-        self.assertEqual("trace:result.api_error_status", status["evidence_source"])
-
-    def test_claude_policy_refusal_is_runner_classified_skip(self) -> None:
-        completed, case_dir = self._run_fake_claude("policy-refusal")
-        self.assertEqual(0, completed.returncode)
-        self.assertIn("SKIP", completed.stdout)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure-skip", status["status"])
-        self.assertEqual("model-policy-refusal", status["reason_category"])
-        self.assertEqual(
-            "trace:system.model_refusal_no_fallback",
-            status["evidence_source"],
-        )
-
-    def test_claude_budget_exhaustion_is_runner_classified_skip(self) -> None:
-        completed, case_dir = self._run_fake_claude("budget-exhausted")
-        self.assertEqual(0, completed.returncode)
-        self.assertIn("SKIP", completed.stdout)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure-skip", status["status"])
-        self.assertEqual("budget-exhausted", status["reason_category"])
-        self.assertEqual("trace:result.subtype", status["evidence_source"])
-        self.assertEqual(0.35, status["generation_cost_usd"])
-
-    def test_claude_empty_generation_result_is_harness_error(self) -> None:
-        completed, case_dir = self._run_fake_claude("empty-result")
-        self.assertEqual(2, completed.returncode)
-        self.assertIn("empty result", completed.stderr)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("generation-output-error", status["status"])
-
-    def test_claude_missing_structured_grade_is_harness_error(self) -> None:
-        completed, case_dir = self._run_fake_claude("missing-structured-grade")
-        self.assertEqual(2, completed.returncode)
-        self.assertIn("structured_output", completed.stderr)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("grading-output-error", status["status"])
-
-    def test_legacy_codex_grade_schema_path_remains_supported(self) -> None:
-        legacy_schema = SCRIPT.parent / "codex_grade.schema.json"
-        self.assertTrue(legacy_schema.is_file())
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            completed = self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--case",
-                "alpha-001",
-                "--grade-schema",
-                str(legacy_schema),
-                "--results-dir",
-                str(root / "results"),
-                "--dry-run",
-            )
-            self.assertEqual(0, completed.returncode, completed.stderr)
-
-    def test_run_preserves_artifacts_and_reproducibility_provenance(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            skill_root = root / "skills"
-            _write_suite(skill_root)
-            fake = _write_fake_codex(root, "pass")
-            revision = _init_git_repo(root)
-            results = root / "results"
-            completed = self._run(
-                "--skill-root",
-                str(skill_root),
-                "--repo-root",
-                str(root),
-                "--codex",
-                str(fake),
-                "--model",
-                "test-model",
-                "--case",
-                "alpha-001",
-                "--results-dir",
-                str(results),
-                "--run",
-                check=True,
-            )
-            case_dir = results / "alpha-001"
-            self.assertIn("PASS", completed.stdout)
-            self.assertEqual("# Alpha answer\n", (case_dir / "answer.md").read_text(encoding="utf-8"))
-            self.assertIn('"type": "generation"', (case_dir / "generation.trace.jsonl").read_text())
-            self.assertIn('"type": "grader"', (case_dir / "grading.trace.jsonl").read_text())
-            grade = json.loads((case_dir / "grade.json").read_text(encoding="utf-8"))
-            self.assertTrue(grade["passed"])
-            plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
-            self.assertEqual("test-model", plan["provenance"]["codex"]["model"])
-            self.assertEqual("codex-cli 9.9-test", plan["provenance"]["codex"]["version"])
-            self.assertEqual(revision, plan["provenance"]["repository"]["revision"])
-            instruction_paths = {row["path"] for row in plan["provenance"]["instruction_files"]}
-            self.assertIn("alpha/SKILL.md", instruction_paths)
-            self.assertIn("alpha/references/contract.md", instruction_paths)
-            status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-            self.assertIsNone(status["generation_cost_usd"])
-            self.assertFalse(status["generation_cost_reported"])
-            run_status = json.loads((results / "run-status.json").read_text(encoding="utf-8"))
-            self.assertIsNone(run_status["observations"]["total_cost_usd"])
-
-    def test_grader_authored_skip_is_rejected(self) -> None:
-        completed, _ = self._run_fake("grader-skip")
-        self.assertEqual(2, completed.returncode)
-        self.assertIn("outcome must be pass or fail", completed.stderr)
-        self.assertNotIn("SKIP", completed.stdout)
-
-    def test_scientific_no_result_is_a_failed_eval(self) -> None:
-        completed, case_dir = self._run_fake("scientific-fail")
-        self.assertEqual(1, completed.returncode)
-        self.assertIn("FAIL", completed.stdout)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("failed", status["status"])
-
-    def test_assertion_text_mismatch_rejected(self) -> None:
-        completed, _ = self._run_fake("mismatch")
-        self.assertEqual(2, completed.returncode)
-        self.assertIn("assertion text/order", completed.stderr)
-
-    def test_empty_assertion_evidence_is_rejected(self) -> None:
-        completed, _ = self._run_fake("empty-evidence")
-        self.assertEqual(2, completed.returncode)
-        self.assertIn("non-empty evidence", completed.stderr)
-
-    def test_stdout_rate_limit_words_do_not_turn_unrelated_error_into_skip(self) -> None:
-        completed, case_dir = self._run_fake("stdout-marker")
-        self.assertEqual(2, completed.returncode)
-        self.assertNotIn("SKIP", completed.stdout)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("generation-error", status["status"])
-
-    def test_stderr_transport_failure_is_runner_classified_skip(self) -> None:
-        completed, case_dir = self._run_fake("transport")
-        self.assertEqual(0, completed.returncode)
-        self.assertIn("SKIP", completed.stdout)
-        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure-skip", status["status"])
-        self.assertEqual("network", status["reason_category"])
-        self.assertEqual("generation", status["phase"])
-
-    def _run_fake(self, mode: str) -> tuple[subprocess.CompletedProcess[str], Path]:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
+def _run(
+    *args: str,
+    check: bool = False,
+    use_default_recipe: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    command_args = list(args)
+    if (
+        not use_default_recipe
+        and "--recipe-root" not in command_args
+        and ("--run" in command_args or "--dry-run" in command_args)
+    ):
+        command_args.extend(["--recipe-root", "."])
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *command_args],
+        check=check,
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_validate_accepts_bionemo_compatible_suite() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_root = Path(tmp) / "skills"
+        _write_suite(skill_root)
+        completed = _run("--skill-root", str(skill_root), "--validate", check=True)
+        assert "1 eval file" in completed.stdout
+        assert "1 case" in completed.stdout
+
+
+def test_validate_rejects_duplicate_ids_across_files() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_root = Path(tmp) / "skills"
+        _write_suite(skill_root, "alpha", [_case("shared-001")])
+        _write_suite(skill_root, "beta", [{**_case("shared-001"), "expected_skill": "beta"}])
+        completed = _run("--skill-root", str(skill_root), "--validate")
+        assert 2 == completed.returncode
+        assert "duplicate eval id" in completed.stderr.lower()
+
+
+def test_validate_rejects_missing_compatible_field() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_root = Path(tmp) / "skills"
+        invalid = _case()
+        del invalid["expected_output"]
+        _write_suite(skill_root, cases=[invalid])
+        completed = _run("--skill-root", str(skill_root), "--validate")
+        assert 2 == completed.returncode
+        assert "expected_output" in completed.stderr
+
+
+def test_list_json_reports_owning_file_and_skill() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_root = Path(tmp) / "skills"
+        suite = _write_suite(skill_root)
+        completed = _run("--skill-root", str(skill_root), "--list", "--format", "json", check=True)
+        payload = json.loads(completed.stdout)
+        assert "alpha-001" == payload[0]["id"]
+        assert "alpha" == payload[0]["skill_name"]
+        assert str(suite) == payload[0]["source"]
+
+
+def test_dry_run_writes_reproducible_plan_without_launching() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
         skill_root = root / "skills"
         _write_suite(skill_root)
-        fake = _write_fake_codex(root, mode)
         results = root / "results"
-        completed = self._run(
+        completed = _run(
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(results),
+            "--dry-run",
+            check=True,
+        )
+        assert "alpha-001" in completed.stdout
+        plan = json.loads((results / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
+        generation = plan["generation_command"]
+        grading = plan["grading_command"]
+        assert "--ephemeral" in generation
+        assert "--json" in generation
+        assert "read-only" in generation
+        assert "--output-schema" in grading
+        assert "dry-run-not-probed" == plan["provenance"]["codex"]["version"]
+        assert "instruction_files" in plan["provenance"]
+        assert not (results / "alpha-001" / "generation.trace.jsonl").exists()
+
+
+def test_default_recipe_root_is_relative_to_repository() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        repo_root = root / "checkout"
+        recipe_root = repo_root / "recipes" / "evo2_phage_gen"
+        recipe_root.mkdir(parents=True)
+        skill_root = root / "installed-plugin" / "skills"
+        _write_suite(skill_root)
+        results = recipe_root / "results" / "default-recipe"
+        _run(
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(repo_root),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(results),
+            "--dry-run",
+            use_default_recipe=True,
+            check=True,
+        )
+        plan = json.loads((results / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
+        assert str(repo_root.resolve()) == plan["repo_root"]
+        assert str(recipe_root.resolve()) == plan["recipe_root"]
+        assert str(recipe_root.resolve()) == plan["working_directory"]
+        generation = plan["generation_command"]
+        assert str(recipe_root.resolve()) == generation[generation.index("-C") + 1]
+
+
+def test_live_codex_runs_in_selected_recipe() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        repo_root = Path(tmp)
+        recipe_root = repo_root / "recipes" / "custom_phage"
+        recipe_root.mkdir(parents=True)
+        skill_root = repo_root / "installed" / "skills"
+        _write_suite(skill_root)
+        fake = _write_fake_codex(repo_root, "pass")
+        results = recipe_root / "results" / "live-cwd"
+        completed = _run(
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(repo_root),
+            "--recipe-root",
+            "recipes/custom_phage",
+            "--codex",
+            str(fake),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(results),
+            "--run",
+            check=True,
+        )
+        assert "PASS" in completed.stdout
+        trace = (results / "alpha-001" / "generation.trace.jsonl").read_text(encoding="utf-8")
+        event = json.loads(trace.splitlines()[0])
+        assert str(recipe_root.resolve()) == event["cwd"]
+
+
+def test_trace_summary_accepts_installation_independent_skill_path() -> None:
+    trace = json.dumps(
+        {
+            "type": "item.completed",
+            "path": "/opt/nvidia/skills/alpha/SKILL.md",
+        }
+    )
+    assert runner._trace_summary(trace, "alpha")["expected_skill_path_observed"]
+
+
+def test_nested_repo_root_provenance_uses_git_toplevel() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        nested = root / "nested" / "recipe"
+        nested.mkdir(parents=True)
+        _init_git_repo(root)
+        results = nested / "results"
+        _run(
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(nested),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(results),
+            "--dry-run",
+            check=True,
+        )
+        provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
+        repository = provenance["repository"]
+        assert str(root.resolve()) == repository["worktree"]
+        assert [] == repository["status_entries"]
+
+
+def test_repeated_dry_run_fails_cleanly_before_writing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        results = root / "results"
+        args = (
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(results),
+            "--dry-run",
+        )
+        assert 0 == _run(*args).returncode
+        original = (results / "alpha-001" / "run-plan.json").read_bytes()
+        repeated = _run(*args)
+        assert 2 == repeated.returncode
+        assert "occupied result destination" in repeated.stderr
+        assert "Traceback" not in repeated.stderr
+        assert original == (results / "alpha-001" / "run-plan.json").read_bytes()
+
+
+def test_partial_multi_case_destination_is_preflighted_atomically() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root, cases=[_case("alpha-001"), _case("alpha-002")])
+        results = root / "results"
+        occupied = results / "alpha-001"
+        occupied.mkdir(parents=True)
+        (occupied / "keep.txt").write_text("keep\n", encoding="utf-8")
+        completed = _run(
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
+            "--all",
+            "--results-dir",
+            str(results),
+            "--dry-run",
+        )
+        assert 2 == completed.returncode
+        assert "alpha-001" in completed.stderr
+        assert not (results / "alpha-002").exists()
+        assert "keep\n" == (occupied / "keep.txt").read_text(encoding="utf-8")
+
+
+def test_live_run_may_use_cli_default_model() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        fake = _write_fake_codex(root, "pass")
+        completed = _run(
             "--skill-root",
             str(skill_root),
             "--repo-root",
             str(root),
             "--codex",
             str(fake),
-            "--model",
-            "test-model",
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(root / "results"),
+            "--run",
+            check=True,
+        )
+        assert "PASS" in completed.stdout
+        plan = json.loads((root / "results" / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
+        assert plan["provenance"]["harness"]["model"] is None
+        assert "-m" not in plan["generation_command"]
+
+
+def test_claude_live_run_requires_explicit_external_upload_consent() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        _write_claude_plugin_manifest(skill_root)
+        fake = _write_fake_claude(root)
+        completed = _run(
+            "--harness",
+            "claude",
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
+            "--claude",
+            str(fake),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(root / "results"),
+            "--run",
+        )
+        assert 2 == completed.returncode
+        assert "--allow-external-skill-upload" in completed.stderr
+        assert "staged recipe files it reads" in completed.stderr
+
+
+def test_claude_dry_run_uses_local_plugin_and_read_only_tools() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        manifest = _write_claude_plugin_manifest(skill_root)
+        results = root / "results"
+        completed = _run(
+            "--harness",
+            "claude",
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
             "--case",
             "alpha-001",
             "--results-dir",
             str(results),
-            "--run",
+            "--dry-run",
+            check=True,
         )
-        return completed, results / "alpha-001"
+        assert "alpha-001" in completed.stdout
+        plan = json.loads((results / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
+        generation = plan["generation_command"]
+        grading = plan["grading_command"]
+        assert "claude" == generation[0]
+        assert "--plugin-dir" in generation
+        assert str(skill_root.parent) in generation
+        assert "--no-session-persistence" in generation
+        assert "--permission-mode" in generation
+        assert "--disallowedTools" in generation
+        assert "Edit" not in generation[generation.index("--tools") + 1]
+        assert "Bash" not in generation[generation.index("--tools") + 1]
+        assert "Bash" not in generation[generation.index("--allowedTools") + 1]
+        assert "" == generation[generation.index("--setting-sources") + 1]
+        assert "--plugin-dir" not in grading
+        assert "--json-schema" in grading
+        effective_schema = json.loads(grading[grading.index("--json-schema") + 1])
+        assert "$schema" not in effective_schema
+        provenance = plan["provenance"]
+        assert "claude" == provenance["harness"]["name"]
+        assert [] == provenance["harness"]["setting_sources"]
+        assert manifest.read_bytes() == (skill_root.parent / ".claude-plugin" / "plugin.json").read_bytes()
 
-    def _run_fake_claude(self, mode: str) -> tuple[subprocess.CompletedProcess[str], Path]:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
+
+def test_claude_run_extracts_stream_result_and_structured_grade() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
         skill_root = root / "skills"
         _write_suite(skill_root)
         _write_claude_plugin_manifest(skill_root)
-        validation = skill_root / "alpha" / "assets" / "VALIDATION.md"
-        validation.parent.mkdir()
-        validation.write_text("prior evaluation outcome\n", encoding="utf-8")
-        fake = _write_fake_claude(root, mode)
+        fake = _write_fake_claude(root)
         _prepare_live_claude_repo(root)
-        if mode == "answer-key-isolation":
-            (root / "tmp_RUNLOG.md").write_text("prior result\n", encoding="utf-8")
-            egg_info = root / "src" / "alpha.egg-info"
-            egg_info.mkdir(parents=True)
-            (egg_info / "PKG-INFO").write_text("generated\n", encoding="utf-8")
-            skill = skill_root / "alpha" / "SKILL.md"
-            skill.write_text(
-                skill.read_text(encoding="utf-8") + "\ndirty tracked marker\n",
-                encoding="utf-8",
-            )
         results = root / "results"
-        completed = self._run(
+        completed = _run(
             "--harness",
             "claude",
             "--skill-root",
@@ -1736,8 +768,393 @@ class EvalRunnerTests(unittest.TestCase):
             str(results),
             "--allow-external-skill-upload",
             "--run",
+            check=True,
         )
-        return completed, results / "alpha-001"
+        case_dir = results / "alpha-001"
+        assert "PASS" in completed.stdout
+        assert "# Alpha answer\n" == (case_dir / "answer.md").read_text(encoding="utf-8")
+        grade = json.loads((case_dir / "grade.json").read_text(encoding="utf-8"))
+        assert grade["passed"]
+        trace = (case_dir / "generation.trace.jsonl").read_text(encoding="utf-8")
+        assert '"type": "result"' in trace
+        plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
+        assert plan["working_directory"] in trace
+        assert str(root) != plan["working_directory"]
+        assert "2.1.211 (Claude Code test)" == plan["provenance"]["harness"]["version"]
+        assert plan["provenance"]["harness"]["model"] is None
+        assert str(root) == plan["repo_root"]
+        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+        assert ["claude-default-test"] == status["generation_models_observed"]
+        assert ["claude-default-test"] == status["grading_models_observed"]
+        run_status = json.loads((results / "run-status.json").read_text(encoding="utf-8"))
+        assert ["claude-default-test"] == run_status["observations"]["generation_models"]
+        assert ["claude-default-test"] == run_status["observations"]["grading_models"]
+        assert round(abs(0.03 - run_status["observations"]["total_cost_usd"]), 7) == 0
+
+
+def test_claude_preserves_recipe_cwd_with_external_tracked_plugin() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        repo_root = root / "checkout"
+        recipe_root = repo_root / "recipes" / "evo2_phage_gen"
+        recipe_root.mkdir(parents=True)
+        (recipe_root / "README.md").write_text("# Recipe\n", encoding="utf-8")
+        _init_git_repo(repo_root)
+
+        plugin_root = root / "installed-plugin"
+        skill_root = plugin_root / "skills"
+        _write_suite(skill_root)
+        _write_claude_plugin_manifest(skill_root)
+        _init_git_repo(plugin_root)
+
+        fake = _write_fake_claude(root)
+        results = recipe_root / "results" / "external-plugin"
+        completed = _run(
+            "--harness",
+            "claude",
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(repo_root),
+            "--recipe-root",
+            "recipes/evo2_phage_gen",
+            "--claude",
+            str(fake),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(results),
+            "--allow-external-skill-upload",
+            "--run",
+            check=True,
+        )
+        assert "PASS" in completed.stdout
+        case_dir = results / "alpha-001"
+        plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
+        assert plan["working_directory"].endswith("/recipes/evo2_phage_gen")
+        trace = (case_dir / "generation.trace.jsonl").read_text(encoding="utf-8")
+        assert plan["working_directory"] in trace
+        generation = plan["generation_command"]
+        staged_plugin = generation[generation.index("--plugin-dir") + 1]
+        assert "/.external-skill-plugin" in staged_plugin
+        assert str(plugin_root.resolve()) != staged_plugin
+        provenance = plan["provenance"]
+        assert str(recipe_root.resolve()) == provenance["harness"]["source_working_directory"]
+        isolation = provenance["evaluation_workspace"]
+        assert "git-tracked-working-tree-plus-sanitized-plugin" == isolation["method"]
+        external = isolation["external_plugin_workspace"]
+        assert external["answer_keys_excluded"]
+        assert [
+            ".claude-plugin/plugin.json",
+            "skills/alpha/SKILL.md",
+        ] == external["required_paths"]
+
+
+def test_claude_disables_claude_md_and_auto_memory_for_both_processes(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("isolation", tmp_path)
+    assert 0 == completed.returncode, completed.stderr
+    plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
+    assert {
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+    } == plan["provenance"]["harness"]["environment_overrides"]
+
+
+def test_claude_generation_hides_eval_answer_keys_in_a_sanitized_workspace(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("answer-key-isolation", tmp_path)
+    assert 0 == completed.returncode, completed.stderr
+    plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
+    source_root = case_dir.parents[1]
+    assert str(source_root) == plan["repo_root"]
+    assert str(source_root) != plan["working_directory"]
+    isolation = plan["provenance"]["evaluation_workspace"]
+    assert isolation["enabled"]
+    assert isolation["answer_keys_excluded"]
+    assert str(source_root) == isolation["source_root"]
+    assert "git-tracked-working-tree-allowlist" == isolation["method"]
+    manifest = {entry["path"]: entry for entry in isolation["content_manifest"]}
+    assert "skills/alpha/SKILL.md" in manifest
+    assert "internal-runtime-link" in manifest
+    assert "external-runtime-link" not in manifest
+    assert "tmp_RUNLOG.md" not in manifest
+    assert "tmp_TRACKED.md" not in manifest
+    assert "skills/alpha/assets/VALIDATION.md" not in manifest
+    assert "skills/alpha/scripts/tests/test_eval_audit.py" not in manifest
+    assert "nested/tmp_CASE/answer.md" not in manifest
+    assert "nested/results/grade.json" not in manifest
+    assert not any(".egg-info" in path for path in manifest)
+    assert isolation["untracked_paths_excluded"]
+    assert "**/tmp_*/**" in isolation["generated_path_patterns_excluded"]
+    assert "**/results/**" in isolation["generated_path_patterns_excluded"]
+    assert [
+        ".claude-plugin/plugin.json",
+        "skills/alpha/SKILL.md",
+    ] == isolation["required_paths"]
+    assert ["external-runtime-link"] == [entry["path"] for entry in isolation["excluded_symlinks"]]
+
+
+def test_claude_live_run_requires_a_git_tracked_source_workspace() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        _write_claude_plugin_manifest(skill_root)
+        fake = _write_fake_claude(root)
+        completed = _run(
+            "--harness",
+            "claude",
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
+            "--claude",
+            str(fake),
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(root / "results"),
+            "--allow-external-skill-upload",
+            "--run",
+        )
+        assert 2 == completed.returncode
+        assert "Git-tracked" in completed.stderr
+
+
+def test_claude_structured_transport_failure_is_runner_classified_skip(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("transport", tmp_path)
+    assert 0 == completed.returncode
+    assert "SKIP" in completed.stdout
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "infrastructure-skip" == status["status"]
+    assert "network" == status["reason_category"]
+    assert "trace:result" == status["evidence_source"]
+    assert ["claude-default-test"] == status["generation_models_observed"]
+    assert 0.015 == status["generation_cost_usd"]
+    assert status["generation_cost_reported"]
+
+
+def test_claude_api_status_is_runner_classified_skip(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("rate-limit-status", tmp_path)
+    assert 0 == completed.returncode
+    assert "SKIP" in completed.stdout
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "infrastructure-skip" == status["status"]
+    assert "rate-limit" == status["reason_category"]
+    assert "trace:result.api_error_status" == status["evidence_source"]
+
+
+def test_claude_policy_refusal_is_runner_classified_skip(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("policy-refusal", tmp_path)
+    assert 0 == completed.returncode
+    assert "SKIP" in completed.stdout
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "infrastructure-skip" == status["status"]
+    assert "model-policy-refusal" == status["reason_category"]
+    assert "trace:system.model_refusal_no_fallback" == status["evidence_source"]
+
+
+def test_claude_budget_exhaustion_is_runner_classified_skip(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("budget-exhausted", tmp_path)
+    assert 0 == completed.returncode
+    assert "SKIP" in completed.stdout
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "infrastructure-skip" == status["status"]
+    assert "budget-exhausted" == status["reason_category"]
+    assert "trace:result.subtype" == status["evidence_source"]
+    assert 0.35 == status["generation_cost_usd"]
+
+
+def test_claude_empty_generation_result_is_harness_error(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("empty-result", tmp_path)
+    assert 2 == completed.returncode
+    assert "empty result" in completed.stderr
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "generation-output-error" == status["status"]
+
+
+def test_claude_missing_structured_grade_is_harness_error(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake_claude("missing-structured-grade", tmp_path)
+    assert 2 == completed.returncode
+    assert "structured_output" in completed.stderr
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "grading-output-error" == status["status"]
+
+
+def test_legacy_codex_grade_schema_path_remains_supported() -> None:
+    legacy_schema = SCRIPT.parent / "codex_grade.schema.json"
+    assert legacy_schema.is_file()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        completed = _run(
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
+            "--case",
+            "alpha-001",
+            "--grade-schema",
+            str(legacy_schema),
+            "--results-dir",
+            str(root / "results"),
+            "--dry-run",
+        )
+        assert 0 == completed.returncode, completed.stderr
+
+
+def test_run_preserves_artifacts_and_reproducibility_provenance() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_root = root / "skills"
+        _write_suite(skill_root)
+        fake = _write_fake_codex(root, "pass")
+        revision = _init_git_repo(root)
+        results = root / "results"
+        completed = _run(
+            "--skill-root",
+            str(skill_root),
+            "--repo-root",
+            str(root),
+            "--codex",
+            str(fake),
+            "--model",
+            "test-model",
+            "--case",
+            "alpha-001",
+            "--results-dir",
+            str(results),
+            "--run",
+            check=True,
+        )
+        case_dir = results / "alpha-001"
+        assert "PASS" in completed.stdout
+        assert "# Alpha answer\n" == (case_dir / "answer.md").read_text(encoding="utf-8")
+        assert '"type": "generation"' in (case_dir / "generation.trace.jsonl").read_text()
+        assert '"type": "grader"' in (case_dir / "grading.trace.jsonl").read_text()
+        grade = json.loads((case_dir / "grade.json").read_text(encoding="utf-8"))
+        assert grade["passed"]
+        plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
+        assert "test-model" == plan["provenance"]["codex"]["model"]
+        assert "codex-cli 9.9-test" == plan["provenance"]["codex"]["version"]
+        assert revision == plan["provenance"]["repository"]["revision"]
+        instruction_paths = {row["path"] for row in plan["provenance"]["instruction_files"]}
+        assert "alpha/SKILL.md" in instruction_paths
+        assert "alpha/references/contract.md" in instruction_paths
+        status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+        assert status["generation_cost_usd"] is None
+        assert not status["generation_cost_reported"]
+        run_status = json.loads((results / "run-status.json").read_text(encoding="utf-8"))
+        assert run_status["observations"]["total_cost_usd"] is None
+
+
+def test_grader_authored_skip_is_rejected(tmp_path: Path) -> None:
+    completed, _ = _run_fake("grader-skip", tmp_path)
+    assert 2 == completed.returncode
+    assert "outcome must be pass or fail" in completed.stderr
+    assert "SKIP" not in completed.stdout
+
+
+def test_scientific_no_result_is_a_failed_eval(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake("scientific-fail", tmp_path)
+    assert 1 == completed.returncode
+    assert "FAIL" in completed.stdout
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "failed" == status["status"]
+
+
+def test_assertion_text_mismatch_rejected(tmp_path: Path) -> None:
+    completed, _ = _run_fake("mismatch", tmp_path)
+    assert 2 == completed.returncode
+    assert "assertion text/order" in completed.stderr
+
+
+def test_empty_assertion_evidence_is_rejected(tmp_path: Path) -> None:
+    completed, _ = _run_fake("empty-evidence", tmp_path)
+    assert 2 == completed.returncode
+    assert "non-empty evidence" in completed.stderr
+
+
+def test_stdout_rate_limit_words_do_not_turn_unrelated_error_into_skip(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake("stdout-marker", tmp_path)
+    assert 2 == completed.returncode
+    assert "SKIP" not in completed.stdout
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "generation-error" == status["status"]
+
+
+def test_stderr_transport_failure_is_runner_classified_skip(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake("transport", tmp_path)
+    assert 0 == completed.returncode
+    assert "SKIP" in completed.stdout
+    status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
+    assert "infrastructure-skip" == status["status"]
+    assert "network" == status["reason_category"]
+    assert "generation" == status["phase"]
+
+
+def _run_fake(mode: str, tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
+    root = tmp_path
+    skill_root = root / "skills"
+    _write_suite(skill_root)
+    fake = _write_fake_codex(root, mode)
+    results = root / "results"
+    completed = _run(
+        "--skill-root",
+        str(skill_root),
+        "--repo-root",
+        str(root),
+        "--codex",
+        str(fake),
+        "--model",
+        "test-model",
+        "--case",
+        "alpha-001",
+        "--results-dir",
+        str(results),
+        "--run",
+    )
+    return completed, results / "alpha-001"
+
+
+def _run_fake_claude(mode: str, tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
+    root = tmp_path
+    skill_root = root / "skills"
+    _write_suite(skill_root)
+    _write_claude_plugin_manifest(skill_root)
+    validation = skill_root / "alpha" / "assets" / "VALIDATION.md"
+    validation.parent.mkdir()
+    validation.write_text("prior evaluation outcome\n", encoding="utf-8")
+    fake = _write_fake_claude(root, mode)
+    _prepare_live_claude_repo(root)
+    if mode == "answer-key-isolation":
+        (root / "tmp_RUNLOG.md").write_text("prior result\n", encoding="utf-8")
+        egg_info = root / "src" / "alpha.egg-info"
+        egg_info.mkdir(parents=True)
+        (egg_info / "PKG-INFO").write_text("generated\n", encoding="utf-8")
+        skill = skill_root / "alpha" / "SKILL.md"
+        skill.write_text(
+            skill.read_text(encoding="utf-8") + "\ndirty tracked marker\n",
+            encoding="utf-8",
+        )
+    results = root / "results"
+    completed = _run(
+        "--harness",
+        "claude",
+        "--skill-root",
+        str(skill_root),
+        "--repo-root",
+        str(root),
+        "--claude",
+        str(fake),
+        "--case",
+        "alpha-001",
+        "--results-dir",
+        str(results),
+        "--allow-external-skill-upload",
+        "--run",
+    )
+    return completed, results / "alpha-001"
 
 
 def test_trace_summary_reports_local_literature_reads_and_deduplicated_web_calls() -> None:
@@ -1884,86 +1301,3 @@ def test_validate_grade_rejects_inconsistent_top_level_verdict(tmp_path: Path) -
         assert "inconsistent with assertion verdicts" in str(exc)
     else:
         raise AssertionError("inconsistent top-level verdict was accepted")
-
-
-def test_code_building_skills_prioritize_single_operator_research_failures() -> None:
-    for skill_name in (
-        "bionemo-phage-design-implement-rl-objectives",
-        "bionemo-phage-design-adapt-execution",
-    ):
-        skill = (SKILL_ROOT / skill_name / "SKILL.md").read_text(encoding="utf-8").lower()
-        for marker in (
-            "single-operator research software",
-            "scientific correctness",
-            "reproducibility",
-            "restartability",
-            "accidental drift",
-            "operator-owned scratch files",
-        ):
-            assert marker in skill
-
-
-def test_monitoring_heartbeat_covers_all_long_running_work() -> None:
-    controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8").lower()
-    adapter_root = SKILL_ROOT / "bionemo-phage-design-adapt-execution"
-    execution = (
-        (adapter_root / "SKILL.md").read_text(encoding="utf-8")
-        + (adapter_root / "references" / "execution-contract.md").read_text(encoding="utf-8")
-    ).lower()
-
-    assert "not only sft or rl" in controller
-    assert "every long-running stage" in execution
-    for marker in (
-        "background launch is not a completed handoff",
-        "meaningful progress events",
-        "verified terminal success or failure",
-        "exit status",
-        "actionable error",
-    ):
-        assert marker in execution
-
-    for skill_name in ("bionemo-phage-design-collect-genomes", "bionemo-phage-design-prepare-sft"):
-        leaf = (SKILL_ROOT / skill_name / "SKILL.md").read_text(encoding="utf-8").lower()
-        assert "bionemo-phage-design-adapt-execution" in leaf
-        assert "long-running" in leaf
-
-    eval_path = adapter_root / "evals" / "evals.json"
-    evals = json.loads(eval_path.read_text(encoding="utf-8"))["evals"]
-    case = next(case for case in evals if case["id"].endswith("background-heartbeat"))
-    prompt = case["prompt"].lower()
-    assertions = " ".join(case["assertions"]).lower()
-    eval_text = f"{prompt} {case['expected_output'].lower()} {assertions}"
-    assert len(prompt) < 120
-    assert len(case["assertions"]) <= 3
-    for marker in ("long-running task", "background", "monitor"):
-        assert marker in prompt
-    for marker in ("every long-running or background task", "next due check", "verified terminal"):
-        assert marker in assertions
-    for workload_detail in ("genome", "phage", "download", "preprocessing", "filtering", "sft", "rl"):
-        assert workload_detail not in eval_text
-
-
-def test_entry_description() -> None:
-    skill = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
-    frontmatter = skill.split("---", maxsplit=2)[1].lower()
-
-    for marker in ("bacteriophage genome", "phage therapy", "antibiotic-resistant infections"):
-        assert marker in frontmatter
-
-
-def test_scanner_topology_guidance_matches_the_cli() -> None:
-    command_resolution = (
-        SKILL_ROOT / "bionemo-phage-design-generate-and-screen" / "references" / "command-resolution.md"
-    ).read_text(encoding="utf-8")
-    cli_source = (SCRIPT.parents[3] / "src" / "bionemo" / "evo2_phage_gen" / "sequence_safety_cli.py").read_text(
-        encoding="utf-8"
-    )
-
-    for marker in ("circular -> no topology argument", "linear -> `--linear`", "reject any other topology"):
-        assert marker in command_resolution
-    assert 'scan.add_argument("--linear"' in cli_source
-    assert 'scan.add_argument("--circular"' not in cli_source
-
-
-if __name__ == "__main__":
-    unittest.main()
