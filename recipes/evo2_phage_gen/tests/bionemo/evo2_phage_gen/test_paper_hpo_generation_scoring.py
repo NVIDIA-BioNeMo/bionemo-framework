@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
 from pathlib import Path
 
 import pandas as pd
@@ -22,13 +21,10 @@ from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 
 
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "score_paper_hpo_generation.py"
-SPEC = importlib.util.spec_from_file_location("score_paper_hpo_generation", SCRIPT)
-assert SPEC and SPEC.loader
-scoring = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(scoring)
 
 
-def test_summary_uses_the_shared_nucleotide_qc_config():
+def test_summary_uses_the_shared_nucleotide_qc_config(load_script):
+    scoring = load_script(SCRIPT, "score_paper_hpo_generation")
     scored = pd.DataFrame(
         {
             "valid_nt_chars": [True],

@@ -135,25 +135,8 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "required instruction or plugin files",
         "paths and SHA-256",
         "integrity check fails",
-        "project-wide RUNLOG",
-        "complete whole-genome",
-        "EMA-derived therapeutic objectives",
-        "auto-enables supported authenticated W&B",
-        "dependency-aware, resource-admitted execution",
-        "bounded autonomy",
-        "durable decision reporting",
     ):
         assert marker in portable_skill
-
-    handoff_section = portable_skill.split("Build this handoff prompt before changing sessions:", maxsplit=1)[1]
-    handoff_prompt = handoff_section.split("```", maxsplit=2)[1]
-    for marker in (
-        "dependency-aware, resource-admitted execution",
-        "independent safe work during monitoring",
-        "bounded autonomy",
-        "durable decision reporting",
-    ):
-        assert marker in handoff_prompt
 
     portable_evals = json.loads(
         (ROOT_SKILLS_DIR / "bionemo-phage-generation" / "evals" / "evals.json").read_text(encoding="utf-8")
@@ -168,8 +151,6 @@ def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handof
         "original request",
         "fixed required sibling allowlist",
         "integrity-failed skill",
-        "whole-genome/lifecycle scope",
-        "without reward starvation",
     ):
         assert marker in portable_evals_text
 
@@ -367,6 +348,17 @@ def test_controller_uses_dependency_graph_and_bounded_autonomy() -> None:
         "`capacity_source`",
     ):
         assert marker in contract
+
+
+def test_controller_does_not_require_a_saved_plan_document() -> None:
+    """The durable graph and decisions replace a generated planning/PLAN.md artifact."""
+    skill_dir = RECIPE_SKILLS_DIR / "bionemo-phage-design"
+    controller = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    contract = (skill_dir / "references" / "project-contract.md").read_text(encoding="utf-8")
+    evals = (skill_dir / "evals" / "evals.json").read_text(encoding="utf-8")
+
+    for text in (controller, contract, evals):
+        assert "planning/PLAN.md" not in text
 
 
 def test_execution_adapter_uses_resource_aware_admission() -> None:

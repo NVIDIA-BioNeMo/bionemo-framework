@@ -107,6 +107,7 @@ for fasta_path in sorted(fasta_dir.glob(cell_glob)):
 PY
 
 shopt -s nullglob
+# shellcheck disable=SC2206  # CELL_GLOB intentionally remains an unquoted pattern.
 CONFIGS=( "${ARC_CONFIG_DIR}"/${CELL_GLOB%.fasta}.yaml )
 if (( ${#CONFIGS[@]} )); then
   mapfile -t CONFIGS < <(printf '%s\n' "${CONFIGS[@]}" | sort)

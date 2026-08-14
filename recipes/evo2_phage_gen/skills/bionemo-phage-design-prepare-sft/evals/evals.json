@@ -52,9 +52,39 @@
       "expected_output": "A separate, bounded safety-filter report produced after SFT data preparation.",
       "assertions": [
         "A separate sub-agent reads only authenticated safety manifests and writes a distinct report artifact after the preparation phase completes.",
-        "The report includes a compact waterfall from the starting set through records without observed signals and total filter failures, with indented mutually exclusive failing-class combinations that reconcile to the failure total.",
+        "The reporting node resolves evo2_phage_summarize_safety_manifest and runs it only on a terminal validated schema-2 scan manifest.",
+        "The report includes a compact waterfall from the starting set through PASS and total excluded records, with separate mutually exclusive FAIL and INDETERMINATE class combinations that reconcile to their state totals and the full denominator.",
+        "If exact representatives were scanned, the report labels unique-sequence counts separately and derives training-record counts only from a complete digest-authenticated lineage map.",
         "Highlights are bounded and use stable record IDs, finding classes, normalized reason codes, and concise tool evidence without nucleotide or protein sequences.",
-        "The report describes potential sequence-safety signals and does not present them as clinical conclusions."
+        "The report describes potential sequence-safety signals and does not present them as clinical conclusions.",
+        "Transient scan staging directories are not treated as an authoritative count or resume surface."
+      ],
+      "expected_skill": "bionemo-phage-design-prepare-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-prepare-sft-005-batched-safety-scan-reconciliation",
+      "prompt": "Use batch size 32 for a large SFT safety scan. A one-batch parity test passed, but the full run exited 3 during final manifest reconciliation and left no terminal output manifest. Can the staging record directories be tallied or resumed?",
+      "expected_output": "A diagnosis that stops without publishing invalid output, plus a full-attempt restart policy and stronger multi-batch preflight.",
+      "assertions": [
+        "The response does not interpret exit 3 alone as biological INDETERMINATE and requires a terminal manifest that validates with that state.",
+        "The response does not promote or tally transient record staging directories as authoritative evidence and restarts the full attempt when no versioned resume contract exists.",
+        "The next preflight spans at least two full proposed batches plus a partial final batch, or the complete input when smaller.",
+        "The preflight exercises terminal manifest serialization and validate-manifest in addition to per-record detector-semantic parity.",
+        "The response preserves the failure log and keeps scanner source, policy, inputs, assets, and tool pins immutable across the replacement run."
+      ],
+      "expected_skill": "bionemo-phage-design-prepare-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-prepare-sft-006-immutable-safety-assets",
+      "prompt": "Prepare a long SFT safety scan in a dirty checkout where the tracked safety-asset recipe may be edited by another task while the scan is running.",
+      "expected_output": "A run-owned, validated safety-asset manifest and recipe pin used consistently across controls, preflight, and the full scan.",
+      "assertions": [
+        "The response resolves evo2_phage_pin_safety_asset_manifest and writes into a new attempt-owned directory rather than relying on the mutable checkout recipe path.",
+        "The response retains PINNING.json and records the pinned recipe and manifest digests.",
+        "The complete control panel, topology preflight, and full scan all use the same pinned asset manifest.",
+        "The response rechecks pinned recipe and manifest digests immediately before launch and keeps them unchanged through terminal manifest validation."
       ],
       "expected_skill": "bionemo-phage-design-prepare-sft",
       "expected_script": null

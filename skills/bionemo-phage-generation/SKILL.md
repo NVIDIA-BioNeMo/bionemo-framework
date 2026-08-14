@@ -63,22 +63,6 @@ Selected revision: <commit or revision>.
 First verify and read only the controller plus the portable contract's fixed required sibling
 allowlist. Record their paths and SHA-256 values, ignore unexpected child skills, and stop on a missing,
 dirty-unapproved, or integrity-failed skill before planning or invoking a stage.
-Verify the implementation initializes a project-wide RUNLOG, defaults to complete whole-genome
-design with lifecycle-wide host-range/viability analysis, requires explicit approval for a material
-scope reduction, adds applicable design-relevant EMA-derived therapeutic objectives to adapted
-therapeutic RL
-without reward starvation, and auto-enables supported authenticated W&B telemetry unless the user
-opts out.
-
-Verify every long-running stage uses dependency-aware, resource-admitted execution and durable
-recurring monitoring through a verified terminal state—not only training, but also downloads,
-preprocessing, filtering, evaluation, and generation.
-The implementation preserves independent safe work during monitoring and bounded autonomy.
-It uses durable decision reporting after plan approval.
-
-Verify safety assets resolve through reviewed release descriptors and authenticated resumable
-caches, and that the exact deployed filters pass their versioned hazard/negative control panel
-before candidate PASS decisions.
 ```
 
 Use the recorded absolute recipe root, never this portable skill's installation path.

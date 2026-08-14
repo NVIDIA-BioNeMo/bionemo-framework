@@ -3,7 +3,7 @@
 
 # Reviewed metadata mirror for material generated under data/external/safety/.
 # Runtime preparation is driven by the typed release descriptors in
-# external_assets.py; focused tests require this mirror to match them exactly.
+# external_assets.py; focused tests pin the security-sensitive source and role fields below.
 # The generated asset_manifest.yaml records observed versions, release headers,
 # retrieval times, and SHA-256 digests; it is intentionally not committed.
 schema_version: 3

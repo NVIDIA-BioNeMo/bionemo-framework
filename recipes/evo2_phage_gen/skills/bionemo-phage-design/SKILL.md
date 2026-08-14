@@ -13,7 +13,7 @@ When the user will be offline and an approved plan continues, begin the response
 
 ```text
 ## DAG and records
-- Graph: DEPENDENCY_GRAPH.yaml and PLAN.md Mermaid are updated to show ...
+- Graph: planning/DEPENDENCY_GRAPH.yaml is updated to show ...
 - Active independent work: ...
 - Blocked descendants and gates: ...
 - Resource queue: ...
@@ -48,11 +48,11 @@ The local sibling package is required. A missing sibling is a package integrity 
 4. Invoke the bionemo-phage-design-adapt-execution skill. Inspect the repository, results, hardware, execution plane, available skills/models, storage paths, capacity, and writability. State job locations and a per-stage GPU topology matrix; inventory local GPU occupancy before sizing.
 5. Build a compact per-skill matrix of inputs, outputs, knowns, gaps, and need.
 
-Build and maintain `planning/DEPENDENCY_GRAPH.yaml` plus the editable Mermaid view in `planning/PLAN.md`. Treat the plan as a DAG: launch every safe, non-conflicting node that is dependency-ready and resource-admissible; numeric stage/action order is not execution order. Monitoring an active job is not an exclusive phase. A blocked node blocks only its descendants, so continue unrelated safe work.
+Build and maintain `planning/DEPENDENCY_GRAPH.yaml`. Treat the plan as a DAG: launch every safe, non-conflicting node that is dependency-ready and resource-admissible; numeric stage/action order is not execution order. Monitoring an active job is not an exclusive phase. A blocked node blocks only its descendants, so continue unrelated safe work.
 
 Treat every operation that can outlive the current tool call or agent turn as long-running, not only SFT or RL. This includes downloads, extraction and indexing, genome preprocessing, safety and QC filtering, evaluation, generation, training, and optimization. Route it through `bionemo-phage-design-adapt-execution`, activate a recurring due-gated monitor before returning, and keep the workflow alive until the facility reports a verified terminal state. A background launch is not completion.
 
-06. Create slug `<target>-<objective>-<mode>` and `<recipe_root>/results/<slug>[-YYYYMMDD]`, adding a date only on request or collision. Before any stage attempt, initialize the root `PROJECT.yaml`, `SUMMARY.md`, append-only `RUNLOG.md`, `planning/PLAN.md`, `planning/DEPENDENCY_GRAPH.yaml`, `planning/DESIGN_SPEC.yaml`, and `planning/DECISIONS.md`; record absolute recipe and result roots before emitting recipe commands.
+06. Create slug `<target>-<objective>-<mode>` and `<recipe_root>/results/<slug>[-YYYYMMDD]`, adding a date only on request or collision. Before any stage attempt, initialize the root `PROJECT.yaml`, `SUMMARY.md`, append-only `RUNLOG.md`, `planning/DEPENDENCY_GRAPH.yaml`, `planning/DESIGN_SPEC.yaml`, and `planning/DECISIONS.md`; record absolute recipe and result roots before emitting recipe commands.
 07. With one clear target, default SFT curation to target-similarity bucket/control-prefix conditioning while allowing opt-out. Treat conditioning as a steerable signal, never as an edit mask. After collection, agree on context: propose p99.9 or the affordable maximum plus worst-case control/prompt/EOD overhead and required alignment. After the final leakage-controlled split, require a post-collection training-budget feedback decision from usable corpus/token mass and the effective batch; do not inherit a publication step count unchanged. Change the RL length basis only for an explicit expansion/contraction goal.
 08. Unless fresh-only, detect compatible SFT runs locally and in configured result roots. Distinguish status inspection from reuse; present materially different candidates and ask whether to reuse or retrain.
 09. After SFT selection and objective/QC approval, invoke the bionemo-phage-design-calibrate-rl-sampling skill. Freeze its prompt compatibility, training mixture, independent validation, paths, and hashes.

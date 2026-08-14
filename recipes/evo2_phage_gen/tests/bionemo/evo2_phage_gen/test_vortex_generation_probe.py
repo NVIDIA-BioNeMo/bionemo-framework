@@ -52,3 +52,4 @@ def test_completion_token_accepts_empty_generation(monkeypatch):
 
     assert module._completion_token(" \n\t") == ""
     assert module._completion_token("ACGT extra\n") == "ACGT"
+    assert module._completion_token("ACGT<EOS>ignored") == "ACGT"

@@ -194,6 +194,8 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     ids=["missing", "nonzero", "timeout"],
 )
 def test_external_dustmasker_failures_are_bounded_and_wrapped(monkeypatch, error):
+    """External dustmasker failures should use one bounded runtime error contract."""
+
     def fail(*_args, **_kwargs):
         raise error
 
@@ -212,6 +214,7 @@ def test_external_dustmasker_failures_are_bounded_and_wrapped(monkeypatch, error
     ["0 - 4", "4 - 3", "1 - 5", "-1 - 2", "not-an-interval"],
 )
 def test_dustmasker_intervals_reject_invalid_one_based_coordinates(tmp_path, interval):
+    """Malformed or out-of-range dustmasker coordinates should be rejected."""
     interval_path = tmp_path / "dustmasker.interval"
     interval_path.write_text(f">seq_0\n{interval}\n")
 

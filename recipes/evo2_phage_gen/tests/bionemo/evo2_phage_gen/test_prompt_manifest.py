@@ -27,6 +27,7 @@ def test_build_prompt_manifest_hashes_prompts_without_storing_sequences(tmp_path
     )
     asset = tmp_path / "arc_revision.txt"
     asset.write_text("arc-revision")
+    missing_asset = tmp_path / "missing-database.dmnd"
 
     manifest = build_prompt_manifest(
         [prompt_jsonl],
@@ -36,17 +37,20 @@ def test_build_prompt_manifest_hashes_prompts_without_storing_sequences(tmp_path
         training_seed=101,
         validation_seed=202,
         arc_revision="abc123",
-        external_asset_paths=[asset],
+        external_asset_paths=[asset, missing_asset],
         wandb_run_id="run-1",
     )
 
     assert manifest["schema_version"] == 1
     assert manifest["generation_seed"] == 11
+    assert manifest["generation_call_index"] == 3
     assert manifest["training_seed"] == 101
     assert manifest["validation_seed"] == 202
     assert manifest["arc_revision"] == "abc123"
     assert manifest["wandb_run_id"] == "run-1"
     assert manifest["external_assets"][0]["exists"] is True
+    assert manifest["external_assets"][1]["exists"] is False
+    assert manifest["external_assets"][1]["sha256"] is None
     prompt_file = manifest["prompt_files"][0]
     assert prompt_file["num_records"] == 1
     record = prompt_file["records"][0]

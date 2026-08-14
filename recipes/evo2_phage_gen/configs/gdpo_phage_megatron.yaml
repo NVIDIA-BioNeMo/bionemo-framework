@@ -5,8 +5,10 @@
 
 defaults: "grpo_phage_megatron.yaml"
 
+run_id: "phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12"
+
 checkpointing:
-  checkpoint_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12"
+  checkpoint_dir: "data/checkpoints/${run_id}"
   pretrained_checkpoint:
     # Start GDPO from the converted base Evo2 Microviridae checkpoint, not from a prior RL run.
     path: "data/checkpoints/evo2_7b_microviridae_mbridge"
@@ -155,7 +157,7 @@ env:
     external_qc:
       enabled: true
       tool_bin_dir: "data/external/bin"
-      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_external_qc"
+      work_dir: "data/checkpoints/${run_id}_external_qc"
       fail_on_error: true
       timeout_seconds: 1800
       enable_protein_hit_count: true
@@ -171,7 +173,7 @@ env:
     mmseqs_cluster_diversity:
       enabled: true
       mmseqs_bin: "data/external/bin/mmseqs"
-      work_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity"
+      work_dir: "data/checkpoints/${run_id}_mmseqs_cluster_diversity"
       keep_artifacts: false
       min_seq_id: 0.99
       coverage: 0.0
@@ -182,7 +184,7 @@ env:
       verbosity: 0
 
 logger:
-  log_dir: "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_logs"
+  log_dir: "data/checkpoints/${run_id}_logs"
   wandb_enabled: true
   wandb:
     project: "evo2_phage_design_rl_gdpo"

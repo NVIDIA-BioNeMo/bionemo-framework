@@ -133,25 +133,12 @@ def _register_recipe_extensions() -> None:
     ACTOR_ENVIRONMENT_REGISTRY["bionemo.evo2_phage_gen.nemo_rl_env.PhageQCEnvironment"] = PY_EXECUTABLES.SYSTEM
 
 
-def _init_ray(upstream_init_ray, ray_module, *, include_dashboard: bool, num_cpus: int | None = None) -> None:
-    """Initialize Ray without letting its optional dashboard block training."""
-    if include_dashboard:
-        upstream_init_ray()
-        return
-
-    original_init = ray_module.init
-
-    def init_without_dashboard(*args, **kwargs):
-        kwargs["include_dashboard"] = False
-        if num_cpus is not None and not kwargs.get("address"):
-            kwargs.setdefault("num_cpus", num_cpus)
-        return original_init(*args, **kwargs)
-
-    ray_module.init = init_without_dashboard
-    try:
-        upstream_init_ray()
-    finally:
-        ray_module.init = original_init
+def _init_ray(upstream_init_ray, *, include_dashboard: bool, num_cpus: int | None = None) -> None:
+    """Initialize Ray through the recipe-patched NeMo-RL interface."""
+    options = {"include_dashboard": include_dashboard}
+    if num_cpus is not None:
+        options["num_cpus"] = num_cpus
+    upstream_init_ray(**options)
 
 
 def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algorithm: str = "config") -> None:
@@ -159,7 +146,6 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
     os.environ.setdefault("NEMO_RL_PY_EXECUTABLES_SYSTEM", "1")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
-        import ray
         from nemo_rl.algorithms.grpo import MasterConfig, async_grpo_train, setup
         from nemo_rl.algorithms.utils import get_tokenizer
         from nemo_rl.data.utils import setup_response_data
@@ -201,7 +187,7 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
 
     include_ray_dashboard = os.environ.get("NEMO_RL_RAY_DASHBOARD", "0").lower() in {"1", "true", "yes"}
     ray_num_cpus = int(os.environ["NEMO_RL_RAY_NUM_CPUS"]) if os.environ.get("NEMO_RL_RAY_NUM_CPUS") else None
-    _init_ray(upstream_init_ray, ray, include_dashboard=include_ray_dashboard, num_cpus=ray_num_cpus)
+    _init_ray(upstream_init_ray, include_dashboard=include_ray_dashboard, num_cpus=ray_num_cpus)
     tokenizer = get_tokenizer(config.policy["tokenizer"])
     assert config.policy["generation"] is not None, "A generation config is required for GRPO/GDPO"
     has_refit_draft_weights = bool(config.policy["draft"]["enabled"])
@@ -269,7 +255,7 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
             loss_fn,
             task_to_env,
             val_task_to_env,
-            logger,
+            experiment_logger,
             checkpointer,
             grpo_state,
             master_config,

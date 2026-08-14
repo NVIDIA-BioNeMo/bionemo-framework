@@ -775,7 +775,7 @@ def _batch_metadata_is_complete(
 
 if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
 
-    @ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)
+    @ray.remote(max_restarts=3, max_task_retries=3, max_concurrency=1000)
     class PhageQCEnvironment(EnvironmentInterface[dict[str, Any]]):
         """Single-turn NeMo-RL environment for phage sequence QC reward."""
 

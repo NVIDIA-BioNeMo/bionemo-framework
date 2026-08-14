@@ -38,6 +38,12 @@ def test_productive_prokaryotic_host_objectives_are_allowed():
         replication_host_domains=frozenset({HostDomain.BACTERIA}),
         endpoint="productive_replication",
     )
+    archaeal_host_range = DesignObjective(
+        kind=ObjectiveKind.PRODUCTIVE_REPLICATION,
+        direction=ObjectiveDirection.INCREASE,
+        replication_host_domains=frozenset({HostDomain.ARCHAEA}),
+        endpoint="productive_replication",
+    )
     bacteria_and_archaea_host_range = DesignObjective(
         kind=ObjectiveKind.PRODUCTIVE_REPLICATION,
         direction=ObjectiveDirection.INCREASE,
@@ -46,6 +52,7 @@ def test_productive_prokaryotic_host_objectives_are_allowed():
     )
 
     assert validate_design_scope(bacterial_or_archaeal_host_range).allowed
+    assert validate_design_scope(archaeal_host_range).allowed
     assert validate_design_scope(bacteria_and_archaea_host_range).allowed
 
 
@@ -219,6 +226,18 @@ def test_only_confirmed_versioned_prokaryotic_host_evidence_is_eligible():
     assert evaluate_host_evidence(bacteria).allowed
     assert evaluate_host_evidence(archaea).allowed
     assert evaluate_host_evidence(mixed).allowed
+
+
+def test_host_evidence_normalizes_string_domain_values():
+    evidence = HostEvidence(
+        source="ncbi",
+        source_version="v2",
+        replication_host_domains=frozenset({"BACTERIA", "ARCHAEA"}),
+        confirmed=True,
+    )
+
+    assert evidence.replication_host_domains == frozenset({HostDomain.BACTERIA, HostDomain.ARCHAEA})
+    assert evidence.to_dict()["replication_host_domains"] == ["ARCHAEA", "BACTERIA"]
 
 
 @pytest.mark.parametrize(

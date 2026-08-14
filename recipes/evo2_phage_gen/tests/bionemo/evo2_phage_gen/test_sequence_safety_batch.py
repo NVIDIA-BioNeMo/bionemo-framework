@@ -16,6 +16,7 @@
 import hashlib
 import subprocess
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -456,8 +457,7 @@ def test_default_batched_scan_preserves_record_order_and_runs_independent_phrogs
         )
         return ORFPreparationResult(state=SafetyState.PASS, artifacts=artifacts)
 
-    def batch_adapter(record_artifacts, *, work_dir, record_output_roots, **kwargs):
-        safety_class = "amr" if "tool_pin" not in kwargs else "toxin"
+    def batch_adapter(record_artifacts, *, safety_class, work_dir, record_output_roots, **_kwargs):
         work_dir.mkdir(parents=True)
         batched = materialize_batched_orf_inputs(record_artifacts, work_dir / "inputs")
         raw = work_dir / f"{safety_class}.raw.tsv"
@@ -556,8 +556,8 @@ def test_default_batched_scan_preserves_record_order_and_runs_independent_phrogs
         batch_workers=2,
         phrogs_workers=2,
         prepare_orfs=prepare_orfs,
-        amr_batch_adapter=batch_adapter,
-        toxin_batch_adapter=batch_adapter,
+        amr_batch_adapter=partial(batch_adapter, safety_class="amr"),
+        toxin_batch_adapter=partial(batch_adapter, safety_class="toxin"),
         phrogs_adapter=phrogs_adapter,
         phrogs_asset_validator=validate_phrogs,
         phrogs_asset_revalidator=revalidate_phrogs,
@@ -687,7 +687,8 @@ def test_started_batch_failure_without_output_serializes_as_failed(tmp_path: Pat
     payload = _serialize_shared_execution(
         execution,
         root=tmp_path,
-        record_indices={"record-a": 0, "record-b": 1},
+        # The scan manifest owns one global index inventory across multiple batches.
+        record_indices={"record-a": 0, "record-b": 1, "record-from-another-batch": 2},
     )
 
     assert execution.execution_status == "FAILED"

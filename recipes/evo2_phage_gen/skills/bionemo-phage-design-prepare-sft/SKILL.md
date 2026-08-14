@@ -30,11 +30,21 @@ Do not allow the shared preprocessing command to choose or randomize the split. 
 
 ## Add the post-filter safety report
 
-After the main SFT data-preparation node reaches a verified terminal state, add a hard-dependent reporting node owned by a separate sub-agent. Resolve the current `report-safety-filter` entry point through command discovery. It must read only the validated `SAFETY_MANIFEST.yaml` and its digest-authenticated child scan manifests, then write a distinct `artifacts/SAFETY_FILTER_REPORT.md` and record it in `OUTPUTS.yaml`.
+Before sequence-safety controls, topology preflight, and the full scan, resolve
+`evo2_phage_pin_safety_asset_manifest` through command discovery. Pin the validated asset manifest and
+its referenced recipe into a new attempt-owned directory, retain `PINNING.json`, and use that pinned
+manifest for every gate. Recheck its recipe and manifest digests immediately before launch so a long
+run does not depend on a mutable checkout path.
 
-Lead with total source records examined, records retained for SFT, and records removed after potential sequence-safety signals. Then aggregate removed records by transparent report-triage category: **Higher** for any required AMR or toxin class failure, **Elevated** when lysogeny is the only recognized required class failure, and **Unclassified** when a trusted record-level failure has no recognized failing-class assignment.
+After the main SFT data-preparation node reaches a verified terminal state, add a hard-dependent reporting node owned by a separate sub-agent. Resolve `evo2_phage_summarize_safety_manifest` through command discovery. Run it only on each terminal schema-2 `sequence_safety_scan` child manifest referenced by the validated `SAFETY_MANIFEST.yaml`; the command revalidates detector evidence before emitting its schema-1 tally. Write a distinct `artifacts/SAFETY_FILTER_REPORT.md`, retain the tally JSON, and record both in `OUTPUTS.yaml`.
 
-Include a compact waterfall table with the starting set, records with no observed or known signals from the configured filters, total filter failures, and indented mutually exclusive combinations of failing safety classes. The combination counts must reconcile to the failure total; include a general remainder row if an unexpected class combination is present.
+Treat the published scan manifest as the first authoritative count surface. The scan output is atomic: per-record directories in a transient staging tree are neither a progress-count API nor resumable evidence. Exit code 3 can mean an operational validation failure as well as a biological INDETERMINATE result; accept the latter only when a terminal output manifest exists and revalidates. Without a separately documented resume contract, restart a failed full scan rather than replaying private staging internals.
+
+Lead with total source records examined, records retained for SFT (PASS), hard filter failures (FAIL), review-required records (INDETERMINATE), and the conservative excluded total (FAIL plus INDETERMINATE). Aggregate hard failures by transparent report-triage category: **Higher** for any required AMR or toxin class failure, **Elevated** when lysogeny is the only recognized required class failure, and **Unclassified** when a trusted record-level failure has no recognized failing-class assignment. Keep INDETERMINATE counts separate from hard failures.
+
+Include a compact waterfall table with the starting set, PASS records, total excluded records, and separate indented mutually exclusive safety-class combinations for FAIL and INDETERMINATE. Each combination family must reconcile to its state total, and PASS + FAIL + INDETERMINATE must reconcile to the denominator; include a general remainder row if an unexpected class combination is present.
+
+The general summarizer counts records in the validated scan manifest. Prefer scanning the source-record population directly. If an execution optimization scans exact representatives, report unique-sequence counts separately and weight back to source records only through a digest-authenticated, complete, one-to-one lineage map whose representative hashes and counts match the scan input. Never label representative counts as training-record counts.
 
 End with a bounded list of the highest-priority removed records using only stable record IDs, concise finding classes, reason codes, and detector names/counts. Do not include nucleotide or protein sequences, raw evidence paths, or project-specific narrative. State explicitly that these are potential computational sequence-safety signals, not clinical conclusions or organism-level danger claims.
 

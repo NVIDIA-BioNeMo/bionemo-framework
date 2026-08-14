@@ -53,7 +53,7 @@ def test_scoring_script_creates_root_before_generation_validation_redirect(tmp_p
         "SFT_FASTA": str(tmp_path / "sft.fna"),
     }
 
-    completed = subprocess.run(["bash", str(SCRIPT)], cwd=RECIPE_ROOT, env=env, check=False)
+    completed = subprocess.run(["bash", str(SCRIPT)], cwd=RECIPE_ROOT, env=env, check=False, timeout=120)
 
     assert completed.returncode == 42
     assert (score_root / "generation-validation.json").read_text() == '{"validated": true}\n'

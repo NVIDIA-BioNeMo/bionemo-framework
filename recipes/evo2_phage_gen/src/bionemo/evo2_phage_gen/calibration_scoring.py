@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from bionemo.evo2_phage_gen.qc import NucleotideQCConfig, trim_at_first_eos
+from bionemo.evo2_phage_gen.qc import NucleotideQCConfig, prompt_nucleotides, trim_at_first_eos
 from bionemo.evo2_phage_gen.reward import (
     ExternalQCRewardConfig,
     MMseqsClusterDiversityConfig,
@@ -35,7 +35,6 @@ from bionemo.evo2_phage_gen.reward import (
 
 
 CELL_RE = re.compile(r"prefix(?P<prefix>\d+)_temp(?P<temperature>\d+(?:\.\d+)?)$")
-DNA = frozenset("ACGTacgt")
 EXTERNAL_OBJECTIVES = {
     "protein_hit_count": "protein_database_hit_count",
     "tropism": "tropism",
@@ -84,11 +83,11 @@ def load_generation_records(path: Path) -> pd.DataFrame:
         if not line.strip():
             continue
         record = json.loads(line)
-        record_id = str(record.get("id", f"{path.stem}_{line_number:06d}"))
+        record_id = str(record.get("id") or f"{path.stem}_{line_number:06d}")
         if record_id in seen:
             raise ValueError(f"duplicate generation ID: {record_id}")
         seen.add(record_id)
-        prompt = "".join(base for base in trim_at_first_eos(str(record.get("prompt", ""))) if base in DNA)
+        prompt = prompt_nucleotides(trim_at_first_eos(str(record.get("prompt", ""))))
         completion = trim_at_first_eos(str(record.get("completion", "")).replace("\n", "").strip())
         rows.append({"id_prompt": record_id, "sequence": (prompt + completion).upper()})
     if not rows:

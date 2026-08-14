@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -267,7 +268,8 @@ def materialize_sweep(
 def validate_sweep(run_root: Path) -> dict:
     """Validate every contracted cell and return exact completion counts."""
     contract = json.loads((run_root / "sweep_contract.json").read_text())
-    rows = list(csv.DictReader((run_root / "cells.tsv").open(), delimiter="\t"))
+    with (run_root / "cells.tsv").open() as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
     expected = int(contract["num_prompts_per_cell"])
     counts = {}
     for row in rows:
@@ -299,6 +301,22 @@ def _parse_args() -> argparse.Namespace:
     materialize.add_argument("--seed", type=int, default=7)
     materialize.add_argument("--prompt-batch-size", type=int, default=16)
     materialize.add_argument("--max-seq-length", type=int, default=10240)
+
+    print_command = subparsers.add_parser("print-command")
+    print_command.add_argument("--infer-script", type=Path, required=True)
+    print_command.add_argument("--checkpoint", type=Path, required=True)
+    print_command.add_argument("--prompt-file", type=Path, required=True)
+    print_command.add_argument("--output-file", type=Path, required=True)
+    print_command.add_argument("--prefix-length", type=int, required=True)
+    print_command.add_argument("--temperature", type=float, required=True)
+    print_command.add_argument("--target-length", type=int, required=True)
+    print_command.add_argument("--seed", type=int, required=True)
+    print_command.add_argument("--tensor-parallel-size", type=int, required=True)
+    print_command.add_argument("--master-port", type=int, required=True)
+    print_command.add_argument("--prompt-batch-size", type=int, required=True)
+    print_command.add_argument("--max-seq-length", type=int, required=True)
+    print_command.add_argument("--top-k", type=int, required=True)
+    print_command.add_argument("--top-p", type=float, required=True)
 
     validate = subparsers.add_parser("validate-cell")
     validate.add_argument("--output", type=Path, required=True)
@@ -332,6 +350,23 @@ def main() -> None:
             max_seq_length=args.max_seq_length,
         )
         print(json.dumps(contract, sort_keys=True))
+    elif args.command == "print-command":
+        command = build_inference_command(
+            infer_script=args.infer_script,
+            checkpoint=args.checkpoint,
+            prompt_file=args.prompt_file,
+            output_file=args.output_file,
+            cell=SweepCell(prefix_length=args.prefix_length, temperature=args.temperature),
+            target_length=args.target_length,
+            seed=args.seed,
+            tensor_parallel_size=args.tensor_parallel_size,
+            master_port=args.master_port,
+            prompt_batch_size=args.prompt_batch_size,
+            max_seq_length=args.max_seq_length,
+            top_k=args.top_k,
+            top_p=args.top_p,
+        )
+        sys.stdout.buffer.write(b"\0".join(item.encode() for item in command) + b"\0")
     elif args.command == "validate-cell":
         print(validate_cell_output(args.output, args.prompts, expected_records=args.expected_records))
     else:

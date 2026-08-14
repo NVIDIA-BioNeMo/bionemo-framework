@@ -89,6 +89,11 @@ def trim_at_first_eos(sequence: str) -> str:
     return sequence[:stop_index]
 
 
+def prompt_nucleotides(prompt: str) -> str:
+    """Return only DNA bases from a prompt that may contain control tokens."""
+    return "".join(char for char in str(prompt) if char in DNA_ALPHABET)
+
+
 def clean_sequence(sequence: str, keep_only_up_to_first_eos: bool = True) -> str:
     """Normalize a generated sequence for nucleotide QC."""
     sequence = str(sequence).replace("\n", "").strip()

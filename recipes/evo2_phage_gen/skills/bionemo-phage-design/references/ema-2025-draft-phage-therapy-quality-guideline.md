@@ -705,7 +705,7 @@ by phage particle.
 
 - Ph.Eur. General chapter on “Bacteriophage potency determination” (2.7.38[^ph-eur-2738]).
 
-- Ph. Eur. General chapter on “Phage therapy medicinal products (5.31)
+- Ph. Eur. General chapter on “Phage therapy medicinal products” (5.31).
 
 \[^ph-eur-2738\]: Ph. Eur. general chapter 2.7.38 is in preparation. The draft has been made available for
 public comments in Pharmeuropa Online, issue 37.2.

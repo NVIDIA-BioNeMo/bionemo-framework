@@ -19,6 +19,7 @@ import tomllib
 from pathlib import Path
 
 import yaml
+from packaging.requirements import Requirement
 
 
 RECIPE_ROOT = Path(__file__).parents[3]
@@ -166,10 +167,11 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["external_qc"]["timeout_seconds"] == 1800
     assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 12
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
-    assert mmseqs_config == {
+    assert config["run_id"].startswith("phage_gdpo_")
+    assert mmseqs_config["work_dir"] == "data/checkpoints/${run_id}_mmseqs_cluster_diversity"
+    assert {key: value for key, value in mmseqs_config.items() if key != "work_dir"} == {
         "enabled": True,
         "mmseqs_bin": "data/external/bin/mmseqs",
-        "work_dir": "data/checkpoints/phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12_mmseqs_cluster_diversity",
         "keep_artifacts": False,
         "min_seq_id": 0.99,
         "coverage": 0.0,
@@ -247,7 +249,7 @@ def test_report_runtime_declares_tabulate_dependency():
     """Installed report commands must include pandas' Markdown-table backend."""
     config = tomllib.loads((RECIPE_ROOT / "pyproject.toml").read_text())
 
-    assert "tabulate" in config["project"]["dependencies"]
+    assert any(Requirement(dependency).name == "tabulate" for dependency in config["project"]["dependencies"])
 
 
 def test_recipe_docker_context_excludes_generated_assets_and_runs_nonroot():

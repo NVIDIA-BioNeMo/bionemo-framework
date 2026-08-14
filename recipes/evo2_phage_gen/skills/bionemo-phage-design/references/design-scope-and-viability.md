@@ -1,6 +1,6 @@
 # Whole-genome design and lifecycle viability
 
-## Keep whole genomes as the default, unless a user has a specific list or category of genes they want to optimize, such as receptor binding proteins
+## Keep whole genomes as the default
 
 Treat each generated candidate as a complete, coherent phage genome and keep the whole genome in
 the mutable design space by default. Similarity to a reference, preservation of synteny, a dominant

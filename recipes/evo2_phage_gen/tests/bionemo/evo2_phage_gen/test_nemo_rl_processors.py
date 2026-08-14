@@ -51,6 +51,7 @@ def test_phage_prompt_data_processor_tokenizes_openai_user_message_without_chat_
         "prompt_nt_length": 4,
         "prompt_index": 3,
     }
+    assert output["loss_multiplier"] == 1.0
 
 
 def test_phage_prompt_data_processor_recomputes_length_after_truncation():
@@ -61,3 +62,27 @@ def test_phage_prompt_data_processor_recomputes_length_after_truncation():
     assert output["length"] == 3
     assert output["message_log"][0]["token_ids"].shape == (3,)
     assert output["loss_multiplier"] == 0.0
+
+
+def test_phage_prompt_data_processor_limits_long_prompts_to_four_tokens():
+    """Long prompts retain only the four-token generation prefix."""
+    output = phage_prompt_data_processor(
+        {"prompt": "ACGTACGT"}, SimpleNamespace(prompt=None), _Tokenizer(), max_seq_length=6, idx=7
+    )
+
+    assert output["length"] == 4
+    assert output["message_log"][0]["token_ids"].tolist() == [65, 67, 71, 84]
+    assert output["extra_env_info"] == {"prompt_nt_length": 8, "prompt_index": 7}
+    assert output["loss_multiplier"] == 0.0
+
+
+def test_phage_prompt_data_processor_formats_task_prompt_template():
+    """Task prompt templates are applied before tokenization and metadata extraction."""
+    output = phage_prompt_data_processor(
+        {"prompt": "AC"}, SimpleNamespace(prompt="prefix:{}"), _Tokenizer(), max_seq_length=20, idx=2
+    )
+
+    assert output["message_log"][0]["content"] == "prefix:AC"
+    assert output["message_log"][0]["token_ids"].tolist() == [ord(char) for char in "prefix:AC"]
+    assert output["extra_env_info"] == {"prompt_nt_length": 2, "prompt_index": 2}
+    assert output["loss_multiplier"] == 1.0

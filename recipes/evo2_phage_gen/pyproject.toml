@@ -69,7 +69,7 @@ dependencies = [
     "biopython",
     "biotite",
     "checkv",
-    "lovis4u",
+    "lovis4u==0.2.0",
     "openpyxl",
     "tabulate",
     "orfipy",
@@ -85,6 +85,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
+    "packaging>=24,<27",
     "pytest>=8.0",
 ]
 
@@ -118,6 +119,8 @@ evo2_phage_run_gdpo = "bionemo.evo2_phage_gen.run_phage_gdpo:main"
 evo2_phage_patch_nemo_rl = "bionemo.evo2_phage_gen.nemo_rl_patches:main"
 evo2_phage_prompt_manifest = "bionemo.evo2_phage_gen.prompt_manifest:main"
 evo2_phage_sequence_safety = "bionemo.evo2_phage_gen.sequence_safety_cli:main"
+evo2_phage_pin_safety_asset_manifest = "bionemo.evo2_phage_gen.safety_asset_manifest_pin:main"
+evo2_phage_summarize_safety_manifest = "bionemo.evo2_phage_gen.safety_manifest_summary:main"
 evo2_phage_validate_safety_controls = "bionemo.evo2_phage_gen.reference_controls:main"
 download_bionemo_data = "bionemo.common.data.load:entrypoint"
 bionemo_fasta_to_jsonl = "bionemo.common.io.fasta_to_jsonl:main"

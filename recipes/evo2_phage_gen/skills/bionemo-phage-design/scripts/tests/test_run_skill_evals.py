@@ -1747,12 +1747,9 @@ def test_monitoring_heartbeat_covers_all_long_running_work() -> None:
         (adapter_root / "SKILL.md").read_text(encoding="utf-8")
         + (adapter_root / "references" / "execution-contract.md").read_text(encoding="utf-8")
     ).lower()
-    portable = (
-        (REPOSITORY_ROOT / "skills" / "bionemo-phage-generation" / "SKILL.md").read_text(encoding="utf-8").lower()
-    )
 
     assert "not only sft or rl" in controller
-    assert "every long-running stage" in portable
+    assert "every long-running stage" in execution
     for marker in (
         "background launch is not a completed handoff",
         "meaningful progress events",

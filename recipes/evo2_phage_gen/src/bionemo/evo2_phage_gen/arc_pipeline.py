@@ -577,6 +577,8 @@ def _apply_online_measurement_patches(output_dir: Path) -> None:
         (ARC_SYNTENY_CALL_SUFFIX, PATCHED_SYNTENY_CALL_SUFFIX),
     )
     missing = [replacement for anchor, replacement in replacements if anchor not in text and replacement not in text]
+    if ARC_ONLINE_GBK_CONVERSION not in text and PATCHED_ONLINE_GBK_CONVERSION not in text:
+        missing.append(PATCHED_ONLINE_GBK_CONVERSION)
     if missing:
         raise ValueError(f"Failed to apply {len(missing)} online objective-measurement patches")
     for anchor, replacement in replacements:

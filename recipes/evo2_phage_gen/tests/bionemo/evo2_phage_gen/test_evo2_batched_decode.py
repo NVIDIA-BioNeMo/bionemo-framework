@@ -220,6 +220,8 @@ def test_batched_hyena_binding_normalizes_reverse_contiguous_slots():
     assert request_slots.tolist() == [4, 5, 6, 7]
     assert context.mamba_metadata.request_to_mamba_state_idx.tolist() == [4, 5, 6, 7]
     assert len(packed_dicts) == 3
+    assert hasattr(context, "fir_filter_state_dict")
+    assert hasattr(context, "iir_filter_state_dict")
     fir_seed = torch.arange(16, dtype=torch.float32).reshape(4, 2, 2)
     iir_seed = torch.arange(24, dtype=torch.float32).reshape(4, 3, 2)
 

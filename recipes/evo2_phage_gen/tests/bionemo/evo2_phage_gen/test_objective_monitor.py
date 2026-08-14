@@ -15,12 +15,23 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 import pytest
 
 from bionemo.evo2_phage_gen import objective_monitor
-from bionemo.evo2_phage_gen.objective_monitor import evaluate_objective_history, extract_validation_history
+from bionemo.evo2_phage_gen.objective_monitor import (
+    _positive_int,
+    evaluate_objective_history,
+    extract_validation_history,
+)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_positive_int_rejects_nonpositive_values(value):
+    with pytest.raises(argparse.ArgumentTypeError, match="positive"):
+        _positive_int(value)
 
 
 def _event(
@@ -87,6 +98,33 @@ def test_reward_and_support_improving_together_continues():
 
     assert result["decision"] == "continue"
     assert result["objectives"]["protein_hit_count"]["status"] == "healthy"
+
+
+def test_objective_history_accepts_custom_hard_pass_and_instability_thresholds():
+    hard_pass_history = [
+        _event(10, 0.0, 1.0, pass_rate=0.50),
+        _event(20, 0.1, 1.0, pass_rate=0.48),
+        _event(30, 0.2, 1.0, pass_rate=0.46),
+    ]
+    instability_history = [
+        _event(10, 0.0, 1.0),
+        _event(20, 0.3, 1.0),
+        _event(30, 0.0, 1.0),
+    ]
+
+    strict_hard_pass = evaluate_objective_history(hard_pass_history, hard_pass_drop_threshold=0.10)
+    sensitive_hard_pass = evaluate_objective_history(hard_pass_history, hard_pass_drop_threshold=0.03)
+    strict_instability = evaluate_objective_history(
+        instability_history, objective_reward_range_threshold=0.50, minimum_reward_sign_changes=2
+    )
+    sensitive_instability = evaluate_objective_history(
+        instability_history, objective_reward_range_threshold=0.25, minimum_reward_sign_changes=1
+    )
+
+    assert "reward_hard_pass_divergence" not in strict_hard_pass["objectives"]["protein_hit_count"]["signals"]
+    assert "reward_hard_pass_divergence" in sensitive_hard_pass["objectives"]["protein_hit_count"]["signals"]
+    assert "objective_instability" not in strict_instability["objectives"]["protein_hit_count"]["signals"]
+    assert "objective_instability" in sensitive_instability["objectives"]["protein_hit_count"]["signals"]
 
 
 def test_missing_per_objective_metrics_pause_after_three_events():
@@ -175,18 +213,35 @@ def test_loss_activity_rebound_clears_pending_masking_signal():
 
 def test_extract_validation_history_derives_only_emitted_gdpo_objectives(monkeypatch, tmp_path):
     points = {
-        "validation/mean_reward": {10: (1.0, 0.5)},
+        "validation/mean_reward": {10: (1.0, 0.5), 20: (2.0, 0.6)},
         "validation/num_sequences": {10: (1.0, 96.0)},
         "validation/gdpo/tropism_mean": {10: (1.0, 0.25)},
         "validation/gdpo/tropism_std": {10: (1.0, 0.1)},
         "validation/gdpo/tropism_nonzero_rate": {10: (1.0, 0.5)},
         "validation/phage_qc/tropism_measurement_available_rate": {10: (1.0, 0.75)},
+        "validation/gdpo/mmseqs_cluster_diversity_mean": {10: (1.0, 0.4)},
+        "validation/gdpo/mmseqs_cluster_diversity_std": {10: (1.0, 0.2)},
+        "validation/gdpo/mmseqs_cluster_diversity_nonzero_rate": {10: (1.0, 0.6)},
+        "validation/phage_qc/mmseqs_cluster_valid_for_clustering_mean": {10: (1.0, 0.6)},
+        "validation/phage_qc/mmseqs_cluster_missing_from_output_mean": {10: (1.0, 0.4)},
+        "validation/gdpo/gc_content_mean": {10: (1.0, 0.8)},
+        "validation/gdpo/gc_content_std": {10: (1.0, 0.05)},
+        "validation/gdpo/gc_content_nonzero_rate": {10: (1.0, 1.0)},
     }
     monkeypatch.setattr(objective_monitor, "_load_scalar_points", lambda _root: points)
 
     history = extract_validation_history(tmp_path)
 
-    assert set(history[0]["objectives"]) == {"tropism"}
+    assert len(history) == 1
+    objectives = history[0]["objectives"]
+    assert set(objectives) == {"gc_content", "mmseqs_cluster_diversity", "tropism"}
+    assert objectives["tropism"]["support_rate"] == 0.75
+    assert objectives["tropism"]["missing_rate"] == 0.25
+    assert objectives["mmseqs_cluster_diversity"]["support_rate"] == 0.6
+    assert objectives["mmseqs_cluster_diversity"]["missing_from_output_rate"] == 0.4
+    assert objectives["mmseqs_cluster_diversity"]["missing_rate"] == 0.4
+    assert objectives["gc_content"]["support_rate"] == 1.0
+    assert objectives["gc_content"]["missing_rate"] == 0.0
 
 
 def test_main_rejects_missing_tensorboard_root_before_writing(monkeypatch, tmp_path):

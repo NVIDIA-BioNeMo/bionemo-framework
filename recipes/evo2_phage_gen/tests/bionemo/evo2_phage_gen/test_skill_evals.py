@@ -31,6 +31,20 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 SKILL_ROOT = RECIPE_ROOT / "skills"
 EVAL_RUNNER = SKILL_ROOT / "bionemo-phage-design" / "scripts" / "run_skill_evals.py"
 RUNNING_IN_CI = os.getenv("CI", "").strip().lower() not in {"", "0", "false", "no", "off"}
+REQUIRED_CASE_FIELDS = {"id", "prompt", "expected_output", "assertions", "expected_skill", "expected_script"}
+
+
+def test_all_skill_eval_files_have_required_case_fields() -> None:
+    """Every checked-in eval file should expose the minimal portable case schema."""
+    eval_files = sorted(SKILL_ROOT.glob("*/evals/evals.json"))
+
+    assert eval_files
+    for eval_file in eval_files:
+        payload = json.loads(eval_file.read_text(encoding="utf-8"))
+        assert payload["skill_name"] == eval_file.parents[1].name
+        assert isinstance(payload["evals"], list) and payload["evals"]
+        for case in payload["evals"]:
+            assert REQUIRED_CASE_FIELDS <= case.keys(), f"{eval_file}: {case.get('id', '<missing id>')}"
 
 
 @pytest.mark.skipif(RUNNING_IN_CI, reason="Skill eval planning is intentionally local-only.")

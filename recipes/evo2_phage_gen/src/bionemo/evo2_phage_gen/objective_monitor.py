@@ -76,6 +76,9 @@ def _objective_window_signals(
     reward_gain_threshold: float,
     support_drop_threshold: float,
     denominator_drop_fraction: float,
+    hard_pass_drop_threshold: float,
+    objective_reward_range_threshold: float,
+    minimum_reward_sign_changes: int,
 ) -> tuple[list[str], list[str]]:
     signals: list[str] = []
     missing_fields = sorted(
@@ -106,7 +109,7 @@ def _objective_window_signals(
         reward_gain >= reward_gain_threshold
         and _finite_number(first.get("hard_pass_rate"))
         and _finite_number(last.get("hard_pass_rate"))
-        and float(last["hard_pass_rate"]) + 0.05 < float(first["hard_pass_rate"])
+        and float(last["hard_pass_rate"]) + hard_pass_drop_threshold < float(first["hard_pass_rate"])
     ):
         signals.append("reward_hard_pass_divergence")
 
@@ -114,7 +117,7 @@ def _objective_window_signals(
     deltas = [right - left for left, right in pairwise(rewards)]
     signs = [1 if delta > 0 else -1 if delta < 0 else 0 for delta in deltas]
     sign_changes = sum(left != 0 and right != 0 and left != right for left, right in pairwise(signs))
-    if max(rewards) - min(rewards) >= 0.50 and sign_changes >= 1:
+    if max(rewards) - min(rewards) >= objective_reward_range_threshold and sign_changes >= minimum_reward_sign_changes:
         signals.append("objective_instability")
     return signals, missing_fields
 
@@ -127,6 +130,9 @@ def evaluate_objective_history(
     reward_gain_threshold: float = 0.15,
     support_drop_threshold: float = 0.15,
     denominator_drop_fraction: float = 0.20,
+    hard_pass_drop_threshold: float = 0.05,
+    objective_reward_range_threshold: float = 0.50,
+    minimum_reward_sign_changes: int = 1,
     activity_epsilon: float = 1e-6,
 ) -> dict[str, Any]:
     """Diagnose objective exploitation from comparable checkpoint-validation events.
@@ -160,6 +166,9 @@ def evaluate_objective_history(
             reward_gain_threshold=reward_gain_threshold,
             support_drop_threshold=support_drop_threshold,
             denominator_drop_fraction=denominator_drop_fraction,
+            hard_pass_drop_threshold=hard_pass_drop_threshold,
+            objective_reward_range_threshold=objective_reward_range_threshold,
+            minimum_reward_sign_changes=minimum_reward_sign_changes,
         )
         signal_streak = 0
         for end in range(minimum_events, len(series) + 1):
@@ -169,6 +178,9 @@ def evaluate_objective_history(
                 reward_gain_threshold=reward_gain_threshold,
                 support_drop_threshold=support_drop_threshold,
                 denominator_drop_fraction=denominator_drop_fraction,
+                hard_pass_drop_threshold=hard_pass_drop_threshold,
+                objective_reward_range_threshold=objective_reward_range_threshold,
+                minimum_reward_sign_changes=minimum_reward_sign_changes,
             )
             signal_streak = signal_streak + 1 if pause_signals.intersection(candidate_signals) else 0
         max_signal_streak = max(max_signal_streak, signal_streak)
@@ -379,6 +391,14 @@ def extract_validation_history(
     return events
 
 
+def _positive_int(value: str) -> int:
+    """Parse a positive integer for command-line event thresholds."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def main() -> None:
     """Evaluate objective history extracted from a TensorBoard run."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -386,8 +406,8 @@ def main() -> None:
     parser.add_argument("--config", type=Path, help="Resolved GDPO config used to select emitted objectives")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history-output", type=Path)
-    parser.add_argument("--minimum-events", type=int, default=3)
-    parser.add_argument("--audit-confirmation-events", type=int, default=8)
+    parser.add_argument("--minimum-events", type=_positive_int, default=3)
+    parser.add_argument("--audit-confirmation-events", type=_positive_int, default=8)
     args = parser.parse_args()
 
     if not args.tensorboard_root.is_dir():

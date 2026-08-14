@@ -21,8 +21,7 @@ from typing import Any
 
 from nemo_rl.data.interfaces import DatumSpec, TaskDataSpec
 
-
-DNA_ALPHABET = frozenset("ACGTacgt")
+from bionemo.evo2_phage_gen.qc import prompt_nucleotides as _prompt_nucleotides
 
 
 def _extract_prompt(datum_dict: dict[str, Any]) -> str:
@@ -36,11 +35,6 @@ def _extract_prompt(datum_dict: dict[str, Any]) -> str:
                 return str(message.get("content", ""))
 
     raise ValueError("Expected a `prompt` field or an OpenAI-style user message.")
-
-
-def _prompt_nucleotides(prompt: str) -> str:
-    """Keep only nucleotide bases from a prompt that may include SFT soft tokens."""
-    return "".join(char for char in prompt if char in DNA_ALPHABET)
 
 
 def phage_prompt_data_processor(

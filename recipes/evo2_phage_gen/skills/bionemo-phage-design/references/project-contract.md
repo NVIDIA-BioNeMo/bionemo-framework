@@ -9,7 +9,6 @@ PROJECT.yaml
 SUMMARY.md
 RUNLOG.md
 planning/
-  PLAN.md
   DEPENDENCY_GRAPH.yaml
   DESIGN_SPEC.yaml
   DECISIONS.md
@@ -35,7 +34,7 @@ reports/
 
 PROJECT.yaml records schema version, slug, creation time, operating mode, project mode, absolute repository/recipe/result roots, target accession and sequence hash, host, objective, design-spec path and hash, repository revision, execution-plan path, and stage pointers. Root PROJECT.yaml and SUMMARY.md expose concise jump links for source revision, design scope, stage attempts, selected SFT, RL, and rollout checkpoints, prompt manifest, TensorBoard directories, W&B status/URLs, and scheduler or cloud jobs. Keep detail append-only in ACTIONS.yaml, run logs, and monitor events. Never store credentials.
 
-Create `PROJECT.yaml`, `SUMMARY.md`, root `RUNLOG.md`, `planning/PLAN.md`, `planning/DEPENDENCY_GRAPH.yaml`, `planning/DESIGN_SPEC.yaml`, and `planning/DECISIONS.md` as one initialization action before creating any stage attempt. Seed the root RUNLOG with the user brief or its durable path, mode, roots, revision/dirty state, initial whole-genome scope, assumptions, unresolved decisions, and telemetry plan. Append every controller decision, material user approval, stage handoff, attempt status transition, and root-pointer promotion. Stage RUNLOG files do not replace this project-wide chronology, and SUMMARY.md does not replace it. In a read-only session, name these exact planned files without claiming creation.
+Create `PROJECT.yaml`, `SUMMARY.md`, root `RUNLOG.md`, `planning/DEPENDENCY_GRAPH.yaml`, `planning/DESIGN_SPEC.yaml`, and `planning/DECISIONS.md` as one initialization action before creating any stage attempt. Seed the root RUNLOG with the user brief or its durable path, mode, roots, revision/dirty state, initial whole-genome scope, assumptions, unresolved decisions, and telemetry plan. Append every controller decision, material user approval, stage handoff, attempt status transition, and root-pointer promotion. Stage RUNLOG files do not replace this project-wide chronology, and SUMMARY.md does not replace it. In a read-only session, name these exact planned files without claiming creation.
 
 ## Operating mode and portable memory
 
@@ -48,7 +47,7 @@ Use durable files as cross-run memory in this order: current user brief and reco
 
 ## Dependency DAG and bounded autonomy
 
-`planning/DEPENDENCY_GRAPH.yaml` is the durable scheduling source of truth; `planning/PLAN.md` holds its editable Mermaid view.
+`planning/DEPENDENCY_GRAPH.yaml` is the durable scheduling source of truth; keep graph state and approvals there and record decisions in `planning/DECISIONS.md`.
 
 At top level, the graph requires `schema_version`, `plan_sha256`, `environment_path`,
 `autonomy_envelope`, `resource_pools`, and `nodes`. `plan_sha256` binds the approved graph to the

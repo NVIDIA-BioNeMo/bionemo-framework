@@ -15,6 +15,7 @@
 
 import csv
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -172,7 +173,7 @@ def test_prepare_prompt_counterfactual_cohort_reuses_sequences_across_prompts(tm
     rows = list(csv.DictReader(output_manifest.open()))
     assert len(rows) == 4
     assert {row["prompt"] for row in rows} == {"+$", "+~"}
-    assert sorted(row["base_sequence_id"] for row in rows).count(rows[0]["base_sequence_id"]) == 2
+    assert Counter(row["base_sequence_id"] for row in rows) == Counter({"natural_00000": 2, "natural_00001": 2})
     assert len({row["sha256"] for row in rows}) == 2
 
 

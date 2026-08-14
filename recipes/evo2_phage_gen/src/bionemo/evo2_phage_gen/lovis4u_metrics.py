@@ -24,8 +24,10 @@ from typing import Any
 import lovis4u
 
 
-def _cluster_command_with_threads(command: Sequence[str], threads: int | None) -> list[str]:
+def _cluster_command_with_threads(command: Sequence[str] | str, threads: int | None) -> Sequence[str] | str:
     """Apply the configured thread count only to the LoVis4u MMseqs cluster call."""
+    if not isinstance(command, (list, tuple)):
+        return command
     updated = list(command)
     if threads is not None and len(updated) > 1 and updated[1] == "cluster" and "--threads" not in updated:
         updated.extend(["--threads", str(threads)])

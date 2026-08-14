@@ -36,6 +36,21 @@ def test_load_generation_records_reconstructs_marker_free_genome(tmp_path):
     assert records.to_dict("records") == [{"id_prompt": "a", "sequence": "GAGTACGT"}]
 
 
+def test_load_generation_records_uses_fallback_for_null_ids(tmp_path):
+    path = tmp_path / "null-ids.jsonl"
+    path.write_text(
+        "\n".join(json.dumps({"id": None, "prompt": "+~AC", "completion": completion}) for completion in ("GT", "TG"))
+        + "\n"
+    )
+
+    records = load_generation_records(path)
+
+    assert records.to_dict("records") == [
+        {"id_prompt": "null-ids_000000", "sequence": "ACGT"},
+        {"id_prompt": "null-ids_000001", "sequence": "ACTG"},
+    ]
+
+
 def test_summarize_cell_separates_measured_zero_from_missing_support():
     scored = pd.DataFrame(
         {

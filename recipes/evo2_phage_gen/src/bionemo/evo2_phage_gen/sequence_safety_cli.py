@@ -1264,7 +1264,7 @@ def _serialize_shared_execution(
     record_indices: Mapping[str, int],
 ) -> dict[str, object]:
     """Serialize one real shared command separately from its per-record parser results."""
-    if set(record_indices) != set(execution.record_ids):
+    if not set(execution.record_ids).issubset(record_indices):
         raise CLIValidationError("shared execution record indices do not match its inventory")
     artifacts = execution.inputs.artifacts
     input_paths = {

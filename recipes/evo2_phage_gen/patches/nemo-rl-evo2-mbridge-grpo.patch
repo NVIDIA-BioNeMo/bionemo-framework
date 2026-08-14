@@ -171,7 +171,7 @@ diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
 index 44a11cddd..c12ec4e1d 100644
 --- a/nemo_rl/experience/rollouts.py
 +++ b/nemo_rl/experience/rollouts.py
-@@ -571,6 +571,40 @@ def calculate_rewards(
+@@ -571,6 +571,39 @@ def calculate_rewards(
      )
 
 
@@ -200,11 +200,10 @@ index 44a11cddd..c12ec4e1d 100644
 +    if not futures:
 +        return metrics
 +    results = list(zip(future_task_names, ray.get(futures), strict=False))
-+    multiple_metric_environments = len(results) > 1
 +    for task_name, result in results:
 +        _, env_metrics = result
 +        for key, value in env_metrics.items():
-+            metric_key = f"{task_name}/{key}" if multiple_metric_environments else key
++            metric_key = f"{task_name}/{key}"
 +            metrics[metric_key] = value
 +    return metrics
 +
@@ -212,7 +211,7 @@ index 44a11cddd..c12ec4e1d 100644
  def run_multi_turn_rollout(
      policy_generation: GenerationInterface,
      input_batch: BatchedDataDict[DatumSpec],
-@@ -717,6 +749,8 @@ def run_multi_turn_rollout(
+@@ -717,6 +748,8 @@ def run_multi_turn_rollout(
          truncation_mask = torch.zeros_like(env_output.terminateds, dtype=torch.bool)
          for i, global_idx in enumerate(active_indices.tolist()):
              env_obs_content = env_output.observations[i]["content"]
@@ -221,7 +220,7 @@ index 44a11cddd..c12ec4e1d 100644
              # Tokenize the raw content from the environment
              # TODO @sahilj: handle if we want these subsequent messages to have a chat template
              tokenized_obs = tokenizer(
-@@ -823,6 +857,7 @@ def run_multi_turn_rollout(
+@@ -823,6 +856,7 @@ def run_multi_turn_rollout(
              sample_env_token_counts.float().mean().item()
          ),
      }
@@ -229,7 +228,7 @@ index 44a11cddd..c12ec4e1d 100644
      return current_batch, rollout_metrics
 
 
-@@ -1289,6 +1324,7 @@ def run_async_multi_turn_rollout(
+@@ -1289,6 +1323,7 @@ def run_async_multi_turn_rollout(
          rollout_metrics["histogram/total_tokens_length"] = [
              t for m in all_sample_metrics for t in m["turn_total_tokens"]
          ]
@@ -712,3 +711,49 @@ index e517e0298..84ef1f1b0 100644
          self.refit_param_info_mcore = self._calculate_refit_param_info()
 
          # Collect tensor metadata for refit / hf side info
+
+diff --git a/nemo_rl/distributed/virtual_cluster.py b/nemo_rl/distributed/virtual_cluster.py
+index 7d50355..ea55326 100644
+--- a/nemo_rl/distributed/virtual_cluster.py
++++ b/nemo_rl/distributed/virtual_cluster.py
+@@ -183,7 +183,12 @@ def _get_free_port_local(
+     return port
+
+
+-def init_ray(log_dir: Optional[str] = None) -> None:
++def init_ray(
++    log_dir: Optional[str] = None,
++    *,
++    include_dashboard: bool = True,
++    num_cpus: Optional[int] = None,
++) -> None:
+     """Initialise Ray.
+
+     Try to attach to an existing local cluster.
+@@ -192,6 +197,8 @@ def init_ray(log_dir: Optional[str] = None) -> None:
+
+     Args:
+         log_dir: Optional directory to store Ray logs and temp files.
++        include_dashboard: Whether a newly created local cluster starts the dashboard.
++        num_cpus: Optional CPU limit for a newly created local cluster.
+     """
+     # Set up runtime environment
+     env_vars = dict(os.environ)
+@@ -260,12 +267,16 @@ def init_ray(log_dir: Optional[str] = None) -> None:
+     local_runtime_env = dict(runtime_env)
+     local_runtime_env.pop("working_dir", None)
+
++    local_init_kwargs = {}
++    if num_cpus is not None:
++        local_init_kwargs["num_cpus"] = num_cpus
+     ray.init(
+         log_to_driver=True,
+-        include_dashboard=True,
++        include_dashboard=include_dashboard,
+         runtime_env=local_runtime_env,
+         _temp_dir=os.path.abspath(log_dir) if log_dir else None,
+         resources={cvd_tag: 1},
++        **local_init_kwargs,
+     )
+     logger.info(
+         f"Started local cluster with tag '{cvd_tag}': {ray.cluster_resources()}"

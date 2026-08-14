@@ -28,15 +28,10 @@ from pathlib import Path
 import torch
 from evo2 import Evo2
 
+from bionemo.evo2_phage_gen.qc import prompt_nucleotides, trim_at_first_eos
+
 
 logger = logging.getLogger(__name__)
-
-
-DNA_ALPHABET = frozenset("ACGTacgt")
-
-
-def _prompt_nucleotides(prompt: str) -> str:
-    return "".join(char for char in prompt if char in DNA_ALPHABET).upper()
 
 
 def _synchronize_cuda() -> None:
@@ -74,8 +69,9 @@ def _normalize_score_values(scores: object, expected_count: int) -> list[float |
 
 
 def _completion_token(sequence: object) -> str:
-    """Extract the first whitespace-delimited generated token, if present."""
-    fields = str(sequence).replace("\n", "").strip().split(maxsplit=1)
+    """Extract generated nucleotides before a textual EOS marker or whitespace."""
+    trimmed = trim_at_first_eos(str(sequence).replace("\n", "").strip())
+    fields = trimmed.split(maxsplit=1)
     return fields[0] if fields else ""
 
 
@@ -97,7 +93,7 @@ def main() -> None:
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    prompt_nt = _prompt_nucleotides(args.prompt)
+    prompt_nt = prompt_nucleotides(args.prompt).upper()
     n_tokens = args.total_nt - len(prompt_nt)
     if n_tokens <= 0:
         raise ValueError(f"--total-nt must exceed nucleotide prompt length {len(prompt_nt)}")

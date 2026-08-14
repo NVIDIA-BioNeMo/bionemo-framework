@@ -50,12 +50,13 @@ MASTER_PORT="${MASTER_PORT:-29641}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-10240}"
 PROMPT_BATCH_SIZE="${PROMPT_BATCH_SIZE:-64}"
 OVERWRITE="${OVERWRITE:-0}"
+DRY_RUN="${DRY_RUN:-0}"
 
 PROMPT_DIR="${RUN_ROOT}/prompts"
 JSONL_DIR="${RUN_ROOT}/jsonl"
 LOG_DIR="${RUN_ROOT}/logs"
 MANIFEST="${RUN_ROOT}/hpo_generation_manifest.tsv"
-INFER_SCRIPT="${REPO_ROOT}/recipes/evo2_megatron/src/bionemo/evo2/run/infer.py"
+INFER_SCRIPT="${RECIPE_DIR}/src/bionemo/evo2/run/infer.py"
 
 if [[ ! -f "${INFER_SCRIPT}" ]]; then
   printf 'ERROR: inference script not found: %s\n' "${INFER_SCRIPT}" >&2
@@ -130,27 +131,38 @@ for temp in ${TEMPERATURES}; do
     started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '\n[%s] START prompt_len=%s temp=%s out=%s\n' "${started_at}" "${prompt_len}" "${temp}" "${out}" | tee -a "${RUNNER_LOG}"
 
-    set +e
-    torchrun \
-      --nproc_per_node "${NPROC_PER_NODE}" \
-      --nnodes 1 \
-      --master_port "${MASTER_PORT}" \
-      "${INFER_SCRIPT}" \
-      --ckpt-dir "${CKPT_DIR}" \
-      --prompt-file "${prompt_file}" \
-      --max-new-tokens "${max_new_tokens}" \
-      --temperature "${temp}" \
-      --top-k "${TOP_K}" \
-      --top-p "${TOP_P}" \
-      --seed "${SEED}" \
-      --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
-      --max-seq-length "${MAX_SEQ_LENGTH}" \
-      --prompt-batch-size "${PROMPT_BATCH_SIZE}" \
-      --stream-output \
-      --output-file "${out}" \
-      > "${log}" 2>&1
-    status=$?
-    set -e
+    command=(
+      torchrun
+      --nproc_per_node "${NPROC_PER_NODE}"
+      --nnodes 1
+      --master_port "${MASTER_PORT}"
+      "${INFER_SCRIPT}"
+      --ckpt-dir "${CKPT_DIR}"
+      --prompt-file "${prompt_file}"
+      --max-new-tokens "${max_new_tokens}"
+      --temperature "${temp}"
+      --top-k "${TOP_K}"
+      --top-p "${TOP_P}"
+      --seed "${SEED}"
+      --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}"
+      --max-seq-length "${MAX_SEQ_LENGTH}"
+      --prompt-batch-size "${PROMPT_BATCH_SIZE}"
+      --stream-output
+      --output-file "${out}"
+    )
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      {
+        printf 'DRY_RUN'
+        printf ' %q' "${command[@]}"
+        printf '\n'
+      } > "${log}"
+      status=0
+    else
+      set +e
+      "${command[@]}" > "${log}" 2>&1
+      status=$?
+      set -e
+    fi
 
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     records="$(count_jsonl_records "${out}")"

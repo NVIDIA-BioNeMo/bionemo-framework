@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -110,6 +111,54 @@ def test_build_inference_command_preserves_total_target_length(tmp_path: Path) -
     assert command[command.index("--top-p") + 1] == "0.85"
     assert command[command.index("--tensor-parallel-size") + 1] == "1"
     assert "--strict-generation" in command
+
+
+def test_print_command_cli_emits_complete_nul_delimited_vector(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "bionemo.evo2_phage_gen.sampling_calibration",
+            "print-command",
+            "--infer-script",
+            str(tmp_path / "infer.py"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--prompt-file",
+            str(tmp_path / "prompts.jsonl"),
+            "--output-file",
+            str(tmp_path / "output.jsonl"),
+            "--prefix-length",
+            "24",
+            "--temperature",
+            "0.9",
+            "--target-length",
+            "6000",
+            "--seed",
+            "7",
+            "--tensor-parallel-size",
+            "2",
+            "--master-port",
+            "29680",
+            "--prompt-batch-size",
+            "16",
+            "--max-seq-length",
+            "10240",
+            "--top-k",
+            "4",
+            "--top-p",
+            "1.0",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    command = [item.decode() for item in completed.stdout.split(b"\0") if item]
+
+    assert command[0] == "torchrun"
+    assert command[command.index("--max-new-tokens") + 1] == "5976"
+    assert command[command.index("--temperature") + 1] == "0.9"
+    assert command[command.index("--output-file") + 1] == str(tmp_path / "output.jsonl")
 
 
 def test_validate_cell_output_requires_exact_prompt_ids(tmp_path: Path) -> None:

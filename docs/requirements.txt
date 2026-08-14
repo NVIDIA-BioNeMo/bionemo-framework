@@ -3,7 +3,7 @@ mkdocs-macros-plugin
 mkdocs-minify-plugin
 mkdocs-gen-files
 pymdown-extensions
-pytest
+pytest>=8,<9
 # Pinned: 0.26.0 (released 2026-03-23) breaks the build with
 # "TemplateNotFound: mkdocs_html/assets/index.css". Try unpinning after a fix is released.
 mkdocs-jupyter==0.25.1

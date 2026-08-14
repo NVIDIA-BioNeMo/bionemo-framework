@@ -209,6 +209,35 @@ preprocess_evo2 --config configs/sft_microviridae_preprocess.yaml
 
 The bundled paper supplement preserves the exact historical configuration.
 
+## Pin safety assets for a long-running scan
+
+Before controls, topology preflight, and a long sequence-safety scan, copy the validated asset
+manifest and its referenced recipe into a new run-owned directory:
+
+```bash
+evo2_phage_pin_safety_asset_manifest \
+  --manifest data/external/safety/asset_manifest.yaml \
+  --output-dir results/PROJECT/sft/runs/ATTEMPT/artifacts/pinned-safety-assets
+```
+
+Use the emitted `asset_manifest.yaml` for every gate and for the full scan, and retain `PINNING.json`.
+The command validates the source, copies the recipe byte-for-byte, rebinds the copied manifest, and
+revalidates it. The destination must not already exist.
+
+## Summarize a validated sequence-safety scan
+
+After `evo2_phage_sequence_safety scan` publishes a terminal schema-2 manifest, emit exact
+PASS, FAIL, INDETERMINATE, class-state, reason-code, and mutually exclusive class-combination counts:
+
+```bash
+evo2_phage_summarize_safety_manifest \
+  --manifest results/PROJECT/sft/runs/ATTEMPT/artifacts/scan/manifest.json \
+  --output results/PROJECT/sft/runs/ATTEMPT/artifacts/safety_tally.json
+```
+
+The command revalidates the full manifest and detector evidence before writing the tally. It counts
+manifest records; any representative-to-source weighting requires a separately authenticated lineage map.
+
 ## Troubleshooting
 
 - If an entrypoint is missing, rerun `.ci_build.sh`, source `.ci_test_env.sh`, and check `pyproject.toml` plus `<command> --help`.

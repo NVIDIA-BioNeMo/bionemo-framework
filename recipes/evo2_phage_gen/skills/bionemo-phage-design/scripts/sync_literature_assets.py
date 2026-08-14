@@ -727,27 +727,93 @@ class DownloadCache:
         """Initialize a cache rooted at the given directory."""
         self.root = root
 
+    @staticmethod
+    def _key(url: str) -> str:
+        return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
     def _paths(self, url: str) -> tuple[Path, Path]:
-        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-        return self.root / f"{digest}.bin", self.root / f"{digest}.json"
+        key = self._key(url)
+        metadata = self.root / f"{key}.json"
+        try:
+            record = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return self.root / f"{key}.bin", metadata
+        payload_file = record.get("payload_file")
+        if isinstance(payload_file, str) and Path(payload_file).name == payload_file:
+            return self.root / payload_file, metadata
+        return self.root / f"{key}.bin", metadata
+
+    @staticmethod
+    def _stage_bytes(root: Path, prefix: str, data: bytes) -> Path:
+        descriptor, name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=root)
+        staged = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+        return staged
 
     def read(self, url: str) -> Downloaded:
-        """Read a cached download for a source URL."""
+        """Read and authenticate a cached download for a source URL."""
         payload, metadata = self._paths(url)
         if not payload.is_file() or not metadata.is_file():
             raise OfflineCacheMiss(f"offline cache miss for {url}")
-        record = json.loads(metadata.read_text(encoding="utf-8"))
-        return Downloaded(payload.read_bytes(), record["content_type"], record["final_url"])
+        try:
+            record = json.loads(metadata.read_text(encoding="utf-8"))
+            data = payload.read_bytes()
+            content_type = record["content_type"]
+            final_url = record["final_url"]
+            payload_file = record["payload_file"]
+            payload_sha256 = record["payload_sha256"]
+            payload_size = record["payload_size"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise OfflineCacheMiss(f"offline cache miss for {url}: incomplete cache entry") from error
+        if (
+            not isinstance(content_type, str)
+            or not isinstance(final_url, str)
+            or not isinstance(payload_file, str)
+            or payload_file != payload.name
+            or not isinstance(payload_sha256, str)
+            or not isinstance(payload_size, int)
+            or payload_size != len(data)
+            or payload_sha256 != hashlib.sha256(data).hexdigest()
+        ):
+            raise OfflineCacheMiss(f"offline cache miss for {url}: cache entry failed integrity validation")
+        return Downloaded(data, content_type, final_url)
 
     def write(self, url: str, value: Downloaded) -> None:
-        """Persist a downloaded response for a source URL."""
+        """Atomically publish a downloaded response for a source URL."""
         self.root.mkdir(parents=True, exist_ok=True)
-        payload, metadata = self._paths(url)
-        payload.write_bytes(value.data)
-        metadata.write_text(
-            json.dumps({"content_type": value.content_type, "final_url": value.final_url}, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        key = self._key(url)
+        old_payload, metadata = self._paths(url)
+        payload_sha256 = hashlib.sha256(value.data).hexdigest()
+        payload = self.root / f"{key}.{payload_sha256}.bin"
+        record = {
+            "content_type": value.content_type,
+            "final_url": value.final_url,
+            "payload_file": payload.name,
+            "payload_sha256": payload_sha256,
+            "payload_size": len(value.data),
+        }
+        metadata_data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        staged_payload = self._stage_bytes(self.root, f".{key}-payload-", value.data)
+        staged_metadata = self._stage_bytes(self.root, f".{key}-metadata-", metadata_data)
+        try:
+            os.replace(staged_payload, payload)
+            staged_payload = None
+            os.replace(staged_metadata, metadata)
+            staged_metadata = None
+        finally:
+            if staged_payload is not None:
+                staged_payload.unlink(missing_ok=True)
+            if staged_metadata is not None:
+                staged_metadata.unlink(missing_ok=True)
+        if old_payload != payload and old_payload.name.startswith(key):
+            old_payload.unlink(missing_ok=True)
 
 
 class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -849,6 +915,8 @@ class Fetcher:
                     "15",
                     "--max-time",
                     "120",
+                    "--max-filesize",
+                    str(MAX_DOWNLOAD_BYTES),
                     "--user-agent",
                     USER_AGENT,
                     "--cookie",
@@ -867,6 +935,8 @@ class Fetcher:
                     completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=135)
                 except subprocess.TimeoutExpired as error:
                     raise RetryableFetchError(f"curl timed out for {current_url}") from error
+                if completed.returncode == 63:
+                    raise SourceValidationError(f"download exceeds {MAX_DOWNLOAD_BYTES} bytes: {url}")
                 if completed.returncode != 0:
                     raise RetryableFetchError(f"curl transport failed for {current_url}: {completed.stderr.strip()}")
                 fields = completed.stdout.rsplit("\t", 2)
@@ -1076,6 +1146,24 @@ def _column_number(reference: str) -> int:
     return result
 
 
+def _xlsx_sheet_names(workbook: Path) -> tuple[str, ...]:
+    """Read worksheet names in workbook order."""
+    try:
+        with zipfile.ZipFile(workbook) as archive:
+            workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
+    except (OSError, KeyError, ET.ParseError, zipfile.BadZipFile) as error:
+        raise WorkbookValidationError(f"invalid XLSX workbook metadata: {error}") from error
+    return tuple(item.attrib.get("name", "") for item in workbook_root.findall(f".//{{{_SHEET_NS}}}sheet"))
+
+
+def _validate_sheet_position(workbook: Path, sheet_name: str, position: int) -> None:
+    """Validate one-based worksheet position required by a pinned source contract."""
+    names = _xlsx_sheet_names(workbook)
+    if position < 1 or len(names) < position or names[position - 1] != sheet_name:
+        ordinal = {1: "first", 2: "second", 3: "third"}.get(position, f"position {position}")
+        raise WorkbookValidationError(f"the workbook's {ordinal} sheet must be named {sheet_name!r}")
+
+
 def read_xlsx_sheet(workbook: Path, sheet_name: str) -> XlsxSheet:
     """Read and validate a named worksheet from an XLSX workbook."""
     try:
@@ -1089,8 +1177,6 @@ def read_xlsx_sheet(workbook: Path, sheet_name: str) -> XlsxSheet:
         except (KeyError, ET.ParseError) as error:
             raise WorkbookValidationError(f"invalid XLSX workbook metadata: {error}") from error
         sheets = workbook_root.findall(f".//{{{_SHEET_NS}}}sheet")
-        if len(sheets) < 2 or sheets[1].attrib.get("name") != "Sheet 1":
-            raise WorkbookValidationError("the workbook's second sheet must be named 'Sheet 1'")
         selected = next((item for item in sheets if item.attrib.get("name") == sheet_name), None)
         if selected is None:
             raise WorkbookValidationError(f"sheet not found: {sheet_name!r}")
@@ -1150,6 +1236,7 @@ def read_xlsx_sheet(workbook: Path, sheet_name: str) -> XlsxSheet:
 
 
 def _sheet1_tsv(workbook: Path, *, expected_rows: int, expected_columns: int) -> tuple[bytes, dict[str, object]]:
+    _validate_sheet_position(workbook, "Sheet 1", 2)
     sheet = read_xlsx_sheet(workbook, "Sheet 1")
     if len(sheet.rows) != expected_rows + 1:
         raise WorkbookValidationError(
@@ -1268,6 +1355,7 @@ def _validate_staged(root: Path, spec: PaperSpec) -> None:
         data = workbook.read_bytes() if workbook.is_file() else b""
         if len(data) != expected_size or _sha256(data) != expected_sha256:
             raise SourceValidationError(f"{spec.slug}: workbook hash/size does not match its pinned source")
+        _validate_sheet_position(workbook, "Sheet 1", 2)
         sheet = read_xlsx_sheet(workbook, "Sheet 1")
         if len(sheet.rows) != expected_rows + 1 or any(len(row) != expected_columns for row in sheet.rows):
             raise SourceValidationError(

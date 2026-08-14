@@ -150,7 +150,11 @@ class HostEvidence:
 
     def __post_init__(self) -> None:
         """Freeze host domains and metadata at construction time."""
-        object.__setattr__(self, "replication_host_domains", frozenset(self.replication_host_domains))
+        try:
+            domains = frozenset(HostDomain(domain) for domain in self.replication_host_domains)
+        except ValueError as error:
+            raise ValueError(f"unsupported replication host domain in {self.replication_host_domains}") from error
+        object.__setattr__(self, "replication_host_domains", domains)
         object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
 
     def to_dict(self) -> dict[str, object]:

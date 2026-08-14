@@ -194,6 +194,10 @@ def measure_novelty(
         sft_fasta,
         attempt_dir / "sft-payload.fasta",
     )
+    reference_payload_fasta = normalize_prompted_fasta(
+        reference_fasta,
+        attempt_dir / "reference-payload.fasta",
+    )
     mmseqs_bin = (tool_bin_dir / "mmseqs").resolve()
 
     target_m8 = attempt_dir / "target.m8"
@@ -201,7 +205,7 @@ def measure_novelty(
     _run_search(
         mmseqs_bin,
         query_fasta,
-        reference_fasta.resolve(),
+        reference_payload_fasta,
         target_m8,
         attempt_dir / "target-tmp",
         threads,
@@ -217,7 +221,9 @@ def measure_novelty(
         attempt_dir / "sft-search.log",
     )
 
-    target_hashes = {canonical_circular_sequence(sequence) for sequence in _read_fasta_sequences(reference_fasta)}
+    target_hashes = {
+        canonical_circular_sequence(sequence) for sequence in _read_fasta_sequences(reference_payload_fasta)
+    }
     sft_hashes = {canonical_circular_sequence(sequence) for sequence in _read_fasta_sequences(sft_payload_fasta)}
     canonical = sweep["sequence"].map(canonical_circular_sequence)
     metrics = sweep[["id_prompt", "cell"]].copy()

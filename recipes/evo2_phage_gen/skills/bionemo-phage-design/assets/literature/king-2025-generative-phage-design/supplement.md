@@ -118,7 +118,7 @@ To determine the optimal parameter combination for phage genome generation with 
 
 ##### ***B.1.15.*** Shannon diversity analysis
 
-Shannon entropy was used to quantify sequence diversity (**Data and code availability**) in generated sequences, *Microviridae* genomes, scrambled *Microviridae* genomes, and the ΦX174 reference genome NC_001 422.1. Generated sequences for each temperature and prompt length were filtered with quality control and tropism constraints before being analyzed. For each dataset, sequences were clustered using MMseqs2 version 13.45111 (<a id="xref-ref-95-7"></a>[Steinegger & Söding, 2017](paper.md#ref-95)) at 99% nucleotide identity, then Shannon entropy was calculated on the resulting distribution of sequences per cluster.
+Shannon entropy was used to quantify sequence diversity (**Data and code availability**) in generated sequences, *Microviridae* genomes, scrambled *Microviridae* genomes, and the ΦX174 reference genome NC_001422.1. Generated sequences for each temperature and prompt length were filtered with quality control and tropism constraints before being analyzed. For each dataset, sequences were clustered using MMseqs2 version 13.45111 (<a id="xref-ref-95-7"></a>[Steinegger & Söding, 2017](paper.md#ref-95)) at 99% nucleotide identity, then Shannon entropy was calculated on the resulting distribution of sequences per cluster.
 
 <a id="sec-33"></a>
 

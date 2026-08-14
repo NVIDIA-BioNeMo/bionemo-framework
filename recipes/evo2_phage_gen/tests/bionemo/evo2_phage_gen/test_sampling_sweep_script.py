@@ -43,7 +43,7 @@ def test_sampling_sweep_dry_run_materializes_marker_only_parallel_plan(tmp_path:
         "TENSOR_PARALLEL_SIZE": "1",
     }
 
-    subprocess.run(["bash", str(SCRIPT)], check=True, env=env, cwd=RECIPE_ROOT)
+    subprocess.run(["bash", str(SCRIPT)], check=True, env=env, cwd=RECIPE_ROOT, timeout=120)
 
     contract = json.loads((run_root / "sweep_contract.json").read_text())
     assert contract["topology"] == {"gpu_ids": [0, 1], "tensor_parallel_size": 1, "replicas": 2}
@@ -67,3 +67,5 @@ def test_sampling_workers_use_dedicated_input_and_guard_token_budget() -> None:
     assert "read -r -u 3 cell_index" in script
     assert 'done 3< "${RUN_ROOT}/cells.tsv"' in script
     assert "if (( max_new_tokens <= 0 )); then" in script
+    assert "sampling_calibration print-command" in script
+    assert "mapfile -d '' -t inference_command" in script

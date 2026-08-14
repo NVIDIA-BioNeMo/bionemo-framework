@@ -18,10 +18,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import bionemo.evo2_phage_gen.calibration_novelty as novelty
 from bionemo.evo2_phage_gen.calibration_novelty import (
     SEARCH_COLUMNS,
     _top_hits,
     canonical_circular_sequence,
+    measure_novelty,
     normalize_prompted_fasta,
     summarize_novelty,
     validate_novelty_file,
@@ -59,6 +61,39 @@ def test_normalize_prompted_fasta_strips_control_tokens_and_rejects_non_dna(tmp_
     invalid.write_text(">bad\n+~ACNT\n")
     with pytest.raises(ValueError, match="non-DNA"):
         normalize_prompted_fasta(invalid, tmp_path / "unused.fna")
+
+
+def test_measure_novelty_normalizes_target_reference_before_search_and_hashing(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.fna"
+    reference.write_text(">reference\n+~ACGT\n")
+    sft = tmp_path / "sft.fna"
+    sft.write_text(">sft\n+~ACGT\n")
+    monkeypatch.setattr(
+        novelty,
+        "_load_sweep",
+        lambda _root: pd.DataFrame({"id_prompt": ["generated"], "cell": ["cell"], "sequence": ["ACGT"]}),
+    )
+    searched_references = []
+
+    def fake_search(_binary, _query, search_reference, output, *_args):
+        searched_references.append(search_reference)
+        output.touch()
+
+    monkeypatch.setattr(novelty, "_run_search", fake_search)
+
+    metrics = measure_novelty(
+        generation_root=tmp_path / "generation",
+        reference_fasta=reference,
+        sft_fasta=sft,
+        tool_bin_dir=tmp_path,
+        work_dir=tmp_path / "work",
+        output_csv=tmp_path / "metrics.csv",
+        threads=1,
+    )
+
+    assert searched_references[0].name == "reference-payload.fasta"
+    assert searched_references[0].read_text() == ">reference\nACGT\n"
+    assert metrics.loc[0, "exact_target_circular_or_revcomp"] == 1.0
 
 
 def test_summarize_novelty_reports_copy_rates():

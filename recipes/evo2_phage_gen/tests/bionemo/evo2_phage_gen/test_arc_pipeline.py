@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import bionemo.evo2_phage_gen.arc_pipeline as arc_pipeline
 from bionemo.evo2_phage_gen.arc_pipeline import (
     ARC_EVO2_GIT_URL,
     ARC_EVO2_REV,
@@ -50,6 +51,7 @@ from bionemo.evo2_phage_gen.arc_pipeline import (
     PATCHED_MMSEQS_EMPTY_GUARD,
     PATCHED_PRODIGAL_CMD,
     _apply_lovis4u_runtime_patches,
+    _apply_online_measurement_patches,
     _assert_arc_source_revision,
     prepare_arc_pipeline_workdir,
 )
@@ -83,6 +85,21 @@ def test_lovis4u_runtime_patch_matches_pinned_source_trailing_whitespace(tmp_pat
     _apply_lovis4u_runtime_patches(tmp_path)
 
     assert PATCHED_LOVIS4U_COMMAND in visualization_path.read_text()
+
+
+def test_online_measurement_patch_rejects_missing_gbk_conversion_anchor(tmp_path):
+    """A drifted GBK conversion anchor must not silently skip its online patch."""
+    patched_fragments = [
+        value
+        for name, value in vars(arc_pipeline).items()
+        if name.startswith(("PATCHED_ONLINE_", "PATCHED_REQUIRED_GENE_", "PATCHED_AAI_", "PATCHED_SYNTENY_"))
+        and name != "PATCHED_ONLINE_GBK_CONVERSION"
+    ]
+    pipeline_path = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_path.write_text("\n".join(patched_fragments))
+
+    with pytest.raises(ValueError, match="online objective-measurement patches"):
+        _apply_online_measurement_patches(tmp_path)
 
 
 def test_prepare_arc_pipeline_workdir_patches_legacy_reference_path(tmp_path):
@@ -227,6 +244,7 @@ def test_prepare_arc_pipeline_workdir_applies_maintained_patch(tmp_path):
 def test_maintained_arc_patch_rotates_only_candidate_and_guards_empty_synteny_counts() -> None:
     """Circular LCS work stays bounded and empty synteny output tolerates absent counts."""
     patch_text = DEFAULT_ARC_PIPELINE_PATCH.read_text()
+    assert "+    def best_circular_lcs_candidate_indices" in patch_text
     helper = patch_text.split("+    def best_circular_lcs_candidate_indices", 1)[1].split(
         "+    def count_syntenic_genes_from_gff_products", 1
     )[0]
@@ -235,6 +253,20 @@ def test_maintained_arc_patch_rotates_only_candidate_and_guards_empty_synteny_co
     assert "for candidate_offset in range(len(candidate_products))" in helper
     assert "if os.path.exists(synteny_counts_csv):" in patch_text
     assert "synteny_filter_counts = pd.read_csv(synteny_counts_csv)" in patch_text
+
+
+def test_maintained_arc_patch_uses_local_empty_input_run_state() -> None:
+    """Empty inputs should skip work without changing the caller's Arc config."""
+    patch_text = DEFAULT_ARC_PIPELINE_PATCH.read_text()
+
+    assert 'config["prodigal_based_filters"] = False' not in patch_text
+    assert 'config["protein_database_hit_count_filter"] = False' not in patch_text
+    assert 'config["mmseqs_clustering_filter"] = False' not in patch_text
+    assert 'config["genetic_architecture_visualization_and_synteny_filtering"] = False' not in patch_text
+    assert "run_prodigal_based_filters" in patch_text
+    assert "run_protein_database_hit_count_filter" in patch_text
+    assert "run_mmseqs_clustering_filter" in patch_text
+    assert "run_genetic_architecture_visualization_and_synteny_filtering" in patch_text
 
 
 def test_maintained_patch_honors_lovis4u_pdf_collection_flag():

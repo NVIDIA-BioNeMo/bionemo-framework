@@ -68,7 +68,7 @@ if [[ ! -d "${CKPT_DIR}" ]]; then
   exit 2
 fi
 
-INFER_SCRIPT="${RECIPE_ROOT}/../evo2_megatron/src/bionemo/evo2/run/infer.py"
+INFER_SCRIPT="${RECIPE_ROOT}/src/bionemo/evo2/run/infer.py"
 if [[ ! -f "${INFER_SCRIPT}" ]]; then
   echo "Inference script not found: ${INFER_SCRIPT}" >&2
   exit 2
@@ -100,6 +100,29 @@ run_worker() {
       echo "${cell_key}: TARGET_LENGTH=${TARGET_LENGTH} must exceed prefix_length=${prefix_length}" >&2
       return 2
     fi
+    local -a inference_command=()
+    mapfile -d '' -t inference_command < <(
+      python -m bionemo.evo2_phage_gen.sampling_calibration print-command \
+        --infer-script "${INFER_SCRIPT}" \
+        --checkpoint "${CKPT_DIR}" \
+        --prompt-file "${prompt_file}" \
+        --output-file "${output_file}" \
+        --prefix-length "${prefix_length}" \
+        --temperature "${temperature}" \
+        --target-length "${TARGET_LENGTH}" \
+        --seed "${SEED}" \
+        --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+        --master-port "$(( MASTER_PORT_BASE + slot ))" \
+        --prompt-batch-size "${PROMPT_BATCH_SIZE}" \
+        --max-seq-length "${MAX_SEQ_LENGTH}" \
+        --top-k "${TOP_K}" \
+        --top-p "${TOP_P}"
+    )
+    if (( ${#inference_command[@]} == 0 )); then
+      echo "${cell_key}: command builder returned no arguments" >&2
+      return 2
+    fi
+
     local attempt=0
     local succeeded=0
     while (( attempt <= MAX_RETRIES )); do
@@ -114,24 +137,7 @@ run_worker() {
         MPLCONFIGDIR="${slot_runtime}/matplotlib" \
         FLASHINFER_WORKSPACE_BASE="${slot_runtime}/flashinfer" \
         timeout --signal=TERM --kill-after=60s "${CELL_TIMEOUT_SECONDS}" \
-          torchrun \
-          --nproc_per_node "${TENSOR_PARALLEL_SIZE}" \
-          --nnodes 1 \
-          --master_port "$(( MASTER_PORT_BASE + slot ))" \
-          "${INFER_SCRIPT}" \
-          --ckpt-dir "${CKPT_DIR}" \
-          --prompt-file "${prompt_file}" \
-          --max-new-tokens "${max_new_tokens}" \
-          --temperature "${temperature}" \
-          --top-k "${TOP_K}" \
-          --top-p "${TOP_P}" \
-          --seed "${SEED}" \
-          --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
-          --max-seq-length "${MAX_SEQ_LENGTH}" \
-          --prompt-batch-size "${PROMPT_BATCH_SIZE}" \
-          --strict-generation \
-          --stream-output \
-          --output-file "${output_file}"
+          "${inference_command[@]}"
       } > "${log}" 2>&1; then
         local rc=0
       else

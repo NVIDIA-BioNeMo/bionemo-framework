@@ -15,12 +15,17 @@
 
 """Integration checks for native extensions built by ``.ci_build.sh``."""
 
+import importlib.util
 import subprocess
 import sys
+
+import pytest
 
 
 def test_causal_conv1d_extension_imports_with_active_torch():
     """The CUDA extension must be compiled for the active system Torch ABI."""
+    if importlib.util.find_spec("causal_conv1d") is None:
+        pytest.skip("causal_conv1d is not installed in this environment")
     result = subprocess.run(
         [sys.executable, "-c", "import causal_conv1d"],
         check=False,

@@ -23,7 +23,7 @@ if ! pip freeze | grep -E '^transformer[-_]engine([= @]|$)' > pip-constraints.tx
     : > pip-constraints.txt
     echo "transformer-engine is not installed; continuing with an empty pip-constraints.txt" >&2
 fi
-uv pip install -r build_requirements.txt --no-build-isolation
+uv pip install -c pip-constraints.txt -r build_requirements.txt --no-build-isolation
 
 # 5. Install the recipe with all remaining dependencies, including test extras.
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation

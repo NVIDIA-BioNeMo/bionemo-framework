@@ -22,10 +22,9 @@
 # copies and linking back to the source file.
 
 import argparse
-import functools
 import logging
-import operator
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -160,10 +159,69 @@ def _iter_copied_tree_files(source_path: Path):
         yield file
 
 
-SOURCE_TO_DESTINATION_MAP: dict[str, list[str]] = {
-    "recipes/evo2_megatron/src/bionemo/common": [
-        "recipes/eden_megatron/src/bionemo/common",
-    ],
+@dataclass(frozen=True)
+class CopySpec:
+    """Describe destinations and rsync-style behavior for one source."""
+
+    destinations: tuple[str, ...]
+    delete: bool = False
+
+
+def _normalize_copy_spec(spec: CopySpec | list[str]) -> CopySpec:
+    """Return a uniform copy specification for legacy list entries."""
+    if isinstance(spec, CopySpec):
+        return spec
+    return CopySpec(destinations=tuple(spec))
+
+
+def _sync_copied_tree(source_path: Path, destination_path: Path, *, delete: bool) -> None:
+    """Copy one directory tree, optionally deleting stale destination entries first."""
+    if delete:
+        if destination_path.is_symlink() or destination_path.is_file():
+            destination_path.unlink()
+        elif destination_path.exists():
+            shutil.rmtree(destination_path)
+    shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
+
+
+def _relative_tree_files(root: Path) -> set[Path]:
+    """Return copied-tree files relative to *root*."""
+    return {file.relative_to(root) for file in _iter_copied_tree_files(root)}
+
+
+def _validate_copied_tree(source_path: Path, destination_path: Path, source_display: str, *, delete: bool) -> None:
+    """Validate copied file contents and, when requested, the exact tree inventory."""
+    source_files = _relative_tree_files(source_path)
+    if delete:
+        destination_files = _relative_tree_files(destination_path)
+        if source_files != destination_files:
+            missing = sorted(str(path) for path in source_files - destination_files)
+            unexpected = sorted(str(path) for path in destination_files - source_files)
+            raise ValueError(
+                f"Copied directory {destination_path} does not exactly mirror {source_path}; "
+                f"missing={missing}, unexpected={unexpected}. Run "
+                f"{Path(__file__).relative_to(Path.cwd())} --fix to fix."
+            )
+    for source_rel in source_files:
+        _compare_file_contents(source_path / source_rel, destination_path / source_rel, source_display)
+
+
+SOURCE_TO_DESTINATION_MAP: dict[str, CopySpec | list[str]] = {
+    "recipes/evo2_megatron/src/bionemo/common": CopySpec(
+        destinations=(
+            "recipes/eden_megatron/src/bionemo/common",
+            "recipes/evo2_phage_gen/src/bionemo/common",
+        ),
+        delete=True,
+    ),
+    "recipes/evo2_megatron/src/bionemo/evo2": CopySpec(
+        destinations=("recipes/evo2_phage_gen/src/bionemo/evo2",),
+        delete=True,
+    ),
+    "recipes/evo2_megatron/tokenizers": CopySpec(
+        destinations=("recipes/evo2_phage_gen/tokenizers",),
+        delete=True,
+    ),
     "models/esm2/modeling_esm_te.py": [
         "recipes/esm2_native_te/modeling_esm_te.py",
         "recipes/esm2_peft_te/example_8m_checkpoint/esm_nv.py",
@@ -238,15 +296,18 @@ def main():
     args = parser.parse_args()
 
     # Check if the script needs to run.
-    all_files = set(SOURCE_TO_DESTINATION_MAP.keys()) | set(
-        functools.reduce(operator.iadd, SOURCE_TO_DESTINATION_MAP.values(), [])
-    )
-    relevant_files = [f for f in args.files if f in all_files]
+    copy_specs = {source: _normalize_copy_spec(spec) for source, spec in SOURCE_TO_DESTINATION_MAP.items()}
+    mapped_paths = {Path(path) for source, spec in copy_specs.items() for path in (source, *spec.destinations)}
+    relevant_files = [
+        filename
+        for filename in args.files
+        if any(Path(filename) == mapped_path or mapped_path in Path(filename).parents for mapped_path in mapped_paths)
+    ]
     # If pre-commit passed a list of files and none are relevant, skip.
     if args.files and not relevant_files:
         return
 
-    for source, destinations in SOURCE_TO_DESTINATION_MAP.items():
+    for source, copy_spec in copy_specs.items():
         source_path = Path(source)
         if not source_path.exists():
             raise ValueError(
@@ -254,7 +315,7 @@ def main():
                 f"source-to-destination map in {Path(__file__).relative_to(Path.cwd())}"
             )
 
-        for destination in destinations:
+        for destination in copy_spec.destinations:
             destination_path = Path(destination)
             if not destination_path.exists():
                 raise ValueError(
@@ -264,20 +325,18 @@ def main():
 
             if args.fix:
                 if source_path.is_dir():
-                    shutil.copytree(source, destination, dirs_exist_ok=True)
+                    _sync_copied_tree(source_path, destination_path, delete=copy_spec.delete)
                     for file in _iter_copied_tree_files(source_path):
                         source_rel = file.relative_to(source_path)
                         _add_banner_to_file(destination_path / source_rel, str(Path(source) / source_rel))
                 else:
                     shutil.copy(source, destination)
                     _add_banner_to_file(destination_path, source)
-                logger.info(f"Copied {source} to {destination}")
+                logger.info("Copied %s to %s", source, destination)
 
             else:
                 if source_path.is_dir():
-                    for file in _iter_copied_tree_files(source_path):
-                        source_rel = file.relative_to(source_path)
-                        _compare_file_contents(file, destination_path / source_rel, source)
+                    _validate_copied_tree(source_path, destination_path, source, delete=copy_spec.delete)
                 else:
                     _compare_file_contents(source_path, destination_path, source)
 

@@ -258,12 +258,12 @@ def test_maintained_patch_initializes_rollout_timing_for_all_training_paths() ->
     assert patch_text.count("rollout_timing_metrics: dict[str, float] = {}") >= 2
 
 
-def test_maintained_patch_uses_stable_multi_environment_metric_names() -> None:
-    """Every metric is task-prefixed when multiple environments emit metrics."""
+def test_maintained_patch_namespaces_every_environment_metric() -> None:
+    """Task prefixes keep environment metrics from replacing core rollout metrics."""
     patch_text = nemo_rl_patches.DEFAULT_PATCH.read_text()
 
-    assert "multiple_metric_environments = len(results) > 1" in patch_text
-    assert 'f"{task_name}/{key}" if multiple_metric_environments else key' in patch_text
+    assert "multiple_metric_environments" not in patch_text
+    assert 'metric_key = f"{task_name}/{key}"' in patch_text
 
 
 def test_maintained_patch_caches_driver_generation_adapter_and_returns_none_from_refit() -> None:
@@ -327,3 +327,40 @@ def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypat
     monkeypatch.setattr(nemo_rl_patches.importlib, "import_module", lambda name: modules[name])
 
     nemo_rl_patches.assert_nemo_rl_patch_symbols()
+
+
+def test_assert_nemo_rl_patch_symbols_rejects_missing_runtime_symbol(monkeypatch) -> None:
+    """Startup should identify a missing required symbol before training begins."""
+    generation_mixin_cls = type(
+        "MegatronGenerationMixin",
+        (),
+        {"_load_generation_adapter": object()},
+    )
+    modules = {
+        "nemo_rl.experience.rollouts": types.SimpleNamespace(collect_environment_metrics=object()),
+        "nemo_rl.models.generation.megatron.megatron_generation": types.SimpleNamespace(
+            _load_generation_adapter=object()
+        ),
+        "nemo_rl.models.generation.megatron.megatron_worker": types.SimpleNamespace(
+            MegatronGenerationMixin=generation_mixin_cls
+        ),
+        "nemo_rl.models.megatron.setup": types.SimpleNamespace(
+            _apply_target_allowlist_prefixes=object(),
+            NoRefitMegatronBridge=object(),
+            _uses_colocated_megatron_generation=object(),
+        ),
+    }
+    monkeypatch.setattr(nemo_rl_patches.importlib, "import_module", lambda name: modules[name])
+
+    with pytest.raises(RuntimeError, match="generate_with_adapter"):
+        nemo_rl_patches.assert_nemo_rl_patch_symbols()
+
+
+def test_maintained_patch_exposes_scoped_ray_initialization_options() -> None:
+    """The recipe passes dashboard and CPU options without replacing ray.init globally."""
+    patch_text = nemo_rl_patches.DEFAULT_PATCH.read_text()
+
+    assert "include_dashboard: bool = True" in patch_text
+    assert "num_cpus: Optional[int] = None" in patch_text
+    assert "include_dashboard=include_dashboard" in patch_text
+    assert 'local_init_kwargs["num_cpus"] = num_cpus' in patch_text

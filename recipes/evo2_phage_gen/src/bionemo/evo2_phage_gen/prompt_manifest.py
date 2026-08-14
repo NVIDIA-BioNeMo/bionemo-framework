@@ -23,8 +23,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bionemo.evo2_phage_gen.qc import prompt_nucleotides as _prompt_nucleotides
 
-DNA_ALPHABET = frozenset("ACGTacgt")
+
 TARGET_METADATA_KEYS = (
     "id",
     "target_id",
@@ -49,10 +50,6 @@ def sha256_file(path: Path) -> str:
 def sha256_text(value: str) -> str:
     """Hash normalized prompt text without storing the text itself."""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _prompt_nucleotides(prompt: str) -> str:
-    return "".join(char for char in prompt if char in DNA_ALPHABET)
 
 
 def _prompt_from_record(record: dict[str, Any]) -> str:

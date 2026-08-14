@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import logging
 import sys
+import textwrap
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
@@ -24,36 +27,26 @@ from omegaconf import OmegaConf
 from bionemo.evo2_phage_gen import run_phage_grpo
 
 
-class _FakeRay:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+def test_init_ray_passes_dashboard_and_cpu_options_to_upstream() -> None:
+    calls = []
 
-    def init(self, **kwargs: object) -> None:
-        self.calls.append(kwargs)
+    def upstream_init_ray(**kwargs) -> None:
+        calls.append(kwargs)
 
+    run_phage_grpo._init_ray(upstream_init_ray, include_dashboard=False, num_cpus=32)
 
-def test_init_ray_disables_optional_dashboard_and_restores_ray_init() -> None:
-    ray = _FakeRay()
-    original_init = ray.init
-
-    def upstream_init_ray() -> None:
-        ray.init(include_dashboard=True, resources={"test": 1})
-
-    run_phage_grpo._init_ray(upstream_init_ray, ray, include_dashboard=False, num_cpus=32)
-
-    assert ray.calls == [{"include_dashboard": False, "resources": {"test": 1}, "num_cpus": 32}]
-    assert ray.init == original_init
+    assert calls == [{"include_dashboard": False, "num_cpus": 32}]
 
 
-def test_init_ray_preserves_dashboard_when_explicitly_enabled() -> None:
-    ray = _FakeRay()
+def test_init_ray_omits_unspecified_cpu_limit() -> None:
+    calls = []
 
-    def upstream_init_ray() -> None:
-        ray.init(include_dashboard=True)
+    def upstream_init_ray(**kwargs) -> None:
+        calls.append(kwargs)
 
-    run_phage_grpo._init_ray(upstream_init_ray, ray, include_dashboard=True)
+    run_phage_grpo._init_ray(upstream_init_ray, include_dashboard=True)
 
-    assert ray.calls == [{"include_dashboard": True}]
+    assert calls == [{"include_dashboard": True}]
 
 
 def test_ensure_prompt_data_files_logs_materialized_paths(tmp_path, monkeypatch, caplog, capsys) -> None:
@@ -82,3 +75,16 @@ def test_ensure_prompt_data_files_logs_materialized_paths(tmp_path, monkeypatch,
     assert f"  {train_path}" in caplog.messages
     assert f"  {validation_path}" in caplog.messages
     assert capsys.readouterr().out == ""
+
+
+def test_sync_trainer_receives_experiment_logger() -> None:
+    """Keep the module logger out of the NeMo-RL trainer call."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(run_phage_grpo.main)))
+    trainer_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "trainer"
+    )
+
+    assert isinstance(trainer_call.args[8], ast.Name)
+    assert trainer_call.args[8].id == "experiment_logger"

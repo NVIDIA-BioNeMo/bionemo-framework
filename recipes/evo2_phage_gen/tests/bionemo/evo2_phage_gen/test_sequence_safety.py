@@ -30,6 +30,33 @@ from bionemo.evo2_phage_gen.sequence_safety import (
 )
 
 
+POLICY_SCHEMA_V1 = """
+schema_version: 1
+policy_id: phage-sequence-safety-v1
+regulatory_basis:
+  label: EMA-derived sequence-design safety gate
+  source: EMA/CHMP/BWP/1/2024
+  source_status: draft
+  source_status_as_of: 2026-08-07
+  regulatory_compliance_claimed: false
+host_scope:
+  allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
+  disallowed_endpoint: increased_eukaryotic_replication
+required_sequence_classes: [amr, toxin]
+bacterial_replication_profile:
+  required_sequence_classes: [amr, toxin, lysogeny]
+  strict_lytic_required: true
+archaeal_only_profile:
+  required_sequence_classes: [amr, toxin]
+  lysogeny: informational
+failure_policy:
+  missing_required_tool: INDETERMINATE
+  missing_required_database: INDETERMINATE
+  parser_schema_mismatch: INDETERMINATE
+  incomplete_host_evidence: INDETERMINATE
+""".lstrip()
+
+
 def _class_result(name: str, state: SafetyState, *, required: bool = True) -> SafetyClassResult:
     return SafetyClassResult(safety_class=name, state=state, required=required)
 
@@ -80,31 +107,10 @@ def test_policy_load_is_strict_and_digest_is_canonical(tmp_path):
     """Policy input must reject unknown classes and hash its sorted JSON representation."""
     policy_path = tmp_path / "policy.yaml"
     policy_path.write_text(
-        """
-schema_version: 1
-policy_id: phage-sequence-safety-v1
-regulatory_basis:
-  label: EMA-derived sequence-design safety gate
-  source: EMA/CHMP/BWP/1/2024
-  source_status: draft
-  source_status_as_of: 2026-08-07
-  regulatory_compliance_claimed: false
-host_scope:
-  allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
-  disallowed_endpoint: increased_eukaryotic_replication
-required_sequence_classes: [toxin, amr]
-bacterial_replication_profile:
-  required_sequence_classes: [amr, toxin, lysogeny]
-  strict_lytic_required: true
-archaeal_only_profile:
-  required_sequence_classes: [amr, toxin]
-  lysogeny: informational
-failure_policy:
-  missing_required_tool: INDETERMINATE
-  missing_required_database: INDETERMINATE
-  parser_schema_mismatch: INDETERMINATE
-  incomplete_host_evidence: INDETERMINATE
-""".lstrip()
+        POLICY_SCHEMA_V1.replace(
+            "required_sequence_classes: [amr, toxin]\nbacterial_replication_profile:",
+            "required_sequence_classes: [toxin, amr]\nbacterial_replication_profile:",
+        )
     )
 
     policy = load_phage_safety_policy(policy_path)
@@ -152,10 +158,22 @@ def test_policy_rejects_unknown_schema_version(tmp_path):
         ("label: EMA-derived sequence-design safety gate", "label: non-regulatory label", "regulatory_basis"),
         ("source_status: draft", "source_status: final", "regulatory_basis"),
         ("lysogeny: informational", "lysogeny: required", "archaeal_only_profile"),
-        ("required_sequence_classes: [amr, toxin]", "required_sequence_classes: [amr]", "required_sequence_classes"),
         (
-            "required_sequence_classes: [amr, toxin]",
-            "required_sequence_classes: [amr, amr, toxin]",
+            "disallowed_endpoint: increased_eukaryotic_replication\n"
+            "required_sequence_classes: [amr, toxin]\n"
+            "bacterial_replication_profile:",
+            "disallowed_endpoint: increased_eukaryotic_replication\n"
+            "required_sequence_classes: [amr]\n"
+            "bacterial_replication_profile:",
+            "required_sequence_classes",
+        ),
+        (
+            "disallowed_endpoint: increased_eukaryotic_replication\n"
+            "required_sequence_classes: [amr, toxin]\n"
+            "bacterial_replication_profile:",
+            "disallowed_endpoint: increased_eukaryotic_replication\n"
+            "required_sequence_classes: [amr, amr, toxin]\n"
+            "bacterial_replication_profile:",
             "duplicate required sequence class",
         ),
         (
@@ -173,33 +191,7 @@ def test_policy_rejects_unknown_schema_version(tmp_path):
 def test_policy_rejects_invalid_schema_v1_scalar_and_profile_values(tmp_path, original, replacement, expected_message):
     """Schema v1 requires its fixed scalars and exact profile class semantics."""
     policy_path = tmp_path / "invalid-policy.yaml"
-    policy_path.write_text(
-        """
-schema_version: 1
-policy_id: phage-sequence-safety-v1
-regulatory_basis:
-  label: EMA-derived sequence-design safety gate
-  source: EMA/CHMP/BWP/1/2024
-  source_status: draft
-  source_status_as_of: 2026-08-07
-  regulatory_compliance_claimed: false
-host_scope:
-  allowed_replication_host_domains: [BACTERIA, ARCHAEA, BACTERIA_AND_ARCHAEA]
-  disallowed_endpoint: increased_eukaryotic_replication
-required_sequence_classes: [amr, toxin]
-bacterial_replication_profile:
-  required_sequence_classes: [amr, toxin, lysogeny]
-  strict_lytic_required: true
-archaeal_only_profile:
-  required_sequence_classes: [amr, toxin]
-  lysogeny: informational
-failure_policy:
-  missing_required_tool: INDETERMINATE
-  missing_required_database: INDETERMINATE
-  parser_schema_mismatch: INDETERMINATE
-  incomplete_host_evidence: INDETERMINATE
-""".lstrip()
-    )
+    policy_path.write_text(POLICY_SCHEMA_V1)
 
     policy_path.write_text(policy_path.read_text().replace(original, replacement, 1))
 

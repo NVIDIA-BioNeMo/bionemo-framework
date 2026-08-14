@@ -189,7 +189,7 @@ required_genes_list:
   - "DNA condensation"
   - "major head protein"
   - "head morphogenesis"
-  - "nan"
+  - "nan" # Arc annotates NC_001422.1_ORF.15 as product=nan, function=unknown function.
   - "pilot protein for DNA ejection"
 required_genes_metrics_file_save_location: "qc6_required_genes_metrics.csv"
 required_genes_evidence_target: 9.0

@@ -1,3 +1,5 @@
+# Source: NVIDIA-NeMo/RL, examples/configs/grpo_math_1B_megatron.yaml, pinned at
+# d83dc4ba009438c67b3ba4f5872405ab17a0476c. No semantic recipe-local divergences.
 # GRPO Algorithm Configuration
 defaults: "grpo_math_1B.yaml"
 

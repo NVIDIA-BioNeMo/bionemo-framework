@@ -52,6 +52,25 @@ require `phrogs_workers <= batch_size` and admit only when
 affinity. The CLI may cap batch workers to the actual group count, and the recorded manifest must use
 the resolved value. Treat `--timeout` as a bound for each shared command (AMRFinder/DIAMOND) and each
 per-record PHROGs command, not one aggregate workflow deadline.
+Before a full batched launch, make the equivalence preflight span at least two complete proposed
+batches plus a non-empty partial final batch: use at least `2 * batch_size + 1` records unless the
+entire input is smaller. Compare exact per-record semantics and exercise terminal manifest
+serialization plus `validate-manifest`; detector-output parity from one batch does not test
+scan-wide versus batch-local record-index reconciliation. Keep the six-control panel as a separate
+required gate.
+
+Keep scanner implementation, policy, inputs, asset manifest, and tool pins immutable from launch
+through terminal manifest validation because the manifest binds those identities. Scan publication is
+atomic: transient per-record staging directories are neither a supported progress tally nor a resume
+surface. Exit 3 is also the CLI's operational-validation status, so classify it as a biological
+INDETERMINATE result only when a terminal manifest exists and validates with that state. If publication
+or reconciliation fails and no explicit versioned resume contract exists, preserve the failure log and
+restart the full attempt; do not promote an ad-hoc replay of private staging artifacts.
+
+Before the control panel, topology preflight, or full scan, resolve and run
+`evo2_phage_pin_safety_asset_manifest` into a new attempt-owned directory. Use that pinned manifest for
+every gate and retain `PINNING.json`; do not leave a long execution bound to a recipe path in a mutable
+checkout. Confirm the pinned recipe and manifest digests again immediately before launch.
 
 Batching shares exact AMRFinder and DIAMOND invocations while PHROGs remains independently parsed per
 record. Cache reuse is valid only for identical normalized sequence plus complete asset, policy, tool,

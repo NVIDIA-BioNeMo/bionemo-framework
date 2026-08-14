@@ -1,6 +1,6 @@
 # Source: NVIDIA-NeMo/RL, examples/configs/grpo_math_1B.yaml, pinned at
 # d83dc4ba009438c67b3ba4f5872405ab17a0476c. This recipe-local copy is
-# intentionally modified for the supported Evo2 integration.
+# intentionally modified only to use YAML null for policy.megatron_cfg.peft.lora_dtype.
 # GRPO Algorithm Configuration
 grpo:
   num_prompts_per_step: 32
@@ -207,7 +207,7 @@ policy:
       lora_A_init_method: "xavier"
       lora_B_init_method: "zero"
       a2a_experimental: false
-      lora_dtype: None
+      lora_dtype: null
 
     optimizer:
       optimizer: "adam"

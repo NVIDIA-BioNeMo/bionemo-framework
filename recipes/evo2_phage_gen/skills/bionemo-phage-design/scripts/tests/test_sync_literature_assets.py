@@ -78,13 +78,25 @@ def _article_html(
 </div></body></html>"""
 
 
-def _make_xlsx(path: Path, *, rows: int = 3, columns: int = 33, formula_values: bool = True) -> None:
-    """Build a minimal XLSX whose second sheet is named ``Sheet 1``."""
+def _make_xlsx(
+    path: Path,
+    *,
+    rows: int = 3,
+    columns: int = 33,
+    formula_values: bool = True,
+    sheet1_second: bool = True,
+) -> None:
+    """Build a minimal XLSX with a configurable Sheet 1 position."""
     main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    sheets = (
+        '<sheet name="Contents" sheetId="1" r:id="rId1"/><sheet name="Sheet 1" sheetId="2" r:id="rId2"/>'
+        if sheet1_second
+        else ('<sheet name="Sheet 1" sheetId="1" r:id="rId2"/><sheet name="Contents" sheetId="2" r:id="rId1"/>')
+    )
     workbook = f"""<?xml version="1.0" encoding="UTF-8"?>
 <workbook xmlns="{main}" xmlns:r="{rel}"><sheets>
-<sheet name="Contents" sheetId="1" r:id="rId1"/><sheet name="Sheet 1" sheetId="2" r:id="rId2"/>
+{sheets}
 </sheets></workbook>"""
     rels = """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -332,6 +344,24 @@ class FetchValidationTests(unittest.TestCase):
             ):
                 fetcher._curl_download("https://www.biorxiv.org/content/a")
 
+    def test_curl_caps_download_size_and_reports_curl_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fetcher = sync.Fetcher(sync.DownloadCache(Path(tmp)), offline=False, refresh=True)
+
+            def run(command, **_kwargs):
+                self.assertEqual(
+                    str(sync.MAX_DOWNLOAD_BYTES),
+                    command[command.index("--max-filesize") + 1],
+                )
+                return sync.subprocess.CompletedProcess(command, 63, "", "maximum file size exceeded")
+
+            with (
+                mock.patch.object(sync.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch.object(sync.subprocess, "run", side_effect=run),
+                self.assertRaisesRegex(sync.SourceValidationError, "exceeds"),
+            ):
+                fetcher._curl_download("https://www.biorxiv.org/content/a")
+
     def test_mime_magic_and_size_validation(self) -> None:
         sync.validate_payload(b"\xff\xd8\xffjpeg", "image/jpeg", "jpeg", min_size=4, max_size=100)
         sync.validate_payload(b"GIF89a-data", "image/gif", "gif", min_size=4, max_size=100)
@@ -399,6 +429,23 @@ class FetchValidationTests(unittest.TestCase):
             cache = sync.DownloadCache(Path(tmp))
             with self.assertRaises(sync.OfflineCacheMiss):
                 cache.read("https://www.biorxiv.org/missing")
+
+    def test_cache_rejects_partial_or_digest_mismatched_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = sync.DownloadCache(Path(tmp))
+            url = "https://www.biorxiv.org/content/a"
+            value = sync.Downloaded(b"payload", "text/plain", url)
+            cache.write(url, value)
+            self.assertEqual(value, cache.read(url))
+
+            payload, metadata = cache._paths(url)
+            payload.write_bytes(b"tampered")
+            with self.assertRaises(sync.OfflineCacheMiss):
+                cache.read(url)
+
+            payload.unlink()
+            with self.assertRaises(sync.OfflineCacheMiss):
+                cache.read(url)
 
     def test_fallback_is_allowed_only_for_retryable_workbook_failures(self) -> None:
         for status in (403, 429, 500, 503):
@@ -516,6 +563,15 @@ class WorkbookTests(unittest.TestCase):
             self.assertTrue(all(len(row) == 33 for row in sheet.rows))
             self.assertEqual(3, len({row[0] for row in sheet.rows[1:]}))
             self.assertEqual(["0.1", "0.2", "0.3"], [row[30] for row in sheet.rows[1:]])
+
+    def test_named_sheet_reader_is_generic_but_sheet1_contract_checks_position(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workbook = Path(tmp) / "media-1.xlsx"
+            _make_xlsx(workbook, sheet1_second=False)
+
+            self.assertEqual("Sheet 1", sync.read_xlsx_sheet(workbook, "Sheet 1").name)
+            with self.assertRaisesRegex(sync.WorkbookValidationError, "second sheet"):
+                sync._sheet1_tsv(workbook, expected_rows=3, expected_columns=33)
 
     def test_missing_formula_cache_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -122,7 +122,7 @@ env:
       host_domain: "BACTERIA"
       host_evidence:
         source: "NCBI Datasets v2alpha genome dataset report"
-        source_version: "NC_001422.1"
+        source_version: "NCBI Datasets v2alpha API"
         replication_host_domains: ["BACTERIA"]
         confirmed: true
         metadata:

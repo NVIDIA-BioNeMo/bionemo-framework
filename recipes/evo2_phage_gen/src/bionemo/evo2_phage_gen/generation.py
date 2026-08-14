@@ -20,6 +20,7 @@ import json
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from bionemo.evo2_phage_gen.qc import prompt_nucleotides as _prompt_nucleotides
 from bionemo.evo2_phage_gen.qc import trim_at_first_eos
 
 
@@ -29,7 +30,6 @@ DEFAULT_PROMPT_PREFIX = "+~"
 PAPER_USEFUL_RL_PROMPT_LENGTHS = (4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 10, 11)
 PAPER_USEFUL_RL_VALIDATION_PROMPT_LENGTH = 10
 PAPER_USEFUL_RL_VALIDATION_RECORDS = 96
-DNA_ALPHABET = frozenset("ACGTacgt")
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -114,11 +114,6 @@ def write_prompt_sweep_jsonl(
 def _sequence_before_eos(sequence: str) -> str:
     """Return generated sequence content before textual EOS markers."""
     return trim_at_first_eos(str(sequence).replace("\n", "").strip())
-
-
-def _prompt_nucleotides(prompt: str) -> str:
-    """Keep only nucleotide bases from a prompt that may include SFT soft tokens."""
-    return "".join(char for char in prompt if char in DNA_ALPHABET)
 
 
 def _wrap_fasta_sequence(sequence: str, width: int = 80) -> str:
