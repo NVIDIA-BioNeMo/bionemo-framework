@@ -1,6 +1,7 @@
 {
     "name": "BioNeMo Recipes Dev Container",
     "build": {
+        "context": ".",
         "dockerfile": "Dockerfile"
     },
     "mounts": [

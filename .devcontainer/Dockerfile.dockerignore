@@ -1,0 +1,4 @@
+# The devcontainer image only needs the Dockerfile and its Python requirements.
+**
+!Dockerfile
+!requirements.txt

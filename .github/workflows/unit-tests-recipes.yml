@@ -196,6 +196,16 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      - name: Include portable phage skill integration inputs
+        if: ${{ matrix.recipe.dir == 'recipes/evo2_phage_gen' }}
+        run: |
+          git sparse-checkout add --no-cone \
+            /.agents/skills \
+            /.claude-plugin/plugin.json \
+            /.codex-plugin/plugin.json \
+            /skills/bionemo-phage-generation
+          git sparse-checkout reapply
+
       - name: Cache Hugging Face models
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:

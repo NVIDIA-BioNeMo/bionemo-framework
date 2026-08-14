@@ -252,18 +252,20 @@ def test_report_runtime_declares_tabulate_dependency():
     assert any(Requirement(dependency).name == "tabulate" for dependency in config["project"]["dependencies"])
 
 
-def test_recipe_docker_context_excludes_generated_assets_and_runs_nonroot():
-    """The recipe build context must exclude generated assets and drop root after build."""
-    ignore_path = RECIPE_ROOT / ".dockerignore"
-    assert ignore_path.is_file()
-    patterns = set(ignore_path.read_text().splitlines())
+def test_recipe_dockerfile_builds_from_the_recipe_directory():
+    """The documented recipe-local build must copy the recipe into its final workdir."""
+    assert not (RECIPE_ROOT / "Dockerfile.dockerignore").exists()
+
+    direct_patterns = set((RECIPE_ROOT / ".dockerignore").read_text().splitlines())
     assert {
-        "data/checkpoints",
-        "data/external",
-        "data/arc_pipeline_patched",
-        "dist",
-    } <= patterns
+        "results",
+        "data/*",
+        "!data/.gitignore",
+        "!data/phage_prompts.jsonl",
+    } <= direct_patterns
 
     dockerfile = (RECIPE_ROOT / "Dockerfile").read_text()
+    assert "WORKDIR /workspace/bionemo/recipes/evo2_phage_gen\nCOPY . .\n" in dockerfile
+    assert dockerfile.count("WORKDIR ") == 1
     assert "useradd" in dockerfile
     assert "\nUSER bionemo\n" in dockerfile

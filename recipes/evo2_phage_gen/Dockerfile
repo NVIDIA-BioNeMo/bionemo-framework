@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.4
+# Build from this recipe directory:
+# docker build -t evo2-phage-gen .
 FROM nvcr.io/nvidia/pytorch:26.07-py3
 
-WORKDIR /workspace/bionemo
-COPY . .
-
 WORKDIR /workspace/bionemo/recipes/evo2_phage_gen
+COPY . .
 
 ENV UV_LINK_MODE=copy
 ENV UV_NO_MANAGED_PYTHON=1

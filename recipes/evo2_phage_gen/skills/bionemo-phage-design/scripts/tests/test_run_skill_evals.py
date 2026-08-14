@@ -36,7 +36,7 @@ sys.modules[RUNNER_SPEC.name] = runner
 RUNNER_SPEC.loader.exec_module(runner)
 SKILL_ROOT = SCRIPT.parents[2]
 REPOSITORY_ROOT = next(parent for parent in SCRIPT.parents if (parent / ".git").exists())
-RECIPE_ROOT = SCRIPT.parents[4]
+RECIPE_ROOT = SCRIPT.parents[3]
 EXPECTED_RECIPE_SKILLS = {
     "bionemo-phage-design",
     "bionemo-phage-design-adapt-execution",

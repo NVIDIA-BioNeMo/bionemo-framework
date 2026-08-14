@@ -7,7 +7,8 @@
 
 # Local generated assets can be hundreds of GB. Mount or prepare them at runtime
 # instead of baking them into the image build context.
-data/checkpoints
-data/external
-data/arc_pipeline_patched
+results
+data/*
+!data/.gitignore
+!data/phage_prompts.jsonl
 dist
