@@ -164,6 +164,48 @@
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-012-ema-host-range-study",
+      "prompt": "While planning objectives for a therapeutic phage-genome program, what exactly does the 2025 EMA draft expect a host-range study to include? Cover the bacterial panel, clinically relevant growth forms and geographic selection, acceptable assays, and the role of receptor knowledge.",
+      "expected_output": "A concise, source-grounded account of the EMA draft's host-range study expectations that preserves the distinction between phenotype evidence and a computational design objective.",
+      "assertions": [
+        "The trace summary lists a content read of bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md in local_source_read_paths. Web calls, if any, are secondary current-status or version checks, and the answer distinguishes them from historical content drawn from the local transcription.",
+        "The response labels the source as the 2025 draft EMA/CHMP/BWP/1/2024 and does not confuse its historical content with a claim about current regulatory status.",
+        "The response says the panel includes the production strain, multiple strains of the target species, closely related species, clinically relevant isolates, and relevant growth forms including planktonic and biofilm-forming strains; geographically relevant host strains should ideally be used for location-specific products, and panel size and variety must be justified.",
+        "The response says spot testing or plaque assay may be used and available receptor-usage knowledge may support, but does not replace, determination of host range.",
+        "For objective planning, the response keeps plaque-forming host range as phenotype evidence or an experimental endpoint and does not promote manufacturing controls or receptor knowledge alone into proof of productive infection."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-013-ema-transduction-distinction",
+      "prompt": "For a strictly lytic therapeutic phage, does the 2025 EMA draft make transduction irrelevant? Distinguish the two forms of transduction it discusses and state the resulting regulatory and objective-planning implication.",
+      "expected_output": "A source-grounded explanation of why strictly lytic status removes the specialised-transduction concern but not the generalised-transduction question.",
+      "assertions": [
+        "The trace summary lists a content read of bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md in local_source_read_paths. Web calls, if any, are secondary current-status or version checks, and the answer distinguishes them from historical content drawn from the local transcription.",
+        "The response labels the source as the 2025 draft EMA/CHMP/BWP/1/2024 and does not confuse its historical content with a claim about current regulatory status.",
+        "The response explains that specialised transduction packages host DNA flanking a prophage, occurs exclusively in temperate phages, and is not a concern once a phage is demonstrated to be strictly lytic.",
+        "The response explains that generalised transduction randomly packages host DNA, can occur in exclusively lytic phages, and therefore the phage's capacity to mediate it should be addressed in the regulatory filing.",
+        "The objective plan keeps a defensible computational proxy separate from the experimental transducing-capacity endpoint and does not infer absence of generalised transduction from a lytic-genome screen alone."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-014-ema-cocktail-potency",
+      "prompt": "For a proposed multiphage therapeutic product, summarize the 2025 EMA draft's potency-testing expectations at active-substance release, finished-product release, and stability. Explain how the component assays avoid interference from the other cocktail phages, and distinguish these product or experimental controls from sequence-only design objectives.",
+      "expected_output": "A source-grounded, stage-specific summary of potency testing for individual phages and multiphage products with the correct objective-planning boundary.",
+      "assertions": [
+        "The trace summary lists a content read of bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md in local_source_read_paths. Web calls, if any, are secondary current-status or version checks, and the answer distinguishes them from historical content drawn from the local transcription.",
+        "The response labels the source as the 2025 draft EMA/CHMP/BWP/1/2024 and does not confuse its historical content with a claim about current regulatory status.",
+        "For active substance, the response describes potency as infectious phage titre, typically PFU per mL, measured by plaque assay or another suitable method in a defined bacterial strain and carried in justified release and shelf-life specifications.",
+        "For a multiphage finished product, the response says potency is determined for each individual phage component unless otherwise justified, using separate plaque-based assays with bacterial strains not susceptible to any other phages in the combination.",
+        "For stability, the response says the infectious titre of each phage is determined; for objective planning, it keeps these product-control assays out of sequence-only RL rewards while retaining potency as an experimental endpoint."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
     }
   ]
 }

@@ -35,6 +35,7 @@ lots](../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-gu
 and [transducing
 capacity](../bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md#transducing-capacity),
 while excluding downstream manufacturing controls from sequence rewards.
+For a question about what the checked-in EMA draft says, read the local transcription before answering even when the detail seems familiar. An official-web check may assess current status or a newer version, but label that check separately and do not use it in place of the local historical content.
 
 For the recipe's default PhiX174 case-study replication, use the current customized replication
 profile: enable filters 1–6, 8, and 9, keep filter 7 disabled, and add every applicable

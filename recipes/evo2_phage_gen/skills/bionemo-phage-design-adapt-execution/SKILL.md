@@ -8,6 +8,7 @@ description: Use when a phage-design workflow must discover or adapt to local GP
 Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Turn the actual environment into explicit human-runnable stage scripts. Generated scripts—not chat—are the command source of truth. Long-running work includes downloads, indexing, preprocessing, filtering, evaluation, generation, SFT, and RL; it must survive and remain queryable across agent-session restarts.
+This is single-operator research software. Prioritize scientific correctness, reproducibility, restartability, and catching accidental drift. Do not spend implementation or review effort defending the operator against deliberate attacks on operator-owned scratch files; retain normal validation for external inputs and safeguards for shared or published artifacts.
 
 ## Discover before choosing
 

@@ -28,16 +28,49 @@ uv pip install -c pip-constraints.txt -r build_requirements.txt --no-build-isola
 # 5. Install the recipe with all remaining dependencies, including test extras.
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
 
-# causal-conv1d's upstream wheel cache is keyed to a coarse Torch version and
-# can retain an extension built against a different nightly ABI. Bypass both
-# upstream and uv wheels for this package only so it compiles against the
-# active system Torch. Keep the source aligned with [tool.uv.sources].
-CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install \
-    --no-cache \
-    --no-deps \
-    --no-build-isolation \
-    --reinstall-package causal-conv1d \
-    'causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@v1.6.1'
+# The resolved causal-conv1d wheel is usually usable. Some Torch nightlies can
+# expose a binary-ABI mismatch at import time; compile only in that case and
+# retain the resulting wheel in BuildKit's persistent uv cache.
+if ! python -c 'import causal_conv1d' >/dev/null 2>&1; then
+    causal_conv1d_abi="$(
+        python -c '
+import platform
+import re
+import sys
+
+import torch
+
+raw = (
+    f"v1.6.1-py{sys.version_info.major}{sys.version_info.minor}-"
+    f"{platform.machine()}-torch{torch.__version__}-cuda{torch.version.cuda}-"
+    f"cxx11abi{int(torch._C._GLIBCXX_USE_CXX11_ABI)}"
+)
+print(re.sub(r"[^A-Za-z0-9._-]+", "_", raw))
+'
+    )"
+    causal_conv1d_wheel_dir="$(uv cache dir)/evo2-phage-gen/causal-conv1d/$causal_conv1d_abi"
+    mkdir -p "$causal_conv1d_wheel_dir"
+    mapfile -t causal_conv1d_wheels < <(
+        find "$causal_conv1d_wheel_dir" -maxdepth 1 -type f -name 'causal_conv1d-*.whl' -print | sort
+    )
+    if ((${#causal_conv1d_wheels[@]} == 0)); then
+        CAUSAL_CONV1D_FORCE_BUILD=TRUE python -m pip wheel \
+            --no-cache-dir \
+            --no-deps \
+            --no-build-isolation \
+            --wheel-dir "$causal_conv1d_wheel_dir" \
+            'causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@v1.6.1'
+        mapfile -t causal_conv1d_wheels < <(
+            find "$causal_conv1d_wheel_dir" -maxdepth 1 -type f -name 'causal_conv1d-*.whl' -print | sort
+        )
+    fi
+    if ((${#causal_conv1d_wheels[@]} != 1)); then
+        echo "expected exactly one cached causal-conv1d wheel, found ${#causal_conv1d_wheels[@]}" >&2
+        exit 1
+    fi
+    uv pip install --no-deps --reinstall-package causal-conv1d "${causal_conv1d_wheels[0]}"
+    python -c 'import causal_conv1d'
+fi
 
 # 6. Upstream NeMo-RL's current pyproject only packages the top-level nemo_rl module.
 # Reinstall the pinned checkout with complete package discovery, then apply and verify this recipe's Evo2 patch.

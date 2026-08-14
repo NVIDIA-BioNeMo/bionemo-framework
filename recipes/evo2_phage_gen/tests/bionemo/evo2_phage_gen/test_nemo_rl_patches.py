@@ -20,7 +20,6 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import subprocess
-import types
 from pathlib import Path
 
 import pytest
@@ -275,8 +274,8 @@ def test_maintained_patch_caches_driver_generation_adapter_and_returns_none_from
     assert "return self.generation.prepare_refit_info()" not in patch_text
 
 
-def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Path, monkeypatch) -> None:
-    """Runtime verification should prove the installed package matches the maintained patch."""
+def test_patch_runtime_check_does_not_import_modules(tmp_path: Path, monkeypatch) -> None:
+    """Patch verification should inspect installed files without loading runtime modules."""
     patch_file = tmp_path / "evo2.patch"
     patch_file.write_text("diff --git a/nemo_rl/example.py b/nemo_rl/example.py\n")
     source_root = tmp_path / "site-packages"
@@ -287,7 +286,11 @@ def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Pat
     spec = importlib.util.spec_from_file_location("nemo_rl", init_file)
 
     _patch_nemo_rl_spec(monkeypatch, spec)
-    monkeypatch.setattr(nemo_rl_patches, "assert_nemo_rl_patch_symbols", lambda: None)
+    monkeypatch.setattr(
+        nemo_rl_patches.importlib,
+        "import_module",
+        lambda name: pytest.fail(f"unexpected runtime import: {name}"),
+    )
 
     calls: list[tuple[list[str], Path]] = []
 
@@ -300,60 +303,6 @@ def test_assert_nemo_rl_patch_runtime_requires_reverse_patch_match(tmp_path: Pat
     nemo_rl_patches.assert_nemo_rl_patch_runtime(patch_file)
 
     assert calls == [(["--batch", "--dry-run", "-R", "-p1", "-i", str(patch_file.resolve())], source_root)]
-
-
-def test_assert_nemo_rl_patch_symbols_accepts_expected_runtime_symbols(monkeypatch) -> None:
-    """Startup should accept a runtime with all expected patched symbols."""
-    rollouts = types.SimpleNamespace(collect_environment_metrics=object())
-    megatron_generation = types.SimpleNamespace(_load_generation_adapter=object())
-    generation_mixin_cls = type(
-        "MegatronGenerationMixin",
-        (),
-        {"_load_generation_adapter": object(), "generate_with_adapter": object()},
-    )
-    megatron_worker = types.SimpleNamespace(MegatronGenerationMixin=generation_mixin_cls)
-    megatron_setup = types.SimpleNamespace(
-        _apply_target_allowlist_prefixes=object(),
-        NoRefitMegatronBridge=object(),
-        _uses_colocated_megatron_generation=object(),
-    )
-    modules = {
-        "nemo_rl.experience.rollouts": rollouts,
-        "nemo_rl.models.generation.megatron.megatron_generation": megatron_generation,
-        "nemo_rl.models.generation.megatron.megatron_worker": megatron_worker,
-        "nemo_rl.models.megatron.setup": megatron_setup,
-    }
-
-    monkeypatch.setattr(nemo_rl_patches.importlib, "import_module", lambda name: modules[name])
-
-    nemo_rl_patches.assert_nemo_rl_patch_symbols()
-
-
-def test_assert_nemo_rl_patch_symbols_rejects_missing_runtime_symbol(monkeypatch) -> None:
-    """Startup should identify a missing required symbol before training begins."""
-    generation_mixin_cls = type(
-        "MegatronGenerationMixin",
-        (),
-        {"_load_generation_adapter": object()},
-    )
-    modules = {
-        "nemo_rl.experience.rollouts": types.SimpleNamespace(collect_environment_metrics=object()),
-        "nemo_rl.models.generation.megatron.megatron_generation": types.SimpleNamespace(
-            _load_generation_adapter=object()
-        ),
-        "nemo_rl.models.generation.megatron.megatron_worker": types.SimpleNamespace(
-            MegatronGenerationMixin=generation_mixin_cls
-        ),
-        "nemo_rl.models.megatron.setup": types.SimpleNamespace(
-            _apply_target_allowlist_prefixes=object(),
-            NoRefitMegatronBridge=object(),
-            _uses_colocated_megatron_generation=object(),
-        ),
-    }
-    monkeypatch.setattr(nemo_rl_patches.importlib, "import_module", lambda name: modules[name])
-
-    with pytest.raises(RuntimeError, match="generate_with_adapter"):
-        nemo_rl_patches.assert_nemo_rl_patch_symbols()
 
 
 def test_maintained_patch_exposes_scoped_ray_initialization_options() -> None:

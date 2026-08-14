@@ -19,9 +19,3 @@ ENV PATH="${VIRTUAL_ENV}/bin:/workspace/bionemo/recipes/evo2_phage_gen/data/exte
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     ./.ci_build.sh
-
-RUN groupadd --gid 10001 bionemo \
-    && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash bionemo \
-    && chown -R bionemo:bionemo /workspace/bionemo/recipes/evo2_phage_gen
-
-USER bionemo

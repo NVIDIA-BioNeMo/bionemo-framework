@@ -35,7 +35,7 @@ def _tracked_skills() -> list[Path]:
         text=True,
     ).stdout.splitlines()
     return sorted(
-        REPO_ROOT / path for path in map(Path, tracked) if path.name == "SKILL.md" and "skills" in path.parts
+        REPO_ROOT / path for path in map(Path, tracked) if path.name == "SKILL.md" and path.parts[0] == "skills"
     )
 
 

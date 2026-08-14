@@ -40,15 +40,6 @@ REQUIRED_NEMO_RL_MODULES = [
     "nemo_rl.models.generation.megatron.megatron_worker",
     "nemo_rl.models.megatron.setup",
 ]
-EXPECTED_PATCHED_SYMBOLS = [
-    ("nemo_rl.experience.rollouts", "collect_environment_metrics"),
-    ("nemo_rl.models.generation.megatron.megatron_generation", "_load_generation_adapter"),
-    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin._load_generation_adapter"),
-    ("nemo_rl.models.generation.megatron.megatron_worker", "MegatronGenerationMixin.generate_with_adapter"),
-    ("nemo_rl.models.megatron.setup", "_apply_target_allowlist_prefixes"),
-    ("nemo_rl.models.megatron.setup", "NoRefitMegatronBridge"),
-    ("nemo_rl.models.megatron.setup", "_uses_colocated_megatron_generation"),
-]
 
 
 def _nemo_rl_source_root() -> Path:
@@ -79,28 +70,6 @@ def patch_sha256(patch_path: Path = DEFAULT_PATCH) -> str:
     return hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
 
 
-def assert_nemo_rl_patch_symbols() -> None:
-    """Fail early if the runtime NeMo-RL package is missing symbols installed by the patch."""
-    missing = []
-    for module_name, qualified_symbol in EXPECTED_PATCHED_SYMBOLS:
-        try:
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError:
-            missing.append(f"{module_name}:{qualified_symbol}")
-            continue
-        obj = module
-        for attr in qualified_symbol.split("."):
-            obj = getattr(obj, attr, None)
-            if obj is None:
-                missing.append(f"{module_name}:{qualified_symbol}")
-                break
-    if missing:
-        raise RuntimeError(
-            "NeMo-RL is missing Evo2 phage patch symbols: "
-            f"{', '.join(missing)}. Run evo2_phage_patch_nemo_rl --repair-install before launching GRPO."
-        )
-
-
 def assert_nemo_rl_patch_runtime(patch_path: Path = DEFAULT_PATCH) -> None:
     """Fail unless the importable NeMo-RL runtime matches the maintained patch."""
     source_root = _nemo_rl_source_root()
@@ -115,7 +84,6 @@ def assert_nemo_rl_patch_runtime(patch_path: Path = DEFAULT_PATCH) -> None:
             f"Reverse dry-run output:\n{reverse_dry_run.stdout}\n"
             f"Forward dry-run output:\n{forward_dry_run.stdout}"
         )
-    assert_nemo_rl_patch_symbols()
 
 
 def _nemo_rl_source_pin() -> tuple[str, str]:

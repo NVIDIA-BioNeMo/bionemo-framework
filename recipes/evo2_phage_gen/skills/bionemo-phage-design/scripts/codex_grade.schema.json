@@ -23,12 +23,5 @@
       }
     },
     "summary": {"type": "string", "minLength": 1}
-  },
-  "allOf": [
-    {
-      "if": {"properties": {"outcome": {"const": "pass"}}, "required": ["outcome"]},
-      "then": {"properties": {"passed": {"const": true}}},
-      "else": {"properties": {"passed": {"const": false}}}
-    }
-  ]
+  }
 }

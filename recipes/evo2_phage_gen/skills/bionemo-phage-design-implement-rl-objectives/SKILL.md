@@ -8,6 +8,7 @@ description: Use when adding or changing Evo2 phage RL metrics, reward functions
 Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
 
 Implement the approved RL_OBJECTIVES.yaml without changing its biological meaning. Make online rewards, offline validation, and final filtering share tested primitives wherever possible.
+This is single-operator research software. Prioritize scientific correctness, reproducibility, restartability, and catching accidental drift. Do not spend implementation or review effort defending the operator against deliberate attacks on operator-owned scratch files; retain normal validation for external inputs and safeguards for shared or published artifacts.
 
 ## Preconditions
 

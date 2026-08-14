@@ -1740,6 +1740,169 @@ class EvalRunnerTests(unittest.TestCase):
         return completed, results / "alpha-001"
 
 
+def test_trace_summary_reports_local_literature_reads_and_deduplicated_web_calls() -> None:
+    manifest = "skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json"
+    supplement = "skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/supplement.md"
+    trace = "\n".join(
+        (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item-manifest",
+                        "type": "command_execution",
+                        "command": f"/bin/bash -lc \"sed -n '1,120p' {manifest}\"",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item-supplement",
+                        "type": "command_execution",
+                        "command": f"/bin/bash -lc \"rg -n 'tropism' {supplement}\"",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {"id": "web-1", "type": "web_search", "query": "published threshold"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"id": "web-1", "type": "web_search", "query": "published threshold"},
+                }
+            ),
+        )
+    )
+
+    summary = runner._trace_summary(trace, "bionemo-phage-design-research-evidence")
+
+    assert summary["bundled_literature_read_paths"] == [manifest, supplement]
+    assert summary["local_source_read_paths"] == [manifest, supplement]
+    assert summary["web_tool_calls_observed"]
+    assert summary["web_tool_call_count"] == 1
+    assert summary["web_tool_call_types"] == ["web_search"]
+
+
+def test_trace_summary_recognizes_claude_read_without_counting_answer_text_as_a_read() -> None:
+    paper = "skills/bionemo-phage-design/assets/literature/black-2026-design-efficiency/paper.md"
+    trace = "\n".join(
+        (
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "read-1",
+                                "name": "Read",
+                                "input": {"file_path": paper},
+                            }
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "I used skills/bionemo-phage-design/assets/literature/"
+                        "king-2025-generative-phage-design/supplement.md.",
+                    },
+                }
+            ),
+        )
+    )
+
+    summary = runner._trace_summary(trace, "bionemo-phage-design-research-evidence")
+
+    assert summary["bundled_literature_read_paths"] == [paper]
+    assert summary["local_source_read_paths"] == [paper]
+    assert not summary["web_tool_calls_observed"]
+    assert summary["web_tool_call_count"] == 0
+    assert summary["web_tool_call_types"] == []
+
+
+def test_trace_summary_reports_ema_guideline_reads_as_local_sources() -> None:
+    guideline = "skills/bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md"
+    trace = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item-ema",
+                "type": "command_execution",
+                "command": f"/bin/bash -lc \"sed -n '260,330p' {guideline}\"",
+            },
+        }
+    )
+
+    summary = runner._trace_summary(trace, "bionemo-phage-design-plan-rl-objectives")
+
+    assert summary["local_source_read_paths"] == [guideline]
+    assert summary["bundled_literature_read_paths"] == []
+    assert not summary["web_tool_calls_observed"]
+
+
+def test_codex_grade_schema_uses_api_supported_flat_contract() -> None:
+    schema = json.loads((SCRIPT.parent / "codex_grade.schema.json").read_text(encoding="utf-8"))
+
+    assert "allOf" not in schema
+    assert "anyOf" not in schema
+    assert "oneOf" not in schema
+    assert schema["required"] == ["case_id", "outcome", "passed", "assertions", "summary"]
+
+
+def test_validate_grade_rejects_inconsistent_top_level_verdict(tmp_path: Path) -> None:
+    case = runner.EvalCase(skill_name="alpha", source=tmp_path / "evals.json", payload=_case())
+    grade_path = tmp_path / "grade.json"
+    grade_path.write_text(
+        json.dumps(
+            {
+                "case_id": case.id,
+                "outcome": "pass",
+                "passed": False,
+                "assertions": [
+                    {"assertion": assertion, "passed": True, "evidence": "observed"}
+                    for assertion in case.payload["assertions"]
+                ],
+                "summary": "Deliberately inconsistent fixture.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        runner._validate_grade(case, grade_path)
+    except runner.EvalError as exc:
+        assert "inconsistent with assertion verdicts" in str(exc)
+    else:
+        raise AssertionError("inconsistent top-level verdict was accepted")
+
+
+def test_code_building_skills_prioritize_single_operator_research_failures() -> None:
+    for skill_name in (
+        "bionemo-phage-design-implement-rl-objectives",
+        "bionemo-phage-design-adapt-execution",
+    ):
+        skill = (SKILL_ROOT / skill_name / "SKILL.md").read_text(encoding="utf-8").lower()
+        for marker in (
+            "single-operator research software",
+            "scientific correctness",
+            "reproducibility",
+            "restartability",
+            "accidental drift",
+            "operator-owned scratch files",
+        ):
+            assert marker in skill
+
+
 def test_monitoring_heartbeat_covers_all_long_running_work() -> None:
     controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8").lower()
     adapter_root = SKILL_ROOT / "bionemo-phage-design-adapt-execution"

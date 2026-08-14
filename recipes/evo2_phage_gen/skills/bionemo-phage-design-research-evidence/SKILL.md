@@ -12,6 +12,7 @@ Produce a compact, auditable evidence packet for a stated decision. Prefer prima
 ## Use bundled publications
 
 Before opening any other file in a bundled publication, open its `../bionemo-phage-design/assets/literature/**/MANIFEST.json`. Begin every response that uses bundled evidence with a source note citing that manifest and stating its stable identifier, source version and license, and relationship to the publication of record. For the King bundle, this means the CC BY 4.0 bioRxiv v1 source and the [final Science article](https://www.science.org/doi/10.1126/science.aec2657) as the publication of record.
+For a factual question about a bundled publication, read the manifest and the relevant checked-in paper or supplement even when the answer seems familiar. Use those files for facts about the bundled version. A web check may identify a newer or final version or current status, but label that check separately and never let a web summary replace the local read.
 
 ## Establish the question
 
