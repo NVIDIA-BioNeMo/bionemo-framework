@@ -313,7 +313,7 @@ def main():
                 else:
                     shutil.copy(source, destination)
                     _add_banner_to_file(destination_path, source)
-                logger.info("Copied %s to %s", source, destination)
+                logger.info(f"Copied {source} to {destination}")
 
             else:
                 if source_path.is_dir():
