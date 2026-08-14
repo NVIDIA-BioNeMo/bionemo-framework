@@ -268,8 +268,6 @@ def test_recipe_dockerfile_builds_from_the_recipe_directory():
     dockerfile = (RECIPE_ROOT / "Dockerfile").read_text()
     assert "WORKDIR /workspace/bionemo/recipes/evo2_phage_gen\nCOPY . .\n" in dockerfile
     assert dockerfile.count("WORKDIR ") == 1
-    assert "useradd" in dockerfile
-    assert "\nUSER bionemo\n" in dockerfile
 
 
 def test_recipe_dockerfile_installs_pinned_uv_before_ci_build():

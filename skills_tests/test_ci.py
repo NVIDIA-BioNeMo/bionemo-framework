@@ -21,40 +21,38 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).parents[1]
-WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "unit-tests-recipes.yml"
+SKILLS_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "unit-tests-skills.yml"
+RECIPES_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "unit-tests-recipes.yml"
 
 
-def _workflow() -> dict:
-    return yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+def _workflow(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_ci_has_skills_job() -> None:
+def test_skills_ci_runs_root_suite() -> None:
     """The root skills suite should run from a complete checkout."""
-    workflow = _workflow()
+    workflow = _workflow(SKILLS_WORKFLOW_PATH)
     job = workflow["jobs"]["skills-tests"]
     checkout = next(step for step in job["steps"] if step.get("name") == "Checkout repository")
     commands = "\n".join(step.get("run", "") for step in job["steps"])
 
     assert "sparse-checkout" not in checkout.get("with", {})
     assert "pytest -v skills_tests" in commands
-    assert "needs.changed-dirs.outputs.skills_changed == 'true'" in job["if"]
-    assert "skills-tests" in workflow["jobs"]["verify-recipe-tests"]["needs"]
 
 
-def test_ci_skill_globs() -> None:
+def test_skills_ci_paths() -> None:
     """Only repository-level skill edits should select the skills job."""
-    workflow = _workflow()
-    changed_dirs = workflow["jobs"]["changed-dirs"]
-    changed_step = next(step for step in changed_dirs["steps"] if step.get("id") == "changed-skills")
-    patterns = changed_step["with"]["files"].splitlines()
+    workflow = _workflow(SKILLS_WORKFLOW_PATH)
+    triggers = workflow.get("on", workflow.get(True))
+    patterns = triggers["push"]["paths"]
 
-    assert changed_dirs["outputs"]["skills_changed"] == "${{ steps.changed-skills.outputs.any_changed }}"
     for root_glob in (
         "skills/**",
         "skills_tests/**",
         ".agents/**",
         ".claude-plugin/**",
         ".codex-plugin/**",
+        ".github/workflows/unit-tests-skills.yml",
     ):
         assert root_glob in patterns
     for recipe_glob in (
@@ -67,9 +65,16 @@ def test_ci_skill_globs() -> None:
         assert recipe_glob not in patterns
 
 
-def test_ci_recipe_checkout() -> None:
-    """Recipe jobs should retain recipe-only sparse checkouts."""
-    workflow = _workflow()
+def test_recipe_ci_stays_recipe_only() -> None:
+    """Recipe CI should not own the repository-level skills job."""
+    workflow = _workflow(RECIPES_WORKFLOW_PATH)
+    changed_dirs = workflow["jobs"]["changed-dirs"]
+
+    assert "skills-tests" not in workflow["jobs"]
+    assert "skills_changed" not in changed_dirs["outputs"]
+    assert all(step.get("id") != "changed-skills" for step in changed_dirs["steps"])
+    assert "skills-tests" not in workflow["jobs"]["verify-recipe-tests"]["needs"]
+
     steps = workflow["jobs"]["unit-tests"]["steps"]
     checkout = next(step for step in steps if step.get("name") == "Checkout repository")
     commands = "\n".join(step.get("run", "") for step in steps)

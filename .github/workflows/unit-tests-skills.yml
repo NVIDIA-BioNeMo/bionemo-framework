@@ -1,0 +1,50 @@
+name: "BioNeMo Skills CI"
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+      - "dependabot/**"
+    paths:
+      - "skills/**"
+      - "skills_tests/**"
+      - ".agents/**"
+      - ".claude-plugin/**"
+      - ".codex-plugin/**"
+      - ".github/workflows/unit-tests-skills.yml"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "0 9 * * *"
+
+defaults:
+  run:
+    shell: bash -x -e -u -o pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  skills-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Run skills tests
+        run: uvx --from pytest==9.1.1 --with PyYAML==6.0.3 pytest -v skills_tests

@@ -59,7 +59,6 @@ jobs:
       all_changed_files: ${{ steps.changed-files.outputs.all_changed_files }}
       dirs: ${{ steps.set-dirs.outputs.dirs }}
       labels: ${{ steps.set-dirs.outputs.labels }}
-      skills_changed: ${{ steps.changed-skills.outputs.any_changed }}
 
     steps:
       - id: get-pr-info
@@ -92,18 +91,6 @@ jobs:
             models/**
             recipes/**
             !recipes/vllm_inference/**
-
-      - name: Get changed skills
-        id: changed-skills
-        uses: step-security/changed-files@95b56dadb92a30ca9036f16423fd3c088a71ee94
-        with:
-          base_sha: ${{ steps.merge-base.outputs.merge-base }}
-          files: |
-            skills/**
-            skills_tests/**
-            .agents/**
-            .claude-plugin/**
-            .codex-plugin/**
 
       - id: set-dirs
         name: Determine which directories to run
@@ -176,39 +163,6 @@ jobs:
           echo '${{ toJSON(steps.changed-files.outputs) }}'
           echo '${{ toJSON(steps.set-dirs.outputs) }}'
         shell: bash
-
-  skills-tests:
-    needs:
-      - changed-dirs
-      - pre-commit
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    if: |
-      !contains(fromJSON(needs.changed-dirs.outputs.labels || '[]'), 'ciflow:skip') &&
-      (
-        needs.changed-dirs.outputs.skills_changed == 'true' ||
-        github.event_name == 'schedule' ||
-        contains(fromJSON(needs.changed-dirs.outputs.labels || '[]'), 'ciflow:all')
-      )
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Setup Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.13"
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          enable-cache: true
-
-      - name: Run skills tests
-        run: uvx --from pytest==9.1.1 --with PyYAML==6.0.3 pytest -v skills_tests
 
   unit-tests:
     needs:
@@ -354,7 +308,6 @@ jobs:
     # Use this job as the required check for PRs.
     needs:
       - pre-commit
-      - skills-tests
       - unit-tests
       - run-tests-notebooks
     runs-on: ubuntu-latest
@@ -363,9 +316,9 @@ jobs:
       - name: Check unit-tests matrix status
         run: |
           if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
-            echo "Some test jobs have failed or been cancelled!"
+            echo "Some recipe test jobs have failed or been cancelled!"
             exit 1
           else
-            echo "All test jobs have completed successfully or were skipped!"
+            echo "All recipe test jobs have completed successfully or were skipped!"
             exit 0
           fi

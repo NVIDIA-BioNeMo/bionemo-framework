@@ -25,8 +25,9 @@ relevant `SKILL.md`, references, evals, skill card, and root-level plugin descri
 change, including any concrete settings or recommendations that name the changed tool behavior.
 
 Put repository-level skill tests in `skills_tests/<skill-name>/`, mirroring `skills/<skill-name>/`;
-shared repository-level checks may live directly in `skills_tests/`. Root skills CI is triggered only
-by root `skills/`, `skills_tests/`, `.agents/`, `.claude-plugin/`, or `.codex-plugin/` changes.
+shared repository-level checks may live directly in `skills_tests/`. The standalone
+`.github/workflows/unit-tests-skills.yml` workflow is triggered only by root `skills/`,
+`skills_tests/`, `.agents/`, `.claude-plugin/`, `.codex-plugin/`, or its own changes.
 Recipe-local skills and tests remain owned by their recipe, follow its closest `AGENTS.md`, must not
 depend on repository-level skill or plugin files, and are tested by the recipe's CI job.
 
