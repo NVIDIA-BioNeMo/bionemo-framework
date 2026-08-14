@@ -25,10 +25,6 @@ REPO_ROOT = Path(__file__).parents[2]
 ROOT_SKILLS = REPO_ROOT / "skills"
 
 
-def _plugin(root: Path, agent: str) -> dict:
-    return json.loads((root / f".{agent}-plugin" / "plugin.json").read_text(encoding="utf-8"))
-
-
 def _frontmatter(path: Path) -> dict:
     parts = path.read_text(encoding="utf-8").split("---", maxsplit=2)
     assert len(parts) == 3 and not parts[0].strip(), path
@@ -37,18 +33,15 @@ def _frontmatter(path: Path) -> dict:
     return metadata
 
 
-def test_root_plugin() -> None:
-    """The repository plugin should expose the canonical root skill directory."""
+def test_root_skill_layout() -> None:
+    """The compatibility alias should expose the canonical root skill directory."""
     skill_names = {path.name for path in ROOT_SKILLS.iterdir() if (path / "SKILL.md").is_file()}
     alias = REPO_ROOT / ".agents" / "skills"
 
-    assert skill_names == {"bionemo-phage-generation"}
+    assert "bionemo-phage-generation" in skill_names
     assert alias.is_symlink()
     assert alias.readlink() == Path("../skills")
     assert alias.resolve() == ROOT_SKILLS.resolve()
-    assert _plugin(REPO_ROOT, "codex")["name"] == "bionemo-phage-generation"
-    assert _plugin(REPO_ROOT, "codex")["skills"] == "./skills/"
-    assert _plugin(REPO_ROOT, "claude")["skills"] == ["./skills/"]
 
 
 def test_portable_handoff() -> None:

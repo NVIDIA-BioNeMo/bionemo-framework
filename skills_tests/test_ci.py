@@ -50,19 +50,19 @@ def test_skills_ci_paths() -> None:
         "skills/**",
         "skills_tests/**",
         ".agents/**",
-        ".claude-plugin/**",
-        ".codex-plugin/**",
         ".github/workflows/unit-tests-skills.yml",
     ):
         assert root_glob in patterns
-    for recipe_glob in (
+    for excluded_glob in (
+        ".claude-plugin/**",
+        ".codex-plugin/**",
         "**/skills/**",
         "**/.agents/**",
         "**/.claude-plugin/**",
         "**/.codex-plugin/**",
         ".github/workflows/unit-tests-recipes.yml",
     ):
-        assert recipe_glob not in patterns
+        assert excluded_glob not in patterns
 
 
 def test_recipe_ci_stays_recipe_only() -> None:

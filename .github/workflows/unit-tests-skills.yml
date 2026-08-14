@@ -9,8 +9,6 @@ on:
       - "skills/**"
       - "skills_tests/**"
       - ".agents/**"
-      - ".claude-plugin/**"
-      - ".codex-plugin/**"
       - ".github/workflows/unit-tests-skills.yml"
   merge_group:
     types: [checks_requested]

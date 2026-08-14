@@ -21,15 +21,20 @@ source tree there.
 
 When a public API, CLI option, configuration default, workflow contract, output schema, or
 user-facing procedure changes, search the affected skill packages for the old behavior. Update the
-relevant `SKILL.md`, references, evals, skill card, and root-level plugin descriptions in the same
-change, including any concrete settings or recommendations that name the changed tool behavior.
+relevant `SKILL.md`, references, evals, and skill card in the same change, including any concrete
+settings or recommendations that name the changed tool behavior.
+
+The repository root is not itself an agent plugin. Do not add root `.claude-plugin/plugin.json` or
+`.codex-plugin/plugin.json` manifests solely to expose `skills/`; introduce a general repository
+plugin only when there is an intentional multi-skill plugin distribution. Recipe-local plugins are
+independent and remain owned by their recipes.
 
 Put repository-level skill tests in `skills_tests/<skill-name>/`, mirroring `skills/<skill-name>/`;
 shared repository-level checks may live directly in `skills_tests/`. The standalone
 `.github/workflows/unit-tests-skills.yml` workflow is triggered only by root `skills/`,
-`skills_tests/`, `.agents/`, `.claude-plugin/`, `.codex-plugin/`, or its own changes.
+`skills_tests/`, `.agents/`, or its own changes.
 Recipe-local skills and tests remain owned by their recipe, follow its closest `AGENTS.md`, must not
-depend on repository-level skill or plugin files, and are tested by the recipe's CI job.
+depend on repository-level skill files, and are tested by the recipe's CI job.
 
 ## Copied files
 
