@@ -307,7 +307,7 @@ def test_genome_id_rejects_characters_that_diverge_between_fasta_and_gff_attribu
         GenomeInput(sequence_id="genome:1", sequence="ACG" * 30)
 
 
-def test_missing_pyrodigal_runtime_is_fail_closed_without_import_time_failure(tmp_path, monkeypatch):
+def test_missing_pyrodigal_runtime_returns_indeterminate_without_import_time_failure(tmp_path, monkeypatch):
     """An unavailable required predictor must become INDETERMINATE rather than a silent fallback pass."""
 
     def missing_predictor():
@@ -647,7 +647,7 @@ def test_amrfinder_mixed_protein_and_nucleotide_rows_retain_authenticated_amr_ev
         ({"Method": ""}, "AMRFINDER_NUCLEOTIDE_METHOD_MISMATCH"),
     ],
 )
-def test_amrfinder_nucleotide_rows_fail_closed_on_unbound_evidence(tmp_path, overrides, reason_code):
+def test_amrfinder_nucleotide_rows_with_unbound_evidence_are_indeterminate(tmp_path, overrides, reason_code):
     """Nucleotide evidence must bind an exact contig, interval, strand, and v4.2.7 method."""
     artifacts = _orf_artifacts(tmp_path)
     output = tmp_path / "amrfinder.tsv"
@@ -2378,7 +2378,7 @@ def test_current_raw_phrogs_manifest_is_indeterminate_without_verified_profile_i
         ),
     ],
 )
-def test_phrogs_final_identity_and_pharokka_provenance_contract_is_fail_closed(tmp_path, mutate, reason_code):
+def test_phrogs_invalid_identity_or_pharokka_provenance_is_indeterminate(tmp_path, mutate, reason_code):
     """The legacy profile source or unverifiable full-profile identity must never execute."""
     manifest = _phrogs_manifest(tmp_path)
     mutate(manifest)
@@ -2664,7 +2664,7 @@ def test_phrogs_runner_validates_contract_and_normalizes_empty_output(tmp_path):
         ("missing_output", "PHROGS_OUTPUT_MISSING"),
     ],
 )
-def test_phrogs_runner_fails_closed_for_version_digest_or_output_drift(tmp_path, drift, reason_code):
+def test_phrogs_runner_returns_indeterminate_for_version_digest_or_output_drift(tmp_path, drift, reason_code):
     """A drifted or unmeasured PHROGs search cannot qualify a strict-lytic design."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _phrogs_manifest(tmp_path)
@@ -2701,7 +2701,7 @@ def test_phrogs_runner_fails_closed_for_version_digest_or_output_drift(tmp_path,
         ("non_utf", "PHROGS_PARSER_SCHEMA_MISMATCH"),
     ],
 )
-def test_phrogs_runner_fails_closed_for_execution_or_malformed_output(tmp_path, failure, reason_code):
+def test_phrogs_runner_returns_indeterminate_for_execution_or_malformed_output(tmp_path, failure, reason_code):
     """A failed process or undecodable MMseqs output cannot become a measured lysogeny PASS."""
     artifacts = _orf_artifacts(tmp_path)
     manifest = _phrogs_manifest(tmp_path)
