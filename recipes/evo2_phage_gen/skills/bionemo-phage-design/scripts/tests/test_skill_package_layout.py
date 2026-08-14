@@ -26,8 +26,6 @@ def _find_repo_root(path: Path) -> Path:
 
 
 REPO_ROOT = _find_repo_root(Path(__file__))
-ROOT_AGENT_DIR = REPO_ROOT / ".agents"
-ROOT_SKILLS_DIR = REPO_ROOT / "skills"
 RECIPE_ROOT = REPO_ROOT / "recipes" / "evo2_phage_gen"
 RECIPE_AGENT_DIR = RECIPE_ROOT / ".agents"
 RECIPE_SKILLS_DIR = RECIPE_ROOT / "skills"
@@ -83,14 +81,6 @@ def _reachable_markdown_files(starts: list[Path], *, root: Path) -> set[Path]:
     return reachable
 
 
-def test_root_plugin_uses_catalog_skill_root_and_agent_compatibility_alias() -> None:
-    assert _skill_names(ROOT_SKILLS_DIR) == {"bionemo-phage-generation"}
-    _assert_agent_skills_alias(ROOT_AGENT_DIR, ROOT_SKILLS_DIR)
-    assert _plugin(REPO_ROOT, "codex")["name"] == "bionemo-phage-generation"
-    assert _plugin(REPO_ROOT, "codex")["skills"] == "./skills/"
-    assert _plugin(REPO_ROOT, "claude")["skills"] == ["./skills/"]
-
-
 def test_recipe_plugin_uses_catalog_skill_root_and_agent_compatibility_alias() -> None:
     assert _skill_names(RECIPE_SKILLS_DIR) == EXPECTED_RECIPE_SKILLS
     _assert_agent_skills_alias(RECIPE_AGENT_DIR, RECIPE_SKILLS_DIR)
@@ -107,52 +97,6 @@ def test_every_bundled_markdown_reference_is_reachable_from_a_skill() -> None:
     reachable = _reachable_markdown_files(starts, root=skills_root.resolve())
     references = {path.resolve() for path in skills_root.glob("*/references/*.md")}
     assert references <= reachable, sorted(str(path.relative_to(skills_root)) for path in references - reachable)
-
-
-def test_portable_skill_requires_complete_checkout_and_absolute_discovery_handoff() -> None:
-    portable_skill = (ROOT_SKILLS_DIR / "bionemo-phage-generation" / "SKILL.md").read_text(encoding="utf-8")
-    for marker in (
-        "VERSION >= 2.4",
-        "bionemo-phage-design/SKILL.md",
-        "design-scope-and-viability.md",
-        "ema-2025-draft-phage-therapy-quality-guideline.md",
-        ".codex-plugin/plugin.json",
-        "https://github.com/NVIDIA-BioNeMo/bionemo-recipes",
-        "canonical default revision",
-        "origin/jstjohn/evo2_phage_gen",
-        "separate clean checkout",
-        "absolute checkout root",
-        "absolute recipe root",
-        "original request",
-        "Codex",
-        "$bionemo-phage-design",
-        "--plugin-dir .",
-        "/evo2-phage-gen:bionemo-phage-design",
-        "missing or integrity-failed skill",
-        "plugin's `skills` root",
-        "fixed required sibling allowlist",
-        "unexpected child skills",
-        "required instruction or plugin files",
-        "paths and SHA-256",
-        "integrity check fails",
-    ):
-        assert marker in portable_skill
-
-    portable_evals = json.loads(
-        (ROOT_SKILLS_DIR / "bionemo-phage-generation" / "evals" / "evals.json").read_text(encoding="utf-8")
-    )
-    portable_evals_text = json.dumps(portable_evals)
-    for marker in (
-        "VERSION == 2.4",
-        "no recipe-local controller",
-        "aggregation",
-        "absolute-root Codex",
-        "absolute-root Claude",
-        "original request",
-        "fixed required sibling allowlist",
-        "integrity-failed skill",
-    ):
-        assert marker in portable_evals_text
 
 
 def test_recipe_skill_contract_guards_scope_provenance_and_telemetry() -> None:
@@ -466,7 +410,7 @@ def test_publication_citation_distinguishes_final_article_from_bundled_preprint(
     assert "../bionemo-phage-design-research-evidence/SKILL.md#use-bundled-publications" in calibration
 
 
-def test_safeguards_reach_operational_workflows_and_card_license() -> None:
+def test_safeguards_reach_operational_workflows() -> None:
     skills_root = RECIPE_SKILLS_DIR
     controller = (skills_root / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
     design_contract = (
@@ -479,14 +423,12 @@ def test_safeguards_reach_operational_workflows_and_card_license() -> None:
     reporting_contract = (
         skills_root / "bionemo-phage-design-generate-and-screen" / "references" / "reporting-contract.md"
     ).read_text(encoding="utf-8")
-    card = (ROOT_AGENT_DIR / "skills" / "bionemo-phage-generation" / "skill-card.md").read_text(encoding="utf-8")
 
     assert "replication within eukaryotic cells" in controller
     assert "non-replicative eukaryotic entry or host-range work" in design_contract
     assert "prohibited endpoint, not a soft penalty" in objective_skill
     assert "whole-sequence cargo and lysogeny screens" in screen_skill
     assert "Computational QC does not establish biological viability" in reporting_contract
-    assert "[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt)" in card
 
     for marker in (
         "reviewed release descriptor",

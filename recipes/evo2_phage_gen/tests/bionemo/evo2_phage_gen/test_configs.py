@@ -15,6 +15,7 @@
 
 """Tests for recipe configuration files."""
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -269,3 +270,17 @@ def test_recipe_dockerfile_builds_from_the_recipe_directory():
     assert dockerfile.count("WORKDIR ") == 1
     assert "useradd" in dockerfile
     assert "\nUSER bionemo\n" in dockerfile
+
+
+def test_recipe_dockerfile_installs_pinned_uv_before_ci_build():
+    """The recipe image must provide uv before invoking the CI build script."""
+    dockerfile = (RECIPE_ROOT / "Dockerfile").read_text()
+    uv_copy = re.search(
+        r"^COPY --from=ghcr\.io/astral-sh/uv:([^\s]+) /uv /uvx /bin/$",
+        dockerfile,
+        flags=re.MULTILINE,
+    )
+
+    assert uv_copy is not None
+    assert uv_copy.group(1) != "latest"
+    assert uv_copy.start() < dockerfile.index("./.ci_build.sh")

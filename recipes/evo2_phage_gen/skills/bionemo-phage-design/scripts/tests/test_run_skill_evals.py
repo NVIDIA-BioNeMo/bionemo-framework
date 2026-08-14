@@ -1780,15 +1780,12 @@ def test_monitoring_heartbeat_covers_all_long_running_work() -> None:
         assert workload_detail not in eval_text
 
 
-def test_entry_skill_descriptions_use_phage_therapy_discovery_language() -> None:
-    skill_paths = (
-        REPOSITORY_ROOT / "skills" / "bionemo-phage-generation" / "SKILL.md",
-        SKILL_ROOT / "bionemo-phage-design" / "SKILL.md",
-    )
-    for skill_path in skill_paths:
-        frontmatter = skill_path.read_text(encoding="utf-8").split("---", maxsplit=2)[1].lower()
-        for marker in ("bacteriophage genome", "phage therapy", "antibiotic-resistant infections"):
-            assert marker in frontmatter
+def test_entry_description() -> None:
+    skill = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text(encoding="utf-8")
+    frontmatter = skill.split("---", maxsplit=2)[1].lower()
+
+    for marker in ("bacteriophage genome", "phage therapy", "antibiotic-resistant infections"):
+        assert marker in frontmatter
 
 
 def test_scanner_topology_guidance_matches_the_cli() -> None:

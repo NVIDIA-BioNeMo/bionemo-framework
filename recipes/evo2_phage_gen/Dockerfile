@@ -3,6 +3,9 @@
 # docker build -t evo2-phage-gen .
 FROM nvcr.io/nvidia/pytorch:26.07-py3
 
+# .ci_build.sh invokes uv before the recipe virtual environment exists.
+COPY --from=ghcr.io/astral-sh/uv:0.12.4 /uv /uvx /bin/
+
 WORKDIR /workspace/bionemo/recipes/evo2_phage_gen
 COPY . .
 
