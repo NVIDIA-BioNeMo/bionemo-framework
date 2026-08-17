@@ -2,8 +2,8 @@
 
 Samuel H. King, Claudia L. Driscoll, David B. Li, Daniel Guo, Aditi T. Merchant, Garyk Brixi, Max E. Wilkinson, Brian L. Hie
 
-Version: v1  
-DOI: [10.1101/2025.09.12.675911](https://doi.org/10.1101/2025.09.12.675911)  
+Version: v1\
+DOI: [10.1101/2025.09.12.675911](https://doi.org/10.1101/2025.09.12.675911)\
 License: [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
 
 <a id="abstract-1"></a>
@@ -70,9 +70,9 @@ Given the success of previous design tasks that required supervised fine-tuning 
 
 To assess the quality of generated DNA sequences, we developed a set of genome-level design constraints by computing various statistics on natural *Microviridae* sequences, including ΦX174 (**<a id="xref-fig-2-7"></a>[Figure 2F](#f2)**). We organized these constraints into three tiers: sequence quality, tropism specificity, and evolutionary diversity. As basic sequence quality control, we filtered out generated sequences containing non-nucleotide characters, enforced lengths between 4–6 kb and GC content within 30–65%, and excluded sequences with DNA homopolymers longer than 10 bases.
 
-We also sought to add constraints on the protein-coding genes of our generated genomes. However, we found that none of six broadly used gene annotation tools were able to annotate all 11 genes on the wild-type ΦX174 sequence (**<a id="xref-fig-2-8"></a>[Figure 2G](#f2)**; **Figure S4A**), reflecting the challenge of predicting overlapping open reading frames (ORFs) (**Figure S4A,B**) (<a id="xref-ref-108-1"></a>[Wright et al., 2022](#ref-108)). To overcome this limitation, we built a bespoke CDS prediction method tailored to ΦX174-like sequences (**Figure S4C**; **Methods**) that was able to fully annotate all genes in ΦX174, with the exception of gene A*, which was partially predicted. With our new method, we applied an additional quality control constraint requiring at least seven predicted protein hits to natural ΦX174 proteins. Because host range is largely determined by the ability of viral spike proteins to bind host cell receptors (<a id="xref-ref-65-2"></a>[Michel et al., 2010](#ref-65); <a id="xref-ref-97-1"></a>[Sun et al., 2017](#ref-97)), we applied a tropism constraint requiring that generated genomes encode spike proteins with moderately high sequence identity (≥ 60%) to the ΦX174 spike protein (**<a id="xref-fig-2-9"></a>[Figure 2F](#f2)**).
+We also sought to add constraints on the protein-coding genes of our generated genomes. However, we found that none of six broadly used gene annotation tools were able to annotate all 11 genes on the wild-type ΦX174 sequence (**<a id="xref-fig-2-8"></a>[Figure 2G](#f2)**; **Figure S4A**), reflecting the challenge of predicting overlapping open reading frames (ORFs) (**Figure S4A,B**) (<a id="xref-ref-108-1"></a>[Wright et al., 2022](#ref-108)). To overcome this limitation, we built a bespoke CDS prediction method tailored to ΦX174-like sequences (**Figure S4C**; **Methods**) that was able to fully annotate all genes in ΦX174, with the exception of gene A\*, which was partially predicted. With our new method, we applied an additional quality control constraint requiring at least seven predicted protein hits to natural ΦX174 proteins. Because host range is largely determined by the ability of viral spike proteins to bind host cell receptors (<a id="xref-ref-65-2"></a>[Michel et al., 2010](#ref-65); <a id="xref-ref-97-1"></a>[Sun et al., 2017](#ref-97)), we applied a tropism constraint requiring that generated genomes encode spike proteins with moderately high sequence identity (≥ 60%) to the ΦX174 spike protein (**<a id="xref-fig-2-9"></a>[Figure 2F](#f2)**).
 
-We encouraged evolutionary novelty by introducing an optional set of diversification filters (**<a id="xref-fig-2-10"></a>[Figure 2F](#f2)**). We preferred genomes with <95% average amino acid identity (AAI) to natural proteins, directly promoting diverged proteome sequences. We also developed a “genetic architecture” constraint to capture preservation of global gene arrangement relative to ΦX174 that we used to remove sequences that too closely resembled ΦX174 (**<a id="xref-fig-2-11"></a>[Figure 2F](#f2)**; **Figure S5**; **Methods**). We favored genomes with 10 or 12 genes in total or those sharing synteny with 10 or 12 of ΦX174’s genes, allowing for variants with single gene losses or gains.
+We encouraged evolutionary novelty by introducing an optional set of diversification filters (**<a id="xref-fig-2-10"></a>[Figure 2F](#f2)**). We preferred genomes with \<95% average amino acid identity (AAI) to natural proteins, directly promoting diverged proteome sequences. We also developed a “genetic architecture” constraint to capture preservation of global gene arrangement relative to ΦX174 that we used to remove sequences that too closely resembled ΦX174 (**<a id="xref-fig-2-11"></a>[Figure 2F](#f2)**; **Figure S5**; **Methods**). We favored genomes with 10 or 12 genes in total or those sharing synteny with 10 or 12 of ΦX174’s genes, allowing for variants with single gene losses or gains.
 
 With our full set of design constraints, we narrowed the set of generated sequences through successive rounds of quality control, tropism filtering, and diversification filtering (**<a id="xref-fig-2-12"></a>[Figure 2H](#f2)**). These filters also separated natural ΦX174-like sequences from other *Microviridae* genomes and scrambled *Microviridae* sequences (**<a id="xref-fig-2-13"></a>[Figure 2I](#f2)**). After tropism filtering, we retained as much as 100% of the Evo 1 SFT generations and 53.8% of the Evo 2 SFT generations. After diversification-based filtering, we retained 10.4% of Evo 1 generations and 17.2% of Evo 2 generations.
 
@@ -106,16 +106,17 @@ Finally, we tested the host range of the generated phages across eight *E. coli*
 Having validated the viability of our generated phages, we next examined the extent of their evolutionary novelty (**<a id="xref-fig-4-1"></a>[Figure 4](#f4)**). Upon analyzing the mutational differences within the generated genomes relative to ΦX174 and other *Microviridae* phages (**<a id="xref-fig-4-2"></a>[Figure 4A–D](#f4)**), we observed hundreds of synonymous, nonsynonymous, and noncoding mutations (**<a id="xref-fig-4-3"></a>[Figure 4A](#f4)**) that include:
 
 <a id="list-item-1"></a>
+
 - a novel gene J insertion in Evo-Φ63;
-<a id="list-item-2"></a>
+  <a id="list-item-2"></a>
 - extended noncoding regions in Evo-Φ63, Evo-Φ2147, Evo-Φ2483, and Evo-Φ2498;
-<a id="list-item-3"></a>
+  <a id="list-item-3"></a>
 - loss of gene K in Evo-Φ114;
-<a id="list-item-4"></a>
+  <a id="list-item-4"></a>
 - large, putative truncations of gene C in Evo-Φ75 and Evo-Φ100, and of gene B in Evo-Φ316;
-<a id="list-item-5"></a>
+  <a id="list-item-5"></a>
 - large, putative elongations of gene E in Evo-Φ4 and Evo-Φ46; and
-<a id="list-item-6"></a>
+  <a id="list-item-6"></a>
 - swapping of gene J in Evo-Φ36 with gene J from Escherichia phage G4, a swap previously found non-viable for wild-type ΦX174 (<a id="xref-ref-27-1"></a>[Fane et al., 1992](#ref-27); <a id="xref-ref-72-1"></a>[Ogunbunmi et al., 2021](#ref-72); <a id="xref-ref-84-1"></a>[Roznowski et al., 2020](#ref-84)).
 
 <a id="f4"></a>
@@ -146,7 +147,7 @@ Generative genomics can propose novel genetic sequences, including large-scale s
 
 ![Figure 5](figures/figure-05.jpg)
 
-**Figure 5 Generated bacteriophages exhibit high fitness.(A) Phage fitness competition assay workflow. (B–C) In three competitions, generated phages and ΦX174 competed head-to-head in E. coli C at equal multiplicity of infection (MOI). We tracked cumulative fold change (log2(FC)) of sequencing read counts over six hours (B). Many generated phages matched or surpassed ΦX174’s performance at various time points (C), indicating a higher relative fitness. Growth curves of infected E. coli C populations show corresponding suppression of bacterial growth. Rectangular boxes, enlarged plots in (C); arrowheads, sequencing sample extraction time points. Dotted line, cumulative log2(FC) of ΦX174. (D) Area under the curve (AUC) of the cumulative log2(FC) of phage read counts shows that generated phages outcompeted ΦX174 over the whole time course. Statistical significance was determined by one-way ANOVA with Tukey HSD (*𝑝-adj < 0.05). Bar height, mean; error bar, standard deviation; circles, 𝑛 = 3 competitions; dotted line, AUC of 0. (E) Growth dynamics of E. coli C infected with generated phages and ΦX174 individually show that several generated phages exhibit lower minimum population density after infection, steeper decline in host growth rate, and shorter time to minimum population density, together indicating stronger lytic capabilities. Statistical significance was determined by one-way ANOVA with Tukey HSD (*𝑝-adj < 0.05; **𝑝-adj < 0.01; ***𝑝-adj < 0.001). Bar height, mean; error bar, standard deviation; circles, 𝑛 = 3 infections; dotted line, mean value of ΦX174.**
+\*\*Figure 5 Generated bacteriophages exhibit high fitness.(A) Phage fitness competition assay workflow. (B–C) In three competitions, generated phages and ΦX174 competed head-to-head in E. coli C at equal multiplicity of infection (MOI). We tracked cumulative fold change (log2(FC)) of sequencing read counts over six hours (B). Many generated phages matched or surpassed ΦX174’s performance at various time points (C), indicating a higher relative fitness. Growth curves of infected E. coli C populations show corresponding suppression of bacterial growth. Rectangular boxes, enlarged plots in (C); arrowheads, sequencing sample extraction time points. Dotted line, cumulative log2(FC) of ΦX174. (D) Area under the curve (AUC) of the cumulative log2(FC) of phage read counts shows that generated phages outcompeted ΦX174 over the whole time course. Statistical significance was determined by one-way ANOVA with Tukey HSD (\*𝑝-adj < 0.05). Bar height, mean; error bar, standard deviation; circles, 𝑛 = 3 competitions; dotted line, AUC of 0. (E) Growth dynamics of E. coli C infected with generated phages and ΦX174 individually show that several generated phages exhibit lower minimum population density after infection, steeper decline in host growth rate, and shorter time to minimum population density, together indicating stronger lytic capabilities. Statistical significance was determined by one-way ANOVA with Tukey HSD (\*𝑝-adj < 0.05; \*\*𝑝-adj < 0.01; \***𝑝-adj < 0.001). Bar height, mean; error bar, standard deviation; circles, 𝑛 = 3 infections; dotted line, mean value of ΦX174.**
 
 We observed that three generated phages, Evo-Φ69, Evo-Φ100, and Evo-Φ111, appeared in the top five phages at the end of three independent competition experiments (**<a id="xref-fig-5-3"></a>[Figure 5B–D](#f5)**). ΦX174 only appeared in the top five phages in competitions 1 and 3, at most ranking in third place. Remarkably, in all three competitions, Evo-Φ69 outcompeted all other phages, with cumulative fold changes between 16× and 65× after six hours of infection. In contrast, at the same time point, ΦX174’s cumulative fold change ranged from 1.3× to 4.0× from its initial infection count.
 
@@ -179,7 +180,7 @@ Given the resistant mutations in the LPS gene synthesis operons of strains CR1 a
 
 In this work, we leveraged genome language models to achieve the first generative design of complete bacteriophage genomes. We established a computational framework for specifying our design goals, including the development of a new gene annotation method and diverse scoring metrics, allowing us to controllably design toward a target genomic architecture and host tropism. In particular, our design template was based on ΦX174, a tractable, safe, and historically significant model genome (<a id="xref-ref-4-3"></a>[Barrell et al., 1976](#ref-4); <a id="xref-ref-32-2"></a>[Goulian et al., 1967](#ref-32); <a id="xref-ref-52-2"></a>[Kirchberger & Ochman, 2023](#ref-52); <a id="xref-ref-86-3"></a>[Sanger et al., 1977](#ref-86); <a id="xref-ref-93-2"></a>[Smith et al., 2003](#ref-93)). We systematically evaluated thousands of computationally generated sequences and experimentally tested nearly 300 designs, resulting in 16 viable phages containing substantial evolutionary diversity and enabling a phage cocktail that rapidly overcame bacterial resistance. Multiple generated phages exhibited increased fitness or faster lytic dynamics relative to ΦX174, demonstrating the ability of generative models to efficiently evolve high-fitness genomes.
 
-Synthetic genomics has historically relied on directed evolution, random mutagenesis, or rational engineering (<a id="xref-ref-13-1"></a>[Coradini et al., 2020](#ref-13); <a id="xref-ref-42-1"></a>[James et al., 2024](#ref-42)). These approaches have been limited in the scope of their achieved evolutionary novelty due to the complexity of genome sequences and the limited throughput of methods for genome editing and synthesis. Rational engineering is further limited by incomplete human understanding of biology; for example, previous systematic efforts have struggled to increase features such as phage lysis rate or genome length (<a id="xref-ref-2-1"></a>[Aoyama & Hayashi, 1985](#ref-2); <a id="xref-ref-25-1"></a>[Endy et al., 2000](#ref-25); <a id="xref-ref-85-1"></a>[Russell & Müller, 1984](#ref-85)). In contrast, our approach enabled designs with substantial novelty in both nucleotide and protein sequence, including the genome of Evo-Φ63, that is 5% (268 bp) longer than ΦX174; Evo-Φ69, which outcompeted ΦX174 in competition assays; and Evo-Φ2483, which exhibited significantly faster lysis rates. Notably, the genome Evo-Φ2147 achieves a level of nucleotide sequence novelty (<95% ANI) on par with that achieved by natural evolution when producing new bacteriophage species (<a id="xref-ref-99-2"></a>[Turner et al., 2021](#ref-99)).
+Synthetic genomics has historically relied on directed evolution, random mutagenesis, or rational engineering (<a id="xref-ref-13-1"></a>[Coradini et al., 2020](#ref-13); <a id="xref-ref-42-1"></a>[James et al., 2024](#ref-42)). These approaches have been limited in the scope of their achieved evolutionary novelty due to the complexity of genome sequences and the limited throughput of methods for genome editing and synthesis. Rational engineering is further limited by incomplete human understanding of biology; for example, previous systematic efforts have struggled to increase features such as phage lysis rate or genome length (<a id="xref-ref-2-1"></a>[Aoyama & Hayashi, 1985](#ref-2); <a id="xref-ref-25-1"></a>[Endy et al., 2000](#ref-25); <a id="xref-ref-85-1"></a>[Russell & Müller, 1984](#ref-85)). In contrast, our approach enabled designs with substantial novelty in both nucleotide and protein sequence, including the genome of Evo-Φ63, that is 5% (268 bp) longer than ΦX174; Evo-Φ69, which outcompeted ΦX174 in competition assays; and Evo-Φ2483, which exhibited significantly faster lysis rates. Notably, the genome Evo-Φ2147 achieves a level of nucleotide sequence novelty (\<95% ANI) on par with that achieved by natural evolution when producing new bacteriophage species (<a id="xref-ref-99-2"></a>[Turner et al., 2021](#ref-99)).
 
 The capability to generate novel genomes with AI systems also raises important biosafety considerations. In line with longstanding precedent for conducting biological research within established biosafety levels (<a id="xref-ref-5-1"></a>[Berg et al., 1975](#ref-5)), we performed all experiments at the biosafety level appropriate for research with bacteriophages and their non-pathogenic bacterial hosts, alongside supplementary precautions (**Methods**). These established biosafety systems can be effectively adapted and applied to the generative design of new biological systems, especially when, as in this work, designs are constrained by well-characterized natural genomes as templates. Moreover, as we have previously demonstrated, the generative models themselves can possess inherent safeguards based on their training data; for instance, we have previously shown that data exclusions successfully prevent the Evo 2 models from designing eukaryotic viruses, including pathogenic human viruses (<a id="xref-ref-9-5"></a>[Brixi et al., 2025](#ref-9)). We have also provided additional details in a supplementary **Biosafety and biocontainment discussion**. By continuing to build upon robust safety frameworks, the field can responsibly unlock the potential of generative models to access and engineer complex biological functions for the benefit of science and society.
 
@@ -226,324 +227,431 @@ Stanford Institute for Human-Centered Artificial Intelligence<a id="ref-list-1">
 - <a id="ref-1"></a>[↵](#xref-ref-1-1)<a id="cit-2025-09-12-675911v1-1"></a>
 
 Abramson, J., Adler, J., Dunger, J., Evans, R., Green, T., Pritzel, A., & Jumper, J. (2024). Accurate structure prediction of biomolecular interactions with AlphaFold 3. Nature, 630(8016), 493–500.
+
 - <a id="ref-2"></a>[↵](#xref-ref-2-1)<a id="cit-2025-09-12-675911v1-2"></a>
 
 Aoyama, A., & Hayashi, M. (1985). Effects of genome size on bacteriophage ΦX174 DNA packaging in vitro. Journal of Biological Chemistry, 260(20), 11033–11038.
+
 - <a id="ref-3"></a>[↵](#xref-ref-3-1)<a id="cit-2025-09-12-675911v1-3"></a>
 
 Archer, C., Kim, J., Jeong, H., Park, J., Vickers, C., Lee, S., & Nielsen, L. (2011). The genome sequence of E. coli W (ATCC 9637): comparative genome analysis and an improved genome-scale reconstruction of E. coli. BMC Genomics, 12(1), 9.
+
 - <a id="ref-4"></a>[↵](#xref-ref-4-1)<a id="cit-2025-09-12-675911v1-4"></a>
 
 Barrell, B., Air, G., & Hutchison, C. (1976). Overlapping genes in bacteriophage ΦX174. Nature, 264(5581).
+
 - <a id="ref-5"></a>[↵](#xref-ref-5-1)<a id="cit-2025-09-12-675911v1-5"></a>
 
 Berg, P., Baltimore, D., Brenner, S., Roblin III, R. O., & Singer, M. F. (1975). Asilomar conference on recombinant DNA molecules. Science, 188(4192), 991–994.
+
 - <a id="ref-6"></a>[↵](#xref-ref-6-1)<a id="cit-2025-09-12-675911v1-6"></a>
 
 Bernal, R., Hafenstein, S., Esmeralda, R., Fane, B., & Rossmann, M. (2004). The ΦX174 protein J mediates DNA packaging and viral attachment to host cells. Journal of Molecular Biology, 337(5), 1109–1122.
+
 - <a id="ref-7"></a>[↵](supplement.md#xref-ref-7-1)<a id="cit-2025-09-12-675911v1-7"></a>
 
 Besemer, J., & Borodovsky, M. (2005). GeneMark: web software for gene finding in prokaryotes, eukaryotes and viruses. Nucleic Acids Research, 33(suppl<sub>2</sub>), 451–454.
+
 - <a id="ref-8"></a>[↵](#xref-ref-8-1)<a id="cit-2025-09-12-675911v1-8"></a>
 
 Brister, J., Ako-Adjei, D., Bao, Y., & Blinkova, O. (2015). NCBI viral genomes resource. Nucleic Acids Research, 43(D1), 571–577.
+
 - <a id="ref-9"></a>[↵](#xref-ref-9-1)<a id="cit-2025-09-12-675911v1-9"></a>
 
 Brixi, G., Durrant, M., Ku, J., Poli, M., Brockman, G., Chang, D., & Hie, B. (2025). Genome modeling and design across all domains of life with Evo 2. bioRxiv.
+
 - <a id="ref-10"></a>[↵](#xref-ref-10-1)<a id="cit-2025-09-12-675911v1-10"></a>
 
 Camacho, C., Coulouris, G., Avagyan, V., Ma, N., Papadopoulos, J., Bealer, K., & Madden, T. (2009). BLAST+: architecture and applications. BMC Bioinformatics, 10(1), 421.
+
 - <a id="ref-11"></a>[↵](#xref-ref-11-1)<a id="cit-2025-09-12-675911v1-11"></a>
 
 Camargo, A., Roux, S., Schulz, F., Babinski, M., Xu, Y., Hu, B., & Kyrpides, N. (2023). Identification of mobile genetic elements with geNomad. Nature Biotechnology, 1–10.
+
 - <a id="ref-12"></a>[↵](supplement.md#xref-ref-12-1)<a id="cit-2025-09-12-675911v1-12"></a>
 
 Chang, T., & Bergen, B. (2024). Language model behavior: A comprehensive survey. Computational Linguistics, 50(1), 293–350.
+
 - <a id="ref-13"></a>[↵](#xref-ref-13-1)<a id="cit-2025-09-12-675911v1-13"></a>
 
 Coradini, A., Hull, C., & Ehrenreich, I. (2020). Building genomes to understand biology. Nature Communications, 11(1), 6177.
+
 - <a id="ref-14"></a>[↵](#xref-ref-14-1)<a id="cit-2025-09-12-675911v1-14"></a>
 
 Costanzo, M., VanderSluis, B., Koch, E., Baryshnikova, A., Pons, C., Tan, G., & Boone, C. (2016). A global genetic interaction network maps a wiring diagram of cellular function. Science, 353(6306), 1420.
+
 - <a id="ref-15"></a>[↵](supplement.md#xref-ref-15-1)<a id="cit-2025-09-12-675911v1-15"></a>
 
 Croll, T. (2018). ISOLDE: a physically realistic environment for model building into low-resolution electron-density maps. Biological Crystallography, 74(6), 519–530.
+
 - <a id="ref-16"></a>[↵](supplement.md#xref-ref-16-1)<a id="cit-2025-09-12-675911v1-16"></a>
 
 Crooks, G., Hon, G., Chandonia, J., & Brenner, S. (2004). WebLogo: a sequence logo generator. Genome Research, 14(6), 1188–1190.
+
 - <a id="ref-17"></a>[↵](#xref-ref-17-1)<a id="cit-2025-09-12-675911v1-17"></a>
 
 Dauparas, J., Anishchenko, I., Bennett, N., Bai, H., Ragotte, R., Milles, L., & Baker, D. (2022). Robust deep learning–based protein sequence design using ProteinMPNN. Science, 378(6615), 49–56.
+
 - <a id="ref-18"></a>[↵](#xref-ref-18-1)<a id="cit-2025-09-12-675911v1-18"></a>
 
 Dedrick, R., Guerrero-Bustamante, C., Garlena, R., Russell, D., Ford, K., Harris, K., & Spencer, H. (2019). Engineered bacteriophages for treatment of a patient with a disseminated drug-resistant Mycobacterium abscessus. Nature Medicine, 25(5), 730–733.
+
 - <a id="ref-19"></a>[↵](supplement.md#xref-ref-19-1)<a id="cit-2025-09-12-675911v1-19"></a>
 
 Delcher, A., Bratke, K., Powers, E., & Salzberg, S. (2007). Identifying bacterial genes and endosymbiont DNA with Glimmer. Bioinformatics, 23(6), 673–679.
+
 - <a id="ref-20"></a>[↵](#xref-ref-20-1)<a id="cit-2025-09-12-675911v1-20"></a>
 
 Durrant, M., Perry, N., Pai, J., Jangid, A., Athukoralage, J., Hiraizumi, M., & Hsu, P. (2024). Bridge RNAs direct programmable recombination of target and donor DNA. Nature, 630(8018), 984–993.
+
 - <a id="ref-21"></a>[↵](#xref-ref-21-1)<a id="cit-2025-09-12-675911v1-21"></a>
 
 Edgar, R., Taylor, B., Lin, V., Altman, T., Barbera, P., Meleshko, D., & Babaian, A. (2022). Petabase-scale sequence alignment catalyses viral discovery. Nature, 602(7895), 142–147.
+
 - <a id="ref-22"></a>[↵](supplement.md#xref-ref-22-1)<a id="cit-2025-09-12-675911v1-22"></a>
 
 Egorov, A., & Atkinson, G. (2025). LoVis4u: a locus visualization tool for comparative genomics and coverage profiles. NAR Genomics and Bioinformatics, 7(1), 009.
+
 - <a id="ref-23"></a>[↵](#xref-ref-23-1)<a id="cit-2025-09-12-675911v1-23"></a>
 
 Elena, S., & Lenski, R. (1997). Test of synergistic interactions among deleterious mutations in bacteria. Nature, 390(6658), 395–398.
+
 - <a id="ref-24"></a>[↵](supplement.md#xref-ref-24-1)<a id="cit-2025-09-12-675911v1-24"></a>
 
 Emsley, P., & Cowtan, K. (2004). Coot: model-building tools for molecular graphics. Biological Crystallography, 60(12), 2126–2132.
+
 - <a id="ref-25"></a>[↵](#xref-ref-25-1)<a id="cit-2025-09-12-675911v1-25"></a>
 
 Endy, D., You, L., Yin, J., & Molineux, I. (2000). Computation, prediction, and experimental tests of fitness for bacteriophage T7 mutants with permuted genomes. Proceedings of the National Academy of Sciences, 97(10), 5375–5380.
+
 - <a id="ref-26"></a>[↵](#xref-ref-26-1)<a id="cit-2025-09-12-675911v1-26"></a>
 
 Faber, M., Leuven, V., T., J., Ederer, M., Sapozhnikov, Y., Wilson, Z., Wichman, H., & Miller, C. (2019). Saturation mutagenesis genome engineering of infective Φx174 bacteriophage via unamplified oligo pools and golden gate assembly. ACS Synthetic Biology, 9(1), 125–131.
+
 - <a id="ref-27"></a>[↵](#xref-ref-27-1)<a id="cit-2025-09-12-675911v1-27"></a>
 
 Fane, B., Head, S., & Hayashi, M. (1992). Functional relationship between the J proteins of bacteriophages phi X174 and G4 during phage morphogenesis. Journal of Bacteriology, 174(8), 2717–2719.
+
 - <a id="ref-28"></a>[↵](#xref-ref-28-1)<a id="cit-2025-09-12-675911v1-28"></a>
 
 Fiers, W., & Sinsheimer, R. (1962). The structure of the DNA of bacteriophage ΦX174: III. Ultracentrifugal evidence for a ring structure. Journal of Molecular Biology, 5(4), 424–434.
+
 - <a id="ref-29"></a>[↵](#xref-ref-29-1)<a id="cit-2025-09-12-675911v1-29"></a>
 
 Fredens, J., Wang, K., Torre, D., Funke, L., Robertson, W., Christova, Y., & Chin, J. (2019). Total synthesis of Escherichia coli with a recoded genome. Nature, 569(7757), 514–518.
+
 - <a id="ref-30"></a>[↵](#xref-ref-30-1)<a id="cit-2025-09-12-675911v1-30"></a>
 
 Gibson, D., Benders, G., Andrews-Pfannkoch, C., Denisova, E., Baden-Tillson, H., Zaveri, J., & Smith, H. (2008). Complete chemical synthesis, assembly, and cloning of a Mycoplasma genitalium genome. Science, 319(5867), 1215–1220.
+
 - <a id="ref-31"></a>[↵](#xref-ref-31-1)<a id="cit-2025-09-12-675911v1-31"></a>
 
 Godson, G., Barrell, B., Staden, R., & Fiddes, J. (1978). Nucleotide sequence of bacteriophage G4 DNA. Nature, 276(5685), 236–247.
+
 - <a id="ref-32"></a>[↵](#xref-ref-32-1)<a id="cit-2025-09-12-675911v1-32"></a>
 
 Goulian, M., Kornberg, A., & Sinsheimer, R. (1967). Enzymatic synthesis of DNA, XXIV. Synthesis of infectious phage ΦX174 DNA. Proceedings of the National Academy of Sciences, 58(6), 2321–2328.
+
 - <a id="ref-33"></a>[↵](supplement.md#xref-ref-33-1)<a id="cit-2025-09-12-675911v1-33"></a>
 
 Harris, C., Millman, K., Walt, S., Gommers, R., Virtanen, P., Cournapeau, D., & Oliphant, T. (2020). Array programming with NumPy. Nature, 585(7825), 357–362.
+
 - <a id="ref-34"></a>[↵](#xref-ref-34-1)<a id="cit-2025-09-12-675911v1-34"></a>
 
 Hayes, T., Rao, R., Akin, H., Sofroniew, N., Oktay, D., Lin, Z., & Rives, A. (2025). Simulating 500 million years of evolution with a language model. Science, 387(6736), 850–858.
+
 - <a id="ref-35"></a>[↵](#xref-ref-35-1)<a id="cit-2025-09-12-675911v1-35"></a>
 
 Hie, B., Shanker, V., Xu, D., Bruun, T., Weidenbacher, P., Tang, S., & Kim, P. (2024). Efficient evolution of human antibodies from general protein language models. Nature Biotechnology, 42(2), 275–283.
+
 - <a id="ref-36"></a>[↵](#xref-ref-36-1)<a id="cit-2025-09-12-675911v1-36"></a>
 
 Hu, E., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., & Chen, W. (2021). LoRA: Low-rank adaptation of large language models [arXiv preprint arXiv:2106.09685.].
+
 - <a id="ref-37"></a>[↵](#xref-ref-37-1)<a id="cit-2025-09-12-675911v1-37"></a>
 
-Hutchison, C.,  III, Chuang,  R., Noskov,  V., Assad-Garcia,  N., Deerinck,  T., Ellisman,  M., & Venter, J. (2016). Design and synthesis of a minimal bacterial genome. Science, 351(6280), 6253.
+Hutchison, C., III, Chuang, R., Noskov, V., Assad-Garcia, N., Deerinck, T., Ellisman, M., & Venter, J. (2016). Design and synthesis of a minimal bacterial genome. Science, 351(6280), 6253.
+
 - <a id="ref-38"></a>[↵](#xref-ref-38-1)<a id="cit-2025-09-12-675911v1-38"></a>
 
-Hutchison, C.,  III, Peterson,  S., Gill,  S., Cline,  R., White,  O., Fraser, C., &  Craig Venter, J. (1999). Global transposon mutagenesis and a minimal Mycoplasma genome. Science, 286(5447), 2165–2169.
+Hutchison, C., III, Peterson, S., Gill, S., Cline, R., White, O., Fraser, C., & Craig Venter, J. (1999). Global transposon mutagenesis and a minimal Mycoplasma genome. Science, 286(5447), 2165–2169.
+
 - <a id="ref-39"></a>[↵](supplement.md#xref-ref-39-1)<a id="cit-2025-09-12-675911v1-39"></a>
 
 Hyatt, D., Chen, G., LoCascio, P., Land, M., Larimer, F., & Hauser, L. (2010). Prodigal: prokaryotic gene recognition and translation initiation site identification. BMC Bioinformatics, 11, 1–11.
+
 - <a id="ref-40"></a>[↵](#xref-ref-40-1)<a id="cit-2025-09-12-675911v1-40"></a>
 
 Ingraham, J., Baranov, M., Costello, Z., Barber, K., Wang, W., Ismail, A., & Grigoryan, G. (2023). Illuminating protein space with a programmable generative model. Nature, 623(7989), 1070–1078.
+
 - <a id="ref-41"></a>[↵](#xref-ref-41-1)<a id="cit-2025-09-12-675911v1-41"></a>
 
 Jacob, F., & Monod, J. (1961). Genetic regulatory mechanisms in the synthesis of proteins. Journal of Molecular Biology, 3(3), 318–356.
+
 - <a id="ref-42"></a>[↵](#xref-ref-42-1)<a id="cit-2025-09-12-675911v1-42"></a>
 
 James, J., Dai, J., Chew, W., & Cai, Y. (2024). The design and engineering of synthetic genomes. Nature Reviews Genetics, 1–22.
+
 - <a id="ref-43"></a>[↵](#xref-ref-43-1)<a id="cit-2025-09-12-675911v1-43"></a>
 
 Jaschke, P., Dotson, G., Hung, K., Liu, D., & Endy, D. (2019). Definitive demonstration by synthesis of genome annotation completeness. Proceedings of the National Academy of Sciences, 116(48), 24206–24213.
+
 - <a id="ref-44"></a>[↵](#xref-ref-44-1)<a id="cit-2025-09-12-675911v1-44"></a>
 
 Jaschke, P., Lieberman, E., Rodriguez, J., Sierra, A., & Endy, D. (2012). A fully decompressed synthetic bacteriophage ΦX174 genome assembled and archived in yeast. Virology, 434(2), 278–284.
+
 - <a id="ref-45"></a>[↵](#xref-ref-45-1)<a id="cit-2025-09-12-675911v1-45"></a>
 
 Jiang, K., Yan, Z., Bernardo, M., Sgrizzi, S., Villiger, L., Kayabolen, A., & Abudayyeh, O. (2024). Rapid in silico directed evolution by a protein language model with EVOLVEpro. Science, 387(6732), 6006.
+
 - <a id="ref-46"></a>[↵](#xref-ref-46-1)<a id="cit-2025-09-12-675911v1-46"></a>
 
 Kaplan, J., McCandlish, S., Henighan, T., Brown, T., Chess, B., Child, R., & Amodei, D. (2020). Scaling laws for neural language models [arXiv preprint arXiv:2001.08361.].
+
 - <a id="ref-47"></a>[↵](supplement.md#xref-ref-47-1)<a id="cit-2025-09-12-675911v1-47"></a>
 
 Karcagi, I., Draskovits, G., Umenhoffer, K., Fekete, G., Kovács, K., Méhi, O., & Papp, B. (2016). Indispensability of horizontally transferred genes and its impact on bacterial genome streamlining. Molecular Biology and Evolution, 33(5), 1257–1269.
+
 - <a id="ref-48"></a>[↵](supplement.md#xref-ref-48-1)<a id="cit-2025-09-12-675911v1-48"></a>
 
 Katoh, K., & Standley, D. (2013). MAFFT multiple sequence alignment software version 7: improvements in performance and usability. Molecular Biology and Evolution, 30(4), 772–780.
+
 - <a id="ref-49"></a>[↵](#xref-ref-49-1)<a id="cit-2025-09-12-675911v1-49"></a>
 
 Kilcher, S., & Loessner, M. (2019). Engineering bacteriophages as versatile biologics. Trends in Microbiology, 27(4), 355–367.
+
 - <a id="ref-50"></a>[↵](#xref-ref-50-1)<a id="cit-2025-09-12-675911v1-50"></a>
 
 Kim, M., Suh, G., Cullen, G., Rodriguez, S., Dharmaraj, T., Chang, T., & Sacher, J. (2025). Bacteriophage therapy for multidrug-resistant infections: current technologies and therapeutic approaches. The Journal of Clinical Investigation, 135(5).
+
 - <a id="ref-51"></a>[↵](supplement.md#xref-ref-51-1)<a id="cit-2025-09-12-675911v1-51"></a>
 
 Kimanius, D., Dong, L., Sharov, G., Nakane, T., & Scheres, S. (2021). New tools for automated cryo-EM single-particle analysis in RELION-4.0. Biochemical Journal, 478(24), 4169–4185.
+
 - <a id="ref-52"></a>[↵](#xref-ref-52-1)<a id="cit-2025-09-12-675911v1-52"></a>
 
 Kirchberger, P., & Ochman, H. (2023). Microviruses: A World Beyond phiX174. Annual Review of Virology, 10(1), 99–118.
+
 - <a id="ref-53"></a>[↵](supplement.md#xref-ref-53-1)<a id="cit-2025-09-12-675911v1-53"></a>
 
 Kunzmann, P., & Hamacher, K. (2018). Biotite: a unifying open source computational biology framework in Python. BMC Bioinformatics, 19, 1–8.
+
 - <a id="ref-54"></a>[↵](#xref-ref-54-1)<a id="cit-2025-09-12-675911v1-54"></a>
 
 Leuven, J., Ederer, M., Burleigh, K., Scott, L., Hughes, R., Codrea, V., & Miller, C. (2021). ΦX174 attenuation by whole-genome codon deoptimization. Genome Biology and Evolution, 13(2), 214.
+
 - <a id="ref-55"></a>[↵](#xref-ref-55-1)<a id="cit-2025-09-12-675911v1-55"></a>
 
 Levrier, A., Karpathakis, I., Nash, B., Bowden, S., Lindner, A., & Noireaux, V. (2024). PHEIGES: all-cell-free phage synthesis and selection from engineered genomes. Nature Communications, 15(1), 2223.
+
 - <a id="ref-56"></a>[↵](#xref-ref-56-1)<a id="cit-2025-09-12-675911v1-56"></a>
 
 Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., & Kiela, D. (2020). Retrieval-augmented generation for knowledge-intensive nlp tasks. Advances in Neural Information Processing Systems, 33, 9459–9474.
+
 - <a id="ref-57"></a>[↵](supplement.md#xref-ref-57-1)<a id="cit-2025-09-12-675911v1-57"></a>
 
 Liebschner, D., Afonine, P., Baker, M., Bunkóczi, G., Chen, V., Croll, T., & Adams, P. (2019). Macromolecular structure determination using X-rays, neutrons and electrons: recent developments in Phenix. Biological Crystallography, 75(10), 861–877.
+
 - <a id="ref-58"></a>[↵](#xref-ref-58-1)<a id="cit-2025-09-12-675911v1-58"></a>
 
 Lin, Z., Akin, H., Rao, R., Hie, B., Zhu, Z., Lu, W., & Rives, A. (2023). Evolutionary-scale prediction of atomiclevel protein structure with a language model. Science, 379(6637), 1123–1130.
+
 - <a id="ref-59"></a>[↵](#xref-ref-59-1)<a id="cit-2025-09-12-675911v1-59"></a>
 
 Logel, D., & Jaschke, P. (2020). A high-resolution map of bacteriophage ΦX174 transcription. Virology, 547, 47–56.
+
 - <a id="ref-60"></a>[↵](#xref-ref-60-1)<a id="cit-2025-09-12-675911v1-60"></a>
 
 Mandell, D., Lajoie, M., Mee, M., Takeuchi, R., Kuznetsov, G., Norville, J., & Church, G. (2015). Biocontainment of genetically modified organisms by synthetic protein design. Nature, 518(7537), 55–60.
+
 - <a id="ref-61"></a>[↵](supplement.md#xref-ref-61-1)<a id="cit-2025-09-12-675911v1-61"></a>
 
 McGuffie, M., & Barrick, J. (2021). pLannotate: engineered plasmid annotation. Nucleic Acids Research, 49(W1), 516–522.
+
 - <a id="ref-62"></a>[↵](#xref-ref-62-1)<a id="cit-2025-09-12-675911v1-62"></a>
 
 McKenna, R., Xia, D., Willingmann, P., IIag, L., Krishnaswamy, S., Rossmann, M., & Incardona, N. (1992). Atomic structure of single-stranded DNA bacteriophage ΦX174 and its functional implications. Nature, 355(6356), 137–143.
+
 - <a id="ref-63"></a>[↵](supplement.md#xref-ref-63-1)<a id="cit-2025-09-12-675911v1-63"></a>
 
 McNair, K., Zhou, C., Dinsdale, E., Souza, B., & Edwards, R. (2019). PHANOTATE: a novel approach to gene identification in phage genomes. Bioinformatics, 35(22), 4537–4542.
+
 - <a id="ref-64"></a>[↵](#xref-ref-64-1)<a id="cit-2025-09-12-675911v1-64"></a>
 
 Merchant, A., King, S., Nguyen, E., & Hie, B. (2024). Semantic mining of functional de novo genes from a genomic language model.
+
 - <a id="ref-65"></a>[↵](#xref-ref-65-1)<a id="cit-2025-09-12-675911v1-65"></a>
 
 Michel, A., Clermont, O., Denamur, E., & Tenaillon, O. (2010). Bacteriophage PhiX174’s ecological niche and the flexibility of its Escherichia coli lipopolysaccharide receptor. Applied and Environmental Microbiology, 76(21), 7310–7313.
+
 - <a id="ref-66"></a>[↵](#xref-ref-66-1)<a id="cit-2025-09-12-675911v1-66"></a>
 
 Mnih, V., Kavukcuoglu, K., Silver, D., Rusu, A., Veness, J., Bellemare, M., & Hassabis, D. (2015). Human-level control through deep reinforcement learning. Nature, 518(7540), 529–533.
+
 - <a id="ref-67"></a>[↵](#xref-ref-67-1)<a id="cit-2025-09-12-675911v1-67"></a>
 
 Mutalik, V., & Arkin, A. (2022). A phage foundry framework to systematically develop viral countermeasures to combat antibiotic-resistant bacterial pathogens. iScience, 25(4).
+
 - <a id="ref-68"></a>[↵](#xref-ref-68-1)<a id="cit-2025-09-12-675911v1-68"></a>
 
 Nayfach, S., Camargo, A., Schulz, F., Eloe-Fadrosh, E., Roux, S., & Kyrpides, N. (2021). CheckV assesses the quality and completeness of metagenome-assembled viral genomes. Nature Biotechnology, 39(5), 578– 585.
+
 - <a id="cit-2025-09-12-675911v1-69"></a>
 
 Nguyen, E., Poli, M., Durrant, M., Kang, B., Katrekar, D., Li, D., & Hie, B. (2024). Sequence modeling and design from molecular to genome scale with Evo. Science, 386(6723), 9336.
+
 - <a id="cit-2025-09-12-675911v1-70"></a>
 
 Nguyen, E., Poli, M., Faizi, M., Thomas, A., Wornow, M., Birch-Sykes, C., & Baccus, S. (2024). Hyenadna: Long-range genomic sequence modeling at single nucleotide resolution. Advances in Neural Information Processing Systems, 36.
+
 - <a id="ref-71"></a>[↵](#xref-ref-71-1)<a id="cit-2025-09-12-675911v1-71"></a>
 
 Nyerges, A., Vinke, S., Flynn, R., Owen, S., Rand, E., Budnik, B., & Church, G. (2023). A swapped genetic code prevents viral infections and gene transfer. Nature, 615(7953), 720–727.
+
 - <a id="ref-72"></a>[↵](#xref-ref-72-1)<a id="cit-2025-09-12-675911v1-72"></a>
 
 Ogunbunmi, E., Roznowski, A., & Fane, B. (2021). The effects of packaged, but misguided, single-stranded DNA genomes are transmitted to the outer surface of the ΦX174 capsid. Journal of Virology, 95(18), 10–1128.
+
 - <a id="ref-73"></a>[↵](supplement.md#xref-ref-73-1)<a id="cit-2025-09-12-675911v1-73"></a>
 
 O’Leary, N., Cox, E., Holmes, J., Anderson, W., Falk, R., Hem, V., & Schneider, V. (2024). Exploring and retrieving sequence and metadata for species across the tree of life with NCBI Datasets. Scientific Data, 11(1), 732.
+
 - <a id="ref-74"></a>[↵](#xref-ref-74-1)<a id="cit-2025-09-12-675911v1-74"></a>
 
 Peet, R. (1974). The measurement of species diversity. Annual Review of Ecology and Systematics, 285–307.
+
 - <a id="ref-75"></a>[↵](supplement.md#xref-ref-75-1)<a id="cit-2025-09-12-675911v1-75"></a>
 
 Pettersen, E., Goddard, T., Huang, C., Meng, E., Couch, G., Croll, T., & Ferrin, T. (2021). UCSF ChimeraX: Structure visualization for researchers, educators, and developers. Protein Science, 30(1), 70–82.
+
 - <a id="ref-76"></a>[↵](#xref-ref-76-1)<a id="cit-2025-09-12-675911v1-76"></a>
 
 Pires, D., Cleto, S., Sillankorva, S., Azeredo, J., & Lu, T. (2016). Genetically engineered phages: a review of advances over the last decade. Microbiology and Molecular Biology Reviews, 80(3), 523–543.
+
 - <a id="ref-77"></a>[↵](#xref-ref-77-1)<a id="cit-2025-09-12-675911v1-77"></a>
 
 Pirnay, J. (2020). Phage therapy in the year 2035. Frontiers in Microbiology, 11, 1171.
+
 - <a id="ref-78"></a>[↵](#xref-ref-78-1)<a id="cit-2025-09-12-675911v1-78"></a>
 
 Pryor, J., Potapov, V., Bilotti, K., Pokhrel, N., & Lohman, G. (2022). Rapid 40 kb genome construction from 52 parts through data-optimized assembly design. ACS Synthetic Biology, 11(6), 2036–2042.
+
 - <a id="ref-79"></a>[↵](supplement.md#xref-ref-79-1)<a id="cit-2025-09-12-675911v1-79"></a>
 
 Punjani, A., Rubinstein, J., Fleet, D., & Brubaker, M. (2017). cryoSPARC: algorithms for rapid unsupervised cryo-EM structure determination. Nature Methods, 14(3), 290–296.
+
 - <a id="cit-2025-09-12-675911v1-80"></a>
 
 Quinones-Olvera, N. (n.d.). Bacteriophage genome sizes. [https://github.com/nataquinones/phage_genome_size/](https://github.com/nataquinones/phage_genome_size/)
+
 - <a id="ref-81"></a>[↵](#xref-ref-81-1)<a id="cit-2025-09-12-675911v1-81"></a>
 
 Richardson, S., Mitchell, L., Stracquadanio, G., Yang, K., Dymond, J., DiCarlo, J., & Bader, J. (2017). Design of a synthetic yeast genome. Science, 355(6329), 1040–1044.
+
 - <a id="ref-82"></a>[↵](#xref-ref-82-1)<a id="cit-2025-09-12-675911v1-82"></a>
 
- Romeyer Dherbey,  J., Parab,  L., Gallie,  J., & Bertels, F. (2023). Stepwise evolution of E. coli C and ΦX174 reveals unexpected lipopolysaccharide (LPS) diversity. Molecular Biology and Evolution, 40(7), 154.
+Romeyer Dherbey, J., Parab, L., Gallie, J., & Bertels, F. (2023). Stepwise evolution of E. coli C and ΦX174 reveals unexpected lipopolysaccharide (LPS) diversity. Molecular Biology and Evolution, 40(7), 154.
+
 - <a id="ref-83"></a>[↵](supplement.md#xref-ref-83-1)<a id="cit-2025-09-12-675911v1-83"></a>
 
 Rosenthal, P., & Henderson, R. (2003). Optimal determination of particle orientation, absolute hand, and contrast loss in single-particle electron cryomicroscopy. Journal of Molecular Biology, 333(4), 721– 745.
+
 - <a id="ref-84"></a>[↵](#xref-ref-84-1)<a id="cit-2025-09-12-675911v1-84"></a>
 
-Roznowski, A., Doore, S., Kemp, S., & Fane, B. (2020). Finally, a role befitting Astar: strongly conserved, unessential microvirus A* proteins ensure the product fidelity of packaging reactions. Journal of Virology, 94(2), 10–1128.
+Roznowski, A., Doore, S., Kemp, S., & Fane, B. (2020). Finally, a role befitting Astar: strongly conserved, unessential microvirus A\* proteins ensure the product fidelity of packaging reactions. Journal of Virology, 94(2), 10–1128.
+
 - <a id="ref-85"></a>[↵](#xref-ref-85-1)<a id="cit-2025-09-12-675911v1-85"></a>
 
 Russell, P., & Müller, U. (1984). Construction of bacteriophage ΦX174 mutants with maximum genome sizes. Journal of Virology, 52(3), 822–827.
+
 - <a id="ref-86"></a>[↵](#xref-ref-86-1)<a id="cit-2025-09-12-675911v1-86"></a>
 
 Sanger, F., Air, G., Barrell, B., Brown, N., Coulson, A., Fiddes, J., & Smith, M. (1977). Nucleotide sequence of bacteriophage ΦX174 DNA. Nature, 265(5596), 687–695.
+
 - <a id="ref-87"></a>[↵](#xref-ref-87-1)<a id="cit-2025-09-12-675911v1-87"></a>
 
 Sanjuán, R., Moya, A., & Elena, S. (2004). The distribution of fitness effects caused by single-nucleotide substitutions in an RNA virus. Proceedings of the National Academy of Sciences, 101(22), 8396–8401.
+
 - <a id="ref-88"></a>[↵](supplement.md#xref-ref-88-1)<a id="cit-2025-09-12-675911v1-88"></a>
 
 Schwengers, O., Jelonek, L., Dieckmann, M., Beyvers, S., Blom, J., & Goesmann, A. (2021). Bakta: rapid and standardized annotation of bacterial genomes via alignment-free sequence identification. Microbial Genomics, 7(11), 000685.
+
 - <a id="ref-89"></a>[↵](supplement.md#xref-ref-89-1)<a id="cit-2025-09-12-675911v1-89"></a>
 
 Seabold, S., & Perktold, J. (2010). Statsmodels: econometric and statistical modeling with python. SciPy, 7(1), 92–96.
+
 - <a id="ref-90"></a>[↵](#xref-ref-90-1)<a id="cit-2025-09-12-675911v1-90"></a>
 
- Shaer Tamar,  E., & Kishony, R. (2022). Multistep diversification in spatiotemporal bacterial-phage coevolution. Nature Communications, 13(1), 7971.
+Shaer Tamar, E., & Kishony, R. (2022). Multistep diversification in spatiotemporal bacterial-phage coevolution. Nature Communications, 13(1), 7971.
+
 - <a id="ref-91"></a>[↵](#xref-ref-91-1)<a id="cit-2025-09-12-675911v1-91"></a>
 
 Shlomai, J., & Kornberg, A. (1980). An Escherichia coli replication protein that recognizes a unique sequence within a hairpin region in phi X174 DNA. Proceedings of the National Academy of Sciences, 77(2), 799– 803.
+
 - <a id="ref-92"></a>[↵](supplement.md#xref-ref-92-1)<a id="cit-2025-09-12-675911v1-92"></a>
 
 Singh, U., & Wurtele, E. (2021). orfipy: a fast and flexible tool for extracting ORFs. Bioinformatics, 37(18), 3019–3020.
+
 - <a id="ref-93"></a>[↵](#xref-ref-93-1)<a id="cit-2025-09-12-675911v1-93"></a>
 
 Smith, H. O., Hutchison III, C. A., Pfannkoch, C., & Venter, J. C. (2003). Generating a synthetic genome by whole genome assembly: ΦX174 bacteriophage from synthetic oligonucleotides. Proceedings of the National Academy of Sciences, 100(26), 15440–15445.
+
 - <a id="ref-94"></a>[↵](#xref-ref-94-1)<a id="cit-2025-09-12-675911v1-94"></a>
 
 Srinivasan, P., & Smolke, C. (2020). Biosynthesis of medicinal tropane alkaloids in yeast. Nature, 585(7826), 614–619.
+
 - <a id="ref-95"></a>[↵](supplement.md#xref-ref-95-1)<a id="cit-2025-09-12-675911v1-95"></a>
 
 Steinegger, M., & Söding, J. (2017). MMseqs2 enables sensitive protein sequence searching for the analysis of massive data sets. Nature Biotechnology, 35(11), 1026–1028.
+
 - <a id="ref-96"></a>[↵](#xref-ref-96-1)<a id="cit-2025-09-12-675911v1-96"></a>
 
 Strathdee, S., Hatfull, G., Mutalik, V., & Schooley, R. (2023). Phage therapy: From biological mechanisms to future directions. Cell, 186(1), 17–31.
+
 - <a id="ref-97"></a>[↵](#xref-ref-97-1)<a id="cit-2025-09-12-675911v1-97"></a>
 
 Sun, Y., Roznowski, A., Tokuda, J., Klose, T., Mauney, A., Pollack, L., & Rossmann, M. (2017). Structural changes of tailless bacteriophage ΦX174 during penetration of bacterial cell walls. Proceedings of the National Academy of Sciences, 114(52), 13708–13713.
+
 - <a id="ref-98"></a>[↵](#xref-ref-98-1)<a id="cit-2025-09-12-675911v1-98"></a>
 
 Terzian, P., Olo Ndela, E., Galiez, C., Lossouarn, J., Pérez Bucio, R., Mom, R., & Enault, F. (2021). PHROG: families of prokaryotic virus proteins clustered using remote homology. NAR Genomics and Bioinformatics, 3(3), 067.
+
 - <a id="ref-99"></a>[↵](#xref-ref-99-1)<a id="cit-2025-09-12-675911v1-99"></a>
 
 Turner, D., Kropinski, A., & Adriaenssens, E. (2021). A roadmap for genome-based phage taxonomy. Viruses, 13(3), 506.
+
 - <a id="ref-100"></a>[↵](#xref-ref-100-1)<a id="cit-2025-09-12-675911v1-100"></a>
 
 Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A., & Polosukhin, I. (2017). Attention is all you need. Advances in Neural Information Processing Systems, 30.
+
 - <a id="ref-101"></a>[↵](supplement.md#xref-ref-101-1)<a id="cit-2025-09-12-675911v1-101"></a>
 
 Virshup, I., Rybakov, S., Theis, F., Angerer, P., & Wolf, F. (2021). anndata: Annotated data. Journal of Open Source Software, 9(101), 4371.
+
 - <a id="ref-102"></a>[↵](#xref-ref-102-1)<a id="cit-2025-09-12-675911v1-102"></a>
 
 Wang, K., Torre, D., Robertson, W., & Chin, J. (2019). Programmed chromosome fission and fusion enable precise large-scale genome rearrangement and assembly. Science, 365(6456), 922–926.
+
 - <a id="ref-103"></a>[↵](supplement.md#xref-ref-103-1)<a id="cit-2025-09-12-675911v1-103"></a>
 
 Wang, R., Yang, S., Liu, Z., Zhang, Y., Wang, X., Xu, Z., & Li, S. (2024). PhageScope: a well-annotated bacteriophage database with automatic analyses and visualizations. Nucleic Acids Research, 52(D1), 756– 761.
+
 - <a id="ref-104"></a>[↵](#xref-ref-104-1)<a id="cit-2025-09-12-675911v1-104"></a>
 
 Wickner, S., & Hurwitz, J. (1974). Conversion of ΦX174 viral DNA to double-stranded form by purified Escherichia coli proteins. Proceedings of the National Academy of Sciences, 71(10), 4120–4124.
+
 - <a id="ref-105"></a>[↵](#xref-ref-105-1)<a id="cit-2025-09-12-675911v1-105"></a>
 
 Widatalla, T., Rafailov, R., & Hie, B. (2024). Aligning protein generative models with experimental fitness via direct preference optimization. *bioRxiv*.
+
 - <a id="ref-106"></a>[↵](#xref-ref-106-1)<a id="cit-2025-09-12-675911v1-106"></a>
 
 Wimmer, E., Mueller, S., Tumpey, T., & Taubenberger, J. (2009). Synthetic viruses: a new opportunity to understand and prevent viral disease. Nature Biotechnology, 27(12), 1163–1172.
+
 - <a id="ref-107"></a>[↵](supplement.md#xref-ref-107-1)<a id="cit-2025-09-12-675911v1-107"></a>
 
 Wolf, F., Angerer, P., & Theis, F. (2018). SCANPY: large-scale single-cell gene expression data analysis. Genome Biology, 19(1), 15.
+
 - <a id="ref-108"></a>[↵](#xref-ref-108-1)<a id="cit-2025-09-12-675911v1-108"></a>
 
 Wright, B., Molloy, M., & Jaschke, P. (2022). Overlapping genes in natural and engineered genomes. Nature Reviews Genetics, 23(3), 154–168.

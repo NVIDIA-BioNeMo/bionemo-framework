@@ -368,13 +368,13 @@
     },
     {
       "path": "paper.md",
-      "sha256": "3985f9864266bb1064cea6ae15a2ac4ad4295e687055b25222b23ab356be0d10",
-      "size": 90064
+      "sha256": "37b1acde4d6c8e9069dc7acf879ff83bd101ab06677092759344002955d1a9fd",
+      "size": 90173
     },
     {
       "path": "supplement.md",
-      "sha256": "53b78bb69b36b2ca7a14a280fc2ee9e9252db9192e739475f230cd4a87ccc7a8",
-      "size": 78828
+      "sha256": "6f6cf27f4f2dd7c0ff171f7d38f161ed63a245c2236272376a9e64f86efe159a",
+      "size": 78834
     },
     {
       "path": "supplementary/media-1.xlsx",
