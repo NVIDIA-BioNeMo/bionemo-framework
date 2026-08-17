@@ -215,16 +215,6 @@ def test_apply_nemo_rl_patch_is_forward_only_and_idempotent(tmp_path: Path, monk
     assert source_file.read_text() == "new\n"
 
 
-def test_patch_sha256_reports_patch_content_hash(tmp_path: Path) -> None:
-    """The launcher should be able to log the exact maintained patch content."""
-    patch_file = tmp_path / "patch.diff"
-    patch_file.write_text("patch contents\n")
-
-    assert nemo_rl_patches.patch_sha256(patch_file) == (
-        "3e21aed045526cbe401bb21136236cf0b768acfb13d71101e953f78792549fa1"
-    )
-
-
 def test_maintained_patch_applies_to_pinned_nemo_rl_source(tmp_path: Path) -> None:
     """The actual maintained patch should apply against the pinned clean NeMo-RL source."""
     _, revision = nemo_rl_patches._nemo_rl_source_pin()

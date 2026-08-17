@@ -8,12 +8,10 @@
 > **Source PDF:** [European Medicines Agency](https://www.ema.europa.eu/en/documents/scientific-guideline/draft-guideline-quality-aspects-phage-therapy-medicinal-products_en.pdf)
 > **EMA record:** [Quality aspects of phage therapy medicinal products](https://www.ema.europa.eu/en/quality-aspects-phage-therapy-medicinal-products)
 > **Accessed:** 3 August 2026
-> **Source PDF SHA-256:** `e7953ee8e56b55bf147962872e721746e0667815a70428dd88bad428c461db48`
-
-This Markdown transcription removes the PDF's printed line numbers, repeating page headers and
-footers, and extraction-only whitespace and line-wrap artifacts. Heading levels and links were
-converted to Markdown; substantive wording and source spelling were otherwise retained. This is a
-clean convenience copy of a draft document, not a replacement for the current official EMA source.
+> This Markdown transcription removes the PDF's printed line numbers, repeating page headers and
+> footers, and extraction-only whitespace and line-wrap artifacts. Heading levels and links were
+> converted to Markdown; substantive wording and source spelling were otherwise retained. This is a
+> clean convenience copy of a draft document, not a replacement for the current official EMA source.
 
 **Keywords:** Bacteriophages, phage therapy, quality aspects, development and manufacture
 

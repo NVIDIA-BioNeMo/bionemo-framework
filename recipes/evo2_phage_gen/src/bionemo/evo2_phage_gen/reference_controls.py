@@ -98,7 +98,7 @@ class ReferenceClassExpectation:
 
 @dataclass(frozen=True)
 class ReferenceControl:
-    """One immutable genome identity and its expected safety-filter behavior."""
+    """One fixed genome identity and its expected safety-filter behavior."""
 
     control_id: str
     accession: str

@@ -4,15 +4,15 @@
     {
       "id": "bionemo-phage-design-operate-mbridge-sft-001-paper-scale-launch",
       "prompt": "Launch a leakage-controlled Evo 2 7B phage SFT run on the hardware available here. Use the publication as the optimization reference, but adapt batch topology safely and select the best validation checkpoint.",
-      "expected_output": "A preflighted Megatron Bridge launch contract that preserves the scientific workload and records the adapted resource configuration.",
+      "expected_output": "A preflighted Megatron Bridge launch decision that preserves the scientific workload, adapts resource configuration, and selects a comparable validation checkpoint.",
       "assertions": [
-        "The response rejects missing split hashes or failed leakage audit and resolves current commands from pyproject, help, source, configs, tests, and README.",
-        "The response treats publication settings as historical evidence and derives the SFT context from an agreed upper bound of the collected genomes' tokenized length distribution, with full-genome samples and masked padding.",
-        "The response benchmarks a DP-first target-length fit and adds TP/PP/CP only when memory or measured throughput requires it, while preserving the approved effective token batch within 5% or documenting an infeasible difference.",
-        "The response uses a public NGC checkpoint when available, records provider/version/hash/format, and uses a public Arc conversion only as a tested fallback.",
-        "The response treats 12,000 steps as a historical starting hypothesis rather than a fixed maximum, recalibrates a ceiling from the final usable corpus and resolved effective batch, schedules at least 30 comparable validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint rather than the final checkpoint.",
-        "The response keeps local TensorBoard authoritative and, unless opted out, safely discovers supported W&B authentication and enables an SFT-specific run automatically on success even when a checked-in default is false; it never exposes keys and records why local-only fallback was necessary.",
-        "The selected-checkpoint handoff includes verified training bytes/tokens, markers, orientation, tokenizer, BOS/EOS, wrappers, padding, and masking for RL sampling calibration."
+        "The response rejects a failed leakage check and resolves current commands from the maintained entry points, help, source, configs, tests, and README.",
+        "Publication settings are historical evidence; the SFT context comes from an agreed upper bound of collected tokenized genome lengths with full-genome samples and masked padding.",
+        "The response benchmarks a DP-first target-length fit and adds TP, PP, or CP only when memory or measured throughput requires it while preserving the approved effective token batch.",
+        "The response uses a public NGC checkpoint when available, records provider, version, and format, and uses a public Arc conversion only as a tested fallback.",
+        "The response treats 12,000 steps as a historical starting hypothesis, recalibrates a ceiling from usable corpus and effective batch, schedules enough comparable validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint.",
+        "The response treats local training and validation metrics as sufficient; optional remote reporting does not gate the scientific run or checkpoint decision.",
+        "The selected-checkpoint handoff includes verified training bytes or tokens, markers, orientation, tokenizer, BOS/EOS, wrappers, padding, and masking for RL sampling calibration."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null
@@ -23,10 +23,10 @@
       "expected_output": "A comparison-aware monitoring decision that retains the best checkpoint and requires sustained degradation beyond noise before stopping.",
       "assertions": [
         "The response distinguishes the selected best-validation checkpoint from the later stopping-evidence checkpoint and preserves best plus latest.",
-        "The response does not stop on a single blip or count validation events that differ in manifest, sample composition, loss definition, or other comparability fields.",
+        "The response does not stop on a single blip or combine validations that differ in sample composition, loss definition, or other comparability semantics.",
         "The response evaluates a declared window, uncertainty or data variance, practical minimum change, patience, and bounded rebound behavior before early stopping.",
-        "The response monitors train/validation loss, learning rate, gradient norm, throughput, GPU memory/utilization, disk, failures, and checkpoint integrity from disk plus configured telemetry.",
-        "Monitoring is due-gated; after one or two healthy validation, checkpoint, or equivalent progress cycles, cadence follows measured step timing and a useful fraction of the early-stop decision horizon rather than a fixed heartbeat, and stable phases may use 5–30 minutes.",
+        "The response monitors train and validation loss, learning rate, gradient norm, throughput, GPU memory and utilization, disk, failures, and checkpoint integrity.",
+        "Monitoring intervals follow measured step timing and the early-stop decision horizon rather than an arbitrary fixed interval.",
         "The response stops at the calibrated step ceiling if sustained comparable overfitting is not established."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
@@ -37,11 +37,11 @@
       "prompt": "A full-genome SFT preflight at 50 kb OOMs with microbatch 2. Reconfigure the run without training on shorter fragments or changing the intended effective token batch.",
       "expected_output": "A measured OOM recovery sequence that preserves context and optimizer-step semantics.",
       "assertions": [
-        "The response records the exact failing shape, hardware, topology, precision, and peak memory before changing configuration.",
+        "The response records the failing shape, hardware, topology, precision, and peak memory before changing configuration.",
         "The response first reduces microbatch and raises gradient accumulation to preserve the approved effective token batch.",
         "The response then considers TP plus DP within local GPUs, followed by supported CP, recomputation, and sharding, rather than silently truncating genomes.",
-        "The response maximizes the stable target-length microbatch and utilization with a safety margin and reruns checkpoint/resume preflight.",
-        "The response creates a decision entry and new attempt if the biological workload or training semantics must change."
+        "The response maximizes the stable target-length microbatch and utilization with a safety margin and reruns checkpoint and resume preflight.",
+        "The response does not silently change biological workload or training semantics; any such change is treated as a separately evaluated attempt."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null
@@ -49,7 +49,7 @@
     {
       "id": "bionemo-phage-design-operate-mbridge-sft-004-flat-with-outlier",
       "prompt": "SFT validation loss has been flat within variance for many comparable checks, except for one abrupt bad evaluation that recovered immediately. Decide whether to stop.",
-      "expected_output": "Continue the plateau, retain the best checkpoint, and audit the outlier separately.",
+      "expected_output": "Continue the plateau, retain the best checkpoint, and investigate the outlier separately.",
       "assertions": [
         "The response does not early-stop for extended flatness within robust ordinary noise.",
         "The response excludes the abrupt outlier from the ordinary-noise estimate and treats it as separate incident evidence.",

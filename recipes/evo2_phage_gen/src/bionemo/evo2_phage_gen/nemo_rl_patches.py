@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib
 import importlib.util
 import logging
@@ -65,11 +64,6 @@ def _run_patch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str
     )
 
 
-def patch_sha256(patch_path: Path = DEFAULT_PATCH) -> str:
-    """Return the SHA256 hash of the maintained NeMo-RL patch."""
-    return hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
-
-
 def assert_nemo_rl_patch_runtime(patch_path: Path = DEFAULT_PATCH) -> None:
     """Fail unless the importable NeMo-RL runtime matches the maintained patch."""
     source_root = _nemo_rl_source_root()
@@ -80,7 +74,6 @@ def assert_nemo_rl_patch_runtime(patch_path: Path = DEFAULT_PATCH) -> None:
         raise RuntimeError(
             "The importable NeMo-RL runtime is not reverse-patch-equivalent to the maintained Evo2 patch.\n"
             f"Runtime root: {source_root}\n"
-            f"Patch SHA256: {patch_sha256(patch_path)}\n"
             f"Reverse dry-run output:\n{reverse_dry_run.stdout}\n"
             f"Forward dry-run output:\n{forward_dry_run.stdout}"
         )
@@ -280,7 +273,7 @@ def main() -> None:
     print(apply_nemo_rl_patch(args.patch, check_only=args.check))
     if args.verify_runtime:
         assert_nemo_rl_patch_runtime(args.patch)
-        logger.info("verified patched nemo-rl runtime with patch SHA256 %s", patch_sha256(args.patch))
+        logger.info("verified patched nemo-rl runtime")
 
 
 if __name__ == "__main__":

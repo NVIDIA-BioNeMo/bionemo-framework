@@ -35,7 +35,7 @@ eukaryotic cells; treat it as prohibited rather than a tunable penalty. This is 
 non-replicative eukaryotic entry or host-range work. Route that work through case-specific intended-use,
 evidence, and safety review before planning it.
 
-Keep sequence eligibility source-neutral. Provenance establishes identity and traceability; it is not
+Keep sequence eligibility source-neutral. Source records establish identity; a source label is not
 a natural-origin attestation. RefSeq, GenBank, phage databases, metagenomic collections, local
 experiments, and model-generated candidates may all proceed when the applicable sequence, host, and
 safety evidence is present. Generated candidates inherit the approved target replication-host evidence
@@ -139,8 +139,8 @@ solutions when evidence does not justify one scalar trade-off.
 
 ## Calibrate host-range models without score chasing
 
-Before training or reusing a host-range model, map every interaction row to versioned host and phage
-assemblies and sequence hashes. Report missing assemblies, conflicting labels, assay/batch differences,
+Before training or reusing a host-range model, map every interaction row to identified versions of the host and phage
+assemblies. Report missing assemblies, conflicting labels, assay/batch differences,
 duplicates, class balance, and the population removed by sequence availability. Do not silently impute
 genome features or claim that the filtered matrix represents the original matrix.
 
@@ -176,6 +176,6 @@ therapy-quality guidance such as the cleaned local [EMA draft guideline on quali
 therapy medicinal products](ema-2025-draft-phage-therapy-quality-guideline.md) to seed the
 coverage table. For a whole-genome interaction model, [GenoPHI](https://github.com/Noonanav/GenoPHI)
 and its [versioned preprint](https://www.biorxiv.org/content/10.1101/2025.11.15.688630v2) illustrate
-relevant model and data-lineage questions. These sources do not replace target-phage, target-strain,
+relevant model and dataset questions. These sources do not replace target-phage, target-strain,
 production-host, and assay-specific primary evidence; resolve current versions and search each
 unresolved axis.

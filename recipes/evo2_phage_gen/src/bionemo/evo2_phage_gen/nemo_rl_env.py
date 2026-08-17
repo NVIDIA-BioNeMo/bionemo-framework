@@ -138,7 +138,7 @@ def _config_path(value: object, *, label: str) -> Path:
 
 
 def _coerce_sequence_safety_config(raw_config: Any) -> SequenceSafetyRewardConfig | None:
-    """Parse the mandatory sequence-safety mapping into the strict Task 6 contract."""
+    """Parse the required sequence-safety settings for Task 6."""
     if raw_config is None:
         return None
     if not isinstance(raw_config, Mapping):

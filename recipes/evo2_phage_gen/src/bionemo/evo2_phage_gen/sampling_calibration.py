@@ -190,7 +190,7 @@ def materialize_sweep(
     prompt_batch_size: int,
     max_seq_length: int,
 ) -> dict:
-    """Materialize an immutable sweep contract and all cell prompt banks."""
+    """Materialize the sweep configuration and all cell prompt banks."""
     cells = build_sweep_cells(prefix_lengths, temperatures)
     groups = partition_gpu_groups(gpu_ids, tensor_parallel_size)
     prompts_dir = run_root / "prompts"
@@ -213,7 +213,7 @@ def materialize_sweep(
         )
 
     cells_path = run_root / "cells.tsv"
-    contract = {
+    sweep_config = {
         "schema_version": 1,
         "state": "planned",
         "checkpoint": str(checkpoint.resolve()),
@@ -236,11 +236,11 @@ def materialize_sweep(
         "cells": [cell.key for cell in cells],
         "cells_tsv": str(cells_path.resolve()),
     }
-    contract_path = run_root / "sweep_contract.json"
-    if contract_path.exists():
-        existing = json.loads(contract_path.read_text())
-        if existing != contract:
-            raise ValueError(f"existing sweep contract differs: {contract_path}")
+    config_path = run_root / "sweep_config.json"
+    if config_path.exists():
+        existing = json.loads(config_path.read_text())
+        if existing != sweep_config:
+            raise ValueError(f"existing sweep configuration differs: {config_path}")
     for path in (prompts_dir, jsonl_dir, logs_dir, runtime_dir):
         path.mkdir(parents=True, exist_ok=True)
     for cell in cells:
@@ -260,17 +260,17 @@ def materialize_sweep(
         )
         writer.writeheader()
         writer.writerows(cell_rows)
-    if not contract_path.exists():
-        contract_path.write_text(json.dumps(contract, indent=2) + "\n")
-    return contract
+    if not config_path.exists():
+        config_path.write_text(json.dumps(sweep_config, indent=2) + "\n")
+    return sweep_config
 
 
 def validate_sweep(run_root: Path) -> dict:
     """Validate every contracted cell and return exact completion counts."""
-    contract = json.loads((run_root / "sweep_contract.json").read_text())
+    sweep_config = json.loads((run_root / "sweep_config.json").read_text())
     with (run_root / "cells.tsv").open() as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
-    expected = int(contract["num_prompts_per_cell"])
+    expected = int(sweep_config["num_prompts_per_cell"])
     counts = {}
     for row in rows:
         counts[row["key"]] = validate_cell_output(
@@ -332,7 +332,7 @@ def main() -> None:
     """Run the sampling calibration materialization or validation command."""
     args = _parse_args()
     if args.command == "materialize":
-        contract = materialize_sweep(
+        sweep_config = materialize_sweep(
             run_root=args.run_root,
             checkpoint=args.checkpoint,
             prefix_lengths=args.prefix_lengths,
@@ -349,7 +349,7 @@ def main() -> None:
             prompt_batch_size=args.prompt_batch_size,
             max_seq_length=args.max_seq_length,
         )
-        print(json.dumps(contract, sort_keys=True))
+        print(json.dumps(sweep_config, sort_keys=True))
     elif args.command == "print-command":
         command = build_inference_command(
             infer_script=args.infer_script,

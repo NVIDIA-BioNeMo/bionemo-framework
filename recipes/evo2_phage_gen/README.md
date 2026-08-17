@@ -39,7 +39,7 @@ Target-profile offline filter counts:
   → 610 synteny/total-gene final passes
 ```
 
-The [historical evidence](skills/bionemo-phage-design/references/historical-evidence.md) keeps the latest operator-reported rerun separate from the earlier checksum-backed step-190 snapshot. The older snapshot records source revision `99673b047a196352afcbb35e7aa4200127af2616`.
+The concise [case-study notes](skills/bionemo-phage-design/references/case-study-results.md) keep the current end-to-end run distinct from the earlier released-SFT shortcut.
 
 ## Run the workflow with an agent
 
@@ -66,9 +66,24 @@ claude --plugin-dir . \
   '/evo2-phage-gen:bionemo-phage-design Use interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
 ```
 
-## Reproduce the RL result
+## Reproduce the current end-to-end PhiX174 result
 
-The shortest path reuses the public 12,000-iteration Microviridae SFT checkpoint and reruns GDPO, generation, and filtering. Run every command below from `recipes/evo2_phage_gen`.
+The successful end-to-end run used this sequence:
+
+1. Build the recipe environment with `./.ci_build.sh`, then source `.ci_test_env.sh`.
+2. Ask the controller for a fresh-base PhiX174 replication plan, review it, and run through the final report.
+3. Collect and validate the Microviridae genomes, then make a cluster-held-out split. The recorded split contained 14,266 training, 100 validation, and 100 test genomes with no near-duplicate leakage at the chosen boundary.
+4. Fine-tune fresh Evo 2 7B to a 12,000-step ceiling. Select checkpoints by validation loss; the run selected step 5,600 and confirmed it on the held-out test set.
+5. Define and validate the objective/QC profile while SFT runs. Calibrate the selected SFT checkpoint; the run chose temperature 1.0 and a 50:50 mixture of 16- and 24-nucleotide prompts.
+6. Run data-parallel GDPO with 96 designs per step, validation every 10 steps, and a 500-step ceiling. Select from validation evidence; the run selected step 430.
+7. Generate exactly 1,000 designs from the selected checkpoint. Apply the target filter profile with filter 7 disabled, then run a separate filter-7-enabled diagnostic and write the final report.
+
+The scripts under the recorded result preserve the implementation used for that experiment, but some contain attempt-local paths. Let the controller generate current commands for a new result root instead of copying those archived scripts verbatim.
+Run long stages through a facility that survives the chat process, keep the job identifier and logs in `RUNLOG.md`, and reattach until success or failure is known.
+
+## Historical RL-only shortcut from the released SFT checkpoint
+
+This shorter path reuses the public 12,000-iteration Microviridae SFT checkpoint and reruns GDPO, generation, and filtering. It does not reproduce the current fresh-base SFT plus step-430 result. Run every command below from `recipes/evo2_phage_gen`.
 
 The historical RL shape used one node with 2× H100 80 GB GPUs. Other hardware may work after reducing batch sizes or changing parallelism. External QC preparation also requires network access and substantial disk space.
 
@@ -97,7 +112,8 @@ mmseqs createdb \
   "$TROPISM_DB_DIR/mmseqs_db_NC_001422_1_Gprotein"
 ```
 
-This prepares MMseqs2, BLAST/DUST, DIAMOND, HMMER, PHROGs, CheckV, and the pinned Arc workflow used by the final filters.
+This prepares MMseqs2, BLAST/DUST, DIAMOND, HMMER, PHROGs, CheckV, and the Arc workflow used by the final filters.
+Record the tool and database releases used. If one changes during a run, note when it changed and rerun the affected controls before comparing or screening candidates. New runs may use newer releases.
 
 ### 3. Convert the released Microviridae SFT checkpoint
 
@@ -151,7 +167,7 @@ evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml \
   logger.tensorboard_enabled=true
 ```
 
-The overrides replace project-specific checkpoint, output, and W&B settings in the checked-in historical config. Agent-managed attempts write the preflight result directly into their resolved config. For this manual command, set `PHAGE_WANDB_ENABLED=true` after supported authentication succeeds; its shell fallback is deliberately false so someone without a W&B account cannot fail on telemetry. W&B is the normal remote telemetry path when the installed client can authenticate through the current session, environment, netrc, or supported login flow; keep TensorBoard and local artifacts authoritative, and use the false fallback only after an explicit opt-out or a recorded bounded authentication/network failure. Validation runs every 10 steps with a 500-step ceiling. Select the best checkpoint from sustained full-QC and diversity evidence; do not stop at step 190 merely because it was best in the recorded run.
+The overrides set the checkpoint and result paths for the historical config. W&B is optional; set `PHAGE_WANDB_ENABLED=true` only when it is already available, and keep the local TensorBoard logs. Validation runs every 10 steps with a 500-step ceiling. Select the best checkpoint from sustained full-QC and diversity evidence; do not stop at step 190 merely because it was best in the recorded run.
 
 ### 6. Generate the 1,000-design rollout
 
@@ -174,7 +190,7 @@ NPROC_PER_NODE=2 TENSOR_PARALLEL_SIZE=2 PROMPT_BATCH_SIZE=64 \
   scripts/run_paper_hpo_generation.sh
 ```
 
-Exact numeric reproduction is source-revision-sensitive; the current inference code includes the persistent-RNG correction used by this command.
+Numeric results can vary with the code, runtime, and accelerator environment; record those along with the sampling settings.
 
 ### 7. Apply the target filter profile
 
@@ -198,7 +214,7 @@ The main outputs are:
 
 Run the filter-7-enabled diagnostic in a separate rollout directory so its fixed summary filenames do not overwrite the target-profile outputs.
 
-## Re-run SFT from the published data
+## Download and preprocess the publication-era SFT data
 
 The released inputs and historical preprocessing path are available:
 
@@ -207,22 +223,7 @@ evo2_phage_download_sft_data --include-raw
 preprocess_evo2 --config configs/sft_microviridae_preprocess.yaml
 ```
 
-The bundled paper supplement preserves the exact historical configuration.
-
-## Pin safety assets for a long-running scan
-
-Before controls, topology preflight, and a long sequence-safety scan, copy the validated asset
-manifest and its referenced recipe into a new run-owned directory:
-
-```bash
-evo2_phage_pin_safety_asset_manifest \
-  --manifest data/external/safety/asset_manifest.yaml \
-  --output-dir results/PROJECT/sft/runs/ATTEMPT/artifacts/pinned-safety-assets
-```
-
-Use the emitted `asset_manifest.yaml` for every gate and for the full scan, and retain `PINNING.json`.
-The command validates the source, copies the recipe byte-for-byte, rebinds the copied manifest, and
-revalidates it. The destination must not already exist.
+The bundled paper supplement describes the publication-era configuration.
 
 ## Summarize a validated sequence-safety scan
 
@@ -235,15 +236,15 @@ evo2_phage_summarize_safety_manifest \
   --output results/PROJECT/sft/runs/ATTEMPT/artifacts/safety_tally.json
 ```
 
-The command revalidates the full manifest and detector evidence before writing the tally. It counts
-manifest records; any representative-to-source weighting requires a separately authenticated lineage map.
+The command revalidates the full scan result and detector evidence before writing the tally. If only
+representative sequences were scanned, convert to source-record counts only from a complete representative mapping.
 
 ## Troubleshooting
 
 - If an entrypoint is missing, rerun `.ci_build.sh`, source `.ci_test_env.sh`, and check `pyproject.toml` plus `<command> --help`.
-- If GDPO runs out of memory, lower the microbatch first while preserving the effective global batch; see the [resource and OOM guide](skills/bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md).
+- If GDPO runs out of memory, preserve whole-genome context and the effective batch while following the [compute guidance](skills/bionemo-phage-design-adapt-execution/references/compute-guidance.md).
 - If external QC fails, verify the large databases completed successfully and inspect the per-stage logs under the rollout root.
-- If a fresh run selects a checkpoint other than step 190, use that checkpoint for rollout and report its validation evidence. Step 190 is historical context, not a fixed target.
+- Use the checkpoint selected by validation evidence rather than treating a historical step as a fixed target.
 
 ## Acknowledgements
 
@@ -269,8 +270,7 @@ manifest records; any representative-to-source weighting requires a separately a
 
 ### Recipe resources
 
-- [Skill validation record](skills/bionemo-phage-design/assets/VALIDATION.md)
-- [Historical result evidence](skills/bionemo-phage-design/references/historical-evidence.md)
+- [PhiX174 case-study results](skills/bionemo-phage-design/references/case-study-results.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)
 - [Recipe commands and dependency pins](pyproject.toml)
 - [Evo 2 model and checkpoint notes](../evo2_megatron/README.md)

@@ -194,7 +194,7 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     ids=["missing", "nonzero", "timeout"],
 )
 def test_external_dustmasker_failures_are_bounded_and_wrapped(monkeypatch, error):
-    """External dustmasker failures should use one bounded runtime error contract."""
+    """External dustmasker failures should use consistent runtime errors."""
 
     def fail(*_args, **_kwargs):
         raise error

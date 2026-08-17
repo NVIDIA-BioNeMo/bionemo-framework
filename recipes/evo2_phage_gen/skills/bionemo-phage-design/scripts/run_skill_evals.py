@@ -105,7 +105,7 @@ EVALUATION_RESPONSE_CONTRACT = """EVALUATION RESPONSE CONTRACT
 - Answer the request directly and self-containedly; do not mutate files or launch jobs.
 - Use the selected skill and only the references or repository files needed for this case.
 - Work only inside the provided working directory. Do not inspect eval definitions, grading files, or paths outside it.
-- When a checked-in primary source addresses the request, read it before answering. Web use may check current status or newer versions, but must not replace the local source.
+- Ground claims in relevant checked-in primary sources. Web use may check current status or newer versions, but must not replace the local source.
 - Use no more than 1,800 words. Prefer a much shorter answer when it can satisfy the request.
 """
 EVALUATION_WORKSPACE_EXCLUDED_TOP_LEVEL = {
@@ -175,10 +175,6 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -214,7 +210,7 @@ def _git_tracked_evaluation_paths(source_root: Path) -> tuple[Path, list[Path]]:
     top = _run_capture(["git", "-C", str(source_root), "rev-parse", "--show-toplevel"])
     if top.returncode != 0:
         reason = (top.stderr or "not a Git worktree").strip().splitlines()[0]
-        raise EvalError("live Claude evaluation requires a Git-tracked source workspace: " + reason)
+        raise EvalError("live evaluation requires a Git-tracked source workspace: " + reason)
     worktree = Path(top.stdout.strip()).resolve()
     listed = _run_capture(["git", "-C", str(source_root), "ls-files", "-z", "--cached", "--", "."])
     if listed.returncode != 0:
@@ -321,40 +317,16 @@ def _stage_evaluation_workspace(
             )
     normalized_required = sorted(set(normalized_required))
 
-    content_manifest: list[dict[str, Any]] = []
-    for path in sorted(working_directory.rglob("*")):
-        relative = path.relative_to(working_directory).as_posix()
-        if path.is_symlink():
-            resolved = path.resolve(strict=True).relative_to(staged_root).as_posix()
-            content_manifest.append(
-                {
-                    "path": relative,
-                    "type": "symlink",
-                    "target": os.readlink(path),
-                    "resolved_target": resolved,
-                    "source": "git-tracked-working-tree",
-                }
-            )
-        elif path.is_file():
-            content_manifest.append(
-                {
-                    "path": relative,
-                    "type": "file",
-                    "bytes": path.stat().st_size,
-                    "sha256": _sha256_file(path),
-                    "source": "git-tracked-working-tree",
-                }
-            )
-
     leaked_excluded_paths = sorted(
-        entry["path"] for entry in content_manifest if _evaluation_workspace_exclusion(Path(entry["path"])) is not None
+        path.relative_to(working_directory).as_posix()
+        for path in working_directory.rglob("*")
+        if _evaluation_workspace_exclusion(path.relative_to(working_directory)) is not None
     )
     if leaked_excluded_paths:
         raise EvalError("sanitized evaluation workspace retained excluded paths: " + ", ".join(leaked_excluded_paths))
-    manifest_rows = [json.dumps(entry, sort_keys=True, separators=(",", ":")) for entry in content_manifest]
     return {
         "enabled": True,
-        "method": "git-tracked-working-tree-allowlist",
+        "method": "git-tracked-working-tree",
         "source_root": str(source_root),
         "source_git_worktree": str(worktree),
         "working_directory": str(working_directory),
@@ -369,10 +341,6 @@ def _stage_evaluation_workspace(
         "deleted_tracked_paths": deleted_tracked_paths,
         "unsupported_tracked_paths": unsupported_tracked_paths,
         "required_paths": normalized_required,
-        "regular_file_count": sum(entry["type"] == "file" for entry in content_manifest),
-        "symlink_count": sum(entry["type"] == "symlink" for entry in content_manifest),
-        "content_manifest": content_manifest,
-        "content_manifest_sha256": _sha256_text("\n".join(manifest_rows)),
         "ephemeral": True,
     }
 
@@ -1027,35 +995,26 @@ def _repository_provenance(repo_root: Path) -> dict[str, Any]:
             "revision": None,
             "branch": None,
             "dirty": None,
-            "status_entries": [],
-            "status_sha256": None,
-            "tracked_diff_sha256": None,
             "reason": (top.stderr or "not a Git worktree").strip().splitlines()[0],
         }
     worktree = Path(top.stdout.strip()).resolve()
     base = ["git", "-C", str(worktree)]
-    git_dir_result = _run_capture([*base, "rev-parse", "--absolute-git-dir"])
     revision = _run_capture([*base, "rev-parse", "HEAD"])
     branch = _run_capture([*base, "branch", "--show-current"])
     status = _run_capture([*base, "status", "--short", "--untracked-files=all"])
-    diff = _run_capture([*base, "diff", "--binary", "HEAD"])
     status_text = status.stdout if status.returncode == 0 else ""
     entries = [line for line in status_text.splitlines() if line]
     return {
         "worktree": str(worktree),
         "evaluation_working_directory": str(repo_root),
-        "git_dir": (str(Path(git_dir_result.stdout.strip()).resolve()) if git_dir_result.returncode == 0 else None),
         "available": revision.returncode == 0,
         "revision": revision.stdout.strip() or None,
         "branch": branch.stdout.strip() or None,
         "dirty": bool(entries) if status.returncode == 0 else None,
-        "status_entries": entries,
-        "status_sha256": _sha256_text(status_text) if status.returncode == 0 else None,
-        "tracked_diff_sha256": _sha256_text(diff.stdout) if diff.returncode == 0 else None,
     }
 
 
-def _instruction_manifest(skill_root: Path) -> tuple[list[dict[str, Any]], str]:
+def _instruction_files(skill_root: Path) -> list[dict[str, str]]:
     candidates: set[Path] = set(skill_root.glob("*/SKILL.md"))
     for skill_dir in skill_root.iterdir():
         if not skill_dir.is_dir():
@@ -1063,16 +1022,7 @@ def _instruction_manifest(skill_root: Path) -> tuple[list[dict[str, Any]], str]:
         references = skill_dir / "references"
         if references.is_dir():
             candidates.update(path for path in references.rglob("*") if path.is_file())
-    rows = [
-        {
-            "path": path.relative_to(skill_root).as_posix(),
-            "bytes": path.stat().st_size,
-            "sha256": _sha256_file(path),
-        }
-        for path in sorted(candidates)
-    ]
-    bundle = _sha256_text("\n".join(f"{row['path']}\t{row['sha256']}\t{row['bytes']}" for row in rows))
-    return rows, bundle
+    return [{"path": path.relative_to(skill_root).as_posix()} for path in sorted(candidates)]
 
 
 def _codex_provenance(codex: str, *, live: bool, model: str | None, sandbox: str) -> dict[str, Any]:
@@ -1087,24 +1037,15 @@ def _codex_provenance(codex: str, *, live: bool, model: str | None, sandbox: str
         version = (completed.stdout or completed.stderr).strip().splitlines()[0]
         if not version:
             raise EvalError("cannot record Codex version: command returned no version")
-    config_root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    config = config_root / "config.toml"
-    try:
-        config_hash = _sha256_file(config) if config.is_file() else None
-    except OSError:
-        config_hash = None
     return {
         "requested_executable": codex,
         "resolved_executable": resolved,
-        "executable_sha256": (_sha256_file(Path(resolved)) if resolved and Path(resolved).is_file() else None),
         "version": version,
         "model": model,
         "model_source": "--model" if model else None,
         "sandbox": sandbox,
         "ephemeral": True,
         "json_trace": True,
-        "user_config_present": config.is_file(),
-        "user_config_sha256": config_hash,
     }
 
 
@@ -1155,7 +1096,6 @@ def _claude_provenance(
         "name": "claude",
         "requested_executable": claude,
         "resolved_executable": resolved,
-        "executable_sha256": (_sha256_file(Path(resolved)) if resolved and Path(resolved).is_file() else None),
         "version": version,
         "model": model,
         "grader_model": grader_model,
@@ -1171,7 +1111,6 @@ def _claude_provenance(
         "disallowed_tools": "Edit,Write,NotebookEdit",
         "plugin_root": str(plugin_root),
         "plugin_manifest": str(plugin_manifest),
-        "plugin_manifest_sha256": _sha256_file(plugin_manifest),
         "max_budget_usd_per_process": max_budget_usd,
         "external_skill_upload_allowed": external_skill_upload_allowed,
         "user_config_present": config.is_file(),
@@ -1202,16 +1141,9 @@ def build_provenance(
     argv: Sequence[str],
 ) -> dict[str, Any]:
     """Build reproducibility metadata for an evaluation run."""
-    instruction_files, instruction_bundle = _instruction_manifest(skill_root)
+    instruction_files = _instruction_files(skill_root)
     sources = sorted({case.source for case in selected})
-    case_rows = [
-        {
-            "id": case.id,
-            "source": str(case.source),
-            "canonical_sha256": _sha256_text(json.dumps(case.payload, sort_keys=True, separators=(",", ":"))),
-        }
-        for case in selected
-    ]
+    case_rows = [{"id": case.id, "source": str(case.source)} for case in selected]
     runner = Path(__file__).resolve()
     if harness == "codex":
         harness_provenance = {
@@ -1240,7 +1172,6 @@ def build_provenance(
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "runner": {
             "path": str(runner),
-            "sha256": _sha256_file(runner),
             "python": sys.version,
             "platform": sys.platform,
             "argv": list(argv),
@@ -1253,11 +1184,10 @@ def build_provenance(
             "execution_working_directory": str(working_directory),
         },
         "evaluation_workspace": evaluation_workspace,
-        "grade_schema": {"path": str(grade_schema), "sha256": _sha256_file(grade_schema)},
-        "eval_sources": [{"path": str(source), "sha256": _sha256_file(source)} for source in sources],
+        "grade_schema": str(grade_schema),
+        "eval_sources": [str(source) for source in sources],
         "cases": case_rows,
         "instruction_files": instruction_files,
-        "instruction_bundle_sha256": instruction_bundle,
     }
     payload[harness] = harness_provenance
     return payload
@@ -1280,8 +1210,6 @@ def prepare_case(
     plugin_root: Path | None,
     plugin_name: str | None,
     max_budget_usd: float | None,
-    provenance: dict[str, Any],
-    provenance_sha256: str,
 ) -> PreparedCase:
     """Materialize one case and its execution plan in the results directory."""
     case_dir = results_dir / case.id
@@ -1309,14 +1237,10 @@ def prepare_case(
             "repo_root": str(repo_root),
             "recipe_root": str(recipe_root),
             "working_directory": str(working_directory),
-            "case_prompt_sha256": _sha256_text(case.payload["prompt"]),
-            "prompt_sha256": _sha256_text(_generation_prompt(case, harness=harness, plugin_name=plugin_name)),
             "generation_command": generation,
             "grading_command": grading,
-            "grade_schema_sha256": _sha256_file(grade_schema),
+            "grade_schema": str(grade_schema),
             "provenance_path": "../run-provenance.json",
-            "provenance_sha256": provenance_sha256,
-            "provenance": provenance,
         },
     )
     return PreparedCase(
@@ -1458,8 +1382,6 @@ def run_prepared_case(prepared: PreparedCase, *, timeout: int) -> str:
             "status": {"pass": "passed", "fail": "failed"}[grade["outcome"]],
             "started_at": started,
             "finished_at": datetime.now(timezone.utc).isoformat(),
-            "answer_sha256": _sha256_file(answer_path),
-            "grade_sha256": _sha256_file(grade_path),
             **all_observations,
         },
     )
@@ -1623,7 +1545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "source_recipe_root": str(recipe_root),
             "working_directory": str(recipe_root),
             "answer_keys_excluded": False,
-            "reason": "dry-run or non-Claude harness",
+            "reason": "dry-run",
         }
         grader_model = args.grader_model or args.model
         plugin_root: Path | None = None
@@ -1646,17 +1568,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         _reserve_results_dir(results_dir, selected)
         try:
             execution_plugin_root = plugin_root
-            if args.run and args.harness == "claude":
-                if plugin_root is None:
-                    raise EvalError("Claude execution requires a validated local plugin")
-                try:
-                    plugin_relative: Path | None = plugin_root.relative_to(repo_root)
-                except ValueError:
-                    plugin_relative = None
+            if args.run:
+                plugin_relative: Path | None = None
+                if args.harness == "claude":
+                    if plugin_root is None:
+                        raise EvalError("Claude execution requires a validated local plugin")
+                    try:
+                        plugin_relative = plugin_root.relative_to(repo_root)
+                    except ValueError:
+                        pass
                 evaluation_workspace_handle = tempfile.TemporaryDirectory(prefix="bionemo-skill-eval-")
                 staged_repository_root = Path(evaluation_workspace_handle.name) / repo_root.name
                 required_runtime_paths: set[Path] = set()
-                if plugin_relative is not None:
+                if args.harness == "claude" and plugin_relative is not None:
                     required_runtime_paths = {
                         plugin_relative / ".claude-plugin" / "plugin.json",
                         *(plugin_relative / "skills" / case.skill_name / "SKILL.md" for case in selected),
@@ -1677,34 +1601,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "selected recipe is not present in the sanitized Git-tracked "
                         f"workspace: {recipe_relative.as_posix()}"
                     )
-                if plugin_relative is not None:
-                    execution_plugin_root = staged_repository_root / plugin_relative
-                else:
-                    execution_plugin_root = staged_repository_root / ".external-skill-plugin"
-                    external_required = {
-                        Path(".claude-plugin/plugin.json"),
-                        *(Path("skills") / case.skill_name / "SKILL.md" for case in selected),
-                    }
-                    try:
-                        external_workspace = _stage_evaluation_workspace(
-                            plugin_root,
-                            execution_plugin_root,
-                            required_paths=sorted(
-                                external_required,
-                                key=lambda path: path.as_posix(),
-                            ),
-                        )
-                    except EvalError as exc:
-                        raise EvalError(
-                            "live Claude evaluation with a plugin outside --repo-root "
-                            "requires that plugin root to be Git-tracked for sanitized "
-                            f"staging: {exc}"
-                        ) from exc
-                    evaluation_workspace["method"] = "git-tracked-working-tree-plus-sanitized-plugin"
-                    evaluation_workspace["external_plugin_workspace"] = external_workspace
-                staged_manifest = execution_plugin_root / ".claude-plugin" / "plugin.json"
-                if not staged_manifest.is_file():
-                    raise EvalError(f"sanitized Claude plugin manifest not found: {staged_manifest}")
+                if args.harness == "claude":
+                    if plugin_relative is not None:
+                        execution_plugin_root = staged_repository_root / plugin_relative
+                    else:
+                        assert plugin_root is not None
+                        execution_plugin_root = staged_repository_root / ".external-skill-plugin"
+                        external_required = {
+                            Path(".claude-plugin/plugin.json"),
+                            *(Path("skills") / case.skill_name / "SKILL.md" for case in selected),
+                        }
+                        try:
+                            external_workspace = _stage_evaluation_workspace(
+                                plugin_root,
+                                execution_plugin_root,
+                                required_paths=sorted(
+                                    external_required,
+                                    key=lambda path: path.as_posix(),
+                                ),
+                            )
+                        except EvalError as exc:
+                            raise EvalError(
+                                "live Claude evaluation with a plugin outside --repo-root "
+                                "requires that plugin root to be Git-tracked for sanitized "
+                                f"staging: {exc}"
+                            ) from exc
+                        evaluation_workspace["method"] = "git-tracked-working-tree-plus-sanitized-plugin"
+                        evaluation_workspace["external_plugin_workspace"] = external_workspace
+                    staged_manifest = execution_plugin_root / ".claude-plugin" / "plugin.json"
+                    if not staged_manifest.is_file():
+                        raise EvalError(f"sanitized Claude plugin manifest not found: {staged_manifest}")
             provenance = build_provenance(
                 selected=selected,
                 skill_root=skill_root,
@@ -1727,7 +1653,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 argv=parsed_argv,
             )
             _write_json(results_dir / "run-provenance.json", provenance)
-            provenance_sha256 = _sha256_file(results_dir / "run-provenance.json")
             prepared = [
                 prepare_case(
                     case,
@@ -1745,8 +1670,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     plugin_root=execution_plugin_root,
                     plugin_name=plugin_name,
                     max_budget_usd=args.max_budget_usd,
-                    provenance=provenance,
-                    provenance_sha256=provenance_sha256,
                 )
                 for case in selected
             ]

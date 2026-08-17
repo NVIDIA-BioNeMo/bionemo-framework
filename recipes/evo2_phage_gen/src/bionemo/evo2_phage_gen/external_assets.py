@@ -803,8 +803,7 @@ def _write_safety_manifest_atomic(manifest_path: Path, manifest: dict) -> None:
             temporary_path = Path(temporary_file.name)
             temporary_file.write(serialized_manifest)
             temporary_file.flush()
-            # The manifest contains only non-secret provenance. Publish it readably so a
-            # container UID that differs from the host UID cannot make the audit trail opaque.
+            # Keep this non-secret file readable across host and container UIDs.
             os.fchmod(temporary_file.fileno(), 0o644)
             os.fsync(temporary_file.fileno())
         os.replace(temporary_path, manifest_path)
@@ -814,8 +813,7 @@ def _write_safety_manifest_atomic(manifest_path: Path, manifest: dict) -> None:
             temporary_path.unlink(missing_ok=True)
         raise
 
-    # The rename is the publication point. A later directory-sync failure cannot be rolled back
-    # safely, so preserve commit semantics rather than reporting a false failed publication.
+    # The replacement is complete before the best-effort directory sync.
     try:
         directory_descriptor = os.open(manifest_path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:

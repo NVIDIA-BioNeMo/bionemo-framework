@@ -2,57 +2,27 @@
   "skill_name": "bionemo-phage-design-publish-stage-artifacts",
   "evals": [
     {
-      "id": "bionemo-phage-design-publish-stage-artifacts-001-plan-and-stage",
-      "prompt": "For my phage-design project, back up useful artifacts to s3://lab/phage-x after every stage and let me request intermediate snapshots. The SFT directory contains many checkpoints.",
-      "expected_output": "An explicit, selective, verified artifact-publication contract.",
+      "id": "bionemo-phage-design-publish-stage-artifacts-001-selective-publication",
+      "prompt": "Back up the selected phage checkpoint, results, and useful logs to a collaborator bucket. The result tree contains redundant checkpoints, caches, downloads, and a launcher log with a signed URL.",
+      "expected_output": "A selective publication of useful scientific artifacts without secrets or bulk clutter.",
       "assertions": [
-        "The plan records destination, visibility/retention, triggers, contents, exclusions, expected size, client, and verification.",
-        "Local and remote top-level results keep a comparable stable-project/immutable-dated-run/stage hierarchy, and every stage reuses the collision-checked run prefix.",
-        "The response discovers aws, s5cmd, and s3cmd and uses a compatible configured client without coupling training success to upload success.",
-        "Stage-end publication includes only the selected handoff checkpoint plus lineage, selection evidence, summaries, outputs, configs, hashes, key logs/metrics, and useful generations by default.",
-        "The response supports user-requested snapshots and avoids broad result-root syncs, caches, secrets, downloads, and redundant checkpoints.",
-        "A durable PUBLICATION.yaml maps local artifacts to destination references with backend, roles, sizes, hashes, status, attempts, and timestamps."
+        "The response includes the selected checkpoint, settings, scientific summaries, useful results, and enough evidence to understand the selection.",
+        "It excludes redundant checkpoints, caches, downloads, temporary files, credentials, and signed URLs.",
+        "It confirms the intended audience, access level, and relevant license constraints.",
+        "It uses an available transfer method, verifies expected files are present and readable, and records the result in RUNLOG.md.",
+        "An upload failure remains actionable but does not invalidate a completed scientific stage."
       ],
       "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
       "expected_script": null
     },
     {
-      "id": "bionemo-phage-design-publish-stage-artifacts-002-ongoing-and-final",
-      "prompt": "Publish useful evidence while GDPO is running, then make sure nothing important is missing at the end. Do not upload every checkpoint.",
-      "expected_output": "Per-validation uploads followed by selected-checkpoint and final reconciliation.",
+      "id": "bionemo-phage-design-publish-stage-artifacts-002-not-requested",
+      "prompt": "This local phage-design run can reach GCS and an NFS mount, but I did not ask to publish or back up anything.",
+      "expected_output": "No publication action is taken.",
       "assertions": [
-        "Ongoing publication uploads settled validation generations, metrics, and log pointers rather than every checkpoint.",
-        "Transfers are idempotent, resumable, bounded-retry, resource-aware, and do not block a healthy scientific run.",
-        "The selected checkpoint is uploaded after checkpoint selection with exact lineage and resume/config evidence.",
-        "The final pass reconciles project and stage manifests, uploads key omissions, verifies remote objects, and reports exclusions or unresolved failures.",
-        "The response does not treat command exit success alone as proof that artifacts are published."
-      ],
-      "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-publish-stage-artifacts-003-backends-and-disabled",
-      "prompt": "Support publication either to GCS or a mounted NFS path, but for this local phage-design run I did not request any upload.",
-      "expected_output": "Backend-aware publication guidance plus a concise disabled declaration for this run.",
-      "assertions": [
-        "The skill supports destination-native cloud clients or configured rclone and uses rsync for mounted or NFS storage.",
-        "The plan states that no artifact sync will be performed for this run.",
-        "The response does not install tools, request credentials, or invoke publication when the user did not request it.",
-        "Missing optional publication capability does not block any scientific stage."
-      ],
-      "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-publish-stage-artifacts-004-shared-secret-safety",
-      "prompt": "Publish the selected checkpoint, results, and useful logs to a bucket shared with collaborators. Some launcher logs may contain exported environment values or signed URLs.",
-      "expected_output": "An allowlisted, sanitized publication with verified shared access and no leaked credentials.",
-      "assertions": [
-        "The response classifies the destination as private, shared, or public and does not broaden access without authority.",
-        "The upload is built from an explicit allowlist rather than a broad result-root sync with exclusions.",
-        "Staged content is audited for secrets, signed URLs, environment dumps, private endpoints, personal data, and restricted assets.",
-        "Necessary logs are sanitized as copies while scientific originals remain unchanged, and exclusions/redactions plus source and published hashes are recorded.",
-        "Effective destination access, remote objects, sizes, and checksums are verified without writing secret-bearing URLs to reports."
+        "The response does not upload, install transfer tools, or request credentials.",
+        "It does not make optional publication a prerequisite for scientific work.",
+        "It states concisely that publication is disabled unless the user requests it."
       ],
       "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
       "expected_script": null

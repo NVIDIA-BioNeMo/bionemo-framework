@@ -6,13 +6,13 @@
       "prompt": "Build an SFT collection for jumbo bacteriophages. Find the best current paper-linked public genome corpus, verify the actual biological payload before downloading it, and tell me whether it is large enough for fine-tuning.",
       "expected_output": "A reproducible source-selection and acquisition plan for the strongest currently qualifying public corpus, based on dataset properties rather than a hard-coded paper identity.",
       "assertions": [
-        "The response identifies the strongest current primary paper and stable versioned repository record for the requested taxon and validates the biological genome payload without imposing a universal 10,000-record gate or preferring a larger but less relevant corpus solely by count.",
-        "The response reports the exact record and usable-genome counts with their units and does not infer corpus size from a paper title, repository landing page, archive size, script count, or search snippet.",
-        "The response follows Data Availability to an exact file and inspects metadata plus a capped payload prefix; if its read-only tools cannot range-fetch/decompress the file, it gives an exact bounded check, leaves the payload unverified, and does not infer FASTA content from metadata, an installer, analysis code, or a similarly named record.",
-        "The response records article and repository versions, access date, license, source checksum when supplied, local checksum plan, retrieval query, eligibility rules, and exclusions.",
-        "The response does not inflate support with exact duplicates, rotations, accession versions, or interaction rows; it evaluates adequacy from unique hashes and clusters, total bases/tokens, target coverage, feasible cluster-held-out sizes, model scale, and training strategy, then requests an explicit go/no-go only when those preregistered needs are not met.",
-        "The result remains valid if a newer qualifying paper and archive supersede the source that existed when this eval was authored.",
-        "The response uses already installed specialist capabilities by default; installing any external plugin requires explicit user approval plus an allowlisted source, immutable revision, checksum, and recorded review before execution, otherwise it continues with bounded public APIs/search."
+        "The response identifies the strongest current primary paper and stable versioned repository record for the requested taxon and validates the biological payload without imposing a universal record-count gate.",
+        "The response reports exact record and usable-genome counts with units and does not infer corpus size from titles, landing pages, archive size, scripts, or snippets.",
+        "The response follows Data Availability to the biological file and inspects metadata plus a bounded payload sample; if it cannot inspect the payload, it gives a bounded check and leaves it unverified.",
+        "The response records source and repository versions, access date, license, retrieval query, eligibility rules, exclusions, and any checksum supplied for the downloaded file.",
+        "The response evaluates adequacy using unique genomes or clusters, total bases or tokens, target coverage, feasible cluster-held-out sizes, model scale, and training strategy rather than duplicate counts.",
+        "The result remains valid if a newer qualifying primary source supersedes the source available when the eval was authored.",
+        "The response uses relevant installed capabilities when available and does not install external tooling without explicit approval; otherwise it continues with bounded public APIs or search."
       ],
       "expected_skill": "bionemo-phage-design-collect-genomes",
       "expected_script": null
@@ -20,11 +20,11 @@
     {
       "id": "bionemo-phage-design-collect-genomes-002-microviridae-replication",
       "prompt": "Collect the Microviridae genomes needed to reproduce the existing Evo 2 phage SFT case study in this repository.",
-      "expected_output": "A plan that discovers and uses the recipe's maintained downloader, then validates and manifests the resulting full-genome collection.",
+      "expected_output": "A plan that discovers and uses the recipe's maintained downloader, then validates the resulting full-genome collection.",
       "assertions": [
         "The response inspects the recipe pyproject entry points, current help, source, nearest config, and tests to resolve the maintained Microviridae downloader rather than copying stale syntax.",
-        "The response stores large FASTA in the gitignored project result root and records queries, versions, licenses, checksums, exclusions, and sequence-level provenance.",
-        "The response validates headers, nucleotide alphabet, nonempty records, compression, counts, lengths, ambiguous bases, and per-sequence hashes before handoff.",
+        "The response stores large FASTA outside source control and records retrieval queries, source versions, licenses, and exclusions.",
+        "The response validates headers, nucleotide alphabet, nonempty records, compression, counts, lengths, ambiguous bases, and exact duplicates before handoff.",
         "The response reports raw, valid, and unique counts without performing or claiming the definitive cluster-held-out SFT split."
       ],
       "expected_skill": "bionemo-phage-design-collect-genomes",
@@ -44,12 +44,12 @@
     },
     {
       "id": "bionemo-phage-design-collect-genomes-004-type-aware-source-discovery",
-      "prompt": "Find additional complete phage genomes with annotations that can support type-aware corpus filtering, and preserve enough provenance to verify every sequence.",
-      "expected_output": "A bounded source-discovery plan that considers current annotated phage catalogs and independently verifies their sequence and metadata provenance.",
+      "prompt": "Find additional complete phage genomes with annotations that can support type-aware corpus filtering, and preserve enough source information to verify every sequence.",
+      "expected_output": "A focused source-discovery plan that considers current annotated phage catalogs and independently checks their sequences and metadata.",
       "assertions": [
-        "The response considers INPHARED alongside other current primary archives or phage-specific catalogs when its annotations and metadata fit the requested type-aware search.",
-        "The response treats catalog annotations as discovery evidence, verifies source accessions and biological payloads, and records versions, retrieval details, licenses, checksums, eligibility rules, and exclusions.",
-        "The response does not assume that a catalog label is correct or require INPHARED when another verified source better fits the declared scope."
+        "The response considers INPHARED alongside other current primary archives or phage-specific catalogs when its annotations and metadata fit the search.",
+        "The response treats catalog annotations as discovery evidence, verifies source accessions and biological payloads, and records versions, retrieval details, licenses, eligibility rules, and exclusions.",
+        "The response does not assume a catalog label is correct or require INPHARED when another verified source better fits the declared scope."
       ],
       "expected_skill": "bionemo-phage-design-collect-genomes",
       "expected_script": null

@@ -45,9 +45,9 @@ def test_sampling_sweep_dry_run_materializes_marker_only_parallel_plan(tmp_path:
 
     subprocess.run(["bash", str(SCRIPT)], check=True, env=env, cwd=RECIPE_ROOT, timeout=120)
 
-    contract = json.loads((run_root / "sweep_contract.json").read_text())
-    assert contract["topology"] == {"gpu_ids": [0, 1], "tensor_parallel_size": 1, "replicas": 2}
-    assert contract["cells"] == [
+    sweep_config = json.loads((run_root / "sweep_config.json").read_text())
+    assert sweep_config["topology"] == {"gpu_ids": [0, 1], "tensor_parallel_size": 1, "replicas": 2}
+    assert sweep_config["cells"] == [
         "prefix0_temp0.7",
         "prefix4_temp0.7",
         "prefix0_temp1.0",

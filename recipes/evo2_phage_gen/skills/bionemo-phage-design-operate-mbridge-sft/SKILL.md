@@ -5,31 +5,12 @@ description: Use when launching, monitoring, stopping, resuming, or relaunching 
 
 # Operate Megatron Bridge Phage SFT
 
-Use the controller's recorded colocated roots. If absent, apply the local [workspace contract](../bionemo-phage-design/references/workspace-contract.md) or stop; never invoke portable bootstrap.
+Work inside the recipe and result roots selected by the controller. Use the execution skill to resolve current commands and infrastructure.
 
-Run SFT from an explicit leakage-controlled split and select the checkpoint with the lowest comparable validation loss. A step limit is a ceiling, not a target.
+Start from the approved base or reused checkpoint and the explicit leakage-controlled split. Follow the concise [training guidance](references/training-guidance.md). Size the run with a bounded full-context smoke test rather than reducing the scientific sequence length.
 
-## Resolve the run
+The smoke test should use real train and validation records and show finite loss, parameter updates, checkpoint writing, and restartability. Fix data, masking, or runtime problems before the full run.
 
-1. Create sft/runs/ATTEMPT/ and read the project contract, ../bionemo-phage-design/references/command-discovery.md, [the SFT operation contract](references/sft-operation.md), ../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md, and the proposed SFT and split manifests. Reject missing hashes or an unsuccessful leakage audit.
-2. Invoke bionemo-phage-design-adapt-execution; use its agent-session continuity, environment, storage, ordered-script, monitoring, resume, and centralized resource and OOM contracts. Resolve current recipe entry points from pyproject.toml, --help, source, nearest config and tests, and README. Never launch from a chat-only or historical command.
-3. Prefer a public NGC checkpoint through the recipe venv download_bionemo_data command with source ngc. Select a model whose supported context covers the agreed target-family bound; available families include evo2/7b-8k:1.0, evo2/7b-1m:1.0, evo2/1b-8k-bf16:1.0 for compatible smoke tests, and evo2/40b-1m-fp8-bf16:1.0 when requested and supported. Confirm identifiers and context support at runtime.
-4. Treat -bf16 1B and 40B assets as the broadly portable choice for BF16 or FP8 execution; the standard 7B assets do not need an FP8-specific variant. If public NGC is unavailable, use a public Arc checkpoint and a tested NeMo2 or Vortex-to-Megatron-Bridge conversion. Record provider, ID and version, license, source hash, format, converter and version, output hash, and fallback reason.
+Train to the evidence-based ceiling from SFT preparation. Do not choose a token run merely because it is cheaper or stop at a publication step count without looking at the planned exposure and validation curve. Monitor training/validation loss, throughput, memory, and failures. Resume a compatible interrupted run from its latest usable checkpoint; start a new attempt when data or model semantics change.
 
-## Preflight and launch
-
-Run a model, data, and checkpoint smoke test before the full attempt. Validate GPU memory and count, topology, precision, full-genome sequence length, padding and loss masking, microbatch, accumulation, disk, mounts, checkpoint compatibility, and throughput on target-length examples. Two H100 80 GB GPUs are a known useful development configuration and more may help; do not make that a universal requirement.
-
-Apply the central [GPU training, RL, and generation policy](../bionemo-phage-design-adapt-execution/references/resource-and-oom-policy.md#gpu-training-rl-and-generation) when fitting memory and throughput. In particular, never silently shorten full-genome context or change the approved effective token batch to hide OOM. Record the tested shape and resolved data, tensor, context, and pipeline parallelism.
-
-Approve an effective token batch for the selected context, then choose global batch and accumulation to preserve it within 5% when feasible. Document the nearest feasible value otherwise. Recompute the handoff's step ceiling from the final usable corpus and resolved effective non-padding token batch. Treat 12,000 steps as a historical starting hypothesis, not a fixed maximum: a materially larger corpus may justify a calibrated ceiling above 12,000, while redundancy or a smaller corpus may justify less. Keep the calibrated value a ceiling rather than a target, and schedule at least 30 comparable validation events and 30 recoverable checkpoint saves by it.
-
-Keep local TensorBoard authoritative. Unless the user opted out, follow the execution adapter's bounded credential discovery and enable W&B automatically when the installed integration authenticates through `WANDB_API_KEY`, netrc, an existing session/settings file, or another supported current mechanism. Use an SFT-specific project with a shared project-family prefix and record the sanitized auth mechanism plus run ID/URL, never keys. A checked-in false default is not project policy. When authentication, package, account, or network access is unavailable, explicitly disable W&B in the attempt's resolved config, record why, and continue without blocking. Keep resolved config, exact ordered scripts, logs, metrics, checkpoints, and monitor events in the attempt.
-
-## Monitor and decide
-
-Follow references/sft-operation.md for validation comparability, sampling uncertainty, phase-aware due gating, patience, sustained-degradation evidence, and bounded rebound observation. Every substantive or due monitoring decision, even for a narrow stopping question, must include a compact health snapshot from both on-disk artifacts and configured telemetry: train and validation loss, learning rate, gradient norm, throughput, GPU utilization and memory, failures, checkpoint integrity, and free space. A timerless not-due response returns without querying and reports the last-observed timestamp and staleness plus next_check_at. Promote each new lowest comparable validation-loss checkpoint as best.
-
-Do not early-stop on one blip or on incomparable validation events. Stop at the calibrated ceiling or after the monitoring contract establishes sustained overfitting beyond its bounded recovery window. Stop immediately for NaN or Inf, corrupt checkpoint or data, critical disk pressure, or unrecoverable resource failure. Treat OOM as a diagnosis and relaunch decision under the central resource policy rather than as permission to truncate genomes.
-
-Preserve best and latest checkpoints and distinguish selected step from stopping step. Resume only a verified exact training state; changed data, config, topology-incompatible state, or weights-only recovery is a new attempt. Finish OUTPUTS.yaml, SUMMARY.md, and RUNLOG.md with checkpoint evidence, hashes, and the verified training-serialization handoff required by bionemo-phage-design-calibrate-rl-sampling.
+Select the checkpoint by validation loss and curve stability, not training loss or the final step. Use the held-out test set once to characterize the selected checkpoint, never to select it. Record the command, resolved settings, environment, data inputs, checkpoints, validation curve, selected step and rationale, test result, and interruptions in `RUNLOG.md` and a concise stage summary.

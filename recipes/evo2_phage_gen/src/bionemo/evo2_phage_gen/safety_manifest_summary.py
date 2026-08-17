@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -165,14 +164,6 @@ def summarize_scan_manifest(manifest: Mapping[str, object]) -> dict[str, object]
     }
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _write_json_atomic(path: Path, value: Mapping[str, object]) -> None:
     path = path.absolute()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +199,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary = summarize_scan_manifest(manifest)
         summary["source_manifest"] = {
             "path": str(manifest_path),
-            "sha256": _sha256(manifest_path),
             "schema_version": manifest["schema_version"],
             "manifest_type": manifest["manifest_type"],
         }

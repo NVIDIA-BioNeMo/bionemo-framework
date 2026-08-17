@@ -81,6 +81,7 @@ def _write_fake_codex(root: Path, mode: str) -> Path:
 
             MODE = {mode!r}
             ASSERTIONS = {ASSERTIONS!r}
+            ORIGINAL_ROOT = {str(root)!r}
             args = sys.argv[1:]
             if args == ["--version"]:
                 print("codex-cli 9.9-test")
@@ -93,6 +94,33 @@ def _write_fake_codex(root: Path, mode: str) -> Path:
                 print("the answer discussed a rate limit")
                 print("ordinary generation failure", file=sys.stderr)
                 raise SystemExit(1)
+            if MODE == "answer-key-isolation" and "--output-schema" not in args:
+                cwd = Path.cwd()
+                failures = []
+                if cwd.resolve() == Path(ORIGINAL_ROOT).resolve():
+                    failures.append("generation used the source repository")
+                if list(cwd.glob("skills/*/evals/evals.json")):
+                    failures.append("eval answer key is visible")
+                if list(cwd.glob("skills/*/assets/VALIDATION.md")):
+                    failures.append("prior validation audit is visible")
+                if list(cwd.glob("skills/*/scripts/tests/*")):
+                    failures.append("eval audit tests are visible")
+                if (cwd / "tmp_RUNLOG.md").exists() or (cwd / "tmp_TRACKED.md").exists():
+                    failures.append("run history is visible")
+                if list(cwd.rglob("*.egg-info")):
+                    failures.append("generated package metadata is visible")
+                if (cwd / "external-runtime-link").is_symlink():
+                    failures.append("external symlink escaped the staged workspace")
+                if not (cwd / "internal-runtime-link").is_symlink():
+                    failures.append("safe tracked symlink is missing")
+                skill = cwd / "skills" / "alpha" / "SKILL.md"
+                if not skill.is_file():
+                    failures.append("selected skill is missing")
+                elif "dirty tracked marker" not in skill.read_text(encoding="utf-8"):
+                    failures.append("tracked working-tree edit is missing")
+                if failures:
+                    print("; ".join(failures), file=sys.stderr)
+                    raise SystemExit(8)
             output = Path(args[args.index("-o") + 1])
             if "--output-schema" not in args:
                 output.write_text("# Alpha answer\\n", encoding="utf-8")
@@ -492,8 +520,10 @@ def test_dry_run_writes_reproducible_plan_without_launching() -> None:
         assert "--json" in generation
         assert "read-only" in generation
         assert "--output-schema" in grading
-        assert "dry-run-not-probed" == plan["provenance"]["codex"]["version"]
-        assert "instruction_files" in plan["provenance"]
+        provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
+        assert "dry-run-not-probed" == provenance["codex"]["version"]
+        assert "instruction_files" in provenance
+        assert "../run-provenance.json" == plan["provenance_path"]
         assert not (results / "alpha-001" / "generation.trace.jsonl").exists()
 
 
@@ -532,9 +562,11 @@ def test_live_codex_runs_in_selected_recipe() -> None:
         repo_root = Path(tmp)
         recipe_root = repo_root / "recipes" / "custom_phage"
         recipe_root.mkdir(parents=True)
+        (recipe_root / "README.md").write_text("# Custom recipe\n", encoding="utf-8")
         skill_root = repo_root / "installed" / "skills"
         _write_suite(skill_root)
         fake = _write_fake_codex(repo_root, "pass")
+        _init_git_repo(repo_root)
         results = recipe_root / "results" / "live-cwd"
         completed = _run(
             "--skill-root",
@@ -555,7 +587,15 @@ def test_live_codex_runs_in_selected_recipe() -> None:
         assert "PASS" in completed.stdout
         trace = (results / "alpha-001" / "generation.trace.jsonl").read_text(encoding="utf-8")
         event = json.loads(trace.splitlines()[0])
-        assert str(recipe_root.resolve()) == event["cwd"]
+        assert str(recipe_root.resolve()) != event["cwd"]
+        assert event["cwd"].endswith("/recipes/custom_phage")
+        provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
+        isolation = provenance["evaluation_workspace"]
+        assert isolation["enabled"]
+        assert isolation["answer_keys_excluded"]
+        assert "git-tracked-working-tree" == isolation["method"]
+        assert "content_manifest" not in isolation
+        assert "content_manifest_sha256" not in isolation
 
 
 def test_trace_summary_accepts_installation_independent_skill_path() -> None:
@@ -592,7 +632,7 @@ def test_nested_repo_root_provenance_uses_git_toplevel() -> None:
         provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
         repository = provenance["repository"]
         assert str(root.resolve()) == repository["worktree"]
-        assert [] == repository["status_entries"]
+        assert not repository["dirty"]
 
 
 def test_repeated_dry_run_fails_cleanly_before_writing() -> None:
@@ -652,6 +692,7 @@ def test_live_run_may_use_cli_default_model() -> None:
         skill_root = root / "skills"
         _write_suite(skill_root)
         fake = _write_fake_codex(root, "pass")
+        _init_git_repo(root)
         completed = _run(
             "--skill-root",
             str(skill_root),
@@ -668,7 +709,8 @@ def test_live_run_may_use_cli_default_model() -> None:
         )
         assert "PASS" in completed.stdout
         plan = json.loads((root / "results" / "alpha-001" / "run-plan.json").read_text(encoding="utf-8"))
-        assert plan["provenance"]["harness"]["model"] is None
+        provenance = json.loads((root / "results" / "run-provenance.json").read_text(encoding="utf-8"))
+        assert provenance["harness"]["model"] is None
         assert "-m" not in plan["generation_command"]
 
 
@@ -738,7 +780,7 @@ def test_claude_dry_run_uses_local_plugin_and_read_only_tools() -> None:
         assert "--json-schema" in grading
         effective_schema = json.loads(grading[grading.index("--json-schema") + 1])
         assert "$schema" not in effective_schema
-        provenance = plan["provenance"]
+        provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
         assert "claude" == provenance["harness"]["name"]
         assert [] == provenance["harness"]["setting_sources"]
         assert manifest.read_bytes() == (skill_root.parent / ".claude-plugin" / "plugin.json").read_bytes()
@@ -780,8 +822,9 @@ def test_claude_run_extracts_stream_result_and_structured_grade() -> None:
         plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
         assert plan["working_directory"] in trace
         assert str(root) != plan["working_directory"]
-        assert "2.1.211 (Claude Code test)" == plan["provenance"]["harness"]["version"]
-        assert plan["provenance"]["harness"]["model"] is None
+        provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
+        assert "2.1.211 (Claude Code test)" == provenance["harness"]["version"]
+        assert provenance["harness"]["model"] is None
         assert str(root) == plan["repo_root"]
         status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
         assert ["claude-default-test"] == status["generation_models_observed"]
@@ -838,7 +881,7 @@ def test_claude_preserves_recipe_cwd_with_external_tracked_plugin() -> None:
         staged_plugin = generation[generation.index("--plugin-dir") + 1]
         assert "/.external-skill-plugin" in staged_plugin
         assert str(plugin_root.resolve()) != staged_plugin
-        provenance = plan["provenance"]
+        provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
         assert str(recipe_root.resolve()) == provenance["harness"]["source_working_directory"]
         isolation = provenance["evaluation_workspace"]
         assert "git-tracked-working-tree-plus-sanitized-plugin" == isolation["method"]
@@ -853,11 +896,12 @@ def test_claude_preserves_recipe_cwd_with_external_tracked_plugin() -> None:
 def test_claude_disables_claude_md_and_auto_memory_for_both_processes(tmp_path: Path) -> None:
     completed, case_dir = _run_fake_claude("isolation", tmp_path)
     assert 0 == completed.returncode, completed.stderr
-    plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
     assert {
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
-    } == plan["provenance"]["harness"]["environment_overrides"]
+    } == json.loads((case_dir.parent / "run-provenance.json").read_text(encoding="utf-8"))["harness"][
+        "environment_overrides"
+    ]
 
 
 def test_claude_generation_hides_eval_answer_keys_in_a_sanitized_workspace(tmp_path: Path) -> None:
@@ -867,22 +911,14 @@ def test_claude_generation_hides_eval_answer_keys_in_a_sanitized_workspace(tmp_p
     source_root = case_dir.parents[1]
     assert str(source_root) == plan["repo_root"]
     assert str(source_root) != plan["working_directory"]
-    isolation = plan["provenance"]["evaluation_workspace"]
+    provenance = json.loads((case_dir.parent / "run-provenance.json").read_text(encoding="utf-8"))
+    isolation = provenance["evaluation_workspace"]
     assert isolation["enabled"]
     assert isolation["answer_keys_excluded"]
     assert str(source_root) == isolation["source_root"]
-    assert "git-tracked-working-tree-allowlist" == isolation["method"]
-    manifest = {entry["path"]: entry for entry in isolation["content_manifest"]}
-    assert "skills/alpha/SKILL.md" in manifest
-    assert "internal-runtime-link" in manifest
-    assert "external-runtime-link" not in manifest
-    assert "tmp_RUNLOG.md" not in manifest
-    assert "tmp_TRACKED.md" not in manifest
-    assert "skills/alpha/assets/VALIDATION.md" not in manifest
-    assert "skills/alpha/scripts/tests/test_eval_audit.py" not in manifest
-    assert "nested/tmp_CASE/answer.md" not in manifest
-    assert "nested/results/grade.json" not in manifest
-    assert not any(".egg-info" in path for path in manifest)
+    assert "git-tracked-working-tree" == isolation["method"]
+    assert "content_manifest" not in isolation
+    assert "content_manifest_sha256" not in isolation
     assert isolation["untracked_paths_excluded"]
     assert "**/tmp_*/**" in isolation["generated_path_patterns_excluded"]
     assert "**/results/**" in isolation["generated_path_patterns_excluded"]
@@ -891,6 +927,22 @@ def test_claude_generation_hides_eval_answer_keys_in_a_sanitized_workspace(tmp_p
         "skills/alpha/SKILL.md",
     ] == isolation["required_paths"]
     assert ["external-runtime-link"] == [entry["path"] for entry in isolation["excluded_symlinks"]]
+
+
+def test_codex_generation_hides_eval_answer_keys_in_a_sanitized_workspace(tmp_path: Path) -> None:
+    completed, case_dir = _run_fake("answer-key-isolation", tmp_path)
+    assert 0 == completed.returncode, completed.stderr
+    plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
+    source_root = case_dir.parents[1]
+    assert str(source_root) == plan["repo_root"]
+    assert str(source_root) != plan["working_directory"]
+    provenance = json.loads((case_dir.parent / "run-provenance.json").read_text(encoding="utf-8"))
+    isolation = provenance["evaluation_workspace"]
+    assert isolation["enabled"]
+    assert isolation["answer_keys_excluded"]
+    assert "git-tracked-working-tree" == isolation["method"]
+    assert "content_manifest" not in isolation
+    assert "content_manifest_sha256" not in isolation
 
 
 def test_claude_live_run_requires_a_git_tracked_source_workspace() -> None:
@@ -1034,11 +1086,11 @@ def test_run_preserves_artifacts_and_reproducibility_provenance() -> None:
         assert '"type": "grader"' in (case_dir / "grading.trace.jsonl").read_text()
         grade = json.loads((case_dir / "grade.json").read_text(encoding="utf-8"))
         assert grade["passed"]
-        plan = json.loads((case_dir / "run-plan.json").read_text(encoding="utf-8"))
-        assert "test-model" == plan["provenance"]["codex"]["model"]
-        assert "codex-cli 9.9-test" == plan["provenance"]["codex"]["version"]
-        assert revision == plan["provenance"]["repository"]["revision"]
-        instruction_paths = {row["path"] for row in plan["provenance"]["instruction_files"]}
+        provenance = json.loads((results / "run-provenance.json").read_text(encoding="utf-8"))
+        assert "test-model" == provenance["codex"]["model"]
+        assert "codex-cli 9.9-test" == provenance["codex"]["version"]
+        assert revision == provenance["repository"]["revision"]
+        instruction_paths = {row["path"] for row in provenance["instruction_files"]}
         assert "alpha/SKILL.md" in instruction_paths
         assert "alpha/references/contract.md" in instruction_paths
         status = json.loads((case_dir / "status.json").read_text(encoding="utf-8"))
@@ -1097,7 +1149,18 @@ def _run_fake(mode: str, tmp_path: Path) -> tuple[subprocess.CompletedProcess[st
     root = tmp_path
     skill_root = root / "skills"
     _write_suite(skill_root)
+    validation = skill_root / "alpha" / "assets" / "VALIDATION.md"
+    validation.parent.mkdir()
+    validation.write_text("prior evaluation outcome\n", encoding="utf-8")
     fake = _write_fake_codex(root, mode)
+    _prepare_live_claude_repo(root)
+    if mode == "answer-key-isolation":
+        (root / "tmp_RUNLOG.md").write_text("prior result\n", encoding="utf-8")
+        egg_info = root / "src" / "alpha.egg-info"
+        egg_info.mkdir(parents=True)
+        (egg_info / "PKG-INFO").write_text("generated\n", encoding="utf-8")
+        skill = skill_root / "alpha" / "SKILL.md"
+        skill.write_text(skill.read_text(encoding="utf-8") + "\ndirty tracked marker\n", encoding="utf-8")
     results = root / "results"
     completed = _run(
         "--skill-root",

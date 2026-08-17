@@ -14,7 +14,7 @@ NVIDIA
 
 ## Use Case
 
-For research and engineering teams that need a reproducible whole-genome, or targeted sub-genome phage-design workflow: establish a compatible workspace, plan from the target, host, intended use, and evidence, assemble licensed inputs and leakage-controlled training data, train and select lineage-verified checkpoints, design and calibrate objectives, and generate and screen auditable candidates.
+For research and engineering teams that need a reproducible whole-genome, or targeted sub-genome phage-design workflow: establish a compatible workspace, plan from the target, host, intended use, and evidence, assemble licensed inputs and leakage-controlled training data, train and select checkpoints, design and calibrate objectives, and generate and screen auditable candidates.
 
 ### Deployment Geography for Use
 
@@ -54,7 +54,7 @@ CTXφ illustrates a known indirect route by which a phage can contribute to huma
 | An objective increases replication within eukaryotic cells, or work silently narrows from whole-genome design. | Reject the prohibited replication endpoint declaratively; default to complete-genome scope and require explicit approval for material reductions. This is not a blanket ban on non-replicative host-range or entry work, which still requires case-specific review. |
 | Adsorption or a single model score is mistaken for productive infection, viability, or potency.                | Cover the full lifecycle, calibrate models for the target domain, apply versioned final QC, and require phenotypic validation.                                                                                                                                      |
 | Reward gaming, missing evidence, or unavailable tools produces a misleading pass.                              | Use adversarial fixtures, bounded independent objectives, support telemetry, online/final alignment checks, and `INDETERMINATE` outcomes that block PASS when required evidence or dependencies are missing.                                                        |
-| Data leakage, stale calibration, out-of-domain predictors, or mixed lineage biases results.                    | Use cluster-held-out splits, versioned evidence and thresholds, uncertainty records, immutable manifests, hashes, and comparable validation gates.                                                                                                                  |
+| Data leakage, stale calibration, out-of-domain predictors, or mixed lineage biases results.                    | Use cluster-held-out splits, documented data and model versions, uncertainty records, and comparable validation gates.                                                                                                                                              |
 | Computational outputs are overstated as biological, therapeutic, clinical, or regulatory conclusions.          | State explicit non-claims and retain wet-lab validation plus expert, biosafety, clinical, and regulatory review.                                                                                                                                                    |
 
 **Execution safeguards:** Preserve existing work, prevent duplicate or destructive launches, retain full-genome context rather than concealing resource failures, protect credentials, and verify publication scope and licensing before transfer.
@@ -74,21 +74,21 @@ CTXφ illustrates a known indirect route by which a phage can contribute to huma
 
 **Output Format:** Repository files and environment-specific model/data artifacts
 
-**Output Parameters:** Target, host, intended use, approved scope, evidence, model lineage, objective/QC policy, and execution environment
+**Output Parameters:** Target, host, intended use, approved scope, evidence, selected model or checkpoint, objective/QC policy, and execution environment
 
-**Other Properties Related to Output:** Versioned, checksummed, lineage-linked, and auditable where supported; outputs are not biological or regulatory determinations.
+**Other Properties Related to Output:** Documented and reproducible where supported; outputs are not biological or regulatory determinations.
 
 ## Evaluation Tasks
 
-Five declarative top-level cases cover clean bootstrap, preservation of an incompatible dirty checkout, interactive handoff, batch handoff, and rejection of an incomplete nominally compatible package. Recipe-package tests also check safety, scope, provenance, telemetry, and evaluation-harness contracts.
+Three declarative top-level cases cover bootstrap, preservation of an incompatible checkout with local work, and controller handoff. Fifty-one recipe-package cases cover scientific scope, evidence use, data leakage, training, objective behavior, durable monitoring, resource-aware execution, and safety screening.
 
 ## Evaluation Results
 
-On 2026-08-11, 61 focused repository tests passed across package-layout and evaluation-harness suites. These are behavioral and software-package checks, not execution of every declarative case, biological validation, agent red-teaming, network or product security assessment, or clinical testing.
+On 2026-08-17, 83 focused skill and evaluation-harness tests and 828 recipe tests passed; seven recipe tests were skipped. These are behavioral and software-package checks, not execution of every declarative case, biological validation, agent red-teaming, network or product security assessment, or clinical testing.
 
 ## Skill Version(s)
 
-Working-tree snapshot based on repository revision 3ca0931b4d28636c7603920b36c433cc8d5a0fa5; card generated 2026-08-11.
+Working-tree snapshot based on repository revision be2db0340f4063df8701d286f205c2aa95fb9239; card updated 2026-08-17.
 
 Initial draft rendered with NVIDIA Trustworthy-AI `skill-card-generator` revision `8717620a622922550c1ffc7b1debdac1195bbfd5` on 2026-08-11. This Markdown card is human-owned after generation.
 

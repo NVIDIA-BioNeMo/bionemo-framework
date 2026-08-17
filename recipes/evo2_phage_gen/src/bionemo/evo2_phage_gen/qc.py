@@ -314,7 +314,7 @@ def _run_dustmasker(
     text: bool,
     timeout: float,
 ) -> None:
-    """Run dustmasker with a finite timeout and one stable error contract."""
+    """Run dustmasker with a finite timeout and consistent errors."""
     try:
         subprocess.run(
             command,

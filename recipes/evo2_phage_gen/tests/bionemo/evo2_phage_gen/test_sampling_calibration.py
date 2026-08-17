@@ -186,7 +186,7 @@ def test_validate_cell_output_requires_exact_prompt_ids(tmp_path: Path) -> None:
         validate_cell_output(output, prompts, expected_records=2)
 
 
-def test_materialize_sweep_contract_mismatch_does_not_modify_outputs(tmp_path: Path) -> None:
+def test_materialize_sweep_config_mismatch_does_not_modify_outputs(tmp_path: Path) -> None:
     kwargs = {
         "run_root": tmp_path / "run",
         "checkpoint": tmp_path / "checkpoint",
@@ -211,7 +211,7 @@ def test_materialize_sweep_contract_mismatch_does_not_modify_outputs(tmp_path: P
         if path.is_file()
     }
 
-    with pytest.raises(ValueError, match="contract differs"):
+    with pytest.raises(ValueError, match="configuration differs"):
         materialize_sweep(**{**kwargs, "temperatures": [0.9]})
 
     after = {

@@ -70,7 +70,7 @@ def test_reward_gain_with_collapsing_support_starts_rebound_window():
     result = evaluate_objective_history(history)
 
     assert result["decision"] == "continue"
-    assert result["reason"] == "audit_signal_pending_confirmation:1/8"
+    assert result["reason"] == "signal_pending_confirmation:1/8"
     assert result["latest_complete_step"] == 30
     assert result["objectives"]["protein_hit_count"]["status"] == "warning"
     assert result["objectives"]["protein_hit_count"]["signal_streak"] == 1
@@ -82,7 +82,7 @@ def test_sustained_reward_support_divergence_pauses_after_rebound_window():
 
     result = evaluate_objective_history(history)
 
-    assert result["decision"] == "pause_for_audit"
+    assert result["decision"] == "pause_for_diagnosis"
     assert result["objectives"]["protein_hit_count"]["status"] == "suspicious"
     assert result["objectives"]["protein_hit_count"]["signal_streak"] == 8
 
@@ -135,7 +135,7 @@ def test_missing_per_objective_metrics_pause_after_three_events():
 
     result = evaluate_objective_history(history)
 
-    assert result["decision"] == "pause_for_audit"
+    assert result["decision"] == "pause_for_diagnosis"
     assert "missing_required_telemetry" in result["objectives"]["synteny"]["signals"]
 
 
@@ -145,7 +145,7 @@ def test_enabled_objective_with_no_measurements_starts_confirmation_window():
     result = evaluate_objective_history(history)
 
     assert result["decision"] == "continue"
-    assert result["reason"] == "audit_signal_pending_confirmation:1/8"
+    assert result["reason"] == "signal_pending_confirmation:1/8"
     assert result["objectives"]["protein_hit_count"]["status"] == "warning"
     assert "objective_unmeasured" in result["objectives"]["protein_hit_count"]["signals"]
 
@@ -155,7 +155,7 @@ def test_enabled_objective_with_no_measurements_pauses_after_confirmation_window
 
     result = evaluate_objective_history(history)
 
-    assert result["decision"] == "pause_for_audit"
+    assert result["decision"] == "pause_for_diagnosis"
     assert result["objectives"]["protein_hit_count"]["status"] == "suspicious"
     assert result["objectives"]["protein_hit_count"]["signal_streak"] == 8
 
@@ -185,7 +185,7 @@ def test_loss_masking_starts_rebound_window_when_only_one_objective_remains_acti
     result = evaluate_objective_history(history)
 
     assert result["decision"] == "continue"
-    assert result["reason"] == "audit_signal_pending_confirmation:1/8"
+    assert result["reason"] == "signal_pending_confirmation:1/8"
     assert "objective_loss_masking" in result["global_signals"]
     assert result["global_signal_streaks"]["objective_loss_masking"] == 1
     assert result["active_objective_counts"] == [4, 2, 1]
@@ -196,7 +196,7 @@ def test_sustained_loss_masking_pauses_after_seventy_additional_steps():
 
     result = evaluate_objective_history(history)
 
-    assert result["decision"] == "pause_for_audit"
+    assert result["decision"] == "pause_for_diagnosis"
     assert result["global_signal_streaks"]["objective_loss_masking"] == 8
 
 

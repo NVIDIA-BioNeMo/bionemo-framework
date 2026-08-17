@@ -128,5 +128,4 @@ def test_main_validates_manifest_and_writes_summary(
     assert calls == [manifest_path]
     written = json.loads(output.read_text(encoding="utf-8"))
     assert written["source_manifest"]["path"] == str(manifest_path.absolute())
-    assert written["source_manifest"]["sha256"]
     assert written["records"]["total"] == 5

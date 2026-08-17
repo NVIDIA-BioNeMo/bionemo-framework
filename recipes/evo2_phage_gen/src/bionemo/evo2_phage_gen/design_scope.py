@@ -108,7 +108,7 @@ class DesignObjective:
             raise ValueError(f"unsupported replication host domain in {self.replication_host_domains}") from error
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the structured objective for a provenance record."""
+        """Serialize the structured objective for a saved result."""
         return {
             "kind": self.kind.value,
             "direction": self.direction.value,
@@ -126,7 +126,7 @@ class ScopeDecision:
     quarantined: bool = False
 
     def __post_init__(self) -> None:
-        """Normalize reason codes to an immutable sequence."""
+        """Normalize reason codes to a stable sequence."""
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     def to_dict(self) -> dict[str, object]:
@@ -140,7 +140,7 @@ class ScopeDecision:
 
 @dataclass(frozen=True)
 class HostEvidence:
-    """Immutable, versioned evidence limited to replication-host attribution."""
+    """Versioned evidence limited to replication-host attribution."""
 
     source: str
     source_version: str | None

@@ -2,16 +2,14 @@
   "skill_name": "bionemo-phage-design-research-evidence",
   "evals": [
     {
-      "id": "bionemo-phage-design-research-evidence-001-new-objective-packet",
-      "prompt": "Research evidence for RL and final-QC objectives for a newly selected jumbo bacteriophage. We want viable, bootable, diverse designs with a target-specific directional change, but we do not yet know which essentiality, synteny, completeness, or predictive-model thresholds transfer.",
-      "expected_output": "A bounded, primary-source evidence plan and auditable packet that covers the objective portfolio without pretending transferred thresholds are universal.",
+      "id": "bionemo-phage-design-research-evidence-001-new-objective-evidence",
+      "prompt": "Research evidence for RL and final-QC objectives for a newly selected jumbo bacteriophage. We want viable, diverse whole-genome designs with a target-specific change, but do not know which essentiality, synteny, completeness, or model thresholds transfer.",
+      "expected_output": "A concise, source-grounded assessment of the evidence that is actually needed for this target.",
       "assertions": [
-        "The response defines the decision, target and host, acceptable transfer distance, evidence needs, and stopping condition before searching.",
-        "The response searches installed specialist life-science skills and checked-in manifests first, uses the three-lane cap only for bounded identifier/payload discovery, and conducts coverage-driven primary-source research across applicable design axes with recorded queries and access dates.",
-        "The response covers complete-genome viability plus adsorption/entry, intracellular defense and phage counter-defense, takeover/replication, morphogenesis/packaging, lysis/progeny, production-host-dependent DNA modification, therapeutic suitability plus safety-related exclusion criteria when applicable, key genes/regulatory architecture, synteny, composition, viable-reference similarity, host prediction, diversity, and final QC as an interacting portfolio; it cites ema-2025-draft-phage-therapy-quality-guideline.md for intended therapeutic use and records a reason for therapy-specific items omitted from an explicitly non-therapeutic project.",
-        "The response ranks direct same-phage evidence above relatives and transferred evidence and records uncertainty, contradictions, population, conditions, and calibration needs.",
-        "The response does not convert expression, conservation, a predictive score, adsorption, or a transferred threshold into universal essentiality, productive infection, or viability, and it marks unresolved lifecycle axes instead of omitting them.",
-        "The response specifies the standard evidence, sources, search-log, candidate-dataset, summary, and run-log artifacts."
+        "The response prioritizes primary biological evidence and distinguishes measured results, author claims, and inference.",
+        "It covers complete-genome viability and the productive-infection lifecycle rather than reducing the problem to one host or similarity score.",
+        "It does not transfer a threshold or essential-gene claim without discussing target relevance and uncertainty.",
+        "It identifies unresolved decisions and experimental validation without demanding unrelated process artifacts."
       ],
       "expected_skill": "bionemo-phage-design-research-evidence",
       "expected_script": null
@@ -19,81 +17,25 @@
     {
       "id": "bionemo-phage-design-research-evidence-002-no-specialist-skill",
       "prompt": "Find current public evidence needed to calibrate a bacterial-phage host prediction score. No specialist literature or database skill appears to be installed in this harness.",
-      "expected_output": "A transparent fallback research plan using public search or APIs without fabricating a missing specialist capability.",
+      "expected_output": "A practical evidence search using the best available primary sources and public databases.",
       "assertions": [
-        "The response verifies the absence of an appropriate installed specialist skill, warns once, and continues with ordinary web search or public APIs; it never installs an unpinned third-party skill, and uses newly acquired skill code only from an allowlisted source whose immutable revision and checksum were reviewed and recorded before use.",
-        "The response prefers primary papers, exact versions, Data Availability records, and stable repository or database identifiers over snippets and secondary summaries.",
-        "The response records model identity, calibration population, host labels, metrics, uncertainty, applicability limits, and access date before recommending a threshold.",
-        "The response proposes a calibration experiment when available evidence cannot justify transfer to the selected phage."
+        "The response uses available web, literature, or biological database access rather than treating the missing specialist skill as a blocker.",
+        "It looks for relevant labeled host interactions, target-domain coverage, negative examples, and known confounders.",
+        "It states source versions or access dates where they affect interpretation and reports evidence limits.",
+        "It does not present a predictive score as proof of productive infection."
       ],
       "expected_skill": "bionemo-phage-design-research-evidence",
       "expected_script": null
     },
     {
-      "id": "bionemo-phage-design-research-evidence-003-publication-tropism-thresholds",
-      "prompt": "In the Evo 2 bacteriophage design publication, what exact spike-protein sequence-identity threshold defined the host-tropism filter, and what five immediately preceding quality-control requirements were applied? Answer concisely with units and inequality directions.",
-      "expected_output": "A locally source-grounded statement of the publication's historical tropism and quality-control thresholds.",
+      "id": "bionemo-phage-design-research-evidence-003-use-documents-as-needed",
+      "prompt": "Briefly answer two questions: what does supervised fine-tuning mean in ordinary machine-learning usage, and how did the bundled Evo 2 phage study construct its target-conditioned training examples? Use source material only where it helps.",
+      "expected_output": "A concise answer that uses common knowledge for the general concept and the relevant bundled study for its specific method.",
       "assertions": [
-        "The answer begins with a source note identifying the king-2025-generative-phage-design bundle as CC BY 4.0 bioRxiv v1, DOI 10.1101/2025.09.12.675911, and distinguishes that bundled source from the final Science publication of record.",
-        "The trace summary lists content reads of bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json and supplement.md in both local_source_read_paths and bundled_literature_read_paths. Web calls, if any, are secondary status or version checks and do not substitute for those local reads.",
-        "The response reports that the tropism filter retained a spike protein with at least 60% protein sequence identity to the PhiX174 spike protein.",
-        "The response reports all five quality-control requirements with correct directions: only A/C/G/T characters, length 4-6 kb, GC content 30-65%, DNA homopolymers at most 10 nt, and at least 7 predicted protein hits."
-      ],
-      "expected_skill": "bionemo-phage-design-research-evidence",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-research-evidence-004-bundled-black-framework",
-      "prompt": "Use the checked-in design-efficiency publication to propose how we should assess whether a phage generation workflow is both effective and genuinely novel. State what the paper does and does not justify transferring to a new, larger phage system.",
-      "expected_output": "A source-versioned capability assessment that separates novelty from efficiency, evaluates the complete workflow, and preserves the publication's empirical limits.",
-      "assertions": [
-        "The response reads bionemo-phage-design/assets/literature/black-2026-design-efficiency/MANIFEST.json and cites the bundled CC BY 4.0 v1 source with DOI 10.64898/2026.06.12.731871.",
-        "It treats evolutionary novelty and design efficiency as separate axes and evaluates the complete model-scaffold, including generation, filtering, ranking, and curation, rather than the raw model alone.",
-        "It explains that functional or biological novelty is not identical to sequence or phylogenetic distance and that efficiency must be compared with explicit baseline generators and functional outcomes.",
-        "It reports the paper's evidence that Evo 2 likelihood predicted viability while correlating with proximity to natural genomes, without converting either association into proof for a new target.",
-        "It retains in vitro validation as the key functional evidence and explicitly limits transfer from compact PhiX174 designs to larger or structurally different phages, proposing new target-matched controls and calibration."
-      ],
-      "expected_skill": "bionemo-phage-design-research-evidence",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-research-evidence-005-publication-corpus-and-sft",
-      "prompt": "For the published Evo 2 phage experiment, give the exact Microviridae corpus counts before and after filtering and 99% clustering, the train/validation/test split, and the main Evo 2 fine-tuning scale and context settings.",
-      "expected_output": "A concise, locally source-grounded reconstruction of the publication's corpus preparation and Evo 2 SFT configuration.",
-      "assertions": [
-        "The answer identifies the local king-2025-generative-phage-design manifest as CC BY 4.0 bioRxiv v1 with DOI 10.1101/2025.09.12.675911 and notes its relationship to the final Science publication of record.",
-        "The trace summary lists content reads of bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json and supplement.md in both local_source_read_paths and bundled_literature_read_paths. Web calls, if any, are secondary status or version checks and do not substitute for those local reads.",
-        "The response reports 15,507 collected genomes, 261 removed for length over 10 kb or non-ACGT characters, and 14,466 sequences after 99% identity clustering.",
-        "The response reports the 14,266 training, 100 validation, and 100 test split.",
-        "The response reports 12,000 iterations on 32 H100 GPUs, batch size 32 samples, context length ten thousand two hundred forty tokens, and global batch size three hundred twenty-seven thousand six hundred eighty tokens."
-      ],
-      "expected_skill": "bionemo-phage-design-research-evidence",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-research-evidence-006-publication-validation-denominators",
-      "prompt": "In the Evo 2 phage publication, how many generated candidates were curated, successfully assembled, and observed to inhibit E. coli C? Also summarize the reported K-12 and E. coli W host-range results and the sequence-verification split among the successful candidates.",
-      "expected_output": "A denominator-preserving, locally source-grounded summary of the publication's experimental validation and host-range observations.",
-      "assertions": [
-        "The answer identifies the local king-2025-generative-phage-design manifest as CC BY 4.0 bioRxiv v1 with DOI 10.1101/2025.09.12.675911 and notes its relationship to the final Science publication of record.",
-        "The trace summary lists content reads of bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json and paper.md in both local_source_read_paths and bundled_literature_read_paths. Web calls, if any, are secondary status or version checks and do not substitute for those local reads.",
-        "The response keeps the denominators distinct: 302 curated candidates, 285 successfully synthesized and assembled, and 16 transformations that inhibited E. coli C growth.",
-        "The response reports no growth inhibition from any of the 285 assemblies in E. coli K-12, and reports that PhiX174 plus 15 of 16 generated phages inhibited E. coli W while no inhibition was seen in the other six tested strains.",
-        "The response reports that sequence verification found 9 of the 16 successful candidates without acquired mutations and 7 with SNVs or deletions relative to the synthesized sequences."
-      ],
-      "expected_skill": "bionemo-phage-design-research-evidence",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-research-evidence-007-publication-design-efficiency-numbers",
-      "prompt": "What quantitative results did the design-efficiency publication report for base Evo 2, phage-fine-tuned Evo 2, and Nucleotide Transformer viability discrimination; the association between Evo 2 likelihood and evolutionary proximity; and observed viability near 97% identity? Where did those results place the model-scaffold in the paper's framework?",
-      "expected_output": "A concise, locally source-grounded quantitative summary of the design-efficiency paper's main capability findings and stated framework placement.",
-      "assertions": [
-        "The answer identifies the black-2026-design-efficiency manifest as the CC BY 4.0 v1 source with DOI 10.64898/2026.06.12.731871.",
-        "The trace summary lists content reads of bionemo-phage-design/assets/literature/black-2026-design-efficiency/MANIFEST.json and paper.md in both local_source_read_paths and bundled_literature_read_paths. Web calls, if any, are secondary status or version checks and do not substitute for those local reads.",
-        "The response reports viability-discrimination AUC 0.86 for base Evo 2, 0.76 for the phage-fine-tuned Evo 2 model, and 0.56 for Nucleotide Transformer.",
-        "The response reports Pearson rho -0.88 with p less than 2.2e-16 between Evo 2 likelihood and evolutionary proximity, preserving the paper's direction and interpretation.",
-        "The response reports 5.3% viability, 16 of 302 sequences, at approximately 97% nucleotide identity and places the model-scaffold in the Optimisation quadrant: high design efficiency and low evolutionary novelty."
+        "The general explanation of supervised fine-tuning does not pretend that reading a paper is necessary for common knowledge.",
+        "The study-specific answer consults and cites the relevant bundled paper or supplement rather than guessing from general practice.",
+        "The response distinguishes the historical study method from the current recipe and does not inspect unrelated documents.",
+        "It answers the question directly without creating an unrelated project workflow."
       ],
       "expected_skill": "bionemo-phage-design-research-evidence",
       "expected_script": null

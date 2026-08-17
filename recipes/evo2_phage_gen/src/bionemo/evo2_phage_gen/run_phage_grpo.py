@@ -160,9 +160,8 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
             "evo2_phage_patch_nemo_rl --repair-install, before launching GRPO or GDPO."
         ) from exc
 
-    from bionemo.evo2_phage_gen.nemo_rl_patches import assert_nemo_rl_patch_runtime, patch_sha256
+    from bionemo.evo2_phage_gen.nemo_rl_patches import assert_nemo_rl_patch_runtime
 
-    logger.info("Using NeMo-RL Evo2 patch SHA256: %s", patch_sha256())
     assert_nemo_rl_patch_runtime()
     _register_recipe_extensions()
     register_omegaconf_resolvers()

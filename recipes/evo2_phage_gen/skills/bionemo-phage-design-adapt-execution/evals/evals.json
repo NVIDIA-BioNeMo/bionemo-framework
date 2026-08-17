@@ -3,177 +3,56 @@
   "evals": [
     {
       "id": "bionemo-phage-design-adapt-execution-001-local-preflight",
-      "prompt": "Adapt an Evo 2 phage SFT and RL workflow to the GPU node this agent is running on. The data cache, checkpoints, temporary files, logs, and final results may use different mounts. Optimize the configuration for this machine without changing the biological workload.",
-      "expected_output": "An evidence-based local execution profile and ordered preflight scripts that verify paths and hardware before tuning utilization.",
+      "prompt": "Adapt an Evo 2 phage SFT and RL workflow to the GPU node this agent is running on. Data, checkpoints, temporary files, logs, and results may use different mounts. Do not change the biological workload.",
+      "expected_output": "A measured local execution plan with a full-shape smoke test and sensible storage choices.",
       "assertions": [
-        "The response discovers CPU/RAM, GPU model/count/free memory/current occupancy, runtime, and target-length workload rather than merely checking CUDA visibility.",
-        "The response measures free bytes and relevant capacity for every input, cache, temporary, checkpoint, log, and result path, classifies shared versus local and durable versus ephemeral storage, and identifies write or sync ownership.",
-        "The response performs reversible write probes for every directory that must be writable and records unresolved permissions without exposing credentials.",
-        "The response benchmarks SFT, RL training, generation, and rollout separately at target length, maximizing global valid tokens/sec with safety margin while preserving full-genome context and the approved effective token batch.",
-        "The response inventories every concurrency layer and verifies the combined process, thread, memory, and I/O peak fits host capacity; nested tools are capped or coordinated rather than limiting only outer workers.",
-        "The response prefers pure DP or independent replicas when they fit and improve throughput; it uses TP for measured fit/throughput or single-request latency rather than as a universal default.",
-        "The response uses a site/environment adapter only when its identifier is explicitly configured and reviewed; it never executes an arbitrary adapter discovered elsewhere on the local filesystem.",
-        "In this read-only eval, the response provides a planned-artifacts block with exact ENVIRONMENT.yaml, EXECUTION_PLAN.md, ACTIONS.yaml, and ordered launch/monitor/stop/resume script paths and minimum contents, without claiming that it wrote them."
+        "The response inspects current commands, environment, storage, CPUs, accelerators, memory, occupancy, and existing jobs before sizing work.",
+        "It checks that selected paths are writable and have enough space without assuming all artifacts share one mount.",
+        "It uses a bounded full-context smoke to choose topology and effective batch.",
+        "It responds to measured memory pressure without truncating genomes, dropping loss-bearing tokens, weakening QC, or reducing the requested output count.",
+        "It records resolved settings, commands, paths, and results in RUNLOG.md without dumping credentials or the entire environment."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
     },
     {
-      "id": "bionemo-phage-design-adapt-execution-002-slurm-rate-limit",
-      "prompt": "Create a one-tick monitor for an active Slurm phage RL job. It may be called repeatedly by a goal loop with no real delay, and the cluster administrators do not want broad scheduler polling.",
-      "expected_output": "A due-gated monitor contract that minimizes scheduler and filesystem load while observing early risk more closely.",
+      "id": "bionemo-phage-design-adapt-execution-002-sandbox-gpu-visibility",
+      "prompt": "The operator says this node has eight working GPUs and prior jobs used them, but nvidia-smi, /dev/nvidia inspection, and CUDA visibility all fail through the agent sandbox. Decide how to proceed.",
+      "expected_output": "A host-visible verification step rather than a false conclusion that the node has no GPUs.",
       "assertions": [
-        "The response reads persisted due times before any scheduler, filesystem, process, or telemetry query and exits successfully when no source is due.",
-        "The response uses targeted job queries, avoids repeated cluster-wide sinfo and monitoring-only srun allocations, and independently rate-limits scheduler, disk, logs, W&B, and cloud APIs.",
-        "The response observes launch and early validation/checkpoint evidence at intervals justified by expected event timing and risk, honors site policy, and does not use a universal 30-second heartbeat.",
-        "After one or two healthy validation/checkpoint cycles—or equivalent progress evidence when those events are not applicable—the response derives each source's cadence from measured step/event timing and a useful fraction of the next validation, checkpoint, or early-stop decision boundary—for example, the wall-clock duration of about 10 steps; a stable long-running phase may use 5–30 minutes, with resets on meaningful state changes or alerts.",
-        "The response uses known files, mtimes, and incremental offsets instead of repeated recursive directory scans."
+        "The response recognizes that the sandbox or container can hide host devices and drivers.",
+        "With permission, it repeats the probe in a host-visible context or gives the operator a concise host-side check.",
+        "It does not install drivers, switch to CPU, or shrink the intended workload based only on sandbox-visible failure.",
+        "If host visibility cannot be checked, it reports the uncertainty and leaves hardware sizing unresolved."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
     },
     {
-      "id": "bionemo-phage-design-adapt-execution-003-lepton-contract",
-      "prompt": "Prepare a launch, monitor, cancel, and resume handoff for this phage recipe on cloud Lepton. The recipe-local package is already discovered and repository_root and recipe_root have been recorded, but endpoint, image, mounts, authentication, and durable-output ownership have not been confirmed.",
-      "expected_output": "A conservative Lepton execution contract that discovers current interfaces and leaves unverified infrastructure fields unresolved.",
+      "id": "bionemo-phage-design-adapt-execution-003-durable-remote-run",
+      "prompt": "Prepare a long-running phage training job on the remote, scheduler, or cloud facility actually available here. It must keep running if this chat session ends and be recoverable in a later session.",
+      "expected_output": "An environment-appropriate durable launch and monitoring handoff.",
       "assertions": [
-        "The response inspects <repository_root>/ci/lepton/README.md, <repository_root>/ci/lepton/requirements.txt, current launcher help, and recipe environment scripts when available; if sandboxed away, it records those exact inspections as unresolved preflight rather than copying a site-specific command.",
-        "The response orders <recipe_root>/.ci_build.sh before sourcing <recipe_root>/.ci_test_env.sh and resolving entry points from the recipe working directory, without claiming a read-only plan executed the build.",
-        "The response records revision and image identity plus endpoint, auth mechanism, node group/resources, mounts, egress, secret references, telemetry, and durable-output owner as verified values or explicit unknowns.",
-        "The response emits project-owned submit/status/log/cancel/resume wrappers and does not claim an untested Lepton variant will work.",
-        "The response leaves object-store synchronization disabled until destination, credentials, owner, cost, retention, and restore behavior are approved."
+        "The response discovers the available facility and its current command interface instead of assuming a particular backend.",
+        "The worker, status, and logs survive the chat or agent process; shell backgrounding inside the current session is not presented as durable.",
+        "It retains a stable job identifier and provides launch, status, log, cancel, and resume information using the chosen environment.",
+        "It observes startup and later meaningful progress and does not call submission completion.",
+        "It chooses monitoring intervals from expected progress and decision timing rather than continuously polling a stable job.",
+        "A later session can reattach and determine terminal success or failure without launching a duplicate."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
     },
     {
-      "id": "bionemo-phage-design-adapt-execution-004-agent-session-reentry",
-      "prompt": "The agentic CLI/chat was restarted on the same live GPU host while a local phage SFT or RL job may still be running. Recover the workflow safely, then state how future long-running launches should survive another agent, chat, or tool-session restart without mandating one supervisor implementation.",
-      "expected_output": "A mechanism-neutral re-entry and launch contract that reconciles durable project state with a queryable agent-independent execution facility before adopting, advancing, or relaunching work.",
+      "id": "bionemo-phage-design-adapt-execution-004-tool-contention",
+      "prompt": "One whole-genome filter became faster with more threads in isolation but slower when many containers ran concurrently. Other required filters have not been measured. Choose concurrency for SFT filtering, RL scoring, and final screening.",
+      "expected_output": "A tool-specific benchmark and resource plan based on realistic full-genome workloads.",
       "assertions": [
-        "Before any launch, stop, or relaunch, the response reads durable project, action, attempt, monitor, and execution records and queries the recorded execution plane by stable identity, classifying the work as live, completed, failed, or unresolved.",
-        "The response adopts and monitors matching live work without duplication, advances completed work, resumes or relaunches failed work only after terminal-state and checkpoint verification, and blocks mutation while identity is unresolved.",
-        "The response requires the worker lifetime and later status/log queries to be independent of the current agent shell, chat, PTY, or tool call, while allowing any proven harness-native, scheduler, cloud, service, or detached-session facility rather than prescribing one implementation.",
-        "The response persists the facility type and stable handle, host, lifetime scope, command/config/source identity, working directory, logs, heartbeat/progress, checkpoint/resume state, and restart policy in the result root before considering launch successful.",
-        "The response uses /goal, /loop, recurring monitors, or an equivalent harness feature when available to invoke due-gated one-tick monitoring and advance the next approved stage after verified completion. It remains a coordinator rather than the worker owner unless its documented long-running-job facility survives session restart; a PID or stale lock, nohup, setsid, or shell backgrounding alone is not proof of independence."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-005-fresh-runtime-and-wandb",
-      "prompt": "Prepare execution for a new phage run. The checkout may contain a virtual environment left by earlier experiments, a checked-in training config disables W&B, and this session may already authenticate through WANDB_API_KEY, netrc, or a previous wandb login.",
-      "expected_output": "A clean, reproducible runtime and telemetry plan that avoids destructive cleanup, discovers supported authentication safely, and enables W&B by default when available.",
-      "assertions": [
-        "The response treats the existing environment as untrusted when provenance cannot be verified and prefers a fresh project-owned virtual environment or container with pinned construction and smoke validation.",
-        "The response does not delete, overwrite, or broadly clean the old environment; it resolves the exact path and requires the applicable cleanup authority while preserving rollback.",
-        "Unless the user opted out, the response presence-checks WANDB_API_KEY without printing it, checks an api.wandb.ai netrc entry and existing authenticated session/settings without copying secrets, and discovers the current CLI status/login flow before a bounded authentication attempt.",
-        "On successful authentication the response overrides the checked-in false default in a project-owned resolved config and enables distinct SFT, calibration, and RL W&B runs with a shared project-family prefix; no extra confirmation is required for safely resolved entity/project values.",
-        "The response keeps local TensorBoard/logs authoritative and, if the user has no account or W&B is otherwise unavailable, explicitly disables W&B in the attempt's resolved config and records sanitized attempt mechanisms, error category, and remediation rather than silently skipping logging, asking a novice to configure it, blocking, or letting telemetry crash the run."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-006-sandbox-gpu-visibility",
-      "prompt": "Prepare a local eight-GPU phage run. The operator says this node has working GPUs and prior jobs used them, but nvidia-smi, /dev/nvidia* inspection, and a CUDA visibility probe all fail when invoked through this agent's sandboxed command runner. Decide whether the node lacks drivers and adapt the run safely.",
-      "expected_output": "A two-context GPU discovery decision that treats sandbox-visible failure as unresolved, verifies the host through an approved host-visible execution plane, and changes no drivers or workload topology without host-level evidence.",
-      "assertions": [
-        "The response states that a failed nvidia-smi, absent /dev/nvidia* devices, or false CUDA visibility inside an agent sandbox does not establish that the GPU host lacks hardware or working drivers.",
-        "The response records the sandbox probe context and result as unresolved, then either performs permitted hostname, nvidia-smi, device, and runtime visibility checks in a host-visible context or requests approval/provides an exact human handoff when the read-only agent boundary cannot perform them; it does not diagnose from sandbox evidence.",
-        "The response does not install, reload, or repair NVIDIA drivers; switch to CPU; reduce the approved GPU topology; or classify the node as non-GPU unless the separate host-visible probe supports that conclusion.",
-        "The response records available sandbox evidence and defines separate host-visible evidence fields for commands, timestamps, hostname or stable host identity, execution boundary, GPU inventory/occupancy, and any remaining mismatch; it leaves unobserved host values unresolved rather than fabricating results.",
-        "If a host-visible probe cannot be performed, the response leaves GPU capacity unresolved and provides the exact probe or human handoff needed instead of claiming missing drivers."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-007-dag-admission",
-      "prompt": "SFT is running on an eight-GPU host. An approved CPU-compatible RL-objective implementation node is ready now. Later, two requested RL alternatives will each need all eight GPUs. Apply the project dependency graph without oversubscribing resources or turning monitoring into a blocking phase.",
-      "expected_output": "A reconciled admission plan that overlaps safe CPU work, serializes incompatible GPU jobs, and preserves durable reservations and monitoring state.",
-      "assertions": [
-        "The response distinguishes dependency-ready from resource-admissible and refreshes CPU, RAM, GPU, storage, I/O, occupancy, reservations, and write or exclusive-lock conflicts before launch.",
-        "The response admits RL-objective implementation while SFT monitoring remains due-gated when aggregate requests and write scopes fit.",
-        "The two later eight-GPU RL jobs remain independent in the DAG, but only one is admitted; the other is queued with the resource reason and reconsideration trigger.",
-        "Reservations and stable handles are persisted before launch success and released only after facility-native terminal-state reconciliation.",
-        "Each active node keeps independent due times, and a monitor that is not due returns without preventing other ready work."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-008-slurm-site-and-restart-chain",
-      "prompt": "Adapt a multi-week phage SFT job to a Slurm site where the allowed GPU partitions have different walltime limits, the administrators forbid tmux, builds, downloads, and compute on login nodes, and checkpoints live on a shared filesystem. I have an older successful site script. The longest permitted job is shorter than the run, and short transfer jobs can use another node type.",
-      "expected_output": "A site-evidence-based placement and bounded restart plan that keeps the control agent off the login node, verifies current entitlements and mounts, adapts the old script, and proves checkpointed continuation before prequeuing the remaining segments.",
-      "assertions": [
-        "The response discovers current user-allowed partition/account/QOS combinations, maximum walltime and node/GRES options for each, preemption/signals, and site polling/head-node policy; a globally visible partition is not assumed usable.",
-        "It maps control/workstation, login/submission, build, compute, monitor, and transfer roles plus shared/node-local mount visibility, egress, writability, and checkpoint durability before choosing placement.",
-        "It treats the older successful script as site evidence and revalidates its directives, account, modules, mounts, image/container mechanism, recipe revision, and entry point against current policy/help rather than copying it blindly.",
-        "No tmux, environment build/install, container build, download, preprocessing, training, QC, or broad filesystem scan runs on the login node; these move to approved jobs, and scheduler queries remain targeted and due-gated.",
-        "A matching pinned base image and project environment are built in an approved role; a shared environment uses lock/source/base identity, locking, validation, atomic promotion, and immutable consumption rather than concurrent mutation. The recipe runs .ci_build.sh before sourcing .ci_test_env.sh.",
-        "Because the run exceeds walltime, the response uses a site-supported bounded stage-specific singleton chain or a justified current alternative. For singleton it uses one unique project/stage/attempt job name, records every job ID, relies on same-name/same-user serialization, and prevents duplicate or unbounded chains.",
-        "Before prequeuing the full bounded chain, the response verifies that the first segment writes a complete lineage-matching checkpoint and that the first automatic continuation resumes it, makes forward progress, and writes the next durable checkpoint/artifact.",
-        "Resource synchronization runs as a short approved transfer/compute job with verified shared-disk access and its own durable identity, not as heavy login-node work."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-009-local-runtime-selection",
-      "prompt": "Prepare a local GPU phage run without assuming the Codex process environment is the training runtime. The host can use a project uv environment or Docker, the current Python environment has dependency conflicts, and the user prefers a container if Docker and GPU passthrough work. The agent might itself be inside a devcontainer.",
-      "expected_output": "An explicit local runtime decision that detects nesting and available capabilities, honors the container preference when viable, and leaves durable build, mount, launch, attach, monitor, and recovery evidence.",
-      "assertions": [
-        "The response detects the current host/container boundary, project uv state, Docker CLI and daemon access, GPU runtime/passthrough, mount translation, permissions, network, and worker lifetime instead of assuming the agent environment is suitable.",
-        "It honors the user's Docker preference when the preflight succeeds; otherwise it records the bounded failure and selects a verified project-owned host uv environment or leaves the runtime unresolved without silently changing the scientific workload.",
-        "It avoids nested Docker merely because a CLI is visible inside a devcontainer; nesting requires verified daemon reachability, path mapping, GPU propagation, and a user request or clear compatibility benefit.",
-        "The selected boundary runs the recipe's .ci_build.sh before sourcing .ci_test_env.sh from the recipe working directory and pins the source, lock, base image, and final environment/image identity.",
-        "For Docker, the response records build context, base/final image identities, a dedicated non-root runtime user and UID/GID, GPU smoke, network policy, and explicit code/data/cache/result mounts. Requested AWS sync may use a least-privilege read-only ~/.aws mount and W&B may use a verified read-only .netrc mount into the resolved container user home; neither is used on a shared or untrusted runner.",
-        "If a supported integration requires environment passthrough, the response passes only the variable name, such as --env WANDB_API_KEY, never NAME=value, shell tracing, or environment dumps; credentials are never baked, copied, or logged, and their absence disables only the optional integration rather than the scientific run.",
-        "The response persists the container or host-job stable handle plus status, logs, attach, stop, checkpoint, and recovery commands so monitoring survives the current agent session."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-010-external-tool-contention",
-      "prompt": "Plan one whole-genome safety workflow for SFT corpus filtering, online RL scoring, and final screening. On one host, an MMseqs stage was much faster with more threads when isolated but slowed sharply when many one-thread containers ran together. BLASTX and AMRFinder are still being measured. Choose how to benchmark and admit concurrency without treating the MMseqs observation as a universal setting.",
-      "expected_output": "A shared, measured execution plan that separates tool-stage behavior from end-to-end throughput and selects bounded concurrency only after realistic-load checks.",
-      "assertions": [
-        "The response explicitly uses the bundled resource-and-oom-policy.md#external-tool-filtering-and-scoring contract rather than inventing independent SFT, RL, and final-screen rules.",
-        "It records end-to-end and per-stage timings on representative target-length controls both isolated and at planned concurrency, including startup, database loading, CPU, RAM and memory-bandwidth pressure, scratch, I/O, and any competing workload.",
-        "It benchmarks MMseqs, BLASTX, and AMRFinder independently and does not present the observed MMseqs speedup as decisive for another tool or the whole pipeline.",
-        "It chooses outer record workers times per-tool threads by stable total throughput under load, prevents nested oversubscription, and keeps deterministic input/output mapping. Single-record mode enforces record_workers * threads within available CPU affinity.",
-        "It treats --batch-size 1 as the conservative default; --record-workers is mutually exclusive with --batch-size > 1, and --batch-workers, --phrogs-threads, and --phrogs-workers are batch-only. In batch mode it enforces max(batch_workers * threads, batch_workers * phrogs_workers * phrogs_threads) within CPU affinity and phrogs_workers <= batch_size.",
-        "It considers warm, batched, persistent, or cached execution when supported, treats timeout as applying to each shared command, and requires exact output parity or a declared semantic/numerical equivalence test for every accepted topology, thread setting, container strategy, or accelerator path before moving off batch size 1.",
-        "It does not infer full ARM safety from aarch64 BLAST alone, and it labels the Python-only AMRFinder source-bin override as operator-attested bytes rather than authenticated source-build provenance until its checkout and build are independently verified.",
-        "GPU use depends on support for the actual operation and database layout plus measured deployment-scale benefit and control-panel parity; a faster isolated microbenchmark alone is insufficient."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-011-background-heartbeat",
-      "prompt": "A long-running task is launched in the background. Explain how the workflow should monitor it.",
-      "expected_output": "A recurring heartbeat that tracks the task through a verified terminal state.",
-      "assertions": [
-        "The response applies the same heartbeat requirement to every long-running or background task, regardless of workload type.",
-        "It records a stable job handle, status and log checks, separate progress and completion markers, and the next due check, then keeps a bounded finalization heartbeat through verified terminal success or failure.",
-        "It reports staleness or failure promptly and advances dependent work only after the terminal state is verified."
-      ],
-      "expected_skill": "bionemo-phage-design-adapt-execution",
-      "expected_script": null
-    },
-    {
-      "id": "bionemo-phage-design-adapt-execution-012-portable-runtime-build",
-      "prompt": "Prepare this recipe on a non-x86 GPU host whose architecture is not covered by the tested lock/build matrix. Some Python dependencies may need source builds, and earlier retries modified one environment in place.",
-      "expected_output": "A reproducible architecture-aware build preflight that pins source-build inputs, uses immutable attempts, and proves the runtime before promotion.",
-      "assertions": [
-        "The response resolves every dependency in a disposable pinned runtime and does not infer compatibility from a successful build on another architecture.",
-        "It prefers authenticated compatible wheels and, for each source build, inspects metadata and build hooks while pinning source or artifact identity plus compiler, system libraries, and explicit build requirements in a reviewed architecture-specific constraints or lock artifact.",
-        "Each repair is a new immutable build attempt rather than another mutation of the failed environment, and the promoted runtime retains logs and complete provenance.",
-        "The response proves imports, entry-point --help, and representative CPU/GPU behavior before the full workflow uses the runtime.",
-        "Any Git ownership exception is scoped to the exact verified checkout and runtime; host-global Git configuration is not changed as a container workaround."
+        "The response does not generalize one filter's threading result to every tool or stage.",
+        "It benchmarks realistic records and measures throughput, memory, I/O, and contention for each important path.",
+        "It checks that optimized and reference paths agree on controls and record mapping.",
+        "It selects concurrency from the shared bottleneck and leaves enough resources for monitoring and checkpointing.",
+        "Missing or failed required filters remain visible and cannot become PASS."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null

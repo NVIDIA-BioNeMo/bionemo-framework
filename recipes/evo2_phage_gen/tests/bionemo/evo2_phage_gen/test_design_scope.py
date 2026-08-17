@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behavioral tests for the declarative phage host-scope contract."""
+"""Behavioral tests for declarative phage host scope."""
 
 import json
 
@@ -321,7 +321,7 @@ def test_host_evidence_deep_freezes_metadata_for_serializable_records():
 
 @pytest.mark.parametrize("unsupported_value", [{"record-1"}, object()])
 def test_host_evidence_rejects_non_json_metadata_values(unsupported_value):
-    """Sets and arbitrary objects cannot enter immutable serializable metadata."""
+    """Sets and arbitrary objects cannot enter serializable metadata."""
     with pytest.raises(TypeError, match="unsupported host-evidence metadata value"):
         HostEvidence(
             source="ncbi",

@@ -126,7 +126,7 @@ def evaluate_objective_history(
     events: Sequence[Mapping[str, Any]],
     *,
     minimum_events: int = 3,
-    audit_confirmation_events: int = 8,
+    diagnosis_confirmation_events: int = 8,
     reward_gain_threshold: float = 0.15,
     support_drop_threshold: float = 0.15,
     denominator_drop_fraction: float = 0.20,
@@ -186,7 +186,7 @@ def evaluate_objective_history(
         max_signal_streak = max(max_signal_streak, signal_streak)
         has_signal = bool(pause_signals.intersection(signals))
         immediate_telemetry_failure = "missing_required_telemetry" in signals
-        confirmed = immediate_telemetry_failure or signal_streak >= audit_confirmation_events
+        confirmed = immediate_telemetry_failure or signal_streak >= diagnosis_confirmation_events
         if confirmed:
             status = "suspicious"
             confirmed_suspicious = True
@@ -226,7 +226,7 @@ def evaluate_objective_history(
         masking_streak = masking_streak + 1 if masked else 0
     max_signal_streak = max(max_signal_streak, masking_streak)
     global_signals = ["objective_loss_masking"] if masking_flags and masking_flags[-1] else []
-    if masking_streak >= audit_confirmation_events:
+    if masking_streak >= diagnosis_confirmation_events:
         confirmed_suspicious = True
     elif global_signals:
         pending_suspicious = True
@@ -235,11 +235,11 @@ def evaluate_objective_history(
         decision = "continue"
         reason = f"insufficient_comparable_events:{len(ordered)}/{minimum_events}"
     elif confirmed_suspicious:
-        decision = "pause_for_audit"
+        decision = "pause_for_diagnosis"
         reason = "per_objective_cheat_mode_or_instability_signal"
     elif pending_suspicious:
         decision = "continue"
-        reason = f"audit_signal_pending_confirmation:{max_signal_streak}/{audit_confirmation_events}"
+        reason = f"signal_pending_confirmation:{max_signal_streak}/{diagnosis_confirmation_events}"
     else:
         decision = "continue"
         reason = "individual_objectives_and_support_are_stable"
@@ -250,7 +250,7 @@ def evaluate_objective_history(
         "reason": reason,
         "latest_complete_step": latest_step,
         "comparable_event_count": len(ordered),
-        "audit_confirmation_events": audit_confirmation_events,
+        "diagnosis_confirmation_events": diagnosis_confirmation_events,
         "required_fields": list(REQUIRED_FIELDS),
         "objectives": findings,
         "active_objective_counts": active_counts,
@@ -407,7 +407,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history-output", type=Path)
     parser.add_argument("--minimum-events", type=_positive_int, default=3)
-    parser.add_argument("--audit-confirmation-events", type=_positive_int, default=8)
+    parser.add_argument("--diagnosis-confirmation-events", type=_positive_int, default=8)
     args = parser.parse_args()
 
     if not args.tensorboard_root.is_dir():
@@ -422,7 +422,7 @@ def main() -> None:
     report = evaluate_objective_history(
         history,
         minimum_events=args.minimum_events,
-        audit_confirmation_events=args.audit_confirmation_events,
+        diagnosis_confirmation_events=args.diagnosis_confirmation_events,
     )
     report["tensorboard_root"] = str(args.tensorboard_root.resolve())
     args.output.parent.mkdir(parents=True, exist_ok=True)

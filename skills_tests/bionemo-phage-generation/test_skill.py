@@ -43,38 +43,6 @@ def test_root_skill_layout() -> None:
     assert alias.resolve() == ROOT_SKILLS.resolve()
 
 
-def test_portable_handoff() -> None:
-    """The portable skill should retain its complete-checkout handoff contract."""
-    skill_root = ROOT_SKILLS / "bionemo-phage-generation"
-    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
-    for marker in (
-        "VERSION >= 2.4",
-        "bionemo-phage-design/SKILL.md",
-        "design-scope-and-viability.md",
-        "ema-2025-draft-phage-therapy-quality-guideline.md",
-        ".codex-plugin/plugin.json",
-        "https://github.com/NVIDIA-BioNeMo/bionemo-recipes",
-        "canonical default revision",
-        "origin/jstjohn/evo2_phage_gen",
-        "separate clean checkout",
-        "absolute checkout root",
-        "absolute recipe root",
-        "original request",
-        "Codex",
-        "$bionemo-phage-design",
-        "--plugin-dir .",
-        "/evo2-phage-gen:bionemo-phage-design",
-        "missing or integrity-failed skill",
-        "plugin's `skills` root",
-        "fixed required sibling allowlist",
-        "unexpected child skills",
-        "required instruction or plugin files",
-        "paths and SHA-256",
-        "integrity check fails",
-    ):
-        assert marker in skill
-
-
 def test_entry_description() -> None:
     """The release-facing entrypoint should use likely user discovery language."""
     skill_path = ROOT_SKILLS / "bionemo-phage-generation" / "SKILL.md"

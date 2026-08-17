@@ -170,7 +170,7 @@ def _read_regular_file_bytes(path: str | Path, *, label: str) -> bytes:
 
 @dataclass(frozen=True)
 class HostEvidenceTableRow:
-    """One immutable, source-versioned replication-host attribution."""
+    """One source-versioned replication-host attribution."""
 
     record_id: str
     accession: str | None
@@ -186,7 +186,7 @@ class HostEvidenceTableRow:
     evidence_digest: str
 
     def __post_init__(self) -> None:
-        """Validate every provenance field and its canonical evidence digest."""
+        """Validate the source fields and evidence digest."""
         _require_text(self.record_id, label="record_id")
         _optional_text(self.accession, label="accession")
         try:
@@ -231,7 +231,7 @@ class HostEvidenceTableRow:
         raw_response_sha256: str | None,
         reason_codes: Sequence[str],
     ) -> HostEvidenceTableRow:
-        """Create a row whose digest binds every provenance and decision field."""
+        """Create a row whose digest covers its source and decision fields."""
         values = {
             "record_id": record_id,
             "accession": accession,
@@ -325,7 +325,7 @@ class HostEvidenceTableRow:
         )
 
     def to_task1_host_evidence(self) -> HostEvidence:
-        """Convert this provenance row to the central typed host-scope contract."""
+        """Convert this evidence row to the typed host-scope model."""
         return HostEvidence(
             source=self.evidence_source,
             source_version=self.evidence_version,
@@ -365,7 +365,7 @@ class HostEvidenceTable:
             raise HostEvidenceError("duplicate record_id in host-evidence table")
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the complete versioned table contract."""
+        """Serialize the complete versioned table."""
         return {
             "schema_version": HOST_EVIDENCE_SCHEMA_VERSION,
             "table_type": HOST_EVIDENCE_TABLE_TYPE,

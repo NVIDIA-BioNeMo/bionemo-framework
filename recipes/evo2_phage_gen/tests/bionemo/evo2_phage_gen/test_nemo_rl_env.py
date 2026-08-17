@@ -155,7 +155,7 @@ def test_score_message_logs_forwards_safety_config_and_retains_historical_reward
 
 
 def test_sequence_safety_mapping_is_parsed_without_bool_or_host_scope_coercion(tmp_path: Path):
-    """Environment config parsing must produce the exact typed Task 6 safety contract."""
+    """Environment config parsing must produce typed Task 6 safety settings."""
     raw = _sequence_safety_mapping(tmp_path)
 
     parsed = nemo_rl_env._coerce_sequence_safety_config(raw)
@@ -649,7 +649,7 @@ def test_phage_qc_metrics_report_zero_acceptance_when_aggregate_state_is_missing
 
 
 def test_phage_qc_qualified_reward_mean_rejects_out_of_range_values():
-    """Qualified reward telemetry uses the same bounded scalar contract as optimization."""
+    """Qualified reward reporting uses the same bounded scalar range as optimization."""
     scored = pd.DataFrame(
         {
             "reward_valid_nt_chars": [1.0, 1.0, 1.0],
