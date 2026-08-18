@@ -177,6 +177,7 @@ stage_00() {
     --pharokka-database-release "${PHAROKKA_DATABASE_RELEASE}"
   run evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched
   if [[ "${DRY_RUN}" == "1" || ! -s data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein.dbtype ]]; then
+    run mkdir -p data/external/mmseqs/NC_001422_1_Gprotein
     run mmseqs createdb data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein
   fi
   if [[ "${DRY_RUN}" == "1" ]]; then note 'fetch and scan the six configured NCBI safety controls'; return; fi

@@ -80,7 +80,7 @@ CTXφ illustrates a known indirect route by which a phage can contribute to huma
 
 ## Evaluation Tasks
 
-Two declarative top-level cases cover bootstrap and controller handoff. Twenty-four recipe-package cases cover scientific scope, evidence use, data leakage, training, objective behavior, durable monitoring, resource-aware execution, and safety screening.
+Three declarative top-level cases cover bootstrap, preservation of an incompatible checkout with local work, and controller handoff. Fifty-two recipe-package cases cover scientific scope, evidence use, data leakage, training, objective behavior, durable monitoring, resource-aware execution, and safety screening.
 
 ## Evaluation Results
 

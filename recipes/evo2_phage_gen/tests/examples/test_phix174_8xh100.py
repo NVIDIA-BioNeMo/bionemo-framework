@@ -73,3 +73,8 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "monitor: external asset preparation" in log
     assert "--prepare-phrogs-consensus-database" in log
     assert "--download-phrogs-sequence-database" not in log
+    mmseqs_dir = "data/external/mmseqs/NC_001422_1_Gprotein"
+    mkdir_command = f"command: mkdir -p {mmseqs_dir}"
+    createdb_command = "command: mmseqs createdb"
+    assert mkdir_command in log
+    assert log.index(mkdir_command) < log.index(createdb_command)
