@@ -17,9 +17,11 @@
 
 from pathlib import Path
 
+import pandas as pd
+import pytest
 import yaml
 
-from bionemo.evo2_phage_gen import rl_readiness
+from bionemo.evo2_phage_gen import nemo_rl_env, rl_readiness
 from bionemo.evo2_phage_gen.rl_readiness import check_rl_readiness
 
 
@@ -72,6 +74,154 @@ def _write_minimal_config(
     config_path = tmp_path / "grpo.yaml"
     config_path.write_text(yaml.safe_dump(config))
     return config_path
+
+
+def _write_control_config(tmp_path: Path) -> Path:
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    config["env"]["phage_qc"] = {
+        "reward_output_mode": "gdpo",
+        "weight_valid_nt_chars": 1.0,
+        "weight_tropism": 1.0,
+        "weight_mmseqs_cluster_diversity": 1.0,
+        "gdpo_objectives": [
+            {"name": "valid_nt_chars", "columns": ["reward_valid_nt_chars"]},
+            {"name": "tropism", "columns": ["reward_external_tropism"]},
+            {"name": "diversity", "columns": ["reward_mmseqs_cluster_diversity"]},
+            {
+                "name": "safety_amr",
+                "columns": ["reward_safety_amr"],
+                "requires_safety_eligibility": False,
+            },
+            {
+                "name": "safety_toxin",
+                "columns": ["reward_safety_toxin"],
+                "requires_safety_eligibility": False,
+            },
+            {
+                "name": "safety_lysogeny",
+                "columns": ["reward_safety_lysogeny"],
+                "requires_safety_eligibility": False,
+            },
+        ],
+        "sequence_safety": {
+            "enabled": True,
+            "host_domain": "BACTERIA",
+            "host_evidence": {
+                "source": "test control",
+                "source_version": "NC_001422.1",
+                "replication_host_domains": ["BACTERIA"],
+                "confirmed": True,
+                "metadata": {},
+            },
+            "asset_manifest_path": str(tmp_path / "asset-manifest.yaml"),
+            "diamond_bin": str(tmp_path / "diamond"),
+            "mmseqs_bin": str(tmp_path / "mmseqs"),
+            "policy_path": str(tmp_path / "policy.yaml"),
+            "work_dir": str(tmp_path / "safety"),
+            "strict_lysis": False,
+            "circular": True,
+            "threads": 1,
+            "timeout_seconds": 30.0,
+        },
+        "external_qc": {
+            "enabled": True,
+            "enable_protein_hit_count": False,
+            "enable_tropism": True,
+            "enable_synteny": False,
+            "enable_average_protein_identity": False,
+            "enable_required_genes": False,
+        },
+        "mmseqs_cluster_diversity": {"enabled": True},
+    }
+    config_path.write_text(yaml.safe_dump(config))
+    return config_path
+
+
+def _control_scores(sequence: str) -> pd.DataFrame:
+    row: dict[str, object] = {
+        "sequence": sequence,
+        "reward": 0.8,
+        "reward_valid_nt_chars": 1.0,
+        "reward_external_tropism": 0.75,
+        "reward_mmseqs_cluster_diversity": 1.0,
+        "external_qc_tool_succeeded": 1.0,
+        "external_qc_measurement_available": 1.0,
+        "tropism_measurement_available": 1.0,
+        "mmseqs_cluster_id": "group0:0",
+        "mmseqs_cluster_size": 1,
+        "mmseqs_cluster_valid_for_clustering": 1.0,
+        "mmseqs_cluster_missing_from_output": 0.0,
+        "safety_gate_state": "PASS",
+        "safety_gate_pass": 1.0,
+        "safety_environment_healthy": 1.0,
+        "safety_gate_measurement_available": 1.0,
+    }
+    for safety_class in ("amr", "toxin", "lysogeny"):
+        row.update(
+            {
+                f"reward_safety_{safety_class}": 1.0,
+                f"safety_{safety_class}_state": "PASS",
+                f"safety_{safety_class}_required": 1.0,
+                f"safety_{safety_class}_finding_count": 0,
+                f"safety_{safety_class}_measurement_available": 1.0,
+                f"safety_{safety_class}_execution_status": "COMPLETED_AND_PARSED",
+            }
+        )
+    return pd.DataFrame([row])
+
+
+def test_environment_control_runs_exact_step(tmp_path, monkeypatch):
+    config_path = _write_control_config(tmp_path)
+    control_fasta = tmp_path / "phix.fna"
+    sequence = "ACGT" * 5
+    control_fasta.write_text(f">phix\n{sequence}\n")
+
+    def score(message_log_batch, **_kwargs):
+        assert message_log_batch == [
+            [
+                {"role": "user", "content": "+~ACGTACGTACGTACGT"},
+                {"role": "assistant", "content": "ACGT"},
+            ]
+        ]
+        return _control_scores(sequence)
+
+    monkeypatch.setattr(nemo_rl_env, "score_message_logs", score)
+
+    result = rl_readiness.run_environment_control(config_path, control_fasta, tmp_path / "control")
+
+    assert result["record_id"] == "phix"
+    assert result["sequence_length"] == 20
+    assert result["objectives"] == {
+        "valid_nt_chars": 1.0,
+        "tropism": 0.75,
+        "diversity": 1.0,
+        "safety_amr": 1.0,
+        "safety_toxin": 1.0,
+        "safety_lysogeny": 1.0,
+    }
+    assert result["support"] == {
+        "external_qc": True,
+        "tropism": True,
+        "mmseqs_cluster_diversity": True,
+        "safety_amr": True,
+        "safety_toxin": True,
+        "safety_lysogeny": True,
+    }
+    assert yaml.safe_load((tmp_path / "control" / "result.json").read_text()) == result
+
+
+def test_environment_control_rejects_skipped_metric(tmp_path, monkeypatch):
+    config_path = _write_control_config(tmp_path)
+    control_fasta = tmp_path / "phix.fna"
+    sequence = "ACGT" * 5
+    control_fasta.write_text(f">phix\n{sequence}\n")
+    scored = _control_scores(sequence)
+    scored.loc[0, "tropism_measurement_available"] = 0.0
+    monkeypatch.setattr(nemo_rl_env, "score_message_logs", lambda *_args, **_kwargs: scored)
+
+    with pytest.raises(rl_readiness.RLEnvironmentControlError, match="tropism.*not measured"):
+        rl_readiness.run_environment_control(config_path, control_fasta, tmp_path / "control")
 
 
 def test_rl_readiness_reports_recipe_evo2_adapter_patch(tmp_path):

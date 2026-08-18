@@ -18,11 +18,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
 import importlib.util
 import json
+import math
 import warnings
 from dataclasses import asdict, dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +44,12 @@ class RLReadinessCheck:
     ok: bool
     required: bool
     detail: str
+
+
+class RLEnvironmentControlError(ValueError):
+    """Report an incomplete or invalid exact-environment control."""
+
+    pass
 
 
 def _nested_get(config: dict[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
@@ -419,6 +428,179 @@ def check_rl_readiness(
     ]
 
 
+def _bounded_control_value(value: object, label: str) -> float:
+    """Return one finite control value in the reward range."""
+    if not isinstance(value, Real) or isinstance(value, bool):
+        raise RLEnvironmentControlError(f"{label} is not a finite number in [0, 1]")
+    number = float(value)
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise RLEnvironmentControlError(f"{label} is not a finite number in [0, 1]")
+    return number
+
+
+def _require_control_value(row: dict[str, Any], column: str, expected: float, label: str) -> None:
+    """Require an exact binary support value from the scored control row."""
+    value = _bounded_control_value(row.get(column), column)
+    if value != expected:
+        raise RLEnvironmentControlError(label)
+
+
+def _validate_control_support(row: dict[str, Any], environment: Any) -> dict[str, bool]:
+    """Confirm that each configured nontrivial scorer measured the control."""
+    support: dict[str, bool] = {}
+    external = environment.external_qc
+    if external.enabled:
+        _require_control_value(row, "external_qc_tool_succeeded", 1.0, "external QC did not complete")
+        _require_control_value(row, "external_qc_measurement_available", 1.0, "external QC was not measured")
+        support["external_qc"] = True
+        external_components = (
+            ("enable_orf", "orf", "reward_external_orf", None),
+            ("enable_coding_density", "coding_density", "reward_external_coding_density", None),
+            (
+                "enable_protein_hit_count",
+                "protein_database_hit_count",
+                "reward_external_protein_hit_count",
+                "protein_database_hit_count_measurement_available",
+            ),
+            ("enable_tropism", "tropism", "reward_external_tropism", "tropism_measurement_available"),
+            ("enable_synteny", "synteny", "reward_external_synteny", "synteny_measurement_available"),
+            (
+                "enable_average_protein_identity",
+                "average_protein_identity",
+                "reward_external_average_protein_identity",
+                "average_protein_identity_measurement_available",
+            ),
+            (
+                "enable_required_genes",
+                "required_genes",
+                "reward_external_required_genes",
+                "required_genes_measurement_available",
+            ),
+        )
+        for enabled_attr, name, reward_column, measurement_column in external_components:
+            if not getattr(external, enabled_attr):
+                continue
+            _bounded_control_value(row.get(reward_column), reward_column)
+            if measurement_column is not None:
+                _require_control_value(row, measurement_column, 1.0, f"{name} was not measured")
+            support[name] = True
+
+    if environment.mmseqs_cluster_diversity.enabled:
+        _bounded_control_value(row.get("reward_mmseqs_cluster_diversity"), "reward_mmseqs_cluster_diversity")
+        _require_control_value(
+            row,
+            "mmseqs_cluster_valid_for_clustering",
+            1.0,
+            "MMseqs diversity control was not eligible for clustering",
+        )
+        _require_control_value(
+            row,
+            "mmseqs_cluster_missing_from_output",
+            0.0,
+            "MMseqs diversity control was missing from clustering output",
+        )
+        if not isinstance(row.get("mmseqs_cluster_size"), Real) or row["mmseqs_cluster_size"] < 1:
+            raise RLEnvironmentControlError("MMseqs diversity control has no cluster assignment")
+        support["mmseqs_cluster_diversity"] = True
+
+    _require_control_value(row, "safety_environment_healthy", 1.0, "sequence safety environment was not healthy")
+    _require_control_value(row, "safety_gate_measurement_available", 1.0, "sequence safety was not measured")
+    _require_control_value(row, "safety_gate_pass", 1.0, "known viable control did not pass sequence safety")
+    if row.get("safety_gate_state") != "PASS":
+        raise RLEnvironmentControlError("known viable control did not pass sequence safety")
+    for safety_class in ("amr", "toxin", "lysogeny"):
+        prefix = f"safety_{safety_class}"
+        _bounded_control_value(row.get(f"reward_{prefix}"), f"reward_{prefix}")
+        _require_control_value(row, f"{prefix}_measurement_available", 1.0, f"{safety_class} was not measured")
+        if row.get(f"{prefix}_execution_status") != "COMPLETED_AND_PARSED":
+            raise RLEnvironmentControlError(f"{safety_class} detector did not complete")
+        if row.get(f"{prefix}_state") != "PASS":
+            raise RLEnvironmentControlError(f"known viable control did not pass {safety_class}")
+        support[f"safety_{safety_class}"] = True
+    return support
+
+
+def run_environment_control(config_path: Path, control_fasta: Path, output_dir: Path) -> dict[str, Any]:
+    """Run one known viable genome through the exact configured NeMo-RL environment."""
+    from bionemo.evo2_phage_gen import nemo_rl_env
+    from bionemo.evo2_phage_gen.generation import DEFAULT_PROMPT_PREFIX
+    from bionemo.evo2_phage_gen.sequence_safety_cli import parse_fasta_records
+
+    config = _load_config_with_defaults(config_path)
+    raw_environment = _nested_get(config, ("env", "phage_qc"))
+    if not isinstance(raw_environment, dict):
+        raise RLEnvironmentControlError("config has no phage_qc environment mapping")
+    environment_config = copy.deepcopy(raw_environment)
+    if environment_config.get("reward_output_mode") != "gdpo":
+        raise RLEnvironmentControlError("exact environment control requires GDPO reward output")
+
+    records = parse_fasta_records(control_fasta)
+    if len(records) != 1:
+        raise RLEnvironmentControlError("control FASTA must contain exactly one genome")
+    record = records[0]
+    prefix_length = 16
+    if len(record.sequence) <= prefix_length:
+        raise RLEnvironmentControlError("control genome must be longer than the 16-base RL prompt")
+
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for section, subdirectory in (
+        ("external_qc", "external-qc"),
+        ("mmseqs_cluster_diversity", "mmseqs"),
+        ("sequence_safety", "safety"),
+    ):
+        section_config = environment_config.get(section)
+        if not isinstance(section_config, dict):
+            if section == "sequence_safety":
+                raise RLEnvironmentControlError("sequence_safety configuration is required")
+            section_config = {}
+            environment_config[section] = section_config
+        section_config["work_dir"] = str(output_dir / subdirectory)
+
+    actor = getattr(nemo_rl_env.PhageQCEnvironment, "__ray_metadata__", None)
+    environment_class = getattr(actor, "modified_class", None)
+    if environment_class is None:
+        raise RLEnvironmentControlError("NeMo-RL environment is unavailable in the active runtime")
+    environment = environment_class(environment_config)
+    messages = [
+        [
+            {"role": "user", "content": DEFAULT_PROMPT_PREFIX + record.sequence[:prefix_length]},
+            {"role": "assistant", "content": record.sequence[prefix_length:]},
+        ]
+    ]
+    environment_result = environment_class.step(environment, messages, [{"record_id": record.sequence_id}])
+    if environment_result.answers != [record.sequence]:
+        raise RLEnvironmentControlError("exact environment did not reconstruct the complete control genome")
+    if len(environment_result.metadata) != 1:
+        raise RLEnvironmentControlError("exact environment returned the wrong control result count")
+    scored = environment_result.metadata[0].get("_phage_qc_scored")
+    if not isinstance(scored, dict):
+        raise RLEnvironmentControlError("exact environment did not return component telemetry")
+
+    reward_rows = environment_result.rewards.detach().cpu().tolist()
+    if len(reward_rows) != 1 or not isinstance(reward_rows[0], list):
+        raise RLEnvironmentControlError("exact environment did not return one GDPO reward vector")
+    objective_names = [objective.name for objective in environment.gdpo_objectives]
+    if len(reward_rows[0]) != len(objective_names):
+        raise RLEnvironmentControlError("GDPO reward vector does not match the configured objectives")
+    objective_values = {
+        name: _bounded_control_value(value, f"objective {name}")
+        for name, value in zip(objective_names, reward_rows[0], strict=True)
+    }
+    for objective in environment.gdpo_objectives:
+        for column in objective.columns:
+            _bounded_control_value(scored.get(column), column)
+
+    result: dict[str, Any] = {
+        "record_id": record.sequence_id,
+        "sequence_length": len(record.sequence),
+        "objectives": objective_values,
+        "support": _validate_control_support(scored, environment),
+    }
+    (output_dir / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return result
+
+
 def _print_text_report(checks: list[RLReadinessCheck]) -> None:
     """Print a concise human-readable readiness report."""
     for check in checks:
@@ -443,13 +625,39 @@ def main() -> None:
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     parser.add_argument("--warn-only", action="store_true", help="Report missing required checks without failing")
+    parser.add_argument("--control-fasta", type=Path, help="Run one known viable genome through the exact environment")
+    parser.add_argument("--control-dir", type=Path, help="Write exact-environment control work and result files here")
     args = parser.parse_args()
+    if (args.control_fasta is None) != (args.control_dir is None):
+        parser.error("--control-fasta and --control-dir must be provided together")
 
     checks = check_rl_readiness(
         args.config,
         require_evo2_adapter=not args.allow_template_gaps,
         checkpoint_override=args.checkpoint,
     )
+    missing_required = [check for check in checks if check.required and not check.ok]
+    if args.control_fasta is not None and not missing_required:
+        try:
+            run_environment_control(args.config, args.control_fasta, args.control_dir)
+        except Exception as error:
+            checks.append(
+                RLReadinessCheck(
+                    name="rl_environment_control",
+                    ok=False,
+                    required=True,
+                    detail=f"{type(error).__name__}: {error}",
+                )
+            )
+        else:
+            checks.append(
+                RLReadinessCheck(
+                    name="rl_environment_control",
+                    ok=True,
+                    required=True,
+                    detail=str((args.control_dir / "result.json").resolve()),
+                )
+            )
     if args.json:
         print(json.dumps([asdict(check) for check in checks], indent=2))
     else:

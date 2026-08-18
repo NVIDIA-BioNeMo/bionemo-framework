@@ -62,9 +62,11 @@ The previous SFT-corpus audit observed 14,465 PASS and one lysogeny-review INDET
 
 SFT selection uses optimizer-step validation. A larger global batch can complete an epoch before
 enough optimizer updates exist to show overfitting, so a best value at the run boundary stops for
-more follow-up even if that requires several epochs. The GDPO pilot exercises the complete reward
-path before the full run; rewards stay in `[0, 1]`, baseline/chance means `0`, missing or failed
-measurements cannot look favorable, and the selected SFT checkpoint remains the KL anchor.
+more follow-up even if that requires several epochs. Before the generated GDPO pilot, the known
+PhiX174 reference runs through the exact configured RL environment and every enabled external,
+diversity, and safety measurement must report support. The pilot then checks training and checkpoint
+behavior; rewards stay in `[0, 1]`, baseline/chance means `0`, missing or failed measurements cannot
+look favorable, and the selected SFT checkpoint remains the KL anchor.
 
 The final scoring pass uses the selected pre-RL SFT checkpoint with its `+~` conditioning prefix.
 `rollout/sft-likelihood/ranked-designs.csv` contains total and mean per-nucleotide log probability

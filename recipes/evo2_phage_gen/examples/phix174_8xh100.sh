@@ -282,10 +282,12 @@ PY
 }
 
 stage_40() {
-  local selected rl="${RESULT_ROOT}/rl" chosen
+  local selected rl="${RESULT_ROOT}/rl" control="${RESULT_ROOT}/rl/environment-control" chosen
   selected="$(read_state selected-sft)"
   run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
-  run evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}"
+  monitored 'RL environment control' "${control}/runner.log" \
+    evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}" \
+    --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422.1.fna --control-dir "${control}"
   local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" logger.wandb_enabled=false)
   monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
   run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"

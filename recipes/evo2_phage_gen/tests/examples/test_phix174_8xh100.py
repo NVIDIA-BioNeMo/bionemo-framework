@@ -166,3 +166,12 @@ def test_dry_run(tmp_path: Path) -> None:
     ]
     assert len(arc_commands) == 1
     assert "--overwrite" in arc_commands[0]
+
+    rl_control = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_check_rl " in line and "--control-fasta" in line
+    )
+    assert rl_control[rl_control.index("--control-fasta") + 1].endswith("NC_001422.1.fna")
+    assert rl_control[rl_control.index("--control-dir") + 1].endswith("/rl/environment-control")
+    assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")

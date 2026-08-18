@@ -99,8 +99,9 @@ tmux new -s phix174-e2e
 
 The top-level command downloads the public corpus, current external tools and databases, reruns the
 safety controls, excludes non-PASS SFT inputs, builds leakage-controlled SFT splits, trains and
-selects SFT, calibrates sampling, runs a full-shape pilot and DP8 GDPO, selects RL from comparable
-validation, generates exactly 1,000 whole genomes, scores all of them with the selected pre-RL SFT,
+selects SFT, calibrates sampling, verifies every enabled RL measurement on the PhiX174 reference,
+runs a full-shape pilot and DP8 GDPO, selects RL from comparable validation, generates exactly 1,000
+whole genomes, scores all of them with the selected pre-RL SFT,
 and runs the current sequence-safety, target Arc, and filter-7 diagnostic screens. The GDPO config includes AMR, toxin, and lysogeny objectives and
 uses the selected SFT checkpoint as its KL anchor.
 
