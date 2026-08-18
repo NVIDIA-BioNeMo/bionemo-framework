@@ -192,4 +192,4 @@ scanned, keep representative and source-record denominators distinct.
 - [PhiX174 case-study results](skills/bionemo-phage-design/references/case-study-results.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)
 - [Recipe commands and dependencies](pyproject.toml)
-- [Evo 2 model and checkpoint notes](../evo2_megatron/README.md)
+- [Evo 2 model and checkpoint notes](https://github.com/NVIDIA-BioNeMo/bionemo-recipes/blob/main/recipes/evo2_megatron/README.md)

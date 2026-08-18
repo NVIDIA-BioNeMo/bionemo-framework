@@ -78,7 +78,7 @@ def test_local_markdown_links_resolve() -> None:
             if not target_text or "://" in target_text or target_text.startswith("mailto:"):
                 continue
             target = (source.parent / target_text).resolve()
-            if not target.exists():
+            if not target.is_relative_to(RECIPE_ROOT.resolve()) or not target.exists():
                 missing.append(f"{source.relative_to(RECIPE_ROOT)} -> {raw_target}")
 
     assert not missing, "\n".join(missing)

@@ -18,10 +18,10 @@ tmux new -s phix174-e2e
   --result-root "$PWD/results/phix174-8xh100"
 ```
 
-The build creates `.ci_test_env.sh`, which the example sources internally. There is no `config.env`,
-implicit `.env` loading, environment dump, or API-key requirement. The script verifies that it is
-running on eight H100 GPUs; restricted agent sandboxes often hide `nvidia-smi`, so launch it on the
-allocated compute node. Use a scratch clone or worktree when a run needs code or config changes.
+The build creates the virtual env used by `.ci_test_env.sh`, which the example sources internally.
+The script verifies that it is running on eight H100 GPUs; restricted agent sandboxes often hide
+`nvidia-smi`, so launch it on the allocated compute node. Use a scratch clone or worktree when
+a run needs code or config changes.
 
 Useful controls:
 
