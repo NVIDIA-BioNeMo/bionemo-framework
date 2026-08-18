@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-publish-stage-artifacts
 description: Use when a phage-design user requests publication, backup, or an intermediate snapshot of selected checkpoints, validation generations, logs, results, or final deliverables to object, cloud, mounted, or network storage.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Publish Phage Stage Artifacts

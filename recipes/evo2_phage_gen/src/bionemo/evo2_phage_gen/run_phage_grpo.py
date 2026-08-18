@@ -134,7 +134,7 @@ def _register_recipe_extensions() -> None:
 
 
 def _init_ray(upstream_init_ray, *, include_dashboard: bool, num_cpus: int | None = None) -> None:
-    """Initialize Ray through the recipe-patched NeMo-RL interface."""
+    """Initialize Ray through the recipe-supported NeMo-RL interface."""
     options = {"include_dashboard": include_dashboard}
     if num_cpus is not None:
         options["num_cpus"] = num_cpus
@@ -157,12 +157,12 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
         raise ModuleNotFoundError(
             "NeMo-RL and its runtime dependencies are required for GRPO/GDPO. "
             "Install the recipe environment, or repair an existing environment with "
-            "evo2_phage_patch_nemo_rl --repair-install, before launching GRPO or GDPO."
+            "evo2_phage_setup_nemo_rl, before launching GRPO or GDPO."
         ) from exc
 
-    from bionemo.evo2_phage_gen.nemo_rl_patches import assert_nemo_rl_patch_runtime
+    from bionemo.evo2_phage_gen.nemo_rl_setup import assert_nemo_rl_runtime
 
-    assert_nemo_rl_patch_runtime()
+    assert_nemo_rl_runtime()
     _register_recipe_extensions()
     register_omegaconf_resolvers()
     args, overrides = _parse_args(default_config, default_algorithm)

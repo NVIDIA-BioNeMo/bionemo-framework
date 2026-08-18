@@ -26,7 +26,7 @@ Global
 
 **Credential Type(s):** API key, Cloud Credentials
 
-A Python-capable agent and a compatible BioNeMo Recipes phage-generation package at recipe version 2.4 or later. Compute, storage, models, databases, and command-line tools depend on the approved project and selected implementation. Credentials are optional for supported telemetry or artifact publication; local records remain authoritative when those services are not used or unavailable. Never place secrets in prompts, logs, or outputs.
+A Python-capable agent and a compatible BioNeMo Recipes phage-generation package at recipe version 2.5 or later. Compute, storage, models, databases, and command-line tools depend on the approved project and selected implementation. Credentials are optional for supported telemetry or artifact publication; local records remain authoritative when those services are not used or unavailable. Never place secrets in prompts, logs, or outputs.
 
 ## Known Risks and Mitigations
 
@@ -64,7 +64,7 @@ CTXφ illustrates a known indirect route by which a phage can contribute to huma
 - [Portable skill source](./SKILL.md)
 - [EMA draft guideline record](https://www.ema.europa.eu/en/quality-aspects-phage-therapy-medicinal-products)
 - [Evo 2 phage-design publication in Science](https://www.science.org/doi/10.1126/science.aec2657)
-- [CC BY bioRxiv v1 source bundled by the implementation package](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full)
+- [Public CC BY bioRxiv v1 source with linked supplement and data](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full)
 - [Waldor and Mekalanos CTXφ primary study](https://pubmed.ncbi.nlm.nih.gov/8658163/)
 - [CTXφ genomics review](https://pubmed.ncbi.nlm.nih.gov/31272871/)
 
@@ -80,15 +80,15 @@ CTXφ illustrates a known indirect route by which a phage can contribute to huma
 
 ## Evaluation Tasks
 
-Three declarative top-level cases cover bootstrap, preservation of an incompatible checkout with local work, and controller handoff. Fifty-one recipe-package cases cover scientific scope, evidence use, data leakage, training, objective behavior, durable monitoring, resource-aware execution, and safety screening.
+Three declarative top-level cases cover bootstrap, preservation of an incompatible checkout with local work, and controller handoff. Fifty-two recipe-package cases cover scientific scope, evidence use, data leakage, training, objective behavior, durable monitoring, resource-aware execution, and safety screening.
 
 ## Evaluation Results
 
-On 2026-08-17, 83 focused skill and evaluation-harness tests and 828 recipe tests passed; seven recipe tests were skipped. These are behavioral and software-package checks, not execution of every declarative case, biological validation, agent red-teaming, network or product security assessment, or clinical testing.
+On 2026-08-18, 426 recipe and recipe-local skill tests and 3 repository-level skill tests passed; six recipe tests were skipped. These are behavioral and software-package checks, not execution of every declarative case, biological validation, agent red-teaming, network or product security assessment, or clinical testing.
 
 ## Skill Version(s)
 
-Working-tree snapshot based on repository revision be2db0340f4063df8701d286f205c2aa95fb9239; card updated 2026-08-17.
+Working-tree snapshot based on repository revision fd7b47835eeb088c2933e2d1b965f10843368d09; card updated 2026-08-18.
 
 Initial draft rendered with NVIDIA Trustworthy-AI `skill-card-generator` revision `8717620a622922550c1ffc7b1debdac1195bbfd5` on 2026-08-11. This Markdown card is human-owned after generation.
 

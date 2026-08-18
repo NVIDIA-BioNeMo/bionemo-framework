@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-calibrate-rl-sampling
 description: Use after selecting an Evo 2 phage SFT checkpoint and defining RL objectives to calibrate prompt serialization, temperature, prefix-length distribution, and fixed validation sampling.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Calibrate Phage RL Sampling

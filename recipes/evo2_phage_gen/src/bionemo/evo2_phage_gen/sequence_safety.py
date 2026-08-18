@@ -13,24 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Immutable sequence-safety results and strict version-one policy loading."""
+"""Result types and policy loading for phage sequence-safety screens."""
 
 from __future__ import annotations
 
-import hashlib
-import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
-from types import MappingProxyType
 
 import yaml
 
 
 class SafetyState(StrEnum):
-    """The three-state outcome for a safety check."""
+    """Represent a sequence-screen decision."""
 
     PASS = "PASS"
     FAIL = "FAIL"
@@ -39,7 +35,7 @@ class SafetyState(StrEnum):
 
 @dataclass(frozen=True)
 class SafetyFinding:
-    """One immutable scanner finding."""
+    """Describe one normalized safety finding."""
 
     safety_class: str
     state: SafetyState
@@ -47,11 +43,12 @@ class SafetyFinding:
     finding_id: str | None = None
 
     def __post_init__(self) -> None:
-        """Normalize reason codes to an immutable sequence."""
+        """Normalize enum and tuple fields."""
+        object.__setattr__(self, "state", SafetyState(self.state))
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the scanner finding."""
+        """Serialize the finding."""
         return {
             "safety_class": self.safety_class,
             "state": self.state.value,
@@ -62,7 +59,7 @@ class SafetyFinding:
 
 @dataclass(frozen=True)
 class SafetyClassResult:
-    """Aggregated result for a single required or informational safety class."""
+    """Summarize one required or optional safety class."""
 
     safety_class: str
     state: SafetyState
@@ -71,12 +68,13 @@ class SafetyClassResult:
     reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Freeze nested findings and reason codes."""
+        """Normalize enum and tuple fields."""
+        object.__setattr__(self, "state", SafetyState(self.state))
         object.__setattr__(self, "findings", tuple(self.findings))
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the class-level safety result."""
+        """Serialize the class result."""
         return {
             "safety_class": self.safety_class,
             "state": self.state.value,
@@ -87,273 +85,81 @@ class SafetyClassResult:
 
 
 def aggregate_safety_state(class_results: tuple[SafetyClassResult, ...]) -> SafetyState:
-    """Apply the required-class precedence: FAIL, then INDETERMINATE, then PASS."""
-    required_states = [result.state for result in class_results if result.required]
-    if not required_states:
+    """Combine required class results conservatively."""
+    states = [result.state for result in class_results if result.required]
+    if not states:
         return SafetyState.INDETERMINATE
-    if SafetyState.FAIL in required_states:
+    if SafetyState.FAIL in states:
         return SafetyState.FAIL
-    if SafetyState.INDETERMINATE in required_states:
+    if SafetyState.INDETERMINATE in states:
         return SafetyState.INDETERMINATE
     return SafetyState.PASS
 
 
 @dataclass(frozen=True)
 class GenomeSafetyResult:
-    """Deterministic safety result for a genome over all configured safety classes."""
+    """Summarize all safety classes for one genome."""
 
     state: SafetyState
     class_results: tuple[SafetyClassResult, ...]
 
     def __post_init__(self) -> None:
-        """Freeze the complete set of class results."""
+        """Normalize enum and tuple fields."""
+        object.__setattr__(self, "state", SafetyState(self.state))
         object.__setattr__(self, "class_results", tuple(self.class_results))
 
     @classmethod
-    def from_class_results(cls, class_results: tuple[SafetyClassResult, ...]) -> GenomeSafetyResult:
-        """Construct a result whose state is derived only from required class outcomes."""
-        frozen_results = tuple(class_results)
-        return cls(state=aggregate_safety_state(frozen_results), class_results=frozen_results)
+    def from_class_results(cls, class_results: tuple[SafetyClassResult, ...]) -> "GenomeSafetyResult":
+        """Build a genome result from class results."""
+        results = tuple(class_results)
+        return cls(aggregate_safety_state(results), results)
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the genome-level safety result."""
+        """Serialize the genome result."""
         return {
             "state": self.state.value,
             "class_results": [result.to_dict() for result in self.class_results],
         }
 
 
-_KNOWN_SEQUENCE_CLASSES = frozenset({"amr", "toxin", "lysogeny"})
-_POLICY_KEYS = frozenset(
-    {
-        "schema_version",
-        "policy_id",
-        "regulatory_basis",
-        "host_scope",
-        "required_sequence_classes",
-        "bacterial_replication_profile",
-        "archaeal_only_profile",
-        "failure_policy",
-    }
-)
-_REGULATORY_BASIS_KEYS = frozenset(
-    {"label", "source", "source_status", "source_status_as_of", "regulatory_compliance_claimed"}
-)
-_HOST_SCOPE_KEYS = frozenset({"allowed_replication_host_domains", "disallowed_endpoint"})
-_BACTERIAL_PROFILE_KEYS = frozenset({"required_sequence_classes", "strict_lytic_required"})
-_ARCHAEAL_PROFILE_KEYS = frozenset({"required_sequence_classes", "lysogeny"})
-_FAILURE_POLICY_KEYS = frozenset(
-    {
-        "missing_required_tool",
-        "missing_required_database",
-        "parser_schema_mismatch",
-        "incomplete_host_evidence",
-    }
-)
-
-
-def _strict_mapping(value: object, *, name: str, keys: frozenset[str]) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    actual_keys = frozenset(value)
-    if actual_keys != keys:
-        unknown = sorted(actual_keys - keys)
-        missing = sorted(keys - actual_keys)
-        raise ValueError(f"{name} keys do not match schema; unknown={unknown}, missing={missing}")
-    return value
-
-
-def _parse_required_sequence_classes(value: object, *, name: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{name} must be a list of sequence classes")
-    unknown = sorted(set(value) - _KNOWN_SEQUENCE_CLASSES)
-    if unknown:
-        raise ValueError(f"unknown required sequence class: {', '.join(unknown)}")
-    if len(value) != len(set(value)):
-        raise ValueError(f"duplicate required sequence class in {name}")
-    return tuple(sorted(value))
-
-
-def _validate_required_sequence_classes(value: object, *, name: str, required: frozenset[str]) -> tuple[str, ...]:
-    """Validate that a policy field contains exactly its schema-v1 required classes."""
-    classes = _parse_required_sequence_classes(value, name=name)
-    if classes != tuple(sorted(required)):
-        raise ValueError(f"{name} must match its schema-v1 required sequence classes")
-    return classes
-
-
-def _validate_regulatory_basis(regulatory_basis: Mapping[str, object]) -> None:
-    """Require the fixed regulatory metadata carried by schema version one."""
-    if (
-        type(regulatory_basis["regulatory_compliance_claimed"]) is not bool
-        or regulatory_basis["regulatory_compliance_claimed"] is not False
-    ):
-        raise ValueError("regulatory_compliance_claimed must be false in schema version 1")
-    if (
-        not isinstance(regulatory_basis["label"], str)
-        or regulatory_basis["label"] != "EMA-derived sequence-design safety gate"
-        or not isinstance(regulatory_basis["source"], str)
-        or regulatory_basis["source"] != "EMA/CHMP/BWP/1/2024"
-        or not isinstance(regulatory_basis["source_status"], str)
-        or regulatory_basis["source_status"] != "draft"
-        or type(regulatory_basis["source_status_as_of"]) is not date
-        or regulatory_basis["source_status_as_of"] != date(2026, 8, 7)
-    ):
-        raise ValueError("regulatory_basis must match schema version 1")
-
-
-def _json_safe(value: object) -> object:
-    """Recursively make parsed YAML values immutable and JSON serializable."""
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return MappingProxyType({str(key): _json_safe(item) for key, item in value.items()})
-    if isinstance(value, list):
-        return tuple(_json_safe(item) for item in value)
-    return value
-
-
-def _plain(value: object) -> object:
-    """Recursively convert immutable policy values into JSON-native containers."""
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [_plain(item) for item in value]
-    return value
-
-
 @dataclass(frozen=True)
 class PhageSafetyPolicy:
-    """Validated schema-version-one policy with deterministic serialization."""
+    """Define the sequence classes required by the safety screen."""
 
-    schema_version: int
     policy_id: str
-    regulatory_basis: Mapping[str, object]
-    host_scope: Mapping[str, object]
     required_sequence_classes: tuple[str, ...]
-    bacterial_replication_profile: Mapping[str, object]
-    archaeal_only_profile: Mapping[str, object]
-    failure_policy: Mapping[str, object]
+    bacterial_required_sequence_classes: tuple[str, ...]
+    failure_policy: Mapping[str, str]
 
-    def __post_init__(self) -> None:
-        """Freeze policy mappings and sort its required classes."""
-        for name in (
-            "regulatory_basis",
-            "host_scope",
-            "bacterial_replication_profile",
-            "archaeal_only_profile",
-            "failure_policy",
-        ):
-            object.__setattr__(self, name, _json_safe(dict(getattr(self, name))))
-        object.__setattr__(self, "required_sequence_classes", tuple(sorted(self.required_sequence_classes)))
 
-    def to_dict(self) -> dict[str, object]:
-        """Return the normalized schema-version-one policy mapping."""
-        host_scope = _plain(self.host_scope)
-        bacterial_profile = _plain(self.bacterial_replication_profile)
-        archaeal_profile = _plain(self.archaeal_only_profile)
-        assert isinstance(host_scope, dict)
-        assert isinstance(bacterial_profile, dict)
-        assert isinstance(archaeal_profile, dict)
-        host_scope["allowed_replication_host_domains"] = sorted(host_scope["allowed_replication_host_domains"])
-        bacterial_profile["required_sequence_classes"] = sorted(bacterial_profile["required_sequence_classes"])
-        archaeal_profile["required_sequence_classes"] = sorted(archaeal_profile["required_sequence_classes"])
-        return {
-            "schema_version": self.schema_version,
-            "policy_id": self.policy_id,
-            "regulatory_basis": _plain(self.regulatory_basis),
-            "host_scope": host_scope,
-            "required_sequence_classes": list(self.required_sequence_classes),
-            "bacterial_replication_profile": bacterial_profile,
-            "archaeal_only_profile": archaeal_profile,
-            "failure_policy": _plain(self.failure_policy),
-        }
-
-    @property
-    def canonical_json(self) -> str:
-        """Return a stable representation suitable for provenance records."""
-        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
-
-    @property
-    def sha256(self) -> str:
-        """Return the SHA-256 digest of :attr:`canonical_json`."""
-        return hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+def _classes(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{label} must be a nonempty list")
+    unknown = set(value) - {"amr", "toxin", "lysogeny"}
+    if unknown or len(value) != len(set(value)):
+        raise ValueError(f"{label} contains unknown or duplicate classes")
+    return tuple(value)
 
 
 def load_phage_safety_policy(path: str | Path) -> PhageSafetyPolicy:
-    """Load and strictly validate a schema-version-one phage safety policy."""
+    """Load and validate a phage safety policy."""
     raw = yaml.safe_load(Path(path).read_text())
     if not isinstance(raw, dict):
-        raise ValueError("policy must be a mapping")
-    if type(raw.get("schema_version")) is not int or raw.get("schema_version") != 1:
-        raise ValueError(f"unsupported policy schema version: {raw.get('schema_version')}")
-    policy = _strict_mapping(raw, name="policy", keys=_POLICY_KEYS)
-    if not isinstance(policy["policy_id"], str) or policy["policy_id"] != "phage-sequence-safety-v1":
-        raise ValueError("policy_id must match schema version 1")
-
-    regulatory_basis = _strict_mapping(
-        policy["regulatory_basis"], name="regulatory_basis", keys=_REGULATORY_BASIS_KEYS
+        raise ValueError("safety policy must be a mapping")
+    policy_id = raw.get("policy_id")
+    if not isinstance(policy_id, str) or not policy_id:
+        raise ValueError("safety policy requires policy_id")
+    bacterial = raw.get("bacterial_replication_profile")
+    failures = raw.get("failure_policy")
+    if not isinstance(bacterial, dict) or not isinstance(failures, dict):
+        raise ValueError("safety policy lacks bacterial or failure behavior")
+    required = _classes(raw.get("required_sequence_classes"), "required_sequence_classes")
+    bacterial_required = _classes(
+        bacterial.get("required_sequence_classes"),
+        "bacterial_replication_profile.required_sequence_classes",
     )
-    host_scope = _strict_mapping(policy["host_scope"], name="host_scope", keys=_HOST_SCOPE_KEYS)
-    bacterial_profile = _strict_mapping(
-        policy["bacterial_replication_profile"],
-        name="bacterial_replication_profile",
-        keys=_BACTERIAL_PROFILE_KEYS,
-    )
-    archaeal_profile = _strict_mapping(
-        policy["archaeal_only_profile"], name="archaeal_only_profile", keys=_ARCHAEAL_PROFILE_KEYS
-    )
-    failure_policy = _strict_mapping(policy["failure_policy"], name="failure_policy", keys=_FAILURE_POLICY_KEYS)
-
-    _validate_regulatory_basis(regulatory_basis)
-
-    if not isinstance(host_scope["allowed_replication_host_domains"], list) or not all(
-        isinstance(domain, str) for domain in host_scope["allowed_replication_host_domains"]
-    ):
-        raise ValueError("allowed_replication_host_domains must be a list of host domains")
-    if (
-        set(host_scope["allowed_replication_host_domains"]) != {"BACTERIA", "ARCHAEA", "BACTERIA_AND_ARCHAEA"}
-        or len(host_scope["allowed_replication_host_domains"]) != 3
-    ):
-        raise ValueError("allowed_replication_host_domains must match schema version 1")
-    if (
-        not isinstance(host_scope["disallowed_endpoint"], str)
-        or host_scope["disallowed_endpoint"] != "increased_eukaryotic_replication"
-    ):
-        raise ValueError("disallowed_endpoint must match schema version 1")
-    if (
-        type(bacterial_profile["strict_lytic_required"]) is not bool
-        or bacterial_profile["strict_lytic_required"] is not True
-    ):
-        raise ValueError("strict_lytic_required must be true in schema version 1")
-    if not isinstance(archaeal_profile["lysogeny"], str) or archaeal_profile["lysogeny"] != "informational":
-        raise ValueError("archaeal_only_profile lysogeny must be informational")
-    if any(value != SafetyState.INDETERMINATE.value for value in failure_policy.values()):
-        raise ValueError("failure_policy values must be INDETERMINATE")
-
-    return PhageSafetyPolicy(
-        schema_version=policy["schema_version"],
-        policy_id=policy["policy_id"],
-        regulatory_basis=regulatory_basis,
-        host_scope=host_scope,
-        required_sequence_classes=_validate_required_sequence_classes(
-            policy["required_sequence_classes"], name="required_sequence_classes", required=frozenset({"amr", "toxin"})
-        ),
-        bacterial_replication_profile={
-            **bacterial_profile,
-            "required_sequence_classes": _validate_required_sequence_classes(
-                bacterial_profile["required_sequence_classes"],
-                name="bacterial_replication_profile.required_sequence_classes",
-                required=frozenset({"amr", "toxin", "lysogeny"}),
-            ),
-        },
-        archaeal_only_profile={
-            **archaeal_profile,
-            "required_sequence_classes": _validate_required_sequence_classes(
-                archaeal_profile["required_sequence_classes"],
-                name="archaeal_only_profile.required_sequence_classes",
-                required=frozenset({"amr", "toxin"}),
-            ),
-        },
-        failure_policy=failure_policy,
-    )
+    if not {"amr", "toxin"} <= set(required) or not {"amr", "toxin", "lysogeny"} <= set(bacterial_required):
+        raise ValueError("safety policy omits a required safety class")
+    if any(value != SafetyState.INDETERMINATE.value for value in failures.values()):
+        raise ValueError("missing evidence must remain INDETERMINATE")
+    return PhageSafetyPolicy(policy_id, required, bacterial_required, failures)

@@ -63,7 +63,7 @@ def test_normalize_prompted_fasta_strips_control_tokens_and_rejects_non_dna(tmp_
         normalize_prompted_fasta(invalid, tmp_path / "unused.fna")
 
 
-def test_measure_novelty_normalizes_target_reference_before_search_and_hashing(tmp_path, monkeypatch):
+def test_measure_novelty_normalizes_target_reference_before_search_and_keying(tmp_path, monkeypatch):
     reference = tmp_path / "reference.fna"
     reference.write_text(">reference\n+~ACGT\n")
     sft = tmp_path / "sft.fna"

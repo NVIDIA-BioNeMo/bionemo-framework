@@ -15,13 +15,21 @@
 
 """Tests for ``bionemo.evo2_phage_gen.generation``."""
 
+import csv
 import json
 
+import pytest
+import torch
+
 from bionemo.evo2_phage_gen.generation import (
+    collect_sft_likelihoods,
     ensure_paper_useful_rl_prompt_files,
+    finalize_ranked_rollout,
     infer_jsonl_to_fasta,
     phix174_prompts,
     write_prompt_sweep_jsonl,
+    write_rl_prompt_bank,
+    write_sft_likelihood_fasta,
 )
 
 
@@ -58,6 +66,28 @@ def test_ensure_paper_useful_rl_prompt_files_materializes_openai_jsonl(tmp_path)
     ]
 
 
+def test_write_rl_prompt_bank_supports_alternating_and_grouped_mixtures(tmp_path):
+    alternating = write_rl_prompt_bank(
+        tmp_path / "train.jsonl",
+        prompt_lengths=[16, 24],
+        repeats_per_length=2,
+        id_prefix="train",
+    )
+    grouped = write_rl_prompt_bank(
+        tmp_path / "validation.jsonl",
+        prompt_lengths=[16, 24],
+        repeats_per_length=2,
+        id_prefix="validation",
+        grouped=True,
+    )
+
+    alternating_records = [json.loads(line) for line in alternating.read_text().splitlines()]
+    grouped_records = [json.loads(line) for line in grouped.read_text().splitlines()]
+    assert [len(row["messages"][0]["content"]) - 2 for row in alternating_records] == [16, 24, 16, 24]
+    assert [len(row["messages"][0]["content"]) - 2 for row in grouped_records] == [16, 16, 24, 24]
+    assert len({row["id"] for row in alternating_records + grouped_records}) == 8
+
+
 def test_write_prompt_sweep_jsonl_repeats_prompts(tmp_path):
     """Prompt JSONL files should be ready for ``infer_evo2 --prompt-file``."""
     paths = write_prompt_sweep_jsonl(tmp_path, prompt_lengths=[4, 6], num_prompts=2, id_prefix="test")
@@ -84,3 +114,165 @@ def test_infer_jsonl_to_fasta_prepends_prompt_and_trims_eos(tmp_path):
     infer_jsonl_to_fasta([input_jsonl], output_fasta)
 
     assert output_fasta.read_text() == (">seq1|prompt4_temp0.7\nGAGTACGT\n>seq2|prompt4_temp0.7\nGAGTTGCA\n")
+
+
+def test_sft_likelihood_outputs_rank_every_design_by_mean_nucleotide_score(tmp_path):
+    generated = tmp_path / "generated.fasta"
+    generated.write_text(">high\nACGT\n>accepted-a\nTGCA\n>accepted-b\nAAAA\n")
+    scoring_fasta = write_sft_likelihood_fasta(generated, tmp_path / "scoring.fasta")
+    assert scoring_fasta.read_text() == ">high\n+~ACGT\n>accepted-a\n+~TGCA\n>accepted-b\n+~AAAA\n"
+
+    predictions = tmp_path / "predictions"
+    predictions.mkdir()
+    (predictions / "seq_idx_map.json").write_text(json.dumps({"accepted-a": 0, "accepted-b": 1, "high": 2}))
+    torch.save(
+        {
+            "seq_idx": torch.tensor([0, 2]),
+            "log_probs_seqs": torch.tensor(
+                [
+                    [-9.0, -0.2, -0.2, -0.2, -0.2],
+                    [-9.0, -0.1, -0.1, -0.1, -0.1],
+                ]
+            ),
+            "loss_mask": torch.ones((2, 5), dtype=torch.bool),
+        },
+        predictions / "predictions__rank_0__dp_rank_0.pt",
+    )
+    torch.save(
+        {
+            "seq_idx": torch.tensor([1]),
+            "log_probs_seqs": torch.tensor([[-9.0, -0.3, -0.3, -0.3, -0.3]]),
+            "loss_mask": torch.ones((1, 5), dtype=torch.bool),
+        },
+        predictions / "predictions__rank_1__dp_rank_1.pt",
+    )
+
+    score_csv = collect_sft_likelihoods(predictions, generated, tmp_path / "scores.csv")
+    with score_csv.open() as handle:
+        score_rows = list(csv.DictReader(handle))
+    assert [row["record_id"] for row in score_rows] == ["high", "accepted-a", "accepted-b"]
+    assert [int(row["likelihood_rank"]) for row in score_rows] == [1, 2, 3]
+    assert [float(row["mean_log_probability_per_nucleotide"]) for row in score_rows] == pytest.approx(
+        [-0.1, -0.2, -0.3]
+    )
+    assert [float(row["total_log_probability"]) for row in score_rows] == pytest.approx([-0.4, -0.8, -1.2])
+
+    safety = tmp_path / "safety.json"
+    safety.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {"record_id": "high", "state": "FAIL"},
+                    {"record_id": "accepted-a", "state": "PASS"},
+                    {"record_id": "accepted-b", "state": "PASS"},
+                ]
+            }
+        )
+    )
+    target = tmp_path / "target.fasta"
+    target.write_text(">renamed-a\nTGCA\n>renamed-b\nAAAA\n")
+    report = tmp_path / "final-designs.json"
+    accepted = tmp_path / "accepted.fasta"
+    summary = tmp_path / "SUMMARY.md"
+
+    finalize_ranked_rollout(
+        generated,
+        safety,
+        target,
+        score_csv,
+        report,
+        accepted,
+        summary,
+        model_checkpoint="selected-sft/iter_0005600",
+    )
+
+    payload = json.loads(report.read_text())
+    assert payload["counts"] == {
+        "generated": 3,
+        "likelihood_scored": 3,
+        "safety_pass": 2,
+        "target_profile_pass": 2,
+        "accepted": 2,
+    }
+    assert payload["ranking"]["primary_score"] == "mean_log_probability_per_nucleotide"
+    assert [row["record_id"] for row in payload["records"]] == ["high", "accepted-a", "accepted-b"]
+    assert [row["accepted_rank"] for row in payload["records"]] == [None, 1, 2]
+    assert accepted.read_text() == ">accepted-a\nTGCA\n>accepted-b\nAAAA\n"
+    assert "within-protocol ranking signal" in summary.read_text()
+
+
+def test_final_rollout_does_not_apply_likelihood_order_when_length_confounded(tmp_path):
+    generated = tmp_path / "generated.fasta"
+    generated.write_text(">short\nA\n>medium\nAC\n>long\nACG\n")
+    scores = tmp_path / "scores.csv"
+    scores.write_text(
+        "likelihood_rank,record_id,length_nt,scored_nucleotides,total_log_probability,mean_log_probability_per_nucleotide\n"
+        "1,long,3,3,-0.3,-0.1\n"
+        "2,medium,2,2,-0.4,-0.2\n"
+        "3,short,1,1,-0.3,-0.3\n"
+    )
+    safety = tmp_path / "safety.json"
+    safety.write_text(
+        json.dumps(
+            {"records": [{"record_id": record_id, "state": "PASS"} for record_id in ("short", "medium", "long")]}
+        )
+    )
+    target = tmp_path / "target.fasta"
+    target.write_text(generated.read_text())
+    report = tmp_path / "final-designs.json"
+    accepted = tmp_path / "accepted.fasta"
+    summary = tmp_path / "SUMMARY.md"
+
+    finalize_ranked_rollout(
+        generated,
+        safety,
+        target,
+        scores,
+        report,
+        accepted,
+        summary,
+        model_checkpoint="selected-sft",
+    )
+
+    payload = json.loads(report.read_text())
+    diagnostic = payload["ranking"]["residual_length_association"]
+    assert diagnostic["spearman_rho"] == pytest.approx(1.0)
+    assert diagnostic["strong_correlation_threshold_abs_rho"] == 0.5
+    assert not payload["ranking"]["applied_to_accepted_candidate_order"]
+    assert accepted.read_text() == ">short\nA\n>medium\nAC\n>long\nACG\n"
+    assert "not applied" in summary.read_text()
+
+
+def test_final_rollout_reports_uninformative_constant_scores_without_nan(tmp_path):
+    generated = tmp_path / "generated.fasta"
+    generated.write_text(">short\nA\n>long\nACG\n")
+    scores = tmp_path / "scores.csv"
+    scores.write_text(
+        "likelihood_rank,record_id,length_nt,scored_nucleotides,total_log_probability,mean_log_probability_per_nucleotide\n"
+        "1,short,1,1,-0.2,-0.2\n"
+        "2,long,3,3,-0.6,-0.2\n"
+    )
+    safety = tmp_path / "safety.json"
+    safety.write_text(
+        json.dumps({"records": [{"record_id": record_id, "state": "PASS"} for record_id in ("short", "long")]})
+    )
+    target = tmp_path / "target.fasta"
+    target.write_text(generated.read_text())
+    report = tmp_path / "report" / "final-designs.json"
+
+    finalize_ranked_rollout(
+        generated,
+        safety,
+        target,
+        scores,
+        report,
+        tmp_path / "report" / "accepted.fasta",
+        tmp_path / "report" / "SUMMARY.md",
+        model_checkpoint="selected-sft",
+    )
+
+    payload = json.loads(report.read_text(), parse_constant=lambda value: pytest.fail(f"unexpected {value}"))
+    diagnostic = payload["ranking"]["residual_length_association"]
+    assert diagnostic["spearman_rho"] is None
+    assert diagnostic["p_value"] is None
+    assert not diagnostic["strong_correlation"]

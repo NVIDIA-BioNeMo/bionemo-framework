@@ -121,6 +121,12 @@ docker build -t esm2_recipe .
 docker run --rm -it --gpus all esm2_recipe python train.py
 ```
 
+For a realized multi-stage computational biology example, see the
+[agent-free PhiX174 whole-genome SFT and GDPO workflow](recipes/evo2_phage_gen/examples/README.md).
+It provides one top-level command for an 8×H100 run, with public-input preparation, current safety
+screens, checkpoint selection, monitoring, generation, selected-SFT likelihood ranking with a
+residual length-bias check, and final reporting.
+
 ## Setting Up the Development Environment
 
 1. Install pre-commit hooks:

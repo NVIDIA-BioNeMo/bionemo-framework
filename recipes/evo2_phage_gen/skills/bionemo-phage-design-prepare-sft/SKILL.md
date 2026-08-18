@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-prepare-sft
 description: Use when phage genomes must be deduplicated, clustered, split without near-duplicate leakage, and converted into explicit train, validation, and test inputs for Evo 2 supervised fine-tuning.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Prepare Phage SFT

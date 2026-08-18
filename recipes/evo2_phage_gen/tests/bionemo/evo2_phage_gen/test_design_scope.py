@@ -245,10 +245,10 @@ def test_host_evidence_normalizes_string_domain_values():
     ("RefSeq", "GenBank", "PhagesDB", "metagenomic collection", "model-generated candidate"),
 )
 def test_prokaryotic_host_evidence_is_source_neutral(source):
-    """Traceable origin labels must not act as a natural-origin attestation gate."""
+    """An origin label alone must not determine biological eligibility."""
     evidence = HostEvidence(
         source=source,
-        source_version="sequence-or-design-manifest-sha256",
+        source_version="user-recorded-origin",
         replication_host_domains=frozenset({HostDomain.BACTERIA}),
         confirmed=True,
     )

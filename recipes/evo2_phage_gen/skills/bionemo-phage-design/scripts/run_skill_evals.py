@@ -451,6 +451,7 @@ def build_commands(
             codex,
             "exec",
             "--ephemeral",
+            "--skip-git-repo-check",
             "--json",
             "-s",
             sandbox,
@@ -543,21 +544,7 @@ def _collect_observed_models(value: Any, models: set[str]) -> None:
             _collect_observed_models(item, models)
 
 
-_BUNDLED_LITERATURE_PATH_RE = re.compile(
-    r"skills/bionemo-phage-design/assets/literature/"
-    r"[A-Za-z0-9._-]+/(?:MANIFEST\.json|paper\.md|supplement\.md)"
-)
-_READ_COMMAND_RE = re.compile(r"(?:^|[\s\"'])(?:awk|cat|grep|head|rg|sed|tail)(?:\s|$)")
-_READ_TOOL_NAMES = {"grep", "read"}
 _TOOL_CALL_TYPES = {"function_call", "tool_call", "tool_use"}
-_EMA_GUIDELINE_PATH_RE = re.compile(
-    r"skills/bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline\.md"
-)
-
-
-def _bundled_literature_paths(value: object) -> set[str]:
-    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
-    return set(_BUNDLED_LITERATURE_PATH_RE.findall(text.replace("\\", "/")))
 
 
 def _normalized_web_tool_type(value: object) -> str | None:
@@ -573,11 +560,6 @@ def _normalized_web_tool_type(value: object) -> str | None:
     return None
 
 
-def _local_source_paths(value: object) -> set[str]:
-    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
-    return _bundled_literature_paths(text) | set(_EMA_GUIDELINE_PATH_RE.findall(text.replace("\\", "/")))
-
-
 def _trace_call_key(kind: str, value: dict[str, Any]) -> str:
     identifier = value.get("id") or value.get("tool_use_id") or value.get("call_id")
     if isinstance(identifier, str) and identifier:
@@ -588,50 +570,30 @@ def _trace_call_key(kind: str, value: dict[str, Any]) -> str:
     return f"{kind}:{_sha256_text(json.dumps(payload, sort_keys=True, default=str))}"
 
 
-def _collect_trace_source_evidence(
+def _collect_trace_web_evidence(
     value: object,
     *,
-    local_reads: set[str],
     web_calls: set[str],
     web_types: set[str],
 ) -> None:
     if isinstance(value, dict):
         event_type = value.get("type")
-        if event_type == "command_execution":
-            command = value.get("command")
-            if isinstance(command, str) and _READ_COMMAND_RE.search(command) and "rg --files" not in command:
-                local_reads.update(_local_source_paths(command))
-
         direct_web_type = _normalized_web_tool_type(event_type)
         if direct_web_type is not None:
             web_types.add(direct_web_type)
             web_calls.add(_trace_call_key(direct_web_type, value))
 
         if event_type in _TOOL_CALL_TYPES:
-            tool_name = value.get("name")
-            web_tool_type = _normalized_web_tool_type(tool_name)
+            web_tool_type = _normalized_web_tool_type(value.get("name"))
             if web_tool_type is not None:
                 web_types.add(web_tool_type)
                 web_calls.add(_trace_call_key(web_tool_type, value))
-            normalized_name = re.sub(r"[^a-z0-9]+", "", str(tool_name).casefold())
-            if normalized_name in _READ_TOOL_NAMES:
-                local_reads.update(_local_source_paths(value.get("input", {})))
 
         for item in value.values():
-            _collect_trace_source_evidence(
-                item,
-                local_reads=local_reads,
-                web_calls=web_calls,
-                web_types=web_types,
-            )
+            _collect_trace_web_evidence(item, web_calls=web_calls, web_types=web_types)
     elif isinstance(value, list):
         for item in value:
-            _collect_trace_source_evidence(
-                item,
-                local_reads=local_reads,
-                web_calls=web_calls,
-                web_types=web_types,
-            )
+            _collect_trace_web_evidence(item, web_calls=web_calls, web_types=web_types)
 
 
 def _trace_summary(trace: str, expected_skill: str | None, plugin_name: str | None = None) -> dict[str, Any]:
@@ -641,7 +603,6 @@ def _trace_summary(trace: str, expected_skill: str | None, plugin_name: str | No
     total_cost_usd: float | None = None
     cost_reported = False
     model_usage: dict[str, Any] = {}
-    local_reads: set[str] = set()
     web_calls: set[str] = set()
     web_types: set[str] = set()
     for line in trace.splitlines():
@@ -661,12 +622,7 @@ def _trace_summary(trace: str, expected_skill: str | None, plugin_name: str | No
             if isinstance(usage, dict):
                 model_usage.update(usage)
         _collect_observed_models(event, observed_models)
-        _collect_trace_source_evidence(
-            event,
-            local_reads=local_reads,
-            web_calls=web_calls,
-            web_types=web_types,
-        )
+        _collect_trace_web_evidence(event, web_calls=web_calls, web_types=web_types)
     normalized_trace = trace.replace("\\", "/")
     skill_marker = f"skills/{expected_skill}/SKILL.md" if expected_skill else None
     plugin_marker = f"{plugin_name}:{expected_skill}" if plugin_name and expected_skill else None
@@ -678,10 +634,6 @@ def _trace_summary(trace: str, expected_skill: str | None, plugin_name: str | No
         "expected_skill_path_observed": bool(skill_marker and skill_marker in normalized_trace),
         "expected_plugin_skill_observed": bool(plugin_marker and plugin_marker in trace),
         "observed_models": sorted(observed_models),
-        "local_source_read_paths": sorted(local_reads),
-        "bundled_literature_read_paths": sorted(
-            path for path in local_reads if _BUNDLED_LITERATURE_PATH_RE.fullmatch(path)
-        ),
         "web_tool_calls_observed": bool(web_calls),
         "web_tool_call_count": len(web_calls),
         "web_tool_call_types": sorted(web_types),

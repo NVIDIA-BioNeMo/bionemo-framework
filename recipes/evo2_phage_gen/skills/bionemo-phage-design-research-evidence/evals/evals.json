@@ -29,11 +29,11 @@
     },
     {
       "id": "bionemo-phage-design-research-evidence-003-use-documents-as-needed",
-      "prompt": "Briefly answer two questions: what does supervised fine-tuning mean in ordinary machine-learning usage, and how did the bundled Evo 2 phage study construct its target-conditioned training examples? Use source material only where it helps.",
-      "expected_output": "A concise answer that uses common knowledge for the general concept and the relevant bundled study for its specific method.",
+      "prompt": "Briefly answer two questions: what does supervised fine-tuning mean in ordinary machine-learning usage, and how did the Evo 2 phage study construct its target-conditioned training examples? Use source material only where it helps.",
+      "expected_output": "A concise answer that uses common knowledge for the general concept and the relevant public study for its specific method.",
       "assertions": [
         "The general explanation of supervised fine-tuning does not pretend that reading a paper is necessary for common knowledge.",
-        "The study-specific answer consults and cites the relevant bundled paper or supplement rather than guessing from general practice.",
+        "The study-specific answer consults and cites the relevant paper or supplement rather than guessing from general practice.",
         "The response distinguishes the historical study method from the current recipe and does not inspect unrelated documents.",
         "It answers the question directly without creating an unrelated project workflow."
       ],

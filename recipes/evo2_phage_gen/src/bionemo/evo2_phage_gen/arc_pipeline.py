@@ -468,7 +468,7 @@ def _git_head(path: Path) -> str | None:
 
 
 def _assert_arc_source_revision(source_dir: Path, expected_revision: str) -> None:
-    """Fail if the Arc source directory is not the pinned revision for the maintained patch."""
+    """Fail when the Arc source is incompatible with the maintained patch."""
     actual_revision = _git_head(source_dir)
     if actual_revision is None:
         raise RuntimeError(

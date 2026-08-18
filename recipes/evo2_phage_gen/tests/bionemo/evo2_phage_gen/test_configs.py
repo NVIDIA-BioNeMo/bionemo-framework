@@ -30,9 +30,6 @@ def test_config_directory_contains_only_supported_runtime_configs():
         "arc_genome_design_filtering_local.yaml",
         "gdpo_phage_megatron.yaml",
         "grpo_phage_megatron.yaml",
-        "nemo_rl_defaults/grpo_math_1B.yaml",
-        "nemo_rl_defaults/grpo_math_1B_megatron.yaml",
-        "phage_safety_assets.yaml",
         "phage_safety_policy.yaml",
         "phage_safety_reference_controls.yaml",
         "sft_microviridae_dataset.yaml",
@@ -110,7 +107,7 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
 
 
 def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
-    """GDPO should return macro-objective rewards and pin MMseqs clustering semantics."""
+    """GDPO should return macro-objective rewards and use 99% MMseqs diversity."""
     config_path = RECIPE_ROOT / "configs" / "gdpo_phage_megatron.yaml"
     config = yaml.safe_load(config_path.read_text())
     env_config = config["env"]["phage_qc"]
@@ -164,7 +161,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["external_qc"]["timeout_seconds"] == 1800
     assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 12
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
-    assert config["run_id"].startswith("phage_gdpo_")
+    assert config["run_id"] == "phix174_gdpo"
     assert mmseqs_config["work_dir"] == "data/checkpoints/${run_id}_mmseqs_cluster_diversity"
     assert {key: value for key, value in mmseqs_config.items() if key != "work_dir"} == {
         "enabled": True,
@@ -178,7 +175,9 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "threads": 16,
         "verbosity": 0,
     }
-    assert config["grpo"]["num_generations_per_prompt"] == 96
+    assert config["grpo"]["num_prompts_per_step"] == 2
+    assert config["grpo"]["num_generations_per_prompt"] == 48
+    assert config["grpo"]["num_prompts_per_step"] * config["grpo"]["num_generations_per_prompt"] == 96
     assert config["grpo"]["val_at_start"] is False
     assert config["grpo"]["val_at_end"] is True
     assert config["policy"]["train_global_batch_size"] == 96
@@ -186,11 +185,11 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["policy"]["generation_batch_size"] == 96
     assert config["policy"]["logprob_batch_size"] == 1
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
-    assert mcore_generation_config["prompt_batch_size"] == 96
-    assert mcore_generation_config["max_requests"] == 96
-    assert "lr1e-6-kl0.001" in config["logger"]["wandb"]["name"]
-    assert "batched96" in config["logger"]["wandb"]["name"]
-    assert config["logger"]["wandb"]["name"].startswith("gdpo-phage")
+    assert mcore_generation_config["prompt_batch_size"] == 12
+    assert mcore_generation_config["max_requests"] == 12
+    assert config["logger"]["wandb_enabled"] is False
+    assert config["logger"]["wandb"]["name"] == "phix174-gdpo"
+    assert config["cluster"] == {"gpus_per_node": 8, "num_nodes": 1}
 
 
 def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():
@@ -216,8 +215,8 @@ def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():
         for path_key in (
             "policy_path",
             "asset_manifest_path",
-            "diamond_tool_pin_path",
-            "mmseqs_tool_pin_path",
+            "diamond_bin",
+            "mmseqs_bin",
             "work_dir",
         ):
             assert isinstance(safety[path_key], str) and safety[path_key], (config_path.name, path_key)

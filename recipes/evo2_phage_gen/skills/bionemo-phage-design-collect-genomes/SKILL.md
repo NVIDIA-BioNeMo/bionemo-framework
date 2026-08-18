@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-collect-genomes
 description: Use when an Evo 2 phage SFT project needs a reproducible Microviridae or new phage genome collection from NCBI, paper-linked repositories, supplements, or other public biological databases.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Collect Phage Genomes

@@ -5,7 +5,7 @@
 
 defaults: "grpo_phage_megatron.yaml"
 
-run_id: "phage_gdpo_base_microviridae_batched96_stockgdpo_fullfalse_decodefix_clusterfix_gdpo12"
+run_id: "phix174_gdpo"
 
 checkpointing:
   checkpoint_dir: "data/checkpoints/${run_id}"
@@ -18,8 +18,8 @@ checkpointing:
 
 grpo:
   max_num_epochs: 500
-  num_prompts_per_step: 1
-  num_generations_per_prompt: 96
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 48
   max_num_steps: 500
   val_period: 10
   val_batch_size: 96
@@ -50,22 +50,23 @@ policy:
   generation_batch_size: 96
   logprob_batch_size: 1
   megatron_cfg:
+    tensor_model_parallel_size: 1
     optimizer:
       lr: 1.0e-6
       min_lr: 1.0e-7
     scheduler:
       lr_warmup_init: 1.0e-7
   generation:
-    max_new_tokens: 5989
+    max_new_tokens: 5976
     temperature: 1.0
     top_p: 1.0
     top_k: 4
     mcore_generation_config:
+      max_requests: 12
+      prompt_batch_size: 12
       cuda_graph_impl: "local"
       inference_cuda_graph_scope: "block"
       use_cuda_graphs_for_non_decode_steps: true
-      max_requests: 96
-      prompt_batch_size: 96
       enable_chunked_prefill: false
       generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
       generation_adapter_config:
@@ -76,10 +77,11 @@ policy:
 
 data:
   train:
-    data_path: "data/phage_prompts_paper_useful_rl.jsonl"
+    data_path: "data/phix174_rl_train_prefix16_24.jsonl"
+  shuffle: false
   validation:
     dataset_name: "openai_format"
-    data_path: "data/phage_prompts_paper_useful_rl_validation_prompt10_96.jsonl"
+    data_path: "data/phix174_rl_validation_prefix16_24.jsonl"
     env_name: "phage_qc"
     prompt_file: null
     system_prompt_file: null
@@ -185,7 +187,11 @@ env:
 
 logger:
   log_dir: "data/checkpoints/${run_id}_logs"
-  wandb_enabled: true
+  wandb_enabled: false
   wandb:
     project: "evo2_phage_design_rl_gdpo"
-    name: "gdpo-phage-base-microviridae-rl500-full-qc-mmseqs-dustmask-lr1e-6-kl0.001-batched96-stockgdpo-fullfalse-decodefix-clusterfix-gdpo12"
+    name: "phix174-gdpo"
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 1

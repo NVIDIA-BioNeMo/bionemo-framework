@@ -16,9 +16,13 @@
 """Utilities for paper-style Evo2 Microviridae generation replication."""
 
 import argparse
+import csv
 import json
+import math
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+
+from Bio import SeqIO
 
 from bionemo.evo2_phage_gen.qc import prompt_nucleotides as _prompt_nucleotides
 from bionemo.evo2_phage_gen.qc import trim_at_first_eos
@@ -61,6 +65,38 @@ def write_openai_prompt_jsonl(path: Path, prompts: Sequence[str]) -> Path:
     with path.open("w") as handle:
         for prompt in prompts:
             handle.write(json.dumps(_openai_prompt_record(prompt)) + "\n")
+    return path
+
+
+def write_rl_prompt_bank(
+    path: Path,
+    *,
+    prompt_lengths: Sequence[int],
+    repeats_per_length: int,
+    reference_start: str = PHIX174_REFERENCE_START,
+    prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
+    id_prefix: str = "rl-prompt",
+    grouped: bool = False,
+) -> Path:
+    """Write an equal-mixture prompt bank for NeMo-RL."""
+    if repeats_per_length <= 0:
+        raise ValueError("repeats_per_length must be positive")
+    prompts_by_length = phix174_prompts(reference_start, prompt_lengths, prompt_prefix=prompt_prefix)
+    if grouped:
+        order = [length for length in prompt_lengths for _ in range(repeats_per_length)]
+    else:
+        order = [length for _ in range(repeats_per_length) for length in prompt_lengths]
+    counters = dict.fromkeys(prompt_lengths, 0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as handle:
+        for length in order:
+            index = counters[length]
+            counters[length] += 1
+            record = {
+                "id": f"{id_prefix}-p{length}-{index:04d}",
+                **_openai_prompt_record(prompts_by_length[length]),
+            }
+            handle.write(json.dumps(record) + "\n")
     return path
 
 
@@ -145,6 +181,281 @@ def infer_jsonl_to_fasta(
     return output_fasta
 
 
+def _fasta_records(path: Path) -> list[tuple[str, str]]:
+    records = [(record.id, str(record.seq).upper()) for record in SeqIO.parse(path, "fasta")]
+    if not records or any(not record_id or not sequence for record_id, sequence in records):
+        raise ValueError(f"no complete FASTA records found: {path}")
+    ids = [record_id for record_id, _ in records]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"duplicate FASTA identifiers in {path}")
+    return records
+
+
+def write_sft_likelihood_fasta(
+    source_fasta: Path,
+    output_fasta: Path,
+    *,
+    prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
+) -> Path:
+    """Prepare generated genomes for conditional likelihood scoring by the SFT model."""
+    if not prompt_prefix:
+        raise ValueError("prompt_prefix must not be empty")
+    output_fasta.parent.mkdir(parents=True, exist_ok=True)
+    output_fasta.write_text(
+        "".join(
+            f">{record_id}\n{_wrap_fasta_sequence(prompt_prefix + sequence)}\n"
+            for record_id, sequence in _fasta_records(source_fasta)
+        )
+    )
+    return output_fasta
+
+
+def collect_sft_likelihoods(
+    prediction_dir: Path,
+    source_fasta: Path,
+    output_csv: Path,
+    *,
+    prefix_length: int = len(DEFAULT_PROMPT_PREFIX),
+) -> Path:
+    """Collect DP prediction shards and rank every genome by mean nucleotide log probability."""
+    import torch
+
+    if prefix_length < 1:
+        raise ValueError("prefix_length must be positive for an SFT-conditioned score")
+    records = _fasta_records(source_fasta)
+    sequence_by_id = dict(records)
+    index_map = {
+        name: int(index) for name, index in json.loads((prediction_dir / "seq_idx_map.json").read_text()).items()
+    }
+    id_by_index = {index: name for name, index in index_map.items()}
+    if len(id_by_index) != len(index_map):
+        raise ValueError("seq_idx_map contains duplicate indices")
+
+    predictions: dict[str, tuple[list[float], list[bool]]] = {}
+    prediction_files = sorted(prediction_dir.rglob("predictions__rank_*__dp_rank_*.pt"))
+    if not prediction_files:
+        raise ValueError(f"no prediction files found: {prediction_dir}")
+    for prediction_file in prediction_files:
+        payload = torch.load(prediction_file, map_location="cpu", weights_only=True)
+        required = {"seq_idx", "log_probs_seqs", "loss_mask"}
+        if not required <= payload.keys():
+            raise ValueError(f"missing per-token fields in {prediction_file}")
+        for sequence_index, log_probs, loss_mask in zip(
+            payload["seq_idx"], payload["log_probs_seqs"], payload["loss_mask"], strict=True
+        ):
+            index = int(sequence_index.item())
+            if index not in id_by_index:
+                raise ValueError(f"unknown sequence index {index} in {prediction_file}")
+            record_id = id_by_index[index]
+            if record_id in predictions:
+                raise ValueError(f"duplicate prediction for {record_id}")
+            predictions[record_id] = (
+                log_probs.detach().cpu().tolist(),
+                loss_mask.detach().cpu().tolist(),
+            )
+
+    expected_ids = set(sequence_by_id)
+    if set(predictions) != expected_ids:
+        missing = sorted(expected_ids - set(predictions))
+        extra = sorted(set(predictions) - expected_ids)
+        raise ValueError(f"prediction/FASTA mismatch: missing={missing}, extra={extra}")
+
+    rows = []
+    for record_id, sequence in records:
+        log_probs, loss_mask = predictions[record_id]
+        expected_valid = len(sequence) + prefix_length - 1
+        if (
+            expected_valid <= 0
+            or len(loss_mask) < expected_valid
+            or not all(loss_mask[:expected_valid])
+            or any(loss_mask[expected_valid:])
+        ):
+            raise ValueError(f"unexpected loss mask for {record_id}")
+        start = prefix_length - 1
+        nucleotide_log_probs = [float(value) for value in log_probs[start : start + len(sequence)]]
+        if len(nucleotide_log_probs) != len(sequence) or not all(
+            math.isfinite(value) for value in nucleotide_log_probs
+        ):
+            raise ValueError(f"incomplete nucleotide log probabilities for {record_id}")
+        total = sum(nucleotide_log_probs)
+        rows.append(
+            {
+                "record_id": record_id,
+                "length_nt": len(sequence),
+                "scored_nucleotides": len(nucleotide_log_probs),
+                "total_log_probability": total,
+                "mean_log_probability_per_nucleotide": total / len(nucleotide_log_probs),
+            }
+        )
+
+    rows.sort(key=lambda row: (-row["mean_log_probability_per_nucleotide"], row["record_id"]))
+    for rank, row in enumerate(rows, start=1):
+        row["likelihood_rank"] = rank
+    fieldnames = (
+        "likelihood_rank",
+        "record_id",
+        "length_nt",
+        "scored_nucleotides",
+        "total_log_probability",
+        "mean_log_probability_per_nucleotide",
+    )
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with output_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return output_csv
+
+
+def finalize_ranked_rollout(
+    generated_fasta: Path,
+    safety_manifest: Path,
+    target_fasta: Path,
+    likelihood_csv: Path,
+    output_json: Path,
+    accepted_fasta: Path,
+    summary_path: Path,
+    *,
+    model_checkpoint: str,
+) -> Path:
+    """Join likelihood and QC evidence, then rank accepted candidates without making a viability claim."""
+    from scipy.stats import spearmanr
+
+    from bionemo.evo2_phage_gen.calibration_novelty import canonical_circular_sequence
+
+    generated = _fasta_records(generated_fasta)
+    sequence_by_id = dict(generated)
+    generated_order = {record_id: index for index, (record_id, _) in enumerate(generated)}
+    safety_payload = json.loads(safety_manifest.read_text())
+    safety_by_id = {str(row["record_id"]): str(row["state"]) for row in safety_payload["records"]}
+    target_sequences = {canonical_circular_sequence(sequence) for _, sequence in _fasta_records(target_fasta)}
+    with likelihood_csv.open() as handle:
+        score_rows = list(csv.DictReader(handle))
+    score_ids = [row["record_id"] for row in score_rows]
+    if len(set(score_ids)) != len(score_ids) or set(score_ids) != set(sequence_by_id):
+        raise ValueError("likelihood table must contain each generated FASTA identifier exactly once")
+    score_rows.sort(key=lambda row: (-float(row["mean_log_probability_per_nucleotide"]), row["record_id"]))
+
+    lengths = [len(sequence) for _, sequence in generated]
+    score_by_id = {row["record_id"]: float(row["mean_log_probability_per_nucleotide"]) for row in score_rows}
+    scores_in_generation_order = [score_by_id[record_id] for record_id, _ in generated]
+    if len(set(lengths)) > 1 and len(set(scores_in_generation_order)) > 1:
+        correlation = spearmanr(lengths, scores_in_generation_order)
+        spearman_rho = float(correlation.statistic)
+        spearman_pvalue = float(correlation.pvalue)
+    else:
+        spearman_rho = None
+        spearman_pvalue = None
+    strong_length_association = spearman_rho is not None and abs(spearman_rho) >= 0.5
+    apply_likelihood_order = not strong_length_association
+    candidate_order = (
+        score_rows if apply_likelihood_order else sorted(score_rows, key=lambda row: generated_order[row["record_id"]])
+    )
+
+    accepted_ids: list[str] = []
+    accepted_rank_by_id: dict[str, int] = {}
+    duplicate_of_by_id: dict[str, str] = {}
+    accepted_canonical: dict[str, str] = {}
+    for score in candidate_order:
+        record_id = score["record_id"]
+        canonical = canonical_circular_sequence(sequence_by_id[record_id])
+        duplicate_of = accepted_canonical.get(canonical)
+        if duplicate_of is not None:
+            duplicate_of_by_id[record_id] = duplicate_of
+        if safety_by_id.get(record_id) == "PASS" and canonical in target_sequences and duplicate_of is None:
+            accepted_ids.append(record_id)
+            accepted_rank_by_id[record_id] = len(accepted_ids)
+            accepted_canonical[canonical] = record_id
+
+    report_rows = []
+    for likelihood_rank, score in enumerate(score_rows, start=1):
+        record_id = score["record_id"]
+        sequence = sequence_by_id[record_id]
+        canonical = canonical_circular_sequence(sequence)
+        report_rows.append(
+            {
+                "likelihood_rank": likelihood_rank,
+                "accepted_rank": accepted_rank_by_id.get(record_id),
+                "record_id": record_id,
+                "sequence": sequence,
+                "length_nt": len(sequence),
+                "scored_nucleotides": int(score["scored_nucleotides"]),
+                "total_log_probability": float(score["total_log_probability"]),
+                "mean_log_probability_per_nucleotide": float(score["mean_log_probability_per_nucleotide"]),
+                "safety_state": safety_by_id.get(record_id, "NOT_EVALUATED"),
+                "target_profile_pass": canonical in target_sequences,
+                "accepted": record_id in accepted_rank_by_id,
+                "duplicate_of_higher_priority_candidate": duplicate_of_by_id.get(record_id),
+            }
+        )
+
+    accepted_fasta.parent.mkdir(parents=True, exist_ok=True)
+    accepted_fasta.write_text(
+        "".join(f">{record_id}\n{_wrap_fasta_sequence(sequence_by_id[record_id])}\n" for record_id in accepted_ids)
+    )
+    if spearman_rho is None:
+        length_interpretation = "All designs have the same length, so residual length association is not estimable."
+    elif strong_length_association:
+        length_interpretation = (
+            "Strong residual length association detected; do not use SFT likelihood to order accepted candidates."
+        )
+    else:
+        length_interpretation = "No strong residual length association detected at the stated threshold."
+    report = {
+        "schema_version": 1,
+        "ranking": {
+            "model_checkpoint": model_checkpoint,
+            "conditioning_prefix": DEFAULT_PROMPT_PREFIX,
+            "primary_score": "mean_log_probability_per_nucleotide",
+            "order": "descending; higher (less negative) is ranked first",
+            "applied_to_accepted_candidate_order": apply_likelihood_order,
+            "total_score_field": "total_log_probability",
+            "residual_length_association": {
+                "method": "Spearman correlation across all generated designs",
+                "n": len(generated),
+                "spearman_rho": spearman_rho,
+                "p_value": spearman_pvalue,
+                "strong_correlation_threshold_abs_rho": 0.5,
+                "strong_correlation": strong_length_association,
+                "interpretation": length_interpretation,
+            },
+            "interpretation": (
+                "Within-protocol ranking signal only; not a universal bootability threshold or proof of viability."
+            ),
+            "evidence": (
+                "Black et al. (2026), Quantifying evolutionary novelty and design efficiency in "
+                "generative genome design, https://doi.org/10.64898/2026.06.12.731871"
+            ),
+        },
+        "counts": {
+            "generated": len(generated),
+            "likelihood_scored": len(report_rows),
+            "safety_pass": sum(row["safety_state"] == "PASS" for row in report_rows),
+            "target_profile_pass": sum(row["target_profile_pass"] for row in report_rows),
+            "accepted": len(accepted_ids),
+        },
+        "records": report_rows,
+    }
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    ordering_summary = (
+        "SFT likelihood ordering applied after the residual length check."
+        if apply_likelihood_order
+        else "SFT likelihood ordering not applied because the normalized score remained strongly length-correlated."
+    )
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        "# PhiX174 run summary\n\n"
+        f"- Generated and SFT-likelihood scored: {len(report_rows)}\n"
+        f"- Safety-PASS and target-profile candidates: {len(accepted_ids)}\n"
+        "- Score: mean nucleotide log probability from the selected pre-RL SFT checkpoint\n"
+        f"- Length-bias check: {length_interpretation} {ordering_summary}\n\n"
+        "Likelihood is a within-protocol ranking signal, not a universal bootability threshold. "
+        "Computational candidates are not evidence of wet-lab viability or safety.\n"
+    )
+    return output_json
+
+
 def _resolve_jsonl_inputs(input_jsonl: Sequence[Path], input_dir: Path | None, glob_pattern: str) -> list[Path]:
     """Resolve explicit JSONL files plus optional directory glob inputs."""
     paths = [Path(path) for path in input_jsonl]
@@ -167,6 +478,18 @@ def main() -> None:
     rl_prompt_parser.add_argument("--data-dir", type=Path, default=RECIPE_ROOT / "data")
     rl_prompt_parser.add_argument("--overwrite", action="store_true")
 
+    rl_bank_parser = subparsers.add_parser(
+        "write-rl-prompts",
+        help="Write an equal-mixture PhiX174 prompt bank for NeMo-RL",
+    )
+    rl_bank_parser.add_argument("--output", type=Path, required=True)
+    rl_bank_parser.add_argument("--prompt-lengths", type=int, nargs="+", required=True)
+    rl_bank_parser.add_argument("--repeats-per-length", type=int, required=True)
+    rl_bank_parser.add_argument("--reference-start", type=str, default=PHIX174_REFERENCE_START)
+    rl_bank_parser.add_argument("--prompt-prefix", type=str, default=DEFAULT_PROMPT_PREFIX)
+    rl_bank_parser.add_argument("--id-prefix", type=str, default="rl-prompt")
+    rl_bank_parser.add_argument("--grouped", action="store_true")
+
     prompt_parser = subparsers.add_parser("write-prompts", help="Write PhiX174 prompt sweep JSONL files")
     prompt_parser.add_argument("--output-dir", type=Path, required=True)
     prompt_parser.add_argument("--reference-start", type=str, default=PHIX174_REFERENCE_START)
@@ -182,10 +505,52 @@ def main() -> None:
     fasta_parser.add_argument("--output-fasta", type=Path, required=True)
     fasta_parser.add_argument("--no-source-stem", action="store_true")
 
+    likelihood_fasta_parser = subparsers.add_parser(
+        "prepare-sft-likelihood",
+        help="Add the SFT control prefix before whole-genome likelihood scoring",
+    )
+    likelihood_fasta_parser.add_argument("--input-fasta", type=Path, required=True)
+    likelihood_fasta_parser.add_argument("--output-fasta", type=Path, required=True)
+    likelihood_fasta_parser.add_argument("--prompt-prefix", default=DEFAULT_PROMPT_PREFIX)
+
+    likelihood_parser = subparsers.add_parser(
+        "collect-sft-likelihood",
+        help="Collect per-token prediction shards and rank every generated genome",
+    )
+    likelihood_parser.add_argument("--prediction-dir", type=Path, required=True)
+    likelihood_parser.add_argument("--source-fasta", type=Path, required=True)
+    likelihood_parser.add_argument("--output-csv", type=Path, required=True)
+    likelihood_parser.add_argument("--prefix-length", type=int, default=len(DEFAULT_PROMPT_PREFIX))
+
+    final_parser = subparsers.add_parser(
+        "finalize-rollout",
+        help="Join likelihood and final QC evidence into the ranked rollout report",
+    )
+    final_parser.add_argument("--generated-fasta", type=Path, required=True)
+    final_parser.add_argument("--safety-manifest", type=Path, required=True)
+    final_parser.add_argument("--target-fasta", type=Path, required=True)
+    final_parser.add_argument("--likelihood-csv", type=Path, required=True)
+    final_parser.add_argument("--output-json", type=Path, required=True)
+    final_parser.add_argument("--accepted-fasta", type=Path, required=True)
+    final_parser.add_argument("--summary", type=Path, required=True)
+    final_parser.add_argument("--model-checkpoint", required=True)
+
     args = parser.parse_args()
     if args.command == "prepare-rl-prompts":
         for path in ensure_paper_useful_rl_prompt_files(args.data_dir, overwrite=args.overwrite).values():
             print(path)
+    elif args.command == "write-rl-prompts":
+        print(
+            write_rl_prompt_bank(
+                args.output,
+                prompt_lengths=args.prompt_lengths,
+                repeats_per_length=args.repeats_per_length,
+                reference_start=args.reference_start,
+                prompt_prefix=args.prompt_prefix,
+                id_prefix=args.id_prefix,
+                grouped=args.grouped,
+            )
+        )
     elif args.command == "write-prompts":
         for path in write_prompt_sweep_jsonl(
             args.output_dir,
@@ -199,6 +564,36 @@ def main() -> None:
     elif args.command == "jsonl-to-fasta":
         paths = _resolve_jsonl_inputs(args.input_jsonl, args.input_dir, args.glob)
         print(infer_jsonl_to_fasta(paths, args.output_fasta, include_source_stem=not args.no_source_stem))
+    elif args.command == "prepare-sft-likelihood":
+        print(
+            write_sft_likelihood_fasta(
+                args.input_fasta,
+                args.output_fasta,
+                prompt_prefix=args.prompt_prefix,
+            )
+        )
+    elif args.command == "collect-sft-likelihood":
+        print(
+            collect_sft_likelihoods(
+                args.prediction_dir,
+                args.source_fasta,
+                args.output_csv,
+                prefix_length=args.prefix_length,
+            )
+        )
+    elif args.command == "finalize-rollout":
+        print(
+            finalize_ranked_rollout(
+                args.generated_fasta,
+                args.safety_manifest,
+                args.target_fasta,
+                args.likelihood_csv,
+                args.output_json,
+                args.accepted_fasta,
+                args.summary,
+                model_checkpoint=args.model_checkpoint,
+            )
+        )
 
 
 if __name__ == "__main__":

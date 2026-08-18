@@ -1,28 +1,25 @@
 # Evo2 Phage Generation Configurations
 
-This directory contains the supported configuration surface for a Microviridae end-to-end run.
+This directory contains the maintained inputs for the Microviridae workflow.
 
-## Runtime Entry Points
+- `sft_microviridae_preprocess.yaml` and `sft_microviridae_dataset.yaml` reproduce the
+  publication-era random split. The current PhiX case study instead uses
+  `evo2_phage_prepare_sft_split`, which writes a cluster-held-out preprocessing config and
+  training dataset under the chosen run directory.
+- `grpo_phage_megatron.yaml` is a self-contained Evo2/NeMo-RL base configuration.
+  `gdpo_phage_megatron.yaml` inherits it and supplies the case-study objectives and training
+  settings.
+- `arc_genome_design_filtering_local.yaml` configures downstream Arc screening.
+- The `phage_safety_*.yaml` files describe the sequence-safety policy, data sources, and
+  reference controls.
 
-- `sft_microviridae_preprocess.yaml` prepares the released Microviridae SFT data.
-- `sft_microviridae_dataset.yaml` defines the corresponding SFT dataset inputs.
-- `gdpo_phage_megatron.yaml` is the production RL entry point used by the replication workflow.
-- `arc_genome_design_filtering_local.yaml` runs Arc nucleotide QC on generated prompt-sweep or
-  rollout FASTA files.
-- `phage_safety_policy.yaml`, `phage_safety_assets.yaml`, and
-  `phage_safety_reference_controls.yaml` define the mandatory sequence-safety policy and assets.
+Generic NeMo-RL examples are not copied into this recipe. When adapting the RL configuration,
+identify the NeMo-RL version selected in `pyproject.toml` or the installed environment, then
+consult that version's `examples/configs` and configuration classes. Installed wheels may omit
+examples, in which case use the matching upstream source checkout. Keep the Evo2 generation
+adapter, whole-genome sequence length, selected SFT checkpoint, and objective/QC behavior from
+this recipe while adapting infrastructure-specific fields.
 
-## RL Inheritance
-
-`gdpo_phage_megatron.yaml` inherits from `grpo_phage_megatron.yaml`, which in turn inherits from
-`nemo_rl_defaults/grpo_math_1B_megatron.yaml` and `nemo_rl_defaults/grpo_math_1B.yaml`. The GRPO
-file is therefore part of the supported configuration stack and can also serve as the scalar-reward
-alternative, but the replication workflow launches the GDPO entry point.
-
-One-step smoke tests and historical diagnostics should use command-line overrides and a dedicated
-results directory instead of adding permanent configs here. This keeps the visible configuration
-surface focused on reproducible end-to-end use.
-
-Full runs may materialize launch-specific overlays for absolute paths, hardware topology, prompt
-artifacts, and resume offsets. Store those resolved overlays with the run metadata; they should
-inherit from `gdpo_phage_megatron.yaml` rather than becoming additional canonical configs here.
+Smoke runs and hardware-specific launches should use command-line overrides and a separate result
+directory rather than adding permanent example configs here. Record the resolved settings and
+observed tool/database versions with the run.

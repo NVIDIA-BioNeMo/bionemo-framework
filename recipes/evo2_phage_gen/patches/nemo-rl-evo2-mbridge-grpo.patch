@@ -1,3 +1,23 @@
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -3,7 +3,7 @@ requires = ["setuptools>=42", "wheel>=0.46.2"]
+ build-backend = "setuptools.build_meta"
+
+ [tool.setuptools]
+-packages = ["nemo_rl"]
++packages = { find = { include = ["nemo_rl*"] } }
+
+ [tool.setuptools.dynamic]
+ version = { attr = "nemo_rl.__version__" }                      # any module attribute compatible with ast.literal_eval
+@@ -13,6 +13,6 @@ name = "nemo-rl"
+ dynamic = ["version", "readme"]
+ description = "NeMo RL: A Scalable and Efficient Post-Training Library for Models Ranging from 1 GPU to 1000s, and from Tiny to >100B Parameters"
+-requires-python = ">=3.13.13,<3.14"
++requires-python = ">=3.10"
+ license = { text = "Apache 2.0" }
+ maintainers = [
+
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
 index e5647bae7..b8603d049 100644
 --- a/nemo_rl/algorithms/grpo.py

@@ -10,6 +10,11 @@ step 5,600 was chosen by the agent as having the lowest validation loss at 0.750
 the loss reported by the evo2 microviridae model, which may have been overfit by the 12,000th step. A loss in this range however is more in line with validation/test
 set losses reported by the model on other validation sets when training the original 7B model, so this may be a better starting point for RL than the published microviridae checkpoint.
 
+The current AMR, toxin, and lysogeny screen was run retrospectively on the 14,466 SFT input
+records. It found 14,465 PASS, 0 FAIL, and 1 INDETERMINATE: `sft_000540` (source accession
+`MH617328.1`) had a lysogeny review-profile signal. This is a possible hit for review, not a
+confirmed hazard. The completed SFT run used the full corpus before this audit.
+
 Pre-RL calibration was performed to choose settings for RL. A temperature of 1.0 performed similarly to other settings, so was chosen. We also chose a mix of 50% length 16 prompts, and 50% length 24 prompts.
 
 GDPO ran for 500 steps. Step 430 was selected because it had the highest
@@ -39,6 +44,11 @@ Target-profile offline filter counts:
   → 610 synteny/total-gene final passes
 ```
 
+A retrospective run of the current AMR, toxin, and lysogeny screen accounted for all 1,000 local
+rollout records: 997 PASS, 0 biological FAIL, 1 INDETERMINATE 135-nt record with no predicted genes,
+and 2 records rejected by nucleotide QC because each contained one ambiguous `R`. The safety result
+is separate from the 610-record target-profile result above.
+
 The concise [case-study notes](skills/bionemo-phage-design/references/case-study-results.md) keep the current end-to-end run distinct from the earlier released-SFT shortcut.
 
 ## Run the workflow with an agent
@@ -66,153 +76,62 @@ claude --plugin-dir . \
   '/evo2-phage-gen:bionemo-phage-design Use interactive case-study-replication mode. Reproduce the PhiX174 GDPO case study. Inspect existing results and propose the plan before launching jobs.'
 ```
 
-## Reproduce the current end-to-end PhiX174 result
+Review the proposed plan, approve or revise it, then tell the same agent to execute the approved
+plan through the terminal report. A proposal alone does not launch the experiment.
 
-The successful end-to-end run used this sequence:
+## Reproduce the current end-to-end PhiX174 result manually
 
-1. Build the recipe environment with `./.ci_build.sh`, then source `.ci_test_env.sh`.
-2. Ask the controller for a fresh-base PhiX174 replication plan, review it, and run through the final report.
-3. Collect and validate the Microviridae genomes, then make a cluster-held-out split. The recorded split contained 14,266 training, 100 validation, and 100 test genomes with no near-duplicate leakage at the chosen boundary.
-4. Fine-tune fresh Evo 2 7B to a 12,000-step ceiling. Select checkpoints by validation loss; the run selected step 5,600 and confirmed it on the held-out test set.
-5. Define and validate the objective/QC profile while SFT runs. Calibrate the selected SFT checkpoint; the run chose temperature 1.0 and a 50:50 mixture of 16- and 24-nucleotide prompts.
-6. Run data-parallel GDPO with 96 designs per step, validation every 10 steps, and a 500-step ceiling. Select from validation evidence; the run selected step 430.
-7. Generate exactly 1,000 designs from the selected checkpoint. Apply the target filter profile with filter 7 disabled, then run a separate filter-7-enabled diagnostic and write the final report.
+The [8×H100 PhiX174 example](examples/README.md) is the realized, agent-free workflow. Its one
+shell script uses maintained package entry points plus the calibration helpers in
+[`scripts/`](scripts/README.md); it does not execute attempt-local code from an archived result.
 
-The scripts under the recorded result preserve the implementation used for that experiment, but some contain attempt-local paths. Let the controller generate current commands for a new result root instead of copying those archived scripts verbatim.
-Run long stages through a facility that survives the chat process, keep the job identifier and logs in `RUNLOG.md`, and reattach until success or failure is known.
-
-## Historical RL-only shortcut from the released SFT checkpoint
-
-This shorter path reuses the public 12,000-iteration Microviridae SFT checkpoint and reruns GDPO, generation, and filtering. It does not reproduce the current fresh-base SFT plus step-430 result. Run every command below from `recipes/evo2_phage_gen`.
-
-The historical RL shape used one node with 2× H100 80 GB GPUs. Other hardware may work after reducing batch sizes or changing parallelism. External QC preparation also requires network access and substantial disk space.
-
-### 1. Build the environment
+From `recipes/evo2_phage_gen` on a node with eight H100 80 GB GPUs:
 
 ```bash
 ./.ci_build.sh
-source .ci_test_env.sh
+
+# Optional but recommended unless a durable scheduler owns the command:
+tmux new -s phix174-e2e
+
+./examples/phix174_8xh100.sh \
+  --result-root "$PWD/results/phix174-8xh100"
 ```
 
-### 2. Prepare external QC and Arc
+The top-level command downloads the public corpus, current external tools and databases, reruns the
+safety controls, excludes non-PASS SFT inputs, builds leakage-controlled SFT splits, trains and
+selects SFT, calibrates sampling, runs a full-shape pilot and DP8 GDPO, selects RL from comparable
+validation, generates exactly 1,000 whole genomes, scores all of them with the selected pre-RL SFT,
+and runs the current sequence-safety, target Arc, and filter-7 diagnostic screens. The GDPO config includes AMR, toxin, and lysogeny objectives and
+uses the selected SFT checkpoint as its KL anchor.
+
+The example records commands and periodic liveness observations in `RUNLOG.md` without copying the
+environment. Database updates are recorded and checked with the control panel rather than rejected
+or silently replaced with historical versions. Its final report keeps PASS, FAIL, and INDETERMINATE
+counts separate and writes the intersection of safety-PASS and target-profile candidates. It also
+writes total and mean per-nucleotide SFT log probability for all 1,000 designs, checks residual
+score-length correlation, and adds the scores and accepted ordering to `rollout/final-designs.json`.
+Likelihood ordering is omitted when that length diagnostic remains strongly confounded. This is a
+within-protocol enrichment signal motivated by [Black et al.](https://doi.org/10.64898/2026.06.12.731871),
+not a bootability threshold.
+
+Useful operator modes are:
 
 ```bash
-evo2_phage_prepare_external_assets \
-  --external-dir data/external \
-  --bin-dir .venv/bin \
-  --download-large-databases
+# No downloads or GPUs; inspect the complete command plan.
+./examples/phix174_8xh100.sh --dry-run --result-root /tmp/phix174-plan
 
-evo2_phage_prepare_arc_pipeline \
-  --output-dir data/arc_pipeline_patched
+# Prepare public data/tools/controls first.
+./examples/phix174_8xh100.sh --prepare-only \
+  --result-root "$PWD/results/phix174-8xh100"
 
-TROPISM_DB_DIR="data/external/mmseqs/NC_001422_1_Gprotein"
-mkdir -p "$TROPISM_DB_DIR"
-mmseqs createdb \
-  data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta \
-  "$TROPISM_DB_DIR/mmseqs_db_NC_001422_1_Gprotein"
+# Resume at a stage boundary after correcting an interruption.
+./examples/phix174_8xh100.sh --resume-from 30 \
+  --result-root "$PWD/results/phix174-8xh100"
 ```
 
-This prepares MMseqs2, BLAST/DUST, DIAMOND, HMMER, PHROGs, CheckV, and the Arc workflow used by the final filters.
-Record the tool and database releases used. If one changes during a run, note when it changed and rerun the affected controls before comparing or screening candidates. New runs may use newer releases.
-
-### 3. Convert the released Microviridae SFT checkpoint
-
-```bash
-: "${TARGET_CONTEXT_LENGTH:?Set from the agreed upper bound of the tokenized training-genome length distribution}"
-
-evo2_convert_vortex_to_mbridge \
-  --hf-repo-id evo-design/evo-2-7b-8k-microviridae \
-  --hf-filename evo2_7b_microviridae.pt \
-  --revision a363aa61d628e5342d5ee148bc0dbac27a1533b7 \
-  --mbridge-ckpt-dir data/checkpoints/evo2_7b_microviridae_mbridge \
-  --model-size evo2_7b_microviridae \
-  --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 \
-  --seq-length "$TARGET_CONTEXT_LENGTH" \
-  --mixed-precision-recipe bf16_mixed
-```
-
-The explicit filename is required because the hosted file does not match the converter's inferred default name.
-
-### 4. Create the training and validation prompts
-
-```bash
-evo2_phage_generation prepare-rl-prompts --data-dir data
-
-evo2_phage_generation write-prompts \
-  --output-dir data \
-  --prompt-lengths 10 \
-  --num-prompts 96 \
-  --id-prefix phage_prompts_paper_useful_rl_validation
-```
-
-The second command creates the 96-row validation file referenced by the historical GDPO configuration.
-
-### 5. Run GDPO
-
-```bash
-RESULT_ROOT="$PWD/results/phix174-gdpo-replication"
-RL_ROOT="$RESULT_ROOT/rl"
-PHAGE_WANDB_ENABLED="${PHAGE_WANDB_ENABLED:-false}"
-mkdir -p "$RL_ROOT"
-
-evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml \
-  checkpointing.pretrained_checkpoint.path=data/checkpoints/evo2_7b_microviridae_mbridge \
-  checkpointing.checkpoint_dir="$RL_ROOT/checkpoints" \
-  env.phage_qc.external_qc.work_dir="$RL_ROOT/external_qc" \
-  env.phage_qc.mmseqs_cluster_diversity.work_dir="$RL_ROOT/mmseqs_cluster_diversity" \
-  logger.log_dir="$RL_ROOT/logs" \
-  logger.wandb_enabled="$PHAGE_WANDB_ENABLED" \
-  logger.wandb.project=evo2_phage_design_rl_gdpo \
-  logger.wandb.name=phix174-gdpo-replication \
-  logger.tensorboard_enabled=true
-```
-
-The overrides set the checkpoint and result paths for the historical config. W&B is optional; set `PHAGE_WANDB_ENABLED=true` only when it is already available, and keep the local TensorBoard logs. Validation runs every 10 steps with a 500-step ceiling. Select the best checkpoint from sustained full-QC and diversity evidence; do not stop at step 190 merely because it was best in the recorded run.
-
-### 6. Generate the 1,000-design rollout
-
-Set `SELECTED_CHECKPOINT` to the checkpoint selected from your run. The path below is the expected path if step 190 is selected.
-
-```bash
-RESULT_ROOT="$PWD/results/phix174-gdpo-replication"
-RL_ROOT="$RESULT_ROOT/rl"
-SELECTED_CHECKPOINT="$RL_ROOT/checkpoints/step_190/policy/weights/iter_0000000"
-ROLLOUT_ROOT="$RESULT_ROOT/rollout-step190-n1000"
-
-RUN_ROOT="$ROLLOUT_ROOT" \
-CKPT_DIR="$SELECTED_CHECKPOINT" \
-PROMPT_LENGTHS="10" \
-TEMPERATURES="1.0" \
-NUM_PROMPTS=1000 \
-TARGET_LENGTH=6000 \
-TOP_K=4 TOP_P=1.0 SEED=7 \
-NPROC_PER_NODE=2 TENSOR_PARALLEL_SIZE=2 PROMPT_BATCH_SIZE=64 \
-  scripts/run_paper_hpo_generation.sh
-```
-
-Numeric results can vary with the code, runtime, and accelerator environment; record those along with the sampling settings.
-
-### 7. Apply the target filter profile
-
-```bash
-RESULT_ROOT="$PWD/results/phix174-gdpo-replication"
-ROLLOUT_ROOT="$RESULT_ROOT/rollout-step190-n1000"
-
-RUN_ROOT="$ROLLOUT_ROOT" \
-TARGET_RECORDS=1000 \
-CELL_GLOB='phix174_prompt10_temp1.0.manifest1000.fasta' \
-GENETIC_ARCHITECTURE_REMOVE_FILTER=0 \
-  scripts/run_paper_hpo_full_arc_scoring.sh
-```
-
-The main outputs are:
-
-- `scores/hpo_full_arc_summary.md` and `.csv` for the aggregate result;
-- per-stage counts under `arc_filtering/`;
-- `qc6_synteny_filter_seqs.csv` and `.fasta` for final passing designs;
-- generation manifests, resolved Arc configs, logs, and intermediate FASTA files under the rollout root.
-
-Run the filter-7-enabled diagnostic in a separate rollout directory so its fixed summary filenames do not overwrite the target-profile outputs.
+Read the [example README](examples/README.md) for scientific review stops, monitoring behavior,
+safety details, and the result layout. A scratch clone or worktree per
+campaign is preferable to copying source code into a run directory.
 
 ## Download and preprocess the publication-era SFT data
 
@@ -223,21 +142,21 @@ evo2_phage_download_sft_data --include-raw
 preprocess_evo2 --config configs/sft_microviridae_preprocess.yaml
 ```
 
-The bundled paper supplement describes the publication-era configuration.
+The public [CC BY bioRxiv version](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full) links the publication-era supplement and data.
 
-## Summarize a validated sequence-safety scan
+## Summarize a sequence-safety scan
 
-After `evo2_phage_sequence_safety scan` publishes a terminal schema-2 manifest, emit exact
-PASS, FAIL, INDETERMINATE, class-state, reason-code, and mutually exclusive class-combination counts:
+After evo2_phage_sequence_safety scan completes, write a compact PASS, FAIL, and INDETERMINATE
+summary:
 
 ```bash
 evo2_phage_summarize_safety_manifest \
-  --manifest results/PROJECT/sft/runs/ATTEMPT/artifacts/scan/manifest.json \
-  --output results/PROJECT/sft/runs/ATTEMPT/artifacts/safety_tally.json
+  --manifest results/PROJECT/sft/scan/manifest.json \
+  --output results/PROJECT/sft/scan/safety_tally.json
 ```
 
-The command revalidates the full scan result and detector evidence before writing the tally. If only
-representative sequences were scanned, convert to source-record counts only from a complete representative mapping.
+The command checks that the per-record results and totals agree. If only representatives were
+scanned, keep representative and source-record denominators distinct.
 
 ## Troubleshooting
 
@@ -260,7 +179,7 @@ representative sequences were scanned, convert to source-record counts only from
 
 - [Final Science publication: *Generative design of novel bacteriophages with genome language models*](https://www.science.org/doi/10.1126/science.aec2657)
 - [Evo 2 publication of record: *Genome modelling and design across all domains of life with Evo 2*](https://doi.org/10.1038/s41586-026-10176-5)
-- [Bundled CC BY bioRxiv v1 paper, supplement, figures, and data](skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/) ([bioRxiv source](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full))
+- [CC BY bioRxiv v1 paper with linked supplement and data](https://www.biorxiv.org/content/10.1101/2025.09.12.675911v1.full)
 
 ### Books
 
@@ -272,5 +191,5 @@ representative sequences were scanned, convert to source-record counts only from
 
 - [PhiX174 case-study results](skills/bionemo-phage-design/references/case-study-results.md)
 - [Public Microviridae SFT checkpoint](https://huggingface.co/evo-design/evo-2-7b-8k-microviridae)
-- [Recipe commands and dependency pins](pyproject.toml)
+- [Recipe commands and dependencies](pyproject.toml)
 - [Evo 2 model and checkpoint notes](../evo2_megatron/README.md)

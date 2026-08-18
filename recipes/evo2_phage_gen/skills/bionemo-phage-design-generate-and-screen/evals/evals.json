@@ -25,6 +25,7 @@
         "Positive controls confirm each enabled filter executed; missing required evidence or tool failure becomes INDETERMINATE rather than PASS.",
         "Short genomes, no ORFs, missing genes, and empty or header-only tool output do not crash or silently skip QC.",
         "It preserves candidate-to-result mapping and reports generated, PASS, FAIL, INDETERMINATE, exact-unique, and clustered counts.",
+        "It reports total and mean per-nucleotide selected-SFT log probability for every design, checks residual score-length correlation, and uses likelihood ordering only when that diagnostic supports it.",
         "Computational screening is not described as proof of bootability, host range, safety, or efficacy."
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",

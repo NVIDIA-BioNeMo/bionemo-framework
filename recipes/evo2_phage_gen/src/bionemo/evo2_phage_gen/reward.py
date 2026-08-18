@@ -16,7 +16,6 @@
 """Pluggable reward functions for Evo2 phage design RL."""
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -57,7 +56,7 @@ SEQUENCE_SAFETY_CLASSES = ("amr", "toxin", "lysogeny")
 SAFETY_REVIEW_CREDIT = 0.25
 
 
-def sequence_safety_reward_contract(
+def sequence_safety_reward_fields(
     *,
     class_states: dict[str, str],
     required_by_class: dict[str, bool],
@@ -235,13 +234,13 @@ class MMseqsClusterDiversityConfig:
 
 @dataclass(frozen=True)
 class SequenceSafetyRewardConfig:
-    """Configuration for manifest-backed Task 4 sequence-safety rewards."""
+    """Configuration for AMR, toxin, and lysogeny sequence-safety rewards."""
 
     host_domain: HostDomain
     host_evidence: HostEvidence
     asset_manifest_path: Path
-    diamond_tool_pin_path: Path
-    mmseqs_tool_pin_path: Path
+    diamond_bin: Path
+    mmseqs_bin: Path
     policy_path: Path = Path("configs/phage_safety_policy.yaml")
     work_dir: Path = Path("data/checkpoints/phage_sequence_safety_reward")
     enabled: bool = True
@@ -273,8 +272,8 @@ def _sequence_safety_config_is_valid(config: object) -> bool:
         return False
     path_values = (
         config.asset_manifest_path,
-        config.diamond_tool_pin_path,
-        config.mmseqs_tool_pin_path,
+        config.diamond_bin,
+        config.mmseqs_bin,
         config.policy_path,
         config.work_dir,
     )
@@ -343,7 +342,7 @@ def _mmseqs_cluster_command(
     result_prefix: Path,
     tmp_dir: Path,
 ) -> list[str]:
-    """Build the pinned MMseqs easy-cluster command for batch diversity rewards."""
+    """Build the configured MMseqs easy-cluster command for batch diversity rewards."""
     command = [
         _resolve_executable_path(config.mmseqs_bin),
         "easy-cluster",
@@ -744,14 +743,8 @@ def _add_unavailable_sequence_safety_rewards(
     required_by_class: dict[str, bool] | None = None,
     strict_lysis: bool = False,
 ) -> pd.DataFrame:
-    """Record INDETERMINATE states and zero required rewards when no trusted scan can be used."""
-    if type(strict_lysis) is not bool:
-        raise ValueError("sequence-safety strict_lysis telemetry must be a boolean")
+    """Record zero reward and an explicit reason when required safety evidence is unavailable."""
     required_classes = dict.fromkeys(SEQUENCE_SAFETY_CLASSES, True) if required_by_class is None else required_by_class
-    if set(required_classes) != set(SEQUENCE_SAFETY_CLASSES) or not all(
-        type(required) is bool for required in required_classes.values()
-    ):
-        raise ValueError("sequence-safety applicability must define every class as required or informational")
     reasons_json = json.dumps([reason_code], separators=(",", ":"))
     defaults: dict[str, object] = {
         "safety_gate_state": "INDETERMINATE",
@@ -763,10 +756,18 @@ def _add_unavailable_sequence_safety_rewards(
         "safety_required_class_pass_count": 0,
         "safety_scan_record_id": "",
         "safety_scan_input_index": -1,
+        "safety_policy_id": "",
+        "safety_asset_state_path": "",
+        "safety_scan_manifest_path": "",
+        "safety_resolved_profile": "",
+        "safety_amrfinder_version": "",
+        "safety_diamond_version": "",
+        "safety_mmseqs_version": "",
+        "safety_strict_lysis": strict_lysis,
     }
     for safety_class in SEQUENCE_SAFETY_CLASSES:
-        prefix = f"safety_{safety_class}"
         required = required_classes[safety_class]
+        prefix = f"safety_{safety_class}"
         defaults.update(
             {
                 f"{prefix}_state": "INDETERMINATE",
@@ -776,42 +777,22 @@ def _add_unavailable_sequence_safety_rewards(
                 f"{prefix}_measurement_available": 0.0,
                 f"{prefix}_execution_status": "NOT_STARTED",
                 f"{prefix}_policy_id": "",
-                f"{prefix}_policy_sha256": "",
                 f"reward_safety_{safety_class}": float(not required),
             }
         )
-    for column in (
-        "safety_policy_id",
-        "safety_policy_sha256",
-        "safety_asset_manifest_sha256",
-        "safety_asset_recipe_sha256",
-        "safety_scan_manifest_path",
-        "safety_scan_manifest_sha256",
-        "safety_resolved_profile",
-        "safety_diamond_tool_sha256",
-        "safety_mmseqs_tool_sha256",
-        "safety_orf_identity_sha256",
-    ):
-        defaults[column] = ""
-    defaults["safety_strict_lysis"] = strict_lysis
     original_index = scored_df.index
     base = scored_df.drop(columns=[column for column in defaults if column in scored_df]).reset_index(drop=True)
-    telemetry = pd.DataFrame(
-        {column: [value] * len(base) for column, value in defaults.items()},
-        index=base.index,
-    )
+    telemetry = pd.DataFrame({column: [value] * len(base) for column, value in defaults.items()}, index=base.index)
     combined = pd.concat([base, telemetry], axis=1).copy()
     combined.index = original_index
     return combined
 
 
 def _sequence_is_scannable(sequence: object) -> bool:
-    """Match the Task 4 normalized nucleotide alphabet without rewriting invalid generations."""
     return isinstance(sequence, str) and re.fullmatch(r"[ACGTNacgtn]+", sequence) is not None
 
 
 def _set_row_values(scored_df: pd.DataFrame, position: int, values: dict[str, object]) -> None:
-    """Set telemetry by row position so duplicate caller indexes cannot alter manifest mapping."""
     for column, value in values.items():
         if column not in scored_df:
             scored_df[column] = ""
@@ -819,16 +800,14 @@ def _set_row_values(scored_df: pd.DataFrame, position: int, values: dict[str, ob
 
 
 def _set_unavailable_reason(scored_df: pd.DataFrame, positions: list[int], reason_code: str) -> None:
-    """Set one unavailable-evidence reason on a subset of unaccepted records."""
     reasons = json.dumps([reason_code], separators=(",", ":"))
     for position in positions:
         values = {"safety_gate_reason_codes": reasons}
-        values.update({f"safety_{safety_class}_reason_codes": reasons for safety_class in SEQUENCE_SAFETY_CLASSES})
+        values.update({f"safety_{name}_reason_codes": reasons for name in SEQUENCE_SAFETY_CLASSES})
         _set_row_values(scored_df, position, values)
 
 
 def _json_reason_codes(value: object) -> str:
-    """Serialize validated manifest reason-code lists without Python repr ambiguity."""
     if not isinstance(value, list) or not all(isinstance(reason, str) for reason in value):
         raise ValueError("sequence-safety reason codes must be a string list")
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
@@ -841,128 +820,100 @@ def _manifest_safety_row(
     expected_record_id: str,
     manifest: dict[str, object],
     manifest_path: Path,
-    manifest_sha256: str,
 ) -> dict[str, object]:
-    """Convert one strictly validated Task 4 record into reward telemetry."""
+    """Convert one validated scan record into compact RL telemetry."""
     if not isinstance(record, dict):
-        raise ValueError("sequence-safety manifest record must be a mapping")
-    if type(record.get("input_index")) is not int or record["input_index"] != expected_input_index:
-        raise ValueError("sequence-safety manifest input-index mapping drift")
-    if record.get("record_id") != expected_record_id:
-        raise ValueError("sequence-safety manifest record-ID mapping drift")
+        raise ValueError("sequence-safety record must be a mapping")
+    if record.get("input_index") != expected_input_index or record.get("record_id") != expected_record_id:
+        raise ValueError("sequence-safety record mapping changed")
     class_results = record.get("class_results")
-    adapter_attempts = record.get("adapter_attempts")
-    if (
-        not isinstance(class_results, list)
-        or len(class_results) != len(SEQUENCE_SAFETY_CLASSES)
-        or not isinstance(adapter_attempts, list)
-        or len(adapter_attempts) != len(SEQUENCE_SAFETY_CLASSES)
-    ):
+    attempts = record.get("adapter_attempts")
+    if not isinstance(class_results, list) or not isinstance(attempts, list):
         raise ValueError("sequence-safety class telemetry is missing")
-    class_by_name = {result.get("safety_class"): result for result in class_results if isinstance(result, dict)}
-    attempt_by_name = {
-        attempt.get("safety_class"): attempt for attempt in adapter_attempts if isinstance(attempt, dict)
-    }
+    class_by_name = {item.get("safety_class"): item for item in class_results if isinstance(item, dict)}
+    attempt_by_name = {item.get("safety_class"): item for item in attempts if isinstance(item, dict)}
     if set(class_by_name) != set(SEQUENCE_SAFETY_CLASSES) or set(attempt_by_name) != set(SEQUENCE_SAFETY_CLASSES):
-        raise ValueError("sequence-safety class inventory drift")
+        raise ValueError("sequence-safety class inventory changed")
 
     policy = manifest.get("policy")
-    assets = manifest.get("safety_asset_manifest")
+    assets = manifest.get("asset_state")
     profile = manifest.get("resolved_profile")
     tools = manifest.get("tools")
     if not all(isinstance(value, dict) for value in (policy, assets, profile, tools)):
-        raise ValueError("sequence-safety provenance is incomplete")
-    diamond = tools.get("diamond")
-    mmseqs = tools.get("mmseqs")
-    orf_predictor = tools.get("orf_predictor")
-    if not all(isinstance(value, dict) for value in (diamond, mmseqs, orf_predictor)):
-        raise ValueError("sequence-safety tool provenance is incomplete")
-
-    declared_state = record.get("state")
-    if declared_state not in {"PASS", "FAIL", "INDETERMINATE"}:
-        raise ValueError("sequence-safety gate state is invalid")
-    record_reasons = record.get("reason_codes")
-    record_reasons_json = _json_reason_codes(record_reasons)
+        raise ValueError("sequence-safety runtime state is incomplete")
     values: dict[str, object] = {
         "safety_scan_record_id": expected_record_id,
         "safety_scan_input_index": expected_input_index,
-        "safety_gate_reason_codes": record_reasons_json,
+        "safety_gate_reason_codes": _json_reason_codes(record.get("reason_codes")),
         "safety_policy_id": policy.get("policy_id"),
-        "safety_policy_sha256": policy.get("canonical_sha256"),
-        "safety_asset_manifest_sha256": assets.get("sha256"),
-        "safety_asset_recipe_sha256": assets.get("recipe_sha256"),
+        "safety_asset_state_path": assets.get("path"),
         "safety_scan_manifest_path": str(manifest_path),
-        "safety_scan_manifest_sha256": manifest_sha256,
         "safety_resolved_profile": profile.get("host_domain"),
         "safety_strict_lysis": profile.get("strict_lysis"),
-        "safety_diamond_tool_sha256": diamond.get("sha256"),
-        "safety_mmseqs_tool_sha256": mmseqs.get("sha256"),
-        "safety_orf_identity_sha256": orf_predictor.get("identity_sha256"),
+        "safety_amrfinder_version": tools.get("amrfinder", {}).get("version", ""),
+        "safety_diamond_version": tools.get("diamond", {}).get("version", ""),
+        "safety_mmseqs_version": tools.get("mmseqs", {}).get("version", ""),
     }
     required_count = 0
     required_pass_count = 0
     required_measurements: list[bool] = []
-    class_states_for_reward: dict[str, str] = {}
+    states: dict[str, str] = {}
     required_by_class: dict[str, bool] = {}
-    review_eligible_by_class: dict[str, bool] = {}
-    recomputed_reasons: list[str] = []
+    review_eligible: dict[str, bool] = {}
+    reasons: list[str] = []
     for safety_class in SEQUENCE_SAFETY_CLASSES:
         result = class_by_name[safety_class]
         attempt = attempt_by_name[safety_class]
-        class_state = result.get("state")
+        state = result.get("state")
         required = result.get("required")
         findings = result.get("findings")
+        status = attempt.get("execution_status")
         class_reasons = result.get("reason_codes")
-        execution_status = attempt.get("execution_status")
         if (
-            class_state not in {"PASS", "FAIL", "INDETERMINATE"}
+            state not in {"PASS", "FAIL", "INDETERMINATE"}
             or type(required) is not bool
             or not isinstance(findings, list)
-            or not isinstance(execution_status, str)
+            or not isinstance(status, str)
         ):
             raise ValueError("sequence-safety class telemetry is invalid")
-        class_reasons_json = _json_reason_codes(class_reasons)
-        recomputed_reasons.extend(class_reasons)
-        measured = execution_status == "COMPLETED_AND_PARSED"
+        reasons.extend(class_reasons)
+        measured = status == "COMPLETED_AND_PARSED"
         if required:
             required_count += 1
-            required_pass_count += int(class_state == "PASS")
+            required_pass_count += int(state == "PASS")
             required_measurements.append(measured)
-        class_states_for_reward[safety_class] = class_state
+        states[safety_class] = state
         required_by_class[safety_class] = required
-        review_eligible_by_class[safety_class] = bool(
-            required and class_state == "INDETERMINATE" and measured and findings
-        )
+        review_eligible[safety_class] = bool(required and state == "INDETERMINATE" and measured and findings)
         prefix = f"safety_{safety_class}"
         values.update(
             {
-                f"{prefix}_state": class_state,
+                f"{prefix}_state": state,
                 f"{prefix}_required": float(required),
-                f"{prefix}_reason_codes": class_reasons_json,
+                f"{prefix}_reason_codes": _json_reason_codes(class_reasons),
                 f"{prefix}_finding_count": len(findings),
                 f"{prefix}_measurement_available": float(measured),
-                f"{prefix}_execution_status": execution_status,
-                f"{prefix}_policy_id": attempt.get("policy_id"),
-                f"{prefix}_policy_sha256": attempt.get("policy_sha256"),
+                f"{prefix}_execution_status": status,
+                f"{prefix}_policy_id": attempt.get("policy_id", ""),
             }
         )
-    reward_contract = sequence_safety_reward_contract(
-        class_states=class_states_for_reward,
+    safety_fields = sequence_safety_reward_fields(
+        class_states=states,
         required_by_class=required_by_class,
-        review_eligible_by_class=review_eligible_by_class,
+        review_eligible_by_class=review_eligible,
     )
-    recomputed_state = reward_contract["safety_gate_state"]
-    recomputed_reasons = list(dict.fromkeys(recomputed_reasons))
-    if declared_state != recomputed_state or record_reasons != recomputed_reasons:
-        raise ValueError("sequence-safety record aggregate drift")
-    environment_healthy = bool(required_measurements) and all(required_measurements)
-    if recomputed_state == "PASS" and not environment_healthy:
-        raise ValueError("sequence-safety PASS lacks measured required-class support")
-    values["safety_environment_healthy"] = float(environment_healthy)
-    values["safety_gate_measurement_available"] = float(environment_healthy)
+    if record.get("state") != safety_fields["safety_gate_state"] or record.get("reason_codes") != list(
+        dict.fromkeys(reasons)
+    ):
+        raise ValueError("sequence-safety record aggregate is inconsistent")
+    healthy = bool(required_measurements) and all(required_measurements)
+    if safety_fields["safety_gate_state"] == "PASS" and not healthy:
+        raise ValueError("sequence-safety PASS lacks completed required measurements")
+    values.update(safety_fields)
+    values["safety_environment_healthy"] = float(healthy)
+    values["safety_gate_measurement_available"] = float(healthy)
     values["safety_required_class_count"] = required_count
     values["safety_required_class_pass_count"] = required_pass_count
-    values.update(reward_contract)
     return values
 
 
@@ -972,7 +923,6 @@ def _sequence_safety_scan_argv(
     output_dir: Path,
     config: SequenceSafetyRewardConfig,
 ) -> list[str]:
-    """Build the Task 4 scan invocation from typed reward configuration."""
     argv = [
         "scan",
         "--input-fasta",
@@ -987,10 +937,10 @@ def _sequence_safety_scan_argv(
         config.host_domain.value,
         "--host-evidence-json",
         json.dumps(config.host_evidence.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
-        "--diamond-tool-pin",
-        str(_recipe_path(config.diamond_tool_pin_path)),
-        "--mmseqs-tool-pin",
-        str(_recipe_path(config.mmseqs_tool_pin_path)),
+        "--diamond-bin",
+        str(_recipe_path(config.diamond_bin)),
+        "--mmseqs-bin",
+        str(_recipe_path(config.mmseqs_bin)),
         "--threads",
         str(config.threads),
         "--timeout",
@@ -1007,7 +957,7 @@ def add_sequence_safety_rewards(
     scored_df: pd.DataFrame,
     config: SequenceSafetyRewardConfig,
 ) -> pd.DataFrame:
-    """Run Task 4 and consume only its revalidated published scan manifest."""
+    """Run Task 4 and map its validated per-record results back to the batch."""
     if not _sequence_safety_config_is_valid(config):
         return _add_unavailable_sequence_safety_rewards(
             scored_df.copy(),
@@ -1050,19 +1000,16 @@ def add_sequence_safety_rewards(
         if exit_code not in {0, 2, 3}:
             raise RuntimeError(f"sequence-safety scanner returned unsupported exit code {exit_code}")
         manifest_path = (output_dir / "manifest.json").absolute()
-        manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         try:
             manifest = sequence_safety_cli.validate_manifest_file(
                 manifest_path,
                 expected_type="sequence_safety_scan",
             )
-            if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != manifest_sha256:
-                raise ValueError("sequence-safety manifest changed during reward mapping")
             if not isinstance(manifest, dict) or manifest.get("manifest_type") != "sequence_safety_scan":
-                raise ValueError("sequence-safety scan did not publish a trusted scan manifest")
+                raise ValueError("sequence-safety scan did not produce the expected result manifest")
             records = manifest.get("records")
             if not isinstance(records, list) or len(records) != len(valid_positions):
-                raise ValueError("sequence-safety manifest record inventory drift")
+                raise ValueError("sequence-safety result count does not match the input batch")
             mapped_rows = [
                 _manifest_safety_row(
                     record,
@@ -1070,7 +1017,6 @@ def add_sequence_safety_rewards(
                     expected_record_id=record_id,
                     manifest=manifest,
                     manifest_path=manifest_path,
-                    manifest_sha256=manifest_sha256,
                 )
                 for scan_index, (record_id, record) in enumerate(zip(record_ids, records, strict=True))
             ]

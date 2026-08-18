@@ -1,13 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-Apache2
 
-schema_version: 2
+schema_version: 1
 panel_id: phage-sequence-safety-controls-v2
-sequence_identity:
-  retrieval: exact_insdc_accession_version_with_optional_1_based_closed_interval
-  normalization: uppercase_sequence_without_whitespace
-  digest: sha256
-  payload_distribution: accession_and_digest_only
 controls:
   - control_id: ctxphi_hazard
     accession: NC_015209.1
@@ -16,7 +11,6 @@ controls:
     role: positive_hazard
     topology: linear
     sequence_length: 10638
-    sequence_sha256: e93781804d68211815c64eba849dcf37017ca0ce9889e75e1b482446c01da11e
     source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_015209.1
     evidence_urls:
       - https://pubmed.ncbi.nlm.nih.gov/8658163/
@@ -25,13 +19,11 @@ controls:
     expected_classes:
       amr:
         state: PASS
-        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
         required_finding_accessions: {}
         minimum_primary_findings: 0
         allow_additional_findings: false
       toxin:
         state: FAIL
-        reason_codes: [TOXIN_HIGH_CONFIDENCE_HOMOLOGY]
         required_finding_accessions:
           ctxA: P01555
           ctxB: P01556
@@ -39,7 +31,6 @@ controls:
         allow_additional_findings: true
       lysogeny:
         state: FAIL
-        reason_codes: [LYSOGENY_HIGH_CONFIDENCE_PROFILE]
         required_finding_accessions: {}
         minimum_primary_findings: 1
         allow_additional_findings: true
@@ -50,7 +41,6 @@ controls:
     role: positive_hazard
     topology: linear
     sequence_length: 61670
-    sequence_sha256: 6f1ba4afd91ef5d5842f1fa660e4270b5b780d418369fe43a7b4605aff524ca4
     source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_000924.1
     evidence_urls:
       - https://pubmed.ncbi.nlm.nih.gov/10074068/
@@ -58,13 +48,11 @@ controls:
     expected_classes:
       amr:
         state: PASS
-        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
         required_finding_accessions: {}
         minimum_primary_findings: 0
         allow_additional_findings: false
       toxin:
         state: FAIL
-        reason_codes: [TOXIN_HIGH_CONFIDENCE_HOMOLOGY]
         required_finding_accessions:
           stxA2: P09385
           stxB2: P09386
@@ -72,7 +60,6 @@ controls:
         allow_additional_findings: true
       lysogeny:
         state: FAIL
-        reason_codes: [LYSOGENY_HIGH_CONFIDENCE_PROFILE]
         required_finding_accessions: {}
         minimum_primary_findings: 1
         allow_additional_findings: true
@@ -83,7 +70,6 @@ controls:
     role: positive_review
     topology: linear
     sequence_length: 66607
-    sequence_sha256: 161e89b5861d25996ea3e6b062a4fa87b54a09e464d7ed32e042814564a0a431
     source_url: https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=AM999887.1&db=nuccore&report=fasta&from=246045&to=312651
     evidence_urls:
       - https://doi.org/10.1038/ncomms13155
@@ -92,20 +78,17 @@ controls:
     expected_classes:
       amr:
         state: PASS
-        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
         required_finding_accessions: {}
         minimum_primary_findings: 0
         allow_additional_findings: false
       toxin:
         state: INDETERMINATE
-        reason_codes: [TOXIN_LATROTOXIN_C_DOMAIN_HOMOLOGY_REVIEW]
         required_finding_accessions:
           latrotoxin_C_domain_bearing_WP0292: PF15658.11
         minimum_primary_findings: 1
         allow_additional_findings: true
       lysogeny:
         state: INDETERMINATE
-        reason_codes: [LYSOGENY_REVIEW_PROFILE]
         required_finding_accessions: {}
         minimum_primary_findings: 1
         allow_additional_findings: true
@@ -116,26 +99,22 @@ controls:
     role: negative
     topology: linear
     sequence_length: 39937
-    sequence_sha256: 00ce104454ea06f9b47d6fba8e62499bfbff7e84bc17141665b96a80588a81fd
     source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_001604.1
     evidence_urls: []
     expected_aggregate_state: PASS
     expected_classes: &negative_expectations
       amr:
         state: PASS
-        reason_codes: [AMRFINDER_MEASURED_NO_AMR_HIT]
         required_finding_accessions: {}
         minimum_primary_findings: 0
         allow_additional_findings: false
       toxin:
         state: PASS
-        reason_codes: [TOXIN_DIAMOND_MEASURED_NO_REVIEW_HIT]
         required_finding_accessions: {}
         minimum_primary_findings: 0
         allow_additional_findings: false
       lysogeny:
         state: PASS
-        reason_codes: [PHROGS_MEASURED_NO_REVIEW_HIT]
         required_finding_accessions: {}
         minimum_primary_findings: 0
         allow_additional_findings: false
@@ -146,7 +125,6 @@ controls:
     role: negative
     topology: circular
     sequence_length: 5386
-    sequence_sha256: 97038c7e1edea2297667d7f0426ba942b322c74cb30e072ec66ba47f9c0448d0
     source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_001422.1
     evidence_urls: []
     expected_aggregate_state: PASS
@@ -158,7 +136,6 @@ controls:
     role: negative
     topology: linear
     sequence_length: 48229
-    sequence_sha256: d41f0cb9322c5088f7567c4f76988ee3408b163e27151d57ab396ecf61aabc58
     source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_022054.2
     evidence_urls:
       - https://phagesdb.org/phages/Muddy/

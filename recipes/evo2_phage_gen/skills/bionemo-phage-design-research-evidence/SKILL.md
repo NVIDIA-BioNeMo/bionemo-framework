@@ -1,13 +1,15 @@
 ---
 name: bionemo-phage-design-research-evidence
 description: Use when a phage-design decision needs literature, database, dataset, gene-essentiality, synteny, viability, bootability, host, threshold, or model evidence.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Research Phage Evidence
 
 Work inside the recipe and result roots selected by the controller. Prefer primary sources and distinguish measured results, author claims, and your inference.
 
-Use the attached documents when an answer is not common knowledge or already available in the skill or other auxiliary data. The King bundle contains the full phage-generation paper and supplement; the Black bundle covers design efficiency and novelty; the local EMA transcription records a draft phage-therapy quality guideline. Consult the relevant paper, supplement, or guideline for specialized methods, quantitative results, or historical committee guidance. Treat bundled versions separately from later publications or current guidance.
+Use the available background sources as needed. The public King phage-generation paper and supplement describe the published experiment, the Black preprint discusses design efficiency and novelty, and the local EMA transcription records a historical draft phage-therapy quality guideline. If an answer is neither common knowledge nor already supported by this skill or its auxiliary notes, consult the relevant full paper, supplement, or guideline rather than guessing. Distinguish historical versions from later publications and current guidance.
 
 For a new target, host, or objective, gather enough evidence to cover complete-genome viability and the productive-infection lifecycle: adsorption and entry, defenses and counter-defenses, replication, morphogenesis and packaging, lysis and progeny, production-host effects, and intended-use safety. Also consider essential/key genes, regulatory architecture, synteny, topology, composition, similarity to viable references, host models, diversity, and final experimental validation. Mark unsupported or non-applicable axes instead of inventing evidence.
 

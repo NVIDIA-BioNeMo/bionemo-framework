@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-plan-rl-objectives
 description: Use when converting a phage-design goal into target-specific RL rewards, validation criteria, and final QC filters, especially for a new reference phage or altered objective.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Design Phage RL Objectives

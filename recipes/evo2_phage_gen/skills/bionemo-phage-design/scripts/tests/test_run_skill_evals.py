@@ -517,6 +517,7 @@ def test_dry_run_writes_reproducible_plan_without_launching() -> None:
         generation = plan["generation_command"]
         grading = plan["grading_command"]
         assert "--ephemeral" in generation
+        assert "--skip-git-repo-check" in generation
         assert "--json" in generation
         assert "read-only" in generation
         assert "--output-schema" in grading
@@ -1220,31 +1221,9 @@ def _run_fake_claude(mode: str, tmp_path: Path) -> tuple[subprocess.CompletedPro
     return completed, results / "alpha-001"
 
 
-def test_trace_summary_reports_local_literature_reads_and_deduplicated_web_calls() -> None:
-    manifest = "skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/MANIFEST.json"
-    supplement = "skills/bionemo-phage-design/assets/literature/king-2025-generative-phage-design/supplement.md"
+def test_trace_summary_deduplicates_web_calls() -> None:
     trace = "\n".join(
         (
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "id": "item-manifest",
-                        "type": "command_execution",
-                        "command": f"/bin/bash -lc \"sed -n '1,120p' {manifest}\"",
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "id": "item-supplement",
-                        "type": "command_execution",
-                        "command": f"/bin/bash -lc \"rg -n 'tropism' {supplement}\"",
-                    },
-                }
-            ),
             json.dumps(
                 {
                     "type": "item.started",
@@ -1262,72 +1241,9 @@ def test_trace_summary_reports_local_literature_reads_and_deduplicated_web_calls
 
     summary = runner._trace_summary(trace, "bionemo-phage-design-research-evidence")
 
-    assert summary["bundled_literature_read_paths"] == [manifest, supplement]
-    assert summary["local_source_read_paths"] == [manifest, supplement]
     assert summary["web_tool_calls_observed"]
     assert summary["web_tool_call_count"] == 1
     assert summary["web_tool_call_types"] == ["web_search"]
-
-
-def test_trace_summary_recognizes_claude_read_without_counting_answer_text_as_a_read() -> None:
-    paper = "skills/bionemo-phage-design/assets/literature/black-2026-design-efficiency/paper.md"
-    trace = "\n".join(
-        (
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "read-1",
-                                "name": "Read",
-                                "input": {"file_path": paper},
-                            }
-                        ]
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "type": "agent_message",
-                        "text": "I used skills/bionemo-phage-design/assets/literature/"
-                        "king-2025-generative-phage-design/supplement.md.",
-                    },
-                }
-            ),
-        )
-    )
-
-    summary = runner._trace_summary(trace, "bionemo-phage-design-research-evidence")
-
-    assert summary["bundled_literature_read_paths"] == [paper]
-    assert summary["local_source_read_paths"] == [paper]
-    assert not summary["web_tool_calls_observed"]
-    assert summary["web_tool_call_count"] == 0
-    assert summary["web_tool_call_types"] == []
-
-
-def test_trace_summary_reports_ema_guideline_reads_as_local_sources() -> None:
-    guideline = "skills/bionemo-phage-design/references/ema-2025-draft-phage-therapy-quality-guideline.md"
-    trace = json.dumps(
-        {
-            "type": "item.completed",
-            "item": {
-                "id": "item-ema",
-                "type": "command_execution",
-                "command": f"/bin/bash -lc \"sed -n '260,330p' {guideline}\"",
-            },
-        }
-    )
-
-    summary = runner._trace_summary(trace, "bionemo-phage-design-plan-rl-objectives")
-
-    assert summary["local_source_read_paths"] == [guideline]
-    assert summary["bundled_literature_read_paths"] == []
-    assert not summary["web_tool_calls_observed"]
 
 
 def test_codex_grade_schema_uses_api_supported_flat_contract() -> None:

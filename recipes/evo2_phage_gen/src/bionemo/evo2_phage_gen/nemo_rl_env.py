@@ -103,8 +103,8 @@ _SEQUENCE_SAFETY_CONFIG_KEYS = frozenset(
         "host_domain",
         "host_evidence",
         "asset_manifest_path",
-        "diamond_tool_pin_path",
-        "mmseqs_tool_pin_path",
+        "diamond_bin",
+        "mmseqs_bin",
         "policy_path",
         "work_dir",
         "strict_lysis",
@@ -116,13 +116,11 @@ _SEQUENCE_SAFETY_CONFIG_KEYS = frozenset(
 _HOST_EVIDENCE_KEYS = frozenset({"source", "source_version", "replication_host_domains", "confirmed", "metadata"})
 
 
-def _require_exact_keys(mapping: Mapping[str, object], expected: frozenset[str], *, label: str) -> None:
-    """Reject missing and unknown safety config keys instead of guessing intent."""
-    keys = set(mapping)
-    if keys != expected:
-        missing = sorted(expected - keys)
-        unknown = sorted(keys - expected)
-        raise ValueError(f"{label} keys do not match schema; missing={missing}, unknown={unknown}")
+def _require_keys(mapping: Mapping[str, object], required: frozenset[str], *, label: str) -> None:
+    """Require fields used by this recipe while allowing additive config metadata."""
+    missing = sorted(required - set(mapping))
+    if missing:
+        raise ValueError(f"{label} is missing required keys: {missing}")
 
 
 def _nonempty_string(value: object, *, label: str) -> str:
@@ -143,7 +141,7 @@ def _coerce_sequence_safety_config(raw_config: Any) -> SequenceSafetyRewardConfi
         return None
     if not isinstance(raw_config, Mapping):
         raise TypeError("sequence_safety must be a mapping.")
-    _require_exact_keys(raw_config, _SEQUENCE_SAFETY_CONFIG_KEYS, label="sequence_safety")
+    _require_keys(raw_config, _SEQUENCE_SAFETY_CONFIG_KEYS, label="sequence_safety")
 
     for key in ("enabled", "strict_lysis", "circular"):
         if type(raw_config[key]) is not bool:
@@ -164,7 +162,7 @@ def _coerce_sequence_safety_config(raw_config: Any) -> SequenceSafetyRewardConfi
     raw_evidence = raw_config["host_evidence"]
     if not isinstance(raw_evidence, Mapping):
         raise TypeError("sequence_safety host_evidence must be a mapping.")
-    _require_exact_keys(raw_evidence, _HOST_EVIDENCE_KEYS, label="sequence_safety host_evidence")
+    _require_keys(raw_evidence, _HOST_EVIDENCE_KEYS, label="sequence_safety host_evidence")
     if type(raw_evidence["confirmed"]) is not bool:
         raise TypeError("sequence_safety host_evidence confirmed must be a boolean.")
     if raw_evidence["confirmed"] is not True:
@@ -204,12 +202,8 @@ def _coerce_sequence_safety_config(raw_config: Any) -> SequenceSafetyRewardConfi
         asset_manifest_path=_config_path(
             raw_config["asset_manifest_path"], label="sequence_safety asset_manifest_path"
         ),
-        diamond_tool_pin_path=_config_path(
-            raw_config["diamond_tool_pin_path"], label="sequence_safety diamond_tool_pin_path"
-        ),
-        mmseqs_tool_pin_path=_config_path(
-            raw_config["mmseqs_tool_pin_path"], label="sequence_safety mmseqs_tool_pin_path"
-        ),
+        diamond_bin=_config_path(raw_config["diamond_bin"], label="sequence_safety diamond_bin"),
+        mmseqs_bin=_config_path(raw_config["mmseqs_bin"], label="sequence_safety mmseqs_bin"),
         policy_path=_config_path(raw_config["policy_path"], label="sequence_safety policy_path"),
         work_dir=_config_path(raw_config["work_dir"], label="sequence_safety work_dir"),
         enabled=raw_config["enabled"],

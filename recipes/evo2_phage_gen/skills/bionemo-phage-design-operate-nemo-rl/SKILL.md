@@ -1,11 +1,13 @@
 ---
 name: bionemo-phage-design-operate-nemo-rl
 description: Use when launching, monitoring, resuming, relaunching, or selecting checkpoints from a NeMo-RL Evo2 phage optimization run.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Operate NeMo-RL Phage Training
 
-Work inside the recipe and result roots selected by the controller. Use the selected SFT checkpoint, approved objectives, and calibrated prompt/sampling settings.
+Work inside the recipe and result roots selected by the controller. Use the selected SFT checkpoint, approved objectives, and calibrated prompt/sampling settings. When adapting to a different NeMo-RL release or infrastructure, inspect the installed configuration classes and that release's upstream `examples/configs`; wheels may omit the examples.
 
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 

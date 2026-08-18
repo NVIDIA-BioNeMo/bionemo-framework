@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-adapt-execution
 description: Use when a phage-design workflow must discover or adapt to local GPU, SSH, Slurm, Lepton, manual, or unfamiliar execution infrastructure and produce durable launch, monitoring, resume, or handoff commands.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Adapt Phage Execution

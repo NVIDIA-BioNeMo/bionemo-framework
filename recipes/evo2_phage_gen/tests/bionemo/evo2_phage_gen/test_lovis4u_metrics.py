@@ -69,7 +69,7 @@ def test_threaded_subprocess_proxy_delegates_without_mutating_wrapped_module():
     assert calls[-1][0] == ["mmseqs", "createdb"]
 
 
-def test_lovis4u_pin():
+def test_lovis4u_dependency_version():
     recipe_root = Path(__file__).resolve().parents[3]
     project = tomllib.loads((recipe_root / "pyproject.toml").read_text())
 

@@ -9,15 +9,16 @@ cd "$SCRIPT_DIR"
 rm -f /usr/local/lib/python*/dist-packages/transformer_engine-*.dist-info/direct_url.json
 export UV_LOCK_TIMEOUT=900  # increase to 15 minutes (900 seconds), adjust as needed
 export UV_LINK_MODE=copy
-uv venv --clear --system-site-packages
+# Native training dependencies currently publish wheels through Python 3.12.
+uv venv --python 3.12 --clear --system-site-packages
 
 # 2. Activate the environment
 source .venv/bin/activate
 
-# 3. Pin warp-lang<1.13.0 (subquadratic-ops-torch 0.2.0 uses wp.context removed in 1.13)
+# 3. Keep warp-lang<1.13.0 because subquadratic-ops-torch 0.2.0 uses wp.context removed in 1.13.
 uv pip install 'warp-lang<1.13.0'
 
-# 4. Install build requirements and pin transformer_engine. An image without
+# 4. Install build requirements against the Transformer Engine already supplied by the image. An image without
 # Transformer Engine intentionally produces an empty constraints file.
 if ! pip freeze | grep -E '^transformer[-_]engine([= @]|$)' > pip-constraints.txt; then
     : > pip-constraints.txt
@@ -72,9 +73,8 @@ print(re.sub(r"[^A-Za-z0-9._-]+", "_", raw))
     python -c 'import causal_conv1d'
 fi
 
-# 6. Upstream NeMo-RL's current pyproject only packages the top-level nemo_rl module.
-# Reinstall the pinned checkout with complete package discovery, then apply and verify this recipe's Evo2 patch.
-evo2_phage_patch_nemo_rl --repair-install --force-reinstall --verify-runtime
+# 6. Apply the recipe's Evo2 support to the configured NeMo-RL source, then install it once.
+evo2_phage_setup_nemo_rl --force-reinstall
 
 # 7. CI starts from the base devcontainer image, so keep native verifier tools
 # recipe-local instead of requiring apt/conda or a custom image. Installing into
@@ -83,6 +83,7 @@ evo2_phage_prepare_external_assets \
   --external-dir data/external \
   --bin-dir .venv/bin \
   --skip-mmseqs \
+  --skip-lovis4u-config \
   --skip-phrogs-annotation \
   --skip-arc-evo2 \
   --skip-checkv

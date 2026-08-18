@@ -47,14 +47,13 @@
     },
     {
       "id": "bionemo-phage-design-004-science-first-reproducibility",
-      "prompt": "Explain how you would make a small computational phage-generation pilot reproducible. The validated dataset and scanner work, but the checkout has unrelated local edits and no project-management manifests.",
+      "prompt": "How would you make a small, single-user computational phage-generation pilot scientifically reproducible, and decide whether it is ready to scale?",
       "expected_output": "An electronic-lab-notebook reproducibility plan centered on the scientific experiment rather than software supply-chain ceremony.",
       "assertions": [
         "The response records the biological question, input dataset and target, model checkpoint, key settings, random seeds, tool and data versions that affect interpretation, commands, outputs, and observed results.",
         "It uses a concise RUNLOG.md and summary so another computational scientist can understand and repeat the pilot.",
         "It includes positive and failure controls, denominators, and known limitations.",
-        "Unrelated local edits and missing project-management files are noted when relevant but are not treated as automatic blockers to a read-only or small pilot decision.",
-        "The reproducibility effort is proportionate to a single-user scientific pilot and does not let software supply-chain bookkeeping eclipse the experiment."
+        "Most detail goes to experimental design, controls, outcomes, and limitations; the response does not make file or tree hashes, immutable source snapshots, clean-checkout rituals, or Git-state audits prerequisites for this single-user pilot."
       ],
       "expected_skill": "bionemo-phage-design",
       "expected_script": null

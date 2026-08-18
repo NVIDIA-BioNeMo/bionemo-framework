@@ -84,7 +84,7 @@ def test_local_markdown_links_resolve() -> None:
     assert not missing, "\n".join(missing)
 
 
-def test_retired_process_framework_is_not_on_the_skill_prompt_surface() -> None:
+def test_retired_prompt_terms() -> None:
     prompt_surface = "\n".join(path.read_text(encoding="utf-8") for path in SKILLS_ROOT.rglob("*.md")).lower()
     for retired in (
         "superpowers",

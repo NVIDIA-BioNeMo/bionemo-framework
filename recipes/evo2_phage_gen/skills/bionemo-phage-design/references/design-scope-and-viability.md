@@ -8,17 +8,7 @@ host-range objective, a named receptor-binding protein, or omission of a diversi
 not authorize a fixed backbone, locus-only edit, tail-fiber-only edit, or another restricted search
 space.
 
-Record the default in `planning/DESIGN_SPEC.yaml`:
-
-```yaml
-schema_version: 1
-intended_use: {category: null, rationale: null}
-design_scope:
-  output_unit: complete-genome
-  mutable_scope: whole-genome
-  fixed_regions: []
-  scope_reduction: {status: none, rationale: null, evidence: [], approved_by: null}
-```
+Record the intended use, complete-genome output, whole-genome mutable scope, protected traits, and any approved scope reduction in the project summary and runlog.
 
 Treat a restricted region, module, edit count, or fixed backbone as a biologically material scope
 reduction. In interactive mode, show the whole-genome alternative, expected benefit, lifecycle blind
@@ -35,11 +25,11 @@ eukaryotic cells; treat it as prohibited rather than a tunable penalty. This is 
 non-replicative eukaryotic entry or host-range work. Route that work through case-specific intended-use,
 evidence, and safety review before planning it.
 
-Keep sequence eligibility source-neutral. Source records establish identity; a source label is not
-a natural-origin attestation. RefSeq, GenBank, phage databases, metagenomic collections, local
+Keep sequence eligibility source-neutral. Source records establish identity; a source label alone is not evidence of
+biological eligibility. RefSeq, GenBank, phage databases, metagenomic collections, local
 experiments, and model-generated candidates may all proceed when the applicable sequence, host, and
 safety evidence is present. Generated candidates inherit the approved target replication-host evidence
-from `DESIGN_SPEC.yaml`; never fail them merely because they are generated. Missing evidence may remain
+from the recorded project scope; never fail them merely because they are generated. Missing evidence may remain
 indeterminate for a decision that actually needs it, but an origin label alone is neither a pass nor a
 failure.
 

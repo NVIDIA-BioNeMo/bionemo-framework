@@ -77,8 +77,8 @@ def _load_prepared_arc_pipeline(tmp_path: Path, module_name: str, monkeypatch):
     return module
 
 
-def test_lovis4u_runtime_patch_matches_pinned_source_trailing_whitespace(tmp_path):
-    """The pinned Arc source has a trailing space after the LoVis4u executable."""
+def test_lovis4u_patch_handles_source_trailing_whitespace(tmp_path):
+    """The compatible Arc source has a trailing space after the LoVis4u executable."""
     visualization_path = tmp_path / "genetic_architecture_visualization.py"
     visualization_path.write_text("    command = [\n        'lovis4u', \n        '-gff', input_gff_dir,\n    ]\n")
 
@@ -189,8 +189,8 @@ def test_prepare_arc_pipeline_resolves_reference_path_before_runtime_cwd_changes
     assert str(phix174_fasta.resolve()) in prepared
 
 
-def test_prepare_arc_pipeline_workdir_checks_pinned_arc_revision(tmp_path, monkeypatch):
-    """The maintained Arc patch should only apply to the pinned Arc source revision."""
+def test_prepare_arc_pipeline_requires_compatible_arc_revision(tmp_path, monkeypatch):
+    """The maintained Arc patch should only apply to its compatible Arc source revision."""
     source_dir = tmp_path / "source" / "phage_gen" / "pipelines"
     source_dir.mkdir(parents=True)
     for filename in ARC_PIPELINE_FILES:

@@ -52,8 +52,8 @@ def _sequence_safety_mapping(tmp_path: Path) -> dict[str, object]:
             "metadata": {"record_id": "NC_001422.1"},
         },
         "asset_manifest_path": str(tmp_path / "asset_manifest.yaml"),
-        "diamond_tool_pin_path": str(tmp_path / "diamond_tool_pin.json"),
-        "mmseqs_tool_pin_path": str(tmp_path / "mmseqs_tool_pin.json"),
+        "diamond_bin": str(tmp_path / "diamond"),
+        "mmseqs_bin": str(tmp_path / "mmseqs"),
         "policy_path": str(tmp_path / "policy.yaml"),
         "work_dir": str(tmp_path / "work"),
         "strict_lysis": False,
@@ -75,8 +75,8 @@ def _disabled_sequence_safety_config(tmp_path: Path) -> SequenceSafetyRewardConf
             metadata={"record_id": "NC_001422.1"},
         ),
         asset_manifest_path=tmp_path / "asset_manifest.yaml",
-        diamond_tool_pin_path=tmp_path / "diamond_tool_pin.json",
-        mmseqs_tool_pin_path=tmp_path / "mmseqs_tool_pin.json",
+        diamond_bin=tmp_path / "diamond",
+        mmseqs_bin=tmp_path / "mmseqs",
         policy_path=tmp_path / "policy.yaml",
         work_dir=tmp_path / "work",
         enabled=False,
@@ -167,6 +167,11 @@ def test_sequence_safety_mapping_is_parsed_without_bool_or_host_scope_coercion(t
     assert parsed.strict_lysis is False
     assert parsed.circular is True
     assert parsed.asset_manifest_path == tmp_path / "asset_manifest.yaml"
+
+    additive = copy.deepcopy(raw)
+    additive["notes"] = "recorded by a newer config writer"
+    additive["host_evidence"]["curator"] = "lab notebook"
+    assert nemo_rl_env._coerce_sequence_safety_config(additive) == parsed
 
     string_bool = copy.deepcopy(raw)
     string_bool["enabled"] = "false"

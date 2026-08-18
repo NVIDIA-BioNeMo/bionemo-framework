@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-operate-mbridge-sft
 description: Use when launching, monitoring, stopping, resuming, or relaunching Evo 2 phage SFT with Megatron Bridge, or when selecting its best validation-loss checkpoint across local, SSH, scheduler, or cloud execution.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Operate Megatron Bridge Phage SFT
@@ -11,6 +13,6 @@ Start from the approved base or reused checkpoint and the explicit leakage-contr
 
 The smoke test should use real train and validation records and show finite loss, parameter updates, checkpoint writing, and restartability. Fix data, masking, or runtime problems before the full run.
 
-Train to the evidence-based ceiling from SFT preparation. Do not choose a token run merely because it is cheaper or stop at a publication step count without looking at the planned exposure and validation curve. Monitor training/validation loss, throughput, memory, and failures. Resume a compatible interrupted run from its latest usable checkpoint; start a new attempt when data or model semantics change.
+Train to the evidence-based ceiling from SFT preparation. Interpret that ceiling in optimizer updates and examples or tokens seen, not epoch count alone: increasing global batch reduces the updates per epoch, so one fast epoch is not evidence of convergence. If the latest comparable validation is still the best and has not rebounded, extend the run—potentially across several epochs—and collect enough validation points to distinguish improvement from a plateau or reversal. Do not choose a token run merely because it is cheaper or copy a publication step count without looking at planned exposure and the validation curve. Monitor training/validation loss, throughput, memory, and failures. Resume a compatible interrupted run from its latest usable checkpoint; start a new attempt when data or model semantics change.
 
 Select the checkpoint by validation loss and curve stability, not training loss or the final step. Use the held-out test set once to characterize the selected checkpoint, never to select it. Record the command, resolved settings, environment, data inputs, checkpoints, validation curve, selected step and rationale, test result, and interruptions in `RUNLOG.md` and a concise stage summary.

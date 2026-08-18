@@ -1,19 +1,21 @@
 ---
 name: bionemo-phage-design
 description: Use when planning or running an Evo 2 bacteriophage genome-design project for phage therapy research, including host-specific candidates for antibiotic-resistant infections and antimicrobial resistance (AMR); coordinates evidence review, genome collection, SFT, GDPO reinforcement learning, checkpoint operations, safety QC, generation, and final screening.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Phage Design Controller
 
-Coordinate the project; delegate each stage to its owning skill. Keep the workflow reproducible, evidence-backed, and portable.
+Coordinate the stages as a computational phage and AI scientist keeping an electronic lab notebook. Record enough to repeat and interpret the experiment, and keep the structure proportionate to the work.
 
-The research skill includes the phage-generation paper and supplement, related design evidence, and a local transcription of the draft EMA phage-therapy quality guideline. Use them as needed for specialized methods, results, or guideline questions; the EMA text is a historical draft rather than current regulatory advice.
+The research skill points to the phage-generation paper and supplement, related design evidence, and a local transcription of the draft EMA phage-therapy quality guideline. Use them as needed for specialized methods, results, or guideline questions; the EMA text is a historical draft rather than current regulatory advice.
 
 ## Intake and plan
 
 1. Select `interactive` unless the user requests `batch`. Interactive mode iterates the initial plan; batch derives it from the user's request. After approval, both modes can act autonomously within that scope.
 2. Resolve the recipe, repository, and result roots using the [workspace guidance](references/workspace-guidance.md). On re-entry, inspect existing results and active jobs before starting new work.
-3. Choose case-study-replication or adapted-design, a concrete target, intended use, and outcome. Unless the user states another use, provisionally treat adapted work as therapeutic and make that assumption visible for revision. Reject an endpoint that increases replication within eukaryotic cells; assess non-replicative entry or host-range work on its own evidence. Default to complete whole-genome candidates and obtain explicit approval before narrowing to a locus, module, RBP, or fixed backbone. Record the intended use, lifecycle endpoint, protected traits, viable references, and scope in `planning/DESIGN_SPEC.yaml`.
+3. Choose case-study-replication or adapted-design, a concrete target, intended use, and outcome. Unless the user states another use, provisionally treat adapted work as therapeutic and make that assumption visible for revision. Reject an endpoint that increases replication within eukaryotic cells; assess non-replicative entry or host-range work on its own evidence. Default to complete whole-genome candidates and obtain explicit approval before narrowing to a locus, module, RBP, or fixed backbone. Record the intended use, lifecycle endpoint, protected traits, viable references, and scope in the project summary and runlog.
 4. Invoke the bionemo-phage-design-adapt-execution skill to inspect the checkout, existing results, available hardware, storage, and current commands before sizing jobs.
 5. Create slug `<target>-<objective>-<mode>` and `<recipe_root>/results/<slug>[-YYYYMMDD]`, adding a date only on request or collision. Initialize the compact [project lab notebook](references/lab-notebook-guidance.md).
 6. With one clear target, default SFT curation to target-similarity bucket/control-prefix conditioning while allowing opt-out. Treat conditioning as a steerable signal, never as an edit mask. Choose context from the tokenized genome-length distribution plus control/prompt/EOD overhead. Set the training budget from the usable corpus and effective batch rather than inheriting a publication step count.

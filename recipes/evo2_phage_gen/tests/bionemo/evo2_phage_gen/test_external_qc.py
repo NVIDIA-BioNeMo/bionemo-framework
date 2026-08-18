@@ -114,7 +114,7 @@ def test_external_qc_checker_requires_enabled_stage_inputs(tmp_path, monkeypatch
 
 
 def test_external_qc_checker_uses_explicit_run_tool_directory(tmp_path, monkeypatch):
-    """Prerequisite discovery should use the same pinned tool directory as scoring."""
+    """Prerequisite discovery should use the same configured tool directory as scoring."""
     tool_bin_dir = tmp_path / "fresh-external" / "bin"
     tool_bin_dir.mkdir(parents=True)
     mmseqs = tool_bin_dir / "mmseqs"

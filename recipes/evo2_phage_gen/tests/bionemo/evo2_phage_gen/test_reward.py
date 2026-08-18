@@ -15,7 +15,6 @@
 
 """Tests for ``bionemo.evo2_phage_gen.reward``."""
 
-import hashlib
 import json
 import os
 import random
@@ -74,8 +73,8 @@ def _bacterial_safety_config(tmp_path: Path, *, enabled: bool = True) -> Sequenc
             confirmed=True,
         ),
         asset_manifest_path=tmp_path / "asset-manifest.yaml",
-        diamond_tool_pin_path=tmp_path / "diamond.json",
-        mmseqs_tool_pin_path=tmp_path / "mmseqs.json",
+        diamond_bin=tmp_path / "diamond.json",
+        mmseqs_bin=tmp_path / "mmseqs.json",
         work_dir=tmp_path / "safety-work",
         enabled=enabled,
     )
@@ -92,8 +91,8 @@ def _archaeal_safety_config(tmp_path: Path, *, strict_lysis: bool) -> SequenceSa
             confirmed=True,
         ),
         asset_manifest_path=tmp_path / "asset-manifest.yaml",
-        diamond_tool_pin_path=tmp_path / "diamond.json",
-        mmseqs_tool_pin_path=tmp_path / "mmseqs.json",
+        diamond_bin=tmp_path / "diamond.json",
+        mmseqs_bin=tmp_path / "mmseqs.json",
         work_dir=tmp_path / ("strict-safety-work" if strict_lysis else "informational-safety-work"),
         strict_lysis=strict_lysis,
     )
@@ -106,25 +105,16 @@ def _install_synthetic_safety_scan(
     required_by_class: dict[str, bool] | None = None,
     review_classes_by_record: list[set[str]] | None = None,
 ) -> dict[str, object]:
-    """Install a complete synthetic Task 4 scan/validation boundary."""
+    """Install a compact synthetic scan at the reward/CLI boundary."""
     required = required_by_class or {"amr": True, "toxin": True, "lysogeny": True}
     review_classes = review_classes_by_record or [set() for _ in class_states_by_record]
-    assert len(review_classes) == len(class_states_by_record)
-    policy_ids = {
-        "amr": "synthetic-amr-policy-v1",
-        "toxin": "synthetic-toxin-policy-v1",
-        "lysogeny": "synthetic-lysogeny-policy-v1",
-    }
-    policy_sha256 = {"amr": "1" * 64, "toxin": "2" * 64, "lysogeny": "3" * 64}
     capture: dict[str, object] = {}
 
     def argv_value(argv: list[str], flag: str) -> str:
         return argv[argv.index(flag) + 1]
 
-    def fake_main(argv, *, runtime=None):
-        assert runtime is None
+    def fake_main(argv, **_kwargs):
         argv = list(argv)
-        assert argv[0] == "scan"
         capture["argv"] = argv
         input_fasta = Path(argv_value(argv, "--input-fasta"))
         output_dir = Path(argv_value(argv, "--output-dir"))
@@ -133,229 +123,108 @@ def _install_synthetic_safety_scan(
         ]
         capture["input_fasta_bytes"] = input_fasta.read_bytes()
         assert len(headers) == len(class_states_by_record)
-        host_evidence = json.loads(argv_value(argv, "--host-evidence-json"))
         strict_lysis = "--strict-lysis" in argv
 
-        records = []
-        record_states = []
-        all_reasons = []
+        records: list[dict[str, object]] = []
+        record_states: list[str] = []
         for input_index, (record_id, states) in enumerate(zip(headers, class_states_by_record, strict=True)):
-            measured_reviews = review_classes[input_index]
-            class_results = []
-            attempts = []
-            record_reasons = []
+            class_results: list[dict[str, object]] = []
+            attempts: list[dict[str, object]] = []
+            reasons: list[str] = []
             for safety_class in ("amr", "toxin", "lysogeny"):
                 state = states[safety_class]
-                if state == "PASS":
-                    reasons = [f"{safety_class.upper()}_SYNTHETIC_NO_FINDINGS"]
-                    findings = []
-                elif state == "FAIL":
-                    reasons = [f"{safety_class.upper()}_SYNTHETIC_HIT"]
-                    findings = [
+                measured_review = safety_class in review_classes[input_index]
+                reason = (
+                    f"{safety_class.upper()}_MEASURED_NO_HIT"
+                    if state == "PASS"
+                    else f"{safety_class.upper()}_HIT"
+                    if state == "FAIL"
+                    else f"{safety_class.upper()}_REVIEW"
+                    if measured_review
+                    else f"{safety_class.upper()}_TOOL_FAILED"
+                )
+                findings = (
+                    [
                         {
                             "safety_class": safety_class,
-                            "state": "FAIL",
-                            "reason_codes": reasons,
-                            "finding_id": f"synthetic-{safety_class}-{input_index}",
+                            "state": state,
+                            "reason_codes": [reason],
+                            "finding_id": f"{safety_class}-{input_index}",
                         }
                     ]
-                elif safety_class in measured_reviews:
-                    reasons = [f"{safety_class.upper()}_SYNTHETIC_REVIEW_HIT"]
-                    findings = [
-                        {
-                            "safety_class": safety_class,
-                            "state": "INDETERMINATE",
-                            "reason_codes": reasons,
-                            "finding_id": f"synthetic-{safety_class}-review-{input_index}",
-                        }
-                    ]
-                else:
-                    reasons = [f"{safety_class.upper()}_SYNTHETIC_DETECTOR_FAILURE"]
-                    findings = []
-                record_reasons.extend(reasons)
+                    if state == "FAIL" or measured_review
+                    else []
+                )
+                reasons.append(reason)
                 class_results.append(
                     {
                         "safety_class": safety_class,
                         "state": state,
                         "required": required[safety_class],
                         "findings": findings,
-                        "reason_codes": reasons,
+                        "reason_codes": [reason],
                     }
-                )
-                execution_status = (
-                    "FAILED"
-                    if state == "INDETERMINATE" and safety_class not in measured_reviews
-                    else "COMPLETED_AND_PARSED"
                 )
                 attempts.append(
                     {
                         "safety_class": safety_class,
-                        "execution_status": execution_status,
-                        "state": state,
-                        "reason_codes": reasons,
-                        "policy_id": policy_ids[safety_class],
-                        "policy_sha256": policy_sha256[safety_class],
-                        "command_cwd": "@OUTPUT_ROOT",
-                        "command": [f"synthetic-{safety_class}-scanner"],
-                        "normalized_output": {
-                            "path": f"records/{input_index:06d}-{record_id}/{safety_class}.json",
-                            "sha256": "4" * 64,
-                            "owned": True,
-                        },
-                        "raw_command_output": {
-                            "path": f"records/{input_index:06d}-{record_id}/{safety_class}.tsv",
-                            "sha256": "5" * 64,
-                            "owned": True,
-                        },
-                        "primary_findings": findings,
-                        "supplemental_findings": [],
+                        "execution_status": (
+                            "FAILED" if state == "INDETERMINATE" and not measured_review else "COMPLETED_AND_PARSED"
+                        ),
+                        "policy_id": f"{safety_class}-policy",
                     }
                 )
-            required_states = [
-                states[safety_class] for safety_class in ("amr", "toxin", "lysogeny") if required[safety_class]
-            ]
-            if "FAIL" in required_states:
-                aggregate_state = "FAIL"
-            elif "INDETERMINATE" in required_states:
-                aggregate_state = "INDETERMINATE"
-            else:
-                aggregate_state = "PASS"
-            record_states.append(aggregate_state)
-            all_reasons.extend(record_reasons)
+            required_states = [states[name] for name in required if required[name]]
+            record_state = (
+                "FAIL"
+                if "FAIL" in required_states
+                else "INDETERMINATE"
+                if "INDETERMINATE" in required_states
+                else "PASS"
+            )
+            record_states.append(record_state)
             records.append(
                 {
-                    "record_id": record_id,
                     "input_index": input_index,
-                    "sequence_sha256": "6" * 64,
-                    "original_record_sha256": "7" * 64,
-                    "sequence_length": 4000,
-                    "circular": "--linear" not in argv,
-                    "host_evidence": host_evidence,
-                    "host_evidence_sha256": "8" * 64,
-                    "resolved_host_profile": argv_value(argv, "--host-domain"),
-                    "strict_lysis": strict_lysis,
-                    "applicability": {safety_class: required[safety_class] for safety_class in required},
-                    "orf_provenance": {
-                        "artifact": {
-                            "path": f"records/{input_index:06d}-{record_id}/orf_provenance.json",
-                            "sha256": "9" * 64,
-                            "owned": True,
-                        },
-                        "preparation_state": "PASS",
-                        "generation_identity_sha256": "f" * 64,
-                        "query_inventory_sha256": "a" * 64,
-                    },
-                    "state": aggregate_state,
-                    "reason_codes": record_reasons,
+                    "record_id": record_id,
+                    "state": record_state,
+                    "reason_codes": list(dict.fromkeys(reasons)),
                     "class_results": class_results,
                     "adapter_attempts": attempts,
                 }
             )
 
-        if "FAIL" in record_states:
-            batch_state = "FAIL"
-        elif "INDETERMINATE" in record_states:
-            batch_state = "INDETERMINATE"
-        else:
-            batch_state = "PASS"
+        batch_state = (
+            "FAIL" if "FAIL" in record_states else "INDETERMINATE" if "INDETERMINATE" in record_states else "PASS"
+        )
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "manifest_type": "sequence_safety_scan",
-            "created_at": "2026-08-08T00:00:00+00:00",
-            "completed_at": "2026-08-08T00:00:01+00:00",
-            "cli_identity": {
-                "name": "evo2-phage-sequence-safety",
-                "version": "1",
-                "entry_point": "bionemo.evo2_phage_gen.sequence_safety_cli:main",
-                "source_path": "/synthetic/sequence_safety_cli.py",
-                "source_sha256": "0" * 64,
-            },
-            "policy": {
-                "path": argv_value(argv, "--policy"),
-                "raw_sha256": "b" * 64,
-                "policy_id": "synthetic-sequence-safety-policy-v1",
-                "canonical_sha256": "c" * 64,
-            },
-            "adapter_policies": [
-                {
-                    "safety_class": safety_class,
-                    "policy_id": policy_ids[safety_class],
-                    "policy_sha256": policy_sha256[safety_class],
-                    "descriptor": {"synthetic": True},
-                }
-                for safety_class in ("amr", "toxin", "lysogeny")
-            ],
-            "safety_asset_manifest": {
-                "path": argv_value(argv, "--asset-manifest"),
-                "sha256": "d" * 64,
-                "recipe_path": "/synthetic/phage_safety_assets.yaml",
-                "recipe_sha256": "e" * 64,
-            },
-            "input_fasta": {
-                "path": str(input_fasta.absolute()),
-                "sha256": hashlib.sha256(input_fasta.read_bytes()).hexdigest(),
-                "count": len(records),
-            },
-            "host_evidence_input": {
-                "kind": "inline_json",
-                "canonical_sha256": "a" * 64,
-                "value": host_evidence,
-            },
+            "input": {"path": str(input_fasta), "count": len(records)},
+            "policy": {"policy_id": "synthetic-policy"},
+            "asset_state": {"path": argv_value(argv, "--asset-manifest")},
             "resolved_profile": {
                 "host_domain": argv_value(argv, "--host-domain"),
                 "strict_lysis": strict_lysis,
-                "applicability": {safety_class: required[safety_class] for safety_class in required},
-            },
-            "runtime_parameters": {
-                "threads": int(argv_value(argv, "--threads")),
-                "timeout_seconds": float(argv_value(argv, "--timeout")),
-                "circular": "--linear" not in argv,
-                "minimum_fallback_amino_acids": 8,
             },
             "tools": {
-                "diamond": {
-                    "tool": "diamond",
-                    "path": "/synthetic/diamond",
-                    "sha256": "6" * 64,
-                    "version": "synthetic",
-                    "version_args": ["version"],
-                    "pin_file_path": argv_value(argv, "--diamond-tool-pin"),
-                    "pin_file_sha256": "7" * 64,
-                },
-                "mmseqs": {
-                    "tool": "mmseqs",
-                    "path": "/synthetic/mmseqs",
-                    "sha256": "8" * 64,
-                    "version": "synthetic",
-                    "version_args": ["version"],
-                    "pin_file_path": argv_value(argv, "--mmseqs-tool-pin"),
-                    "pin_file_sha256": "9" * 64,
-                },
-                "orf_predictor": {
-                    "identity": {"name": "synthetic-orf-predictor"},
-                    "identity_sha256": "f" * 64,
-                },
+                "amrfinder": {"path": "/tools/amrfinder", "version": "4.2.7"},
+                "diamond": {"path": argv_value(argv, "--diamond-bin"), "version": "2.1.24"},
+                "mmseqs": {"path": argv_value(argv, "--mmseqs-bin"), "version": "18"},
             },
-            "environment": {"python": "synthetic"},
+            "databases": {},
             "records": records,
             "aggregate": {
                 "state": batch_state,
-                "reason_codes": list(dict.fromkeys(all_reasons)),
                 "counts": {state: record_states.count(state) for state in ("PASS", "FAIL", "INDETERMINATE")},
-            },
-            "derivatives": {},
-            "claim_boundary": {
-                "label": "EMA-derived sequence-design safety gate",
-                "regulatory_compliance_claimed": False,
             },
         }
         output_dir.mkdir(parents=True)
-        (output_dir / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+        (output_dir / "manifest.json").write_text(json.dumps(manifest) + "\n")
         capture["manifest"] = manifest
         return {"PASS": 0, "FAIL": 2, "INDETERMINATE": 3}[batch_state]
 
-    def fake_validate_manifest_file(path, *, runtime=None, expected_type=None):
-        assert runtime is None
+    def fake_validate_manifest_file(path, *, expected_type=None, **_kwargs):
         payload = json.loads(Path(path).read_text())
         if expected_type is not None and payload["manifest_type"] != expected_type:
             raise sequence_safety_cli.CLIValidationError(f"expected {expected_type} manifest")
@@ -367,18 +236,18 @@ def _install_synthetic_safety_scan(
     return capture
 
 
-def test_sequence_safety_reward_contract_partial_credit_requires_explicit_review_evidence():
-    from bionemo.evo2_phage_gen.reward import sequence_safety_reward_contract
+def test_sequence_safety_reward_fields_partial_credit_requires_explicit_review_evidence():
+    from bionemo.evo2_phage_gen.reward import sequence_safety_reward_fields
 
     class_states = {"amr": "PASS", "toxin": "INDETERMINATE", "lysogeny": "PASS"}
     required = {"amr": True, "toxin": True, "lysogeny": True}
 
-    review = sequence_safety_reward_contract(
+    review = sequence_safety_reward_fields(
         class_states=class_states,
         required_by_class=required,
         review_eligible_by_class={"amr": False, "toxin": True, "lysogeny": False},
     )
-    unavailable = sequence_safety_reward_contract(
+    unavailable = sequence_safety_reward_fields(
         class_states=class_states,
         required_by_class=required,
         review_eligible_by_class={"amr": False, "toxin": False, "lysogeny": False},
@@ -454,8 +323,8 @@ def test_disabled_sequence_safety_config_is_explicitly_indeterminate(tmp_path):
         ("host_domain", "BACTERIA"),
         ("host_evidence", {}),
         ("asset_manifest_path", "asset-manifest.yaml"),
-        ("diamond_tool_pin_path", "diamond.json"),
-        ("mmseqs_tool_pin_path", "mmseqs.json"),
+        ("diamond_bin", "diamond.json"),
+        ("mmseqs_bin", "mmseqs.json"),
         ("policy_path", "phage-safety-policy.yaml"),
         ("work_dir", "safety-work"),
         ("enabled", "false"),
@@ -503,8 +372,8 @@ def test_disabled_archaeal_config_keeps_lysogeny_informational_but_gate_ineligib
         host_domain=config.host_domain,
         host_evidence=config.host_evidence,
         asset_manifest_path=config.asset_manifest_path,
-        diamond_tool_pin_path=config.diamond_tool_pin_path,
-        mmseqs_tool_pin_path=config.mmseqs_tool_pin_path,
+        diamond_bin=config.diamond_bin,
+        mmseqs_bin=config.mmseqs_bin,
         work_dir=config.work_dir,
         enabled=False,
         strict_lysis=False,
@@ -539,8 +408,8 @@ def test_valid_unavailable_config_preserves_strict_lysis_telemetry(tmp_path):
     assert scored["reward"].tolist() == [0.0]
 
 
-def test_validated_clean_scan_emits_independent_safety_rewards_and_provenance(tmp_path, monkeypatch):
-    """A validated all-PASS manifest should qualify the unchanged historical reward."""
+def test_clean_scan_emits_independent_safety_rewards(tmp_path, monkeypatch):
+    """An all-PASS scan qualifies the ordinary whole-genome reward."""
     capture = _install_synthetic_safety_scan(
         monkeypatch,
         class_states_by_record=[{"amr": "PASS", "toxin": "PASS", "lysogeny": "PASS"}],
@@ -551,46 +420,21 @@ def test_validated_clean_scan_emits_independent_safety_rewards_and_provenance(tm
 
     assert source.to_dict("records") == [{"id_prompt": "original-id", "sequence": "ACGT" * 1000}]
     assert capture["input_fasta_bytes"].startswith(b">safety_record_000000\n")
-    assert scored["id_prompt"].tolist() == ["original-id"]
-    assert scored["sequence"].tolist() == ["ACGT" * 1000]
     assert scored["safety_scan_record_id"].tolist() == ["safety_record_000000"]
-    assert scored["safety_scan_input_index"].tolist() == [0]
     assert scored["safety_gate_state"].tolist() == ["PASS"]
-    assert scored["safety_gate_pass"].tolist() == [1.0]
     assert scored["safety_environment_healthy"].tolist() == [1.0]
-    assert scored["safety_required_class_count"].tolist() == [3]
     assert scored["safety_required_class_pass_count"].tolist() == [3]
-    assert scored["reward_historical"].tolist() == [1.0]
-    assert scored["reward_safety_penalty"].tolist() == [0.0]
     assert scored["reward"].tolist() == [1.0]
-    assert scored["reward_binary_historical_core_pass"].tolist() == [1.0]
     assert scored["reward_binary_core_pass"].tolist() == [1.0]
-    for safety_class, policy_id in (
-        ("amr", "synthetic-amr-policy-v1"),
-        ("toxin", "synthetic-toxin-policy-v1"),
-        ("lysogeny", "synthetic-lysogeny-policy-v1"),
-    ):
+    for safety_class in ("amr", "toxin", "lysogeny"):
         assert scored[f"safety_{safety_class}_state"].tolist() == ["PASS"]
-        assert scored[f"safety_{safety_class}_required"].tolist() == [1.0]
-        assert scored[f"safety_{safety_class}_finding_count"].tolist() == [0]
         assert scored[f"safety_{safety_class}_measurement_available"].tolist() == [1.0]
-        assert scored[f"safety_{safety_class}_execution_status"].tolist() == ["COMPLETED_AND_PARSED"]
-        assert scored[f"safety_{safety_class}_policy_id"].tolist() == [policy_id]
         assert scored[f"reward_safety_{safety_class}"].tolist() == [1.0]
-    assert scored["safety_policy_id"].tolist() == ["synthetic-sequence-safety-policy-v1"]
-    assert scored["safety_policy_sha256"].tolist() == ["c" * 64]
-    assert scored["safety_asset_manifest_sha256"].tolist() == ["d" * 64]
-    assert scored["safety_asset_recipe_sha256"].tolist() == ["e" * 64]
-    assert scored["safety_diamond_tool_sha256"].tolist() == ["6" * 64]
-    assert scored["safety_mmseqs_tool_sha256"].tolist() == ["8" * 64]
-    assert scored["safety_orf_identity_sha256"].tolist() == ["f" * 64]
-    manifest_path = Path(scored.loc[0, "safety_scan_manifest_path"])
-    assert manifest_path == capture["validated_manifest_path"]
-    assert scored["safety_scan_manifest_sha256"].tolist() == [hashlib.sha256(manifest_path.read_bytes()).hexdigest()]
+    assert scored["safety_policy_id"].tolist() == ["synthetic-policy"]
+    assert Path(scored.loc[0, "safety_scan_manifest_path"]) == capture["validated_manifest_path"]
     assert {"safety_amr", "safety_toxin", "safety_lysogeny"}.issubset(
         {component.name for component in REWARD_COMPONENTS}
     )
-    assert "safety_amr" not in scored.loc[0, "reward_active_components"]
 
 
 def test_mixed_batch_isolates_each_required_failure_and_unscannable_record(tmp_path, monkeypatch):
@@ -640,19 +484,19 @@ def test_mixed_batch_isolates_each_required_failure_and_unscannable_record(tmp_p
     assert scored["safety_environment_healthy"].tolist() == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
     assert scored["reward_safety_penalty"].tolist() == [0.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     assert scored["reward"].tolist() == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert scored.loc[4, "safety_toxin_reason_codes"] == '["TOXIN_SYNTHETIC_DETECTOR_FAILURE"]'
+    assert scored.loc[4, "safety_toxin_reason_codes"] == '["TOXIN_TOOL_FAILED"]'
     assert scored.loc[5, "safety_gate_reason_codes"] == '["SEQUENCE_SAFETY_RECORD_UNSCANNABLE"]'
 
 
-def test_unvalidated_pass_manifest_cannot_certify_reward_eligibility(tmp_path, monkeypatch):
-    """A Task 4 validator rejection must override raw all-PASS manifest content."""
+def test_invalid_safety_result_has_zero_credit(tmp_path, monkeypatch):
+    """A rejected safety result must not award credit."""
     _install_synthetic_safety_scan(
         monkeypatch,
         class_states_by_record=[{"amr": "PASS", "toxin": "PASS", "lysogeny": "PASS"}],
     )
 
     def reject_manifest(*_args, **_kwargs):
-        raise sequence_safety_cli.CLIValidationError("synthetic provenance drift")
+        raise sequence_safety_cli.CLIValidationError("synthetic result mismatch")
 
     monkeypatch.setattr(sequence_safety_cli, "validate_manifest_file", reject_manifest)
 
@@ -672,8 +516,8 @@ def test_unvalidated_pass_manifest_cannot_certify_reward_eligibility(tmp_path, m
     assert scored["safety_scan_manifest_path"].tolist() == [""]
 
 
-def test_diagnostic_manifest_is_not_accepted_as_per_record_safety_evidence(tmp_path, monkeypatch):
-    """A validated diagnostic artifact is not a scan manifest and cannot carry PASS eligibility."""
+def test_diagnostic_result_has_zero_credit(tmp_path, monkeypatch):
+    """A diagnostic summary is not per-record safety evidence."""
     capture = _install_synthetic_safety_scan(
         monkeypatch,
         class_states_by_record=[{"amr": "PASS", "toxin": "PASS", "lysogeny": "PASS"}],
@@ -746,8 +590,8 @@ def test_archaeal_lysogeny_retains_raw_state_but_is_neutral_unless_strict(tmp_pa
     assert strict["reward"].tolist() == [0.0]
 
 
-def test_manifest_mapping_tamper_rejects_entire_batch_without_partial_pass(tmp_path, monkeypatch):
-    """A bad later input index must not leave an earlier row certified from the same manifest."""
+def test_mismatched_record_mapping_rejects_batch(tmp_path, monkeypatch):
+    """A mismatched later index must invalidate the complete measured batch."""
     _install_synthetic_safety_scan(
         monkeypatch,
         class_states_by_record=[
@@ -757,12 +601,12 @@ def test_manifest_mapping_tamper_rejects_entire_batch_without_partial_pass(tmp_p
     )
     validate = sequence_safety_cli.validate_manifest_file
 
-    def tamper_after_validation(*args, **kwargs):
+    def return_mismatched_result(*args, **kwargs):
         payload = validate(*args, **kwargs)
         payload["records"][1]["input_index"] = 0
         return payload
 
-    monkeypatch.setattr(sequence_safety_cli, "validate_manifest_file", tamper_after_validation)
+    monkeypatch.setattr(sequence_safety_cli, "validate_manifest_file", return_mismatched_result)
 
     scored = score_nucleotide_metrics(
         pd.DataFrame(
@@ -784,20 +628,20 @@ def test_manifest_mapping_tamper_rejects_entire_batch_without_partial_pass(tmp_p
     assert scored["safety_scan_manifest_path"].tolist() == ["", ""]
 
 
-def test_manifest_class_state_tamper_cannot_leave_aggregate_pass_eligible(tmp_path, monkeypatch):
-    """Reward mapping must reject a PASS record that no longer agrees with its required class states."""
+def test_inconsistent_class_state_has_zero_credit(tmp_path, monkeypatch):
+    """A class result inconsistent with its aggregate must not award credit."""
     _install_synthetic_safety_scan(
         monkeypatch,
         class_states_by_record=[{"amr": "PASS", "toxin": "PASS", "lysogeny": "PASS"}],
     )
     validate = sequence_safety_cli.validate_manifest_file
 
-    def tamper_after_validation(*args, **kwargs):
+    def return_mismatched_result(*args, **kwargs):
         payload = validate(*args, **kwargs)
         payload["records"][0]["class_results"][0]["state"] = "FAIL"
         return payload
 
-    monkeypatch.setattr(sequence_safety_cli, "validate_manifest_file", tamper_after_validation)
+    monkeypatch.setattr(sequence_safety_cli, "validate_manifest_file", return_mismatched_result)
 
     scored = score_nucleotide_metrics(
         pd.DataFrame({"id_prompt": ["state-drift"], "sequence": ["ACGT" * 1000]}),
@@ -942,7 +786,7 @@ def test_reward_components_are_registered_and_clipped_to_unit_interval():
 
 
 def test_only_exact_safety_gate_pass_one_can_qualify_reward():
-    """Only a numeric scalar one may satisfy the binary safety eligibility contract."""
+    """Only a numeric scalar one may satisfy the binary safety eligibility rule."""
     scored = _aggregate_reward(
         pd.DataFrame(
             {

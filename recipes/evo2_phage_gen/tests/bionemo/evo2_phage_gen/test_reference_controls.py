@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
-import tomllib
-from copy import deepcopy
+import json
 from pathlib import Path
 
 import pytest
+import yaml
 
+from bionemo.evo2_phage_gen import reference_controls
 from bionemo.evo2_phage_gen.reference_controls import (
     ReferenceControlError,
     load_reference_control_panel,
@@ -28,261 +27,196 @@ from bionemo.evo2_phage_gen.reference_controls import (
 )
 
 
-_CONFIG = Path(__file__).parents[3] / "configs" / "phage_safety_reference_controls.yaml"
+CONFIG = Path(__file__).parents[3] / "configs" / "phage_safety_reference_controls.yaml"
 
 
-def _panel():
-    return load_reference_control_panel(_CONFIG)
-
-
-def _measured_report(control):
-    attempts = []
+def _report(control) -> dict[str, object]:
     class_results = []
-    for safety_class, expectation in control.expected_classes.items():
+    attempts = []
+    for name, expectation in control.expected_classes.items():
+        accessions = list(expectation.required_finding_accessions.values())
+        while len(accessions) < expectation.minimum_primary_findings:
+            accessions.append(f"observed-{name}-{len(accessions)}")
         findings = [
             {
+                "safety_class": name,
+                "state": expectation.state.value,
+                "reason_codes": [f"{name.upper()}_CONTROL_SIGNAL"],
+                "finding_id": f"{name}-{index}",
                 "accession": accession,
-                "state": expectation.state.value,
-                "reason_codes": list(expectation.reason_codes),
             }
-            for accession in expectation.required_finding_accessions.values()
+            for index, accession in enumerate(accessions)
         ]
-        while len(findings) < expectation.minimum_primary_findings:
-            findings.append(
-                {
-                    "accession": f"fixture-{safety_class}-{len(findings)}",
-                    "state": expectation.state.value,
-                    "reason_codes": list(expectation.reason_codes),
-                }
-            )
-        attempts.append(
-            {
-                "safety_class": safety_class,
-                "execution_status": "COMPLETED_AND_PARSED",
-                "state": expectation.state.value,
-                "reason_codes": list(expectation.reason_codes),
-                "primary_findings": findings,
-                "supplemental_findings": [],
-            }
-        )
         class_results.append(
             {
-                "safety_class": safety_class,
+                "safety_class": name,
                 "state": expectation.state.value,
                 "required": True,
-                "reason_codes": list(expectation.reason_codes),
+                "reason_codes": [f"{name.upper()}_CONTROL_RESULT"],
                 "findings": findings,
             }
         )
+        attempts.append(
+            {
+                "safety_class": name,
+                "execution_status": "COMPLETED_AND_PARSED",
+                "policy_id": f"{name}-policy",
+            }
+        )
+    state = control.expected_aggregate_state.value
     return {
+        "schema_version": 2,
         "manifest_type": "sequence_safety_scan",
-        "resolved_profile": {"host_domain": "BACTERIA", "strict_lysis": True},
+        "resolved_profile": {
+            "host_domain": "BACTERIA",
+            "strict_lysis": True,
+            "circular": control.circular,
+        },
         "records": [
             {
+                "input_index": 0,
                 "record_id": control.record_id,
                 "sequence_length": control.sequence_length,
-                "sequence_sha256": control.sequence_sha256,
-                "circular": control.circular,
-                "strict_lysis": True,
-                "state": control.expected_aggregate_state.value,
+                "state": state,
+                "reason_codes": [],
                 "class_results": class_results,
                 "adapter_attempts": attempts,
             }
         ],
-        "aggregate": {"state": control.expected_aggregate_state.value},
+        "aggregate": {
+            "state": state,
+            "counts": {
+                "PASS": int(state == "PASS"),
+                "FAIL": int(state == "FAIL"),
+                "INDETERMINATE": int(state == "INDETERMINATE"),
+            },
+        },
     }
 
 
-def _reports(panel):
-    return {control.control_id: _measured_report(control) for control in panel.controls}
+def test_panel_covers_positive_review_and_negative_controls() -> None:
+    panel = load_reference_control_panel(CONFIG)
+    roles = {control.role for control in panel.controls}
+    assert roles == {"positive_hazard", "positive_review", "negative"}
+    assert panel.by_id["phix174_negative"].accession == "NC_001422.1"
 
 
-def _attempt(report, safety_class):
-    return next(
-        attempt for attempt in report["records"][0]["adapter_attempts"] if attempt["safety_class"] == safety_class
-    )
+def test_panel_uses_scientific_identifiers_and_expected_states() -> None:
+    payload = yaml.safe_load(CONFIG.read_text())
+    assert "sequence_identity" not in payload
+    assert all(control["sequence_length"] > 0 for control in payload["controls"])
 
 
-def test_reference_control_panel_pins_exact_immutable_records_and_expectations():
-    panel = _panel()
-    controls = {control.control_id: control for control in panel.controls}
-
-    assert set(controls) == {
-        "ctxphi_hazard",
-        "shiga_toxin_933w_hazard",
-        "wopip1_latrotoxin_domain_hazard",
-        "t7_negative",
-        "phix174_negative",
-        "muddy_negative",
-    }
-    assert (controls["ctxphi_hazard"].accession, controls["ctxphi_hazard"].sequence_length) == (
-        "NC_015209.1",
-        10638,
-    )
-    assert controls["ctxphi_hazard"].expected_classes["toxin"].required_finding_accessions == {
-        "ctxA": "P01555",
-        "ctxB": "P01556",
-    }
-    assert controls["ctxphi_hazard"].expected_classes["lysogeny"].state.value == "FAIL"
-    assert (
-        controls["shiga_toxin_933w_hazard"].accession,
-        controls["shiga_toxin_933w_hazard"].sequence_length,
-    ) == ("NC_000924.1", 61670)
-    assert controls["shiga_toxin_933w_hazard"].expected_classes["toxin"].required_finding_accessions == {
-        "stxA2": "P09385",
-        "stxB2": "P09386",
-    }
-    wopip1 = controls["wopip1_latrotoxin_domain_hazard"]
-    assert wopip1.accession == "AM999887.1"
-    assert wopip1.sequence_interval == (246045, 312651)
-    assert wopip1.record_id == "AM999887.1_246045_312651"
-    assert wopip1.role == "positive_review"
-    assert wopip1.expected_aggregate_state.value == "INDETERMINATE"
-    assert wopip1.expected_classes["toxin"].required_finding_accessions == {
-        "latrotoxin_C_domain_bearing_WP0292": "PF15658.11"
-    }
-    assert wopip1.expected_classes["toxin"].state.value == "INDETERMINATE"
-    assert wopip1.expected_classes["lysogeny"].state.value == "INDETERMINATE"
-    assert controls["phix174_negative"].circular is True
-    assert controls["muddy_negative"].accession == "NC_022054.2"
-    assert all(
-        expectation.state.value == "PASS"
-        for control in panel.controls
-        if control.role == "negative"
-        for expectation in control.expected_classes.values()
-    )
-
-
-def test_reference_control_validator_has_a_recipe_entrypoint():
-    project = tomllib.loads((Path(__file__).parents[3] / "pyproject.toml").read_text())
-
-    assert project["project"]["scripts"]["evo2_phage_validate_safety_controls"] == (
-        "bionemo.evo2_phage_gen.reference_controls:main"
-    )
-
-
-def test_reference_control_gate_accepts_only_the_complete_measured_panel():
-    panel = _panel()
-
-    result = validate_reference_control_reports(panel, _reports(panel))
-
+def test_complete_measured_control_panel_passes() -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls}
+    result = validate_reference_control_reports(panel, reports)
     assert result["state"] == "PASS"
-    assert result["panel_id"] == "phage-sequence-safety-controls-v2"
-    assert set(result["controls"]) == {control.control_id for control in panel.controls}
+    assert set(result["controls"]) == set(panel.by_id)
+    assert "tool versions" in result["claim_boundary"]
 
 
-def test_reference_control_gate_emits_production_safety_reward_contract():
-    panel = _panel()
-
-    controls = validate_reference_control_reports(panel, _reports(panel))["controls"]
-
-    assert controls["ctxphi_hazard"]["rl_safety"] == {
-        "safety_gate_state": "FAIL",
-        "safety_gate_pass": 0.0,
-        "reward_safety_penalty": 1.0,
-        "reward_safety_amr": 1.0,
-        "reward_safety_toxin": 0.0,
-        "reward_safety_lysogeny": 0.0,
-    }
-    assert controls["shiga_toxin_933w_hazard"]["rl_safety"] == controls["ctxphi_hazard"]["rl_safety"]
-    assert controls["wopip1_latrotoxin_domain_hazard"]["rl_safety"] == {
-        "safety_gate_state": "INDETERMINATE",
-        "safety_gate_pass": 0.0,
-        "reward_safety_penalty": 1.0,
-        "reward_safety_amr": 1.0,
-        "reward_safety_toxin": 0.25,
-        "reward_safety_lysogeny": 0.25,
-    }
-    for control_id in ("t7_negative", "phix174_negative", "muddy_negative"):
-        assert controls[control_id]["rl_safety"] == {
-            "safety_gate_state": "PASS",
-            "safety_gate_pass": 1.0,
-            "reward_safety_penalty": 0.0,
-            "reward_safety_amr": 1.0,
-            "reward_safety_toxin": 1.0,
-            "reward_safety_lysogeny": 1.0,
-        }
+def test_missing_detector_or_failed_attempt_rejects_control() -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls}
+    first = panel.controls[0]
+    reports[first.control_id]["records"][0]["adapter_attempts"][1]["execution_status"] = "FAILED"
+    with pytest.raises(ReferenceControlError, match="measured outcome"):
+        validate_reference_control_reports(panel, reports)
 
 
-def test_ctxphi_accepts_narrow_measured_amrfinder_supplemental_toxin_evidence():
-    panel = _panel()
-    reports = _reports(panel)
-    record = reports["ctxphi_hazard"]["records"][0]
-    amr = _attempt(reports["ctxphi_hazard"], "amr")
-    amr["supplemental_findings"] = [
-        {
-            "safety_class": "toxin",
-            "state": "INDETERMINATE",
-            "reason_codes": ["AMRFINDER_PLUS_VIRULENCE_SUPPLEMENTAL"],
-            "accession": "AAF94614.1",
-        }
-    ]
-    toxin_result = next(row for row in record["class_results"] if row["safety_class"] == "toxin")
-    toxin_result["reason_codes"].append("AMRFINDER_PLUS_VIRULENCE_SUPPLEMENTAL")
+@pytest.mark.parametrize("field", ("record_id", "sequence_length"))
+def test_accession_and_length_mismatch_rejects_control(field: str) -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls}
+    first = panel.controls[0]
+    reports[first.control_id]["records"][0][field] = "wrong" if field == "record_id" else 1
+    with pytest.raises(ReferenceControlError, match="accession or length"):
+        validate_reference_control_reports(panel, reports)
+
+
+def test_topology_mismatch_rejects_control() -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls}
+    control = panel.by_id["phix174_negative"]
+    reports[control.control_id]["resolved_profile"]["circular"] = False
+    with pytest.raises(ReferenceControlError, match="topology"):
+        validate_reference_control_reports(panel, reports)
+
+
+def test_changed_positive_signal_is_reported_for_review() -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls}
+    control = panel.by_id["ctxphi_hazard"]
+    toxin = next(
+        result
+        for result in reports[control.control_id]["records"][0]["class_results"]
+        if result["safety_class"] == "toxin"
+    )
+    toxin["findings"] = []
 
     result = validate_reference_control_reports(panel, reports)
 
-    assert result["controls"]["ctxphi_hazard"]["classes"]["toxin"]["reason_codes"] == [
-        "TOXIN_HIGH_CONFIDENCE_HOMOLOGY",
-        "AMRFINDER_PLUS_VIRULENCE_SUPPLEMENTAL",
-    ]
-
-
-def test_reference_control_gate_rejects_noncanonical_host_profile():
-    panel = _panel()
-    reports = _reports(panel)
-    reports["ctxphi_hazard"]["resolved_profile"]["host_domain"] = "bacteria"
-
-    with pytest.raises(ReferenceControlError, match="strict bacterial lysis profile"):
-        validate_reference_control_reports(panel, reports)
-
-
-@pytest.mark.parametrize("missing_gene", ["ctxA", "ctxB"])
-def test_ctxphi_requires_independent_detection_of_both_cholera_toxin_genes(missing_gene):
-    panel = _panel()
-    reports = _reports(panel)
-    toxin = _attempt(reports["ctxphi_hazard"], "toxin")
-    accession = panel.by_id["ctxphi_hazard"].expected_classes["toxin"].required_finding_accessions[missing_gene]
-    toxin["primary_findings"] = [finding for finding in toxin["primary_findings"] if finding["accession"] != accession]
-
-    with pytest.raises(ReferenceControlError, match=missing_gene):
-        validate_reference_control_reports(panel, reports)
-
-
-def test_ctxphi_must_independently_fail_the_lysogeny_gate():
-    panel = _panel()
-    reports = _reports(panel)
-    lysogeny = _attempt(reports["ctxphi_hazard"], "lysogeny")
-    lysogeny.update(
-        state="PASS",
-        reason_codes=["PHROGS_MEASURED_NO_REVIEW_HIT"],
-        primary_findings=[],
+    assert result["state"] == "REVIEW"
+    assert control.control_id in result["changed_controls"]
+    assert any(
+        "missed reference findings" in reason for reason in result["controls"][control.control_id]["review_reasons"]
     )
 
-    with pytest.raises(ReferenceControlError, match="ctxphi_hazard.*lysogeny"):
+
+def test_new_database_finding_is_logged_without_requiring_an_older_database() -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls}
+    control = panel.by_id["phix174_negative"]
+    toxin = next(
+        result
+        for result in reports[control.control_id]["records"][0]["class_results"]
+        if result["safety_class"] == "toxin"
+    )
+    toxin["findings"].append(
+        {
+            "safety_class": "toxin",
+            "state": "FAIL",
+            "reason_codes": ["NEW_DATABASE_HIT"],
+            "finding_id": "new-hit",
+            "accession": "NEW0001",
+        }
+    )
+    toxin["state"] = "FAIL"
+    reports[control.control_id]["records"][0]["state"] = "FAIL"
+    reports[control.control_id]["aggregate"]["state"] = "FAIL"
+    reports[control.control_id]["aggregate"]["counts"] = {"PASS": 0, "FAIL": 1, "INDETERMINATE": 0}
+
+    result = validate_reference_control_reports(panel, reports)
+
+    assert result["state"] == "REVIEW"
+    assert "older database" in result["claim_boundary"]
+    assert result["controls"][control.control_id]["observed_filter_state"] == "FAIL"
+
+
+def test_reports_must_cover_the_whole_panel() -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls[:-1]}
+    with pytest.raises(ReferenceControlError, match="complete control panel"):
         validate_reference_control_reports(panel, reports)
 
 
-@pytest.mark.parametrize("control_id", ["t7_negative", "phix174_negative", "muddy_negative"])
-def test_negative_controls_reject_toxin_or_lysogeny_false_positives(control_id):
-    panel = _panel()
-    for safety_class in ("toxin", "lysogeny"):
-        reports = _reports(panel)
-        attempt = _attempt(reports[control_id], safety_class)
-        attempt["primary_findings"] = [{"accession": "false-positive", "state": "FAIL", "reason_codes": ["fixture"]}]
-
-        with pytest.raises(ReferenceControlError, match=f"{control_id}.*{safety_class}"):
-            validate_reference_control_reports(panel, reports)
-
-
-def test_reference_control_gate_rejects_identity_drift_and_incomplete_panels():
-    panel = _panel()
-    drifted = _reports(panel)
-    drifted["muddy_negative"]["records"][0]["sequence_sha256"] = "0" * 64
-    with pytest.raises(ReferenceControlError, match="muddy_negative.*sequence SHA-256"):
-        validate_reference_control_reports(panel, drifted)
-
-    incomplete = deepcopy(_reports(panel))
-    incomplete.pop("phix174_negative")
-    with pytest.raises(ReferenceControlError, match="control report set"):
-        validate_reference_control_reports(panel, incomplete)
+def test_cli_writes_small_summary(tmp_path: Path, monkeypatch) -> None:
+    panel = load_reference_control_panel(CONFIG)
+    reports = {control.control_id: _report(control) for control in panel.controls}
+    report_paths = {}
+    for control_id, report in reports.items():
+        path = tmp_path / f"{control_id}.json"
+        path.write_text(json.dumps(report))
+        report_paths[control_id] = path
+    monkeypatch.setattr(
+        reference_controls,
+        "load_reference_control_panel",
+        lambda _path: panel,
+    )
+    output = tmp_path / "summary.json"
+    args = ["--config", str(CONFIG), "--output", str(output)]
+    for control_id, path in report_paths.items():
+        args.extend(("--report", f"{control_id}={path}"))
+    assert reference_controls.main(args) == 0
+    assert json.loads(output.read_text())["state"] == "PASS"

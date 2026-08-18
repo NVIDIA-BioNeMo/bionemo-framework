@@ -20,5 +20,10 @@ contract, output path or schema, README procedure, or user-facing documentation:
    change.
 3. Run the skill evaluation validator and focused skill-runner tests.
 
+When a workflow stage, CLI argument, configuration, or output layout changes, update the affected
+files under `scripts/` and `examples/`, their mirrored tests under `tests/scripts/` or
+`tests/examples/`, and the recipe/root README pointers in the same change. Keep the example's
+one-command dry run useful so documentation drift is caught without launching a scientific job.
+
 Keep recipe-specific implementation guidance here rather than in the repository-level portable
 `bionemo-phage-generation` skill.

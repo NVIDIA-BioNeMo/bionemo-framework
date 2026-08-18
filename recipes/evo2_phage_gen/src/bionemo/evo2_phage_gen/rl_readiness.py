@@ -276,7 +276,11 @@ def _checkpoint_iteration_resolution_check(checkpoint_path: str | Path | None) -
 
 
 def _config_checks(
-    config_path: Path, *, require_evo2_adapter: bool, expected_gpus: int | None
+    config_path: Path,
+    *,
+    require_evo2_adapter: bool,
+    expected_gpus: int | None,
+    checkpoint_override: Path | None = None,
 ) -> list[RLReadinessCheck]:
     """Check files and settings referenced by the GRPO config."""
     checks = [_path_check("grpo_config", config_path, required=True)]
@@ -289,6 +293,7 @@ def _config_checks(
         checks.append(RLReadinessCheck("grpo_config_parse", ok=False, required=True, detail=str(error)))
         return checks
 
+    checkpoint_path = checkpoint_override or _nested_get(config, ("checkpointing", "pretrained_checkpoint", "path"))
     checks.extend(
         [
             _path_check(
@@ -296,16 +301,11 @@ def _config_checks(
                 _config_relative_path(config_path, config.get("defaults")),
                 required=True,
             ),
-            _path_check(
-                "pretrained_checkpoint",
-                _nested_get(config, ("checkpointing", "pretrained_checkpoint", "path")),
-                required=True,
-            ),
+            _path_check("pretrained_checkpoint", checkpoint_path, required=True),
             _path_check("tokenizer", _nested_get(config, ("policy", "tokenizer", "name")), required=True),
             _path_check("prompt_data", _nested_get(config, ("data", "train", "data_path")), required=True),
         ]
     )
-    checkpoint_path = _nested_get(config, ("checkpointing", "pretrained_checkpoint", "path"))
     checks.extend(
         [
             _checkpoint_iteration_resolution_check(checkpoint_path),
@@ -405,11 +405,17 @@ def check_rl_readiness(
     *,
     require_evo2_adapter: bool = True,
     expected_gpus: int | None = None,
+    checkpoint_override: Path | None = None,
 ) -> list[RLReadinessCheck]:
     """Check whether the phage GRPO scaffold is ready to launch."""
     return [
         *_runtime_checks(),
-        *_config_checks(config_path, require_evo2_adapter=require_evo2_adapter, expected_gpus=expected_gpus),
+        *_config_checks(
+            config_path,
+            require_evo2_adapter=require_evo2_adapter,
+            expected_gpus=expected_gpus,
+            checkpoint_override=checkpoint_override,
+        ),
     ]
 
 
@@ -426,6 +432,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Check prerequisites for the Evo2 phage NeMo-RL GRPO scaffold")
     parser.add_argument("--config", type=Path, default=DEFAULT_GRPO_CONFIG)
     parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="Check this selected SFT checkpoint instead of the template checkpoint path",
+    )
+    parser.add_argument(
         "--allow-template-gaps",
         action="store_true",
         help="Report the known Evo2 policy-adapter gap as optional instead of failing",
@@ -437,6 +448,7 @@ def main() -> None:
     checks = check_rl_readiness(
         args.config,
         require_evo2_adapter=not args.allow_template_gaps,
+        checkpoint_override=args.checkpoint,
     )
     if args.json:
         print(json.dumps([asdict(check) for check in checks], indent=2))

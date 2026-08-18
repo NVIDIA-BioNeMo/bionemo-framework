@@ -71,6 +71,19 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-mbridge-sft-006-one-epoch-still-improving",
+      "prompt": "An SFT job used more nodes and a larger global batch, reached one epoch in 736 optimizer steps, and stopped. Its lowest comparable validation loss is at the final checkpoint, with no rebound. Decide whether training is complete and how to continue.",
+      "expected_output": "A continuation decision based on optimizer updates, data exposure, and the validation trajectory rather than epoch count alone.",
+      "assertions": [
+        "The response explains that a larger global batch produces fewer optimizer updates per epoch and does not treat completion of one epoch as evidence of convergence.",
+        "Because the final comparable validation is still best and has not rebounded, the response recommends resuming from the compatible checkpoint and extending the training ceiling rather than declaring the run complete.",
+        "The continuation is sized and monitored using optimizer updates plus examples or tokens seen, with enough comparable validation points to distinguish continued improvement from a plateau or rebound; several epochs may be appropriate, but no fixed epoch count is imposed.",
+        "Checkpoint selection remains based on the lowest credible comparable validation loss, and the held-out test split is not used to decide how long to train."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
+      "expected_script": null
     }
   ]
 }

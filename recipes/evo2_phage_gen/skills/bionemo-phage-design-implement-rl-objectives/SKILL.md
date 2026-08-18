@@ -1,6 +1,8 @@
 ---
 name: bionemo-phage-design-implement-rl-objectives
 description: Use when adding or changing Evo2 phage RL metrics, reward functions, filter logic, or validation criteria after an objective plan has been approved.
+metadata:
+  author: NVIDIA <bionemofeedback@nvidia.com>
 ---
 
 # Implement Phage RL Objectives

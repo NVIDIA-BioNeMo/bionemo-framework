@@ -2,11 +2,6 @@
 
 Keep one project directory beneath the selected recipe's `results/` directory.
 
-At the project root, use:
+At the project root, keep `SUMMARY.md` for the target, intended use, design scope, current scientific results, and next steps, plus `RUNLOG.md` as the electronic lab notebook.
 
-- `PROJECT.yaml` for the target, host, intended use, mode, and current stage;
-- `planning/DESIGN_SPEC.yaml` for whole-genome or explicitly narrowed design scope;
-- `SUMMARY.md` for current scientific results and next steps; and
-- `RUNLOG.md` as the electronic lab notebook.
-
-For each stage, keep its main inputs, resolved settings, outputs, and a concise summary together. In the runlog, record dated commands, software/data versions where they affect interpretation, random seeds and sampling settings, job/checkpoint locations, key metrics, failures, resumes, and reasons for scientific decisions. Avoid dumping credentials, entire environments, repetitive polls, or metadata that does not help reproduce or interpret the experiment.
+For each stage, keep its main inputs, resolved settings, outputs, and a concise summary together. In the runlog, record dated commands, software/data versions where they affect interpretation, random seeds and sampling settings, job/checkpoint locations, key metrics, failures, resumes, and reasons for scientific decisions. Record scientific settings and relevant identifiers or releases. Avoid credentials and repetitive polls.
