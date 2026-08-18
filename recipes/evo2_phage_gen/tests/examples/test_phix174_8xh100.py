@@ -99,3 +99,11 @@ def test_dry_run(tmp_path: Path) -> None:
     ]
     assert safety_commands
     assert all("--overwrite" in command for command in safety_commands)
+
+    arc_commands = [
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_prepare_arc_pipeline " in line
+    ]
+    assert len(arc_commands) == 1
+    assert "--overwrite" in arc_commands[0]
