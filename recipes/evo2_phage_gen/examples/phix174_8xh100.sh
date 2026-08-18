@@ -42,6 +42,11 @@ STATE_DIR="${RESULT_ROOT}/state"
 STAGE_DIR="${RESULT_ROOT}/stages"
 RUNLOG="${RESULT_ROOT}/RUNLOG.md"
 mkdir -p "${RESULT_ROOT}" "${STATE_DIR}" "${STAGE_DIR}"
+exec 9> "${RESULT_ROOT}/.run.lock"
+if ! flock -n 9; then
+  printf 'Another PhiX174 example is already running for this result directory: %s\n' "${RESULT_ROOT}" >&2
+  exit 1
+fi
 [[ -f "${RUNLOG}" ]] || printf '# PhiX174 8xH100 run log\n\n' > "${RUNLOG}"
 
 note() {

@@ -40,7 +40,8 @@ Useful controls:
 
 If an unfinished stage is interrupted, rerun the original command with the same result root. The
 script reuses completed stages and cached or partial downloads, so the run directory need not be
-deleted.
+deleted. Only one invocation may use a result root at a time. If AMRFinder fails, its captured
+output is retained as `amrfinder/amrfinder.log` below that scan directory.
 
 The six dependency-ordered stages are input/control preparation, SFT safety and splitting, SFT
 training and selection, sampling calibration, GDPO pilot/training, and final generation, SFT

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -24,6 +25,24 @@ from pathlib import Path
 
 RECIPE_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = RECIPE_ROOT / "examples/phix174_8xh100.sh"
+
+
+def test_same_result_lock(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    result_root.mkdir()
+    with (result_root / ".run.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        completed = subprocess.run(
+            ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+            cwd=RECIPE_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert completed.returncode != 0
+    assert "already running for this result directory" in completed.stderr
 
 
 def test_dry_run(tmp_path: Path) -> None:

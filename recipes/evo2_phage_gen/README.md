@@ -135,7 +135,8 @@ Useful operator modes are:
 
 After an interrupted unfinished stage, rerun the original top-level command with the same result
 root. Completed stage markers are skipped and cached or partial downloads are reused; deleting the
-result directory is not required.
+result directory is not required. Only one invocation may use a result root at a time; a concurrent
+invocation exits instead of sharing stage work directories.
 
 Read the [example README](examples/README.md) for scientific review stops, monitoring behavior,
 safety details, and the result layout. A scratch clone or worktree per

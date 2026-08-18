@@ -574,6 +574,19 @@ def run_amrfinder_batch(
             status="FAILED",
             command=command,
         )
+    except subprocess.CalledProcessError as error:
+        stdout = error.stdout if isinstance(error.stdout, str) else ""
+        stderr = error.stderr if isinstance(error.stderr, str) else ""
+        (Path(work_dir) / "amrfinder.log").write_text(f"stdout:\n{stdout.rstrip()}\n\nstderr:\n{stderr.rstrip()}\n")
+        return _all_results(
+            sequence_ids,
+            "amr",
+            SafetyState.INDETERMINATE,
+            True,
+            "AMRFINDER_EXECUTION_FAILED",
+            status="FAILED",
+            command=command,
+        )
     except (OSError, subprocess.SubprocessError):
         return _all_results(
             sequence_ids,

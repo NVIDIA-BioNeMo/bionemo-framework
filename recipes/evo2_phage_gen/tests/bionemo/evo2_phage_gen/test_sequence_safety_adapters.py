@@ -196,6 +196,39 @@ def test_amrfinder_supports_nucleotide_only_hits(tmp_path: Path) -> None:
     assert result.class_result.findings[0].evidence_path == "amrfinder-nucleotide"
 
 
+def test_amrfinder_failure_keeps_diagnostics(tmp_path: Path) -> None:
+    genome = GenomeInput("g1", "ATG" * 20)
+    artifacts = prepare_orf_artifacts((genome,), tmp_path / "orfs", predictor=_OneGene())
+    runtime = _tool(tmp_path, "amrfinder")
+
+    def runner(argv, **kwargs):
+        if len(argv) == 2 and argv[1] in {"version", "--version"}:
+            return _completed("amrfinder 4.2.7")
+        raise subprocess.CalledProcessError(
+            7,
+            argv,
+            output="partial tool output\n",
+            stderr="database unavailable\n",
+        )
+
+    work_dir = tmp_path / "amr"
+    result = run_amrfinder_batch(
+        (genome,),
+        artifacts,
+        runtime=runtime,
+        database=tmp_path / "amr-db",
+        database_version="current",
+        work_dir=work_dir,
+        runner=runner,
+    )["g1"]
+
+    assert result.class_result.state is SafetyState.INDETERMINATE
+    assert result.execution_status == "FAILED"
+    assert (work_dir / "amrfinder.log").read_text() == (
+        "stdout:\npartial tool output\n\nstderr:\ndatabase unavailable\n"
+    )
+
+
 def test_phrogs_high_confidence_hit_fails_bacterial_profile(tmp_path: Path) -> None:
     genome = GenomeInput("g1", "ATG" * 20)
     artifacts = prepare_orf_artifacts((genome,), tmp_path / "orfs", predictor=_OneGene())
