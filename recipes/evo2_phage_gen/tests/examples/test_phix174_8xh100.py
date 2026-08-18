@@ -16,15 +16,55 @@
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import os
 import shlex
 import subprocess
+import sys
+import urllib.request
 from pathlib import Path
 
 
 RECIPE_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = RECIPE_ROOT / "examples/phix174_8xh100.sh"
+
+
+def test_control_fasta_ids(tmp_path: Path, monkeypatch) -> None:
+    marker = 'python - configs/phage_safety_reference_controls.yaml "${root}" "${table}" "${DRY_RUN}" <<\'PY\'\n'
+    body = SCRIPT.read_text().split(marker, 1)[1].split("\nPY\n", 1)[0]
+    config = tmp_path / "controls.yaml"
+    root = tmp_path / "controls"
+    table = root / "controls.tsv"
+    config.write_text(
+        json.dumps(
+            {
+                "controls": [
+                    {
+                        "control_id": "whole",
+                        "accession": "NC_000001.1",
+                        "sequence_interval": None,
+                        "sequence_length": 4,
+                        "topology": "circular",
+                    },
+                    {
+                        "control_id": "slice",
+                        "accession": "NC_000002.1",
+                        "sequence_interval": {"start": 3, "end": 6},
+                        "sequence_length": 4,
+                        "topology": "linear",
+                    },
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: io.BytesIO(b">ncbi\nACGT\n"))
+    monkeypatch.setattr(sys, "argv", ["-", str(config), str(root), str(table), "0"])
+
+    exec(compile(body, str(SCRIPT), "exec"), {})
+
+    assert (root / "whole.fasta").read_text() == ">NC_000001.1\nACGT\n"
+    assert (root / "slice.fasta").read_text() == ">NC_000002.1_3_6\nACGT\n"
 
 
 def test_same_result_lock(tmp_path: Path) -> None:

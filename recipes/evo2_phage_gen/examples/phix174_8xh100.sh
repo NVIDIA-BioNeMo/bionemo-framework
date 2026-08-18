@@ -195,14 +195,16 @@ rows = []
 for c in yaml.safe_load(config.read_text())["controls"]:
     path = root / f'{c["control_id"]}.fasta'
     if not dry_run:
+        interval = c.get("sequence_interval")
         query = {"db":"nuccore","id":c["accession"],"rettype":"fasta","retmode":"text"}
-        if c.get("sequence_interval"):
-            query |= {"seq_start":c["sequence_interval"]["start"],"seq_stop":c["sequence_interval"]["end"]}
+        if interval:
+            query |= {"seq_start":interval["start"],"seq_stop":interval["end"]}
         text = urllib.request.urlopen("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + urllib.parse.urlencode(query), timeout=120).read().decode()
         sequence = "".join(line.strip() for line in text.splitlines() if line and not line.startswith(">"))
         if len(sequence) != c["sequence_length"] or set(sequence.upper()) - set("ACGTN"):
             raise SystemExit(f'invalid NCBI response for {c["accession"]}: {len(sequence)} bases')
-        path.write_text(f'>{c["control_id"]}\n{sequence}\n')
+        record_id = c["accession"] if not interval else f'{c["accession"]}_{interval["start"]}_{interval["end"]}'
+        path.write_text(f">{record_id}\n{sequence}\n")
     evidence = json.dumps({"source":"NCBI Nucleotide","source_version":c["accession"],"replication_host_domains":["BACTERIA"],"confirmed":True}, separators=(",",":"))
     rows.append((c["control_id"], path.resolve(), c["topology"], evidence))
 with table.open("w", newline="") as out:
