@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -78,3 +79,23 @@ def test_dry_run(tmp_path: Path) -> None:
     createdb_command = "command: mmseqs createdb"
     assert mkdir_command in log
     assert log.index(mkdir_command) < log.index(createdb_command)
+
+    control_commands = [
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_sequence_safety scan" in line and "reference-controls" in line
+    ]
+    assert len(control_commands) == 6
+    for command in control_commands:
+        evidence = json.loads(command[command.index("--host-evidence-json") + 1])
+        assert evidence["source"] == "NCBI Nucleotide"
+        assert evidence["replication_host_domains"] == ["BACTERIA"]
+        assert evidence["confirmed"] is True
+
+    safety_commands = [
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_sequence_safety " in line
+    ]
+    assert safety_commands
+    assert all("--overwrite" in command for command in safety_commands)

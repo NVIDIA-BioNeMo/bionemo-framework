@@ -180,37 +180,39 @@ stage_00() {
     run mkdir -p data/external/mmseqs/NC_001422_1_Gprotein
     run mmseqs createdb data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein
   fi
-  if [[ "${DRY_RUN}" == "1" ]]; then note 'fetch and scan the six configured NCBI safety controls'; return; fi
   local root="${RESULT_ROOT}/inputs/reference-controls" table="${RESULT_ROOT}/inputs/reference-controls/controls.tsv"
-  python - configs/phage_safety_reference_controls.yaml "${root}" "${table}" <<'PY'
+  python - configs/phage_safety_reference_controls.yaml "${root}" "${table}" "${DRY_RUN}" <<'PY'
 import csv, json, sys, urllib.parse, urllib.request
 from pathlib import Path
 import yaml
-config, root, table = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]); root.mkdir(parents=True, exist_ok=True)
+config, root, table, dry_run = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "1"; root.mkdir(parents=True, exist_ok=True)
 rows = []
 for c in yaml.safe_load(config.read_text())["controls"]:
-    query = {"db":"nuccore","id":c["accession"],"rettype":"fasta","retmode":"text"}
-    if c.get("sequence_interval"):
-        query |= {"seq_start":c["sequence_interval"]["start"],"seq_stop":c["sequence_interval"]["end"]}
-    text = urllib.request.urlopen("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + urllib.parse.urlencode(query), timeout=120).read().decode()
-    sequence = "".join(line.strip() for line in text.splitlines() if line and not line.startswith(">"))
-    if len(sequence) != c["sequence_length"] or set(sequence.upper()) - set("ACGTN"):
-        raise SystemExit(f'invalid NCBI response for {c["accession"]}: {len(sequence)} bases')
-    path = root / f'{c["control_id"]}.fasta'; path.write_text(f'>{c["control_id"]}\n{sequence}\n')
+    path = root / f'{c["control_id"]}.fasta'
+    if not dry_run:
+        query = {"db":"nuccore","id":c["accession"],"rettype":"fasta","retmode":"text"}
+        if c.get("sequence_interval"):
+            query |= {"seq_start":c["sequence_interval"]["start"],"seq_stop":c["sequence_interval"]["end"]}
+        text = urllib.request.urlopen("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + urllib.parse.urlencode(query), timeout=120).read().decode()
+        sequence = "".join(line.strip() for line in text.splitlines() if line and not line.startswith(">"))
+        if len(sequence) != c["sequence_length"] or set(sequence.upper()) - set("ACGTN"):
+            raise SystemExit(f'invalid NCBI response for {c["accession"]}: {len(sequence)} bases')
+        path.write_text(f'>{c["control_id"]}\n{sequence}\n')
     evidence = json.dumps({"source":"NCBI Nucleotide","source_version":c["accession"],"replication_host_domains":["BACTERIA"],"confirmed":True}, separators=(",",":"))
     rows.append((c["control_id"], path.resolve(), c["topology"], evidence))
 with table.open("w", newline="") as out:
-    writer=csv.writer(out, delimiter="\t", lineterminator="\n"); writer.writerow(("id","fasta","topology","evidence")); writer.writerows(rows)
+    writer=csv.writer(out, delimiter="\t", lineterminator="\n", quotechar=None, quoting=csv.QUOTE_NONE); writer.writerow(("id","fasta","topology","evidence")); writer.writerows(rows)
 PY
   local reports=() id fasta topology evidence scan command
   while IFS=$'\t' read -r id fasta topology evidence; do
     [[ "${id}" == id ]] && continue
     scan="${root}/scans/${id}"
-    command=(evo2_phage_sequence_safety scan --input-fasta "${fasta}" --output-dir "${scan}" --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800)
+    command=(evo2_phage_sequence_safety scan --input-fasta "${fasta}" --output-dir "${scan}" --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800 --overwrite)
     [[ "${topology}" == linear ]] && command+=(--linear)
     run_result "control ${id}" "${root}/logs/${id}.log" "${command[@]}"
     check_scan "${scan}/manifest.json"; reports+=(--report "${id}=${scan}/manifest.json")
   done < "${table}"
+  [[ "${DRY_RUN}" == "1" ]] && return
   evo2_phage_validate_safety_controls --config configs/phage_safety_reference_controls.yaml "${reports[@]}" --output "${root}/current-results.json" || {
     printf '# Review required\n\nCurrent safety-control behavior changed; inspect `%s`. Do not roll back databases automatically.\n' "${root}/current-results.json" > "${RESULT_ROOT}/REVIEW_REQUIRED.md"; return 4;
   }
@@ -232,10 +234,10 @@ SeqIO.write(records, output, "fasta")
 PY
   fi
   local evidence='{"source":"Zenodo record 17101843","source_version":"Zenodo record 17101843","replication_host_domains":["BACTERIA"],"confirmed":true}'
-  run_result 'SFT safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan --input-fasta "${safety}/biological.fna" --output-dir "${safety}/scan" --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800
+  run_result 'SFT safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan --input-fasta "${safety}/biological.fna" --output-dir "${safety}/scan" --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800 --overwrite
   check_scan "${safety}/scan/manifest.json"
   run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
-  run_result 'SFT safety partition' "${safety}/partition.log" evo2_phage_sequence_safety filter-fasta --input-fasta "${source}" --scan-manifest "${safety}/scan/manifest.json" --output-dir "${safety}/partitions"
+  run_result 'SFT safety partition' "${safety}/partition.log" evo2_phage_sequence_safety filter-fasta --input-fasta "${source}" --scan-manifest "${safety}/scan/manifest.json" --output-dir "${safety}/partitions" --overwrite
   run evo2_phage_prepare_sft_split --source-fasta "${safety}/partitions/pass.fasta" --output-dir "${prep}" --mmseqs-bin data/external/bin/mmseqs --validation-count 100 --test-count 100 --seed 1234 --min-seq-id 0.98 --coverage 0.8 --cov-mode 0 --threads 16
   run preprocess_evo2 --config "${prep}/preprocess.yaml"; state sft-prepared "${prep}"
 }
@@ -391,7 +393,7 @@ PY
   run_result 'final safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan \
     --input-fasta "${safety}/input-qc/qc2_nt_filter_seqs.fasta" --output-dir "${safety}/scan" \
     --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml \
-    --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800
+    --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800 --overwrite
   check_scan "${safety}/scan/manifest.json"
   run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
 
