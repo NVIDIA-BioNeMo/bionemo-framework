@@ -759,7 +759,7 @@ def _safety_state(
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "tools": {
-            "amrfinder": {"path": str((bin_dir / "amrfinder").resolve()), "version": amr_state["tool_version"]},
+            "amrfinder": {"path": str((bin_dir / "amrfinder").absolute()), "version": amr_state["tool_version"]},
             "diamond": {
                 "path": str((bin_dir / "diamond").resolve()),
                 "version": _tool_version(bin_dir / "diamond", "version"),

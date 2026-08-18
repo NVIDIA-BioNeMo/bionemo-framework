@@ -188,12 +188,15 @@ def test_minimal_asset_preparation_can_skip_network_work(tmp_path: Path) -> None
 def test_safety_state_records_current_versions_and_paths(tmp_path: Path, monkeypatch) -> None:
     external = tmp_path / "external"
     bin_dir = external / "bin"
+    amr_tool_dir = external / "tools" / "amrfinder_v4.2.7"
     amr_dir = external / "safety" / "amrfinder"
     toxin_dir = external / "safety" / "toxins"
     phrogs_dir = external / "phrogs"
-    for directory in (bin_dir, amr_dir, toxin_dir, phrogs_dir):
+    for directory in (bin_dir, amr_tool_dir, amr_dir, toxin_dir, phrogs_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    for tool in ("amrfinder", "diamond", "mmseqs"):
+    (amr_tool_dir / "amrfinder").write_text("amrfinder")
+    (bin_dir / "amrfinder").symlink_to(amr_tool_dir / "amrfinder")
+    for tool in ("diamond", "mmseqs"):
         (bin_dir / tool).write_text(tool)
     (amr_dir / "state.json").write_text(
         json.dumps(
@@ -225,6 +228,7 @@ def test_safety_state_records_current_versions_and_paths(tmp_path: Path, monkeyp
         PreparedAsset("profile", profile, "PHROGs current"),
         PreparedAsset("lookup", lookup, "one family"),
     )
+    assert state["tools"]["amrfinder"]["path"] == str((bin_dir / "amrfinder").absolute())
     assert state["tools"]["diamond"]["version"] == "diamond current"
     assert state["databases"]["phrogs"]["release"] == "PHROGs current"
 
