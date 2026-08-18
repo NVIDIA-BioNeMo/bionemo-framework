@@ -339,7 +339,8 @@ def finalize_ranked_rollout(
     lengths = [len(sequence) for _, sequence in generated]
     score_by_id = {row["record_id"]: float(row["mean_log_probability_per_nucleotide"]) for row in score_rows}
     scores_in_generation_order = [score_by_id[record_id] for record_id, _ in generated]
-    if len(set(lengths)) > 1 and len(set(scores_in_generation_order)) > 1:
+    informative_scores = len(set(scores_in_generation_order)) > 1
+    if len(set(lengths)) > 1 and informative_scores:
         correlation = spearmanr(lengths, scores_in_generation_order)
         spearman_rho = float(correlation.statistic)
         spearman_pvalue = float(correlation.pvalue)
@@ -347,7 +348,7 @@ def finalize_ranked_rollout(
         spearman_rho = None
         spearman_pvalue = None
     strong_length_association = spearman_rho is not None and abs(spearman_rho) >= 0.5
-    apply_likelihood_order = not strong_length_association
+    apply_likelihood_order = informative_scores and not strong_length_association
     candidate_order = (
         score_rows if apply_likelihood_order else sorted(score_rows, key=lambda row: generated_order[row["record_id"]])
     )
@@ -393,7 +394,9 @@ def finalize_ranked_rollout(
     accepted_fasta.write_text(
         "".join(f">{record_id}\n{_wrap_fasta_sequence(sequence_by_id[record_id])}\n" for record_id in accepted_ids)
     )
-    if spearman_rho is None:
+    if not informative_scores:
+        length_interpretation = "All normalized scores are equal, so they provide no ordering signal and length association is not estimable."
+    elif spearman_rho is None:
         length_interpretation = "All designs have the same length, so residual length association is not estimable."
     elif strong_length_association:
         length_interpretation = (
@@ -413,6 +416,7 @@ def finalize_ranked_rollout(
             "residual_length_association": {
                 "method": "Spearman correlation across all generated designs",
                 "n": len(generated),
+                "score_varies": informative_scores,
                 "spearman_rho": spearman_rho,
                 "p_value": spearman_pvalue,
                 "strong_correlation_threshold_abs_rho": 0.5,
@@ -438,11 +442,16 @@ def finalize_ranked_rollout(
     }
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    ordering_summary = (
-        "SFT likelihood ordering applied after the residual length check."
-        if apply_likelihood_order
-        else "SFT likelihood ordering not applied because the normalized score remained strongly length-correlated."
-    )
+    if apply_likelihood_order:
+        ordering_summary = "SFT likelihood ordering applied after the residual length check."
+    elif not informative_scores:
+        ordering_summary = (
+            "SFT likelihood ordering not applied because the normalized scores do not discriminate designs."
+        )
+    else:
+        ordering_summary = (
+            "SFT likelihood ordering not applied because the normalized score remained strongly length-correlated."
+        )
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(
         "# PhiX174 run summary\n\n"

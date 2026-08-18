@@ -276,3 +276,5 @@ def test_final_rollout_reports_uninformative_constant_scores_without_nan(tmp_pat
     assert diagnostic["spearman_rho"] is None
     assert diagnostic["p_value"] is None
     assert not diagnostic["strong_correlation"]
+    assert not payload["ranking"]["applied_to_accepted_candidate_order"]
+    assert (tmp_path / "report" / "accepted.fasta").read_text() == ">short\nA\n>long\nACG\n"
