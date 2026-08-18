@@ -15,6 +15,10 @@ MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-600}"
 PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755221/files/pharokka_v1.11.0_databases.tar.gz?download=1}"
 PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
 PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
+SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-32}"
+SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
+SAFETY_THREADS="${SAFETY_THREADS:-32}"
+SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
 
 usage() {
   printf '%s\n' \
@@ -241,7 +245,7 @@ SeqIO.write(records, output, "fasta")
 PY
   fi
   local evidence='{"source":"Zenodo record 17101843","source_version":"Zenodo record 17101843","replication_host_domains":["BACTERIA"],"confirmed":true}'
-  run_result 'SFT safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan --input-fasta "${safety}/biological.fna" --output-dir "${safety}/scan" --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800 --overwrite
+  run_result 'SFT safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan --input-fasta "${safety}/biological.fna" --output-dir "${safety}/scan" --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --batch-size "${SAFETY_BATCH_SIZE}" --orf-workers "${SAFETY_ORF_WORKERS}" --threads "${SAFETY_THREADS}" --phrogs-threads "${SAFETY_PHROGS_THREADS}" --timeout 1800 --overwrite
   check_scan "${safety}/scan/manifest.json"
   run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
   run_result 'SFT safety partition' "${safety}/partition.log" evo2_phage_sequence_safety filter-fasta --input-fasta "${source}" --scan-manifest "${safety}/scan/manifest.json" --output-dir "${safety}/partitions" --overwrite
@@ -284,6 +288,8 @@ PY
 stage_40() {
   local selected rl="${RESULT_ROOT}/rl" control="${RESULT_ROOT}/rl/environment-control" chosen
   selected="$(read_state selected-sft)"
+  export NEMO_RL_RAY_NUM_CPUS="${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}"
+  note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
   run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
   monitored 'RL environment control' "${control}/runner.log" \
     evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}" \
@@ -402,7 +408,9 @@ PY
   run_result 'final safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan \
     --input-fasta "${safety}/input-qc/qc2_nt_filter_seqs.fasta" --output-dir "${safety}/scan" \
     --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml \
-    --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis --threads 16 --timeout 1800 --overwrite
+    --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis \
+    --batch-size "${SAFETY_BATCH_SIZE}" --orf-workers "${SAFETY_ORF_WORKERS}" \
+    --threads "${SAFETY_THREADS}" --phrogs-threads "${SAFETY_PHROGS_THREADS}" --timeout 1800 --overwrite
   check_scan "${safety}/scan/manifest.json"
   run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
 

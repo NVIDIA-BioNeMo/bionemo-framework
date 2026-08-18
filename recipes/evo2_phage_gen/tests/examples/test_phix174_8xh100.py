@@ -91,7 +91,12 @@ def test_dry_run(tmp_path: Path) -> None:
     completed = subprocess.run(
         ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
         cwd=RECIPE_ROOT,
-        env={**os.environ, "API_KEY": "do-not-record", "NVIDIA_API_KEY": "also-do-not-record"},
+        env={
+            **os.environ,
+            "API_KEY": "do-not-record",
+            "NVIDIA_API_KEY": "also-do-not-record",
+            "NEMO_RL_RAY_NUM_CPUS": "96",
+        },
         check=False,
         capture_output=True,
         text=True,
@@ -158,6 +163,26 @@ def test_dry_run(tmp_path: Path) -> None:
     ]
     assert safety_commands
     assert all("--overwrite" in command for command in safety_commands)
+    large_scans = [
+        command
+        for command in safety_commands
+        if any(
+            part.endswith(
+                (
+                    "/sft/source-safety/biological.fna",
+                    "/rollout/sequence-safety/input-qc/qc2_nt_filter_seqs.fasta",
+                )
+            )
+            for part in command
+        )
+    ]
+    assert len(large_scans) == 2
+    for command in large_scans:
+        assert command[command.index("--batch-size") + 1] == "32"
+        assert command[command.index("--orf-workers") + 1] == "32"
+        assert command[command.index("--threads") + 1] == "32"
+        assert command[command.index("--phrogs-threads") + 1] == "64"
+    assert "RL Ray CPU slots: 96" in log
 
     arc_commands = [
         shlex.split(line.partition("command: ")[2])

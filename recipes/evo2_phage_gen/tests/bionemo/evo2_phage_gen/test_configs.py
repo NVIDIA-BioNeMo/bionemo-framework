@@ -94,6 +94,9 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert sequence_safety["host_evidence"]["replication_host_domains"] == ["BACTERIA"]
     assert sequence_safety["policy_path"] == "configs/phage_safety_policy.yaml"
     assert sequence_safety["asset_manifest_path"] == "data/external/safety/asset_manifest.yaml"
+    assert sequence_safety["batch_size"] == 32
+    assert sequence_safety["orf_workers"] == 16
+    assert sequence_safety["phrogs_threads"] == 16
     assert external_qc["lovis4u_mmseqs_threads"] == 8
     assert external_qc["lovis4u_metrics_only"] is True
     assert generation_config["temperature"] > 0.0
@@ -159,8 +162,15 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["external_qc"]["fail_on_error"] is True
     assert env_config["external_qc"]["tool_bin_dir"] == "data/external/bin"
     assert env_config["external_qc"]["timeout_seconds"] == 1800
-    assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 12
+    assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 32
+    assert env_config["external_qc"]["lovis4u_mmseqs_threads"] == 8
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
+    assert env_config["sequence_safety"] == {
+        "batch_size": 32,
+        "orf_workers": 32,
+        "phrogs_threads": 64,
+        "threads": 32,
+    }
     assert config["run_id"] == "phix174_gdpo"
     assert mmseqs_config["work_dir"] == "data/checkpoints/${run_id}_mmseqs_cluster_diversity"
     assert {key: value for key, value in mmseqs_config.items() if key != "work_dir"} == {
@@ -172,7 +182,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "cov_mode": 0,
         "seq_id_mode": 0,
         "cluster_mode": 0,
-        "threads": 16,
+        "threads": 64,
         "verbosity": 0,
     }
     assert config["grpo"]["num_prompts_per_step"] == 2

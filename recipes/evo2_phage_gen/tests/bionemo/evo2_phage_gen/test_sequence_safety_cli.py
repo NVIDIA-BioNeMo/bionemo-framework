@@ -187,6 +187,95 @@ def test_scan_runs_every_detector_and_logs_observed_state(tmp_path: Path, monkey
     assert (output / "RUNLOG.md").is_file()
 
 
+def test_scan_batches_records_with_bounded_workers(tmp_path: Path, monkeypatch) -> None:
+    fasta = tmp_path / "input.fasta"
+    fasta.write_text("".join(f">g{index}\n" + "ATG" * 30 + "\n" for index in range(5)))
+    policy = tmp_path / "policy.yaml"
+    _policy(policy)
+    assets = tmp_path / "assets.yaml"
+    assets.write_text("schema_version: 1\ntools: {}\ndatabases: {}\n")
+    output = tmp_path / "scan"
+    prepared: list[tuple[list[str], int]] = []
+    detector_calls: list[tuple[str, list[str], int]] = []
+
+    monkeypatch.setattr(cli, "_load_asset_state", lambda _path: {})
+    monkeypatch.setattr(
+        cli,
+        "_runtime_state",
+        lambda _args, _assets: (
+            {
+                "selected": {"amrfinder": object(), "diamond": object(), "mmseqs": object()},
+                "observed": {},
+            },
+            {
+                "amrfinder": {"path": "x", "version": "x"},
+                "toxins": {"path": "x", "version": "x"},
+                "phrogs": {"path": "x", "lookup": "x", "version": "x"},
+            },
+        ),
+    )
+
+    def prepare(genomes, _work_dir, *, workers=1, **_kwargs):
+        prepared.append(([genome.sequence_id for genome in genomes], workers))
+        return SimpleNamespace()
+
+    def detector(name: str):
+        def scan(genomes, _artifacts, *, threads, **_kwargs):
+            detector_calls.append((name, [genome.sequence_id for genome in genomes], threads))
+            return {genome.sequence_id: _adapter(name) for genome in genomes}
+
+        return scan
+
+    monkeypatch.setattr(cli, "prepare_orf_artifacts", prepare)
+    monkeypatch.setattr(cli, "run_amrfinder_batch", detector("amr"))
+    monkeypatch.setattr(cli, "run_toxin_batch", detector("toxin"))
+    monkeypatch.setattr(cli, "run_phrogs_batch", detector("lysogeny"))
+
+    exit_code = cli.main(
+        [
+            "scan",
+            "--input-fasta",
+            str(fasta),
+            "--output-dir",
+            str(output),
+            "--policy",
+            str(policy),
+            "--asset-manifest",
+            str(assets),
+            "--host-domain",
+            "BACTERIA",
+            "--host-evidence-json",
+            _host(),
+            "--strict-lysis",
+            "--batch-size",
+            "2",
+            "--orf-workers",
+            "4",
+            "--threads",
+            "7",
+            "--phrogs-threads",
+            "11",
+        ]
+    )
+    manifest = json.loads((output / "manifest.json").read_text())
+
+    assert exit_code == 0
+    assert prepared == [(["g0", "g1"], 4), (["g2", "g3"], 4), (["g4"], 4)]
+    assert detector_calls == [
+        (name, records, 11 if name == "lysogeny" else 7)
+        for records in (["g0", "g1"], ["g2", "g3"], ["g4"])
+        for name in ("amr", "toxin", "lysogeny")
+    ]
+    assert [record["record_id"] for record in manifest["records"]] == [f"g{index}" for index in range(5)]
+    assert manifest["execution"] == {
+        "batch_count": 3,
+        "batch_size": 2,
+        "orf_workers": 4,
+        "phrogs_threads": 11,
+        "threads": 7,
+    }
+
+
 def test_scan_marks_every_class_indeterminate_when_orf_prediction_fails(tmp_path: Path, monkeypatch) -> None:
     fasta = tmp_path / "input.fasta"
     fasta.write_text(">tiny\nATG\n")

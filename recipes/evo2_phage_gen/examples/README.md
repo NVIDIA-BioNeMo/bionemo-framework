@@ -47,6 +47,11 @@ The six dependency-ordered stages are input/control preparation, SFT safety and 
 training and selection, sampling calibration, GDPO pilot/training, and final generation, SFT
 likelihood scoring, and screening.
 Calibration uses the eight GPUs in parallel; SFT and GDPO use their configured distributed layouts.
+On the reference node, where `nproc` reports 160 CPUs, the large safety scans use 32-record batches,
+32 parallel ORF predictions, 32 threads for AMRFinder/DIAMOND, and 64 for the PHROGs MMseqs search.
+The GDPO reward phases are sequential and use at most 64 tool threads; Ray is given the current
+`nproc` allocation (or `NEMO_RL_RAY_NUM_CPUS` when explicitly set). The `SAFETY_*` environment
+variables can lower these limits on a smaller or shared node.
 Long commands remain supervised by the top-level process, with a meaningful liveness update every
 ten minutes. Run that process in tmux or a scheduler so it survives a disconnected chat or shell.
 

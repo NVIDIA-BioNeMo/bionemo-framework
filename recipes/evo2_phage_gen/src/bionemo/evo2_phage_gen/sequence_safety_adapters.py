@@ -23,8 +23,10 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import local
 from typing import Protocol
 from urllib.parse import quote
 
@@ -308,19 +310,46 @@ def prepare_orf_artifacts(
     *,
     predictor: GenePredictor | None = None,
     minimum_fallback_amino_acids: int = 8,
+    workers: int = 1,
 ) -> ORFArtifacts:
     """Predict ORFs and write the shared detector query files."""
     if not genomes or len({genome.sequence_id for genome in genomes}) != len(genomes):
         raise ValueError("ORF preparation requires unique, nonempty genome IDs")
-    selected = predictor or _new_predictor()
+    if type(workers) is not int or workers < 1:
+        raise ValueError("ORF workers must be a positive integer")
+    resolved_workers = min(workers, len(genomes))
+    if predictor is not None and resolved_workers > 1:
+        raise ValueError("a custom ORF predictor may only be used with one worker")
+    thread_state = local()
+
+    def predict(genome: GenomeInput) -> tuple[tuple[PredictedGene, ...], tuple[ORFQueryRecord, ...]]:
+        selected = predictor
+        if selected is None:
+            selected = getattr(thread_state, "predictor", None)
+            if selected is None:
+                selected = _new_predictor()
+                thread_state.predictor = selected
+        calls = selected.predict(genome.sequence, circular=genome.circular)
+        primary_keys = {(gene.start, gene.end, gene.strand, gene.protein) for gene in calls}
+        fallback = tuple(
+            record
+            for record in _six_frame_records(genome, minimum_fallback_amino_acids)
+            if (record.start, record.end, record.strand, record.protein) not in primary_keys
+        )
+        return calls, fallback
+
+    if resolved_workers == 1:
+        predictions = tuple(predict(genome) for genome in genomes)
+    else:
+        with ThreadPoolExecutor(max_workers=resolved_workers, thread_name_prefix="phage-orf") as executor:
+            predictions = tuple(executor.map(predict, genomes))
+
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     primary: list[ORFQueryRecord] = []
     fallback: list[ORFQueryRecord] = []
     gff = ["##gff-version 3"]
-    for genome in genomes:
-        calls = selected.predict(genome.sequence, circular=genome.circular)
-        primary_keys: set[tuple[int, int, str, str]] = set()
+    for genome, (calls, fallback_records) in zip(genomes, predictions, strict=True):
         gff.append(f"##sequence-region {genome.sequence_id} 1 {len(genome.sequence)}")
         for index, gene in enumerate(calls, start=1):
             query_id = f"{genome.sequence_id}__orf{index:04d}"
@@ -336,7 +365,6 @@ def prepare_orf_artifacts(
                 "pyrodigal-gv",
             )
             primary.append(record)
-            primary_keys.add((gene.start, gene.end, gene.strand, gene.protein))
             escaped = quote(query_id, safe="._-")
             gff.append(
                 "\t".join(
@@ -353,11 +381,7 @@ def prepare_orf_artifacts(
                     )
                 )
             )
-        fallback.extend(
-            record
-            for record in _six_frame_records(genome, minimum_fallback_amino_acids)
-            if (record.start, record.end, record.strand, record.protein) not in primary_keys
-        )
+        fallback.extend(fallback_records)
 
     genomes_fna = work_dir / "genomes.fna"
     proteins_faa = work_dir / "proteins.faa"

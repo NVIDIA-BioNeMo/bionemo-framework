@@ -68,6 +68,36 @@ def test_observe_tool_version_logs_selected_runtime(tmp_path: Path) -> None:
     assert calls == [[str(runtime.path), "version"]]
 
 
+def test_orf_workers_preserve_record_order(tmp_path: Path, monkeypatch) -> None:
+    observed: dict[str, int] = {}
+
+    class Executor:
+        def __init__(self, *, max_workers: int, **_kwargs):
+            observed["max_workers"] = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def map(self, function, values):
+            return [function(value) for value in values]
+
+    monkeypatch.setattr(adapters, "ThreadPoolExecutor", Executor)
+    monkeypatch.setattr(adapters, "_new_predictor", _OneGene)
+    genomes = tuple(GenomeInput(f"g{index}", "ATG" * 20) for index in range(3))
+
+    artifacts = prepare_orf_artifacts(genomes, tmp_path / "orfs", workers=8)
+
+    assert observed == {"max_workers": 3}
+    assert [record.sequence_id for record in artifacts.query_records if record.evidence_path == "pyrodigal-gv"] == [
+        "g0",
+        "g1",
+        "g2",
+    ]
+
+
 def test_tiny_genome_without_orfs_is_review_required_not_a_crash(tmp_path: Path) -> None:
     genome = GenomeInput("tiny", "ATG")
     artifacts = prepare_orf_artifacts(

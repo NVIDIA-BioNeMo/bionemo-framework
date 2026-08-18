@@ -146,8 +146,15 @@ def _coerce_sequence_safety_config(raw_config: Any) -> SequenceSafetyRewardConfi
     for key in ("enabled", "strict_lysis", "circular"):
         if type(raw_config[key]) is not bool:
             raise TypeError(f"sequence_safety {key} must be a boolean.")
-    if type(raw_config["threads"]) is not int or raw_config["threads"] < 1:
-        raise TypeError("sequence_safety threads must be a positive integer.")
+    resource_values = {
+        "threads": raw_config["threads"],
+        "batch_size": raw_config.get("batch_size", 1),
+        "orf_workers": raw_config.get("orf_workers", 1),
+        "phrogs_threads": raw_config.get("phrogs_threads", raw_config["threads"]),
+    }
+    for key, value in resource_values.items():
+        if type(value) is not int or value < 1:
+            raise TypeError(f"sequence_safety {key} must be a positive integer.")
     timeout = raw_config["timeout_seconds"]
     if not isinstance(timeout, Real) or isinstance(timeout, bool) or not math.isfinite(float(timeout)) or timeout <= 0:
         raise TypeError("sequence_safety timeout_seconds must be a positive finite number.")
@@ -209,7 +216,10 @@ def _coerce_sequence_safety_config(raw_config: Any) -> SequenceSafetyRewardConfi
         enabled=raw_config["enabled"],
         strict_lysis=raw_config["strict_lysis"],
         circular=raw_config["circular"],
-        threads=raw_config["threads"],
+        threads=resource_values["threads"],
+        batch_size=resource_values["batch_size"],
+        orf_workers=resource_values["orf_workers"],
+        phrogs_threads=resource_values["phrogs_threads"],
         timeout_seconds=float(timeout),
     )
 

@@ -296,53 +296,64 @@ def _run_scan(args: argparse.Namespace) -> int:
     runtime_state, databases = _runtime_state(args, assets)
     selected = runtime_state.pop("selected")
     assert isinstance(selected, dict)
+    batches = tuple(genomes[index : index + args.batch_size] for index in range(0, len(genomes), args.batch_size))
+    phrogs_threads = args.threads if args.phrogs_threads is None else args.phrogs_threads
+    adapter_results: dict[str, dict[str, AdapterResult]] = {}
+    commands: dict[str, list[str]] = {}
+    for batch_index, batch in enumerate(batches):
+        batch_root = output_dir if len(batches) == 1 else output_dir / "batches" / f"{batch_index:06d}"
+        print(
+            f"safety scan batch {batch_index + 1}/{len(batches)}: preparing {len(batch)} records",
+            flush=True,
+        )
+        try:
+            artifacts = prepare_orf_artifacts(batch, batch_root / "orfs", workers=args.orf_workers)
+        except (ImportError, ModuleNotFoundError, RuntimeError, ValueError) as error:
+            reason = f"ORF_PREDICTION_FAILED:{type(error).__name__}"
+            for genome in batch:
+                adapter_results[genome.sequence_id] = {
+                    safety_class: AdapterResult(
+                        SafetyClassResult(
+                            safety_class,
+                            SafetyState.INDETERMINATE,
+                            safety_class != "lysogeny" or host_domain is not HostDomain.ARCHAEA or args.strict_lysis,
+                            reason_codes=(reason,),
+                        ),
+                        "FAILED",
+                    )
+                    for safety_class in SAFETY_CLASSES
+                }
+            print(
+                f"safety scan batch {batch_index + 1}/{len(batches)}: ORF preparation failed",
+                flush=True,
+            )
+            continue
 
-    try:
-        artifacts = prepare_orf_artifacts(genomes, output_dir / "orfs")
-    except (ImportError, ModuleNotFoundError, RuntimeError, ValueError) as error:
-        reason = f"ORF_PREDICTION_FAILED:{type(error).__name__}"
-        adapter_results = {
-            sequence_id: {
-                safety_class: AdapterResult(
-                    SafetyClassResult(
-                        safety_class,
-                        SafetyState.INDETERMINATE,
-                        safety_class != "lysogeny" or host_domain is not HostDomain.ARCHAEA or args.strict_lysis,
-                        reason_codes=(reason,),
-                    ),
-                    "FAILED",
-                )
-                for safety_class in SAFETY_CLASSES
-            }
-            for sequence_id in (record.sequence_id for record in records)
-        }
-        commands: dict[str, list[str]] = {}
-    else:
         amr_database = databases["amrfinder"]
         toxin_database = databases["toxins"]
         phrogs_database = databases["phrogs"]
         amr = run_amrfinder_batch(
-            genomes,
+            batch,
             artifacts,
             runtime=selected["amrfinder"],
             database=Path(amr_database["path"]),
             database_version=str(amr_database["version"]),
-            work_dir=output_dir / "amrfinder",
+            work_dir=batch_root / "amrfinder",
             threads=args.threads,
             timeout=args.timeout,
         )
         toxin = run_toxin_batch(
-            genomes,
+            batch,
             artifacts,
             runtime=selected["diamond"],
             database=Path(toxin_database["path"]),
             database_version=str(toxin_database["version"]),
-            work_dir=output_dir / "toxins",
+            work_dir=batch_root / "toxins",
             threads=args.threads,
             timeout=args.timeout,
         )
         phrogs = run_phrogs_batch(
-            genomes,
+            batch,
             artifacts,
             runtime=selected["mmseqs"],
             database=Path(phrogs_database["path"]),
@@ -350,22 +361,20 @@ def _run_scan(args: argparse.Namespace) -> int:
             database_version=str(phrogs_database["version"]),
             host_domain=host_domain,
             strict_lysis=args.strict_lysis,
-            work_dir=output_dir / "phrogs",
-            threads=args.threads,
+            work_dir=batch_root / "phrogs",
+            threads=phrogs_threads,
             timeout=args.timeout,
         )
-        adapter_results = {
-            record.sequence_id: {
-                "amr": amr[record.sequence_id],
-                "toxin": toxin[record.sequence_id],
-                "lysogeny": phrogs[record.sequence_id],
+        for genome in batch:
+            adapter_results[genome.sequence_id] = {
+                "amr": amr[genome.sequence_id],
+                "toxin": toxin[genome.sequence_id],
+                "lysogeny": phrogs[genome.sequence_id],
             }
-            for record in records
-        }
-        commands = {
-            safety_class: list(next(iter(result.values())).command)
-            for safety_class, result in (("amr", amr), ("toxin", toxin), ("lysogeny", phrogs))
-        }
+        for safety_class, result in (("amr", amr), ("toxin", toxin), ("lysogeny", phrogs)):
+            if safety_class not in commands and result:
+                commands[safety_class] = list(next(iter(result.values())).command)
+        print(f"safety scan batch {batch_index + 1}/{len(batches)}: complete", flush=True)
 
     serialized_records: list[dict[str, object]] = []
     for index, record in enumerate(records):
@@ -412,6 +421,13 @@ def _run_scan(args: argparse.Namespace) -> int:
         },
         "tools": runtime_state["observed"],
         "databases": databases,
+        "execution": {
+            "batch_count": len(batches),
+            "batch_size": args.batch_size,
+            "orf_workers": args.orf_workers,
+            "threads": args.threads,
+            "phrogs_threads": phrogs_threads,
+        },
         "commands": commands,
         "records": serialized_records,
         "aggregate": {
@@ -430,6 +446,11 @@ def _run_scan(args: argparse.Namespace) -> int:
                 f"- Host profile: {host_domain.value}; strict lysis: {args.strict_lysis}",
                 f"- Tools: {json.dumps(runtime_state['observed'], sort_keys=True)}",
                 f"- Databases: {json.dumps(databases, sort_keys=True)}",
+                (
+                    f"- Execution: {len(batches)} batches of up to {args.batch_size}; "
+                    f"ORF workers {args.orf_workers}; detector threads {args.threads}; "
+                    f"PHROGs threads {phrogs_threads}"
+                ),
                 f"- Results: {dict(manifest['aggregate']['counts'])}",
                 "",
             )
@@ -572,6 +593,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--strict-lysis", action="store_true")
     scan.add_argument("--linear", action="store_true")
     scan.add_argument("--threads", type=int, default=1)
+    scan.add_argument("--batch-size", type=int, default=1, help="records per detector batch")
+    scan.add_argument("--orf-workers", type=int, default=1, help="parallel ORF predictions within each batch")
+    scan.add_argument(
+        "--phrogs-threads",
+        type=int,
+        help="PHROGs MMseqs threads per batch (defaults to --threads)",
+    )
     scan.add_argument("--timeout", type=float, default=300.0)
     scan.add_argument("--overwrite", action="store_true")
     scan.set_defaults(handler=_run_scan)
@@ -599,8 +627,14 @@ def main(argv: Sequence[str] | None = None, **_: object) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
-        if args.command == "scan" and (args.threads < 1 or args.timeout <= 0):
-            raise CLIValidationError("threads and timeout must be positive")
+        if args.command == "scan" and (
+            args.threads < 1
+            or args.batch_size < 1
+            or args.orf_workers < 1
+            or (args.phrogs_threads is not None and args.phrogs_threads < 1)
+            or args.timeout <= 0
+        ):
+            raise CLIValidationError("batch size, workers, threads, and timeout must be positive")
         return int(args.handler(args))
     except (CLIValidationError, OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError) as error:
         parser._print_message(f"{parser.prog}: error: {error}\n", sys.stderr)

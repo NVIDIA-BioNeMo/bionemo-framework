@@ -247,6 +247,9 @@ class SequenceSafetyRewardConfig:
     strict_lysis: bool = False
     circular: bool = True
     threads: int = 1
+    batch_size: int = 1
+    orf_workers: int = 1
+    phrogs_threads: int = 1
     timeout_seconds: float = 300.0
 
 
@@ -281,7 +284,10 @@ def _sequence_safety_config_is_valid(config: object) -> bool:
         return False
     if any(type(value) is not bool for value in (config.enabled, config.strict_lysis, config.circular)):
         return False
-    if type(config.threads) is not int or config.threads < 1:
+    if any(
+        type(value) is not int or value < 1
+        for value in (config.threads, config.batch_size, config.orf_workers, config.phrogs_threads)
+    ):
         return False
     if (
         not isinstance(config.timeout_seconds, Real)
@@ -943,6 +949,12 @@ def _sequence_safety_scan_argv(
         str(_recipe_path(config.mmseqs_bin)),
         "--threads",
         str(config.threads),
+        "--batch-size",
+        str(config.batch_size),
+        "--orf-workers",
+        str(config.orf_workers),
+        "--phrogs-threads",
+        str(config.phrogs_threads),
         "--timeout",
         str(config.timeout_seconds),
     ]

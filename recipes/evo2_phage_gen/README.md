@@ -103,7 +103,9 @@ selects SFT, calibrates sampling, verifies every enabled RL measurement on the P
 runs a full-shape pilot and DP8 GDPO, selects RL from comparable validation, generates exactly 1,000
 whole genomes, scores all of them with the selected pre-RL SFT,
 and runs the current sequence-safety, target Arc, and filter-7 diagnostic screens. The GDPO config includes AMR, toxin, and lysogeny objectives and
-uses the selected SFT checkpoint as its KL anchor.
+uses the selected SFT checkpoint as its KL anchor. On the reference 160-CPU allocation, large safety
+scans use 32-record batches and no phase exceeds 64 tool threads; see the
+[realized example](examples/README.md) for the adjustable settings.
 
 The example records commands and periodic liveness observations in `RUNLOG.md` without copying the
 environment. The realized example defaults to PHROGs v4 from the Pharokka v1.11.0 Zenodo
@@ -156,7 +158,20 @@ The public [CC BY bioRxiv version](https://www.biorxiv.org/content/10.1101/2025.
 
 ## Summarize a sequence-safety scan
 
-After evo2_phage_sequence_safety scan completes, write a compact PASS, FAIL, and INDETERMINATE
+For a large FASTA on comparable hardware, use bounded batches and parallel ORF prediction rather
+than preparing every record serially:
+
+```bash
+evo2_phage_sequence_safety scan \
+  --input-fasta genomes.fasta --output-dir results/PROJECT/safety \
+  --policy configs/phage_safety_policy.yaml \
+  --asset-manifest data/external/safety/asset_manifest.yaml \
+  --host-domain BACTERIA --host-evidence-json "$HOST_EVIDENCE_JSON" --strict-lysis \
+  --batch-size 32 --orf-workers 32 --threads 32 --phrogs-threads 64
+```
+
+Choose smaller values when CPU affinity, memory, I/O, or concurrent work requires it. The scan log
+reports batch progress. After the scan completes, write a compact PASS, FAIL, and INDETERMINATE
 summary:
 
 ```bash

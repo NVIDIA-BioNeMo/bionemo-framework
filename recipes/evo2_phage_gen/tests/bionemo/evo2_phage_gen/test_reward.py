@@ -416,10 +416,22 @@ def test_clean_scan_emits_independent_safety_rewards(tmp_path, monkeypatch):
     )
     source = pd.DataFrame({"id_prompt": ["original-id"], "sequence": ["ACGT" * 1000]})
 
-    scored = score_nucleotide_metrics(source, sequence_safety=_bacterial_safety_config(tmp_path))
+    config = replace(
+        _bacterial_safety_config(tmp_path),
+        threads=7,
+        batch_size=5,
+        orf_workers=3,
+        phrogs_threads=11,
+    )
+    scored = score_nucleotide_metrics(source, sequence_safety=config)
 
     assert source.to_dict("records") == [{"id_prompt": "original-id", "sequence": "ACGT" * 1000}]
     assert capture["input_fasta_bytes"].startswith(b">safety_record_000000\n")
+    argv = capture["argv"]
+    assert argv[argv.index("--threads") + 1] == "7"
+    assert argv[argv.index("--batch-size") + 1] == "5"
+    assert argv[argv.index("--orf-workers") + 1] == "3"
+    assert argv[argv.index("--phrogs-threads") + 1] == "11"
     assert scored["safety_scan_record_id"].tolist() == ["safety_record_000000"]
     assert scored["safety_gate_state"].tolist() == ["PASS"]
     assert scored["safety_environment_healthy"].tolist() == [1.0]

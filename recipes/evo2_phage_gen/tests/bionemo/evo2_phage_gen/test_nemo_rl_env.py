@@ -59,6 +59,9 @@ def _sequence_safety_mapping(tmp_path: Path) -> dict[str, object]:
         "strict_lysis": False,
         "circular": True,
         "threads": 2,
+        "batch_size": 5,
+        "orf_workers": 3,
+        "phrogs_threads": 7,
         "timeout_seconds": 30.0,
     }
 
@@ -166,6 +169,9 @@ def test_sequence_safety_mapping_is_parsed_without_bool_or_host_scope_coercion(t
     assert parsed.enabled is True
     assert parsed.strict_lysis is False
     assert parsed.circular is True
+    assert parsed.batch_size == 5
+    assert parsed.orf_workers == 3
+    assert parsed.phrogs_threads == 7
     assert parsed.asset_manifest_path == tmp_path / "asset_manifest.yaml"
 
     additive = copy.deepcopy(raw)

@@ -170,8 +170,14 @@ env:
       enable_required_genes: true
       required_genes_evidence_target: 9.0
       # Per external-QC reward run; set lower if several environment actors score concurrently.
-      lovis4u_parallel_jobs: 12
+      lovis4u_parallel_jobs: 32
+      lovis4u_mmseqs_threads: 8
       lovis4u_collect_pdfs: false
+    sequence_safety:
+      batch_size: 32
+      orf_workers: 32
+      threads: 32
+      phrogs_threads: 64
     mmseqs_cluster_diversity:
       enabled: true
       mmseqs_bin: "data/external/bin/mmseqs"
@@ -182,7 +188,7 @@ env:
       cov_mode: 0
       seq_id_mode: 0
       cluster_mode: 0
-      threads: 16
+      threads: 64
       verbosity: 0
 
 logger:
