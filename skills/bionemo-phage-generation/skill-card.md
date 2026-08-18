@@ -80,15 +80,15 @@ CTXφ illustrates a known indirect route by which a phage can contribute to huma
 
 ## Evaluation Tasks
 
-Three declarative top-level cases cover bootstrap, preservation of an incompatible checkout with local work, and controller handoff. Fifty-two recipe-package cases cover scientific scope, evidence use, data leakage, training, objective behavior, durable monitoring, resource-aware execution, and safety screening.
+Two declarative top-level cases cover bootstrap and controller handoff. Twenty-four recipe-package cases cover scientific scope, evidence use, data leakage, training, objective behavior, durable monitoring, resource-aware execution, and safety screening.
 
 ## Evaluation Results
 
-On 2026-08-18, 426 recipe and recipe-local skill tests and 3 repository-level skill tests passed; six recipe tests were skipped. These are behavioral and software-package checks, not execution of every declarative case, biological validation, agent red-teaming, network or product security assessment, or clinical testing.
+On 2026-08-18, 428 recipe and recipe-local skill tests and 3 repository-level skill tests passed; six recipe tests were skipped. These are behavioral and software-package checks, not execution of every declarative case, biological validation, agent red-teaming, network or product security assessment, or clinical testing.
 
 ## Skill Version(s)
 
-Working-tree snapshot based on repository revision fd7b47835eeb088c2933e2d1b965f10843368d09; card updated 2026-08-18.
+Working-tree snapshot; card updated 2026-08-18.
 
 Initial draft rendered with NVIDIA Trustworthy-AI `skill-card-generator` revision `8717620a622922550c1ffc7b1debdac1195bbfd5` on 2026-08-11. This Markdown card is human-owned after generation.
 

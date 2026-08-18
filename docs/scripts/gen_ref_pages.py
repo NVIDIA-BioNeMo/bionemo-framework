@@ -59,7 +59,7 @@ SUPPORT_FILE_SUFFIXES = {
     ".yml",
 }
 SUPPORT_FILE_NAMES = {"Dockerfile", "LICENSE", "Makefile", "requirements.txt"}
-SKIP_SUPPORT_DIRS = {"assets", "examples", "notebooks", ".venv", "__pycache__", ".pytest_cache"}
+SKIP_SUPPORT_DIRS = {"assets", "examples", "notebooks", "results", ".venv", "__pycache__", ".pytest_cache"}
 GITHUB_BLOB_BASE = "https://github.com/NVIDIA-BioNeMo/bionemo-framework/blob/main"
 GITHUB_TREE_BASE = "https://github.com/NVIDIA-BioNeMo/bionemo-framework/tree/main"
 
@@ -397,10 +397,18 @@ def copy_docs_from_dir(source_dir: Path, dest_dir: Path, root: Path, log_prefix:
     has_directory_index = False
 
     for path in sorted(source_dir.rglob("*")):
-        if not path.is_file() or path.suffix not in {".md", ".ipynb"}:
+        if not path.is_file():
             continue
 
-        dest_file = dest_dir / path.relative_to(source_dir)
+        relative_path = path.relative_to(source_dir)
+        dest_file = dest_dir / relative_path
+        if path.suffix == ".sh":
+            copy_binary_file(path, dest_file, f"{log_prefix}: {dest_file}")
+            continue
+        if path.suffix not in {".md", ".ipynb"}:
+            continue
+        if path.name == "README.md":
+            dest_file = dest_file.with_name("index.md")
         if dest_file.parent == dest_dir and dest_file.name in {"index.md", "README.md"}:
             has_directory_index = True
 

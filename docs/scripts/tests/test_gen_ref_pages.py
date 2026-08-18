@@ -78,3 +78,45 @@ def test_unpublished_recipe_skill_links_target_github(target: str, expected: str
     )
 
     assert rewritten == f"[reference]({expected})"
+
+
+def test_example_readme_and_script_copy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source_dir = tmp_path / "examples"
+    source_dir.mkdir()
+    readme = source_dir / "README.md"
+    script = source_dir / "run.sh"
+    readme.write_text("[run](run.sh)\n", encoding="utf-8")
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    text_copies: list[tuple[Path, Path]] = []
+    binary_copies: list[tuple[Path, Path]] = []
+
+    monkeypatch.setattr(
+        gen_ref_pages,
+        "copy_text_file",
+        lambda source, dest, root, log: text_copies.append((source, dest)),
+    )
+    monkeypatch.setattr(
+        gen_ref_pages,
+        "copy_binary_file",
+        lambda source, dest, log: binary_copies.append((source, dest)),
+    )
+    monkeypatch.setattr(
+        gen_ref_pages,
+        "write_directory_index",
+        lambda *args: pytest.fail("README.md should supply the directory index"),
+    )
+
+    copied_docs = gen_ref_pages.copy_docs_from_dir(
+        source_dir,
+        Path("main/examples/demo/examples"),
+        tmp_path,
+        "copied",
+    )
+
+    assert text_copies == [(readme, Path("main/examples/demo/examples/index.md"))]
+    assert binary_copies == [(script, Path("main/examples/demo/examples/run.sh"))]
+    assert copied_docs == [Path("main/examples/demo/examples/index.md")]
+
+
+def test_run_results_are_not_doc_support() -> None:
+    assert not gen_ref_pages._should_copy_support_file(Path("results/run-001/records.json"))
