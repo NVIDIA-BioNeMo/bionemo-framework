@@ -70,3 +70,6 @@ def test_dry_run(tmp_path: Path) -> None:
     ):
         assert command in log
     assert "do-not-record" not in log
+    assert "monitor: external asset preparation" in log
+    assert "--prepare-phrogs-consensus-database" in log
+    assert "--download-phrogs-sequence-database" not in log

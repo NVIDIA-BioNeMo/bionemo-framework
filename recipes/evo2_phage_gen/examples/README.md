@@ -38,6 +38,10 @@ Useful controls:
   --result-root "$PWD/results/phix174-8xh100"
 ```
 
+If an unfinished stage is interrupted, rerun the original command with the same result root. The
+script reuses completed stages and cached or partial downloads, so the run directory need not be
+deleted.
+
 The six dependency-ordered stages are input/control preparation, SFT safety and splitting, SFT
 training and selection, sampling calibration, GDPO pilot/training, and final generation, SFT
 likelihood scoring, and screening.
@@ -45,9 +49,13 @@ Calibration uses the eight GPUs in parallel; SFT and GDPO use their configured d
 Long commands remain supervised by the top-level process, with a meaningful liveness update every
 ten minutes. Run that process in tmux or a scheduler so it survives a disconnected chat or shell.
 
-Databases are refreshed rather than pinned to the historical run. The script records the current
-installed state and reruns positive, review, and negative controls; changed behavior stops for review
-instead of silently selecting an older database. Required detector failures remain INDETERMINATE.
+The realized example defaults to the Pharokka v1.11.0 Zenodo bundle through public
+`PHAROKKA_DATABASE_*` environment variables. Override the three values together when using another compatible release. It uses the bundle’s PHROGs v4 profiles and
+annotations, derives the consensus database used by Arc, and logs progress to
+`inputs/external-assets.log`. The transfer is bounded and resumable. Databases are refreshed rather
+than pinned to the historical run: the script records the installed state and reruns positive,
+review, and negative controls; changed behavior stops for review instead of silently selecting an
+older database. Required detector failures remain INDETERMINATE.
 The previous SFT-corpus audit observed 14,465 PASS and one lysogeny-review INDETERMINATE among
 14,466 inputs; every new run records and uses its own result.
 

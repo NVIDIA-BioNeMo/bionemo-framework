@@ -25,12 +25,15 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import yaml
 
@@ -48,12 +51,11 @@ _BLAST_PLUS_URLS = {
 }
 DEFAULT_DIAMOND_URL = "https://github.com/bbuchfink/diamond/releases/download/v2.1.24/diamond-linux64.tar.gz"
 DEFAULT_HMMER_URL = "https://conda.anaconda.org/bioconda/linux-64/hmmer-3.4-hb6cb901_4.tar.bz2"
-DEFAULT_PHROGS_ANNOTATION_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/phrog_annot_v4.tsv"
-DEFAULT_PHROGS_MMSEQS_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/phrogs_mmseqs_db.tar.gz"
-DEFAULT_PHROGS_FASTA_URL = "https://phrogs.lmge.uca.fr/downloads_from_website/FAA_phrog.tar.gz"
-DEFAULT_PHROGS_PROFILE_URL = "https://zenodo.org/record/17110353/files/pharokka_v1.8.0_databases.tar.gz"
-DEFAULT_PHROGS_PROFILE_MD5 = "a63c485241b900a11989bd1821bfbb09"
-DEFAULT_PHROGS_PROFILE_RELEASE = "Pharokka database v1.8.0 / PHROGs v4"
+DEFAULT_PHAROKKA_DATABASE_URL = (
+    "https://zenodo.org/records/21755221/files/pharokka_v1.11.0_databases.tar.gz?download=1"
+)
+DEFAULT_PHAROKKA_DATABASE_MD5 = "143bb375ddb0b0653e5cb5671f4a7629"
+DEFAULT_PHAROKKA_DATABASE_RELEASE = "Pharokka database v1.11.0 / PHROGs v4"
 DEFAULT_ARC_EVO2_REPO_URL = ARC_EVO2_GIT_URL
 DEFAULT_ARC_EVO2_REPO_REV = ARC_EVO2_REV
 DEFAULT_AMRFINDER_RELEASE = "amrfinder_v4.2.7"
@@ -128,8 +130,10 @@ def _download(
     *,
     overwrite: bool = False,
     published_md5: str | None = None,
+    timeout: float = 60.0,
+    attempts: int = 3,
 ) -> tuple[Path, dict[str, str]]:
-    """Download a URL, resuming a partial file and checking a provider checksum when supplied."""
+    """Download a URL with bounded retries, partial-file resume, and optional provider checksum."""
     output_path = Path(output_path)
     if output_path.is_file() and not overwrite:
         if published_md5 is not None and _md5(output_path) != published_md5.lower():
@@ -140,19 +144,41 @@ def _download(
     partial = output_path.with_suffix(output_path.suffix + ".part")
     if overwrite:
         partial.unlink(missing_ok=True)
-    offset = partial.stat().st_size if partial.is_file() else 0
-    request: str | urllib.request.Request = url
-    if offset:
-        request = urllib.request.Request(url, headers={"Range": f"bytes={offset}-"})
-    with urllib.request.urlopen(request) as response:
-        append = offset > 0 and getattr(response, "status", None) == 206
-        with partial.open("ab" if append else "wb") as output:
-            shutil.copyfileobj(response, output)
-        headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+    if attempts < 1:
+        raise ValueError("Download attempts must be positive")
+    if partial.is_file() and published_md5 is not None and _md5(partial) == published_md5.lower():
+        partial.replace(output_path)
+        return output_path, {}
+
+    headers: dict[str, str] = {}
+    for attempt in range(1, attempts + 1):
+        offset = partial.stat().st_size if partial.is_file() else 0
+        request: str | urllib.request.Request = url
+        if offset:
+            request = urllib.request.Request(url, headers={"Range": f"bytes={offset}-"})
+        print(f"downloading {output_path.name}: {offset} bytes already present")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                append = offset > 0 and getattr(response, "status", None) == 206
+                with partial.open("ab" if append else "wb") as output:
+                    while block := response.read(1024 * 1024):
+                        output.write(block)
+                headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+            break
+        except (TimeoutError, urllib.error.URLError, ConnectionError, OSError) as error:
+            if attempt == attempts:
+                raise
+            print(
+                f"download interrupted for {output_path.name}; retrying ({attempt}/{attempts}): {error}",
+                file=sys.stderr,
+            )
+            time.sleep(attempt)
+
     if published_md5 is not None and _md5(partial) != published_md5.lower():
         partial.unlink(missing_ok=True)
         raise ValueError(f"Published checksum does not match download: {url}")
     partial.replace(output_path)
+    print(f"download complete: {output_path}")
     return output_path, headers
 
 
@@ -454,19 +480,86 @@ def prepare_toxin_reference(
     return PreparedAsset("toxin_reference", database, f"UniProt {release}")
 
 
+def _find_pharokka_database(root: Path) -> Path:
+    """Find one extracted Pharokka database directory with the PHROGs files we consume."""
+    candidates: list[Path] = []
+    for annotation in Path(root).rglob("phrog_annot_v4.tsv"):
+        candidate = annotation.parent
+        required = (
+            candidate / PHROGS_PROFILE_DATABASE_NAME,
+            candidate / f"{PHROGS_PROFILE_DATABASE_NAME}.dbtype",
+            candidate / f"{PHROGS_PROFILE_DATABASE_NAME}.index",
+            candidate / f"{PHROGS_PROFILE_DATABASE_NAME}.lookup",
+            candidate / f"{PHROGS_PROFILE_DATABASE_NAME}_h",
+            candidate / f"{PHROGS_PROFILE_DATABASE_NAME}_h.dbtype",
+            candidate / f"{PHROGS_PROFILE_DATABASE_NAME}_h.index",
+        )
+        if all(path.is_file() for path in required) and any(candidate.glob("VERSION_*")):
+            candidates.append(candidate)
+    if len(candidates) != 1:
+        raise FileNotFoundError(f"Expected one complete Pharokka database below {root}, found {len(candidates)}")
+    return candidates[0]
+
+
+def prepare_pharokka_database(
+    external_dir: Path = DEFAULT_EXTERNAL_DIR,
+    *,
+    database_url: str = DEFAULT_PHAROKKA_DATABASE_URL,
+    published_md5: str | None = DEFAULT_PHAROKKA_DATABASE_MD5,
+    release: str = DEFAULT_PHAROKKA_DATABASE_RELEASE,
+    overwrite: bool = False,
+) -> PreparedAsset:
+    """Download and validate the Pharokka bundle that supplies the recipe's PHROGs assets."""
+    external_dir = Path(external_dir)
+    archive_name = Path(urlparse(database_url).path).name
+    archive, _ = _download(
+        database_url,
+        external_dir / "downloads" / archive_name,
+        overwrite=overwrite,
+        published_md5=published_md5,
+    )
+    bundle_name = archive_name.removesuffix(".tar.gz")
+    extracted = _extract_tar(archive, external_dir / "phrogs" / bundle_name, overwrite=overwrite)
+    database = _find_pharokka_database(extracted)
+    profile = _find_profile_database(database)
+    state = {
+        "release": release,
+        "source_url": database_url,
+        "archive": str(archive.resolve()),
+        "database_root": str(database.resolve()),
+        "annotation_path": str((database / "phrog_annot_v4.tsv").resolve()),
+        "profile_database_path": str(profile.resolve()),
+    }
+    state_path = external_dir / "phrogs" / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    return PreparedAsset("pharokka_database", database, release)
+
+
 def prepare_phrogs_annotation(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
-    annotation_url: str = DEFAULT_PHROGS_ANNOTATION_URL,
+    database_root: Path | None = None,
+    database_url: str = DEFAULT_PHAROKKA_DATABASE_URL,
+    published_md5: str | None = DEFAULT_PHAROKKA_DATABASE_MD5,
+    release: str = DEFAULT_PHAROKKA_DATABASE_RELEASE,
     overwrite: bool = False,
 ) -> PreparedAsset:
-    """Download and normalize PHROGs annotations."""
-    path, _ = _download(
-        annotation_url,
-        Path(external_dir) / "phrogs" / "phrog_annot_v4.tsv",
-        overwrite=overwrite,
-    )
-    return PreparedAsset("phrogs_annotation", path, annotation_url)
+    """Expose the PHROGs annotation table from a Pharokka database bundle."""
+    external_dir = Path(external_dir)
+    if database_root is None:
+        database_root = prepare_pharokka_database(
+            external_dir,
+            database_url=database_url,
+            published_md5=published_md5,
+            release=release,
+            overwrite=overwrite,
+        ).path
+    source = Path(database_root) / "phrog_annot_v4.tsv"
+    if not source.is_file():
+        raise FileNotFoundError(f"Pharokka PHROGs annotation table is missing: {source}")
+    path = _expose(source, external_dir / "phrogs" / "phrog_annot_v4.tsv")
+    return PreparedAsset("phrogs_annotation", path, release)
 
 
 def _profile_ids(profile_database: Path) -> set[str]:
@@ -494,21 +587,23 @@ def _find_profile_database(root: Path) -> Path:
 def prepare_phrogs_profile_db(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
-    profile_url: str = DEFAULT_PHROGS_PROFILE_URL,
-    published_md5: str | None = DEFAULT_PHROGS_PROFILE_MD5,
-    release: str = DEFAULT_PHROGS_PROFILE_RELEASE,
+    database_root: Path | None = None,
+    database_url: str = DEFAULT_PHAROKKA_DATABASE_URL,
+    published_md5: str | None = DEFAULT_PHAROKKA_DATABASE_MD5,
+    release: str = DEFAULT_PHAROKKA_DATABASE_RELEASE,
     overwrite: bool = False,
 ) -> PreparedAsset:
-    """Download the PHROGs profile database."""
+    """Expose the PHROGs profile database from a Pharokka database bundle."""
     external_dir = Path(external_dir)
-    archive, _ = _download(
-        profile_url,
-        external_dir / "downloads" / Path(profile_url).name,
-        overwrite=overwrite,
-        published_md5=published_md5,
-    )
-    extracted = _extract_tar(archive, external_dir / "phrogs" / "profiles", overwrite=overwrite)
-    database = _find_profile_database(extracted)
+    if database_root is None:
+        database_root = prepare_pharokka_database(
+            external_dir,
+            database_url=database_url,
+            published_md5=published_md5,
+            release=release,
+            overwrite=overwrite,
+        ).path
+    database = _find_profile_database(Path(database_root))
     return PreparedAsset("phrogs_profile_database", database, release)
 
 
@@ -568,58 +663,48 @@ def prepare_phrogs_lookup(
     return PreparedAsset("phrogs_lysogeny_lookup", output_path, f"{len(rows)} profile families")
 
 
-def prepare_phrogs_mmseqs_db(
-    external_dir: Path = DEFAULT_EXTERNAL_DIR,
-    *,
-    phrogs_mmseqs_url: str = DEFAULT_PHROGS_MMSEQS_URL,
-    overwrite: bool = False,
-) -> PreparedAsset:
-    """Download the Arc-compatible PHROGs MMseqs database."""
-    external_dir = Path(external_dir)
-    archive, _ = _download(
-        phrogs_mmseqs_url,
-        external_dir / "downloads" / Path(phrogs_mmseqs_url).name,
-        overwrite=overwrite,
-    )
-    extracted = _extract_tar(archive, external_dir / "phrogs" / "phrogs_mmseqs_db", overwrite=overwrite)
-    return PreparedAsset("phrogs_mmseqs_db", extracted, phrogs_mmseqs_url)
+def _clear_mmseqs_database(prefix: Path) -> None:
+    """Remove an incomplete MMseqs database at one explicit prefix."""
+    for path in prefix.parent.glob(f"{prefix.name}*"):
+        if path.is_file() or path.is_symlink():
+            path.unlink()
 
 
-def prepare_phrogs_gpu_sequence_db(
+def prepare_phrogs_consensus_db(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
     bin_dir: Path | None = None,
-    phrogs_fasta_url: str = DEFAULT_PHROGS_FASTA_URL,
+    profile_database: Path | None = None,
+    database_url: str = DEFAULT_PHAROKKA_DATABASE_URL,
+    published_md5: str | None = DEFAULT_PHAROKKA_DATABASE_MD5,
+    release: str = DEFAULT_PHAROKKA_DATABASE_RELEASE,
     overwrite: bool = False,
 ) -> PreparedAsset:
-    """Build a local MMseqs database from PHROGs sequences."""
+    """Derive the Arc-compatible PHROGs consensus database from the Pharokka profiles."""
     external_dir = Path(external_dir)
-    archive, _ = _download(
-        phrogs_fasta_url,
-        external_dir / "downloads" / Path(phrogs_fasta_url).name,
-        overwrite=overwrite,
-    )
-    extracted = _extract_tar(archive, external_dir / "phrogs" / "FAA_phrog", overwrite=overwrite)
-    fasta_paths = sorted(
-        path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".fa", ".faa", ".fasta"}
-    )
-    if not fasta_paths:
-        raise FileNotFoundError("PHROGs sequence archive contains no FASTA files")
-    combined = external_dir / "phrogs" / "FAA_phrog_combined.faa"
-    if overwrite or not combined.exists():
-        with combined.open("wb") as output:
-            for fasta in fasta_paths:
-                output.write(fasta.read_bytes())
-    padded = external_dir / "phrogs" / "phrogs_gpu_seq_db_pad"
-    if overwrite or not padded.exists():
-        selected_bin = Path(bin_dir) if bin_dir else external_dir / "bin"
-        sequence_db = external_dir / "phrogs" / "phrogs_gpu_seq_db"
-        subprocess.run([str(selected_bin / "mmseqs"), "createdb", str(combined), str(sequence_db)], check=True)
-        subprocess.run(
-            [str(selected_bin / "mmseqs"), "makepaddedseqdb", str(sequence_db), str(padded), "--write-lookup", "1"],
-            check=True,
-        )
-    return PreparedAsset("phrogs_gpu_sequence_database", padded, f"{len(fasta_paths)} FASTA files")
+    if profile_database is None:
+        profile_database = prepare_phrogs_profile_db(
+            external_dir,
+            database_url=database_url,
+            published_md5=published_md5,
+            release=release,
+            overwrite=overwrite,
+        ).path
+    selected_bin = Path(bin_dir) if bin_dir else external_dir / "bin"
+    mmseqs = selected_bin / "mmseqs"
+    consensus = external_dir / "phrogs" / "phrogs_consensus_db"
+    padded = external_dir / "phrogs" / "phrogs_consensus_db_pad"
+    required = (padded, Path(f"{padded}.dbtype"), Path(f"{padded}.lookup"))
+    if not overwrite and all(path.is_file() for path in required):
+        return PreparedAsset("phrogs_consensus_database", padded, release)
+
+    _clear_mmseqs_database(consensus)
+    _clear_mmseqs_database(padded)
+    subprocess.run([str(mmseqs), "profile2consensus", str(profile_database), str(consensus)], check=True)
+    subprocess.run([str(mmseqs), "makepaddedseqdb", str(consensus), str(padded), "--write-lookup", "1"], check=True)
+    if any(not path.is_file() for path in required):
+        raise FileNotFoundError(f"MMseqs did not create a complete PHROGs consensus database: {padded}")
+    return PreparedAsset("phrogs_consensus_database", padded, release)
 
 
 def prepare_checkv_database(
@@ -711,7 +796,7 @@ def prepare_external_assets(
     download_phrogs_annotation: bool = True,
     download_arc_evo2: bool = True,
     download_large_databases: bool = False,
-    download_phrogs_sequence_database: bool = False,
+    prepare_phrogs_consensus_database: bool = False,
     download_checkv: bool = True,
     configure_lovis4u: bool = True,
     with_safety: bool = False,
@@ -720,11 +805,9 @@ def prepare_external_assets(
     blast_plus_url: str | None = None,
     diamond_url: str = DEFAULT_DIAMOND_URL,
     hmmer_url: str = DEFAULT_HMMER_URL,
-    phrogs_mmseqs_url: str = DEFAULT_PHROGS_MMSEQS_URL,
-    phrogs_fasta_url: str = DEFAULT_PHROGS_FASTA_URL,
-    phrogs_profile_url: str = DEFAULT_PHROGS_PROFILE_URL,
-    phrogs_profile_md5: str | None = DEFAULT_PHROGS_PROFILE_MD5,
-    phrogs_profile_release: str = DEFAULT_PHROGS_PROFILE_RELEASE,
+    pharokka_database_url: str = DEFAULT_PHAROKKA_DATABASE_URL,
+    pharokka_database_md5: str | None = DEFAULT_PHAROKKA_DATABASE_MD5,
+    pharokka_database_release: str = DEFAULT_PHAROKKA_DATABASE_RELEASE,
     amrfinder_url: str = DEFAULT_AMRFINDER_URL,
     amrfinder_release: str = DEFAULT_AMRFINDER_RELEASE,
     arc_evo2_repo_url: str = DEFAULT_ARC_EVO2_REPO_URL,
@@ -752,10 +835,43 @@ def prepare_external_assets(
         assets.append(prepare_hmmer(external_dir, bin_dir=target_bin, hmmer_url=hmmer_url, overwrite=overwrite))
     if configure_lovis4u:
         assets.append(configure_lovis4u_mmseqs(target_bin / "mmseqs"))
-    annotation = None
-    if download_phrogs_annotation or with_safety:
-        annotation = prepare_phrogs_annotation(external_dir, overwrite=overwrite)
-        assets.append(annotation)
+
+    annotation: PreparedAsset | None = None
+    profile: PreparedAsset | None = None
+    needs_pharokka = download_phrogs_annotation or prepare_phrogs_consensus_database or with_safety
+    if needs_pharokka:
+        pharokka = prepare_pharokka_database(
+            external_dir,
+            database_url=pharokka_database_url,
+            published_md5=pharokka_database_md5,
+            release=pharokka_database_release,
+            overwrite=overwrite,
+        )
+        assets.append(pharokka)
+        profile = prepare_phrogs_profile_db(
+            external_dir,
+            database_root=pharokka.path,
+            release=pharokka_database_release,
+        )
+        assets.append(profile)
+        if download_phrogs_annotation or with_safety:
+            annotation = prepare_phrogs_annotation(
+                external_dir,
+                database_root=pharokka.path,
+                release=pharokka_database_release,
+            )
+            assets.append(annotation)
+        if prepare_phrogs_consensus_database:
+            assets.append(
+                prepare_phrogs_consensus_db(
+                    external_dir,
+                    bin_dir=target_bin,
+                    profile_database=profile.path,
+                    release=pharokka_database_release,
+                    overwrite=overwrite,
+                )
+            )
+
     if download_arc_evo2:
         assets.append(
             prepare_arc_evo2_checkout(
@@ -765,28 +881,12 @@ def prepare_external_assets(
                 overwrite=overwrite,
             )
         )
-    if download_large_databases:
-        assets.append(
-            prepare_phrogs_mmseqs_db(
-                external_dir,
-                phrogs_mmseqs_url=phrogs_mmseqs_url,
-                overwrite=overwrite,
-            )
-        )
-        if download_checkv:
-            assets.append(prepare_checkv_database(external_dir, bin_dir=target_bin, overwrite=overwrite))
-    if download_phrogs_sequence_database:
-        assets.append(
-            prepare_phrogs_gpu_sequence_db(
-                external_dir,
-                bin_dir=target_bin,
-                phrogs_fasta_url=phrogs_fasta_url,
-                overwrite=overwrite,
-            )
-        )
+    if download_large_databases and download_checkv:
+        assets.append(prepare_checkv_database(external_dir, bin_dir=target_bin, overwrite=overwrite))
+
     if with_safety:
-        if annotation is None:
-            raise RuntimeError("PHROGs annotation preparation unexpectedly skipped")
+        if annotation is None or profile is None:
+            raise RuntimeError("PHROGs preparation unexpectedly skipped")
         amr = prepare_amrfinder_plus(
             external_dir,
             bin_dir=target_bin,
@@ -799,19 +899,12 @@ def prepare_external_assets(
             diamond_bin=target_bin / "diamond",
             overwrite=overwrite,
         )
-        profile = prepare_phrogs_profile_db(
-            external_dir,
-            profile_url=phrogs_profile_url,
-            published_md5=phrogs_profile_md5,
-            release=phrogs_profile_release,
-            overwrite=overwrite,
-        )
         lookup = prepare_phrogs_lookup(
             annotation.path,
             profile.path,
             external_dir / "safety" / "phrogs_lysogeny_lookup.tsv",
         )
-        assets.extend((amr, toxins, profile, lookup))
+        assets.extend((amr, toxins, lookup))
         manifest_path = Path(safety_manifest) if safety_manifest else external_dir / "safety" / "asset_manifest.yaml"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
@@ -835,18 +928,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-lovis4u-config", action="store_true")
     parser.add_argument("--skip-checkv", action="store_true")
     parser.add_argument("--download-large-databases", action="store_true")
-    parser.add_argument("--download-phrogs-sequence-database", action="store_true")
+    parser.add_argument("--prepare-phrogs-consensus-database", action="store_true")
     parser.add_argument("--with-safety", action="store_true")
     parser.add_argument("--safety-manifest", type=Path)
     parser.add_argument("--mmseqs-url", default=DEFAULT_MMSEQS_GPU_URL)
     parser.add_argument("--blast-plus-url")
     parser.add_argument("--diamond-url", default=DEFAULT_DIAMOND_URL)
     parser.add_argument("--hmmer-url", default=DEFAULT_HMMER_URL)
-    parser.add_argument("--phrogs-mmseqs-url", default=DEFAULT_PHROGS_MMSEQS_URL)
-    parser.add_argument("--phrogs-fasta-url", default=DEFAULT_PHROGS_FASTA_URL)
-    parser.add_argument("--phrogs-profile-url", default=DEFAULT_PHROGS_PROFILE_URL)
-    parser.add_argument("--phrogs-profile-md5", default=DEFAULT_PHROGS_PROFILE_MD5)
-    parser.add_argument("--phrogs-profile-release", default=DEFAULT_PHROGS_PROFILE_RELEASE)
+    parser.add_argument("--pharokka-database-url", default=DEFAULT_PHAROKKA_DATABASE_URL)
+    parser.add_argument("--pharokka-database-md5", default=DEFAULT_PHAROKKA_DATABASE_MD5)
+    parser.add_argument("--pharokka-database-release", default=DEFAULT_PHAROKKA_DATABASE_RELEASE)
     parser.add_argument("--amrfinder-url", default=DEFAULT_AMRFINDER_URL)
     parser.add_argument("--amrfinder-release", default=DEFAULT_AMRFINDER_RELEASE)
     parser.add_argument("--arc-evo2-repo-url", default=DEFAULT_ARC_EVO2_REPO_URL)
@@ -868,7 +959,7 @@ def main() -> None:
         download_phrogs_annotation=not args.skip_phrogs_annotation,
         download_arc_evo2=not args.skip_arc_evo2,
         download_large_databases=args.download_large_databases,
-        download_phrogs_sequence_database=args.download_phrogs_sequence_database,
+        prepare_phrogs_consensus_database=args.prepare_phrogs_consensus_database,
         download_checkv=not args.skip_checkv,
         configure_lovis4u=not args.skip_lovis4u_config,
         with_safety=args.with_safety,
@@ -877,11 +968,9 @@ def main() -> None:
         blast_plus_url=args.blast_plus_url,
         diamond_url=args.diamond_url,
         hmmer_url=args.hmmer_url,
-        phrogs_mmseqs_url=args.phrogs_mmseqs_url,
-        phrogs_fasta_url=args.phrogs_fasta_url,
-        phrogs_profile_url=args.phrogs_profile_url,
-        phrogs_profile_md5=args.phrogs_profile_md5,
-        phrogs_profile_release=args.phrogs_profile_release,
+        pharokka_database_url=args.pharokka_database_url,
+        pharokka_database_md5=args.pharokka_database_md5,
+        pharokka_database_release=args.pharokka_database_release,
         amrfinder_url=args.amrfinder_url,
         amrfinder_release=args.amrfinder_release,
         arc_evo2_repo_url=args.arc_evo2_repo_url,

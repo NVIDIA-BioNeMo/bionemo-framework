@@ -95,7 +95,7 @@ homology_filter_seqs_circular_fasta_file_save_location: "qc4_homology_filter_seq
 
 protein_database_hit_count_filter: true
 mmseqs_threads: 16
-mmseqs_db_protein_database: "recipes/evo2_phage_gen/data/external/phrogs/phrogs_gpu_seq_db_pad"
+mmseqs_db_protein_database: "recipes/evo2_phage_gen/data/external/phrogs/phrogs_consensus_db_pad"
 mmseqs_protein_database_results_dir_save_location: "qc4_mmseqs_results_protein_database"
 mmseqs_protein_database_sensitivity: 4.0
 protein_database_hit_count: 7

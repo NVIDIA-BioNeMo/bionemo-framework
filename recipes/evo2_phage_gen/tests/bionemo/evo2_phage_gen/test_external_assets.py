@@ -16,6 +16,7 @@
 import hashlib
 import io
 import json
+import time
 from pathlib import Path
 from typing import ClassVar
 
@@ -44,7 +45,7 @@ class _Response(io.BytesIO):
 def test_download_checks_provider_checksum_at_download_boundary(tmp_path: Path, monkeypatch) -> None:
     payload = b"provider archive"
     expected = hashlib.md5(payload, usedforsecurity=False).hexdigest()
-    monkeypatch.setattr(assets.urllib.request, "urlopen", lambda _request: _Response(payload))
+    monkeypatch.setattr(assets.urllib.request, "urlopen", lambda _request, timeout=None: _Response(payload))
 
     output, headers = assets._download(
         "https://example.test/archive.tar.gz",
@@ -54,7 +55,7 @@ def test_download_checks_provider_checksum_at_download_boundary(tmp_path: Path, 
     assert output.read_bytes() == payload
     assert headers["x-release"] == "current"
 
-    monkeypatch.setattr(assets.urllib.request, "urlopen", lambda _request: _Response(b"changed"))
+    monkeypatch.setattr(assets.urllib.request, "urlopen", lambda _request, timeout=None: _Response(b"changed"))
     with pytest.raises(ValueError, match="Published checksum"):
         assets._download(
             "https://example.test/archive.tar.gz",
@@ -63,10 +64,72 @@ def test_download_checks_provider_checksum_at_download_boundary(tmp_path: Path, 
         )
 
 
+def test_download_retries_stalled_transfer_and_resumes_partial(tmp_path: Path, monkeypatch, capsys) -> None:
+    output_path = tmp_path / "archive.tar.gz"
+    partial = tmp_path / "archive.tar.gz.part"
+    partial.write_bytes(b"prefix")
+    resumed = _Response(b"suffix")
+    resumed.status = 206
+    outcomes = iter((TimeoutError("stalled"), resumed))
+    calls: list[tuple[str | None, float | None]] = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append((request.get_header("Range"), timeout))
+        outcome = next(outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(assets.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    output, _headers = assets._download("https://example.test/archive.tar.gz", output_path)
+
+    assert output.read_bytes() == b"prefixsuffix"
+    assert calls == [("bytes=6-", 60.0), ("bytes=6-", 60.0)]
+    messages = capsys.readouterr()
+    assert "retrying" in messages.err
+    assert "archive.tar.gz" in messages.out
+
+
 def test_pyrodigal_wrapper_is_a_normal_executable(tmp_path: Path) -> None:
     prepared = prepare_pyrodigal_wrapper(tmp_path / "bin")
     assert prepared.path.stat().st_mode & 0o111
     assert "exec pyrodigal" in prepared.path.read_text()
+
+
+def test_derives_phrogs_consensus_from_pharokka_profiles(tmp_path: Path, monkeypatch) -> None:
+    profile = tmp_path / "pharokka" / "phrogs_profile_db"
+    profile.parent.mkdir()
+    profile.write_text("profiles")
+    Path(f"{profile}.lookup").write_text("0\tphrog_1\t0\n")
+    for suffix in (".dbtype", ".index", "_h", "_h.dbtype", "_h.index"):
+        Path(f"{profile}{suffix}").write_text("database")
+    (profile.parent / "phrog_annot_v4.tsv").write_text("phrog\tannot\tcategory\n")
+    (profile.parent / "VERSION_1_11_0").write_text("1.11.0\n")
+    assert assets._find_pharokka_database(profile.parent) == profile.parent
+    calls: list[list[str]] = []
+
+    def fake_run(command, check):
+        assert check
+        calls.append(command)
+        output = Path(command[3])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("database")
+        Path(f"{output}.dbtype").write_text("type")
+        Path(f"{output}.lookup").write_text("0\tphrog_1\t0\n")
+
+    monkeypatch.setattr(assets.subprocess, "run", fake_run)
+
+    prepared = assets.prepare_phrogs_consensus_db(
+        tmp_path / "external",
+        bin_dir=tmp_path / "bin",
+        profile_database=profile,
+    )
+
+    assert prepared.path.name == "phrogs_consensus_db_pad"
+    assert [command[1] for command in calls] == ["profile2consensus", "makepaddedseqdb"]
+    assert calls[1][-2:] == ["--write-lookup", "1"]
 
 
 def test_phrogs_lookup_uses_available_profiles_and_tolerates_database_growth(tmp_path: Path) -> None:
@@ -170,17 +233,17 @@ def test_parser_allows_current_database_overrides() -> None:
     parsed = assets.build_parser().parse_args(
         [
             "--with-safety",
-            "--phrogs-profile-url",
-            "https://example.test/new-profiles.tar.gz",
-            "--phrogs-profile-md5",
+            "--pharokka-database-url",
+            "https://example.test/pharokka-databases.tar.gz",
+            "--pharokka-database-md5",
             "provider-value",
-            "--phrogs-profile-release",
-            "PHROGs newer",
+            "--pharokka-database-release",
+            "Pharokka newer",
             "--amrfinder-url",
             "https://example.test/amr.tar.gz",
             "--amrfinder-release",
             "amrfinder newer",
         ]
     )
-    assert parsed.phrogs_profile_release == "PHROGs newer"
+    assert parsed.pharokka_database_release == "Pharokka newer"
     assert parsed.amrfinder_release == "amrfinder newer"

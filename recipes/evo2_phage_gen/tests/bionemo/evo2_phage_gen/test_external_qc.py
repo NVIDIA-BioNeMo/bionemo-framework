@@ -85,7 +85,7 @@ def test_external_qc_checker_allows_missing_optional_external_tools(tmp_path):
 
     missing_required = [check.name for check in checks if check.required and not check.ok]
     assert missing_required == []
-    assert any(check.name == "phrogs_mmseqs_db" and not check.required and not check.ok for check in checks)
+    assert any(check.name == "phrogs_consensus_db" and not check.required and not check.ok for check in checks)
 
 
 @pytest.mark.parametrize("payload", ["", "- one\n- two\n", "42\n"])
@@ -107,7 +107,7 @@ def test_external_qc_checker_requires_enabled_stage_inputs(tmp_path, monkeypatch
     )
 
     missing_required = {check.name for check in checks if check.required and not check.ok}
-    assert "phrogs_mmseqs_db" in missing_required
+    assert "phrogs_consensus_db" in missing_required
     assert "tropism_mmseqs_db" in missing_required
     assert "mmseqs" in missing_required
     assert "orfipy" in missing_required

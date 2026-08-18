@@ -105,8 +105,12 @@ and runs the current sequence-safety, target Arc, and filter-7 diagnostic screen
 uses the selected SFT checkpoint as its KL anchor.
 
 The example records commands and periodic liveness observations in `RUNLOG.md` without copying the
-environment. Database updates are recorded and checked with the control panel rather than rejected
-or silently replaced with historical versions. Its final report keeps PASS, FAIL, and INDETERMINATE
+environment. The realized example defaults to PHROGs v4 from the Pharokka v1.11.0 Zenodo
+bundle through public `PHAROKKA_DATABASE_*` environment variables. Override the three values together when using another compatible release. It derives the Arc-compatible
+consensus database locally and writes download progress to
+`inputs/external-assets.log`. Transfers use bounded retries and resume partial files. Database
+updates are recorded and checked with the control panel rather than rejected or silently replaced
+with historical versions. Its final report keeps PASS, FAIL, and INDETERMINATE
 counts separate and writes the intersection of safety-PASS and target-profile candidates. It also
 writes total and mean per-nucleotide SFT log probability for all 1,000 designs, checks residual
 score-length correlation, and adds the scores and accepted ordering to `rollout/final-designs.json`.
@@ -128,6 +132,10 @@ Useful operator modes are:
 ./examples/phix174_8xh100.sh --resume-from 30 \
   --result-root "$PWD/results/phix174-8xh100"
 ```
+
+After an interrupted unfinished stage, rerun the original top-level command with the same result
+root. Completed stage markers are skipped and cached or partial downloads are reused; deleting the
+result directory is not required.
 
 Read the [example README](examples/README.md) for scientific review stops, monitoring behavior,
 safety details, and the result layout. A scratch clone or worktree per

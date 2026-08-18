@@ -12,6 +12,9 @@ DRY_RUN=0
 PREPARE_ONLY=0
 RESUME_FROM=00
 MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-600}"
+PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755221/files/pharokka_v1.11.0_databases.tar.gz?download=1}"
+PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
+PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
 
 usage() {
   printf '%s\n' \
@@ -70,6 +73,7 @@ monitored() {
   shift 2
   printf -v command '%q ' "$@"
   note "command: ${command}"
+  note "monitor: ${label}; log: ${log}"
   [[ "${DRY_RUN}" == "1" ]] && return
   mkdir -p "$(dirname -- "${log}")"
   "$@" > "${log}" 2>&1 &
@@ -165,7 +169,12 @@ cd "${RECIPE_ROOT}"
 
 stage_00() {
   run evo2_phage_download_sft_data --include-raw
-  run evo2_phage_prepare_external_assets --external-dir data/external --bin-dir data/external/bin --download-large-databases --download-phrogs-sequence-database --with-safety
+  monitored 'external asset preparation' "${RESULT_ROOT}/inputs/external-assets.log" \
+    evo2_phage_prepare_external_assets --external-dir data/external --bin-dir data/external/bin \
+    --download-large-databases --prepare-phrogs-consensus-database --with-safety \
+    --pharokka-database-url "${PHAROKKA_DATABASE_URL}" \
+    --pharokka-database-md5 "${PHAROKKA_DATABASE_MD5}" \
+    --pharokka-database-release "${PHAROKKA_DATABASE_RELEASE}"
   run evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched
   if [[ "${DRY_RUN}" == "1" || ! -s data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein.dbtype ]]; then
     run mmseqs createdb data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein

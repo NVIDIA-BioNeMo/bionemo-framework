@@ -109,7 +109,7 @@ def check_arc_qc_prerequisites(
             _check_tool("orfipy", "orfipy", required=homology_required, search_path=search_path),
             _check_tool("mmseqs", "mmseqs", required=homology_required, search_path=search_path),
             _check_path(
-                "phrogs_mmseqs_db",
+                "phrogs_consensus_db",
                 config,
                 "mmseqs_db_protein_database",
                 required=homology_required and bool(config.get("protein_database_hit_count_filter")),
