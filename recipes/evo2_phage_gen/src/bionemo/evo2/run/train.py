@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import torch
+from megatron.bridge.training.callbacks import Callback
 from megatron.bridge.training.comm_overlap import (
     CommOverlapConfig,
     userbuffers_bf16_h100_h8192_tp4_mbs1_seqlen8192,
@@ -1055,12 +1056,13 @@ def train(args: argparse.Namespace) -> None:
         cfg.logger.wandb_entity = args.wandb_entity
         # cfg.logger.wandb_save_dir = ...  # FIXME fill this in or decide if the default is ok
         # FIXME consider allowing megatron to specify the run id for regularly restarting slurm jobs.
-    checkpoint_callbacks: list[MetricCheckpointRetention] = []
+    callbacks: list[Callback] = []
     if args.keep_best_k is None:
         cfg.checkpoint.most_recent_k = args.most_recent_k
     else:
+        # Disable Megatron's latest-K pruning; the callback owns both best-K and recent-K retention.
         cfg.checkpoint.most_recent_k = -1
-        checkpoint_callbacks.append(
+        callbacks.append(
             MetricCheckpointRetention(
                 metric_name=args.checkpoint_metric_name,
                 keep_best_k=args.keep_best_k,
@@ -1113,8 +1115,8 @@ def train(args: argparse.Namespace) -> None:
         forward_step_fn = hyena_forward_step
 
     logger.info(f"Starting pretraining (model_type={model_type})...")
-    if checkpoint_callbacks:
-        pretrain(cfg, forward_step_fn, callbacks=checkpoint_callbacks)
+    if callbacks:
+        pretrain(cfg, forward_step_fn, callbacks=callbacks)
     else:
         pretrain(cfg, forward_step_fn)
 

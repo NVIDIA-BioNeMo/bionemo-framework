@@ -189,16 +189,32 @@ class MetricCheckpointRetention(Callback):
             for step, match in matches.items()
             if int(step) in directories
         ]
+        # Each item is (checkpoint step, metric value, validation-step distance).
+        # Sort by metric, then prefer newer checkpoints on ties, then closer metric matches.
         if self.higher_is_better:
-            scored.sort(key=lambda item: (-item[1], item[2], -item[0]))
+            scored.sort(key=lambda item: (-item[1], -item[0], item[2]))
         else:
-            scored.sort(key=lambda item: (item[1], item[2], -item[0]))
+            scored.sort(key=lambda item: (item[1], -item[0], item[2]))
 
-        keep = historical & directories.keys()
-        keep.update(step for step, _, _ in scored[: self.keep_best_k])
-        keep.update(sorted(directories, reverse=True)[: self.keep_recent_k])
+        best_steps = {step for step, _, _ in scored[: self.keep_best_k]}
+        recent_steps = set(sorted(directories, reverse=True)[: self.keep_recent_k])
+        keep = (historical & directories.keys()) | best_steps | recent_steps
         for step, path in directories.items():
             if step not in keep:
+                match = matches.get(str(step))
+                metric_detail = (
+                    f"matched {self.metric_name!r}={float(match['value']):.6g}"
+                    if match is not None
+                    else f"no matched {self.metric_name!r}"
+                )
+                logger.info(
+                    "Deleting checkpoint step %d at %s: %s and outside best-%d and recent-%d retention",
+                    step,
+                    path,
+                    metric_detail,
+                    self.keep_best_k,
+                    self.keep_recent_k,
+                )
                 shutil.rmtree(path)
         metadata["retained_checkpoint_steps"] = sorted(_iteration_directories(checkpoint_root))
 
@@ -275,6 +291,29 @@ class MetricCheckpointRetention(Callback):
                 raise RuntimeError(message)
             logger.warning("%s; falling back to most-recent checkpoint retention", message)
         else:
+            previous_values = [
+                float(previous_match["value"]) for previous_match in metadata["matches_by_checkpoint_step"].values()
+            ]
+            value = float(match["value"])
+            is_new_best = not previous_values or (
+                value >= max(previous_values) if self.higher_is_better else value <= min(previous_values)
+            )
+            if is_new_best:
+                logger.info(
+                    "New best %r=%.6g at validation step %d; retaining checkpoint step %d",
+                    self.metric_name,
+                    value,
+                    match["validation_step"],
+                    checkpoint_step,
+                )
+            else:
+                logger.info(
+                    "Matched checkpoint step %d to validation step %d with %r=%.6g",
+                    checkpoint_step,
+                    match["validation_step"],
+                    self.metric_name,
+                    value,
+                )
             metadata["matches_by_checkpoint_step"][str(checkpoint_step)] = match
 
         observed.add(checkpoint_step)

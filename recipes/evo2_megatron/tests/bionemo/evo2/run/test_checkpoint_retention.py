@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,7 +39,8 @@ def _context(checkpoint_root: Path, step: int, loss: float | None = None) -> Sim
     return context
 
 
-def test_keeps_best_and_latest(tmp_path: Path) -> None:
+def test_keeps_best_and_latest(tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO)
     retention = MetricCheckpointRetention(
         metric_name="lm loss",
         keep_best_k=2,
@@ -66,6 +68,42 @@ def test_keeps_best_and_latest(tmp_path: Path) -> None:
     matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
     assert matches["metric_name"] == "lm loss"
     assert matches["direction"] == "minimize"
+    assert "New best 'lm loss'=0.8 at validation step 1" in caplog.text
+    assert "New best 'lm loss'=0.4 at validation step 2" in caplog.text
+    assert "Deleting checkpoint step 1" in caplog.text
+    assert "outside best-2 and recent-1 retention" in caplog.text
+
+
+@pytest.mark.parametrize("higher_is_better", [False, True])
+def test_equal_metric_favors_newer_checkpoint(tmp_path: Path, caplog, higher_is_better: bool) -> None:
+    caplog.set_level(logging.INFO)
+    retention = MetricCheckpointRetention(
+        metric_name="lm loss",
+        keep_best_k=1,
+        keep_recent_k=1,
+        higher_is_better=higher_is_better,
+    )
+
+    first_context = _context(tmp_path, 1, 0.4)
+    retention.on_eval_end(first_context)
+    (tmp_path / "iter_0000001").mkdir()
+    retention.on_checkpoint_save(first_context)
+
+    retention.on_eval_end(_context(tmp_path, 2, 0.4))
+    (tmp_path / "iter_0000003").mkdir()
+    retention.on_checkpoint_save(_context(tmp_path, 3))
+
+    last_value = 0.1 if higher_is_better else 0.9
+    last_context = _context(tmp_path, 4, last_value)
+    retention.on_eval_end(last_context)
+    (tmp_path / "iter_0000004").mkdir()
+    retention.on_checkpoint_save(last_context)
+
+    assert {path.name for path in tmp_path.glob("iter_*")} == {
+        "iter_0000003",
+        "iter_0000004",
+    }
+    assert "New best 'lm loss'=0.4 at validation step 2; retaining checkpoint step 3" in caplog.text
 
 
 def test_matches_nearest_past_metric(tmp_path: Path, caplog) -> None:
@@ -92,7 +130,7 @@ def test_matches_nearest_past_metric(tmp_path: Path, caplog) -> None:
     retention.on_checkpoint_save(_context(tmp_path, 5))
 
     assert {path.name for path in tmp_path.glob("iter_*")} == {
-        "iter_0000002",
+        "iter_0000003",
         "iter_0000005",
     }
     metrics = json.loads((tmp_path / "validation_metrics.json").read_text())
