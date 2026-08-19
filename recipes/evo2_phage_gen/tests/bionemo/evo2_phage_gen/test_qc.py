@@ -151,7 +151,7 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
         output_path = args[args.index("-out") + 1]
-        Path(output_path).write_text(">seq_0\n1 - 80\n>seq_1\n321 - 400\n")
+        Path(output_path).write_text(">seq_0\n0 - 79\n>seq_1\n320 - 399\n")
 
     monkeypatch.setattr("bionemo.evo2_phage_gen.qc.subprocess.run", fake_run)
     df = pd.DataFrame(
@@ -184,6 +184,17 @@ def test_add_nucleotide_metrics_uses_external_dustmasker_interval_output(monkeyp
     assert scored["dustmask_end_pass"].tolist() == [True, True]
 
 
+def test_dustmasker_accepts_zero_based_inclusive_full_length_interval(tmp_path):
+    """A fully masked sequence is a valid QC result, not a parser failure."""
+    interval_path = tmp_path / "dustmasker.interval"
+    interval_path.write_text(">seq_0\n0 - 5999\n")
+
+    masks = _parse_dustmasker_interval_output(interval_path, [6000])
+
+    assert len(masks[0]) == 6000
+    assert all(masks[0])
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -211,9 +222,9 @@ def test_external_dustmasker_failures_are_bounded_and_wrapped(monkeypatch, error
 
 @pytest.mark.parametrize(
     "interval",
-    ["0 - 4", "4 - 3", "1 - 5", "-1 - 2", "not-an-interval"],
+    ["0 - 4", "3 - 2", "4 - 4", "-1 - 2", "0 - -1", "not-an-interval"],
 )
-def test_dustmasker_intervals_reject_invalid_one_based_coordinates(tmp_path, interval):
+def test_dustmasker_intervals_reject_invalid_zero_based_coordinates(tmp_path, interval):
     """Malformed or out-of-range dustmasker coordinates should be rejected."""
     interval_path = tmp_path / "dustmasker.interval"
     interval_path.write_text(f">seq_0\n{interval}\n")

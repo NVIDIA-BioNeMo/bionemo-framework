@@ -81,7 +81,7 @@ run_worker() {
       attempt=$(( attempt + 1 ))
     done
     if [[ "${succeeded}" != "1" ]]; then
-      echo "${cell} failed after bounded retries" >&2
+      echo "${cell} failed after bounded retries; see ${log}" >&2
       return 1
     fi
   done 3< "${GENERATION_ROOT}/cells.tsv"
@@ -100,7 +100,7 @@ for pid in "${pids[@]}"; do
   fi
 done
 if [[ "${failed}" != "0" ]]; then
-  echo "One or more scoring workers failed; rerun resumes validated cells." >&2
+  echo "One or more scoring workers failed; inspect ${SCORE_ROOT}/logs/*.attempt-*.log. Rerunning resumes validated cells." >&2
   exit 1
 fi
 

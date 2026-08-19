@@ -309,8 +309,18 @@ stage_20() {
 stage_30() {
   local selected calibration="${RESULT_ROOT}/calibration" evidence selection="${RESULT_ROOT}/calibration/selected-sampling.json"
   selected="$(read_state selected-sft)"; evidence="${calibration}/scoring/selection-evidence.csv"
-  monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 scripts/calibration/run_sft_sampling_sweep.sh
-  monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
+  if [[ -f "${STAGE_DIR}/30-calibration-generation.done" ]]; then
+    note 'substage 30-calibration-generation already complete'
+  else
+    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 scripts/calibration/run_sft_sampling_sweep.sh
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-generation.done"
+  fi
+  if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then
+    note 'substage 30-calibration-scoring already complete'
+  else
+    monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-scoring.done"
+  fi
   if [[ "${DRY_RUN}" == "1" ]]; then note 'verify fresh calibration supports temperature 1.0 and prefixes 16/24'; else
     python - "${evidence}" "${selection}" <<'PY'
 import json, sys, pandas as pd

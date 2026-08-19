@@ -227,6 +227,8 @@ def test_substage_resume(tmp_path: Path) -> None:
     stage_root = result_root / "stages"
     stage_root.mkdir(parents=True)
     (stage_root / "20-sft.done").touch()
+    (stage_root / "30-calibration-generation.done").touch()
+    (stage_root / "30-calibration-scoring.done").touch()
     (stage_root / "50-rollout.done").touch()
     (stage_root / "40-rl.done").touch()
 
@@ -254,6 +256,11 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "evo2_convert_nemo2_to_mbridge" not in log
     assert "monitor: 12,000-step SFT" not in log
     assert "monitor: held-out SFT evaluation" in log
+    assert "substage 30-calibration-generation already complete" in log
+    assert "monitor: calibration generation" not in log
+    assert "substage 30-calibration-scoring already complete" in log
+    assert "monitor: calibration scoring" not in log
+    assert "verify fresh calibration supports temperature 1.0 and prefixes 16/24" in log
     assert "substage 40-rl already complete" in log
     assert "monitor: RL environment control" not in log
     assert "substage 50-rollout already complete" in log

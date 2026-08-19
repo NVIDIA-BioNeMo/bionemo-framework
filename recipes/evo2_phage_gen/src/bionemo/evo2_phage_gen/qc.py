@@ -281,9 +281,9 @@ def _parse_dustmasker_interval_output(interval_path: Path, sequence_lengths: lis
             raise ValueError(f"invalid dustmasker interval for seq_{seq_index}: {coordinate_text!r}")
         start, end = (int(value) for value in interval_match.groups())
         sequence_length = sequence_lengths[seq_index]
-        if start <= 0 or end < start or end > sequence_length:
+        if start < 0 or end < start or end >= sequence_length:
             raise ValueError(
-                f"invalid dustmasker interval for seq_{seq_index}: {start} - {end} outside 1 - {sequence_length}"
+                f"invalid dustmasker interval for seq_{seq_index}: {start} - {end} outside 0 - {sequence_length - 1}"
             )
         intervals_by_index[seq_index].append((start, end))
 
@@ -293,7 +293,7 @@ def _parse_dustmasker_interval_output(interval_path: Path, sequence_lengths: lis
         if seq_len <= 0:
             continue
         for start, end in intervals:
-            masks[seq_index][start - 1 : end] = [True] * (end - start + 1)
+            masks[seq_index][start : end + 1] = [True] * (end - start + 1)
     return masks
 
 
