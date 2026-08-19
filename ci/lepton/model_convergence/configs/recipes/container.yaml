@@ -1,0 +1,189 @@
+# @package _global_
+defaults:
+  - /base
+  - _self_
+
+job_name: "conatinertest"
+
+############################################################
+# lepton job info
+############################################################
+node_group: yo-bom-lepton-001
+mount_from: node-nfs:fs1
+num_nodes: 1
+device_type: gpu
+num_devices: 2
+gpu_type: h100-sxm
+resource_shape: "${device_type}.${num_devices}x${gpu_type}"
+
+############################################################
+# kratos info: where to log data
+############################################################
+kratos_subject: "convergence_tests_v0.0.3"
+
+############################################################
+# recipe identifiers
+# mostly used for logging and observability
+############################################################
+recipe_subdir: esm2_native_te
+model_type: esm2
+variant: train # train, finetune
+
+# Core identifiers for filtering
+framework: native # native, accelerate
+precision: fp16 # likely bf16 or fp8
+te_enabled: true
+fp8_enabled: false
+# thd_enabled: false
+
+# Catchall for additional features/configs
+extras: [] # e.g. [thd]
+
+############################################################
+# wandb info (total_gpus used for group name)
+############################################################
+# `total_gpus` calculated from lepton job info above
+total_gpus: ${multiply:${num_devices},${num_nodes}}
+
+wandb_init_args:
+  project: "test_convergence__recipes__${sanitize:${branch}}"
+  group: "${model_type}__${task_cmd}__${total_gpus}gpus__${sanitize:${gpu_type}}"
+  job_type: "${recipe_subdir}"
+  name: null
+
+############################################################
+# task commands
+# shared across all products (if not explicitly overridden)
+############################################################
+
+# script overrides
+# these should match the keys in the recipe's config file
+model_tag: nvidia/esm2_t36_3B_UR50D
+task_cmd: train_fsdp2 # mfsdp
+num_train_steps: 20_000
+# dataset commands
+micro_batch_size: 16
+load_dataset_kwargs_path: nvidia/esm2_uniref_pretraining_data
+load_dataset_kwargs_streaming: true
+load_dataset_kwargs_revision: 4ac1d2973567e46b8ca95901f4b4793a21305995 # pragma: allowlist secret
+
+# lr commands
+num_warmup_steps: 2_000
+# checkpoint controls
+ckpt_dir: ""
+save_checkpoints: false
+save_final_model: false
+resume_from_checkpoint: false
+use_distributed_checkpoint_fsdp2: false
+
+log_to_kratos: false
+
+############################################################
+# Checkout Script
+# Standardized script to clone the BioNeMo repository and install
+# dependencies before the training run starts. Child configs can
+# inherit and reuse this logic without modification.
+############################################################
+checkout_script: |
+  set -euo pipefail
+  
+  echo "========================================"
+  echo "Setting up BioNeMo environment"
+  echo "========================================"
+  
+  # Clone repo
+  git clone https://github.com/NVIDIA/bionemo-framework.git
+  cd bionemo-framework/
+  git checkout jstjohn/evo2_megatron_bridge_recipe
+  # build container from dockerfile here
+  cd bionemo-recipes/recipes/evo2_megatron
+  
+  # Install uv (if not already available)
+  if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.cargo/bin:$PATH"
+  fi
+  
+  # Fix TransformerEngine direct_url issue
+  rm -f /usr/local/lib/python*/dist-packages/transformer_engine-*.dist-info/direct_url.json
+  
+  # Create venv with system site packages
+  export UV_LINK_MODE=copy
+  export VIRTUAL_ENV=/workspace/.venv
+  export PATH="$VIRTUAL_ENV/bin:$PATH"
+  
+  uv venv --system-site-packages --seed $VIRTUAL_ENV
+  
+  # Create constraints file
+  pip freeze | grep transformer_engine > pip-constraints.txt
+  
+  # Install dependencies
+  uv pip install -r build_requirements.txt --no-build-isolation
+  uv pip install -c pip-constraints.txt -e . --no-build-isolation
+  
+  echo "========================================"
+  echo "BioNeMo environment ready!"
+  echo "========================================"
+
+
+run_script: |
+  pwd
+
+  ls
+
+  echo "ls ../../.."
+  ls ../../..
+  echo "ls ../../../.."
+  ls ../../../..
+  echo "ls ../../../.."
+  ls ../../../../../..
+
+
+  train_evo2 \
+  --hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_256 \
+  --sharded-eden-data \
+  --seq-length=8192 \
+  --stride 7992 \
+  --sequence-db-dir ../../../../../data/bcr_eden/OG2_database_splits \
+  --train-window-db ../../../../../data/bcr_eden/OG2_database_splits/og2__train__short.sqlite \
+  --val-window-db ../../../../../data/bcr_eden/OG2_database_splits/og2__validation__short.sqlite \
+  --test-window-db ../../../../../data/bcr_eden/OG2_database_splits/og2__test__short.sqlite \
+  --most-recent-k 3 \
+  --max-steps=72926 \
+  --constant-steps 1024 \
+  --seed 1234 \
+  --dataset-seed 1234 \
+  --no-weight-decay-embeddings \
+  --grad-reduce-in-fp32 \
+  --activation-checkpoint-recompute-num-layers 1 \
+  --mixed-precision-recipe bf16-with-fp8-delayed-scaling-mixed \
+  --hybrid-override-pattern SDH*SDHSDH*SDHSDH*SDHSDH* \
+  --use-precision-aware-optimizer \
+  --log-num-zeros-in-grad \
+  --enable-preemption \
+  --no-fp32-residual-connection \
+  --ckpt-async-save \
+  --overlap-grad-reduce \
+  --clip-grad 1 \
+  --eod-pad-in-loss-mask \
+  --wandb-project evo2-recipes-verification \
+  --lr 3e-04 \
+  --wd 0.01 \
+  --min-lr 6e-06 \
+  --warmup-steps 1024 \
+  --attention-dropout 0.001 \
+  --hidden-dropout 0.001 \
+  --eval-iters=10 \
+  --eval-interval=100 \
+  --debug-ddp-parity-freq 100 \
+  --experiment-name=pretrain_striped_hyena_1b_nv_parallel \
+  --result-dir=FIXME \
+  --tensor-model-parallel-size=1 \
+  --context-parallel-size=1 \
+  --pipeline-model-parallel-size=1 \
+  --workers 8 \
+  --log-interval 5 \
+  --no-renormalize-loss \
+  --micro-batch-size=20 \
+  --global-batch-size=960 \
+  --model-size=striped_hyena_1b_nv_parallel
