@@ -43,6 +43,20 @@ script reuses completed stages and cached or partial downloads, so the run direc
 deleted. Only one invocation may use a result root at a time. If AMRFinder fails, its captured
 output is retained as `amrfinder/amrfinder.log` below that scan directory.
 
+SFT training, RL training, and final generation also write narrower completion markers:
+`20-sft.done`, `40-rl.done`, and `50-rollout.done`. These let a resumed run skip an accepted
+long-running result while still performing its downstream selection, evaluation, screening, and
+reporting. For example, after inspecting checkpoints from an interrupted SFT run:
+
+```bash
+touch results/phix174-8xh100/stages/20-sft.done
+./examples/phix174_8xh100.sh --resume-from 20 \
+  --result-root "$PWD/results/phix174-8xh100"
+```
+
+Create a narrow marker manually only when that substage's outputs are complete enough to accept;
+ordinary successful runs create it automatically.
+
 The six dependency-ordered stages are input/control preparation, SFT safety and splitting, SFT
 training and selection, sampling calibration, GDPO pilot/training, and final generation, SFT
 likelihood scoring, and screening.

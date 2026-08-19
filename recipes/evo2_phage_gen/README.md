@@ -146,6 +146,8 @@ After an interrupted unfinished stage, rerun the original top-level command with
 root. Completed stage markers are skipped and cached or partial downloads are reused; deleting the
 result directory is not required. Only one invocation may use a result root at a time; a concurrent
 invocation exits instead of sharing stage work directories.
+The example README also documents narrower markers for accepting completed SFT, RL, or generation
+work without skipping checkpoint selection and downstream checks.
 
 Read the [example README](examples/README.md) for scientific review stops, monitoring behavior,
 safety details, and the result layout. A scratch clone or worktree per

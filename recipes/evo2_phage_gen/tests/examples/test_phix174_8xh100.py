@@ -211,3 +211,47 @@ def test_dry_run(tmp_path: Path) -> None:
     assert rl_control[rl_control.index("--control-fasta") + 1].endswith("NC_001422.1.fna")
     assert rl_control[rl_control.index("--control-dir") + 1].endswith("/rl/environment-control")
     assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
+
+
+def test_substage_resume(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    stage_root = result_root / "stages"
+    stage_root.mkdir(parents=True)
+    (stage_root / "20-sft.done").touch()
+    (stage_root / "50-rollout.done").touch()
+    (stage_root / "40-rl.done").touch()
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--resume-from",
+            "20",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "substage 20-sft already complete" in log
+    assert "monitor: SFT smoke" not in log
+    assert "evo2_convert_nemo2_to_mbridge" not in log
+    assert "monitor: 12,000-step SFT" not in log
+    assert "monitor: held-out SFT evaluation" in log
+    assert "substage 40-rl already complete" in log
+    assert "monitor: RL environment control" not in log
+    assert "substage 50-rollout already complete" in log
+    assert "evo2_phage_generation write-prompts" not in log
+    assert "--max-new-tokens 5976" not in log
+    assert "monitor: selected-SFT likelihood scoring" in log
+    assert "monitor: one-step GDPO pilot" not in log
+    assert "monitor: 500-step DP8 GDPO" not in log
+    assert "evo2_phage_monitor_objectives" in log
+    assert "evo2_phage_sequence_safety scan" in log

@@ -256,13 +256,18 @@ PY
 stage_20() {
   local prep base_nemo base_mbridge="${RESULT_ROOT}/checkpoints/evo2-7b-8k-mbridge-10240" sft="${RESULT_ROOT}/sft/train" selected
   prep="$(read_state sft-prepared)"
-  [[ "${DRY_RUN}" == "1" ]] && base_nemo='<downloaded-evo2-7b-8k>' || base_nemo="$(download_bionemo_data evo2/7b-8k:1.0 | tail -n 1)"
-  if [[ "${DRY_RUN}" == "1" || ! -d "${base_mbridge}" ]]; then
-    run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size evo2_7b_base --seq-length 10240 --mixed-precision-recipe bf16_mixed
-  fi
   local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size evo2_7b_base --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size 2 --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
-  monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
-  monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2
+  if [[ -f "${STAGE_DIR}/20-sft.done" ]]; then
+    note 'substage 20-sft already complete'
+  else
+    [[ "${DRY_RUN}" == "1" ]] && base_nemo='<downloaded-evo2-7b-8k>' || base_nemo="$(download_bionemo_data evo2/7b-8k:1.0 | tail -n 1)"
+    if [[ "${DRY_RUN}" == "1" || ! -d "${base_mbridge}" ]]; then
+      run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size evo2_7b_base --seq-length 10240 --mixed-precision-recipe bf16_mixed
+    fi
+    monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
+    monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft.done"
+  fi
   [[ "${DRY_RUN}" == "1" ]] && selected='<selected-sft>' || selected="$(select_checkpoint sft "${sft}/evo2/tb_logs" "${sft}/evo2/checkpoints" "${RESULT_ROOT}/sft/checkpoint-selection.json")"
   state selected-sft "${selected}"
   monitored 'held-out SFT evaluation' "${RESULT_ROOT}/sft/heldout.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/heldout_dataset.yaml" --finetune-ckpt-dir "${selected}" --global-batch-size 20 --max-steps 0 --eval-interval 1 --eval-iters 5 --warmup-steps 0 --decay-steps 0 --result-dir "${RESULT_ROOT}/sft/heldout" --experiment-name evo2-heldout
@@ -287,18 +292,23 @@ PY
 
 stage_40() {
   local selected rl="${RESULT_ROOT}/rl" control="${RESULT_ROOT}/rl/environment-control" chosen
-  selected="$(read_state selected-sft)"
-  export NEMO_RL_RAY_NUM_CPUS="${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}"
-  note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
-  run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
-  monitored 'RL environment control' "${control}/runner.log" \
-    evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}" \
-    --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422.1.fna --control-dir "${control}"
-  local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" logger.wandb_enabled=false)
-  monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
-  run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
-  check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
-  monitored '500-step DP8 GDPO' "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
+  if [[ -f "${STAGE_DIR}/40-rl.done" ]]; then
+    note 'substage 40-rl already complete'
+  else
+    selected="$(read_state selected-sft)"
+    export NEMO_RL_RAY_NUM_CPUS="${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}"
+    note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
+    run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
+    monitored 'RL environment control' "${control}/runner.log" \
+      evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}" \
+      --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422.1.fna --control-dir "${control}"
+    local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" logger.wandb_enabled=false)
+    monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
+    run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
+    check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
+    monitored '500-step DP8 GDPO' "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-rl.done"
+  fi
   run evo2_phage_monitor_objectives --tensorboard-root "${rl}/logs" --config configs/gdpo_phage_megatron.yaml --output "${rl}/objective-health.json" --history-output "${rl}/objective-history.json"
   check_objectives "${rl}/objective-health.json"
   [[ "${DRY_RUN}" == "1" ]] && chosen='<selected-rl>' || chosen="$(select_checkpoint rl "${rl}/logs" "${rl}/checkpoints" "${rl}/checkpoint-selection.json")"
@@ -313,7 +323,14 @@ stage_50() {
   safety="${rollout}/sequence-safety"
   likelihood="${rollout}/sft-likelihood"
   infer="${RECIPE_ROOT}/src/bionemo/evo2/run/infer.py"
-  run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" --prompt-lengths 16 24 --num-prompts 500 --id-prefix final
+  if [[ -f "${STAGE_DIR}/50-rollout.done" ]]; then
+    note 'substage 50-rollout already complete'
+    if [[ "${DRY_RUN}" != "1" && ! -s "${fasta}" ]]; then
+      printf 'rollout substage is marked complete but FASTA is missing: %s\n' "${fasta}" >&2
+      return 1
+    fi
+  else
+    run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" --prompt-lengths 16 24 --num-prompts 500 --id-prefix final
   local shard_dir="${rollout}/prompts/dp8" rank started waited alive failed=0 printable pid
   local -a command=() outputs=() pids=() logs=()
   if [[ "${DRY_RUN}" == "1" ]]; then
@@ -388,6 +405,8 @@ count = sum(1 for _ in SeqIO.parse(sys.argv[1], "fasta"))
 if count != 1000:
     raise SystemExit(f"expected exactly 1000 generated genomes, found {count}")
 PY
+  fi
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-rollout.done"
   fi
 
   run evo2_phage_generation prepare-sft-likelihood \
