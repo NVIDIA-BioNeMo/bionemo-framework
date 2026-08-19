@@ -97,7 +97,8 @@ tmux new -s phix174-e2e
   --result-root "$PWD/results/phix174-8xh100"
 ```
 
-`NUM_GPUS` (default 8) and `NUM_CPUS` (default `nproc`) are the top-level topology controls.
+`NUM_GPUS` (default 8) and `NUM_CPUS` (default `nproc`, in logical CPUs) are the top-level
+topology controls.
 The script permits other GPU models with a tuning warning; see the
 [realized example](examples/README.md) for the affected stages and CPU sub-budgets.
 

@@ -20,7 +20,7 @@ tmux new -s phix174-e2e
 
 The build creates the virtual env used by `.ci_test_env.sh`, which the example sources internally.
 `NUM_GPUS` defaults to 8 and controls SFT processes, RL topology, calibration GPUs, rollout
-workers, and likelihood scoring. `NUM_CPUS` defaults to `nproc` and sets the Ray CPU budget.
+workers, and likelihood scoring. `NUM_CPUS` defaults to `nproc` and sets the Ray logical-CPU budget.
 The script checks the configured GPU count. Other accelerator models are allowed with a warning
 because memory, batch, and parallelism settings may need tuning; the reference settings are not a
 performance claim for another topology. `NUM_GPUS` must currently be even for the SFT
@@ -65,7 +65,7 @@ The six dependency-ordered stages are input/control preparation, SFT safety and 
 training and selection, sampling calibration, GDPO pilot/training, and final generation, SFT
 likelihood scoring, and screening.
 Calibration uses `NUM_GPUS` in parallel; SFT, GDPO, rollout generation, and likelihood scoring use
-the same configured count. On the reference node, where `nproc` reports 160 CPUs, the large safety
+the same configured count. On the reference node, where `nproc` reports 160 logical CPUs, the large safety
 scans use 128-record batches, 32 parallel ORF predictions, 32 threads for AMRFinder/DIAMOND, and 64
 for the PHROGs MMseqs search. The GDPO reward phases are sequential and use at most 64 tool threads;
 `NUM_CPUS` sets the Ray CPU budget. `CALIBRATION_WORKERS` and the existing `SAFETY_*`

@@ -204,7 +204,7 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     printf 'Warning: this example was tested on 8 H100 80GB GPUs. Detected:\n%s\nTune memory, batch, and parallelism settings for this topology.\n' "${gpu_info}" >&2
   fi
 fi
-note "planned topology: ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
+note "planned topology: ${NUM_GPUS} GPUs, ${NUM_CPUS} logical CPUs"
 printf '{"gpu_count":%s,"cpu_count":%s,"gpu_type":"%s","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}\n' "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" > "${RESULT_ROOT}/settings.json"
 cd "${RECIPE_ROOT}"
 
