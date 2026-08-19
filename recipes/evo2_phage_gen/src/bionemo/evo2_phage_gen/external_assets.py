@@ -670,6 +670,62 @@ def _clear_mmseqs_database(prefix: Path) -> None:
             path.unlink()
 
 
+def prepare_phrogs_safety_db(
+    profile_database: Path,
+    safety_lookup: Path,
+    output_path: Path,
+    *,
+    mmseqs_path: Path,
+    release: str | None = None,
+    runner=subprocess.run,
+) -> PreparedAsset:
+    """Select the PHROGs profiles used by the lysogeny screen."""
+    source = Path(profile_database)
+    source_keys: dict[str, str] = {}
+    for line in Path(f"{source}.lookup").read_text().splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 2:
+            source_keys[fields[1]] = fields[0]
+
+    with Path(safety_lookup).open(newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    selected_ids = [row["phrog"] for row in rows]
+    if not selected_ids:
+        raise ValueError("PHROGs safety lookup contains no profiles")
+    missing = sorted(set(selected_ids) - set(source_keys))
+    if missing:
+        raise ValueError(f"PHROGs safety profiles are missing from the database: {', '.join(missing)}")
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _clear_mmseqs_database(output)
+    key_file = output.parent / f".{output.name}.{os.getpid()}.keys"
+    key_file.write_text("".join(f"{source_keys[profile]}\n" for profile in selected_ids))
+    try:
+        runner(
+            [str(mmseqs_path), "createsubdb", str(key_file), str(source), str(output)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for suffix in (".lookup", ".source", "_h", "_h.dbtype", "_h.index"):
+            destination = Path(f"{output}{suffix}")
+            destination.unlink(missing_ok=True)
+            shutil.copy2(Path(f"{source}{suffix}"), destination)
+        required = (output, Path(f"{output}.dbtype"), Path(f"{output}.index"), Path(f"{output}.lookup"))
+        if any(not path.is_file() or path.stat().st_size == 0 for path in required):
+            raise RuntimeError("MMseqs did not create a complete PHROGs safety database")
+    except Exception:
+        _clear_mmseqs_database(output)
+        raise
+    finally:
+        key_file.unlink(missing_ok=True)
+
+    count = len(selected_ids)
+    family_count = f"{count} selected {'family' if count == 1 else 'families'}"
+    return PreparedAsset("phrogs_safety_database", output, f"{release}; {family_count}" if release else family_count)
+
+
 def prepare_phrogs_consensus_db(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
@@ -904,11 +960,18 @@ def prepare_external_assets(
             profile.path,
             external_dir / "safety" / "phrogs_lysogeny_lookup.tsv",
         )
-        assets.extend((amr, toxins, lookup))
+        safety_profile = prepare_phrogs_safety_db(
+            profile.path,
+            lookup.path,
+            external_dir / "safety" / "phrogs_profile_db",
+            mmseqs_path=target_bin / "mmseqs",
+            release=profile.detail,
+        )
+        assets.extend((amr, toxins, lookup, safety_profile))
         manifest_path = Path(safety_manifest) if safety_manifest else external_dir / "safety" / "asset_manifest.yaml"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
-            yaml.safe_dump(_safety_state(external_dir, target_bin, profile, lookup), sort_keys=False)
+            yaml.safe_dump(_safety_state(external_dir, target_bin, safety_profile, lookup), sort_keys=False)
         )
 
     return assets

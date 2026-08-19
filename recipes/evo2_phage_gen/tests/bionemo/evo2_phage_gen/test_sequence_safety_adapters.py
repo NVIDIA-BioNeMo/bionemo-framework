@@ -56,16 +56,24 @@ def test_genome_input_normalizes_sequence_and_rejects_invalid_data() -> None:
     assert GenomeInput("phix|rollout", "atg nn").sequence == "ATGNN"
 
 
-def test_observe_tool_version_logs_selected_runtime(tmp_path: Path) -> None:
+def test_observe_tool_version_logs_selected_runtime(tmp_path: Path, monkeypatch) -> None:
     runtime = _tool(tmp_path, "diamond")
     calls: list[list[str]] = []
+    environments: list[dict[str, str]] = []
+    monkeypatch.setenv("BASH_ENV", "/etc/bash.bashrc")
+    monkeypatch.setenv("ENV", "/etc/shinit_v2")
+    monkeypatch.setenv("SAFETY_TEST_VALUE", "preserved")
 
     def runner(argv, **kwargs):
         calls.append(argv)
+        environments.append(kwargs["env"])
         return _completed("diamond version 2.1.24\n")
 
     assert observe_tool_version(runtime, runner=runner) == "diamond version 2.1.24"
     assert calls == [[str(runtime.path), "version"]]
+    assert environments[0]["SAFETY_TEST_VALUE"] == "preserved"
+    assert "BASH_ENV" not in environments[0]
+    assert "ENV" not in environments[0]
 
 
 def test_orf_workers_preserve_record_order(tmp_path: Path, monkeypatch) -> None:

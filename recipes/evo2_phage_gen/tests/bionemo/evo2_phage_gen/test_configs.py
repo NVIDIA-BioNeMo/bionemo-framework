@@ -94,7 +94,7 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert sequence_safety["host_evidence"]["replication_host_domains"] == ["BACTERIA"]
     assert sequence_safety["policy_path"] == "configs/phage_safety_policy.yaml"
     assert sequence_safety["asset_manifest_path"] == "data/external/safety/asset_manifest.yaml"
-    assert sequence_safety["batch_size"] == 32
+    assert sequence_safety["batch_size"] == 128
     assert sequence_safety["orf_workers"] == 16
     assert sequence_safety["phrogs_threads"] == 16
     assert external_qc["lovis4u_mmseqs_threads"] == 8
@@ -165,8 +165,9 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["external_qc"]["lovis4u_parallel_jobs"] == 32
     assert env_config["external_qc"]["lovis4u_mmseqs_threads"] == 8
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
+    assert env_config["sequence_safety"]["batch_size"] >= config["policy"]["generation_batch_size"]
     assert env_config["sequence_safety"] == {
-        "batch_size": 32,
+        "batch_size": 128,
         "orf_workers": 32,
         "phrogs_threads": 64,
         "threads": 32,

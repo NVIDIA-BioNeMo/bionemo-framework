@@ -22,6 +22,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -302,8 +303,10 @@ def _run_scan(args: argparse.Namespace) -> int:
     commands: dict[str, list[str]] = {}
     for batch_index, batch in enumerate(batches):
         batch_root = output_dir if len(batches) == 1 else output_dir / "batches" / f"{batch_index:06d}"
+        batch_label = f"safety scan batch {batch_index + 1}/{len(batches)}"
+        batch_started = time.perf_counter()
         print(
-            f"safety scan batch {batch_index + 1}/{len(batches)}: preparing {len(batch)} records",
+            f"{batch_label}: predicting ORFs for {len(batch)} records",
             flush=True,
         )
         try:
@@ -324,14 +327,16 @@ def _run_scan(args: argparse.Namespace) -> int:
                     for safety_class in SAFETY_CLASSES
                 }
             print(
-                f"safety scan batch {batch_index + 1}/{len(batches)}: ORF preparation failed",
+                f"{batch_label}: ORF preparation failed after {time.perf_counter() - batch_started:.1f}s",
                 flush=True,
             )
             continue
 
+        orf_finished = time.perf_counter()
         amr_database = databases["amrfinder"]
         toxin_database = databases["toxins"]
         phrogs_database = databases["phrogs"]
+        print(f"{batch_label}: AMR screen", flush=True)
         amr = run_amrfinder_batch(
             batch,
             artifacts,
@@ -342,6 +347,8 @@ def _run_scan(args: argparse.Namespace) -> int:
             threads=args.threads,
             timeout=args.timeout,
         )
+        amr_finished = time.perf_counter()
+        print(f"{batch_label}: toxin screen", flush=True)
         toxin = run_toxin_batch(
             batch,
             artifacts,
@@ -352,6 +359,8 @@ def _run_scan(args: argparse.Namespace) -> int:
             threads=args.threads,
             timeout=args.timeout,
         )
+        toxin_finished = time.perf_counter()
+        print(f"{batch_label}: lysogeny screen", flush=True)
         phrogs = run_phrogs_batch(
             batch,
             artifacts,
@@ -374,7 +383,13 @@ def _run_scan(args: argparse.Namespace) -> int:
         for safety_class, result in (("amr", amr), ("toxin", toxin), ("lysogeny", phrogs)):
             if safety_class not in commands and result:
                 commands[safety_class] = list(next(iter(result.values())).command)
-        print(f"safety scan batch {batch_index + 1}/{len(batches)}: complete", flush=True)
+        finished = time.perf_counter()
+        print(
+            f"{batch_label}: complete in {finished - batch_started:.1f}s "
+            f"(ORFs {orf_finished - batch_started:.1f}s, AMR {amr_finished - orf_finished:.1f}s, "
+            f"toxin {toxin_finished - amr_finished:.1f}s, lysogeny {finished - toxin_finished:.1f}s)",
+            flush=True,
+        )
 
     serialized_records: list[dict[str, object]] = []
     for index, record in enumerate(records):

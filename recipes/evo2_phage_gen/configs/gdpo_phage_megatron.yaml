@@ -174,7 +174,7 @@ env:
       lovis4u_mmseqs_threads: 8
       lovis4u_collect_pdfs: false
     sequence_safety:
-      batch_size: 32
+      batch_size: 128
       orf_workers: 32
       threads: 32
       phrogs_threads: 64

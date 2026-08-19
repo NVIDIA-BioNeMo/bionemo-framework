@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,27 @@ from bionemo.evo2_phage_gen.sequence_safety import SafetyClassResult, SafetyFind
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 _SEQUENCE_ID = re.compile(r"^[A-Za-z0-9_.|-]+$")
+
+
+def _external_tool_environment() -> dict[str, str]:
+    """Preserve the caller environment without interactive shell startup hooks."""
+    environment = dict(os.environ)
+    environment.pop("BASH_ENV", None)
+    environment.pop("ENV", None)
+    return environment
+
+
+def _run_external(
+    command: Sequence[str], *, runner: CommandRunner, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    return runner(
+        list(command),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=_external_tool_environment(),
+    )
 
 
 @dataclass(frozen=True)
@@ -413,13 +435,7 @@ def observe_tool_version(
     """Read a tool version without interpreting its format."""
     if not runtime.path.is_file():
         raise FileNotFoundError(runtime.path)
-    completed = runner(
-        [str(runtime.path), *runtime.version_args],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    completed = _run_external((str(runtime.path), *runtime.version_args), runner=runner, timeout=timeout)
     return (completed.stdout.strip() or completed.stderr.strip()).splitlines()[0]
 
 
@@ -579,7 +595,7 @@ def run_amrfinder_batch(
     command = _amrfinder_command(artifacts, runtime, Path(database), runtime.path.parent, output, threads)
     try:
         version = observe_tool_version(runtime, runner=runner, timeout=timeout)
-        runner(list(command), check=True, capture_output=True, text=True, timeout=timeout)
+        _run_external(command, runner=runner, timeout=timeout)
         if not output.is_file():
             raise ValueError("missing output")
         with output.open() as handle:
@@ -798,7 +814,7 @@ def run_toxin_batch(
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
         version = observe_tool_version(runtime, runner=runner, timeout=timeout)
-        runner(list(command), check=True, capture_output=True, text=True, timeout=timeout)
+        _run_external(command, runner=runner, timeout=timeout)
         if not output.is_file():
             raise ValueError("missing output")
         rows = [line.split("\t") for line in output.read_text().splitlines() if line.strip()]
@@ -1027,7 +1043,7 @@ def run_phrogs_batch(
         profiles = _phrogs_profiles(lookup)
         version = observe_tool_version(runtime, runner=runner, timeout=timeout)
         for command in commands:
-            runner(list(command), check=True, capture_output=True, text=True, timeout=timeout)
+            _run_external(command, runner=runner, timeout=timeout)
         if not output.is_file():
             raise ValueError("missing output")
         rows = [line.split("\t") for line in output.read_text().splitlines() if line.strip()]

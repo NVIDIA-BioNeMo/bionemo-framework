@@ -169,6 +169,41 @@ def test_phrogs_lookup_records_review_and_high_confidence_families(tmp_path: Pat
     assert "review" in output
 
 
+def test_phrogs_safety_db_uses_current_lookup(tmp_path: Path) -> None:
+    source = tmp_path / "phrogs_profile_db"
+    source.write_text("full database")
+    Path(f"{source}.lookup").write_text("7\tphrog_1\t0\n9\tphrog_99\t0\n")
+    for suffix in (".dbtype", ".index", ".source", "_h", "_h.dbtype", "_h.index"):
+        Path(f"{source}{suffix}").write_text("database")
+    lookup = tmp_path / "safety.tsv"
+    lookup.write_text(
+        "phrog\tannot\tcategory\tconfidence\tmatched_term\n"
+        "phrog_1\tintegrase\tintegration and excision\thigh_confidence\tintegrase\n"
+    )
+    selected_keys: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        selected_keys.append(Path(command[2]).read_text())
+        output = Path(command[4])
+        output.write_text("selected database")
+        Path(f"{output}.dbtype").write_text("type")
+        Path(f"{output}.index").write_text("index")
+        for suffix in (".lookup", ".source", "_h", "_h.dbtype", "_h.index"):
+            Path(f"{output}{suffix}").symlink_to(Path(f"{source}{suffix}"))
+
+    prepared = assets.prepare_phrogs_safety_db(
+        source,
+        lookup,
+        tmp_path / "safety" / "phrogs_profile_db",
+        mmseqs_path=tmp_path / "bin" / "mmseqs",
+        runner=fake_run,
+    )
+
+    assert selected_keys == ["7\n"]
+    assert prepared.path.read_text() == "selected database"
+    assert prepared.detail == "1 selected family"
+
+
 def test_minimal_asset_preparation_can_skip_network_work(tmp_path: Path) -> None:
     prepared = prepare_external_assets(
         tmp_path,

@@ -187,7 +187,7 @@ def test_scan_runs_every_detector_and_logs_observed_state(tmp_path: Path, monkey
     assert (output / "RUNLOG.md").is_file()
 
 
-def test_scan_batches_records_with_bounded_workers(tmp_path: Path, monkeypatch) -> None:
+def test_scan_batches_records_with_bounded_workers(tmp_path: Path, monkeypatch, capsys) -> None:
     fasta = tmp_path / "input.fasta"
     fasta.write_text("".join(f">g{index}\n" + "ATG" * 30 + "\n" for index in range(5)))
     policy = tmp_path / "policy.yaml"
@@ -258,6 +258,7 @@ def test_scan_batches_records_with_bounded_workers(tmp_path: Path, monkeypatch) 
         ]
     )
     manifest = json.loads((output / "manifest.json").read_text())
+    progress = capsys.readouterr().out
 
     assert exit_code == 0
     assert prepared == [(["g0", "g1"], 4), (["g2", "g3"], 4), (["g4"], 4)]
@@ -274,6 +275,11 @@ def test_scan_batches_records_with_bounded_workers(tmp_path: Path, monkeypatch) 
         "phrogs_threads": 11,
         "threads": 7,
     }
+    assert "safety scan batch 1/3: predicting ORFs for 2 records" in progress
+    assert "safety scan batch 1/3: AMR screen" in progress
+    assert "safety scan batch 1/3: toxin screen" in progress
+    assert "safety scan batch 1/3: lysogeny screen" in progress
+    assert "safety scan batch 1/3: complete in " in progress
 
 
 def test_scan_marks_every_class_indeterminate_when_orf_prediction_fails(tmp_path: Path, monkeypatch) -> None:

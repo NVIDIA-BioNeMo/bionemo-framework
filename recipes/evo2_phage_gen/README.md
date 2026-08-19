@@ -167,12 +167,16 @@ evo2_phage_sequence_safety scan \
   --policy configs/phage_safety_policy.yaml \
   --asset-manifest data/external/safety/asset_manifest.yaml \
   --host-domain BACTERIA --host-evidence-json "$HOST_EVIDENCE_JSON" --strict-lysis \
-  --batch-size 32 --orf-workers 32 --threads 32 --phrogs-threads 64
+  --batch-size 128 --orf-workers 32 --threads 32 --phrogs-threads 64
 ```
 
-Choose smaller values when CPU affinity, memory, I/O, or concurrent work requires it. The scan log
-reports batch progress. After the scan completes, write a compact PASS, FAIL, and INDETERMINATE
-summary:
+Batch size controls how often the external tools and databases are started; when memory permits,
+use a batch large enough to cover one RL generation batch and benchmark larger FASTA scans before
+scaling. Choose smaller thread and worker values when CPU affinity, memory, I/O, or concurrent work
+requires it. The scan log names the active detector and reports per-phase timing. Asset preparation
+derives the small lysogeny search database from the PHROGs families selected in the current Pharokka
+release, while recording the release used. After the scan completes, write a compact PASS, FAIL, and
+INDETERMINATE summary:
 
 ```bash
 evo2_phage_summarize_safety_manifest \

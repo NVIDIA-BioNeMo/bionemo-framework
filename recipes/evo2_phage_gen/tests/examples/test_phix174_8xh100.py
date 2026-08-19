@@ -178,7 +178,7 @@ def test_dry_run(tmp_path: Path) -> None:
     ]
     assert len(large_scans) == 2
     for command in large_scans:
-        assert command[command.index("--batch-size") + 1] == "32"
+        assert command[command.index("--batch-size") + 1] == "128"
         assert command[command.index("--orf-workers") + 1] == "32"
         assert command[command.index("--threads") + 1] == "32"
         assert command[command.index("--phrogs-threads") + 1] == "64"

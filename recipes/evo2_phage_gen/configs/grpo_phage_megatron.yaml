@@ -277,7 +277,7 @@ env:
       strict_lysis: false
       circular: true
       threads: 16
-      batch_size: 32
+      batch_size: 128
       orf_workers: 16
       phrogs_threads: 16
       timeout_seconds: 300.0
