@@ -73,7 +73,7 @@ class FastaRecord:
     sequence: str
 
 
-def parse_fasta_records(path: Path) -> tuple[FastaRecord, ...]:
+def parse_fasta_records(path: Path, *, validate_sequence: bool = True) -> tuple[FastaRecord, ...]:
     """Parse and validate FASTA records."""
     records: list[FastaRecord] = []
     header: str | None = None
@@ -84,7 +84,7 @@ def parse_fasta_records(path: Path) -> tuple[FastaRecord, ...]:
             continue
         if line.startswith(">"):
             if header is not None:
-                records.append(_fasta_record(header, sequence_lines))
+                records.append(_fasta_record(header, sequence_lines, validate_sequence=validate_sequence))
             header = line[1:]
             sequence_lines = []
         else:
@@ -92,7 +92,7 @@ def parse_fasta_records(path: Path) -> tuple[FastaRecord, ...]:
                 raise CLIValidationError("FASTA sequence appears before its first header")
             sequence_lines.append(line)
     if header is not None:
-        records.append(_fasta_record(header, sequence_lines))
+        records.append(_fasta_record(header, sequence_lines, validate_sequence=validate_sequence))
     if not records:
         raise CLIValidationError("input FASTA is empty")
     identifiers = [record.sequence_id for record in records]
@@ -101,9 +101,13 @@ def parse_fasta_records(path: Path) -> tuple[FastaRecord, ...]:
     return tuple(records)
 
 
-def _fasta_record(header: str, sequence_lines: list[str]) -> FastaRecord:
+def _fasta_record(header: str, sequence_lines: list[str], *, validate_sequence: bool) -> FastaRecord:
     sequence_id = header.split(maxsplit=1)[0]
     sequence = "".join(sequence_lines).upper()
+    if not validate_sequence:
+        if not sequence_id or not sequence:
+            raise CLIValidationError("FASTA records require a nonempty ID and sequence")
+        return FastaRecord(sequence_id, header, sequence)
     try:
         genome = GenomeInput(sequence_id, sequence)
     except ValueError as error:
@@ -547,7 +551,7 @@ def _write_fasta(path: Path, records: list[FastaRecord]) -> None:
 
 def _run_filter(args: argparse.Namespace) -> int:
     manifest = validate_manifest_file(args.scan_manifest, expected_type="sequence_safety_scan")
-    records = parse_fasta_records(args.input_fasta)
+    records = parse_fasta_records(args.input_fasta, validate_sequence=False)
     scan_records = manifest["records"]
     if len(records) != len(scan_records):
         raise CLIValidationError("FASTA and scan manifest record counts differ")
@@ -653,7 +657,7 @@ def main(argv: Sequence[str] | None = None, **_: object) -> int:
         return int(args.handler(args))
     except (CLIValidationError, OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError) as error:
         parser._print_message(f"{parser.prog}: error: {error}\n", sys.stderr)
-        return 3
+        return 4
 
 
 if __name__ == "__main__":

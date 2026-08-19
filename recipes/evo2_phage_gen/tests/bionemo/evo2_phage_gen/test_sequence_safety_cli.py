@@ -339,7 +339,7 @@ def test_scan_marks_every_class_indeterminate_when_orf_prediction_fails(tmp_path
 
 def test_filter_partitions_records_without_reordering(tmp_path: Path) -> None:
     fasta = tmp_path / "input.fasta"
-    fasta.write_text(">a\nATG\n>b\nCCC\n")
+    fasta.write_text(">a\n+!ATG\n>b\n+$CCC\n")
     scan = tmp_path / "scan.json"
     scan.write_text(
         json.dumps(
@@ -390,5 +390,11 @@ def test_filter_partitions_records_without_reordering(tmp_path: Path) -> None:
         )
         == 2
     )
-    assert (output / "pass.fasta").read_text() == ">a\nATG\n"
-    assert (output / "fail.fasta").read_text() == ">b\nCCC\n"
+    assert (output / "pass.fasta").read_text() == ">a\n+!ATG\n"
+    assert (output / "fail.fasta").read_text() == ">b\n+$CCC\n"
+
+
+def test_cli_error_is_distinct_from_indeterminate(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.json"
+
+    assert cli.main(["validate-manifest", "--manifest", str(missing)]) == 4
