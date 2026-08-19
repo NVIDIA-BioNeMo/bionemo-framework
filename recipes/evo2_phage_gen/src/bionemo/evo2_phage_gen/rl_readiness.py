@@ -290,6 +290,7 @@ def _config_checks(
     require_evo2_adapter: bool,
     expected_gpus: int | None,
     checkpoint_override: Path | None = None,
+    gpus_per_node: int | None = None,
 ) -> list[RLReadinessCheck]:
     """Check files and settings referenced by the GRPO config."""
     checks = [_path_check("grpo_config", config_path, required=True)]
@@ -363,7 +364,9 @@ def _config_checks(
         )
     )
 
-    configured_gpus_value = _nested_get(config, ("cluster", "gpus_per_node"), 1)
+    configured_gpus_value = (
+        gpus_per_node if gpus_per_node is not None else _nested_get(config, ("cluster", "gpus_per_node"), 1)
+    )
     try:
         configured_gpus = int(configured_gpus_value)
     except (TypeError, ValueError):
@@ -415,6 +418,7 @@ def check_rl_readiness(
     require_evo2_adapter: bool = True,
     expected_gpus: int | None = None,
     checkpoint_override: Path | None = None,
+    gpus_per_node: int | None = None,
 ) -> list[RLReadinessCheck]:
     """Check whether the phage GRPO scaffold is ready to launch."""
     return [
@@ -424,6 +428,7 @@ def check_rl_readiness(
             require_evo2_adapter=require_evo2_adapter,
             expected_gpus=expected_gpus,
             checkpoint_override=checkpoint_override,
+            gpus_per_node=gpus_per_node,
         ),
     ]
 
@@ -613,6 +618,7 @@ def main() -> None:
     """CLI entry point for NeMo-RL readiness checks."""
     parser = argparse.ArgumentParser(description="Check prerequisites for the Evo2 phage NeMo-RL GRPO scaffold")
     parser.add_argument("--config", type=Path, default=DEFAULT_GRPO_CONFIG)
+    parser.add_argument("--gpus-per-node", type=int, help="Check an effective GPU count that overrides the config")
     parser.add_argument(
         "--checkpoint",
         type=Path,
@@ -635,6 +641,7 @@ def main() -> None:
         args.config,
         require_evo2_adapter=not args.allow_template_gaps,
         checkpoint_override=args.checkpoint,
+        gpus_per_node=args.gpus_per_node,
     )
     missing_required = [check for check in checks if check.required and not check.ok]
     if args.control_fasta is not None and not missing_required:

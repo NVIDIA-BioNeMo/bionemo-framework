@@ -6,7 +6,7 @@ every design with the selected SFT, and applies the current sequence-safety and 
 screens. These are computational candidates, not
 evidence of bootability, therapeutic fitness, or wet-lab safety.
 
-From `recipes/evo2_phage_gen` on a node with eight H100 80 GB GPUs:
+The reference command was tested from `recipes/evo2_phage_gen` on eight H100 80 GB GPUs:
 
 ```bash
 ./.ci_build.sh
@@ -19,9 +19,13 @@ tmux new -s phix174-e2e
 ```
 
 The build creates the virtual env used by `.ci_test_env.sh`, which the example sources internally.
-The script verifies that it is running on eight H100 GPUs; restricted agent sandboxes often hide
-`nvidia-smi`, so launch it on the allocated compute node. Use a scratch clone or worktree when
-a run needs code or config changes.
+`NUM_GPUS` defaults to 8 and controls SFT processes, RL topology, calibration GPUs, rollout
+workers, and likelihood scoring. `NUM_CPUS` defaults to `nproc` and sets the Ray CPU budget.
+The script checks the configured GPU count. Other accelerator models are allowed with a warning
+because memory, batch, and parallelism settings may need tuning; the reference settings are not a
+performance claim for another topology. `NUM_GPUS` must currently be even for the SFT
+tensor-parallel layout. Restricted agent sandboxes often hide `nvidia-smi`, so launch on the
+allocated compute node. Use a scratch clone or worktree when a run needs code or config changes.
 
 Useful controls:
 
@@ -60,12 +64,13 @@ ordinary successful runs create it automatically.
 The six dependency-ordered stages are input/control preparation, SFT safety and splitting, SFT
 training and selection, sampling calibration, GDPO pilot/training, and final generation, SFT
 likelihood scoring, and screening.
-Calibration uses the eight GPUs in parallel; SFT and GDPO use their configured distributed layouts.
-On the reference node, where `nproc` reports 160 CPUs, the large safety scans use 32-record batches,
-32 parallel ORF predictions, 32 threads for AMRFinder/DIAMOND, and 64 for the PHROGs MMseqs search.
-The GDPO reward phases are sequential and use at most 64 tool threads; Ray is given the current
-`nproc` allocation (or `NEMO_RL_RAY_NUM_CPUS` when explicitly set). The `SAFETY_*` environment
-variables can lower these limits on a smaller or shared node.
+Calibration uses `NUM_GPUS` in parallel; SFT, GDPO, rollout generation, and likelihood scoring use
+the same configured count. On the reference node, where `nproc` reports 160 CPUs, the large safety
+scans use 128-record batches, 32 parallel ORF predictions, 32 threads for AMRFinder/DIAMOND, and 64
+for the PHROGs MMseqs search. The GDPO reward phases are sequential and use at most 64 tool threads;
+`NUM_CPUS` sets the Ray CPU budget. `CALIBRATION_WORKERS` and the existing `SAFETY_*`
+environment variables can lower the CPU sub-budgets on a smaller or shared node. Recheck global
+batch divisibility and memory use when changing GPU topology.
 Long commands remain supervised by the top-level process, with a meaningful liveness update every
 ten minutes. Run that process in tmux or a scheduler so it survives a disconnected chat or shell.
 

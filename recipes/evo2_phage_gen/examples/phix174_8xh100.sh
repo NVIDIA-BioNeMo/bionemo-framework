@@ -11,10 +11,28 @@ RESULT_ROOT="${RECIPE_ROOT}/results/phix174-8xh100"
 DRY_RUN=0
 PREPARE_ONLY=0
 RESUME_FROM=00
+NUM_GPUS="${NUM_GPUS:-8}"
+NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}}"
+for resource_name in NUM_GPUS NUM_CPUS; do
+  resource_value="${!resource_name}"
+  if [[ ! "${resource_value}" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s must be a positive integer; got %q\n' "${resource_name}" "${resource_value}" >&2
+    exit 2
+  fi
+done
+if ((NUM_GPUS % 2 != 0)); then
+  printf 'NUM_GPUS must be even for the example SFT tensor-parallel layout; got %s\n' "${NUM_GPUS}" >&2
+  exit 2
+fi
+GPU_IDS=
+for ((gpu_index=0; gpu_index<NUM_GPUS; gpu_index++)); do
+  GPU_IDS+="${GPU_IDS:+ }${gpu_index}"
+done
 MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-600}"
 PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755221/files/pharokka_v1.11.0_databases.tar.gz?download=1}"
 PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
 PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
+CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
 SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
 SAFETY_THREADS="${SAFETY_THREADS:-32}"
@@ -160,6 +178,7 @@ print(result["checkpoint"])
 PY
 }
 
+gpu_type='not queried (dry run)'
 if [[ "${DRY_RUN}" != "1" ]]; then
   # shellcheck source=/dev/null
   source "${RECIPE_ROOT}/.ci_test_env.sh"
@@ -167,13 +186,26 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   export CUDA_DEVICE_MAX_CONNECTIONS=1
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   if ! gpu_info="$(nvidia-smi --query-gpu=name --format=csv,noheader)"; then
-    printf '%s\n' 'Unable to query GPUs. Run on the allocated compute node, outside a restricted agent sandbox.' >&2
+    printf '%s\n' 'Unable to query GPUs. This script requires GPUs; run it on the allocated compute node, outside a restricted agent sandbox.' >&2
     exit 2
   fi
-  [[ "$(wc -l <<< "${gpu_info}")" == 8 ]] || { printf 'Expected 8 GPUs; found:\n%s\n' "${gpu_info}" >&2; exit 2; }
-  [[ "$(grep -c H100 <<< "${gpu_info}")" == 8 ]] || { printf 'Expected 8 H100 GPUs; found:\n%s\n' "${gpu_info}" >&2; exit 2; }
+  detected_gpus="$(awk 'NF { count++ } END { print count + 0 }' <<< "${gpu_info}")"
+  if [[ "${detected_gpus}" != "${NUM_GPUS}" ]]; then
+    printf 'Expected %s GPUs; found %s:\n%s\n' "${NUM_GPUS}" "${detected_gpus}" "${gpu_info}" >&2
+    if [[ "${detected_gpus}" == "0" ]]; then
+      printf '%s\n' 'This script requires GPUs.' >&2
+    else
+      printf 'If this topology is intended, rerun with NUM_GPUS=%s and tune its batch and parallelism settings.\n' "${detected_gpus}" >&2
+    fi
+    exit 2
+  fi
+  gpu_type="$(sed -n '1p' <<< "${gpu_info}")"
+  if [[ "$(grep -c H100 <<< "${gpu_info}")" != "${NUM_GPUS}" ]]; then
+    printf 'Warning: this example was tested on 8 H100 80GB GPUs. Detected:\n%s\nTune memory, batch, and parallelism settings for this topology.\n' "${gpu_info}" >&2
+  fi
 fi
-printf '%s\n' '{"gpu_count":8,"gpu_type":"H100 80GB","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}' > "${RESULT_ROOT}/settings.json"
+note "planned topology: ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
+printf '{"gpu_count":%s,"cpu_count":%s,"gpu_type":"%s","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}\n' "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" > "${RESULT_ROOT}/settings.json"
 cd "${RECIPE_ROOT}"
 
 stage_00() {
@@ -264,20 +296,21 @@ stage_20() {
     if [[ "${DRY_RUN}" == "1" || ! -d "${base_mbridge}" ]]; then
       run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size evo2_7b_base --seq-length 10240 --mixed-precision-recipe bf16_mixed
     fi
-    monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
-    monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2
+    monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
+    monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft.done"
   fi
   [[ "${DRY_RUN}" == "1" ]] && selected='<selected-sft>' || selected="$(select_checkpoint sft "${sft}/evo2/tb_logs" "${sft}/evo2/checkpoints" "${RESULT_ROOT}/sft/checkpoint-selection.json")"
   state selected-sft "${selected}"
-  monitored 'held-out SFT evaluation' "${RESULT_ROOT}/sft/heldout.log" torchrun --nproc-per-node 8 --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/heldout_dataset.yaml" --finetune-ckpt-dir "${selected}" --global-batch-size 20 --max-steps 0 --eval-interval 1 --eval-iters 5 --warmup-steps 0 --decay-steps 0 --result-dir "${RESULT_ROOT}/sft/heldout" --experiment-name evo2-heldout
+  # Bridge validates the scheduler before entering its zero-update evaluation path, so its inert decay length must be positive.
+  monitored 'held-out SFT evaluation' "${RESULT_ROOT}/sft/heldout.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/heldout_dataset.yaml" --finetune-ckpt-dir "${selected}" --global-batch-size 20 --max-steps 0 --eval-interval 1 --eval-iters 5 --warmup-steps 0 --decay-steps 1 --result-dir "${RESULT_ROOT}/sft/heldout" --experiment-name evo2-heldout
 }
 
 stage_30() {
   local selected calibration="${RESULT_ROOT}/calibration" evidence selection="${RESULT_ROOT}/calibration/selected-sampling.json"
   selected="$(read_state selected-sft)"; evidence="${calibration}/scoring/selection-evidence.csv"
-  monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS='0 1 2 3 4 5 6 7' TENSOR_PARALLEL_SIZE=1 scripts/calibration/run_sft_sampling_sweep.sh
-  monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS=8 scripts/calibration/run_sampling_calibration_scoring.sh
+  monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 scripts/calibration/run_sft_sampling_sweep.sh
+  monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
   if [[ "${DRY_RUN}" == "1" ]]; then note 'verify fresh calibration supports temperature 1.0 and prefixes 16/24'; else
     python - "${evidence}" "${selection}" <<'PY'
 import json, sys, pandas as pd
@@ -296,17 +329,17 @@ stage_40() {
     note 'substage 40-rl already complete'
   else
     selected="$(read_state selected-sft)"
-    export NEMO_RL_RAY_NUM_CPUS="${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}"
+    export NEMO_RL_RAY_NUM_CPUS="${NUM_CPUS}"
     note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
     run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
     monitored 'RL environment control' "${control}/runner.log" \
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}" \
-      --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422.1.fna --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" logger.wandb_enabled=false)
+      --gpus-per-node "${NUM_GPUS}" --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422.1.fna --control-dir "${control}"
+    local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false)
     monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
     run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
     check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
-    monitored '500-step DP8 GDPO' "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
+    monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-rl.done"
   fi
   run evo2_phage_monitor_objectives --tensorboard-root "${rl}/logs" --config configs/gdpo_phage_megatron.yaml --output "${rl}/objective-health.json" --history-output "${rl}/objective-history.json"
@@ -331,15 +364,17 @@ stage_50() {
     fi
   else
     run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" --prompt-lengths 16 24 --num-prompts 500 --id-prefix final
-  local shard_dir="${rollout}/prompts/dp8" rank started waited alive failed=0 printable pid
+  local shard_dir="${rollout}/prompts/dp${NUM_GPUS}" rank started waited alive failed=0 printable pid
   local -a command=() outputs=() pids=() logs=()
   if [[ "${DRY_RUN}" == "1" ]]; then
-    note 'split the 500/500 prompt mixture into eight homogeneous 125-record shards'
+    note "split the 500/500 prompt mixture into ${NUM_GPUS} homogeneous GPU shards"
   else
-    python - "${rollout}/prompts/final_prompt16_500.jsonl" "${rollout}/prompts/final_prompt24_500.jsonl" "${shard_dir}" <<'PY'
+    python - "${rollout}/prompts/final_prompt16_500.jsonl" "${rollout}/prompts/final_prompt24_500.jsonl" "${shard_dir}" "${NUM_GPUS}" <<'PY'
 import json, sys
 from pathlib import Path
 inputs, output = [Path(path) for path in sys.argv[1:3]], Path(sys.argv[3])
+num_gpus = int(sys.argv[4])
+ranks_per_prompt = num_gpus // 2
 records = [[json.loads(line) for line in path.read_text().splitlines() if line] for path in inputs]
 if [len(group) for group in records] != [500, 500]:
     raise SystemExit("expected 500 prompts for each prefix length")
@@ -347,13 +382,17 @@ all_records = records[0] + records[1]
 if len({record["id"] for record in all_records}) != 1000:
     raise SystemExit("final prompt IDs are not unique")
 output.mkdir(parents=True, exist_ok=True)
-for rank in range(8):
-    shard = all_records[rank * 125 : (rank + 1) * 125]
-    (output / f"dp{rank}.jsonl").write_text("".join(json.dumps(record) + "\n" for record in shard))
+for group_index, group in enumerate(records):
+    for local_rank in range(ranks_per_prompt):
+        rank = group_index * ranks_per_prompt + local_rank
+        start = local_rank * len(group) // ranks_per_prompt
+        end = (local_rank + 1) * len(group) // ranks_per_prompt
+        shard = group[start:end]
+        (output / f"dp{rank}.jsonl").write_text("".join(json.dumps(record) + "\n" for record in shard))
 PY
   fi
   started=${SECONDS}
-  for rank in {0..7}; do
+  for ((rank=0; rank<NUM_GPUS; rank++)); do
     outputs+=("${rollout}/jsonl/dp${rank}.jsonl")
     logs+=("${rollout}/logs/dp${rank}.log")
     command=(env CUDA_VISIBLE_DEVICES="${rank}" torchrun --nproc_per_node 1 --nnodes 1 \
@@ -377,9 +416,9 @@ PY
         sleep 10; waited=$((waited + 10)); alive=0
         for pid in "${pids[@]}"; do kill -0 "${pid}" 2>/dev/null && alive=$((alive + 1)); done
       done
-      ((alive > 0)) && note "generation: ${alive}/8 workers still running after $((SECONDS - started))s"
+      ((alive > 0)) && note "generation: ${alive}/${NUM_GPUS} workers still running after $((SECONDS - started))s"
     done
-    for rank in {0..7}; do
+    for ((rank=0; rank<NUM_GPUS; rank++)); do
       if ! wait "${pids[rank]}"; then tail -n 30 "${logs[rank]}" >&2; failed=1; fi
     done
     ((failed == 0)) || return 1
@@ -388,12 +427,12 @@ import json, sys
 seen = set()
 for path in sys.argv[1:]:
     records = [json.loads(line) for line in open(path) if line.strip()]
-    if len(records) != 125:
-        raise SystemExit(f"{path} has {len(records)} records instead of 125")
     for record in records:
         if record["id"] in seen:
             raise SystemExit(f'duplicate generated ID: {record["id"]}')
         seen.add(record["id"])
+if len(seen) != 1000:
+    raise SystemExit(f"expected 1000 generated records, found {len(seen)}")
 PY
   fi
   run evo2_phage_generation jsonl-to-fasta --input-jsonl "${outputs[@]}" --output-fasta "${fasta}"
@@ -412,7 +451,7 @@ PY
   run evo2_phage_generation prepare-sft-likelihood \
     --input-fasta "${fasta}" --output-fasta "${likelihood}/sft-conditioned.fasta"
   monitored 'selected-SFT likelihood scoring' "${likelihood}/predict.log" \
-    torchrun --nproc-per-node 8 --no-python predict_evo2 \
+    torchrun --nproc-per-node "${NUM_GPUS}" --no-python predict_evo2 \
     --fasta "${likelihood}/sft-conditioned.fasta" --ckpt-dir "${selected_sft}" \
     --output-dir "${likelihood}/predictions" --tensor-parallel-size 1 --micro-batch-size 1 \
     --use-subquadratic-ops --output-log-prob-seqs --log-prob-collapse-option per_token

@@ -220,7 +220,7 @@ def test_environment_control_rejects_skipped_metric(tmp_path, monkeypatch):
     scored.loc[0, "tropism_measurement_available"] = 0.0
     monkeypatch.setattr(nemo_rl_env, "score_message_logs", lambda *_args, **_kwargs: scored)
 
-    with pytest.raises(rl_readiness.RLEnvironmentControlError, match="tropism.*not measured"):
+    with pytest.raises(rl_readiness.RLEnvironmentControlError, match=r"tropism.*not measured"):
         rl_readiness.run_environment_control(config_path, control_fasta, tmp_path / "control")
 
 
@@ -392,3 +392,13 @@ def test_rl_readiness_reports_invalid_gpu_count(tmp_path):
 
     assert not cuda_check.ok
     assert "gpus_per_node" in cuda_check.detail
+
+
+def test_gpu_override(tmp_path):
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+
+    checks = check_rl_readiness(config_path, expected_gpus=4, gpus_per_node=4)
+    cuda_check = {check.name: check for check in checks}["cuda_gpus"]
+
+    assert cuda_check.ok
+    assert cuda_check.detail == "available=4, required=4"

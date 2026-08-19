@@ -114,8 +114,9 @@ def test_dry_run(tmp_path: Path) -> None:
     ]
     settings = json.loads((result_root / "settings.json").read_text())
     assert settings == {
+        "cpu_count": 96,
         "gpu_count": 8,
-        "gpu_type": "H100 80GB",
+        "gpu_type": "not queried (dry run)",
         "whole_genome": True,
         "safety_screen": "current configured databases",
         "final_generation_count": 1000,
@@ -195,6 +196,14 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "--strict-checkpoint-metric" in sft_command
     assert sft_command[sft_command.index("--checkpoint-metric-step-tolerance") + 1] == "1"
 
+    heldout_command = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: torchrun " in line and "--experiment-name evo2-heldout" in line
+    )
+    assert heldout_command[heldout_command.index("--max-steps") + 1] == "0"
+    assert heldout_command[heldout_command.index("--decay-steps") + 1] == "1"
+
     arc_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
@@ -255,3 +264,38 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: 500-step DP8 GDPO" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "evo2_phage_sequence_safety scan" in log
+
+
+def test_topology_env(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={
+            **os.environ,
+            "NUM_GPUS": "4",
+            "NUM_CPUS": "48",
+            "NEMO_RL_RAY_NUM_CPUS": "",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["gpu_count"] == 4
+    assert settings["cpu_count"] == 48
+    log = (result_root / "RUNLOG.md").read_text()
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    distributed = [command for command in commands if command[:1] == ["torchrun"] and "--nproc-per-node" in command]
+    assert {command[command.index("--nproc-per-node") + 1] for command in distributed} == {"4"}
+    calibration = next(command for command in commands if "scripts/calibration/run_sft_sampling_sweep.sh" in command)
+    assert "GPU_IDS=0 1 2 3" in calibration
+    rollout = [
+        command[1] for command in commands if command[:1] == ["env"] and command[1].startswith("CUDA_VISIBLE_DEVICES=")
+    ]
+    assert rollout == [f"CUDA_VISIBLE_DEVICES={rank}" for rank in range(4)]
+    assert "cluster.gpus_per_node=4" in log
+    assert "RL Ray CPU slots: 48" in log

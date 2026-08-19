@@ -85,7 +85,7 @@ The [8×H100 PhiX174 example](examples/README.md) is the realized, agent-free wo
 shell script uses maintained package entry points plus the calibration helpers in
 [`scripts/`](scripts/README.md); it does not execute attempt-local code from an archived result.
 
-From `recipes/evo2_phage_gen` on a node with eight H100 80 GB GPUs:
+The reference command was tested from `recipes/evo2_phage_gen` on eight H100 80 GB GPUs:
 
 ```bash
 ./.ci_build.sh
@@ -97,15 +97,19 @@ tmux new -s phix174-e2e
   --result-root "$PWD/results/phix174-8xh100"
 ```
 
+`NUM_GPUS` (default 8) and `NUM_CPUS` (default `nproc`) are the top-level topology controls.
+The script permits other GPU models with a tuning warning; see the
+[realized example](examples/README.md) for the affected stages and CPU sub-budgets.
+
 The top-level command downloads the public corpus, current external tools and databases, reruns the
 safety controls, excludes non-PASS SFT inputs, builds leakage-controlled SFT splits, trains and
 selects SFT, calibrates sampling, verifies every enabled RL measurement on the PhiX174 reference,
-runs a full-shape pilot and DP8 GDPO, selects RL from comparable validation, generates exactly 1,000
-whole genomes, scores all of them with the selected pre-RL SFT,
-and runs the current sequence-safety, target Arc, and filter-7 diagnostic screens. The GDPO config includes AMR, toxin, and lysogeny objectives and
-uses the selected SFT checkpoint as its KL anchor. On the reference 160-CPU allocation, large safety
-scans use 32-record batches and no phase exceeds 64 tool threads; see the
-[realized example](examples/README.md) for the adjustable settings.
+runs a full-shape pilot and GDPO on the configured GPUs, selects RL from comparable validation,
+generates exactly 1,000 whole genomes, scores all of them with the selected pre-RL SFT, and runs the
+current sequence-safety, target Arc, and filter-7 diagnostic screens. The GDPO config includes AMR,
+toxin, and lysogeny objectives and uses the selected SFT checkpoint as its KL anchor. On the
+reference 160-CPU allocation, large safety scans use 128-record batches and no phase exceeds 64 tool
+threads; see the [realized example](examples/README.md) for the adjustable settings.
 
 The realized SFT stage validates and saves every 400 optimizer steps, retaining the three lowest
 validation-loss checkpoints plus the latest resume checkpoint. Its checkpoint directory contains
