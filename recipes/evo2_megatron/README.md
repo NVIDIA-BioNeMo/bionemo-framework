@@ -82,7 +82,7 @@ add flags such as:
   --checkpoint-metric-step-tolerance 1
 ```
 
-With best-K enabled, the save interval must be a multiple of the validation interval. The callback assigns the closest already-recorded metric when each checkpoint is saved, writes all scalar validation results to `validation_metrics.json`, and records the chosen checkpoint-to-validation assignments in `checkpoint_metrics.json`. By default, missing matches warn and use recent-K retention; `--strict-checkpoint-metric` stops instead and reports the raw validation keys. TensorBoard adds a ` validation` suffix to those raw keys. Checkpoints that predate newly enabled tracking are left in place as historical unscored checkpoints.
+With best-K enabled, the save interval must be a multiple of the validation interval. The callback assigns the closest already-recorded metric when each checkpoint is saved, writes all scalar validation results to `validation_metrics.json`, and records the chosen assignments in `checkpoint_metrics.json`; its `best_checkpoint` field points to the selected relative checkpoint directory. By default, missing matches warn and use recent-K retention; `--strict-checkpoint-metric` stops instead and reports the raw validation keys. TensorBoard adds a ` validation` suffix to those raw keys. Checkpoints that predate newly enabled tracking are left in place as historical unscored checkpoints.
 
 > **Tip:** The `--use-subquadratic-ops` flag enables fused subquadratic-ops
 > CUDA kernels (`b2b_causal_conv1d` for proj+mixer fusion in prefill,

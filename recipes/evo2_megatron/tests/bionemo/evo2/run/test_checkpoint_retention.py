@@ -68,6 +68,7 @@ def test_keeps_best_and_latest(tmp_path: Path, caplog) -> None:
     matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
     assert matches["metric_name"] == "lm loss"
     assert matches["direction"] == "minimize"
+    assert matches["best_checkpoint"] == "iter_0000002"
     assert "New best 'lm loss'=0.8 at validation step 1" in caplog.text
     assert "New best 'lm loss'=0.4 at validation step 2" in caplog.text
     assert "Deleting checkpoint step 1" in caplog.text
@@ -104,6 +105,8 @@ def test_equal_metric_favors_newer_checkpoint(tmp_path: Path, caplog, higher_is_
         "iter_0000004",
     }
     assert "New best 'lm loss'=0.4 at validation step 2; retaining checkpoint step 3" in caplog.text
+    matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
+    assert matches["best_checkpoint"] == "iter_0000003"
 
 
 def test_matches_nearest_past_metric(tmp_path: Path, caplog) -> None:
@@ -256,6 +259,7 @@ def test_missing_metric_falls_back_to_recent(tmp_path: Path, caplog) -> None:
     assert metrics["metrics_by_validation_step"]["1"]["validation accuracy"] == pytest.approx(0.1)
     matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
     assert matches["matches_by_checkpoint_step"] == {}
+    assert matches["best_checkpoint"] is None
     assert matches["unmatched_checkpoint_steps"] == [1, 2, 3]
     assert "falling back to most-recent checkpoint retention" in caplog.text
 

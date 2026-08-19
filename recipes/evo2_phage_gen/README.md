@@ -110,7 +110,8 @@ scans use 32-record batches and no phase exceeds 64 tool threads; see the
 The realized SFT stage validates and saves every 400 optimizer steps, retaining the three lowest
 validation-loss checkpoints plus the latest resume checkpoint. Its checkpoint directory contains
 `validation_metrics.json` with every scalar validation metric and `checkpoint_metrics.json` with
-the save-time validation assignment used for retention. This example stops if the raw `lm loss` metric is absent or cannot be matched; TensorBoard exposes the same value as `lm loss validation`.
+the save-time validation assignment plus a `best_checkpoint` relative directory pointer. This
+example stops if the raw `lm loss` metric is absent or cannot be matched; TensorBoard exposes the same value as `lm loss validation`.
 
 The example records commands and periodic liveness observations in `RUNLOG.md` without copying the
 environment. The realized example defaults to PHROGs v4 from the Pharokka v1.11.0 Zenodo

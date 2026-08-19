@@ -133,6 +133,7 @@ class MetricCheckpointRetention(Callback):
             )
             if actual != expected:
                 raise ValueError(f"{path} describes {actual}; expected {expected}")
+            metadata.setdefault("best_checkpoint", None)
             return metadata
 
         historical_steps = set(_iteration_directories(checkpoint_root))
@@ -153,6 +154,7 @@ class MetricCheckpointRetention(Callback):
             "observed_checkpoint_steps": [],
             "matches_by_checkpoint_step": {},
             "unmatched_checkpoint_steps": [],
+            "best_checkpoint": None,
             "retained_checkpoint_steps": sorted(historical_steps),
         }
 
@@ -195,6 +197,7 @@ class MetricCheckpointRetention(Callback):
             scored.sort(key=lambda item: (-item[1], -item[0], item[2]))
         else:
             scored.sort(key=lambda item: (item[1], -item[0], item[2]))
+        metadata["best_checkpoint"] = f"iter_{scored[0][0]:07d}" if scored else None
 
         best_steps = {step for step, _, _ in scored[: self.keep_best_k]}
         recent_steps = set(sorted(directories, reverse=True)[: self.keep_recent_k])

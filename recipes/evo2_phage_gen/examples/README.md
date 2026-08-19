@@ -70,8 +70,8 @@ enough optimizer updates exist to show overfitting, so a best value at the run b
 more follow-up even if that requires several epochs. Before the generated GDPO pilot, the known
 The SFT command keeps the best three validation-loss checkpoints plus the latest resume point.
 `validation_metrics.json` stores all scalar validation measurements, and `checkpoint_metrics.json`
-stores the metric assignment made when each checkpoint is saved. The example requires the raw
-`lm loss` key; the corresponding TensorBoard tag is `lm loss validation`.
+stores each save-time metric assignment and a `best_checkpoint` relative directory pointer. The
+example requires the raw `lm loss` key; the corresponding TensorBoard tag is `lm loss validation`.
 PhiX174 reference runs through the exact configured RL environment and every enabled external,
 diversity, and safety measurement must report support. The pilot then checks training and checkpoint
 behavior; rewards stay in `[0, 1]`, baseline/chance means `0`, missing or failed measurements cannot
