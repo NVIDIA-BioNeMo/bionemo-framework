@@ -41,6 +41,7 @@ from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import MODEL_OPTIONS, hyena_forward_step, infer_model_type
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.recipes.evo2 import evo2_1b_pretrain_config as pretrain_config
+from bionemo.evo2.run.checkpoint_retention import MetricCheckpointRetention
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -283,8 +284,15 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         "--eval-interval",
         type=int,
         default=100,
-        help="Number of steps between validation measurements and model checkpoints.",
+        help="Number of steps between validation measurements.",
     )  # DONE
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=None,
+        help="Number of steps between model checkpoints. Defaults to --eval-interval. With --keep-best-k, "
+        "this must be a multiple of --eval-interval so each saved checkpoint has a current validation metric.",
+    )
     parser.add_argument("--eval-iters", type=int, default=32, help="Number of validation iterations.")  # DONE
     parser.add_argument(
         "--grad-reduce-in-fp32", action="store_true", default=False, help="Gradient reduce in FP32."
@@ -587,30 +595,40 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         "--most-recent-k",
         type=int,
         default=5,
-        help="Number of most recent checkpoints to keep. Set to -1 to save all checkpoints.",
-    )  # DONE
-    # parser.add_argument(
-    #     "--metric-to-monitor-for-checkpoints",
-    #     type=str,
-    #     default="val_loss",
-    #     help="Metric to monitor for checkpoints.",
-    # )  # TODO implement
-    # parser.add_argument(
-    #     "--save-last-checkpoint",
-    #     action="store_true",
-    #     default=True,
-    #     help="Save the last checkpoint.",
-    # )  # TODO implement
-    # parser.add_argument(
-    #     "--no-save-last-checkpoint",
-    #     action="store_false",
-    #     dest="save_last_checkpoint",
-    #     default=True,
-    #     help="Disable saving the last checkpoint.",
-    # )  # TODO implement
-    # parser.add_argument(
-    #     "--lora-checkpoint-path", type=str, default=None, help="LoRA checkpoint path"
-    # )  # TODO implement
+        help="Number of newest checkpoints to keep for resume. Without --keep-best-k this is Megatron's latest-K "
+        "retention; -1 keeps all checkpoints.",
+    )
+    parser.add_argument(
+        "--keep-best-k",
+        type=int,
+        default=None,
+        help="Also retain this many checkpoints ranked by a validation metric. Decisions are made when each "
+        "checkpoint is saved; unmatched checkpoints fall back to --most-recent-k.",
+    )
+    parser.add_argument(
+        "--checkpoint-metric-name",
+        type=str,
+        default="lm loss",
+        help="Validation metric used by --keep-best-k.",
+    )
+    parser.add_argument(
+        "--strict-checkpoint-metric",
+        action="store_true",
+        help="Fail if validation omits the configured metric or a saved checkpoint cannot be matched to it.",
+    )
+    parser.add_argument(
+        "--checkpoint-metric-mode",
+        choices=("min", "max"),
+        default="min",
+        help="Whether lower or higher values of --checkpoint-metric-name are better.",
+    )
+    parser.add_argument(
+        "--checkpoint-metric-step-tolerance",
+        type=int,
+        default=1,
+        help="Maximum iteration-label difference when assigning an already recorded validation metric to a "
+        "new checkpoint. Exact matches win and equal-distance ties prefer the earlier validation iteration.",
+    )
     parser.add_argument(
         "--no-calculate-per-token-loss",
         action="store_true",
@@ -709,7 +727,22 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Skip freeze modules for LoRA fine-tuning, as a comma-separated list.",
     )
 
-    return parser.parse_args(args=args)
+    parsed_args = parser.parse_args(args=args)
+    if parsed_args.keep_best_k is not None:
+        save_interval = parsed_args.save_interval
+        if save_interval is None:
+            save_interval = parsed_args.eval_interval
+        if parsed_args.keep_best_k < 1:
+            parser.error("--keep-best-k must be at least 1")
+        if parsed_args.most_recent_k < 1:
+            parser.error("--most-recent-k must be at least 1 when --keep-best-k is used")
+        if parsed_args.eval_interval < 1 or save_interval < 1:
+            parser.error("--eval-interval and --save-interval must be positive when --keep-best-k is used")
+        if save_interval % parsed_args.eval_interval:
+            parser.error("--save-interval must be a multiple of --eval-interval when --keep-best-k is used")
+        if parsed_args.checkpoint_metric_step_tolerance < 0:
+            parser.error("--checkpoint-metric-step-tolerance must not be negative")
+    return parsed_args
 
 
 def _validate_finetune_ckpt_dir(ckpt_dir: str) -> Path:
@@ -845,7 +878,7 @@ def train(args: argparse.Namespace) -> None:
 
     cfg.checkpoint.async_save = args.ckpt_async_save
     cfg.checkpoint.ckpt_format = args.ckpt_format
-    cfg.checkpoint.save_interval = args.eval_interval
+    cfg.checkpoint.save_interval = args.save_interval if args.save_interval is not None else args.eval_interval
     cfg.checkpoint.save_optim = not args.no_save_optim
     cfg.checkpoint.save_rng = True
     cfg.checkpoint.fully_parallel_load = True
@@ -1016,11 +1049,21 @@ def train(args: argparse.Namespace) -> None:
         cfg.logger.wandb_entity = args.wandb_entity
         # cfg.logger.wandb_save_dir = ...  # FIXME fill this in or decide if the default is ok
         # FIXME consider allowing megatron to specify the run id for regularly restarting slurm jobs.
-    # Checkpoint
-    # TODO verify that this is the right thing to do here.
-    if args.eval_interval:
-        cfg.checkpoint.save_interval = args.eval_interval
-    cfg.checkpoint.most_recent_k = args.most_recent_k
+    checkpoint_callbacks: list[MetricCheckpointRetention] = []
+    if args.keep_best_k is None:
+        cfg.checkpoint.most_recent_k = args.most_recent_k
+    else:
+        cfg.checkpoint.most_recent_k = -1
+        checkpoint_callbacks.append(
+            MetricCheckpointRetention(
+                metric_name=args.checkpoint_metric_name,
+                keep_best_k=args.keep_best_k,
+                keep_recent_k=args.most_recent_k,
+                higher_is_better=args.checkpoint_metric_mode == "max",
+                step_tolerance=args.checkpoint_metric_step_tolerance,
+                strict_metric=args.strict_checkpoint_metric,
+            )
+        )
 
     if args.finetune_ckpt_dir:
         validated_ckpt_dir = _validate_finetune_ckpt_dir(args.finetune_ckpt_dir)
@@ -1064,7 +1107,10 @@ def train(args: argparse.Namespace) -> None:
         forward_step_fn = hyena_forward_step
 
     logger.info(f"Starting pretraining (model_type={model_type})...")
-    pretrain(cfg, forward_step_fn)
+    if checkpoint_callbacks:
+        pretrain(cfg, forward_step_fn, callbacks=checkpoint_callbacks)
+    else:
+        pretrain(cfg, forward_step_fn)
 
     if not args.ckpt_async_save:
         # Async checkpoint saving will lazily destroy the process group when the last checkpoint is saved.

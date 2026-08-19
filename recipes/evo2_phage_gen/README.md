@@ -107,6 +107,11 @@ uses the selected SFT checkpoint as its KL anchor. On the reference 160-CPU allo
 scans use 32-record batches and no phase exceeds 64 tool threads; see the
 [realized example](examples/README.md) for the adjustable settings.
 
+The realized SFT stage validates and saves every 400 optimizer steps, retaining the three lowest
+validation-loss checkpoints plus the latest resume checkpoint. Its checkpoint directory contains
+`validation_metrics.json` with every scalar validation metric and `checkpoint_metrics.json` with
+the save-time validation assignment used for retention. This example stops if the raw `lm loss` metric is absent or cannot be matched; TensorBoard exposes the same value as `lm loss validation`.
+
 The example records commands and periodic liveness observations in `RUNLOG.md` without copying the
 environment. The realized example defaults to PHROGs v4 from the Pharokka v1.11.0 Zenodo
 bundle through public `PHAROKKA_DATABASE_*` environment variables. Override the three values together when using another compatible release. It derives the Arc-compatible

@@ -184,6 +184,17 @@ def test_dry_run(tmp_path: Path) -> None:
         assert command[command.index("--phrogs-threads") + 1] == "64"
     assert "RL Ray CPU slots: 96" in log
 
+    sft_command = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: torchrun " in line and "--max-steps 12000" in line
+    )
+    assert sft_command[sft_command.index("--keep-best-k") + 1] == "3"
+    assert sft_command[sft_command.index("--most-recent-k") + 1] == "1"
+    assert sft_command[sft_command.index("--checkpoint-metric-name") + 1] == "lm loss"
+    assert "--strict-checkpoint-metric" in sft_command
+    assert sft_command[sft_command.index("--checkpoint-metric-step-tolerance") + 1] == "1"
+
     arc_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()

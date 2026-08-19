@@ -33,6 +33,48 @@ def test_no_save_optim_flag_can_be_enabled():
     assert args.no_save_optim is True
 
 
+def test_best_checkpoint_args():
+    args = parse_args(
+        [
+            "--mock-data",
+            "--keep-best-k",
+            "3",
+            "--most-recent-k",
+            "1",
+            "--checkpoint-metric-name",
+            "lm loss",
+            "--checkpoint-metric-step-tolerance",
+            "3",
+            "--eval-interval",
+            "20",
+            "--save-interval",
+            "100",
+        ]
+    )
+
+    assert args.keep_best_k == 3
+    assert args.most_recent_k == 1
+    assert args.checkpoint_metric_name == "lm loss"
+    assert args.checkpoint_metric_mode == "min"
+    assert args.checkpoint_metric_step_tolerance == 3
+    assert args.save_interval == 100
+
+
+def test_best_checkpoint_args_check_cadence():
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--mock-data",
+                "--keep-best-k",
+                "3",
+                "--eval-interval",
+                "20",
+                "--save-interval",
+                "30",
+            ]
+        )
+
+
 @pytest.mark.parametrize(
     ("extra_args", "expected_save_optim"),
     [
@@ -56,3 +98,42 @@ def test_train_assigns_save_optim_from_no_save_optim_flag(monkeypatch, extra_arg
 
     assert cfg.checkpoint.save_optim is expected_save_optim
     mocked_pretrain_config.assert_called_once()
+
+
+def test_train_installs_metric_retention(monkeypatch):
+    cfg = MagicMock()
+    cfg.checkpoint.load = None
+    mocked_pretrain = MagicMock()
+    monkeypatch.setattr(train_module, "pretrain_config", MagicMock(return_value=cfg))
+    monkeypatch.setattr(train_module, "pretrain", mocked_pretrain)
+    monkeypatch.setattr(train_module, "get_rank_safe", lambda: 1)
+    monkeypatch.setattr(train_module.torch.distributed, "is_initialized", lambda: False)
+
+    args = parse_args(
+        [
+            "--mock-data",
+            "--eval-interval",
+            "20",
+            "--save-interval",
+            "100",
+            "--keep-best-k",
+            "3",
+            "--most-recent-k",
+            "1",
+            "--strict-checkpoint-metric",
+            "--checkpoint-metric-step-tolerance",
+            "3",
+        ]
+    )
+    train_module.train(args)
+
+    assert cfg.checkpoint.most_recent_k == -1
+    assert cfg.checkpoint.save_interval == 100
+    callbacks = mocked_pretrain.call_args.kwargs["callbacks"]
+    assert len(callbacks) == 1
+    callback = callbacks[0]
+    assert callback.metric_name == "lm loss"
+    assert callback.keep_best_k == 3
+    assert callback.keep_recent_k == 1
+    assert callback.step_tolerance == 3
+    assert callback.strict_metric is True
