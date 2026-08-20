@@ -264,6 +264,7 @@ def test_maintained_arc_patch_uses_local_empty_input_run_state() -> None:
     assert 'config["mmseqs_clustering_filter"] = False' not in patch_text
     assert 'config["genetic_architecture_visualization_and_synteny_filtering"] = False' not in patch_text
     assert "run_prodigal_based_filters" in patch_text
+    assert "+        run_orfipy = " not in patch_text
     assert "run_protein_database_hit_count_filter" in patch_text
     assert "run_mmseqs_clustering_filter" in patch_text
     assert "run_genetic_architecture_visualization_and_synteny_filtering" in patch_text

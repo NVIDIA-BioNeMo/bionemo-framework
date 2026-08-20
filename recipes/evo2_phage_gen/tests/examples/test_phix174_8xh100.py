@@ -209,8 +209,8 @@ def test_dry_run(tmp_path: Path) -> None:
         for line in log.splitlines()
         if "command: evo2_phage_prepare_arc_pipeline " in line
     ]
-    assert len(arc_commands) == 1
-    assert "--overwrite" in arc_commands[0]
+    assert len(arc_commands) == 2
+    assert all("--overwrite" in command for command in arc_commands)
 
     rl_control = next(
         shlex.split(line.partition("command: ")[2])

@@ -318,6 +318,7 @@ stage_30() {
   if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then
     note 'substage 30-calibration-scoring already complete'
   else
+    run evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
     monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-scoring.done"
   fi

@@ -510,7 +510,7 @@
                  raise ValueError("Unsupported file format. Please provide a .fna or .fasta file.")
 
 +        filtered_df = seq_df.copy()
-+        run_orfipy = len(filtered_df) > 0
++        should_run_orfipy = len(filtered_df) > 0
 +        if len(filtered_df) == 0:
 +            print("No sequences available for homology filtering; writing empty homology outputs.")
 +
@@ -531,7 +531,7 @@
 -                    config["orfipy_orfs_file_save_location"],
 -                    config["orfipy_tmp_proteins_file_save_location"],
 -                    config["orfipy_proteins_file_save_location"])
-+        if run_orfipy:
++        if should_run_orfipy:
 +            print(f"Pseudo-circularizing {len(seq_df)} genomes...")
 +            append_upstream_of_last_frame_stop(seq_fasta, f'{config["results_save_dir"]}/{config["homology_filter_seqs_circular_fasta_file_save_location"]}')
 +            # Call ORFs by orfipy
