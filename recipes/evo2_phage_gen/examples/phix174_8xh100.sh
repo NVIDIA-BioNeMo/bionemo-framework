@@ -337,6 +337,7 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   export PATH="${RECIPE_ROOT}/data/external/bin:${PATH}"
   export CUDA_DEVICE_MAX_CONNECTIONS=1
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  export NCCL_GRAPH_REGISTER=0
   if ! gpu_info="$(nvidia-smi --query-gpu=name --format=csv,noheader)"; then
     printf '%s\n' 'Unable to query GPUs. This script requires GPUs; run it on the allocated compute node, outside a restricted agent sandbox.' >&2
     exit 2
@@ -567,6 +568,7 @@ PY
 
 stage_50() {
   local selected selected_sft rollout="${RESULT_ROOT}/rollout" fasta safety likelihood evidence infer
+  local checkv_db repo_root
   load_sampling_selection
   selected="$(read_state selected-rl)"
   selected_sft="$(read_state selected-sft)"
@@ -700,6 +702,32 @@ PY
   run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
 
   if [[ "${DRY_RUN}" == "1" ]]; then
+    checkv_db='<prepared-checkv-db>'
+  elif [[ -n "${CHECKVDB:-}" ]]; then
+    [[ -d "${CHECKVDB}" ]] || {
+      printf 'CHECKVDB is not a directory: %s\n' "${CHECKVDB}" >&2
+      return 1
+    }
+    checkv_db="$(cd -- "${CHECKVDB}" && pwd)"
+  else
+    checkv_db="$(python - "${RECIPE_ROOT}/data/external/checkv" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+databases = sorted(path.resolve() for path in root.glob("checkv-db-*") if path.is_dir())
+if not databases:
+    raise SystemExit(f"no prepared CheckV database found under {root}")
+print(databases[-1])
+PY
+)"
+  fi
+  export CHECKVDB="${checkv_db}"
+  repo_root="$(cd -- "${RECIPE_ROOT}/../.." && pwd)"
+  note "Arc CheckV database: ${CHECKVDB}"
+  note "Arc screening working directory: ${repo_root}"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
     note 'prepare target and filter-7 diagnostic Arc configs from the maintained local template'
   else
     python - configs/arc_genome_design_filtering_local.yaml "${fasta}" "${rollout}" <<'PY'
@@ -730,10 +758,15 @@ for name, remove_filter in (("target-profile", False), ("filter7-diagnostic", Tr
     (out / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
 PY
   fi
-  monitored 'Arc target profile' "${rollout}/target-profile/runner.log" \
-    python data/arc_pipeline_patched/genome_design_filtering_pipeline.py "${rollout}/target-profile/config.yaml"
-  monitored 'Arc filter-7 diagnostic' "${rollout}/filter7-diagnostic/runner.log" \
-    python data/arc_pipeline_patched/genome_design_filtering_pipeline.py "${rollout}/filter7-diagnostic/config.yaml"
+  (
+    cd "${repo_root}"
+    monitored 'Arc target profile' "${rollout}/target-profile/runner.log" \
+      python "${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" \
+      "${rollout}/target-profile/config.yaml"
+    monitored 'Arc filter-7 diagnostic' "${rollout}/filter7-diagnostic/runner.log" \
+      python "${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" \
+      "${rollout}/filter7-diagnostic/config.yaml"
+  )
 
   if [[ "${DRY_RUN}" == "1" ]]; then
     note 'join all 1,000 SFT likelihoods with safety and target-profile results; rank only if length bias is acceptable'

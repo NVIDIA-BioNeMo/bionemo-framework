@@ -103,6 +103,7 @@ def test_same_result_lock(tmp_path: Path) -> None:
 
 def test_dry_run(tmp_path: Path) -> None:
     subprocess.run(["bash", "-n", str(SCRIPT)], check=True, timeout=10)
+    assert "export NCCL_GRAPH_REGISTER=0" in SCRIPT.read_text()
     result_root = tmp_path / "result"
     completed = subprocess.run(
         ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
@@ -201,6 +202,8 @@ def test_dry_run(tmp_path: Path) -> None:
         assert command[command.index("--threads") + 1] == "32"
         assert command[command.index("--phrogs-threads") + 1] == "64"
     assert "RL Ray CPU slots: 96" in log
+    assert "Arc CheckV database: <prepared-checkv-db>" in log
+    assert f"Arc screening working directory: {RECIPE_ROOT.parents[1]}" in log
 
     sft_command = next(
         shlex.split(line.partition("command: ")[2])

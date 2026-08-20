@@ -278,3 +278,35 @@ def test_final_rollout_reports_uninformative_constant_scores_without_nan(tmp_pat
     assert not diagnostic["strong_correlation"]
     assert not payload["ranking"]["applied_to_accepted_candidate_order"]
     assert (tmp_path / "report" / "accepted.fasta").read_text() == ">short\nA\n>long\nACG\n"
+
+
+def test_final_rollout_allows_zero_target_passes(tmp_path):
+    generated = tmp_path / "generated.fasta"
+    generated.write_text(">candidate\nACGT\n")
+    safety = tmp_path / "safety.json"
+    safety.write_text(json.dumps({"records": [{"record_id": "candidate", "state": "PASS"}]}))
+    target = tmp_path / "target.fasta"
+    target.write_text("")
+    scores = tmp_path / "scores.csv"
+    scores.write_text(
+        "likelihood_rank,record_id,length_nt,scored_nucleotides,total_log_probability,"
+        "mean_log_probability_per_nucleotide\n"
+        "1,candidate,4,4,-0.4,-0.1\n"
+    )
+    report = tmp_path / "final-designs.json"
+    accepted = tmp_path / "accepted.fasta"
+
+    finalize_ranked_rollout(
+        generated,
+        safety,
+        target,
+        scores,
+        report,
+        accepted,
+        tmp_path / "SUMMARY.md",
+        model_checkpoint="selected-sft",
+    )
+
+    assert json.loads(report.read_text())["counts"]["target_profile_pass"] == 0
+    assert json.loads(report.read_text())["counts"]["accepted"] == 0
+    assert accepted.read_text() == ""

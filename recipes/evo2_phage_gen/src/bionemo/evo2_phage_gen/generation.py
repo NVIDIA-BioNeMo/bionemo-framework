@@ -181,9 +181,13 @@ def infer_jsonl_to_fasta(
     return output_fasta
 
 
-def _fasta_records(path: Path) -> list[tuple[str, str]]:
+def _fasta_records(path: Path, *, allow_empty: bool = False) -> list[tuple[str, str]]:
     records = [(record.id, str(record.seq).upper()) for record in SeqIO.parse(path, "fasta")]
-    if not records or any(not record_id or not sequence for record_id, sequence in records):
+    if not records:
+        if allow_empty:
+            return []
+        raise ValueError(f"no complete FASTA records found: {path}")
+    if any(not record_id or not sequence for record_id, sequence in records):
         raise ValueError(f"no complete FASTA records found: {path}")
     ids = [record_id for record_id, _ in records]
     if len(set(ids)) != len(ids):
@@ -328,7 +332,9 @@ def finalize_ranked_rollout(
     generated_order = {record_id: index for index, (record_id, _) in enumerate(generated)}
     safety_payload = json.loads(safety_manifest.read_text())
     safety_by_id = {str(row["record_id"]): str(row["state"]) for row in safety_payload["records"]}
-    target_sequences = {canonical_circular_sequence(sequence) for _, sequence in _fasta_records(target_fasta)}
+    target_sequences = {
+        canonical_circular_sequence(sequence) for _, sequence in _fasta_records(target_fasta, allow_empty=True)
+    }
     with likelihood_csv.open() as handle:
         score_rows = list(csv.DictReader(handle))
     score_ids = [row["record_id"] for row in score_rows]
