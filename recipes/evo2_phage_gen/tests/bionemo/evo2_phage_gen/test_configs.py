@@ -107,6 +107,8 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert mcore_generation_config["max_requests"] >= generation_batch_size
     assert mcore_generation_config["prompt_batch_size"] == generation_batch_size
     assert "evo2_batched_decode_size" not in mcore_generation_config
+    assert config["logger"]["tensorboard_enabled"] is True
+    assert config["logger"]["tensorboard"] == {}
 
 
 def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():

@@ -311,6 +311,7 @@ logger:
   wandb:
     project: grpo-dev
     name: sj_megatron_1B
+  tensorboard: {}
   gpu_monitoring:
     collection_interval: 10
     flush_interval: 10
