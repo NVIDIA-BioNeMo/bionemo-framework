@@ -32,43 +32,18 @@ import logging
 import os
 import re
 import shutil
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import DefaultSavePlanner, FileSystemReader, FileSystemWriter
-from torch.distributed.checkpoint.metadata import BytesStorageMetadata, MetadataIndex
-from torch.distributed.checkpoint.planner import SavePlan, WriteItemType
+from torch.distributed.checkpoint import DefaultLoadPlanner, DefaultSavePlanner, FileSystemReader, FileSystemWriter
+from torch.distributed.checkpoint.metadata import BytesStorageMetadata
 
 
 logger = logging.getLogger(__name__)
 
 _STRIP_KEY_PREFIXES = ("optimizer.", "opt_param_scheduler.", "rng_state")
-
-
-class _MetadataPreservingSavePlanner(DefaultSavePlanner):
-    """Keep source object shards serialized as objects even when they contain tensors."""
-
-    def __init__(self, object_keys: set[str]) -> None:
-        super().__init__()
-        self.object_keys = object_keys
-
-    def create_local_plan(self) -> SavePlan:
-        plan = super().create_local_plan()
-        items = [
-            replace(
-                item,
-                index=MetadataIndex(item.index.fqn),
-                type=WriteItemType.BYTE_IO,
-                tensor_data=None,
-            )
-            if item.index.fqn in self.object_keys
-            else item
-            for item in plan.items
-        ]
-        return replace(plan, items=items)
 
 
 def _resolve_iter_dir(ckpt_dir: Path) -> Path:
@@ -144,14 +119,22 @@ def remove_optimizer(
     if skipped_keys:
         logger.debug(f"Skipped keys (first 20): {skipped_keys[:20]}")
 
-    dcp.load(state_dict=state_dict, storage_reader=reader, no_dist=True)
+    # The mapping is deliberately flat and uses the source metadata FQNs as exact
+    # keys. Disabling planner flattening keeps serialized objects such as TE
+    # ``_extra_state`` under those keys even when an object contains tensors.
+    dcp.load(
+        state_dict=state_dict,
+        storage_reader=reader,
+        planner=DefaultLoadPlanner(flatten_state_dict=False, flatten_sharded_tensors=False),
+        no_dist=True,
+    )
 
     # --- 2. Save model-only state dict to destination ---
     writer = FileSystemWriter(str(dst_iter_dir), single_file_per_rank=False, thread_count=os.cpu_count())
     dcp.save(
         state_dict=state_dict,
         storage_writer=writer,
-        planner=_MetadataPreservingSavePlanner(model_object_keys),
+        planner=DefaultSavePlanner(flatten_state_dict=False, flatten_sharded_tensors=False),
         no_dist=True,
     )
     expected_keys = set(state_dict)

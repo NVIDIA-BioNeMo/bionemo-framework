@@ -18,39 +18,14 @@
 
 """Tests for producing model-only Megatron Bridge checkpoints."""
 
-from dataclasses import replace
 from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import DefaultSavePlanner, FileSystemReader, FileSystemWriter
-from torch.distributed.checkpoint.metadata import BytesStorageMetadata, MetadataIndex
-from torch.distributed.checkpoint.planner import SavePlan, WriteItemType
+from torch.distributed.checkpoint.metadata import BytesStorageMetadata
 
 from bionemo.common.checkpoint.remove_optimizer import remove_optimizer
-
-
-class _ObjectStateSavePlanner(DefaultSavePlanner):
-    """Save one tensor value as an object shard, as Megatron's ShardedObject planner does."""
-
-    def __init__(self, object_key: str) -> None:
-        super().__init__()
-        self.object_key = object_key
-
-    def create_local_plan(self) -> SavePlan:
-        plan = super().create_local_plan()
-        items = [
-            replace(
-                item,
-                index=MetadataIndex(item.index.fqn),
-                type=WriteItemType.BYTE_IO,
-                tensor_data=None,
-            )
-            if item.index.fqn == self.object_key
-            else item
-            for item in plan.items
-        ]
-        return replace(plan, items=items)
 
 
 def _write_checkpoint_with_model_object(tmp_path: Path) -> tuple[Path, str]:
@@ -60,11 +35,14 @@ def _write_checkpoint_with_model_object(tmp_path: Path) -> tuple[Path, str]:
     dcp.save(
         state_dict={
             "decoder.final_norm.weight": torch.arange(4, dtype=torch.float32),
-            extra_state_key: torch.empty(0, dtype=torch.uint8),
+            # Transformer Engine object state can contain tensors. DCP must retain
+            # the containing object under this exact metadata key rather than
+            # flattening its contents into a ``.0`` child key.
+            extra_state_key: [torch.empty(0, dtype=torch.uint8)],
             "optimizer.state.exp_avg": torch.ones(4),
         },
         storage_writer=FileSystemWriter(str(source_iteration)),
-        planner=_ObjectStateSavePlanner(extra_state_key),
+        planner=DefaultSavePlanner(flatten_state_dict=False),
         no_dist=True,
     )
     source_metadata = FileSystemReader(str(source_iteration)).read_metadata()
@@ -104,4 +82,6 @@ def test_remove_optimizer_can_preserve_model_object_state(tmp_path: Path) -> Non
         storage_reader=FileSystemReader(str(prepared_iteration)),
         no_dist=True,
     )
-    torch.testing.assert_close(loaded_extra_state[extra_state_key], torch.empty(0, dtype=torch.uint8))
+    assert isinstance(loaded_extra_state[extra_state_key], list)
+    assert len(loaded_extra_state[extra_state_key]) == 1
+    torch.testing.assert_close(loaded_extra_state[extra_state_key][0], torch.empty(0, dtype=torch.uint8))
