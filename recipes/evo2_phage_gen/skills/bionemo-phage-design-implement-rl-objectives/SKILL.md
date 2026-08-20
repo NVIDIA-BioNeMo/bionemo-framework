@@ -11,6 +11,8 @@ Work inside the selected recipe checkout and follow its existing code and test p
 
 Keep rewards bounded on `[0, 1]`, with the objective plan's meaningful baseline at zero and target at one. Handle short genomes, absent genes or ORFs, empty tool output, missing observations, invalid values, and tool failures explicitly. Do not let an exception, default value, or skipped branch create positive credit.
 
+For learned or stacked scorers, construct upstream features from deployment-matched out-of-fold predictions. Test ranking and calibration in the high-reward tail, scorer-training versus policy-candidate shift, and model/seed disagreement; treat unsupported candidates as missing or out of domain rather than extrapolating confidently.
+
 Add focused tests that demonstrate:
 
 - each enabled component runs and is logged for a known positive control;

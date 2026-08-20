@@ -56,6 +56,20 @@
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-005-resume-selection",
+      "prompt": "The realized PhiX174 script completed calibration generation and scoring, then stopped because the new evidence does not support its historical default. I approved autonomous evidence-based continuation and am offline. Resume it.",
+      "expected_output": "An evidence-based canonical sampling selection and a marker-aware rerun, not a silent historical-default override.",
+      "assertions": [
+        "The response inspects calibration/scoring/selection-evidence.csv and the underlying score and novelty evidence before choosing settings.",
+        "It writes the reviewed choice to calibration/sampling-selection.yaml with the complete script-supported schema and records its rationale.",
+        "It reruns the same top-level command and result root so completed calibration substages are reused.",
+        "It does not pass examples/default-sampling-selection.yaml merely to bypass the failed hard check.",
+        "It distinguishes a user-requested --sampling-selection override from the agent's evidence-based autonomous path."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": "examples/phix174_8xh100.sh"
     }
   ]
 }

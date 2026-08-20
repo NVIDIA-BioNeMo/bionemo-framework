@@ -11,6 +11,7 @@ RESULT_ROOT="${RECIPE_ROOT}/results/phix174-8xh100"
 DRY_RUN=0
 PREPARE_ONLY=0
 RESUME_FROM=00
+SAMPLING_SELECTION_SOURCE=
 NUM_GPUS="${NUM_GPUS:-8}"
 NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}}"
 for resource_name in NUM_GPUS NUM_CPUS; do
@@ -41,16 +42,18 @@ SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
 usage() {
   printf '%s\n' \
     'Usage: ./examples/phix174_8xh100.sh [OPTIONS]' \
-    '  --result-root PATH  Result directory (default: results/phix174-8xh100)' \
-    '  --prepare-only      Prepare public inputs/tools/controls, then stop' \
-    '  --resume-from ID    Start at stage 00, 10, 20, 30, 40, or 50' \
-    '  --dry-run           Record and print commands without external work' \
-    '  -h, --help          Show this help'
+    '  --result-root PATH         Result directory (default: results/phix174-8xh100)' \
+    '  --sampling-selection PATH  Copy and use a sampling-selection YAML' \
+    '  --prepare-only             Prepare public inputs/tools/controls, then stop' \
+    '  --resume-from ID           Start at stage 00, 10, 20, 30, 40, or 50' \
+    '  --dry-run                  Record and print commands without external work' \
+    '  -h, --help                 Show this help'
 }
 
 while (($#)); do
   case "$1" in
     --result-root) RESULT_ROOT="$2"; shift 2 ;;
+    --sampling-selection) SAMPLING_SELECTION_SOURCE="$2"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     --resume-from) RESUME_FROM="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -63,6 +66,23 @@ case "${RESUME_FROM}" in 00|10|20|30|40|50) ;; *) printf 'Invalid stage: %s\n' "
 STATE_DIR="${RESULT_ROOT}/state"
 STAGE_DIR="${RESULT_ROOT}/stages"
 RUNLOG="${RESULT_ROOT}/RUNLOG.md"
+SAMPLING_SELECTION="${RESULT_ROOT}/calibration/sampling-selection.yaml"
+DEFAULT_SAMPLING_SELECTION="${RECIPE_ROOT}/examples/default-sampling-selection.yaml"
+SAMPLING_SELECTION_OVERRIDDEN=0
+SAMPLING_TEMPERATURE=
+SAMPLING_TOP_K=
+SAMPLING_TOP_P=
+SAMPLING_MAX_NEW_TOKENS=
+SAMPLING_PROMPT_LENGTHS_TEXT=
+SAMPLING_RL_SEED=
+SAMPLING_ROLLOUT_SEED=
+SAMPLING_SEED_STRIDE=
+SAMPLING_PROMPT_LABEL=
+SAMPLING_TRAIN_REPEATS=
+SAMPLING_VALIDATION_REPEATS=
+SAMPLING_FINAL_PER_LENGTH=
+SAMPLING_RANKS_PER_PROMPT=
+declare -a SAMPLING_PROMPT_LENGTHS=()
 mkdir -p "${RESULT_ROOT}" "${STATE_DIR}" "${STAGE_DIR}"
 exec 9> "${RESULT_ROOT}/.run.lock"
 if ! flock -n 9; then
@@ -74,6 +94,140 @@ fi
 note() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "${RUNLOG}"
 }
+
+sampling_selection_fields() {
+  python - "$1" "${NUM_GPUS}" <<'PY'
+import math
+import sys
+from pathlib import Path
+
+import yaml
+
+path, num_gpus = Path(sys.argv[1]), int(sys.argv[2])
+required = {
+    "temperature",
+    "top_k",
+    "top_p",
+    "max_new_tokens",
+    "prompt_lengths",
+    "rl_seed",
+    "rollout_seed",
+    "seed_stride",
+}
+
+try:
+    data = yaml.safe_load(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("document must be a mapping")
+    missing, unknown = required - data.keys(), data.keys() - required
+    if missing:
+        raise ValueError(f"missing keys: {', '.join(sorted(missing))}")
+    if unknown:
+        raise ValueError(f"unknown keys: {', '.join(sorted(unknown))}")
+
+    def real(name, *, lower, upper=None):
+        value = data[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be numeric")
+        value = float(value)
+        if not math.isfinite(value) or value <= lower or (upper is not None and value > upper):
+            interval = f"({lower}, {upper}]" if upper is not None else f"> {lower}"
+            raise ValueError(f"{name} must be finite and {interval}")
+        return value
+
+    def integer(name, *, minimum):
+        value = data[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+        return value
+
+    temperature = real("temperature", lower=0)
+    top_k = integer("top_k", minimum=0)
+    top_p = real("top_p", lower=0, upper=1)
+    max_new_tokens = integer("max_new_tokens", minimum=1)
+    rl_seed = integer("rl_seed", minimum=0)
+    rollout_seed = integer("rollout_seed", minimum=0)
+    seed_stride = integer("seed_stride", minimum=1)
+    prompt_lengths = data["prompt_lengths"]
+    if not isinstance(prompt_lengths, list) or not prompt_lengths:
+        raise ValueError("prompt_lengths must be a non-empty list")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in prompt_lengths):
+        raise ValueError("prompt_lengths must contain integers")
+    if len(set(prompt_lengths)) != len(prompt_lengths):
+        raise ValueError("prompt_lengths must be unique")
+    if any(value < 0 or value > 65 for value in prompt_lengths):
+        raise ValueError("prompt_lengths must be between 0 and the 65-nt PhiX174 reference prefix")
+    strata = len(prompt_lengths)
+    deployment_sizes = {"12-record RL training bank": 12, "96-record RL validation bank": 96,
+                        "1,000-record final rollout": 1000, "GPU count": num_gpus}
+    incompatible = [name for name, size in deployment_sizes.items() if size % strata]
+    if incompatible:
+        raise ValueError(
+            f"{strata} prompt strata do not tile the equal-mixture deployment shapes: {', '.join(incompatible)}"
+        )
+    if max_new_tokens + max(prompt_lengths) > 10240:
+        raise ValueError("max_new_tokens plus the longest prompt exceeds the 10,240-token model context")
+except (OSError, ValueError, yaml.YAMLError) as error:
+    print(f"Invalid sampling selection {path}: {error}", file=sys.stderr)
+    raise SystemExit(2) from error
+
+fields = (
+    str(temperature),
+    str(top_k),
+    str(top_p),
+    str(max_new_tokens),
+    " ".join(str(value) for value in prompt_lengths),
+    str(rl_seed),
+    str(rollout_seed),
+    str(seed_stride),
+    "-".join(str(value) for value in prompt_lengths),
+    str(12 // strata),
+    str(96 // strata),
+    str(1000 // strata),
+    str(num_gpus // strata),
+)
+print("\t".join(fields))
+PY
+}
+
+load_sampling_selection() {
+  local fields
+  if [[ -s "${SAMPLING_SELECTION}" ]]; then
+    fields="$(sampling_selection_fields "${SAMPLING_SELECTION}")" || return
+  elif [[ "${DRY_RUN}" == "1" ]]; then
+    fields="$(sampling_selection_fields "${DEFAULT_SAMPLING_SELECTION}")" || return
+  else
+    printf 'Missing sampling selection: %s\n' "${SAMPLING_SELECTION}" >&2
+    return 2
+  fi
+  IFS=$'\t' read -r SAMPLING_TEMPERATURE SAMPLING_TOP_K SAMPLING_TOP_P \
+    SAMPLING_MAX_NEW_TOKENS SAMPLING_PROMPT_LENGTHS_TEXT SAMPLING_RL_SEED \
+    SAMPLING_ROLLOUT_SEED SAMPLING_SEED_STRIDE SAMPLING_PROMPT_LABEL \
+    SAMPLING_TRAIN_REPEATS SAMPLING_VALIDATION_REPEATS SAMPLING_FINAL_PER_LENGTH \
+    SAMPLING_RANKS_PER_PROMPT <<< "${fields}"
+  read -r -a SAMPLING_PROMPT_LENGTHS <<< "${SAMPLING_PROMPT_LENGTHS_TEXT}"
+}
+
+if [[ "${DRY_RUN}" != "1" ]]; then
+  # shellcheck source=/dev/null
+  source "${RECIPE_ROOT}/.ci_test_env.sh"
+fi
+
+if [[ -n "${SAMPLING_SELECTION_SOURCE}" ]]; then
+  sampling_selection_fields "${SAMPLING_SELECTION_SOURCE}" > /dev/null
+  mkdir -p "$(dirname -- "${SAMPLING_SELECTION}")"
+  if [[ ! -e "${SAMPLING_SELECTION}" || ! "${SAMPLING_SELECTION_SOURCE}" -ef "${SAMPLING_SELECTION}" ]]; then
+    selection_tmp="${SAMPLING_SELECTION}.tmp.$$"
+    cp -- "${SAMPLING_SELECTION_SOURCE}" "${selection_tmp}"
+    mv -- "${selection_tmp}" "${SAMPLING_SELECTION}"
+  fi
+  SAMPLING_SELECTION_OVERRIDDEN=1
+  if [[ "${SAMPLING_SELECTION_SOURCE}" -ef "${DEFAULT_SAMPLING_SELECTION}" ]]; then
+    note "WARNING: using bundled historical sampling settings from ${SAMPLING_SELECTION_SOURCE}; they override rather than derive from fresh calibration"
+  else
+    note "WARNING: copied explicit sampling selection from ${SAMPLING_SELECTION_SOURCE} to ${SAMPLING_SELECTION}; fresh calibration compatibility will not be enforced"
+  fi
+fi
 
 run() {
   printf -v command '%q ' "$@"
@@ -180,8 +334,6 @@ PY
 
 gpu_type='not queried (dry run)'
 if [[ "${DRY_RUN}" != "1" ]]; then
-  # shellcheck source=/dev/null
-  source "${RECIPE_ROOT}/.ci_test_env.sh"
   export PATH="${RECIPE_ROOT}/data/external/bin:${PATH}"
   export CUDA_DEVICE_MAX_CONNECTIONS=1
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -307,7 +459,7 @@ stage_20() {
 }
 
 stage_30() {
-  local selected calibration="${RESULT_ROOT}/calibration" evidence selection="${RESULT_ROOT}/calibration/selected-sampling.json"
+  local selected calibration="${RESULT_ROOT}/calibration" evidence
   selected="$(read_state selected-sft)"; evidence="${calibration}/scoring/selection-evidence.csv"
   if [[ -f "${STAGE_DIR}/30-calibration-generation.done" ]]; then
     note 'substage 30-calibration-generation already complete'
@@ -322,20 +474,55 @@ stage_30() {
     monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-scoring.done"
   fi
-  if [[ "${DRY_RUN}" == "1" ]]; then note 'verify fresh calibration supports temperature 1.0 and prefixes 16/24'; else
-    python - "${evidence}" "${selection}" <<'PY'
-import json, sys, pandas as pd
-table=pd.read_csv(sys.argv[1]); chosen=table[(table.temperature==1.0)&table.prefix_length.isin([16,24])]
-if len(chosen)!=2 or not chosen[["eligible","metric_environment_ok","temperature_1_default_candidate"]].to_numpy().all(): raise SystemExit("fresh calibration does not support temperature 1.0 with prefixes 16/24")
-open(sys.argv[2],"w").write(json.dumps({"temperature":1.0,"top_k":4,"top_p":1.0,"max_new_tokens":5976,"prompt_lengths":[16,24],"weights":[0.5,0.5],"seed":7,"seed_stride":1000003},indent=2)+"\n")
+  if [[ -s "${SAMPLING_SELECTION}" ]]; then
+    if [[ "${SAMPLING_SELECTION_OVERRIDDEN}" == "1" ]]; then
+      note "using explicit sampling selection: ${SAMPLING_SELECTION}"
+    else
+      note "using existing sampling selection and skipping the fresh-calibration default check: ${SAMPLING_SELECTION}"
+    fi
+  elif [[ "${DRY_RUN}" == "1" ]]; then
+    note 'verify fresh calibration supports the bundled default, unless calibration/sampling-selection.yaml exists'
+  else
+    python - "${evidence}" "${DEFAULT_SAMPLING_SELECTION}" <<'PY'
+import sys
+
+import pandas as pd
+import yaml
+
+table = pd.read_csv(sys.argv[1])
+selection = yaml.safe_load(open(sys.argv[2]))
+chosen = table[
+    (table.temperature == selection["temperature"])
+    & table.prefix_length.isin(selection["prompt_lengths"])
+]
+supported = (
+    len(chosen) == len(selection["prompt_lengths"])
+    and chosen[["eligible", "metric_environment_ok", "temperature_1_default_candidate"]].to_numpy().all()
+)
+if not supported:
+    raise SystemExit(
+        "fresh calibration does not support the bundled sampling selection; inspect "
+        f"{sys.argv[1]}, then create calibration/sampling-selection.yaml or rerun with "
+        "--sampling-selection PATH"
+    )
 PY
+    cp -- "${DEFAULT_SAMPLING_SELECTION}" "${SAMPLING_SELECTION}.tmp.$$"
+    mv -- "${SAMPLING_SELECTION}.tmp.$$" "${SAMPLING_SELECTION}"
+    note "fresh calibration supports the bundled default; wrote ${SAMPLING_SELECTION}"
   fi
-  run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/train.jsonl" --prompt-lengths 16 24 --repeats-per-length 6 --id-prefix train
-  run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/validation.jsonl" --prompt-lengths 16 24 --repeats-per-length 48 --id-prefix validation --grouped
+  load_sampling_selection
+  note "sampling selection: temperature=${SAMPLING_TEMPERATURE}, prompt lengths=${SAMPLING_PROMPT_LENGTHS_TEXT}, max new tokens=${SAMPLING_MAX_NEW_TOKENS}"
+  run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/train.jsonl" \
+    --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --repeats-per-length "${SAMPLING_TRAIN_REPEATS}" \
+    --id-prefix train
+  run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/validation.jsonl" \
+    --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --repeats-per-length "${SAMPLING_VALIDATION_REPEATS}" \
+    --id-prefix validation --grouped
 }
 
 stage_40() {
   local selected rl="${RESULT_ROOT}/rl" control="${RESULT_ROOT}/rl/environment-control" chosen
+  load_sampling_selection
   if [[ -f "${STAGE_DIR}/40-rl.done" ]]; then
     note 'substage 40-rl already complete'
   else
@@ -346,7 +533,7 @@ stage_40() {
     monitored 'RL environment control' "${control}/runner.log" \
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}" \
       --gpus-per-node "${NUM_GPUS}" --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422.1.fna --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false)
+    local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
     run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
     check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
@@ -361,9 +548,10 @@ stage_40() {
 
 stage_50() {
   local selected selected_sft rollout="${RESULT_ROOT}/rollout" fasta safety likelihood evidence infer
+  load_sampling_selection
   selected="$(read_state selected-rl)"
   selected_sft="$(read_state selected-sft)"
-  fasta="${rollout}/fasta/phix174_prompt16-24_temp1.0.n1000.fasta"
+  fasta="${rollout}/fasta/phix174_prompt${SAMPLING_PROMPT_LABEL}_temp${SAMPLING_TEMPERATURE}.n1000.fasta"
   safety="${rollout}/sequence-safety"
   likelihood="${rollout}/sft-likelihood"
   infer="${RECIPE_ROOT}/src/bionemo/evo2/run/infer.py"
@@ -374,24 +562,31 @@ stage_50() {
       return 1
     fi
   else
-    run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" --prompt-lengths 16 24 --num-prompts 500 --id-prefix final
-  local shard_dir="${rollout}/prompts/dp${NUM_GPUS}" rank started waited alive failed=0 printable pid
-  local -a command=() outputs=() pids=() logs=()
+    run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" \
+      --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-prompts "${SAMPLING_FINAL_PER_LENGTH}" \
+      --id-prefix final
+  local shard_dir="${rollout}/prompts/dp${NUM_GPUS}" rank started waited alive failed=0 printable pid prompt_length
+  local -a command=() outputs=() pids=() logs=() prompt_files=()
+  for prompt_length in "${SAMPLING_PROMPT_LENGTHS[@]}"; do
+    prompt_files+=("${rollout}/prompts/final_prompt${prompt_length}_${SAMPLING_FINAL_PER_LENGTH}.jsonl")
+  done
   if [[ "${DRY_RUN}" == "1" ]]; then
-    note "split the 500/500 prompt mixture into ${NUM_GPUS} homogeneous GPU shards"
+    note "split the equal prompt mixture (${SAMPLING_PROMPT_LENGTHS_TEXT}) into ${NUM_GPUS} homogeneous GPU shards"
   else
-    python - "${rollout}/prompts/final_prompt16_500.jsonl" "${rollout}/prompts/final_prompt24_500.jsonl" "${shard_dir}" "${NUM_GPUS}" <<'PY'
+    python - "${shard_dir}" "${NUM_GPUS}" "${SAMPLING_RANKS_PER_PROMPT}" "${prompt_files[@]}" <<'PY'
 import json, sys
 from pathlib import Path
-inputs, output = [Path(path) for path in sys.argv[1:3]], Path(sys.argv[3])
-num_gpus = int(sys.argv[4])
-ranks_per_prompt = num_gpus // 2
+output, num_gpus, ranks_per_prompt = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+inputs = [Path(path) for path in sys.argv[4:]]
 records = [[json.loads(line) for line in path.read_text().splitlines() if line] for path in inputs]
-if [len(group) for group in records] != [500, 500]:
-    raise SystemExit("expected 500 prompts for each prefix length")
-all_records = records[0] + records[1]
+expected_per_group = 1000 // len(inputs)
+if [len(group) for group in records] != [expected_per_group] * len(inputs):
+    raise SystemExit(f"expected {expected_per_group} prompts for each prefix length")
+all_records = [record for group in records for record in group]
 if len({record["id"] for record in all_records}) != 1000:
     raise SystemExit("final prompt IDs are not unique")
+if ranks_per_prompt * len(records) != num_gpus:
+    raise SystemExit("sampling selection does not tile the configured GPUs")
 output.mkdir(parents=True, exist_ok=True)
 for group_index, group in enumerate(records):
     for local_rank in range(ranks_per_prompt):
@@ -408,8 +603,10 @@ PY
     logs+=("${rollout}/logs/dp${rank}.log")
     command=(env CUDA_VISIBLE_DEVICES="${rank}" torchrun --nproc_per_node 1 --nnodes 1 \
       --master_port "$((29544 + rank))" "${infer}" --ckpt-dir "${selected}" \
-      --prompt-file "${shard_dir}/dp${rank}.jsonl" --max-new-tokens 5976 --temperature 1.0 \
-      --top-k 4 --top-p 1.0 --seed "$((7 + rank * 1000003))" --tensor-parallel-size 1 \
+      --prompt-file "${shard_dir}/dp${rank}.jsonl" --max-new-tokens "${SAMPLING_MAX_NEW_TOKENS}" \
+      --temperature "${SAMPLING_TEMPERATURE}" --top-k "${SAMPLING_TOP_K}" \
+      --top-p "${SAMPLING_TOP_P}" --seed "$((SAMPLING_ROLLOUT_SEED + rank * SAMPLING_SEED_STRIDE))" \
+      --tensor-parallel-size 1 \
       --max-seq-length 10240 --prompt-batch-size 16 --strict-generation --stream-output \
       --output-file "${outputs[-1]}")
     printf -v printable '%q ' "${command[@]}"; note "command: ${printable}"

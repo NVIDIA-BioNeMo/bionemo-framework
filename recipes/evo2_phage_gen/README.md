@@ -145,6 +145,11 @@ Useful operator modes are:
 # Resume at a stage boundary after correcting an interruption.
 ./examples/phix174_8xh100.sh --resume-from 30 \
   --result-root "$PWD/results/phix174-8xh100"
+
+# Explicitly override calibration with the historical case-study sampling settings.
+./examples/phix174_8xh100.sh \
+  --result-root "$PWD/results/phix174-8xh100" \
+  --sampling-selection examples/default-sampling-selection.yaml
 ```
 
 After an interrupted unfinished stage, rerun the original top-level command with the same result
@@ -152,7 +157,10 @@ root. Completed stage markers are skipped and cached or partial downloads are re
 result directory is not required. Only one invocation may use a result root at a time; a concurrent
 invocation exits instead of sharing stage work directories.
 The example README also documents narrower markers for accepting completed SFT, RL, or generation
-work without skipping checkpoint selection and downstream checks.
+work without skipping checkpoint selection and downstream checks. It also documents how
+`calibration/sampling-selection.yaml` is selected from calibration evidence, how an existing file
+resumes the stopped stage, and how `--sampling-selection PATH` copies an explicit operator override
+on either the first run or a rerun.
 
 Read the [example README](examples/README.md) for scientific review stops, monitoring behavior,
 safety details, and the result layout. A scratch clone or worktree per

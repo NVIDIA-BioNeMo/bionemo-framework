@@ -40,12 +40,75 @@ Useful controls:
 # Resume at a stage boundary; completed stages are skipped automatically.
 ./examples/phix174_8xh100.sh --resume-from 30 \
   --result-root "$PWD/results/phix174-8xh100"
+
+# Explicitly use the historical case-study settings instead of requiring fresh calibration support.
+./examples/phix174_8xh100.sh \
+  --result-root "$PWD/results/phix174-8xh100" \
+  --sampling-selection examples/default-sampling-selection.yaml
 ```
 
 If an unfinished stage is interrupted, rerun the original command with the same result root. The
 script reuses completed stages and cached or partial downloads, so the run directory need not be
 deleted. Only one invocation may use a result root at a time. If AMRFinder fails, its captured
 output is retained as `amrfinder/amrfinder.log` below that scan directory.
+
+### Choose or override sampling settings
+
+Stage 30 uses `${RESULT_ROOT}/calibration/sampling-selection.yaml` as the canonical sampling
+selection. When `--sampling-selection PATH` is supplied, the script validates the file and copies
+it to that location before running any stage. The supplied file therefore works both on the first
+invocation and when resuming after calibration. If the canonical file already exists, stage 30
+uses it and skips the hard check against the bundled historical choice. Without either file, the
+script writes the bundled default only when fresh calibration supports it; otherwise it stops for
+review without repeating completed calibration generation or scoring.
+
+For the specific post-calibration stop caused by an unsupported historical choice, either accept
+the historical settings explicitly:
+
+```bash
+./examples/phix174_8xh100.sh \
+  --result-root "$PWD/results/phix174-8xh100" \
+  --sampling-selection examples/default-sampling-selection.yaml
+```
+
+This logs a warning because the selection is an operator override, not a conclusion from the new
+calibration. Subsequent reruns with the same result root may omit `--sampling-selection`; the copied
+canonical file remains in the run record.
+
+To make an evidence-based selection instead, inspect
+`calibration/scoring/selection-evidence.csv`. Exclude rows where `eligible` or
+`metric_environment_ok` is false, confirm the external measurements are available, compare the
+aggregate reward and target-signal confidence intervals, and reject settings whose apparent yield
+comes from high target/SFT copy rates or weak within-setting diversity. Prefer a stable
+quality-diversity plateau over a noisy maximum, and prefer temperature 1.0 only when it is
+practically comparable. Prompt lengths in one file share one temperature and are deployed as an
+equal mixture.
+
+Copy [the default file](default-sampling-selection.yaml) as a schema example and edit every value:
+
+```yaml
+temperature: 0.9
+top_k: 4
+top_p: 1.0
+max_new_tokens: 5976
+prompt_lengths: [12, 24]
+rl_seed: 42
+rollout_seed: 7
+seed_stride: 1000003
+```
+
+The file must contain exactly these keys. Temperatures and token counts must be positive, `top_p`
+must be in `(0, 1]`, prompt lengths must be unique PhiX174 prefixes between 0 and 65 nt, and the
+longest prompt plus `max_new_tokens` must fit the 10,240-token context. This example uses equal
+prompt strata, so their count must divide the 12-record training bank, 96-record validation bank,
+1,000-record final rollout, and configured GPU count. One, two, or four strata work with the
+reference eight-GPU shape.
+
+You may write the reviewed file directly to
+`results/phix174-8xh100/calibration/sampling-selection.yaml` and rerun the original command, or
+keep it elsewhere and pass `--sampling-selection PATH`. Do not change the selection while resuming
+an RL checkpoint: a material prompt or sampling change should start a new RL attempt from the
+selected SFT checkpoint while retaining the earlier run as evidence.
 
 Long-running work also writes narrower completion markers: `20-sft.done`,
 `30-calibration-generation.done`, `30-calibration-scoring.done`, `40-rl.done`, and

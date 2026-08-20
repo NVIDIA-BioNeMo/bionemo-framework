@@ -121,8 +121,38 @@
         "The response defines how the predictor will be used and the expected candidate domain before choosing splits or claims.",
         "Holdouts cover relevant deployment shifts and prevent duplicate, study, site, time, or batch leakage where applicable.",
         "It tests label-associated cohort and collection confounders instead of allowing them to become shortcuts.",
+        "Any stacked scorer is trained from deployment-matched out-of-fold base predictions rather than in-sample predictions.",
+        "It validates ranking and calibration in the policy-selected high-score tail and uses model or seed disagreement as uncertainty or out-of-domain evidence.",
+        "If the learned scorer remains weak, it follows current ML best practices and selects evidence-supported modeling, data, ensemble, refitting, or post-processing techniques as an open-ended menu rather than a mandatory sequence.",
         "It evaluates the predictor alone and for incremental value within the complete reward and filter system.",
         "It reports uncertainty, subgroup or source behavior, applicability limits, and out-of-domain handling."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-010-no-model-scorer",
+      "prompt": "Inspect the baseline PhiX174 run, which has only deterministic sequence checks and external-tool measurements in its RL reward. No learned scorer has been requested. The existing signals are weak; diagnose how to improve reward behavior.",
+      "expected_output": "A reward and measurement diagnosis that does not invent a learned scorer.",
+      "assertions": [
+        "The response does not introduce an unrequested model-based RL score merely because the existing non-model signals are weak.",
+        "It reserves advanced ML training and ensemble escalation for a learned scorer that is explicitly requested or independently justified for the RL reward.",
+        "It instead investigates support, denominators, scale, calibration, proposal distribution, proxy behavior, and component interactions in the existing rewards.",
+        "It preserves the run's deterministic checks, external measurements, final hard QC, and experimental validation roles."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-011-requested-bootability-model",
+      "prompt": "Augment the baseline PhiX174 RL reward with a new learned bootability scorer. Plan how to build, validate, and integrate that model with the existing deterministic sequence checks and external-tool measurements.",
+      "expected_output": "A plan for the requested bootability scorer that does not refuse merely because the baseline has no learned score.",
+      "assertions": [
+        "The response proceeds with planning the requested learned scorer and does not reject it solely because the baseline PhiX174 reward has no model-based component.",
+        "It defines the bootability endpoint, candidate domain, evidence, controls, and intended reward role without treating a model score as proof of viability or productive infection.",
+        "It uses deployment-matched validation with leakage and confounder controls, calibration and uncertainty, high-score-tail evaluation, and explicit out-of-domain behavior.",
+        "It keeps the new bounded component visible, defines missing or failed inference behavior, and tests its incremental value alongside the existing rewards and final hard QC.",
+        "Any advanced modeling, data, ensemble, refitting, or post-processing techniques remain evidence-selected options rather than a mandatory sequence."
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null

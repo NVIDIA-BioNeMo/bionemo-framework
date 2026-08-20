@@ -30,6 +30,22 @@ RECIPE_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = RECIPE_ROOT / "examples/phix174_8xh100.sh"
 
 
+def _write_sampling_selection(path: Path) -> str:
+    text = """\
+temperature: 0.9
+top_k: 17
+top_p: 0.85
+max_new_tokens: 5800
+prompt_lengths: [4, 8, 16, 24]
+rl_seed: 101
+rollout_seed: 7
+seed_stride: 11
+"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return text
+
+
 def test_control_fasta_ids(tmp_path: Path, monkeypatch) -> None:
     marker = 'python - configs/phage_safety_reference_controls.yaml "${root}" "${table}" "${DRY_RUN}" <<\'PY\'\n'
     body = SCRIPT.read_text().split(marker, 1)[1].split("\nPY\n", 1)[0]
@@ -222,6 +238,117 @@ def test_dry_run(tmp_path: Path) -> None:
     assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
 
 
+def test_sampling_selection_override(tmp_path: Path) -> None:
+    source = tmp_path / "custom-selection.yaml"
+    expected = _write_sampling_selection(source)
+    result_root = tmp_path / "result"
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--result-root",
+            str(result_root),
+            "--sampling-selection",
+            str(source),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (result_root / "calibration/sampling-selection.yaml").read_text() == expected
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "WARNING: copied explicit sampling selection" in log
+    assert "using explicit sampling selection" in log
+    assert "sampling selection: temperature=0.9, prompt lengths=4 8 16 24, max new tokens=5800" in log
+
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
+    assert len(prompt_banks) == 2
+    assert all(
+        command[command.index("--prompt-lengths") + 1 : command.index("--repeats-per-length")]
+        == ["4", "8", "16", "24"]
+        for command in prompt_banks
+    )
+    assert prompt_banks[0][prompt_banks[0].index("--repeats-per-length") + 1] == "3"
+    assert prompt_banks[1][prompt_banks[1].index("--repeats-per-length") + 1] == "24"
+
+    gdpo = next(command for command in commands if command[:1] == ["evo2_phage_run_gdpo"])
+    for override in (
+        "policy.generation.max_new_tokens=5800",
+        "policy.generation.temperature=0.9",
+        "policy.generation.top_k=17",
+        "policy.generation.top_p=0.85",
+        "policy.generation.mcore_generation_config.generation_adapter_config.seed=101",
+        "policy.generation.mcore_generation_config.generation_adapter_config.seed_stride=11",
+    ):
+        assert override in gdpo
+
+    rollout = [command for command in commands if command[:1] == ["env"] and "--prompt-file" in command]
+    assert len(rollout) == 8
+    for rank, command in enumerate(rollout):
+        assert command[command.index("--max-new-tokens") + 1] == "5800"
+        assert command[command.index("--temperature") + 1] == "0.9"
+        assert command[command.index("--top-k") + 1] == "17"
+        assert command[command.index("--top-p") + 1] == "0.85"
+        assert command[command.index("--seed") + 1] == str(7 + rank * 11)
+    assert "phix174_prompt4-8-16-24_temp0.9.n1000.fasta" in log
+
+
+def test_existing_sampling_selection_is_reused(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    canonical = result_root / "calibration/sampling-selection.yaml"
+    _write_sampling_selection(canonical)
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "using existing sampling selection and skipping the fresh-calibration default check" in log
+    assert "policy.generation.temperature=0.9" in log
+
+
+def test_invalid_override_preserves_selection(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    canonical = result_root / "calibration/sampling-selection.yaml"
+    expected = _write_sampling_selection(canonical)
+    invalid = tmp_path / "invalid.yaml"
+    invalid.write_text("temperature: 0.7\n")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--result-root",
+            str(result_root),
+            "--sampling-selection",
+            str(invalid),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert "Invalid sampling selection" in completed.stderr
+    assert canonical.read_text() == expected
+
+
 def test_substage_resume(tmp_path: Path) -> None:
     result_root = tmp_path / "result"
     stage_root = result_root / "stages"
@@ -260,7 +387,7 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: calibration generation" not in log
     assert "substage 30-calibration-scoring already complete" in log
     assert "monitor: calibration scoring" not in log
-    assert "verify fresh calibration supports temperature 1.0 and prefixes 16/24" in log
+    assert "verify fresh calibration supports the bundled default" in log
     assert "substage 40-rl already complete" in log
     assert "monitor: RL environment control" not in log
     assert "substage 50-rollout already complete" in log

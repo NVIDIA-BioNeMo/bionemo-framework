@@ -52,6 +52,7 @@
         "It diagnoses runtime, denominator, proposal distribution, and proxy behavior and may use calibrated shaping without changing the biological endpoint.",
         "Required hard exclusions remain independent of online partial credit.",
         "The host classifier remains one calibrated signal and is not treated as proof of viability or therapeutic safety.",
+        "If the host classifier is learned or stacked, it uses deployment-matched out-of-fold predictions and tests the RL-selected high-score tail, policy-candidate shift, and model or seed disagreement.",
         "Focused controls and an installed-runtime smoke verify each implemented component."
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
