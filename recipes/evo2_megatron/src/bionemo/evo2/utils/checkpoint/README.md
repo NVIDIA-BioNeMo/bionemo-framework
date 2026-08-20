@@ -210,9 +210,9 @@ evo2_export_mbridge_to_vortex \
 After training, MBridge checkpoints include optimizer state (moments,
 scheduler, etc.) which can significantly increase checkpoint size. The
 `evo2_remove_optimizer.py` utility strips this state, producing a smaller
-checkpoint suitable for distribution or inference. Note that this utility
-currently needs updating to work with Megatron Bridge checkpoints
-(see the `FIXME` in the source).
+checkpoint suitable for distribution or inference. Its historical default also
+omits serialized model-object shards; pass `--preserve-model-object-state` when a
+native MBridge consumer requires objects such as Transformer Engine `_extra_state`.
 
 ## Savanna training checkpoint utilities
 

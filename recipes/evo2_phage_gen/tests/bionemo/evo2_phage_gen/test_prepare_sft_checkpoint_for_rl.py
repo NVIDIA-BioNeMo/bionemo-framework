@@ -66,10 +66,10 @@ def test_prepare_builds_reusable_rl_checkpoint(tmp_path: Path, monkeypatch) -> N
     source_root = tmp_path / "source"
     source_iteration = _write_source(source_root)
     output = tmp_path / "sft-checkpoint"
-    calls: list[tuple[Path, Path]] = []
+    calls: list[tuple[Path, Path, bool]] = []
 
-    def fake_remove_optimizer(source: Path, destination: Path) -> Path:
-        calls.append((source, destination))
+    def fake_remove_optimizer(source: Path, destination: Path, *, preserve_model_object_state: bool = False) -> Path:
+        calls.append((source, destination, preserve_model_object_state))
         target = destination / source.name
         shutil.copytree(source, target)
         (destination / "latest_checkpointed_iteration.txt").write_text("5200\n")
@@ -83,6 +83,7 @@ def test_prepare_builds_reusable_rl_checkpoint(tmp_path: Path, monkeypatch) -> N
     assert prepared == output / "iter_0005200"
     assert len(calls) == 1
     assert calls[0][0] == source_iteration.resolve()
+    assert calls[0][2] is True
     assert (prepared / "__0_0.distcp").read_bytes() == b"source checkpoint payload"
     assert not (prepared / "train_state.pt").exists()
     assert not (output / "latest_train_state.pt").exists()
@@ -116,7 +117,7 @@ def test_existing_prepared_checkpoint_rejects_changed_source(tmp_path: Path, mon
     source_iteration = _write_source(source_root)
     output = tmp_path / "sft-checkpoint"
 
-    def fake_remove_optimizer(source: Path, destination: Path) -> Path:
+    def fake_remove_optimizer(source: Path, destination: Path, *, preserve_model_object_state: bool = False) -> Path:
         shutil.copytree(source, destination / source.name)
         return destination
 
@@ -130,3 +131,33 @@ def test_existing_prepared_checkpoint_rejects_changed_source(tmp_path: Path, mon
         assert "does not match the selected source checkpoint" in str(error)
     else:
         raise AssertionError("changed source checkpoint reused a stale prepared checkpoint")
+
+
+def test_schema_one_preparation_is_rebuilt(tmp_path: Path, monkeypatch) -> None:
+    """A rerun replaces payloads made before model object state was preserved."""
+    source_root = tmp_path / "source"
+    _write_source(source_root)
+    output = tmp_path / "sft-checkpoint"
+    calls = 0
+
+    def fake_remove_optimizer(source: Path, destination: Path, *, preserve_model_object_state: bool = False) -> Path:
+        nonlocal calls
+        calls += 1
+        shutil.copytree(source, destination / source.name)
+        return destination
+
+    monkeypatch.setattr(prepare_sft_checkpoint_for_rl, "remove_optimizer", fake_remove_optimizer)
+    prepare_sft_checkpoint_for_rl.prepare_sft_checkpoint_for_rl(source_root, output)
+    legacy_manifest_path = output / "preparation-manifest.json"
+    legacy_manifest = json.loads(legacy_manifest_path.read_text())
+    legacy_manifest["schema_version"] = 1
+    legacy_manifest.pop("model_object_state_preserved", None)
+    legacy_manifest_path.write_text(json.dumps(legacy_manifest))
+
+    prepared = prepare_sft_checkpoint_for_rl.prepare_sft_checkpoint_for_rl(source_root, output)
+
+    assert calls == 2
+    assert prepared == output / "iter_0005200"
+    current_manifest = json.loads(legacy_manifest_path.read_text())
+    assert current_manifest["schema_version"] == 2
+    assert current_manifest["model_object_state_preserved"] is True

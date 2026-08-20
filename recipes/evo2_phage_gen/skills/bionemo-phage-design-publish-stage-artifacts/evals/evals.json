@@ -34,6 +34,7 @@
       "assertions": [
         "The aws s3 sync source is RESULT_ROOT/rl/sft-checkpoint rather than the raw full-state SFT checkpoint tree.",
         "The synchronized payload includes preparation-manifest.json and the manifest-recorded direct iter_* checkpoint.",
+        "Before syncing, preparation-manifest.json has schema_version 2 and model_object_state_preserved true; a schema-1 preparation is regenerated rather than published.",
         "The raw SFT optimizer and training state is excluded unless exact SFT-training resume backup was explicitly requested.",
         "It verifies the expected remote objects and records the destination, contents, exclusions, and transfer result in RUNLOG.md."
       ],

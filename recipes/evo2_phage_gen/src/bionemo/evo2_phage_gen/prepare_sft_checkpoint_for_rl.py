@@ -44,6 +44,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+PREPARATION_SCHEMA_VERSION = 2
 MODEL_RUNTIME_FIELDS = (
     "no_sync_func",
     "grad_sync_func",
@@ -57,11 +58,20 @@ STRIPPED_DCP_KEY_PREFIXES = ("optimizer.", "opt_param_scheduler.", "rng_state")
 _ITERATION_RE = re.compile(r"^iter_(\d+)$")
 
 
-def remove_optimizer(source: Path, destination: Path) -> Path:
+def remove_optimizer(
+    source: Path,
+    destination: Path,
+    *,
+    preserve_model_object_state: bool = False,
+) -> Path:
     """Load the heavyweight DCP rewrite utility only when preparation starts."""
     from bionemo.common.checkpoint.remove_optimizer import remove_optimizer as rewrite_checkpoint
 
-    return rewrite_checkpoint(source, destination)
+    return rewrite_checkpoint(
+        source,
+        destination,
+        preserve_model_object_state=preserve_model_object_state,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -138,13 +148,12 @@ def _load_manifest(path: Path) -> Mapping[str, Any]:
     return manifest
 
 
-def _reuse_existing(source: Path, output: Path, source_facts: Mapping[str, Any]) -> Path:
+def _reuse_existing(source: Path, output: Path, source_facts: Mapping[str, Any]) -> Path | None:
     manifest_path = output / "preparation-manifest.json"
     manifest = _load_manifest(manifest_path)
     expected_checkpoint = (output / source.name).resolve()
-    matches_source = all(
+    source_matches = all(
         (
-            manifest.get("schema_version") == 1,
             manifest.get("state") == "succeeded",
             manifest.get("source_sft_checkpoint") == str(source),
             manifest.get("source_run_config_sha256") == source_facts["run_config_sha256"],
@@ -152,6 +161,20 @@ def _reuse_existing(source: Path, output: Path, source_facts: Mapping[str, Any])
             manifest.get("source_payload_file_count") == source_facts["payload_file_count"],
             manifest.get("source_payload_bytes") == source_facts["payload_bytes"],
             manifest.get("prepared_sft_checkpoint") == str(expected_checkpoint),
+        )
+    )
+    if manifest.get("schema_version") == 1 and source_matches:
+        logger.warning(
+            "Replacing schema-1 SFT checkpoint preparation at %s because it may omit serialized model object state",
+            output,
+        )
+        return None
+
+    matches_source = all(
+        (
+            manifest.get("schema_version") == PREPARATION_SCHEMA_VERSION,
+            manifest.get("model_object_state_preserved") is True,
+            source_matches,
         )
     )
     if not matches_source:
@@ -178,6 +201,22 @@ def _reuse_existing(source: Path, output: Path, source_facts: Mapping[str, Any])
     return expected_checkpoint
 
 
+def _install_prepared_output(candidate: Path, output: Path, staging: Path, replace_existing: bool) -> None:
+    """Install a completed preparation, atomically replacing a recognized legacy output."""
+    if not replace_existing:
+        os.replace(candidate, output)
+        return
+
+    previous = staging / "schema-1-sft-checkpoint"
+    os.replace(output, previous)
+    try:
+        os.replace(candidate, output)
+    except BaseException:
+        os.replace(previous, output)
+        raise
+    shutil.rmtree(previous)
+
+
 def prepare_sft_checkpoint_for_rl(source_checkpoint: Path, output_dir: Path) -> Path:
     """Create or reuse an RL-ready copy of an SFT checkpoint.
 
@@ -197,14 +236,18 @@ def prepare_sft_checkpoint_for_rl(source_checkpoint: Path, output_dir: Path) -> 
         "payload_file_count": source_file_count,
         "payload_bytes": source_bytes,
     }
+    replace_existing = False
     if output.exists():
-        return _reuse_existing(source, output, source_facts)
+        reused = _reuse_existing(source, output, source_facts)
+        if reused is not None:
+            return reused
+        replace_existing = True
 
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
     candidate = staging / "sft-checkpoint"
     try:
-        remove_optimizer(source, candidate)
+        remove_optimizer(source, candidate, preserve_model_object_state=True)
         prepared = candidate / source.name
         for training_state in (prepared / "train_state.pt", candidate / "latest_train_state.pt"):
             training_state.unlink(missing_ok=True)
@@ -223,13 +266,14 @@ def prepare_sft_checkpoint_for_rl(source_checkpoint: Path, output_dir: Path) -> 
         payload_file_count, payload_bytes = _tree_stats(prepared)
         final_checkpoint = (output / source.name).resolve()
         manifest = {
-            "schema_version": 1,
+            "schema_version": PREPARATION_SCHEMA_VERSION,
             "state": "succeeded",
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "source_sft_checkpoint": str(source),
             "prepared_sft_checkpoint": str(final_checkpoint),
             "copy_mode": "model-only-dcp-rewrite",
             "source_sft_checkpoint_tree_unchanged": True,
+            "model_object_state_preserved": True,
             "payload_file_count": payload_file_count,
             "payload_bytes": payload_bytes,
             "source_payload_file_count": source_file_count,
@@ -243,7 +287,7 @@ def prepare_sft_checkpoint_for_rl(source_checkpoint: Path, output_dir: Path) -> 
             "omitted_training_state_files": ["iter_*/train_state.pt", "latest_train_state.pt"],
         }
         (candidate / "preparation-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        os.replace(candidate, output)
+        _install_prepared_output(candidate, output, staging, replace_existing)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

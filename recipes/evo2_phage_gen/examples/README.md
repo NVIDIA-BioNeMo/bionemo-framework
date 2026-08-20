@@ -175,7 +175,9 @@ removes `train_state.pt`, and nulls process-local model callbacks and timers in 
 `rl/sft-checkpoint/preparation-manifest.json`; the script then uses the manifest's direct
 `iter_*` path for RL readiness, policy initialization, and the fixed SFT KL anchor. Rerunning the
 same top-level command validates and reuses a matching prepared checkpoint. An existing but
-mismatched or incomplete prepared checkpoint stops for review rather than being overwritten.
+mismatched or incomplete prepared checkpoint stops for review rather than being overwritten. A
+matching schema-1 preparation is rebuilt atomically because that older reducer could omit
+serialized Transformer Engine model state required by strict checkpoint loading.
 
 PhiX174 reference runs through the exact configured RL environment and every enabled external,
 diversity, and safety measurement must report support. The pilot then checks training and checkpoint

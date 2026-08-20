@@ -121,10 +121,12 @@ example stops if the raw `lm loss` metric is absent or cannot be matched; Tensor
 
 At the start of stage 40, `evo2_phage_prepare_sft_checkpoint_for_rl` rewrites the selected Megatron
 Distributed Checkpoint below `rl/sft-checkpoint/`. The prepared copy retains model weights,
-tokenizer/configuration, and checkpoint metadata; removes optimizer, scheduler, RNG, and training
-state; and nulls serialized model callbacks and timers that belong to the SFT process. Its
+serialized Transformer Engine model object state, tokenizer/configuration, and checkpoint
+metadata; removes optimizer, scheduler, RNG, and training state; and nulls serialized model
+callbacks and timers that belong to the SFT process. Its
 `preparation-manifest.json` records the source and resulting checkpoint, hashes, fields sanitized,
-and size reduction. RL readiness and both GDPO launches use the direct `iter_*` path recorded in
+model object-state preservation, and size reduction. A matching schema-1 preparation is rebuilt
+atomically on rerun. RL readiness and both GDPO launches use the direct `iter_*` path recorded in
 that manifest. The original SFT checkpoint remains unchanged for an exact SFT resume, held-out
 evaluation, and final likelihood scoring.
 

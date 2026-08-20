@@ -194,6 +194,10 @@ scheduler state from the DCP files, and copies model weights, tokenizer, and
 config files to the destination. The resulting checkpoint is directly usable
 with `--finetune-ckpt-dir` or the export tools.
 
+By default, the historical weights-only behavior also omits serialized model-object
+shards. Pass `--preserve-model-object-state` when a downstream native MBridge loader
+needs objects such as Transformer Engine `_extra_state`.
+
 ## Fine-tuning from an existing checkpoint
 
 ### From NeMo2 checkpoints (NGC)

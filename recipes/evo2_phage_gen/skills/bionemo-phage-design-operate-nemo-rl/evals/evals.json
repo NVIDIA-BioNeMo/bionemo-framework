@@ -83,6 +83,19 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-007-schema-one-checkpoint",
+      "prompt": "The PhiX174 GDPO pilot fails strict checkpoint loading with `Missing key in checkpoint state_dict: decoder.final_norm._extra_state/shard_0_1`. The prepared RL checkpoint has a schema-1 preparation manifest. Resume the run without repeating SFT or calibration.",
+      "expected_output": "Regenerate the derived model-only checkpoint with its serialized model object state and resume from stage 40.",
+      "assertions": [
+        "The response identifies that the schema-1 reducer omitted or changed DCP byte/object model state such as Transformer Engine _extra_state; it does not blame an SFT/NeMo-RL version change.",
+        "It reruns the same top-level command and relies on preparation to atomically replace the matching schema-1 derived checkpoint with schema version 2.",
+        "The replacement retains non-optimizer object shards and records model_object_state_preserved true while leaving the full-state source SFT checkpoint unchanged.",
+        "It does not weaken strict checkpoint loading, strip more runtime state in NeMo-RL workers, or repeat completed SFT and calibration."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }
