@@ -103,6 +103,7 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert generation_config["top_k"] is None
     assert generation_config["top_p"] == 1.0
     assert generation_batch_size == 1
+    assert config["policy"]["offload_optimizer_for_logprob"] is False
     assert mcore_generation_config["max_requests"] % tensor_model_parallel_size == 0
     assert mcore_generation_config["max_requests"] >= generation_batch_size
     assert mcore_generation_config["prompt_batch_size"] == generation_batch_size

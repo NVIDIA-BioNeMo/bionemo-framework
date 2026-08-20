@@ -93,6 +93,7 @@ policy:
   train_micro_batch_size: 1
   generation_batch_size: 1
   logprob_batch_size: 1
+  offload_optimizer_for_logprob: false
   max_total_sequence_length: 10240
   precision: bfloat16
   dtensor_cfg:
