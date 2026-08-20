@@ -297,6 +297,27 @@ def test_rl_readiness_checks_selected_checkpoint_override(tmp_path):
     assert missing_required == []
 
 
+def test_rl_readiness_checks_prompt_data_override(tmp_path):
+    """Readiness should inspect the generated prompt bank passed to the launch command."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    config["data"]["train"]["data_path"] = str(tmp_path / "unused-template-prompts.jsonl")
+    config_path.write_text(yaml.safe_dump(config))
+    generated_prompts = tmp_path / "result" / "rl" / "train.jsonl"
+    generated_prompts.parent.mkdir(parents=True)
+    generated_prompts.write_text('{"messages": []}\n')
+
+    checks = check_rl_readiness(
+        config_path,
+        expected_gpus=2,
+        prompt_data_override=generated_prompts,
+    )
+    prompt_check = {check.name: check for check in checks}["prompt_data"]
+
+    assert prompt_check.ok
+    assert prompt_check.detail == str(generated_prompts)
+
+
 def test_rl_readiness_resolves_inherited_config_values(tmp_path):
     """Readiness should validate the same inherited config that NeMo-RL launches."""
     base_config = _write_minimal_config(tmp_path, include_adapter=True)

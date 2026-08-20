@@ -290,6 +290,7 @@ def _config_checks(
     require_evo2_adapter: bool,
     expected_gpus: int | None,
     checkpoint_override: Path | None = None,
+    prompt_data_override: Path | None = None,
     gpus_per_node: int | None = None,
 ) -> list[RLReadinessCheck]:
     """Check files and settings referenced by the GRPO config."""
@@ -304,6 +305,11 @@ def _config_checks(
         return checks
 
     checkpoint_path = checkpoint_override or _nested_get(config, ("checkpointing", "pretrained_checkpoint", "path"))
+    prompt_data_path = (
+        prompt_data_override
+        if prompt_data_override is not None
+        else _nested_get(config, ("data", "train", "data_path"))
+    )
     checks.extend(
         [
             _path_check(
@@ -313,7 +319,7 @@ def _config_checks(
             ),
             _path_check("pretrained_checkpoint", checkpoint_path, required=True),
             _path_check("tokenizer", _nested_get(config, ("policy", "tokenizer", "name")), required=True),
-            _path_check("prompt_data", _nested_get(config, ("data", "train", "data_path")), required=True),
+            _path_check("prompt_data", prompt_data_path, required=True),
         ]
     )
     checks.extend(
@@ -418,6 +424,7 @@ def check_rl_readiness(
     require_evo2_adapter: bool = True,
     expected_gpus: int | None = None,
     checkpoint_override: Path | None = None,
+    prompt_data_override: Path | None = None,
     gpus_per_node: int | None = None,
 ) -> list[RLReadinessCheck]:
     """Check whether the phage GRPO scaffold is ready to launch."""
@@ -428,6 +435,7 @@ def check_rl_readiness(
             require_evo2_adapter=require_evo2_adapter,
             expected_gpus=expected_gpus,
             checkpoint_override=checkpoint_override,
+            prompt_data_override=prompt_data_override,
             gpus_per_node=gpus_per_node,
         ),
     ]
@@ -625,6 +633,11 @@ def main() -> None:
         help="Check this selected SFT checkpoint instead of the template checkpoint path",
     )
     parser.add_argument(
+        "--prompt-data",
+        type=Path,
+        help="Check this generated RL training prompt bank instead of the template prompt path",
+    )
+    parser.add_argument(
         "--allow-template-gaps",
         action="store_true",
         help="Report the known Evo2 policy-adapter gap as optional instead of failing",
@@ -641,6 +654,7 @@ def main() -> None:
         args.config,
         require_evo2_adapter=not args.allow_template_gaps,
         checkpoint_override=args.checkpoint,
+        prompt_data_override=args.prompt_data,
         gpus_per_node=args.gpus_per_node,
     )
     missing_required = [check for check in checks if check.required and not check.ok]

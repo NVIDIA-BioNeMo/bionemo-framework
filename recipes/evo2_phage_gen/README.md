@@ -160,7 +160,9 @@ The example README also documents narrower markers for accepting completed SFT, 
 work without skipping checkpoint selection and downstream checks. It also documents how
 `calibration/sampling-selection.yaml` is selected from calibration evidence, how an existing file
 resumes the stopped stage, and how `--sampling-selection PATH` copies an explicit operator override
-on either the first run or a rerun.
+on either the first run or a rerun. Stage 30 materializes the selected run's RL prompt banks below
+the result root; stage 40 checks the generated training bank and passes both generated paths to
+training automatically.
 
 Read the [example README](examples/README.md) for scientific review stops, monitoring behavior,
 safety details, and the result layout. A scratch clone or worktree per

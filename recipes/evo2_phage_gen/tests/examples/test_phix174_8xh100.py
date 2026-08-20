@@ -235,6 +235,7 @@ def test_dry_run(tmp_path: Path) -> None:
     )
     assert rl_control[rl_control.index("--control-fasta") + 1].endswith("NC_001422.1.fna")
     assert rl_control[rl_control.index("--control-dir") + 1].endswith("/rl/environment-control")
+    assert rl_control[rl_control.index("--prompt-data") + 1] == str(result_root / "rl/train.jsonl")
     assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
 
 

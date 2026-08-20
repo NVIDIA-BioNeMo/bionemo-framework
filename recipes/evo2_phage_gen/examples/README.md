@@ -62,6 +62,12 @@ uses it and skips the hard check against the bundled historical choice. Without 
 script writes the bundled default only when fresh calibration supports it; otherwise it stops for
 review without repeating completed calibration generation or scoring.
 
+After a selection is available, stage 30 creates `${RESULT_ROOT}/rl/train.jsonl` and
+`${RESULT_ROOT}/rl/validation.jsonl`. Stage 40 automatically checks the run-specific training bank
+and passes both files to training; do not create the template `data/phix174_rl_*` files manually.
+A rerun with the same result root recreates either prompt bank if needed while reusing completed
+calibration work.
+
 For the specific post-calibration stop caused by an unsupported historical choice, either accept
 the historical settings explicitly:
 
