@@ -15,7 +15,7 @@ dependencies = [
     "lightning",
     "nemo_toolkit[lightning]==2.4.0",
     "fiddle",
-    "megatron-core",
+    "megatron-core==0.17.1",
     "pytest",
     "requests",
     "hydra-core",
