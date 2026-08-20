@@ -12,7 +12,8 @@
         "The response uses a public NGC checkpoint when available, records provider, version, and format, and uses a public Arc conversion only as a tested fallback.",
         "The response treats 12,000 steps as a historical starting hypothesis, recalibrates a ceiling from usable corpus and effective batch, schedules enough comparable validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint.",
         "The response treats local training and validation metrics as sufficient; optional remote reporting does not gate the scientific run or checkpoint decision.",
-        "The selected-checkpoint handoff includes verified training bytes or tokens, markers, orientation, tokenizer, BOS/EOS, wrappers, padding, and masking for RL sampling calibration."
+        "The selected-checkpoint review includes verified training bytes or tokens, markers, orientation, tokenizer, BOS/EOS, wrappers, padding, and masking for RL sampling calibration.",
+        "Before NeMo-RL, it creates a separate model-only SFT checkpoint that strips optimizer, scheduler, RNG, and training state, sanitizes runtime callbacks and timers, records provenance, and leaves the resumable SFT source unchanged."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null

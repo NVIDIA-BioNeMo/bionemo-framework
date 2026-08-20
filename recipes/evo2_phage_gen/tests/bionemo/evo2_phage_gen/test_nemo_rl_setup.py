@@ -50,7 +50,7 @@ def test_patch_owns_packaging_changes(tmp_path: Path) -> None:
     assert 'requires-python = ">=3.10"' in pyproject
 
 
-def test_patch_uses_bridge_checkpoint_compatibility_loader(tmp_path: Path) -> None:
+def test_patch_uses_standard_bridge_config_loader(tmp_path: Path) -> None:
     source = _cached_source()
     if source is None:
         pytest.skip("configured NeMo-RL source is not cached")
@@ -58,10 +58,11 @@ def test_patch_uses_bridge_checkpoint_compatibility_loader(tmp_path: Path) -> No
     nemo_rl_setup.apply_source_patch(build)
     setup_source = (build / "nemo_rl" / "models" / "megatron" / "setup.py").read_text()
 
-    assert (
-        "cfg_from_pretrained = ConfigContainer.from_dict(\n"
-        "                read_run_config(pretrained_run_config), mode=InstantiationMode.STRICT"
-    ) in setup_source
+    assert "cfg_from_pretrained = ConfigContainer.from_yaml(" in setup_source
+    assert "_apply_target_allowlist_prefixes(config)" in setup_source
+    assert "load_model_config(pretrained_path)" not in setup_source
+    assert "_reset_model_runtime_state" not in setup_source
+    assert "read_run_config(pretrained_run_config)" not in setup_source
 
 
 def test_setup_patches_before_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

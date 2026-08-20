@@ -132,8 +132,8 @@ Create a narrow marker manually only when that substage's outputs are complete e
 ordinary successful runs create it automatically.
 
 The six dependency-ordered stages are input/control preparation, SFT safety and splitting, SFT
-training and selection, sampling calibration, GDPO pilot/training, and final generation, SFT
-likelihood scoring, and screening.
+training and selection, sampling calibration, model-only SFT-to-RL checkpoint preparation plus
+GDPO pilot/training, and final generation, SFT likelihood scoring, and screening.
 Calibration uses `NUM_GPUS` in parallel; SFT, GDPO, rollout generation, and likelihood scoring use
 the same configured count. On the reference node, where `nproc` reports 160 logical CPUs, the large safety
 scans use 128-record batches, 32 parallel ORF predictions, 32 threads for AMRFinder/DIAMOND, and 64
@@ -156,11 +156,27 @@ The previous SFT-corpus audit observed 14,465 PASS and one lysogeny-review INDET
 
 SFT selection uses optimizer-step validation. A larger global batch can complete an epoch before
 enough optimizer updates exist to show overfitting, so a best value at the run boundary stops for
-more follow-up even if that requires several epochs. Before the generated GDPO pilot, the known
+more follow-up even if that requires several epochs.
 The SFT command keeps the best three validation-loss checkpoints plus the latest resume point.
 `validation_metrics.json` stores all scalar validation measurements, and `checkpoint_metrics.json`
 stores each save-time metric assignment and a `best_checkpoint` relative directory pointer. The
 example requires the raw `lm loss` key; the corresponding TensorBoard tag is `lm loss validation`.
+Before the GDPO pilot, stage 40 runs:
+
+```bash
+evo2_phage_prepare_sft_checkpoint_for_rl \
+  --source-checkpoint results/phix174-8xh100/sft/train/evo2/checkpoints/iter_NNNNNNN \
+  --output-dir results/phix174-8xh100/rl/sft-checkpoint
+```
+
+The command rewrites the distributed checkpoint without optimizer, scheduler, or RNG state,
+removes `train_state.pt`, and nulls process-local model callbacks and timers in the copied
+`run_config.yaml`. It leaves the selected SFT checkpoint unchanged and writes
+`rl/sft-checkpoint/preparation-manifest.json`; the script then uses the manifest's direct
+`iter_*` path for RL readiness, policy initialization, and the fixed SFT KL anchor. Rerunning the
+same top-level command validates and reuses a matching prepared checkpoint. An existing but
+mismatched or incomplete prepared checkpoint stops for review rather than being overwritten.
+
 PhiX174 reference runs through the exact configured RL environment and every enabled external,
 diversity, and safety measurement must report support. The pilot then checks training and checkpoint
 behavior; rewards stay in `[0, 1]`, baseline/chance means `0`, missing or failed measurements cannot

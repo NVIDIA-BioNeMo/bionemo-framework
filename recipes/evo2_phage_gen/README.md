@@ -104,8 +104,9 @@ The script permits other GPU models with a tuning warning; see the
 
 The top-level command downloads the public corpus, current external tools and databases, reruns the
 safety controls, excludes non-PASS SFT inputs, builds leakage-controlled SFT splits, trains and
-selects SFT, calibrates sampling, verifies every enabled RL measurement on the PhiX174 reference,
-runs a full-shape pilot and GDPO on the configured GPUs, selects RL from comparable validation,
+selects SFT, calibrates sampling, prepares a model-only SFT checkpoint for RL, verifies every
+enabled RL measurement on the PhiX174 reference, runs a full-shape pilot and GDPO on the
+configured GPUs, selects RL from comparable validation,
 generates exactly 1,000 whole genomes, scores all of them with the selected pre-RL SFT, and runs the
 current sequence-safety, target Arc, and filter-7 diagnostic screens. The GDPO config includes AMR,
 toxin, and lysogeny objectives and uses the selected SFT checkpoint as its KL anchor. On the
@@ -117,6 +118,15 @@ validation-loss checkpoints plus the latest resume checkpoint. Its checkpoint di
 `validation_metrics.json` with every scalar validation metric and `checkpoint_metrics.json` with
 the save-time validation assignment plus a `best_checkpoint` relative directory pointer. This
 example stops if the raw `lm loss` metric is absent or cannot be matched; TensorBoard exposes the same value as `lm loss validation`.
+
+At the start of stage 40, `evo2_phage_prepare_sft_checkpoint_for_rl` rewrites the selected Megatron
+Distributed Checkpoint below `rl/sft-checkpoint/`. The prepared copy retains model weights,
+tokenizer/configuration, and checkpoint metadata; removes optimizer, scheduler, RNG, and training
+state; and nulls serialized model callbacks and timers that belong to the SFT process. Its
+`preparation-manifest.json` records the source and resulting checkpoint, hashes, fields sanitized,
+and size reduction. RL readiness and both GDPO launches use the direct `iter_*` path recorded in
+that manifest. The original SFT checkpoint remains unchanged for an exact SFT resume, held-out
+evaluation, and final likelihood scoring.
 
 The example records commands and periodic liveness observations in `RUNLOG.md` without copying the
 environment. The realized example defaults to PHROGs v4 from the Pharokka v1.11.0 Zenodo
@@ -161,8 +171,12 @@ work without skipping checkpoint selection and downstream checks. It also docume
 `calibration/sampling-selection.yaml` is selected from calibration evidence, how an existing file
 resumes the stopped stage, and how `--sampling-selection PATH` copies an explicit operator override
 on either the first run or a rerun. Stage 30 materializes the selected run's RL prompt banks below
-the result root; stage 40 checks the generated training bank and passes both generated paths to
-training automatically.
+the result root; stage 40 creates or validates the idempotent model-only SFT checkpoint prepared
+for RL, checks the generated training bank, and passes that checkpoint plus both generated prompt
+paths to training automatically. When publishing the SFT input used by RL, synchronize
+`rl/sft-checkpoint/`
+rather than the much larger full-state SFT checkpoint unless exact SFT continuation was explicitly
+requested.
 
 Read the [example README](examples/README.md) for scientific review stops, monitoring behavior,
 safety details, and the result layout. A scratch clone or worktree per

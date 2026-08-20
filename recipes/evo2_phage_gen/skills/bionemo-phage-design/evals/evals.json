@@ -23,6 +23,7 @@
         "The response collects and validates full genomes, uses cluster-held-out splits, and keeps the target prompting neighborhood in training when required.",
         "It sizes context and SFT duration from the actual corpus and selects checkpoints from validation rather than copying a paper step.",
         "It calibrates sampling from the selected SFT serialization and keeps calibration, RL validation, and final rollout separate.",
+        "Before RL, it prepares and records a model-only, optimizer-free, runtime-sanitized SFT checkpoint while retaining the original full-state SFT checkpoint for SFT resume.",
         "It uses a worker and monitoring facility that survives the chat process and can be reattached by job identifier.",
         "It respects stage dependencies while overlapping independent evidence, preparation, or objective work when resources and write scopes permit.",
         "It runs every enabled reward and QC component with positive and failure controls and records useful progress in RUNLOG.md.",

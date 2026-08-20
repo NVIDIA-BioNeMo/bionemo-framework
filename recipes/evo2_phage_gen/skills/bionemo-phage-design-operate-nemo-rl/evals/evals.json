@@ -78,7 +78,8 @@
         "The response identifies a mismatch between the template config path and the generated result-root prompt bank.",
         "Readiness and training use the same result-root train.jsonl path, while validation uses the matching result-root validation.jsonl.",
         "It does not copy a run-specific prompt bank into the shared recipe data path.",
-        "It reruns the same top-level command with the same result root so missing prompt banks are recreated and completed calibration is reused."
+        "It reruns the same top-level command with the same result root so missing prompt banks are recreated and completed calibration is reused.",
+        "Before readiness, the rerun creates or reuses the optimizer-free, runtime-sanitized SFT checkpoint prepared for RL and uses its direct iter_* path instead of the raw full-state SFT checkpoint."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null

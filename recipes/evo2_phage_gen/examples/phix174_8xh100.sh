@@ -522,19 +522,37 @@ PY
 
 stage_40() {
   local selected rl="${RESULT_ROOT}/rl" control="${RESULT_ROOT}/rl/environment-control" chosen
+  local prepared_sft_root="${RESULT_ROOT}/rl/sft-checkpoint" rl_checkpoint
   load_sampling_selection
   if [[ -f "${STAGE_DIR}/40-rl.done" ]]; then
     note 'substage 40-rl already complete'
   else
     selected="$(read_state selected-sft)"
+    # Use the editable source module so a post-calibration rerun works before console-script metadata is refreshed.
+    run python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl \
+      --source-checkpoint "${selected}" --output-dir "${prepared_sft_root}"
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      rl_checkpoint='<rl-sft-checkpoint>'
+    else
+      rl_checkpoint="$(python - "${prepared_sft_root}/preparation-manifest.json" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+if manifest.get("state") != "succeeded":
+    raise SystemExit(f"SFT checkpoint preparation for RL is not complete: {sys.argv[1]}")
+print(manifest["prepared_sft_checkpoint"])
+PY
+)"
+    fi
+    state rl-sft-checkpoint "${rl_checkpoint}"
+    note "RL will use the prepared optimizer-free, runtime-sanitized SFT checkpoint: ${rl_checkpoint}"
     export NEMO_RL_RAY_NUM_CPUS="${NUM_CPUS}"
     note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
     run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
     monitored 'RL environment control' "${control}/runner.log" \
-      evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${selected}" \
+      evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422_1.fna --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${selected}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
     run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
     check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
@@ -735,7 +753,7 @@ PY
     --model-checkpoint "${selected_sft}"
 }
 
-printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 pilot/train/monitor/select GDPO' '50 generate, SFT-score, and screen 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
+printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/train/monitor/select GDPO' '50 generate, SFT-score, and screen 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
 for id in 00 10 20 30 40 50; do
   ((10#${id} < 10#${RESUME_FROM})) && continue
   [[ "${PREPARE_ONLY}" == "1" && "${id}" != 00 ]] && continue

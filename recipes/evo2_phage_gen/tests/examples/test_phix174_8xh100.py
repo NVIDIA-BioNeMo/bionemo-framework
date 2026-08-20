@@ -125,7 +125,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "10 safety-screen and prepare SFT",
         "20 train/select/evaluate SFT",
         "30 calibrate sampling",
-        "40 pilot/train/monitor/select GDPO",
+        "40 prepare SFT checkpoint for RL; pilot/train/monitor/select GDPO",
         "50 generate, SFT-score, and screen 1,000 genomes",
     ]
     settings = json.loads((result_root / "settings.json").read_text())
@@ -144,6 +144,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "evo2_phage_prepare_sft_split",
         "train_evo2",
         "run_sampling_calibration_scoring.sh",
+        "bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl",
         "evo2_phage_run_gdpo",
         "predict_evo2",
         "collect-sft-likelihood",
@@ -236,7 +237,17 @@ def test_dry_run(tmp_path: Path) -> None:
     assert rl_control[rl_control.index("--control-fasta") + 1].endswith("NC_001422_1.fna")
     assert rl_control[rl_control.index("--control-dir") + 1].endswith("/rl/environment-control")
     assert rl_control[rl_control.index("--prompt-data") + 1] == str(result_root / "rl/train.jsonl")
+    assert rl_control[rl_control.index("--checkpoint") + 1] == "<rl-sft-checkpoint>"
+    preparation = log.index("command: python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl")
+    assert preparation < log.index("command: evo2_phage_check_rl")
     assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
+
+    gdpo = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_run_gdpo " in line
+    )
+    assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
 
 
 def test_sampling_selection_override(tmp_path: Path) -> None:

@@ -26,6 +26,19 @@
       ],
       "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-publish-stage-artifacts-003-s3-rl-input",
+      "prompt": "Sync the selected SFT checkpoint that initializes this phage RL run to an AWS S3 collaboration prefix. The original checkpoint is about 85 GB because it contains resumable training state, but stage 40 prepared a reduced checkpoint for RL.",
+      "expected_output": "An S3 publication plan that distributes the smaller checkpoint actually consumed by RL.",
+      "assertions": [
+        "The aws s3 sync source is RESULT_ROOT/rl/sft-checkpoint rather than the raw full-state SFT checkpoint tree.",
+        "The synchronized payload includes preparation-manifest.json and the manifest-recorded direct iter_* checkpoint.",
+        "The raw SFT optimizer and training state is excluded unless exact SFT-training resume backup was explicitly requested.",
+        "It verifies the expected remote objects and records the destination, contents, exclusions, and transfer result in RUNLOG.md."
+      ],
+      "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
+      "expected_script": null
     }
   ]
 }
