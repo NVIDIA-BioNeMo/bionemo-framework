@@ -647,15 +647,21 @@ index b0d5be4d9..6f7dca0c0 100644
  def destroy_parallel_state():
      """Safely destroy parallel state and reset async call tracking.
 
-@@ -464,6 +498,7 @@ def setup_model_config(
+@@ -464,8 +498,11 @@ def setup_model_config(
                  "directory not mounted on this node. Please check."
              )
 
 +        _apply_target_allowlist_prefixes(config)
++        from megatron.bridge.training.utils.checkpoint_utils import read_run_config
++
          try:
-             cfg_from_pretrained = ConfigContainer.from_yaml(
-                 pretrained_run_config, mode=InstantiationMode.STRICT
-@@ -950,6 +985,8 @@ def _create_megatron_config(
+-            cfg_from_pretrained = ConfigContainer.from_yaml(
+-                pretrained_run_config, mode=InstantiationMode.STRICT
++            cfg_from_pretrained = ConfigContainer.from_dict(
++                read_run_config(pretrained_run_config), mode=InstantiationMode.STRICT
+             )
+         except Exception as e:
+@@ -950,6 +987,8 @@ def _create_megatron_config(
          "overlap_param_gather": overlap_param_gather,
          "reuse_grad_buf_for_mxfp8_param_ag": reuse_grad_buf_for_mxfp8_param_ag,
      }
@@ -664,7 +670,7 @@ index b0d5be4d9..6f7dca0c0 100644
 
      return ConfigContainer(
          model=model_cfg,
-@@ -986,7 +1023,7 @@ def _create_megatron_config(
+@@ -986,7 +1025,7 @@ def _create_megatron_config(
          dataset=None,
          tokenizer=TokenizerConfig(
              tokenizer_type="HuggingFaceTokenizer",
@@ -673,7 +679,7 @@ index b0d5be4d9..6f7dca0c0 100644
          ),
      )
 
-@@ -1554,9 +1591,11 @@ def finalize_megatron_setup(
+@@ -1554,9 +1593,11 @@ def finalize_megatron_setup(
          pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
      )
 
@@ -686,7 +692,7 @@ index b0d5be4d9..6f7dca0c0 100644
          hf_tokenizer_kwargs={
              "trust_remote_code": True,
              "use_fast": True,
-@@ -1571,9 +1610,10 @@ def finalize_megatron_setup(
+@@ -1571,9 +1612,10 @@ def finalize_megatron_setup(
      )
 
      dp_size = worker_sharding_annotations.get_axis_size("data_parallel")
