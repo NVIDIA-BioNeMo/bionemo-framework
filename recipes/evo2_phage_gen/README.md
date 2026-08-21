@@ -114,6 +114,13 @@ toxin, and lysogeny objectives and uses the selected SFT checkpoint as its KL an
 reference 160-CPU allocation, large safety scans use 128-record batches and no phase exceeds 64 tool
 threads; see the [realized example](examples/README.md) for the adjustable settings.
 
+The RL train and validation banks use a recipe-owned OpenAI-format dataset that fixes their NeMo-RL
+task name to `phage_qc`, independent of result-root paths such as `rl/validation.jsonl`. Checkpoint
+selection therefore remains on the strict safety-qualified, full-QC, cluster-deduplicated pass rate
+at `val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate`; an `rl-validation/`
+metric prefix indicates the generic path-derived dataset was selected and should not be copied into
+the checkpoint metric.
+
 The realized SFT stage validates and saves every 400 optimizer steps, retaining the three lowest
 validation-loss checkpoints plus the latest resume checkpoint. Its checkpoint directory contains
 `validation_metrics.json` with every scalar validation metric and `checkpoint_metrics.json` with

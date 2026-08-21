@@ -79,6 +79,7 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     generation_config = config["policy"]["generation"]
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
     tensor_model_parallel_size = config["policy"]["megatron_cfg"]["tensor_model_parallel_size"]
+    train_data = config["data"]["train"]
 
     assert generation_config["max_new_tokens"] == config["env"]["phage_qc"]["genome_length_max"] - 4
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 0.0
@@ -110,6 +111,7 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert "evo2_batched_decode_size" not in mcore_generation_config
     assert config["logger"]["tensorboard_enabled"] is True
     assert config["logger"]["tensorboard"] == {}
+    assert train_data["dataset_name"] == "bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset"
 
 
 def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
@@ -119,6 +121,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     env_config = config["env"]["phage_qc"]
     mmseqs_config = env_config["mmseqs_cluster_diversity"]
     objectives = env_config["gdpo_objectives"]
+    validation_data = config["data"]["validation"]
 
     assert config["defaults"] == "grpo_phage_megatron.yaml"
     assert env_config["reward_output_mode"] == "gdpo"
@@ -204,6 +207,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["logger"]["wandb_enabled"] is False
     assert config["logger"]["wandb"]["name"] == "phix174-gdpo"
     assert config["cluster"] == {"gpus_per_node": 8, "num_nodes": 1}
+    assert validation_data["dataset_name"] == "bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset"
 
 
 def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():

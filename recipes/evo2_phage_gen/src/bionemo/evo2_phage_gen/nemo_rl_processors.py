@@ -19,9 +19,36 @@ from __future__ import annotations
 
 from typing import Any
 
+from nemo_rl.data.datasets.response_datasets.oai_format_dataset import OpenAIFormatDataset
 from nemo_rl.data.interfaces import DatumSpec, TaskDataSpec
 
 from bionemo.evo2_phage_gen.qc import prompt_nucleotides as _prompt_nucleotides
+
+
+class PhageOpenAIFormatDataset(OpenAIFormatDataset):
+    """Load OpenAI-format phage prompts under the stable ``phage_qc`` task.
+
+    NeMo-RL's generic OpenAI dataset derives its task name from the prompt-bank
+    path. Result-root paths such as ``rl/train.jsonl`` and
+    ``rl/validation.jsonl`` would therefore expose unrelated ``rl-train`` and
+    ``rl-validation`` metric namespaces. This recipe-owned dataset keeps train
+    and validation attached to the same phage environment and metric namespace
+    regardless of where their JSONL files are materialized.
+    """
+
+    task_name = "phage_qc"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Load prompts while preserving the recipe-owned task name."""
+        self._stable_task_name = self.task_name
+        super().__init__(*args, **kwargs)
+        self.task_name = self._stable_task_name
+
+    def format_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Format one prompt with the stable phage task name."""
+        formatted = super().format_data(data)
+        formatted["task_name"] = self._stable_task_name
+        return formatted
 
 
 def _extract_prompt(datum_dict: dict[str, Any]) -> str:

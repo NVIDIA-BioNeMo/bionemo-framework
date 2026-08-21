@@ -34,6 +34,7 @@ import yaml
 
 RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_GRPO_CONFIG = RECIPE_ROOT / "configs" / "grpo_phage_megatron.yaml"
+PHAGE_OPENAI_DATASET = "bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset"
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,41 @@ def _config_relative_path(config_path: Path, path_like: str | Path | None) -> Pa
         return None
     path = Path(path_like)
     return path if path.is_absolute() else config_path.parent / path
+
+
+def _phage_dataset_task_namespace_check(config: dict[str, Any]) -> RLReadinessCheck:
+    """Require path-independent task names for every configured phage dataset."""
+    data_config = config.get("data")
+    defaults = data_config.get("default", {}) if isinstance(data_config, dict) else {}
+    inspected: list[str] = []
+    offenders: list[str] = []
+    if isinstance(data_config, dict):
+        for split in ("train", "validation"):
+            raw_entries = data_config.get(split)
+            if raw_entries is None:
+                continue
+            entries = raw_entries if isinstance(raw_entries, list) else [raw_entries]
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    continue
+                env_name = entry.get("env_name", defaults.get("env_name"))
+                if env_name != "phage_qc":
+                    continue
+                label = f"data.{split}" if len(entries) == 1 else f"data.{split}[{index}]"
+                dataset_name = entry.get("dataset_name", defaults.get("dataset_name"))
+                inspected.append(f"{label}.dataset_name={dataset_name!r}")
+                if dataset_name != PHAGE_OPENAI_DATASET:
+                    offenders.append(f"{label}.dataset_name={dataset_name!r}")
+
+    detail = ", ".join(inspected) if inspected else "no phage_qc train or validation dataset"
+    if offenders:
+        detail = f"{', '.join(offenders)}; expected {PHAGE_OPENAI_DATASET!r}"
+    return RLReadinessCheck(
+        name="phage_dataset_task_namespace",
+        ok=bool(inspected) and not offenders,
+        required=True,
+        detail=detail,
+    )
 
 
 def _merge_config_mappings(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -369,6 +405,7 @@ def _config_checks(
             detail=f"data.train.env_name={env_name!r}",
         )
     )
+    checks.append(_phage_dataset_task_namespace_check(config))
 
     configured_gpus_value = (
         gpus_per_node if gpus_per_node is not None else _nested_get(config, ("cluster", "gpus_per_node"), 1)

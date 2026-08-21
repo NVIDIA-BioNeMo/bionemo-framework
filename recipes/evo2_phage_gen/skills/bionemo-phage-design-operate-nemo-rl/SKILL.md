@@ -16,9 +16,13 @@ Treat materialized training and validation prompt banks as run artifacts: readin
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 
 Validate the configured checkpoint-selection metric against the actual validation metric names.
-The environment hook returns bare metric keys and NeMo-RL adds the task namespace exactly once, so
-the PhiX metric resolves as `val:phage_qc/<metric>`. Timing-marker keys remain unnamespaced for
-phase reporting. A missing metric is an integration error to diagnose; do not switch to another
+The recipe's phage OpenAI-format dataset assigns both training and validation the stable task name
+`phage_qc` regardless of their result-root JSONL paths. The environment hook returns bare metric
+keys and NeMo-RL adds that task namespace exactly once, so the strict PhiX checkpoint endpoint is
+`val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate`. A logged `rl-train/` or
+`rl-validation/` prefix means the path-naming generic dataset was used; restore the recipe dataset
+rather than encoding the path into the checkpoint metric. Timing-marker keys remain unnamespaced
+for phase reporting. A missing metric is an integration error to diagnose; do not switch to another
 target environment or biological profile merely to make a key appear.
 
 Choose topology and batch settings from measured full-genome behavior. Preserve complete-genome context and the intended effective batch. Use GDPO and 99%-cluster inverse-frequency diversity for the default case study unless evidence supports another approved method.

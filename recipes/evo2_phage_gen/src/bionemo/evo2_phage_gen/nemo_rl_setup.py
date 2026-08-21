@@ -144,8 +144,11 @@ def assert_nemo_rl_runtime() -> None:
         raise RuntimeError("NeMo-RL is missing modules required by the Evo2 phage recipe")
     grpo = importlib.import_module("nemo_rl.algorithms.grpo")
     cluster = importlib.import_module("nemo_rl.distributed.virtual_cluster")
+    dataset_utils = importlib.import_module("nemo_rl.data.datasets.utils")
     if not callable(getattr(grpo, "split_environment_timing_metrics", None)):
         raise RuntimeError("NeMo-RL is missing environment timing support")
+    if not callable(getattr(dataset_utils, "resolve_external_dataset_class", None)):
+        raise RuntimeError("NeMo-RL is missing support for external recipe datasets")
     parameters = inspect.signature(cluster.init_ray).parameters
     if not {"include_dashboard", "num_cpus"}.issubset(parameters):
         raise RuntimeError("NeMo-RL is missing local Ray resource controls")

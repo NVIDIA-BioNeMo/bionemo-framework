@@ -80,7 +80,7 @@ data:
     data_path: "data/phix174_rl_train_prefix16_24.jsonl"
   shuffle: false
   validation:
-    dataset_name: "openai_format"
+    dataset_name: "bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset"
     data_path: "data/phix174_rl_validation_prefix16_24.jsonl"
     env_name: "phage_qc"
     prompt_file: null

@@ -96,6 +96,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-008-stable-metric-namespace",
+      "prompt": "PhiX174 GDPO validation finishes, then checkpointing says `Metric phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate not found in val metrics`. TensorBoard contains `validation/rl-validation/binary_safety_qualified_full_qc_cluster_deduplicated_rate`, and the validation bank lives at `RESULT_ROOT/rl/validation.jsonl`. Rename the checkpoint metric so I can resume.",
+      "expected_output": "Keep the strict phage endpoint and restore the recipe-owned stable task namespace rather than coupling checkpoint selection to a result path.",
+      "assertions": [
+        "The response identifies `rl-validation` as a task name derived from the result-root JSONL path by the generic OpenAI-format dataset.",
+        "Both training and validation use the recipe's stable phage OpenAI-format dataset so their task name is `phage_qc` regardless of prompt-bank location.",
+        "The checkpoint metric remains `val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate`.",
+        "It does not rename the checkpoint metric to an `rl-validation` path or replace the strict endpoint with mean reward.",
+        "The failed pilot can rerun from the same top-level result root without repeating completed SFT or calibration."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

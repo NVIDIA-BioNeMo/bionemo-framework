@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import torch
 
+from bionemo.evo2_phage_gen import nemo_rl_processors
 from bionemo.evo2_phage_gen.nemo_rl_processors import phage_prompt_data_processor
 
 
@@ -25,6 +26,20 @@ class _Tokenizer:
         assert return_tensors == "pt"
         assert add_special_tokens is False
         return {"input_ids": torch.tensor([[ord(char) for char in text]], dtype=torch.long)}
+
+
+def test_phage_openai_dataset_uses_stable_task_name_independent_of_path(tmp_path):
+    """Moving a prompt bank must not change its environment metric namespace."""
+    dataset_path = tmp_path / "arbitrary-run" / "rl" / "validation.jsonl"
+    dataset_path.parent.mkdir(parents=True)
+    dataset_path.write_text('{"messages":[{"role":"user","content":"ACGT"},{"role":"assistant","content":""}]}\n')
+
+    dataset_class = getattr(nemo_rl_processors, "PhageOpenAIFormatDataset", None)
+    assert dataset_class is not None
+    dataset = dataset_class(data_path=str(dataset_path), use_preserving_dataset=True)
+
+    assert dataset.task_name == "phage_qc"
+    assert dataset.dataset[0]["task_name"] == "phage_qc"
 
 
 def test_phage_prompt_data_processor_tokenizes_openai_user_message_without_chat_template():

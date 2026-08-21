@@ -113,13 +113,33 @@ def test_runtime_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
-    monkeypatch.setattr(
-        nemo_rl_setup.importlib,
-        "import_module",
-        lambda name: (
-            SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
-            if name.endswith(".grpo")
-            else SimpleNamespace(init_ray=init_ray)
-        ),
-    )
+
+    def import_module(name):
+        if name.endswith(".grpo"):
+            return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
+        if name.endswith(".datasets.utils"):
+            return SimpleNamespace(resolve_external_dataset_class=lambda name: name)
+        return SimpleNamespace(init_ray=init_ray)
+
+    monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
     nemo_rl_setup.assert_nemo_rl_runtime()
+
+
+def test_runtime_capabilities_require_external_dataset_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale install must fail before configs use a dotted recipe dataset."""
+
+    def init_ray(log_dir=None, *, include_dashboard=True, num_cpus=None):
+        return None
+
+    def import_module(name):
+        if name.endswith(".grpo"):
+            return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
+        if name.endswith(".datasets.utils"):
+            return SimpleNamespace()
+        return SimpleNamespace(init_ray=init_ray)
+
+    monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
+    monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
+
+    with pytest.raises(RuntimeError, match="external recipe datasets"):
+        nemo_rl_setup.assert_nemo_rl_runtime()

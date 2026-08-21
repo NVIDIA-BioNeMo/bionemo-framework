@@ -62,7 +62,13 @@ def _write_minimal_config(
             },
             "generation": {"backend": "megatron"},
         },
-        "data": {"train": {"data_path": str(prompt_data), "env_name": "phage_qc"}},
+        "data": {
+            "train": {
+                "dataset_name": "bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset",
+                "data_path": str(prompt_data),
+                "env_name": "phage_qc",
+            }
+        },
         "env": {"phage_qc": {}},
         "cluster": {"gpus_per_node": 2},
     }
@@ -267,6 +273,24 @@ def test_rl_readiness_passes_when_adapter_path_is_configured(tmp_path):
     missing_required = [check for check in checks if check.required and not check.ok]
 
     assert missing_required == []
+
+
+@pytest.mark.parametrize("split", ["train", "validation"])
+def test_rl_readiness_rejects_path_derived_phage_task_namespace(tmp_path, split):
+    """Readiness must catch the generic dataset before a long validation rollout."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    config["data"]["validation"] = dict(config["data"]["train"])
+    config["data"][split]["dataset_name"] = "openai_format"
+    config_path.write_text(yaml.safe_dump(config))
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    namespace_check = {check.name: check for check in checks}["phage_dataset_task_namespace"]
+
+    assert not namespace_check.ok
+    assert namespace_check.required
+    assert "openai_format" in namespace_check.detail
+    assert f"data.{split}.dataset_name" in namespace_check.detail
 
 
 def test_rl_readiness_accepts_specific_megatron_bridge_iteration_directory(tmp_path):
