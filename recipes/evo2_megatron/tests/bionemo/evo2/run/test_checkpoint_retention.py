@@ -19,6 +19,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -37,6 +38,11 @@ def _context(checkpoint_root: Path, step: int, loss: float | None = None) -> Sim
     if loss is not None:
         context.total_loss_dict = {"lm loss": torch.tensor(loss)}
     return context
+
+
+def _formatted_log_calls(log_method: Mock) -> str:
+    """Render %-style logger calls without depending on process-global logging configuration."""
+    return "\n".join(str(call.args[0]) % tuple(call.args[1:]) for call in log_method.call_args_list)
 
 
 def test_keeps_best_and_latest(tmp_path: Path, caplog) -> None:
@@ -109,29 +115,29 @@ def test_equal_metric_favors_newer_checkpoint(tmp_path: Path, caplog, higher_is_
     assert matches["best_checkpoint"] == "iter_0000003"
 
 
-def test_matches_nearest_past_metric(tmp_path: Path, caplog) -> None:
-    caplog.set_level(logging.WARNING)
+def test_matches_nearest_past_metric(tmp_path: Path) -> None:
     retention = MetricCheckpointRetention(
         metric_name="lm loss",
         keep_best_k=1,
         keep_recent_k=1,
         higher_is_better=False,
     )
-    for step, loss in ((1, 0.8), (2, 0.4)):
-        context = _context(tmp_path, step, loss)
-        retention.on_eval_end(context)
-        (tmp_path / f"iter_{step:07d}").mkdir()
-        retention.on_checkpoint_save(context)
+    with patch("bionemo.evo2.run.checkpoint_retention.logger.warning") as warning:
+        for step, loss in ((1, 0.8), (2, 0.4)):
+            context = _context(tmp_path, step, loss)
+            retention.on_eval_end(context)
+            (tmp_path / f"iter_{step:07d}").mkdir()
+            retention.on_checkpoint_save(context)
 
-    (tmp_path / "iter_0000003").mkdir()
-    retention.on_checkpoint_save(_context(tmp_path, 3))
+        (tmp_path / "iter_0000003").mkdir()
+        retention.on_checkpoint_save(_context(tmp_path, 3))
 
-    matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
-    assert matches["matches_by_checkpoint_step"]["3"]["validation_step"] == 2
-    assert matches["matches_by_checkpoint_step"]["3"]["value"] == pytest.approx(0.4)
+        matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
+        assert matches["matches_by_checkpoint_step"]["3"]["validation_step"] == 2
+        assert matches["matches_by_checkpoint_step"]["3"]["value"] == pytest.approx(0.4)
 
-    (tmp_path / "iter_0000005").mkdir()
-    retention.on_checkpoint_save(_context(tmp_path, 5))
+        (tmp_path / "iter_0000005").mkdir()
+        retention.on_checkpoint_save(_context(tmp_path, 5))
 
     assert {path.name for path in tmp_path.glob("iter_*")} == {
         "iter_0000003",
@@ -141,11 +147,10 @@ def test_matches_nearest_past_metric(tmp_path: Path, caplog) -> None:
     assert set(metrics["metrics_by_validation_step"]) == {"1", "2"}
     matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
     assert "5" not in matches["matches_by_checkpoint_step"]
-    assert "has no recorded validation metric" in caplog.text
+    assert "has no recorded validation metric" in _formatted_log_calls(warning)
 
 
-def test_preserves_historical_checkpoints(tmp_path: Path, caplog) -> None:
-    caplog.set_level(logging.WARNING)
+def test_preserves_historical_checkpoints(tmp_path: Path) -> None:
     (tmp_path / "iter_0000001").mkdir()
     (tmp_path / "iter_0000002").mkdir()
     retention = MetricCheckpointRetention(
@@ -155,11 +160,12 @@ def test_preserves_historical_checkpoints(tmp_path: Path, caplog) -> None:
         higher_is_better=False,
     )
 
-    for step, loss in ((3, 0.5), (4, 0.7), (5, 0.3)):
-        context = _context(tmp_path, step, loss)
-        retention.on_eval_end(context)
-        (tmp_path / f"iter_{step:07d}").mkdir()
-        retention.on_checkpoint_save(context)
+    with patch("bionemo.evo2.run.checkpoint_retention.logger.warning") as warning:
+        for step, loss in ((3, 0.5), (4, 0.7), (5, 0.3)):
+            context = _context(tmp_path, step, loss)
+            retention.on_eval_end(context)
+            (tmp_path / f"iter_{step:07d}").mkdir()
+            retention.on_checkpoint_save(context)
 
     assert {path.name for path in tmp_path.glob("iter_*")} == {
         "iter_0000001",
@@ -171,7 +177,7 @@ def test_preserves_historical_checkpoints(tmp_path: Path, caplog) -> None:
     matches = json.loads((tmp_path / "checkpoint_metrics.json").read_text())
     assert matches["tracking_started_at_step"] == 3
     assert matches["historical_unscored_steps"] == [1, 2]
-    assert "keeping them as historical unscored checkpoints" in caplog.text
+    assert "keeping them as historical unscored checkpoints" in _formatted_log_calls(warning)
 
 
 def test_prefers_exact_recorded_step(tmp_path: Path) -> None:
@@ -237,8 +243,7 @@ def test_does_not_rematch_after_save(tmp_path: Path) -> None:
     assert matches["matches_by_checkpoint_step"]["100"]["validation_step"] == 98
 
 
-def test_missing_metric_falls_back_to_recent(tmp_path: Path, caplog) -> None:
-    caplog.set_level(logging.WARNING)
+def test_missing_metric_falls_back_to_recent(tmp_path: Path) -> None:
     retention = MetricCheckpointRetention(
         metric_name="lm loss",
         keep_best_k=2,
@@ -247,12 +252,13 @@ def test_missing_metric_falls_back_to_recent(tmp_path: Path, caplog) -> None:
         step_tolerance=0,
     )
 
-    for step in (1, 2, 3):
-        context = _context(tmp_path, step)
-        context.total_loss_dict = {"validation accuracy": torch.tensor(step / 10)}
-        retention.on_eval_end(context)
-        (tmp_path / f"iter_{step:07d}").mkdir()
-        retention.on_checkpoint_save(context)
+    with patch("bionemo.evo2.run.checkpoint_retention.logger.warning") as warning:
+        for step in (1, 2, 3):
+            context = _context(tmp_path, step)
+            context.total_loss_dict = {"validation accuracy": torch.tensor(step / 10)}
+            retention.on_eval_end(context)
+            (tmp_path / f"iter_{step:07d}").mkdir()
+            retention.on_checkpoint_save(context)
 
     assert {path.name for path in tmp_path.glob("iter_*")} == {
         "iter_0000002",
@@ -264,7 +270,7 @@ def test_missing_metric_falls_back_to_recent(tmp_path: Path, caplog) -> None:
     assert matches["matches_by_checkpoint_step"] == {}
     assert matches["best_checkpoint"] is None
     assert matches["unmatched_checkpoint_steps"] == [1, 2, 3]
-    assert "falling back to most-recent checkpoint retention" in caplog.text
+    assert "falling back to most-recent checkpoint retention" in _formatted_log_calls(warning)
 
 
 def test_strict_missing_metric(tmp_path: Path) -> None:
