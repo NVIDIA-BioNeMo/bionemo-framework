@@ -56,6 +56,20 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-005-workstation-container",
+      "prompt": "A workstation has working NVIDIA GPUs and Docker with the NVIDIA container runtime, but the BioNeMo recipe is checked out on the host and its dependencies are not installed there. Establish a supported environment without modifying the host Python installation.",
+      "expected_output": "A GPU-enabled NVIDIA PyTorch container workflow using the mounted checkout and recipe build scripts.",
+      "assertions": [
+        "The response uses a GPU-enabled container because the recipe build scripts are tested against the NVIDIA PyTorch container environment.",
+        "It identifies the recipe Dockerfile or repository .devcontainer as an appropriate starting point.",
+        "It exposes the workstation GPUs and bind-mounts the checkout plus the selected data, cache, and result locations.",
+        "It runs ./.ci_build.sh inside the mounted checkout and sources .ci_test_env.sh before recipe commands.",
+        "It keeps the mounted source and installed editable code aligned and records the resolved image and mount layout."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

@@ -114,6 +114,22 @@ def test_controller_keeps_phix_rerun_orchestration_agent_directed() -> None:
     assert "let the task and execution environment determine the orchestration" in controller
 
 
+def test_adapt_execution_documents_gpu_container_path() -> None:
+    """GPU workstations should use the supported NVIDIA container build environment."""
+    guidance = (
+        SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "infrastructure-guidance.md"
+    ).read_text()
+
+    for marker in (
+        "NVIDIA PyTorch container",
+        ".devcontainer/",
+        "bind-mount",
+        "./.ci_build.sh",
+        ".ci_test_env.sh",
+    ):
+        assert marker in guidance
+
+
 @pytest.mark.skipif(RUNNING_IN_CI, reason="Skill eval planning is intentionally local-only.")
 def test_all_skill_evals_are_discovered_and_plannable(tmp_path: Path) -> None:
     """Run every skill eval through the no-model-call planning path."""
