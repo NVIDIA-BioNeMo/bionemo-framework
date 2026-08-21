@@ -47,6 +47,28 @@ def test_all_skill_eval_files_have_required_case_fields() -> None:
             assert REQUIRED_CASE_FIELDS <= case.keys(), f"{eval_file}: {case.get('id', '<missing id>')}"
 
 
+def test_rl_objective_skill_requires_intermediate_reward_shaping() -> None:
+    """Sparse terminal objectives should retain explicit, graded biological stepping stones."""
+    skill = (SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text()
+
+    assert "intermediate rewards" in skill
+    assert "essential-gene completeness" in skill
+    assert "reasonable synteny" in skill
+    assert "host-range or bootability" in skill
+    assert "partial credit" in skill
+    assert "rather than dominate or substitute" not in skill
+
+
+def test_rl_skill_scopes_safety_objectives() -> None:
+    """Whole-genome RL keeps the three safety objectives while allowing narrow-scope exceptions."""
+    skill = (SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text()
+
+    assert "whole-genome designs" in skill
+    assert "custom or adapted runs" in skill
+    assert "AMR, toxin, and lysogeny" in skill
+    assert "locus or module" in skill
+
+
 @pytest.mark.skipif(RUNNING_IN_CI, reason="Skill eval planning is intentionally local-only.")
 def test_all_skill_evals_are_discovered_and_plannable(tmp_path: Path) -> None:
     """Run every skill eval through the no-model-call planning path."""

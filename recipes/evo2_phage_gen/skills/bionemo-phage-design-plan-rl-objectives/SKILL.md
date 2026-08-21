@@ -11,6 +11,10 @@ Work inside the recipe and result roots selected by the controller. Translate th
 
 Cover complete-genome viability and the productive-infection lifecycle, not only host binding: adsorption/entry, defense and counter-defense, replication, morphogenesis/packaging, lysis/progeny, essential/key genes, regulation, synteny, topology, composition, similarity to viable references, desired host direction, diversity, and intended-use safety. A host-range model is one signal and does not prove productive infection.
 
+When host-range or bootability rewards are sparse, do not rely on them as the only learning signal. Add biologically justified intermediate rewards—such as essential-gene completeness and reasonable synteny—with carefully calibrated partial credit toward evidence-supported ranges. Log them separately.
+
+For whole-genome designs—including custom or adapted runs—include AMR, toxin, and lysogeny as separate RL objectives. An explicitly scoped locus or module edit may omit objectives that the edited region cannot affect.
+
 Define components using the concise [objective guidance](references/objective-guidance.md). Each reward remains on `[0, 1]`: zero is a meaningful random/baseline or clearly unacceptable outcome, not merely the raw metric's numeric zero, and one is the supported target. Missing, invalid, empty, or failed measurements must not crash the portfolio or receive accidental positive credit.
 
 For every component, identify a positive control that proves the calculation actually runs, plus baseline/random, boundary, no-hit/empty, too-short, missing-gene, and tool-failure cases as applicable. Specify what is logged so a silently skipped or fixed-zero component is visible. Keep required hard-QC filters independent of reward shaping.

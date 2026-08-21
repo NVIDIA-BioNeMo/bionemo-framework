@@ -985,8 +985,8 @@ def test_scored_records_exclude_full_sequence_from_rollout_metadata():
     json.dumps(records, allow_nan=False)
 
 
-def test_global_post_process_metrics_accepts_rollout_total_reward():
-    """Global GDPO metrics are recomputed from this assembled batch, never stale actor state."""
+def test_global_post_process_metrics_leave_task_namespace_to_nemo_rl():
+    """The environment hook returns bare keys because NeMo-RL adds the task namespace."""
     if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
         pytest.skip("NeMo-RL is unavailable")
 
@@ -1029,9 +1029,9 @@ def test_global_post_process_metrics_accepts_rollout_total_reward():
     assert returned_batch is batch
     assert metrics["mean_reward"] == 0.5
     assert metrics["pass_rate"] == 0.5
-    assert "binary_core_pass_rate" not in metrics
-    assert metrics["phage_qc/valid_nt_chars_score_mean"] == 0.5
-    assert metrics["phage_qc/binary_core_pass_rate"] == 0.5
+    assert metrics["valid_nt_chars_score_mean"] == 0.5
+    assert metrics["binary_core_pass_rate"] == 0.5
+    assert "phage_qc/valid_nt_chars_score_mean" not in metrics
     assert metrics["gdpo/valid_nt_chars_mean"] == 0.5
     assert metrics["gdpo/valid_nt_chars_std"] == pytest.approx(0.5)
     assert metrics["gdpo/valid_nt_chars_min"] == 0.0
@@ -1075,8 +1075,7 @@ def test_global_post_process_metrics_handles_empty_gdpo_batch_without_actor_cach
     assert metrics["pass_rate"] == 0.0
     assert metrics["dense_reward_ge_1_rate"] == 0.0
     assert metrics["num_sequences"] == 0
-    assert metrics["phage_qc/num_sequences"] == 0
-    assert metrics["phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
+    assert metrics["binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
     assert metrics["gdpo/num_objectives"] == 2
     assert not any(key.startswith("gdpo/stale") for key in metrics)
 
@@ -1104,8 +1103,8 @@ def test_global_post_process_metrics_report_zero_acceptance_without_rollout_meta
     )
 
     assert metrics["pass_rate"] == 0.0
-    assert metrics["phage_qc/num_sequences"] == 0
-    assert metrics["phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
+    assert metrics["num_sequences"] == 0
+    assert metrics["binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
     assert "phage_qc/valid_nt_chars_score_mean" not in metrics
 
 
@@ -1153,8 +1152,8 @@ def test_global_post_process_metrics_does_not_fill_optional_fields_from_actor_ca
 
     _returned_batch, metrics = env_cls.global_post_process_and_metrics(env, batch)
 
-    assert "phage_qc/mmseqs_cluster_num_clusters" not in metrics
-    assert metrics["phage_qc/binary_core_pass_cluster_deduplicated_count"] == 2
+    assert "mmseqs_cluster_num_clusters" not in metrics
+    assert metrics["binary_core_pass_cluster_deduplicated_count"] == 2
     assert metrics["pass_rate"] == 1.0
 
 
@@ -1217,8 +1216,8 @@ def test_global_post_process_metrics_rejects_partial_or_misaligned_metadata(
     )
 
     assert metrics["pass_rate"] == 0.0
-    assert metrics["phage_qc/num_sequences"] == 0
-    assert metrics["phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
+    assert metrics["num_sequences"] == 0
+    assert metrics["binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
 
 
 @pytest.mark.parametrize("scored_row", [{}, {"reward": 1.0}, {"safety_gate_state": "PASS", "reward": 1.0}])
@@ -1247,7 +1246,7 @@ def test_global_gdpo_metrics_reject_correct_count_but_incomplete_scored_rows(
     )
 
     assert metrics["pass_rate"] == 0.0
-    assert metrics["phage_qc/num_sequences"] == 0
-    assert metrics["phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
+    assert metrics["num_sequences"] == 0
+    assert metrics["binary_safety_qualified_full_qc_cluster_deduplicated_rate"] == 0.0
     assert metrics["gdpo/num_objectives"] == 1
     assert not any(key.startswith("gdpo/biological_") for key in metrics)

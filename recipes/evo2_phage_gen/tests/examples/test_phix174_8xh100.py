@@ -127,7 +127,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "20 train/select/evaluate SFT",
         "30 calibrate sampling",
         "40 prepare SFT checkpoint for RL; pilot/train/monitor/select GDPO",
-        "50 generate, SFT-score, and screen 1,000 genomes",
+        "50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes",
     ]
     settings = json.loads((result_root / "settings.json").read_text())
     assert settings == {
@@ -149,6 +149,10 @@ def test_dry_run(tmp_path: Path) -> None:
         "evo2_phage_run_gdpo",
         "predict_evo2",
         "collect-sft-likelihood",
+        "deduplicate-fasta",
+        "summarize-arc-screen",
+        "select-hard-qc-passers",
+        "cluster-post-qc",
         "genome_design_filtering_pipeline.py",
         "finalize-rollout",
     ):
@@ -204,6 +208,17 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "RL Ray CPU slots: 96" in log
     assert "Arc CheckV database: <prepared-checkv-db>" in log
     assert f"Arc screening working directory: {RECIPE_ROOT.parents[1]}" in log
+    assert "Arc internal MMseqs clustering disabled" in log
+
+    deduplication = log.index("command: evo2_phage_generation deduplicate-fasta")
+    likelihood = log.index("monitor: selected-SFT likelihood scoring")
+    safety = log.index("command: evo2_phage_sequence_safety scan", likelihood)
+    target = log.index("monitor: Arc target profile")
+    diagnostic = log.index("monitor: Arc filter-7 diagnostic")
+    clustering = log.index("command: evo2_phage_generation cluster-post-qc")
+    reporting = log.index("command: evo2_phage_generation finalize-rollout")
+    assert deduplication < likelihood < safety < target < diagnostic < clustering < reporting
+    assert "/rollout/deduplication/representatives.fasta" in log
 
     sft_command = next(
         shlex.split(line.partition("command: ")[2])
@@ -413,6 +428,62 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: 500-step DP8 GDPO" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "evo2_phage_sequence_safety scan" in log
+
+
+def test_stage50_granular_markers_skip_completed_work(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    stage_root = result_root / "stages"
+    stage_root.mkdir(parents=True)
+    for marker in (
+        "20-sft.done",
+        "30-calibration-generation.done",
+        "30-calibration-scoring.done",
+        "40-rl.done",
+        "50-rollout.done",
+        "50-deduplication.done",
+        "50-sft-likelihood.done",
+        "50-sequence-safety.done",
+        "50-target-profile.done",
+        "50-filter7-diagnostic.done",
+        "50-final-clustering.done",
+        "50-report.done",
+    ):
+        (stage_root / marker).touch()
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--resume-from",
+            "50",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    for substage in (
+        "50-rollout",
+        "50-deduplication",
+        "50-sft-likelihood",
+        "50-sequence-safety",
+        "50-target-profile",
+        "50-filter7-diagnostic",
+        "50-final-clustering",
+        "50-report",
+    ):
+        assert f"substage {substage} already complete" in log
+    assert "command: evo2_phage_generation deduplicate-fasta" not in log
+    assert "command: evo2_phage_sequence_safety scan" not in log
+    assert "command: evo2_phage_generation cluster-post-qc" not in log
+    assert "command: evo2_phage_generation finalize-rollout" not in log
 
 
 def test_topology_env(tmp_path: Path) -> None:

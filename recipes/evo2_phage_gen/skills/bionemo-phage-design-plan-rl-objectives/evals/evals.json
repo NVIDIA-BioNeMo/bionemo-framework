@@ -64,6 +64,7 @@
       "assertions": [
         "The response defaults to complete genomes and requires approval before a locus, RBP, fixed-backbone, or edit-count reduction.",
         "It covers adsorption and entry, defense and counter-defense, replication, morphogenesis and packaging, lysis and progeny, genome integrity, and intended-use safety.",
+        "It includes AMR, toxin, and lysogeny as separate RL objectives for whole-genome custom or adapted runs; an explicitly scoped locus or module edit may omit objectives that its edited region cannot affect.",
         "It defines target gain, original-host retention or loss, and disfavored-host avoidance as applicable.",
         "The host classifier remains one calibrated signal with deployment-matched validation and phenotype follow-up.",
         "Unscorable safety or viability criteria remain experimental endpoints or hard exclusions rather than disappearing."
@@ -153,6 +154,18 @@
         "It uses deployment-matched validation with leakage and confounder controls, calibration and uncertainty, high-score-tail evaluation, and explicit out-of-domain behavior.",
         "It keeps the new bounded component visible, defines missing or failed inference behavior, and tests its incremental value alongside the existing rewards and final hard QC.",
         "Any advanced modeling, data, ensemble, refitting, or post-processing techniques remain evidence-selected options rather than a mandatory sequence."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-012-intermediate-shaping",
+      "prompt": "Our whole-genome RL run is not improving because host-range and bootability rewards are sparse. The portfolio omitted essential-gene and synteny shaping. Revise the objective plan.",
+      "expected_output": "A bounded portfolio with graded biological intermediate rewards that provide dense guidance toward sparse terminal objectives.",
+      "assertions": [
+        "The response adds biologically justified intermediate rewards such as essential-gene completeness and reasonable synteny instead of relying only on sparse terminal rewards.",
+        "Each intermediate reward uses carefully calibrated partial credit toward an evidence-supported range with meaningful zero and target anchors.",
+        "Intermediate terms remain separately logged and their support and learnability are monitored."
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null

@@ -26,6 +26,9 @@ The research skill points to the phage-generation paper and supplement, related 
 Plan by dependencies rather than forcing every stage into a serial checklist. Evidence research, genome collection, execution discovery, and objective planning may overlap once their inputs are clear. Prepare, train, and select SFT before calibration; start RL only after the selected SFT, implemented objectives, calibration, result-root prompt banks, and model-only SFT checkpoint prepared for RL are ready; final generation waits for the selected RL checkpoint. Run independent ready work in parallel only when compute and write scopes fit, while durable monitoring continues without blocking other work.
 
 For long SFT, calibration generation or scoring, RL, or rollout work, use the realized example's narrow completion markers to reuse an accepted result after interruption while still running checkpoint selection and downstream checks. If the example stops after calibration because its historical default is unsupported, inspect the completed evidence and follow the calibration skill's sampling-selection handoff; do not bypass that review with the bundled default on the agent's own initiative.
+Do not replace the canonical sampling selection inside an old or active RL result root; a material
+change starts a new SFT-anchored attempt. In the final rollout, preserve separate raw,
+biological-representative, hard-QC, and post-QC-cluster denominators.
 
 Record the safety database and model releases used. If one changes during a run, mark the boundary and rerun the affected controls before interpreting comparisons. New runs may use newer releases; missing required evidence remains INDETERMINATE.
 

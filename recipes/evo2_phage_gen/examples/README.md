@@ -112,14 +112,19 @@ reference eight-GPU shape.
 
 You may write the reviewed file directly to
 `results/phix174-8xh100/calibration/sampling-selection.yaml` and rerun the original command, or
-keep it elsewhere and pass `--sampling-selection PATH`. Do not change the selection while resuming
-an RL checkpoint: a material prompt or sampling change should start a new RL attempt from the
-selected SFT checkpoint while retaining the earlier run as evidence.
+keep it elsewhere and pass `--sampling-selection PATH`. On an old or active RL result root, pass
+that option again only for the identical reviewed selection. Replacing it in place can introduce
+prompt, validation, and sampling drift partway through RL. A material change belongs in a new
+result root and RL attempt from the selected SFT checkpoint, with the earlier run retained as
+evidence.
 
 Long-running work also writes narrower completion markers: `20-sft.done`,
 `30-calibration-generation.done`, `30-calibration-scoring.done`, `40-rl.done`, and
-`50-rollout.done`. These let a resumed run skip an accepted result while still performing its
-downstream selection, evaluation, screening, and reporting. For example, after inspecting
+stage-50 markers for `rollout`, `deduplication`, `sft-likelihood`, `sequence-safety`,
+`target-profile`, `filter7-diagnostic`, `final-clustering`, and `report`. These let a resumed run
+skip an accepted result while still performing its downstream selection, evaluation, screening,
+clustering, and reporting. Each completed stage-50 marker is checked against its required output
+before it is reused. For example, after inspecting
 checkpoints from an interrupted SFT run:
 
 ```bash
@@ -133,7 +138,8 @@ ordinary successful runs create it automatically.
 
 The six dependency-ordered stages are input/control preparation, SFT safety and splitting, SFT
 training and selection, sampling calibration, model-only SFT-to-RL checkpoint preparation plus
-GDPO pilot/training, and final generation, SFT likelihood scoring, and screening.
+GDPO pilot/training, and final generation, biological deduplication, SFT likelihood scoring,
+hard-QC screening, post-QC clustering, and reporting.
 Calibration uses `NUM_GPUS` in parallel; SFT, GDPO, rollout generation, and likelihood scoring use
 the same configured count. On the reference node, where `nproc` reports 160 logical CPUs, the large safety
 scans use 128-record batches, 32 parallel ORF predictions, 32 threads for AMRFinder/DIAMOND, and 64
@@ -184,11 +190,16 @@ diversity, and safety measurement must report support. The pilot then checks tra
 behavior; rewards stay in `[0, 1]`, baseline/chance means `0`, missing or failed measurements cannot
 look favorable, and the selected SFT checkpoint remains the KL anchor.
 
-The final scoring pass uses the selected pre-RL SFT checkpoint with its `+~` conditioning prefix.
-`rollout/sft-likelihood/ranked-designs.csv` contains total and mean per-nucleotide log probability
-for all 1,000 designs. `rollout/final-designs.json` joins those values to each design's safety state,
-target-profile result, and accepted rank; `accepted_candidates.fasta` follows the same ranking when
-it is usable. The report also computes Spearman correlation between length and the normalized score.
+Stage 50 scores all 1,000 raw designs with the selected pre-RL SFT checkpoint and its `+~`
+conditioning prefix, while exact, circular, and reverse-complement biological equivalents are
+collapsed before expensive safety and Arc screening. Arc's internal clustering is disabled. Only
+safety-PASS representatives that pass the target hard-QC branch enter the final MMseqs clustering
+at 99% identity, 80% coverage, coverage mode 0, and cluster mode 0; filter 7 remains a separate
+diagnostic branch. `rollout/sft-likelihood/ranked-designs.csv` therefore retains raw-design total
+and mean per-nucleotide log probability, while `rollout/final-designs.json` reconciles the raw,
+biological-representative, hard-QC, and post-QC-cluster denominators. `accepted_candidates.fasta`
+contains one representative per final cluster and follows the SFT ranking when it is usable. The
+report also computes Spearman correlation between length and the normalized score.
 At absolute rho 0.5 or greater, it preserves the likelihood results but keeps the accepted FASTA in
 generation order because residual length bias makes the likelihood ordering unreliable.
 
@@ -202,6 +213,8 @@ because it scales with sequence length.
 The result root is the electronic lab notebook. `RUNLOG.md` records commands, liveness, failures, and
 stage completion; `settings.json` contains only the small scientific setting allowlist. Checkpoint
 selection, calibration, objective-health, likelihood scores, safety summaries, target and diagnostic
-Arc results, accepted candidates, and the final `SUMMARY.md` remain beside their stage outputs. A
+Arc waterfalls, deduplication mapping, hard-QC set, final cluster memberships, accepted candidates,
+and the final `SUMMARY.md` remain beside their stage outputs. The final report carries the selected
+checkpoints and sampling settings plus concise safety tool/database and clustering provenance. A
 boundary-best checkpoint, changed safety control, unsupported calibration choice, or unhealthy RL
 objective is an intentional review stop; routine setup and execution need no agent intervention.

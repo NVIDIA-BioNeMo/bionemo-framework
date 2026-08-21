@@ -65,6 +65,18 @@ def test_patch_uses_standard_bridge_config_loader(tmp_path: Path) -> None:
     assert "read_run_config(pretrained_run_config)" not in setup_source
 
 
+def test_environment_metrics_receive_one_task_namespace(tmp_path: Path) -> None:
+    source = _cached_source()
+    if source is None:
+        pytest.skip("configured NeMo-RL source is not cached")
+    build = nemo_rl_setup._copy_build_source(source, tmp_path / "build")
+    nemo_rl_setup.apply_source_patch(build)
+    rollout_source = (build / "nemo_rl" / "experience" / "rollouts.py").read_text()
+
+    assert 'key.startswith("__timing__/")' in rollout_source
+    assert 'metric_key = key if key.startswith("__timing__/") else f"{task_name}/{key}"' in rollout_source
+
+
 def test_setup_patches_before_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "source"
     (source / "nemo_rl" / "algorithms").mkdir(parents=True)

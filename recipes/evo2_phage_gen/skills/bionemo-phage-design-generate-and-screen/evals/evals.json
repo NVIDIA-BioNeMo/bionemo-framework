@@ -21,10 +21,10 @@
       "expected_output": "A complete-genome rollout with explicit all/any QC, deduplication, clustering, and a concise waterfall.",
       "assertions": [
         "The response records the checkpoint, prompt mixture, sampling settings, target length, seeds or prompt IDs, and tool/data versions that affect interpretation.",
-        "It validates full genomes, removes biological duplicates, runs every required component, then applies the approved all/any logic.",
+        "It scores all 1,000 raw designs when SFT likelihood is requested, removes exact/circular/reverse-complement biological duplicates before expensive QC, runs every required component on representatives, then applies the approved all/any logic.",
         "Positive controls confirm each enabled filter executed; missing required evidence or tool failure becomes INDETERMINATE rather than PASS.",
         "Short genomes, no ORFs, missing genes, and empty or header-only tool output do not crash or silently skip QC.",
-        "It preserves candidate-to-result mapping and reports generated, PASS, FAIL, INDETERMINATE, exact-unique, and clustered counts.",
+        "It disables pre-QC clustering, clusters only the safety-PASS hard-QC set, preserves complete candidate-to-result and cluster mapping, and reports raw, representative, PASS, FAIL, INDETERMINATE, hard-QC, and clustered counts.",
         "It reports total and mean per-nucleotide selected-SFT log probability for every design, checks residual score-length correlation, and uses likelihood ordering only when that diagnostic supports it.",
         "Computational screening is not described as proof of bootability, host range, safety, or efficacy."
       ],

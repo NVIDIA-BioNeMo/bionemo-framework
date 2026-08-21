@@ -15,6 +15,12 @@ Treat materialized training and validation prompt banks as run artifacts: readin
 
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 
+Validate the configured checkpoint-selection metric against the actual validation metric names.
+The environment hook returns bare metric keys and NeMo-RL adds the task namespace exactly once, so
+the PhiX metric resolves as `val:phage_qc/<metric>`. Timing-marker keys remain unnamespaced for
+phase reporting. A missing metric is an integration error to diagnose; do not switch to another
+target environment or biological profile merely to make a key appear.
+
 Choose topology and batch settings from measured full-genome behavior. Preserve complete-genome context and the intended effective batch. Use GDPO and 99%-cluster inverse-frequency diversity for the default case study unless evidence supports another approved method.
 
 Follow the concise [monitoring guidance](references/monitoring-guidance.md). Set a training ceiling and validation/checkpoint cadence that can reveal improvement, collapse, or overfitting; do not stop after a token number of steps or select the latest checkpoint automatically.

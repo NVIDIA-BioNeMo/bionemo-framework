@@ -537,6 +537,46 @@ def main() -> None:
     likelihood_parser.add_argument("--output-csv", type=Path, required=True)
     likelihood_parser.add_argument("--prefix-length", type=int, default=len(DEFAULT_PROMPT_PREFIX))
 
+    deduplication_parser = subparsers.add_parser(
+        "deduplicate-fasta",
+        help="Remove exact, circular, and reverse-complement biological duplicates",
+    )
+    deduplication_parser.add_argument("--input-fasta", type=Path, required=True)
+    deduplication_parser.add_argument("--output-fasta", type=Path, required=True)
+    deduplication_parser.add_argument("--mapping-csv", type=Path, required=True)
+    deduplication_parser.add_argument("--report", type=Path, required=True)
+
+    arc_summary_parser = subparsers.add_parser(
+        "summarize-arc-screen",
+        help="Validate an Arc hard-QC branch and record its waterfall",
+    )
+    arc_summary_parser.add_argument("--config", type=Path, required=True)
+    arc_summary_parser.add_argument("--input-fasta", type=Path, required=True)
+    arc_summary_parser.add_argument("--output-json", type=Path, required=True)
+    arc_summary_parser.add_argument("--expected-filter7", choices=("true", "false"), required=True)
+
+    hard_qc_parser = subparsers.add_parser(
+        "select-hard-qc-passers",
+        help="Intersect safety-PASS representatives with target-profile hard-QC passers",
+    )
+    hard_qc_parser.add_argument("--representative-fasta", type=Path, required=True)
+    hard_qc_parser.add_argument("--safety-manifest", type=Path, required=True)
+    hard_qc_parser.add_argument("--target-fasta", type=Path, required=True)
+    hard_qc_parser.add_argument("--output-fasta", type=Path, required=True)
+    hard_qc_parser.add_argument("--report", type=Path, required=True)
+
+    clustering_parser = subparsers.add_parser(
+        "cluster-post-qc",
+        help="Cluster hard-QC passers with the pinned final-order MMseqs contract",
+    )
+    clustering_parser.add_argument("--input-fasta", type=Path, required=True)
+    clustering_parser.add_argument("--output-fasta", type=Path, required=True)
+    clustering_parser.add_argument("--memberships-csv", type=Path, required=True)
+    clustering_parser.add_argument("--report", type=Path, required=True)
+    clustering_parser.add_argument("--work-dir", type=Path, required=True)
+    clustering_parser.add_argument("--mmseqs-bin", default="mmseqs")
+    clustering_parser.add_argument("--threads", type=int, default=16)
+
     final_parser = subparsers.add_parser(
         "finalize-rollout",
         help="Join likelihood and final QC evidence into the ranked rollout report",
@@ -549,6 +589,18 @@ def main() -> None:
     final_parser.add_argument("--accepted-fasta", type=Path, required=True)
     final_parser.add_argument("--summary", type=Path, required=True)
     final_parser.add_argument("--model-checkpoint", required=True)
+    final_parser.add_argument("--rl-checkpoint")
+    final_parser.add_argument("--deduplication-mapping", type=Path)
+    final_parser.add_argument("--diagnostic-fasta", type=Path)
+    final_parser.add_argument("--cluster-representatives-fasta", type=Path)
+    final_parser.add_argument("--cluster-memberships", type=Path)
+    final_parser.add_argument("--sampling-selection", type=Path)
+    final_parser.add_argument("--deduplication-report", type=Path)
+    final_parser.add_argument("--hard-qc-report", type=Path)
+    final_parser.add_argument("--target-report", type=Path)
+    final_parser.add_argument("--diagnostic-report", type=Path)
+    final_parser.add_argument("--clustering-report", type=Path)
+    final_parser.add_argument("--run-log", type=Path)
 
     args = parser.parse_args()
     if args.command == "prepare-rl-prompts":
@@ -596,19 +648,97 @@ def main() -> None:
                 prefix_length=args.prefix_length,
             )
         )
-    elif args.command == "finalize-rollout":
+    elif args.command == "deduplicate-fasta":
+        from bionemo.evo2_phage_gen.rollout_evidence import deduplicate_fasta
+
+        print(deduplicate_fasta(args.input_fasta, args.output_fasta, args.mapping_csv, args.report))
+    elif args.command == "summarize-arc-screen":
+        from bionemo.evo2_phage_gen.rollout_evidence import summarize_arc_screen
+
         print(
-            finalize_ranked_rollout(
-                args.generated_fasta,
-                args.safety_manifest,
-                args.target_fasta,
-                args.likelihood_csv,
+            summarize_arc_screen(
+                args.config,
+                args.input_fasta,
                 args.output_json,
-                args.accepted_fasta,
-                args.summary,
-                model_checkpoint=args.model_checkpoint,
+                expected_filter7=args.expected_filter7 == "true",
             )
         )
+    elif args.command == "select-hard-qc-passers":
+        from bionemo.evo2_phage_gen.rollout_evidence import select_hard_qc_passers
+
+        print(
+            select_hard_qc_passers(
+                args.representative_fasta,
+                args.safety_manifest,
+                args.target_fasta,
+                args.output_fasta,
+                args.report,
+            )
+        )
+    elif args.command == "cluster-post-qc":
+        from bionemo.evo2_phage_gen.rollout_evidence import cluster_post_qc_fasta
+
+        print(
+            cluster_post_qc_fasta(
+                args.input_fasta,
+                args.output_fasta,
+                args.memberships_csv,
+                args.report,
+                work_dir=args.work_dir,
+                mmseqs_bin=args.mmseqs_bin,
+                threads=args.threads,
+            )
+        )
+    elif args.command == "finalize-rollout":
+        if args.deduplication_mapping is None:
+            print(
+                finalize_ranked_rollout(
+                    args.generated_fasta,
+                    args.safety_manifest,
+                    args.target_fasta,
+                    args.likelihood_csv,
+                    args.output_json,
+                    args.accepted_fasta,
+                    args.summary,
+                    model_checkpoint=args.model_checkpoint,
+                )
+            )
+        else:
+            from bionemo.evo2_phage_gen.rollout_evidence import finalize_rollout_report
+
+            required = {
+                "--rl-checkpoint": args.rl_checkpoint,
+                "--diagnostic-fasta": args.diagnostic_fasta,
+                "--cluster-representatives-fasta": args.cluster_representatives_fasta,
+                "--cluster-memberships": args.cluster_memberships,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                parser.error(f"enhanced finalization requires: {', '.join(missing)}")
+            print(
+                finalize_rollout_report(
+                    args.generated_fasta,
+                    args.deduplication_mapping,
+                    args.safety_manifest,
+                    args.target_fasta,
+                    args.diagnostic_fasta,
+                    args.likelihood_csv,
+                    args.cluster_representatives_fasta,
+                    args.cluster_memberships,
+                    args.output_json,
+                    args.accepted_fasta,
+                    args.summary,
+                    model_checkpoint=args.model_checkpoint,
+                    rl_checkpoint=args.rl_checkpoint,
+                    sampling_selection=args.sampling_selection,
+                    deduplication_report=args.deduplication_report,
+                    hard_qc_report=args.hard_qc_report,
+                    target_report=args.target_report,
+                    diagnostic_report=args.diagnostic_report,
+                    clustering_report=args.clustering_report,
+                    run_log=args.run_log,
+                )
+            )
 
 
 if __name__ == "__main__":

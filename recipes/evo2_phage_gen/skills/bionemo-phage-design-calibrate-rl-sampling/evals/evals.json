@@ -38,6 +38,7 @@
         "It compares valid candidate throughput and scientific parity rather than device utilization alone.",
         "It does not silently alter full-genome length or sampling semantics to make a layout fit.",
         "Because the prompt distribution changed materially, it does not treat the paused RL state as an unchanged resume.",
+        "It does not overwrite the paused run's canonical sampling-selection file or reuse its result root for the changed distribution.",
         "The new attempt starts from the selected SFT baseline while retaining the paused checkpoint as prior evidence."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",

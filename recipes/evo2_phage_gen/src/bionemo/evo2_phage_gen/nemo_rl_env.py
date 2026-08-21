@@ -967,11 +967,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                         metrics[f"gdpo/{objective_name}_min"] = float(values.min())
                         metrics[f"gdpo/{objective_name}_max"] = float(values.max())
                         metrics[f"gdpo/{objective_name}_nonzero_rate"] = float((values != 0.0).mean())
-            for key, value in phage_metrics.items():
-                if key.startswith(TIMING_METRIC_MARKER_PREFIX):
-                    metrics[key] = value
-                else:
-                    metrics[f"phage_qc/{key}"] = value
+            metrics.update(phage_metrics)
             return batch, metrics
 
 else:

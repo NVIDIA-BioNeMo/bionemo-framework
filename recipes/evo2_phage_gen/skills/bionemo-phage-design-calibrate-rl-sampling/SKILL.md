@@ -34,3 +34,9 @@ skill is operating the demo autonomously, do not pass
 `examples/default-sampling-selection.yaml` merely to get past a calibration stop. Make the
 evidence-based decision and write the canonical file directly. Use the bundled default override
 only when the user explicitly chooses historical settings despite the warning.
+
+On an old or active RL result root, supply the override again only when it is identical to the
+recorded canonical selection. Do not replace prompt lengths, temperature, seeds, or related
+sampling settings in place: that can introduce training/validation drift after the run has begun.
+Start a new result root and SFT-anchored RL attempt for a material change, retaining the earlier run
+as evidence.

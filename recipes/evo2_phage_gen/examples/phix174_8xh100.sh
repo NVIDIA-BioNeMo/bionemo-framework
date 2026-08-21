@@ -283,6 +283,29 @@ if bad:
 PY
 }
 
+require_file() {
+  [[ "${DRY_RUN}" == "1" ]] && return
+  [[ -f "$1" ]] || { printf 'missing %s: %s\n' "$2" "$1" >&2; return 1; }
+}
+
+require_nonempty_file() {
+  [[ "${DRY_RUN}" == "1" ]] && return
+  [[ -s "$1" ]] || { printf 'missing or empty %s: %s\n' "$2" "$1" >&2; return 1; }
+}
+
+check_success_report() {
+  [[ "${DRY_RUN}" == "1" ]] && return
+  python - "$1" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+if payload.get("state") != "succeeded":
+    raise SystemExit(f"nonterminal report {path}: {payload.get('state')!r}")
+PY
+}
+
 check_objectives() {
   [[ "${DRY_RUN}" == "1" ]] && return
   python - "$1" <<'PY'
@@ -568,6 +591,7 @@ PY
 
 stage_50() {
   local selected selected_sft rollout="${RESULT_ROOT}/rollout" fasta safety likelihood evidence infer
+  local dedup target diagnostic hard_qc clustering
   local checkv_db repo_root
   load_sampling_selection
   selected="$(read_state selected-rl)"
@@ -575,6 +599,11 @@ stage_50() {
   fasta="${rollout}/fasta/phix174_prompt${SAMPLING_PROMPT_LABEL}_temp${SAMPLING_TEMPERATURE}.n1000.fasta"
   safety="${rollout}/sequence-safety"
   likelihood="${rollout}/sft-likelihood"
+  dedup="${rollout}/deduplication"
+  target="${rollout}/target-profile"
+  diagnostic="${rollout}/filter7-diagnostic"
+  hard_qc="${rollout}/hard-qc"
+  clustering="${rollout}/post-qc-clustering"
   infer="${RECIPE_ROOT}/src/bionemo/evo2/run/infer.py"
   if [[ -f "${STAGE_DIR}/50-rollout.done" ]]; then
     note 'substage 50-rollout already complete'
@@ -677,40 +706,70 @@ PY
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-rollout.done"
   fi
 
-  run evo2_phage_generation prepare-sft-likelihood \
-    --input-fasta "${fasta}" --output-fasta "${likelihood}/sft-conditioned.fasta"
-  monitored 'selected-SFT likelihood scoring' "${likelihood}/predict.log" \
-    torchrun --nproc-per-node "${NUM_GPUS}" --no-python predict_evo2 \
-    --fasta "${likelihood}/sft-conditioned.fasta" --ckpt-dir "${selected_sft}" \
-    --output-dir "${likelihood}/predictions" --tensor-parallel-size 1 --micro-batch-size 1 \
-    --use-subquadratic-ops --output-log-prob-seqs --log-prob-collapse-option per_token
-  run evo2_phage_generation collect-sft-likelihood \
-    --prediction-dir "${likelihood}/predictions" --source-fasta "${fasta}" \
-    --output-csv "${likelihood}/ranked-designs.csv"
-
-  run evo2_phage_nucleotide_qc --input-fasta "${fasta}" --output-dir "${safety}/input-qc" \
-    --genome-length-min 1 --genome-length-max 1000000 --gc-content-min 0 --gc-content-max 100 \
-    --homopolymer-max 1000000
-  evidence='{"source":"NCBI PhiX174 reference","source_version":"NC_001422.1","replication_host_domains":["BACTERIA"],"confirmed":true}'
-  run_result 'final safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan \
-    --input-fasta "${safety}/input-qc/qc2_nt_filter_seqs.fasta" --output-dir "${safety}/scan" \
-    --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml \
-    --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis \
-    --batch-size "${SAFETY_BATCH_SIZE}" --orf-workers "${SAFETY_ORF_WORKERS}" \
-    --threads "${SAFETY_THREADS}" --phrogs-threads "${SAFETY_PHROGS_THREADS}" --timeout 1800 --overwrite
-  check_scan "${safety}/scan/manifest.json"
-  run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
-
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    checkv_db='<prepared-checkv-db>'
-  elif [[ -n "${CHECKVDB:-}" ]]; then
-    [[ -d "${CHECKVDB}" ]] || {
-      printf 'CHECKVDB is not a directory: %s\n' "${CHECKVDB}" >&2
-      return 1
-    }
-    checkv_db="$(cd -- "${CHECKVDB}" && pwd)"
+  if [[ -f "${STAGE_DIR}/50-deduplication.done" ]]; then
+    note 'substage 50-deduplication already complete'
+    require_nonempty_file "${dedup}/representatives.fasta" 'deduplicated representative FASTA'
+    require_nonempty_file "${dedup}/mapping.csv" 'deduplication mapping'
+    check_success_report "${dedup}/report.json"
   else
-    checkv_db="$(python - "${RECIPE_ROOT}/data/external/checkv" <<'PY'
+    run evo2_phage_generation deduplicate-fasta \
+      --input-fasta "${fasta}" --output-fasta "${dedup}/representatives.fasta" \
+      --mapping-csv "${dedup}/mapping.csv" --report "${dedup}/report.json"
+    check_success_report "${dedup}/report.json"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-deduplication.done"
+  fi
+
+  if [[ -f "${STAGE_DIR}/50-sft-likelihood.done" ]]; then
+    note 'substage 50-sft-likelihood already complete'
+    require_nonempty_file "${likelihood}/ranked-designs.csv" 'raw SFT likelihood table'
+  else
+    run evo2_phage_generation prepare-sft-likelihood \
+      --input-fasta "${fasta}" --output-fasta "${likelihood}/sft-conditioned.fasta"
+    monitored 'selected-SFT likelihood scoring' "${likelihood}/predict.log" \
+      torchrun --nproc-per-node "${NUM_GPUS}" --no-python predict_evo2 \
+      --fasta "${likelihood}/sft-conditioned.fasta" --ckpt-dir "${selected_sft}" \
+      --output-dir "${likelihood}/predictions" --tensor-parallel-size 1 --micro-batch-size 1 \
+      --use-subquadratic-ops --output-log-prob-seqs --log-prob-collapse-option per_token
+    run evo2_phage_generation collect-sft-likelihood \
+      --prediction-dir "${likelihood}/predictions" --source-fasta "${fasta}" \
+      --output-csv "${likelihood}/ranked-designs.csv"
+    require_nonempty_file "${likelihood}/ranked-designs.csv" 'raw SFT likelihood table'
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-sft-likelihood.done"
+  fi
+
+  if [[ -f "${STAGE_DIR}/50-sequence-safety.done" ]]; then
+    note 'substage 50-sequence-safety already complete'
+    require_file "${safety}/scan/manifest.json" 'sequence-safety manifest'
+    require_file "${safety}/summary.json" 'sequence-safety summary'
+    check_scan "${safety}/scan/manifest.json"
+  else
+    run evo2_phage_nucleotide_qc --input-fasta "${dedup}/representatives.fasta" --output-dir "${safety}/input-qc" \
+      --genome-length-min 1 --genome-length-max 1000000 --gc-content-min 0 --gc-content-max 100 \
+      --homopolymer-max 1000000
+    evidence='{"source":"NCBI PhiX174 reference","source_version":"NC_001422.1","replication_host_domains":["BACTERIA"],"confirmed":true}'
+    run_result 'final safety scan' "${safety}/scan.log" evo2_phage_sequence_safety scan \
+      --input-fasta "${safety}/input-qc/qc2_nt_filter_seqs.fasta" --output-dir "${safety}/scan" \
+      --policy configs/phage_safety_policy.yaml --asset-manifest data/external/safety/asset_manifest.yaml \
+      --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis \
+      --batch-size "${SAFETY_BATCH_SIZE}" --orf-workers "${SAFETY_ORF_WORKERS}" \
+      --threads "${SAFETY_THREADS}" --phrogs-threads "${SAFETY_PHROGS_THREADS}" --timeout 1800 --overwrite
+    check_scan "${safety}/scan/manifest.json"
+    run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
+    require_file "${safety}/summary.json" 'sequence-safety summary'
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-sequence-safety.done"
+  fi
+
+  if [[ ! -f "${STAGE_DIR}/50-target-profile.done" || ! -f "${STAGE_DIR}/50-filter7-diagnostic.done" ]]; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      checkv_db='<prepared-checkv-db>'
+    elif [[ -n "${CHECKVDB:-}" ]]; then
+      [[ -d "${CHECKVDB}" ]] || {
+        printf 'CHECKVDB is not a directory: %s\n' "${CHECKVDB}" >&2
+        return 1
+      }
+      checkv_db="$(cd -- "${CHECKVDB}" && pwd)"
+    else
+      checkv_db="$(python - "${RECIPE_ROOT}/data/external/checkv" <<'PY'
 from pathlib import Path
 import sys
 
@@ -721,72 +780,139 @@ if not databases:
 print(databases[-1])
 PY
 )"
+    fi
+    export CHECKVDB="${checkv_db}"
+    repo_root="$(cd -- "${RECIPE_ROOT}/../.." && pwd)"
+    note "Arc CheckV database: ${CHECKVDB}"
+    note "Arc screening working directory: ${repo_root}"
+    note 'Arc internal MMseqs clustering disabled; final 99% clustering runs only after safety and hard QC'
   fi
-  export CHECKVDB="${checkv_db}"
-  repo_root="$(cd -- "${RECIPE_ROOT}/../.." && pwd)"
-  note "Arc CheckV database: ${CHECKVDB}"
-  note "Arc screening working directory: ${repo_root}"
 
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    note 'prepare target and filter-7 diagnostic Arc configs from the maintained local template'
-  else
-    python - configs/arc_genome_design_filtering_local.yaml "${fasta}" "${rollout}" <<'PY'
+  write_arc_rollout_config() {
+    local branch_root="$1" remove_filter="$2"
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      note "prepare ${branch_root##*/} Arc config from the maintained local template (filter 7=${remove_filter})"
+      return
+    fi
+    python - configs/arc_genome_design_filtering_local.yaml "${dedup}/representatives.fasta" \
+      "${branch_root}" "${remove_filter}" <<'PY'
 from pathlib import Path
-import sys, yaml
-base, fasta, root = Path(sys.argv[1]), Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve()
-for name, remove_filter in (("target-profile", False), ("filter7-diagnostic", True)):
-    config = yaml.safe_load(base.read_text())
-    out = root / name
-    config.update({
-        "results_save_dir": str(out / "arc"),
-        "current_config_file": str(out / "config.yaml"),
-        "evo_gen_seqs_fasta_file_save_location": str(fasta),
-        "orf_filtering": True,
-        "use_nucleotide_filtered_df": True,
-        "homology_filtering": True,
-        "use_orf_filtered_df": True,
-        "use_nucleotide_filtered_df_instead": False,
-        "checkv_filter": True,
-        "genetic_architecture_filter": True,
-        "diversification_filtering": True,
-        "mmseqs_clustering_filter": True,
-        "genetic_architecture_remove_filter": remove_filter,
-        "genetic_architecture_visualization_and_synteny_filtering": True,
-        "use_reference_genome": True,
-    })
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
-PY
-  fi
-  (
-    cd "${repo_root}"
-    monitored 'Arc target profile' "${rollout}/target-profile/runner.log" \
-      python "${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" \
-      "${rollout}/target-profile/config.yaml"
-    monitored 'Arc filter-7 diagnostic' "${rollout}/filter7-diagnostic/runner.log" \
-      python "${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" \
-      "${rollout}/filter7-diagnostic/config.yaml"
-  )
+import sys
+import yaml
 
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    note 'join all 1,000 SFT likelihoods with safety and target-profile results; rank only if length bias is acceptable'
+base, fasta, output = Path(sys.argv[1]), Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve()
+remove_filter = sys.argv[4] == "true"
+config = yaml.safe_load(base.read_text())
+config.update({
+    "results_save_dir": str(output / "arc"),
+    "current_config_file": str(output / "config.yaml"),
+    "evo_gen_seqs_fasta_file_save_location": str(fasta),
+    "orf_filtering": True,
+    "use_nucleotide_filtered_df": True,
+    "homology_filtering": True,
+    "use_orf_filtered_df": True,
+    "use_nucleotide_filtered_df_instead": False,
+    "checkv_filter": True,
+    "genetic_architecture_filter": True,
+    "diversification_filtering": True,
+    "mmseqs_clustering_filter": False,
+    "genetic_architecture_remove_filter": remove_filter,
+    "genetic_architecture_visualization_and_synteny_filtering": True,
+    "use_reference_genome": True,
+})
+output.mkdir(parents=True, exist_ok=True)
+(output / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+PY
+  }
+
+  if [[ -f "${STAGE_DIR}/50-target-profile.done" ]]; then
+    note 'substage 50-target-profile already complete'
+    require_file "${target}/arc/qc6_synteny_filter_seqs.fasta" 'terminal target-profile FASTA'
+    check_success_report "${target}/screening.json"
   else
-    [[ -f "${rollout}/target-profile/arc/qc6_synteny_filter_seqs.fasta" ]] || {
-      printf 'missing terminal target-profile FASTA: %s\n' \
-        "${rollout}/target-profile/arc/qc6_synteny_filter_seqs.fasta" >&2
-      return 1
-    }
+    write_arc_rollout_config "${target}" false
+    (
+      cd "${repo_root}"
+      monitored 'Arc target profile' "${target}/runner.log" \
+        python "${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" \
+        "${target}/config.yaml"
+    )
+    run evo2_phage_generation summarize-arc-screen --config "${target}/config.yaml" \
+      --input-fasta "${dedup}/representatives.fasta" --output-json "${target}/screening.json" \
+      --expected-filter7 false
+    check_success_report "${target}/screening.json"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-target-profile.done"
   fi
-  run evo2_phage_generation finalize-rollout \
-    --generated-fasta "${fasta}" --safety-manifest "${safety}/scan/manifest.json" \
-    --target-fasta "${rollout}/target-profile/arc/qc6_synteny_filter_seqs.fasta" \
-    --likelihood-csv "${likelihood}/ranked-designs.csv" \
-    --output-json "${rollout}/final-designs.json" \
-    --accepted-fasta "${rollout}/accepted_candidates.fasta" --summary "${RESULT_ROOT}/SUMMARY.md" \
-    --model-checkpoint "${selected_sft}"
+
+  if [[ -f "${STAGE_DIR}/50-filter7-diagnostic.done" ]]; then
+    note 'substage 50-filter7-diagnostic already complete'
+    require_file "${diagnostic}/arc/qc6_synteny_filter_seqs.fasta" 'terminal filter-7 diagnostic FASTA'
+    check_success_report "${diagnostic}/screening.json"
+  else
+    write_arc_rollout_config "${diagnostic}" true
+    (
+      cd "${repo_root}"
+      monitored 'Arc filter-7 diagnostic' "${diagnostic}/runner.log" \
+        python "${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" \
+        "${diagnostic}/config.yaml"
+    )
+    run evo2_phage_generation summarize-arc-screen --config "${diagnostic}/config.yaml" \
+      --input-fasta "${dedup}/representatives.fasta" --output-json "${diagnostic}/screening.json" \
+      --expected-filter7 true
+    check_success_report "${diagnostic}/screening.json"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-filter7-diagnostic.done"
+  fi
+
+  if [[ -f "${STAGE_DIR}/50-final-clustering.done" ]]; then
+    note 'substage 50-final-clustering already complete'
+    require_file "${hard_qc}/passers.fasta" 'hard-QC passer FASTA'
+    check_success_report "${hard_qc}/report.json"
+    require_file "${clustering}/representatives.fasta" 'post-QC cluster representative FASTA'
+    require_nonempty_file "${clustering}/memberships.csv" 'post-QC cluster membership table'
+    check_success_report "${clustering}/report.json"
+  else
+    run evo2_phage_generation select-hard-qc-passers \
+      --representative-fasta "${dedup}/representatives.fasta" \
+      --safety-manifest "${safety}/scan/manifest.json" \
+      --target-fasta "${target}/arc/qc6_synteny_filter_seqs.fasta" \
+      --output-fasta "${hard_qc}/passers.fasta" --report "${hard_qc}/report.json"
+    run evo2_phage_generation cluster-post-qc --input-fasta "${hard_qc}/passers.fasta" \
+      --output-fasta "${clustering}/representatives.fasta" \
+      --memberships-csv "${clustering}/memberships.csv" --report "${clustering}/report.json" \
+      --work-dir "${clustering}/work" --mmseqs-bin data/external/bin/mmseqs --threads 16
+    check_success_report "${hard_qc}/report.json"
+    check_success_report "${clustering}/report.json"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-final-clustering.done"
+  fi
+
+  if [[ -f "${STAGE_DIR}/50-report.done" ]]; then
+    note 'substage 50-report already complete'
+    check_success_report "${rollout}/final-designs.json"
+    require_file "${rollout}/accepted_candidates.fasta" 'accepted candidate FASTA'
+    require_nonempty_file "${RESULT_ROOT}/SUMMARY.md" 'run summary'
+  else
+    note 'record the raw and representative denominators, hard-QC waterfall, post-QC clusters, and limitations'
+    run evo2_phage_generation finalize-rollout \
+      --generated-fasta "${fasta}" --deduplication-mapping "${dedup}/mapping.csv" \
+      --safety-manifest "${safety}/scan/manifest.json" \
+      --target-fasta "${target}/arc/qc6_synteny_filter_seqs.fasta" \
+      --diagnostic-fasta "${diagnostic}/arc/qc6_synteny_filter_seqs.fasta" \
+      --likelihood-csv "${likelihood}/ranked-designs.csv" \
+      --cluster-representatives-fasta "${clustering}/representatives.fasta" \
+      --cluster-memberships "${clustering}/memberships.csv" \
+      --output-json "${rollout}/final-designs.json" \
+      --accepted-fasta "${rollout}/accepted_candidates.fasta" --summary "${RESULT_ROOT}/SUMMARY.md" \
+      --model-checkpoint "${selected_sft}" --rl-checkpoint "${selected}" \
+      --sampling-selection "${SAMPLING_SELECTION}" --deduplication-report "${dedup}/report.json" \
+      --hard-qc-report "${hard_qc}/report.json" --target-report "${target}/screening.json" \
+      --diagnostic-report "${diagnostic}/screening.json" --clustering-report "${clustering}/report.json" \
+      --run-log "${RUNLOG}"
+    check_success_report "${rollout}/final-designs.json"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-report.done"
+  fi
 }
 
-printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/train/monitor/select GDPO' '50 generate, SFT-score, and screen 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
+printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/train/monitor/select GDPO' '50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
 for id in 00 10 20 30 40 50; do
   ((10#${id} < 10#${RESUME_FROM})) && continue
   [[ "${PREPARE_ONLY}" == "1" && "${id}" != 00 ]] && continue

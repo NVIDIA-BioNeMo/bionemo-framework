@@ -108,7 +108,8 @@ selects SFT, calibrates sampling, prepares a model-only SFT checkpoint for RL, v
 enabled RL measurement on the PhiX174 reference, runs a full-shape pilot and GDPO on the
 configured GPUs, selects RL from comparable validation,
 generates exactly 1,000 whole genomes, scores all of them with the selected pre-RL SFT, and runs the
-current sequence-safety, target Arc, and filter-7 diagnostic screens. The GDPO config includes AMR,
+current biological deduplication, sequence-safety, target Arc, filter-7 diagnostic, and post-QC
+clustering stages. The GDPO config includes AMR,
 toxin, and lysogeny objectives and uses the selected SFT checkpoint as its KL anchor. On the
 reference 160-CPU allocation, large safety scans use 128-record batches and no phase exceeds 64 tool
 threads; see the [realized example](examples/README.md) for the adjustable settings.
@@ -137,9 +138,11 @@ consensus database locally and writes download progress to
 `inputs/external-assets.log`. Transfers use bounded retries and resume partial files. Database
 updates are recorded and checked with the control panel rather than rejected or silently replaced
 with historical versions. Its final report keeps PASS, FAIL, and INDETERMINATE
-counts separate and writes the intersection of safety-PASS and target-profile candidates. It also
-writes total and mean per-nucleotide SFT log probability for all 1,000 designs, checks residual
-score-length correlation, and adds the scores and accepted ordering to `rollout/final-designs.json`.
+counts separate. It scores all 1,000 raw designs with SFT likelihood, collapses exact/circular/
+reverse-complement equivalents before expensive QC, disables Arc's pre-QC clustering, then clusters
+the safety-PASS target hard-QC set at 99% identity and 80% coverage. It checks residual score-length
+correlation and adds raw and representative denominators, final cluster assignments, scores, and
+accepted ordering to `rollout/final-designs.json`.
 Likelihood ordering is omitted when that length diagnostic remains strongly confounded. This is a
 within-protocol enrichment signal motivated by [Black et al.](https://doi.org/10.64898/2026.06.12.731871),
 not a bootability threshold.
@@ -168,6 +171,9 @@ After an interrupted unfinished stage, rerun the original top-level command with
 root. Completed stage markers are skipped and cached or partial downloads are reused; deleting the
 result directory is not required. Only one invocation may use a result root at a time; a concurrent
 invocation exits instead of sharing stage work directories.
+When resuming an old or active RL result root, do not replace its canonical sampling selection in
+place. Reusing the identical reviewed selection is safe; a material prompt or sampling change can
+introduce drift and should start a new result root and SFT-anchored RL attempt.
 The example README also documents narrower markers for accepting completed SFT, RL, or generation
 work without skipping checkpoint selection and downstream checks. It also documents how
 `calibration/sampling-selection.yaml` is selected from calibration evidence, how an existing file

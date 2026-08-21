@@ -223,7 +223,7 @@ index 44a11cddd..c12ec4e1d 100644
 +    for task_name, result in results:
 +        _, env_metrics = result
 +        for key, value in env_metrics.items():
-+            metric_key = f"{task_name}/{key}"
++            metric_key = key if key.startswith("__timing__/") else f"{task_name}/{key}"
 +            metrics[metric_key] = value
 +    return metrics
 +
