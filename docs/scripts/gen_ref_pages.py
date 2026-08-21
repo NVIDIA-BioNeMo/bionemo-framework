@@ -382,7 +382,7 @@ def write_generated_tutorials_index() -> None:
 
 
 def copy_docs_from_dir(source_dir: Path, dest_dir: Path, root: Path, log_prefix: str) -> list[Path]:
-    """Copy Markdown and notebook files from a directory tree.
+    """Copy documentation and its support files from a directory tree.
 
     Args:
         source_dir (Path): Directory containing documentation files.
@@ -402,10 +402,9 @@ def copy_docs_from_dir(source_dir: Path, dest_dir: Path, root: Path, log_prefix:
 
         relative_path = path.relative_to(source_dir)
         dest_file = dest_dir / relative_path
-        if path.suffix == ".sh":
-            copy_binary_file(path, dest_file, f"{log_prefix}: {dest_file}")
-            continue
         if path.suffix not in {".md", ".ipynb"}:
+            if _should_copy_support_file(relative_path):
+                copy_binary_file(path, dest_file, f"{log_prefix}: {dest_file}")
             continue
         if path.name == "README.md":
             dest_file = dest_file.with_name("index.md")

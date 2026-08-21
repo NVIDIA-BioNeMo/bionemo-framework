@@ -118,5 +118,41 @@ def test_example_readme_and_script_copy(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert copied_docs == [Path("main/examples/demo/examples/index.md")]
 
 
+def test_example_support_file_is_copied_next_to_generated_readme(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Linked example configuration must exist beside its generated documentation."""
+    source_dir = tmp_path / "examples"
+    source_dir.mkdir()
+    (source_dir / "README.md").write_text(
+        "[configuration](default-settings.yaml)\n",
+        encoding="utf-8",
+    )
+    settings = source_dir / "default-settings.yaml"
+    settings.write_text("temperature: 1.0\n", encoding="utf-8")
+    generated_root = tmp_path / "generated"
+
+    def open_generated(path: Path, mode: str):
+        destination = generated_root / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        return destination.open(mode)
+
+    generated_files = ModuleType("mkdocs_gen_files")
+    generated_files.open = open_generated
+    generated_files.set_edit_path = lambda *args: None
+    monkeypatch.setattr(gen_ref_pages, "mkdocs_gen_files", generated_files)
+
+    copied_docs = gen_ref_pages.copy_docs_from_dir(
+        source_dir,
+        Path("main/examples/demo/examples"),
+        tmp_path,
+        "copied",
+    )
+
+    generated_settings = generated_root / "main/examples/demo/examples/default-settings.yaml"
+    assert generated_settings.read_text(encoding="utf-8") == "temperature: 1.0\n"
+    assert copied_docs == [Path("main/examples/demo/examples/index.md")]
+
+
 def test_run_results_are_not_doc_support() -> None:
     assert not gen_ref_pages._should_copy_support_file(Path("results/run-001/records.json"))
