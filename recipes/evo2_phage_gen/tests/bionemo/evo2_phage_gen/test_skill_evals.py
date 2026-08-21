@@ -69,6 +69,41 @@ def test_rl_skill_scopes_safety_objectives() -> None:
     assert "locus or module" in skill
 
 
+def test_rl_objective_skills_require_a_human_score_definition_artifact() -> None:
+    """Planning and implementation should leave the resolved score contract in the run record."""
+    plan_skill = (SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text()
+    implement_skill = (SKILL_ROOT / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md").read_text()
+
+    for skill in (plan_skill, implement_skill):
+        assert "artifacts/RL_SCORE_DEFINITIONS.md" in skill
+        assert "zero-credit" in skill
+        assert "full-credit" in skill
+        assert "biological rationale" in skill
+        assert "not a required stage of the fully scripted run" in skill
+        assert "Current PhiX174 GDPO score definitions" in skill
+
+
+def test_rl_operator_skill_documents_native_megatron_checkpoint_saving() -> None:
+    """Megatron training and rollout should share the native MBridge checkpoint contract."""
+    skill = (SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "SKILL.md").read_text()
+
+    assert "native Megatron-Bridge" in skill
+    assert "checkpointing.model_save_format: null" in skill
+    assert "policy.dtensor_cfg.enabled: false" in skill
+
+
+def test_phage_design_skills_default_new_runs_to_evo2_7b_1m() -> None:
+    """New phage projects should start from the trained-further long-context 7B family."""
+    controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text()
+    sft = (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "SKILL.md").read_text()
+
+    for skill in (controller, sft):
+        assert "evo2/7b-1m:1.0" in skill
+        assert "evo2_7b" in skill
+        assert "new phage-design" in skill
+        assert "mid-run" in skill
+
+
 @pytest.mark.skipif(RUNNING_IN_CI, reason="Skill eval planning is intentionally local-only.")
 def test_all_skill_evals_are_discovered_and_plannable(tmp_path: Path) -> None:
     """Run every skill eval through the no-model-call planning path."""

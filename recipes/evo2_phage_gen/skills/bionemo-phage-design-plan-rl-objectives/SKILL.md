@@ -23,4 +23,10 @@ Check the portfolio for duplicate signals, scale dominance, incompatible directi
 
 For the PhiX174 case study, retain filters 1–6, 8, and 9 with filter 7 disabled for the target profile, and run filter 7 separately as a diagnostic. Add relevant safety objectives without pretending this computational profile establishes biological viability.
 
-Write a concise `artifacts/RL_OBJECTIVES.yaml` or table containing component definitions, baselines/targets, missing-data behavior, controls, hard-QC relationship, validation/selection criteria, and unresolved biological choices. Summarize the decision in `RUNLOG.md`.
+Write a concise `artifacts/RL_OBJECTIVES.yaml` or table containing component definitions, baselines/targets, missing-data behavior, controls, hard-QC relationship, validation/selection criteria, and unresolved biological choices.
+
+Also write `artifacts/RL_SCORE_DEFINITIONS.md` in the selected result root for a scientist reading the run record. Give every enabled objective one compact row or subsection with its reward column, measured quantity and units, direction, exact formula and resolved target-specific settings, zero-credit region or state (lower and upper sides when applicable), full-credit region or state, and how partial credit changes on either side. State categorical and missing/invalid/empty/no-hit/missing-gene/tool-failure behavior directly when numeric ranges do not apply. Include the biological rationale, evidence citations, controls, telemetry, and relationship to final hard QC. This is an agent-produced objective-design artifact, not a required stage of the fully scripted run.
+
+Use the **Current PhiX174 GDPO score definitions** section in `examples/README.md` as a concise worked example of this writeup, but resolve every setting and source for the selected target rather than copying PhiX-specific thresholds.
+
+Summarize the decision and both artifact paths in `RUNLOG.md`.

@@ -10,6 +10,7 @@
         "It makes a provisional therapeutic assumption visible when intended use is unspecified.",
         "It asks only questions whose answers materially change the experiment and can inspect available evidence or prior results first.",
         "It defaults to complete genomes and does not infer an RBP-only or locus-only task.",
+        "For a new 7B project it selects evo2/7b-1m:1.0 with model size evo2_7b, while treating a checkpoint-family change in an existing run as a new attempt.",
         "It creates a compact project summary and RUNLOG.md rather than a large process framework."
       ],
       "expected_skill": "bionemo-phage-design",

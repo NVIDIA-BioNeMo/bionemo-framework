@@ -15,6 +15,8 @@ Treat materialized training and validation prompt banks as run artifacts: readin
 
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 
+Save native Megatron-Bridge `torch_dist` checkpoints: set `checkpointing.model_save_format: null`, keep `checkpointing.save_consolidated: false`, `policy.megatron_cfg.enabled: true`, and `policy.dtensor_cfg.enabled: false`, and omit `_v2`. NeMo-RL writes `step_N/policy/weights/iter_0000000`, which this recipe resumes from and gives directly to Megatron rollout. Named formats such as `safetensors` belong to the Automodel/DTensor path, not this worker. Updating this recipe config in an editable checkout does not require `evo2_phage_setup_nemo_rl --force-reinstall`; rerun the failed pilot from the same top-level result root.
+
 Validate the configured checkpoint-selection metric against the actual validation metric names.
 The recipe's phage OpenAI-format dataset assigns both training and validation the stable task name
 `phage_qc` regardless of their result-root JSONL paths. The environment hook returns bare metric

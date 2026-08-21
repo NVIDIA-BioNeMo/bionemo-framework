@@ -78,14 +78,16 @@ checkpointing:
   keep_top_k: 3
   save_period: 10
   checkpoint_must_save_by: null
-  model_save_format: safetensors
+  # MegatronPolicyWorker writes native Megatron-Bridge torch_dist checkpoints.
+  # Named formats are for the Automodel/DTensor checkpoint path.
+  model_save_format: null
   save_consolidated: false
   save_optimizer: true
   pretrained_checkpoint:
     path: data/checkpoints/evo2_7b_microviridae_mbridge
     format: megatron_bridge
 policy:
-  model_name: bionemo/evo2_7b_base
+  model_name: bionemo/evo2_7b
   tokenizer:
     name: tokenizers/nucleotide_fast_tokenizer_512
     chat_template_kwargs: null
@@ -97,6 +99,7 @@ policy:
   max_total_sequence_length: 10240
   precision: bfloat16
   dtensor_cfg:
+    # This recipe uses the Megatron worker and its native distributed checkpoints.
     enabled: false
   megatron_cfg:
     enabled: true

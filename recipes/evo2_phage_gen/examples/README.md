@@ -15,10 +15,27 @@ The reference command was tested from `recipes/evo2_phage_gen` on eight H100 80 
 tmux new -s phix174-e2e
 
 ./examples/phix174_8xh100.sh \
+  --model-variant 7b-base \
   --result-root "$PWD/results/phix174-8xh100"
 ```
 
 The build creates the virtual env used by `.ci_test_env.sh`, which the example sources internally.
+The primary command uses `evo2/7b-8k:1.0`, model size `evo2_7b_base`, because the published
+Microviridae work and the realized PhiX case-study lineage used the 7B-base family. For a fresh
+PhiX experiment, the trained-further 1M checkpoint is probably the better starting point and can
+still run at this example's shorter 10,240-token sequence length:
+
+```bash
+./examples/phix174_8xh100.sh \
+  --model-variant 7b-1m \
+  --result-root "$PWD/results/phix174-7b-1m"
+```
+
+That selects `evo2/7b-1m:1.0`, model size `evo2_7b`, and the matching NeMo-RL provider name.
+Checkpoint lineage is authoritative; a mislabeled `policy.model_name` in old run metadata does not
+change which pretrained weights were used. Nevertheless, keep the provider name consistent in new
+configs. A result root that already contains a 7B-base SFT run must remain on that family when
+resuming. Moving to 1M is a new result root and SFT-anchored attempt, not a mid-run override.
 `NUM_GPUS` defaults to 8 and controls SFT processes, RL topology, calibration GPUs, rollout
 workers, and likelihood scoring. `NUM_CPUS` defaults to `nproc` and sets the Ray logical-CPU budget.
 The script checks the configured GPU count. Other accelerator models are allowed with a warning
@@ -39,6 +56,12 @@ Useful controls:
 
 # Resume at a stage boundary; completed stages are skipped automatically.
 ./examples/phix174_8xh100.sh --resume-from 30 \
+  --model-variant 7b-base \
+  --result-root "$PWD/results/phix174-8xh100"
+
+# Continue an interrupted 7B-base run whose stage-40 pilot did not complete.
+./examples/phix174_8xh100.sh --resume-from 40 \
+  --model-variant 7b-base \
   --result-root "$PWD/results/phix174-8xh100"
 
 # Explicitly use the historical case-study settings instead of requiring fresh calibration support.
@@ -90,7 +113,7 @@ quality-diversity plateau over a noisy maximum, and prefer temperature 1.0 only 
 practically comparable. Prompt lengths in one file share one temperature and are deployed as an
 equal mixture.
 
-Copy [the default file](default-sampling-selection.yaml) as a schema example and edit every value:
+Copy `examples/default-sampling-selection.yaml` as a schema example and edit every value:
 
 ```yaml
 temperature: 0.9
@@ -218,3 +241,56 @@ and the final `SUMMARY.md` remain beside their stage outputs. The final report c
 checkpoints and sampling settings plus concise safety tool/database and clustering provenance. A
 boundary-best checkpoint, changed safety control, unsupported calibration choice, or unhealthy RL
 objective is an intentional review stop; routine setup and execution need no agent intervention.
+
+## Current PhiX174 GDPO score definitions
+
+This is the human-readable contract for the 15 objectives in
+`configs/gdpo_phage_megatron.yaml`. It is also the worked example for the run-specific
+`artifacts/RL_SCORE_DEFINITIONS.md` that an agent writes when designing or changing objectives;
+the E2E shell script does not generate that artifact. These thresholds reproduce the current
+PhiX174 computational profile, not universal phage-design optima or evidence of bootability.
+
+GDPO receives each row below as a separate `[0, 1]` objective. The scalar `weight_*` settings are
+diagnostic and do not reweight objectives after GDPO normalization. The first 12 objectives are
+forced to zero unless the sequence has an exact sequence-safety `PASS`; the three safety
+objectives remain unmasked so failures still provide learning signal. Unless a row says otherwise,
+missing, invalid, non-finite, or failed measurements receive zero. Final checkpoint selection uses
+the stricter safety-qualified, full-QC, cluster-deduplicated pass rate rather than mean reward.
+
+### Sequence feasibility
+
+| Objective (reward column)                    | Zero credit                                                                                          | Full credit                                                                                                                                | Partial credit and rationale                                                                                                                                                                                                                                                           |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `valid_nt_chars` (`reward_valid_nt_chars`)   | Any emitted character outside A/C/G/T.                                                               | No non-ACGT character is present.                                                                                                          | Binary. The raw helper regards an empty string as having no invalid character, but empty output fails length and aggregate nucleotide gates and cannot receive the safety-qualified GDPO objective. This prevents malformed sequence text from satisfying downstream biological tools. |
+| `genome_length` (`reward_genome_length`)     | Length at or below 2,000 nt, or at or above 8,000 nt.                                                | 4,000–6,000 nt inclusive.                                                                                                                  | Let *L* be length. Below 4,000: `max(0, 1 - (4000-L)/2000)`; above 6,000: `max(0, 1 - (L-6000)/2000)`. The target band brackets the 5,386-nt [PhiX174 reference genome](https://www.ncbi.nlm.nih.gov/nuccore/NC_001422.1).                                                             |
+| `gc_content` (`reward_gc_content`)           | Mathematically at or below −5% or at or above 100%; only the 100% endpoint is physically attainable. | 30–65% inclusive.                                                                                                                          | Below 30%: `max(0, 1 - (30-GC)/35)`; above 65%: `max(0, 1 - (GC-65)/35)`. Thus 0% GC still scores 1/7, while 100% scores 0. The broad band rejects extreme composition while leaving room around the PhiX reference.                                                                   |
+| `nt_homopolymer` (`reward_nt_homopolymer`)   | No finite positive run length reaches exactly zero; invalid or unavailable measurements score zero.  | Maximum nucleotide run *H* ≤ 10 bases.                                                                                                     | For *H* > 10, score `10/H`, decreasing asymptotically toward zero. Long homopolymers are discouraged because they are low-complexity and can complicate synthesis and sequencing.                                                                                                      |
+| `dustmask_end` (`reward_dustmask_end`)       | No valid masked fraction reaches zero; failed or invalid DUST measurement scores zero.               | Maximum DUST-masked fraction *F* over either terminal 200-nt window ≤ 0.9.                                                                 | For 0.9 < *F* ≤ 1, score `0.9/F` (0.9–1.0). The separate nucleotide-pass objective supplies the hard cutoff. DUST detects low-complexity sequence using the approach described by [Morgulis et al.](https://doi.org/10.1089/cmb.2006.13.1028).                                         |
+| `nucleotide_pass` (`reward_nucleotide_pass`) | Any component gate fails.                                                                            | All characters are A/C/G/T, length is 4,000–6,000 nt, GC is 30–65%, maximum homopolymer is ≤10, and both terminal DUST fractions are ≤0.9. | Binary conjunction. It supplies an explicit feasibility milestone in addition to the dense component objectives.                                                                                                                                                                       |
+
+### Protein evidence, architecture, and diversity
+
+| Objective (reward column)                                               | Zero credit                                                                                                                                             | Full credit                                                                                                                                    | Partial credit and rationale                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `protein_hit_count` (`reward_external_protein_hit_count`)               | No measured PHROGs hit, missing output, or tool failure.                                                                                                | At least 7 protein-database hits.                                                                                                              | For *C*=1…6 hits, score `C/7`. [PHROGs](https://doi.org/10.1093/nargab/lqab067) supplies curated prokaryotic-virus protein families, so this is graded evidence of recognizable phage coding content, not proof of function.                                                                                                                                                                                                                                                                                        |
+| `tropism` (`reward_external_tropism`)                                   | No measured hit or 0% identity to the PhiX G spike protein.                                                                                             | Best measured protein identity *I* ≥ 60%.                                                                                                      | For 0 < *I* < 60%, score `I/60`; identity above the threshold is not penalized. This preserves the current Arc target-host-recognition proxy used by the [PhiX design workflow](https://www.science.org/doi/10.1126/science.aec2657).                                                                                                                                                                                                                                                                               |
+| `required_genes` (`reward_external_required_genes`)                     | Missing metrics, an empty required-label definition, or zero labels matched.                                                                            | Every configured required label is matched and the definition contains at least 9 labels.                                                      | Score `(matched/total) × min(total/9, 1)`, where `total` is the number of configured required labels. The nine current labels are terminase, endolysin, major spike protein, DNA replication initiation, DNA condensation, major head protein, head morphogenesis, pilot protein for DNA ejection, and Arc's literal `nan` compatibility label for the reference ORF with unknown function. This supplies partial credit for recovered reference functions without treating annotations as experimental validation. |
+| `synteny` (`reward_external_synteny`)                                   | Impossible `syntenic > total`, missing output, or tool failure. No valid finite gene-count pair otherwise reaches exactly zero.                         | `(syntenic,total)` is one of `(10,10)`, `(10,11)`, `(10,12)`, `(11,12)`, or `(12,12)`; `(11,11)` is intentionally excluded by the Arc profile. | Let `d_total` be distance of total genes from [10,12] and `d_pair` Manhattan distance to the nearest full-credit pair. Score `1/(1+d_total) × 1/(1+d_pair)`. It rewards gradual recovery of PhiX-like gene count and ordering while retaining the exact final gate.                                                                                                                                                                                                                                                 |
+| `average_protein_identity` (`reward_external_average_protein_identity`) | Missing identity, no measured proteins, or tool failure.                                                                                                | AAI ≤95% with at least 10 measured protein entries.                                                                                            | Score `novelty × min(gene_count/10,1)`, where novelty is 1 through 95% AAI and `max(0.25, (100-AAI)/5)` above 95%. Novelty falls to 0.25 by 98.75% and then plateaus; evidence grows linearly through 10 proteins. This separates novelty from annotation support.                                                                                                                                                                                                                                                  |
+| `mmseqs_cluster_diversity` (`reward_mmseqs_cluster_diversity`)          | The genome fails basic nucleotide feasibility, is missing from MMseqs output, or the tool fails. No finite cluster size otherwise reaches exactly zero. | A singleton within its prompt group.                                                                                                           | With 99% minimum sequence identity, a member of a cluster of size *N* scores `1/N`. This directly rewards within-batch sequence diversity; [MMseqs2](https://doi.org/10.1038/nbt.3988) provides the clustering implementation.                                                                                                                                                                                                                                                                                      |
+
+### Mandatory whole-genome safety objectives
+
+All three classes are required for the PhiX bacterial-host profile. Each class uses the same
+categorical mapping: `PASS → 1`, a review-eligible measured `INDETERMINATE` with findings `→ 0.25`,
+and `FAIL`, unmeasured, invalid, or tool-failed `→ 0`. The hard safety gate still requires all
+required classes to be `PASS`; partial credit never qualifies a candidate for acceptance. This
+separation follows the conservative screening posture in `configs/phage_safety_policy.yaml` and
+regulatory emphasis on excluding detrimental genes and temperate behavior in [EMA's phage-therapy
+quality guideline](https://www.ema.europa.eu/en/quality-aspects-phage-therapy-medicinal-products).
+
+| Objective (reward column)                    | Full-credit state | What the class screens                                                                   |
+| -------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
+| `safety_amr` (`reward_safety_amr`)           | `PASS`            | Acquired antimicrobial-resistance determinants.                                          |
+| `safety_toxin` (`reward_safety_toxin`)       | `PASS`            | Toxin and virulence-associated protein evidence.                                         |
+| `safety_lysogeny` (`reward_safety_lysogeny`) | `PASS`            | Integrases, repressors, excision machinery, and other lysogeny/temperate-phage evidence. |

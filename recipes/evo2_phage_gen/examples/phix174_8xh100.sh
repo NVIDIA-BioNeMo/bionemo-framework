@@ -12,6 +12,7 @@ DRY_RUN=0
 PREPARE_ONLY=0
 RESUME_FROM=00
 SAMPLING_SELECTION_SOURCE=
+MODEL_VARIANT="${MODEL_VARIANT:-7b-base}"
 NUM_GPUS="${NUM_GPUS:-8}"
 NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}}"
 for resource_name in NUM_GPUS NUM_CPUS; do
@@ -43,6 +44,7 @@ usage() {
   printf '%s\n' \
     'Usage: ./examples/phix174_8xh100.sh [OPTIONS]' \
     '  --result-root PATH         Result directory (default: results/phix174-8xh100)' \
+    '  --model-variant NAME       7b-base (default) or 7b-1m' \
     '  --sampling-selection PATH  Copy and use a sampling-selection YAML' \
     '  --prepare-only             Prepare public inputs/tools/controls, then stop' \
     '  --resume-from ID           Start at stage 00, 10, 20, 30, 40, or 50' \
@@ -53,6 +55,7 @@ usage() {
 while (($#)); do
   case "$1" in
     --result-root) RESULT_ROOT="$2"; shift 2 ;;
+    --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
     --sampling-selection) SAMPLING_SELECTION_SOURCE="$2"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     --resume-from) RESUME_FROM="$2"; shift 2 ;;
@@ -62,6 +65,26 @@ while (($#)); do
   esac
 done
 case "${RESUME_FROM}" in 00|10|20|30|40|50) ;; *) printf 'Invalid stage: %s\n' "${RESUME_FROM}" >&2; exit 2 ;; esac
+case "${MODEL_VARIANT}" in
+  7b-base)
+    BASE_CHECKPOINT_RESOURCE='evo2/7b-8k:1.0'
+    BASE_CHECKPOINT_DIR='evo2-7b-8k-mbridge-10240'
+    BASE_DOWNLOAD_PLACEHOLDER='<downloaded-evo2-7b-8k>'
+    MODEL_SIZE='evo2_7b_base'
+    RL_MODEL_NAME='bionemo/evo2_7b_base'
+    ;;
+  7b-1m)
+    BASE_CHECKPOINT_RESOURCE='evo2/7b-1m:1.0'
+    BASE_CHECKPOINT_DIR='evo2-7b-1m-mbridge-10240'
+    BASE_DOWNLOAD_PLACEHOLDER='<downloaded-evo2-7b-1m>'
+    MODEL_SIZE='evo2_7b'
+    RL_MODEL_NAME='bionemo/evo2_7b'
+    ;;
+  *)
+    printf 'Invalid model variant: %s (expected 7b-base or 7b-1m)\n' "${MODEL_VARIANT}" >&2
+    exit 2
+    ;;
+esac
 
 STATE_DIR="${RESULT_ROOT}/state"
 STAGE_DIR="${RESULT_ROOT}/stages"
@@ -94,6 +117,23 @@ fi
 note() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "${RUNLOG}"
 }
+
+MODEL_VARIANT_STATE="${STATE_DIR}/model-variant"
+if [[ -s "${MODEL_VARIANT_STATE}" ]]; then
+  RECORDED_MODEL_VARIANT="$(sed -n '1p' "${MODEL_VARIANT_STATE}")"
+elif [[ -s "${STATE_DIR}/selected-sft" || -f "${STAGE_DIR}/20-sft.done" ]]; then
+  # Runs created before this selector existed used the publication-style 7B-base checkpoint.
+  RECORDED_MODEL_VARIANT='7b-base'
+else
+  RECORDED_MODEL_VARIANT="${MODEL_VARIANT}"
+fi
+if [[ "${MODEL_VARIANT}" != "${RECORDED_MODEL_VARIANT}" ]]; then
+  printf 'This result root recorded model variant is %s, not %s; use the recorded variant or a new result root.\n' \
+    "${RECORDED_MODEL_VARIANT}" "${MODEL_VARIANT}" >&2
+  exit 2
+fi
+printf '%s\n' "${MODEL_VARIANT}" > "${MODEL_VARIANT_STATE}"
+note "model variant: ${MODEL_VARIANT} (${BASE_CHECKPOINT_RESOURCE}, model size ${MODEL_SIZE})"
 
 sampling_selection_fields() {
   python - "$1" "${NUM_GPUS}" <<'PY'
@@ -381,7 +421,9 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   fi
 fi
 note "planned topology: ${NUM_GPUS} GPUs, ${NUM_CPUS} logical CPUs"
-printf '{"gpu_count":%s,"cpu_count":%s,"gpu_type":"%s","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}\n' "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" > "${RESULT_ROOT}/settings.json"
+printf '{"gpu_count":%s,"cpu_count":%s,"gpu_type":"%s","model_variant":"%s","base_checkpoint":"%s","model_size":"%s","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}\n' \
+  "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
+  > "${RESULT_ROOT}/settings.json"
 cd "${RECIPE_ROOT}"
 
 stage_00() {
@@ -462,15 +504,15 @@ PY
 }
 
 stage_20() {
-  local prep base_nemo base_mbridge="${RESULT_ROOT}/checkpoints/evo2-7b-8k-mbridge-10240" sft="${RESULT_ROOT}/sft/train" selected
+  local prep base_nemo base_mbridge="${RESULT_ROOT}/checkpoints/${BASE_CHECKPOINT_DIR}" sft="${RESULT_ROOT}/sft/train" selected
   prep="$(read_state sft-prepared)"
-  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size evo2_7b_base --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size 2 --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
+  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size 2 --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
   if [[ -f "${STAGE_DIR}/20-sft.done" ]]; then
     note 'substage 20-sft already complete'
   else
-    [[ "${DRY_RUN}" == "1" ]] && base_nemo='<downloaded-evo2-7b-8k>' || base_nemo="$(download_bionemo_data evo2/7b-8k:1.0 | tail -n 1)"
+    [[ "${DRY_RUN}" == "1" ]] && base_nemo="${BASE_DOWNLOAD_PLACEHOLDER}" || base_nemo="$(download_bionemo_data "${BASE_CHECKPOINT_RESOURCE}" | tail -n 1)"
     if [[ "${DRY_RUN}" == "1" || ! -d "${base_mbridge}" ]]; then
-      run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size evo2_7b_base --seq-length 10240 --mixed-precision-recipe bf16_mixed
+      run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size "${MODEL_SIZE}" --seq-length 10240 --mixed-precision-recipe bf16_mixed
     fi
     monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
     monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2
@@ -576,7 +618,7 @@ PY
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422_1.fna --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
     run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
     check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"

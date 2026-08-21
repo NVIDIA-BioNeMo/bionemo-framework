@@ -169,6 +169,20 @@
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-013-score-definition-artifact",
+      "prompt": "Plan two modified phage reward functions and one new reward for a custom whole-genome target. The machine-readable objective YAML is already planned; add the human-facing scientific deliverables needed before implementation.",
+      "expected_output": "A concise run-specific score-definition report that makes every reward function auditable by a scientist.",
+      "assertions": [
+        "The response writes artifacts/RL_SCORE_DEFINITIONS.md in the selected result root as an agent-produced planning artifact, not as a mandatory scripted RL stage.",
+        "The report covers every enabled objective and names its measured quantity, units, direction, exact score or formula, and resolved target-specific settings.",
+        "For each objective it states the zero-credit region or categorical state, full-credit region or state, and how partial credit grows or shrinks below and above the target when applicable.",
+        "It records missing, invalid, empty, no-hit, missing-gene, and tool-failure behavior plus the relationship to final hard QC.",
+        "It gives a concise biological rationale and cites the target-specific primary source, database record, or authoritative guidance when the rationale or threshold depends on external evidence."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
     }
   ]
 }

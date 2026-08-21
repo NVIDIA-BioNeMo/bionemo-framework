@@ -69,6 +69,11 @@ codex \
 
 The recipe-local skill bundle includes a validated [Codex plugin manifest](.codex-plugin/plugin.json). Other Agent Skills-compatible harnesses can start from [the implementation controller skill](skills/bionemo-phage-design/SKILL.md).
 
+New 7B phage-design runs default to the trained-further long-context checkpoint
+`evo2/7b-1m:1.0` with model size `evo2_7b`. The `_base` identifier is the earlier 8K
+architecture; do not change an existing checkpoint family mid-run. Continue an old run with its
+recorded model, or start a new result root and SFT-anchored attempt when adopting the 1M model.
+
 With Claude Code, run the following from `recipes/evo2_phage_gen` to load the recipe-local plugin:
 
 ```bash
@@ -94,8 +99,22 @@ The reference command was tested from `recipes/evo2_phage_gen` on eight H100 80 
 tmux new -s phix174-e2e
 
 ./examples/phix174_8xh100.sh \
+  --model-variant 7b-base \
   --result-root "$PWD/results/phix174-8xh100"
 ```
+
+This primary reproduction command uses the publication-style `evo2/7b-8k:1.0` /
+`evo2_7b_base` lineage. A fresh PhiX attempt may instead use the trained-further 1M family, which
+is probably preferable for this task even at the 10,240-token run length:
+
+```bash
+./examples/phix174_8xh100.sh \
+  --model-variant 7b-1m \
+  --result-root "$PWD/results/phix174-7b-1m"
+```
+
+Do not use that option to change an existing 7B-base SFT/RL result root; continue it with
+`--model-variant 7b-base`.
 
 `NUM_GPUS` (default 8) and `NUM_CPUS` (default `nproc`, in logical CPUs) are the top-level
 topology controls.
@@ -166,6 +185,12 @@ Useful operator modes are:
 
 # Resume at a stage boundary after correcting an interruption.
 ./examples/phix174_8xh100.sh --resume-from 30 \
+  --model-variant 7b-base \
+  --result-root "$PWD/results/phix174-8xh100"
+
+# Retry the RL stage of an interrupted publication-style 7B-base run.
+./examples/phix174_8xh100.sh --resume-from 40 \
+  --model-variant 7b-base \
   --result-root "$PWD/results/phix174-8xh100"
 
 # Explicitly override calibration with the historical case-study sampling settings.

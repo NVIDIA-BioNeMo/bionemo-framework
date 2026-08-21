@@ -372,6 +372,53 @@ def test_rl_readiness_rejects_non_colocated_megatron_topology(tmp_path):
     assert topology_check.required
 
 
+def test_rl_readiness_rejects_named_save_format_for_megatron_policy(tmp_path):
+    """Native Megatron workers must not request an Automodel/DTensor export format."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    config["checkpointing"]["model_save_format"] = "safetensors"
+    config["policy"]["dtensor_cfg"] = {"_v2": True, "enabled": False}
+    config_path.write_text(yaml.safe_dump(config))
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    checkpoint_check = {check.name: check for check in checks}["checkpoint_save_backend_contract"]
+
+    assert not checkpoint_check.ok
+    assert checkpoint_check.required
+    assert "model_save_format=None" in checkpoint_check.detail
+
+
+def test_rl_readiness_accepts_native_megatron_checkpoint_contract(tmp_path):
+    """Megatron training and rollout share native distributed MBridge checkpoints."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    config["checkpointing"]["model_save_format"] = None
+    config["checkpointing"]["save_consolidated"] = False
+    config["policy"]["dtensor_cfg"] = {"enabled": False}
+    config_path.write_text(yaml.safe_dump(config))
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    checkpoint_check = {check.name: check for check in checks}["checkpoint_save_backend_contract"]
+
+    assert checkpoint_check.ok
+    assert "native Megatron-Bridge" in checkpoint_check.detail
+
+
+def test_rl_readiness_rejects_dtensor_worker_for_megatron_checkpoint_contract(tmp_path):
+    """The Evo2 Megatron path must not silently select a DTensor policy worker."""
+    config_path = _write_minimal_config(tmp_path, include_adapter=True)
+    config = yaml.safe_load(config_path.read_text())
+    config["checkpointing"]["model_save_format"] = None
+    config["policy"]["dtensor_cfg"] = {"enabled": True}
+    config_path.write_text(yaml.safe_dump(config))
+
+    checks = check_rl_readiness(config_path, expected_gpus=2)
+    checkpoint_check = {check.name: check for check in checks}["checkpoint_save_backend_contract"]
+
+    assert not checkpoint_check.ok
+    assert "dtensor_cfg.enabled=False" in checkpoint_check.detail
+
+
 def test_module_check_reports_find_spec_errors(monkeypatch):
     """Import-discovery failures should become diagnostic results."""
     monkeypatch.setattr(

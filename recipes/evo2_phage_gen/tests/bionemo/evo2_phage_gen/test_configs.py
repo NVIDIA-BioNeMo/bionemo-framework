@@ -78,6 +78,7 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     generation_batch_size = config["policy"]["generation_batch_size"]
     generation_config = config["policy"]["generation"]
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
+    dtensor_config = config["policy"]["dtensor_cfg"]
     tensor_model_parallel_size = config["policy"]["megatron_cfg"]["tensor_model_parallel_size"]
     train_data = config["data"]["train"]
 
@@ -104,7 +105,13 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert generation_config["top_k"] is None
     assert generation_config["top_p"] == 1.0
     assert generation_batch_size == 1
+    assert config["policy"]["model_name"] == "bionemo/evo2_7b"
     assert config["policy"]["offload_optimizer_for_logprob"] is False
+    assert config["policy"]["megatron_cfg"]["enabled"] is True
+    assert dtensor_config["enabled"] is False
+    assert "_v2" not in dtensor_config
+    assert config["checkpointing"]["model_save_format"] is None
+    assert config["checkpointing"]["pretrained_checkpoint"]["format"] == "megatron_bridge"
     assert mcore_generation_config["max_requests"] % tensor_model_parallel_size == 0
     assert mcore_generation_config["max_requests"] >= generation_batch_size
     assert mcore_generation_config["prompt_batch_size"] == generation_batch_size
@@ -208,6 +215,18 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["logger"]["wandb"]["name"] == "phix174-gdpo"
     assert config["cluster"] == {"gpus_per_node": 8, "num_nodes": 1}
     assert validation_data["dataset_name"] == "bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset"
+
+
+def test_phix_example_documents_every_gdpo_objective():
+    """The fixed PhiX example should explain every score enabled by its GDPO config."""
+    config = yaml.safe_load((RECIPE_ROOT / "configs" / "gdpo_phage_megatron.yaml").read_text())
+    readme = (RECIPE_ROOT / "examples" / "README.md").read_text()
+    heading = "## Current PhiX174 GDPO score definitions"
+
+    assert heading in readme
+    score_section = readme.split(heading, maxsplit=1)[1]
+    for objective in config["env"]["phage_qc"]["gdpo_objectives"]:
+        assert f"`{objective['name']}`" in score_section
 
 
 def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():

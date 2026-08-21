@@ -110,6 +110,21 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-009-megatron-checkpoint-dispatch",
+      "prompt": "A Megatron GDPO pilot finishes validation, then checkpoint saving raises `model_save_format must be None or omitted if using DTensorPolicyWorker (_v2=False)`. The config intentionally uses Megatron and `model_save_format: safetensors`. Should I remove the save format or enable DTensor?",
+      "expected_output": "Keep the Megatron worker and save the native Megatron-Bridge checkpoint consumed by resume and rollout.",
+      "assertions": [
+        "The response sets checkpointing.model_save_format to null and checkpointing.save_consolidated to false.",
+        "It keeps policy.megatron_cfg.enabled true and policy.dtensor_cfg.enabled false, and omits _v2.",
+        "It explains that the Megatron worker writes native Megatron-Bridge torch_dist checkpoints under step_N/policy/weights/iter_0000000 for direct resume and rollout use.",
+        "It does not request safetensors, a consolidated HF export, or a DTensor policy worker.",
+        "It reruns the failed pilot from the same top-level result root after updating the recipe checkout.",
+        "It does not require a NeMo-RL force reinstall for an editable recipe config change."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

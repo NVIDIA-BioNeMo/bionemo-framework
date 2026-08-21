@@ -22,4 +22,6 @@ Add focused tests that demonstrate:
 - the installed runtime accepts the expected names, shapes, dtypes, devices, and reductions; and
 - a tiny deterministic RL smoke computes rewards, writes a checkpoint, and can resume.
 
+Before declaring reward work complete, create or refresh `artifacts/RL_SCORE_DEFINITIONS.md` in the selected result root. Reconcile it against the implemented reward columns, formulas, resolved configuration, and focused boundary/failure tests. For every enabled objective, state the measured quantity and units, direction, exact formula and settings, zero-credit and full-credit regions or categorical states, both-side partial-credit behavior when applicable, missing/invalid/empty/no-hit/missing-gene/tool-failure behavior, biological rationale and citations, controls and telemetry, and relationship to final hard QC. This is an agent-produced implementation artifact, not a required stage of the fully scripted run. Use the **Current PhiX174 GDPO score definitions** section in `examples/README.md` as a worked format, not as target-independent scientific defaults.
+
 Use the execution skill for a real installed-environment smoke test when local imports are not representative. Run the relevant focused tests after implementation and record the command, settings, results, and any scientific limitation in the stage summary and `RUNLOG.md`.

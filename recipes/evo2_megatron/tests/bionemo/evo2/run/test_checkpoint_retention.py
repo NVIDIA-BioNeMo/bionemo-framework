@@ -110,7 +110,7 @@ def test_equal_metric_favors_newer_checkpoint(tmp_path: Path, caplog, higher_is_
 
 
 def test_matches_nearest_past_metric(tmp_path: Path, caplog) -> None:
-    caplog.set_level(logging.WARNING, logger="bionemo.evo2.run.checkpoint_retention")
+    caplog.set_level(logging.WARNING)
     retention = MetricCheckpointRetention(
         metric_name="lm loss",
         keep_best_k=1,
@@ -145,7 +145,7 @@ def test_matches_nearest_past_metric(tmp_path: Path, caplog) -> None:
 
 
 def test_preserves_historical_checkpoints(tmp_path: Path, caplog) -> None:
-    caplog.set_level(logging.WARNING, logger="bionemo.evo2.run.checkpoint_retention")
+    caplog.set_level(logging.WARNING)
     (tmp_path / "iter_0000001").mkdir()
     (tmp_path / "iter_0000002").mkdir()
     retention = MetricCheckpointRetention(
@@ -238,7 +238,7 @@ def test_does_not_rematch_after_save(tmp_path: Path) -> None:
 
 
 def test_missing_metric_falls_back_to_recent(tmp_path: Path, caplog) -> None:
-    caplog.set_level(logging.WARNING, logger="bionemo.evo2.run.checkpoint_retention")
+    caplog.set_level(logging.WARNING)
     retention = MetricCheckpointRetention(
         metric_name="lm loss",
         keep_best_k=2,

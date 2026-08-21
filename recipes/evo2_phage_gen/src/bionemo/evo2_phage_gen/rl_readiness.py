@@ -396,6 +396,28 @@ def _config_checks(
             detail=f"policy.megatron_cfg.enabled={megatron_enabled!r}",
         )
     )
+    model_save_format = _nested_get(config, ("checkpointing", "model_save_format"))
+    save_consolidated = bool(_nested_get(config, ("checkpointing", "save_consolidated"), False))
+    dtensor_enabled = bool(_nested_get(config, ("policy", "dtensor_cfg", "enabled"), False))
+    checkpoint_save_contract_ok = model_save_format is None and not save_consolidated and not dtensor_enabled
+    checks.append(
+        RLReadinessCheck(
+            name="checkpoint_save_backend_contract",
+            ok=checkpoint_save_contract_ok,
+            required=True,
+            detail=(
+                "native Megatron-Bridge torch_dist checkpoint saving is configured"
+                if checkpoint_save_contract_ok
+                else (
+                    "native Megatron-Bridge checkpoint saving requires "
+                    "checkpointing.model_save_format=None, checkpointing.save_consolidated=False, "
+                    "and policy.dtensor_cfg.enabled=False; got "
+                    f"model_save_format={model_save_format!r}, save_consolidated={save_consolidated!r}, "
+                    f"dtensor_cfg.enabled={dtensor_enabled!r}"
+                )
+            ),
+        )
+    )
     env_name = _nested_get(config, ("data", "train", "env_name"))
     checks.append(
         RLReadinessCheck(

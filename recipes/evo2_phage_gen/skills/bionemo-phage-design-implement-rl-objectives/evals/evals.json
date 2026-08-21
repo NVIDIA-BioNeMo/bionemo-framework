@@ -57,6 +57,20 @@
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-005-refresh-score-definition-artifact",
+      "prompt": "Implement approved changes to two reward functions and add a third reward. The code and tests pass, and the objective YAML names the components. Finish the scientific handoff without adding a new stage to the fully scripted run.",
+      "expected_output": "The implemented score behavior and its human-readable run artifact agree exactly.",
+      "assertions": [
+        "The response creates or refreshes artifacts/RL_SCORE_DEFINITIONS.md in the selected result root before declaring the reward work complete.",
+        "Every implemented objective has its measured quantity, units, direction, exact formula, resolved configuration, zero-credit and full-credit regions, and both-side partial-credit behavior when applicable.",
+        "Categorical and missing or failed states are described explicitly rather than forced into invented numeric ranges.",
+        "The report includes concise biological rationale, evidence citations, controls, telemetry, and final hard-QC relationship for each objective.",
+        "The report is checked against the implemented reward columns, formulas, configuration, and focused boundary tests; it is an agent-authored run artifact rather than a required pipeline stage."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
     }
   ]
 }

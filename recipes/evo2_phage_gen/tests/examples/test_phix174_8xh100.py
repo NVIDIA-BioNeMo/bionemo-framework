@@ -134,6 +134,9 @@ def test_dry_run(tmp_path: Path) -> None:
         "cpu_count": 96,
         "gpu_count": 8,
         "gpu_type": "not queried (dry run)",
+        "model_variant": "7b-base",
+        "base_checkpoint": "evo2/7b-8k:1.0",
+        "model_size": "evo2_7b_base",
         "whole_genome": True,
         "safety_screen": "current configured databases",
         "final_generation_count": 1000,
@@ -226,6 +229,7 @@ def test_dry_run(tmp_path: Path) -> None:
         if "command: torchrun " in line and "--max-steps 12000" in line
     )
     assert sft_command[sft_command.index("--keep-best-k") + 1] == "3"
+    assert sft_command[sft_command.index("--model-size") + 1] == "evo2_7b_base"
     assert sft_command[sft_command.index("--most-recent-k") + 1] == "1"
     assert sft_command[sft_command.index("--checkpoint-metric-name") + 1] == "lm loss"
     assert "--strict-checkpoint-metric" in sft_command
@@ -266,6 +270,84 @@ def test_dry_run(tmp_path: Path) -> None:
         if "command: evo2_phage_run_gdpo " in line
     )
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
+    assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
+
+    conversion = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_convert_nemo2_to_mbridge " in line
+    )
+    assert conversion[conversion.index("--nemo2-ckpt-dir") + 1] == "<downloaded-evo2-7b-8k>"
+    assert conversion[conversion.index("--model-size") + 1] == "evo2_7b_base"
+
+
+def test_dry_run_supports_preferred_7b_1m_variant(tmp_path: Path) -> None:
+    """A fresh result root can explicitly select the trained-further long-context family."""
+    result_root = tmp_path / "result-1m"
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--model-variant",
+            "7b-1m",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["model_variant"] == "7b-1m"
+    assert settings["base_checkpoint"] == "evo2/7b-1m:1.0"
+    assert settings["model_size"] == "evo2_7b"
+    log = (result_root / "RUNLOG.md").read_text()
+    conversion = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_convert_nemo2_to_mbridge " in line
+    )
+    assert conversion[conversion.index("--nemo2-ckpt-dir") + 1] == "<downloaded-evo2-7b-1m>"
+    assert conversion[conversion.index("--model-size") + 1] == "evo2_7b"
+    gdpo = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_run_gdpo " in line
+    )
+    assert "policy.model_name=bionemo/evo2_7b" in gdpo
+
+
+def test_existing_base_run_rejects_mid_run_switch_to_1m(tmp_path: Path) -> None:
+    """Historical result roots without a variant marker are known to be 7B-base runs."""
+    result_root = tmp_path / "existing-base"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state" / "selected-sft").write_text("/checkpoint/iter_0005200\n")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--model-variant",
+            "7b-1m",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert "recorded model variant is 7b-base" in completed.stderr
+    assert "new result root" in completed.stderr
 
 
 def test_sampling_selection_override(tmp_path: Path) -> None:

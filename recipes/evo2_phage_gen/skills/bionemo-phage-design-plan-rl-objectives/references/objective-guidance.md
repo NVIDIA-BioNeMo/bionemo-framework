@@ -17,3 +17,5 @@ For each reward, record:
 - its relationship to final hard QC and experimental validation.
 
 Keep component scores visible. Test for duplicated evidence, scale dominance, opposing directions, sparse support, and combinations that favor the wrong endpoint. A required safety or viability check remains a final exclusion or INDETERMINATE result even when an online proxy is useful for shaping.
+
+Write the resolved human-readable record to `artifacts/RL_SCORE_DEFINITIONS.md` in the selected result root. Include exact zero/full-credit states and both-sided partial-credit behavior when applicable, plus concise biological rationale and evidence citations. Use the **Current PhiX174 GDPO score definitions** section in `examples/README.md` as a worked format only. An agent creates or refreshes this artifact when objectives are planned or implemented; it is not a stage of the fixed E2E script.

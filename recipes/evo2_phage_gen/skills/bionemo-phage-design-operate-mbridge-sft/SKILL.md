@@ -9,7 +9,9 @@ metadata:
 
 Work inside the recipe and result roots selected by the controller. Use the execution skill to resolve current commands and infrastructure.
 
-Start from the approved base or reused checkpoint and the explicit leakage-controlled split. Follow the concise [training guidance](references/training-guidance.md). Size the run with a bounded full-context smoke test rather than reducing the scientific sequence length.
+For a new phage-design project using the 7B family, start from the long-context NGC checkpoint `evo2/7b-1m:1.0` with model size `evo2_7b`; it was trained further than the 8K `_base` checkpoint and remains valid for shorter inputs. A compatible reused checkpoint may retain its recorded family, but do not switch an old or active run from `evo2_7b_base` to `evo2_7b` mid-run. Such a change starts a new result root and SFT-anchored attempt.
+
+Use that approved base or reused checkpoint and the explicit leakage-controlled split. Follow the concise [training guidance](references/training-guidance.md). Size the run with a bounded full-context smoke test rather than reducing the scientific sequence length.
 
 The smoke test should use real train and validation records and show finite loss, parameter updates, checkpoint writing, and restartability. Fix data, masking, or runtime problems before the full run.
 
