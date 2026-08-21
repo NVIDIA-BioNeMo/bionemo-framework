@@ -70,6 +70,19 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-006-non-x86-assets",
+      "prompt": "An ARM64 GPU workstation can run an NVIDIA PyTorch container. Determine whether the current Evo 2 phage external-asset setup can run unchanged.",
+      "expected_output": "An architecture-aware setup assessment that identifies the native binary work required before execution.",
+      "assertions": [
+        "The response identifies the current MMseqs2-GPU, DIAMOND, and HMMER downloads as Linux x86_64 binaries.",
+        "It requires updates to the corresponding external-asset download and selection logic for non-x86_64 execution.",
+        "It validates native replacement binaries before scientific stages use them.",
+        "It does not claim that selecting an ARM-compatible base container alone makes the current setup supported."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

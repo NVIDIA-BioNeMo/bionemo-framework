@@ -126,6 +126,11 @@ def test_adapt_execution_documents_gpu_container_path() -> None:
         "bind-mount",
         "./.ci_build.sh",
         ".ci_test_env.sh",
+        "x86_64",
+        "MMseqs2-GPU",
+        "DIAMOND",
+        "HMMER",
+        "non-x86_64",
     ):
         assert marker in guidance
 
