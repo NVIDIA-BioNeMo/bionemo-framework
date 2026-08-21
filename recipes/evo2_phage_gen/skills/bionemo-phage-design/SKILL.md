@@ -27,7 +27,18 @@ For a new phage-design project using the 7B family, default to the trained-furth
 
 Plan by dependencies rather than forcing every stage into a serial checklist. Evidence research, genome collection, execution discovery, and objective planning may overlap once their inputs are clear. Prepare, train, and select SFT before calibration; start RL only after the selected SFT, implemented objectives, calibration, result-root prompt banks, and model-only SFT checkpoint prepared for RL are ready; final generation waits for the selected RL checkpoint. Run independent ready work in parallel only when compute and write scopes fit, while durable monitoring continues without blocking other work.
 
-For long SFT, calibration generation or scoring, RL, or rollout work, use the realized example's narrow completion markers to reuse an accepted result after interruption while still running checkpoint selection and downstream checks. If the example stops after calibration because its historical default is unsupported, inspect the completed evidence and follow the calibration skill's sampling-selection handoff; do not bypass that review with the bundled default on the agent's own initiative.
+When operating or adapting the realized PhiX experiment, read the
+[example README](../../examples/README.md) as the source of truth for its current commands,
+selection handoff, and restart markers. Use its workflow when compatible, but do not assume the
+same shell launch or topology fits a different GPU or scheduler environment; adapt execution from
+measured hardware while preserving scientific semantics and durable stage boundaries. If the
+example stops for sampling review, inspect the completed evidence and follow the calibration
+skill's handoff rather than selecting the bundled historical default on the agent's own initiative.
+Treat the top-level PhiX script as a reference implementation of the realized DAG. For a rerun, an
+agent may run it directly, adapt or wrap it for custom settings and deliberate decision points, or
+compose the stage subskills through another scheduler. Use the example README and dependency DAG
+to understand current handoffs and stage relationships; let the task and execution environment
+determine the orchestration.
 Do not replace the canonical sampling selection inside an old or active RL result root; a material
 change starts a new SFT-anchored attempt. In the final rollout, preserve separate raw,
 biological-representative, hard-QC, and post-QC-cluster denominators.

@@ -126,7 +126,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "10 safety-screen and prepare SFT",
         "20 train/select/evaluate SFT",
         "30 calibrate sampling",
-        "40 prepare SFT checkpoint for RL; pilot/train/monitor/select GDPO",
+        "40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO",
         "50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes",
     ]
     settings = json.loads((result_root / "settings.json").read_text())
@@ -378,7 +378,6 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
     assert "WARNING: copied explicit sampling selection" in log
     assert "using explicit sampling selection" in log
     assert "sampling selection: temperature=0.9, prompt lengths=4 8 16 24, max new tokens=5800" in log
-
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
     prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
     assert len(prompt_banks) == 2
@@ -410,6 +409,34 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
         assert command[command.index("--top-p") + 1] == "0.85"
         assert command[command.index("--seed") + 1] == str(7 + rank * 11)
     assert "phix174_prompt4-8-16-24_temp0.9.n1000.fasta" in log
+
+
+def test_calibrate_only_stops_after_scoring_for_sampling_review(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--calibrate-only",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "monitor: calibration generation" in log
+    assert "monitor: calibration scoring" in log
+    assert "calibration review requested" in log
+    assert str(result_root / "calibration/scoring/selection-evidence.csv") in log
+    assert "write-rl-prompts" not in log
+    assert "evo2_phage_run_gdpo" not in log
 
 
 def test_existing_sampling_selection_is_reused(tmp_path: Path) -> None:
@@ -510,6 +537,69 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: 500-step DP8 GDPO" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "evo2_phage_sequence_safety scan" in log
+
+
+def test_stage40_pilot_marker_skips_pilot_but_runs_monitor_and_full_training(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    stage_root = result_root / "stages"
+    stage_root.mkdir(parents=True)
+    (stage_root / "40-pilot.done").touch()
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--resume-from",
+            "40",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "substage 40-pilot already complete" in log
+    assert "monitor: one-step GDPO pilot" not in log
+    assert "evo2_phage_monitor_objectives" in log
+    assert "monitor: 500-step DP8 GDPO" in log
+
+
+def test_stage40_pilot_check_marker_skips_completed_pilot_check(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    stage_root = result_root / "stages"
+    stage_root.mkdir(parents=True)
+    (stage_root / "40-pilot.done").touch()
+    (stage_root / "40-pilot-check.done").touch()
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--resume-from",
+            "40",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "substage 40-pilot already complete" in log
+    assert "substage 40-pilot-check already complete" in log
+    assert str(result_root / "rl-pilot/objective-health.json") not in log
+    assert "monitor: 500-step DP8 GDPO" in log
 
 
 def test_stage50_granular_markers_skip_completed_work(tmp_path: Path) -> None:

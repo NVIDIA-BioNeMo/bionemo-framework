@@ -10,6 +10,7 @@ RECIPE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RESULT_ROOT="${RECIPE_ROOT}/results/phix174-8xh100"
 DRY_RUN=0
 PREPARE_ONLY=0
+CALIBRATE_ONLY=0
 RESUME_FROM=00
 SAMPLING_SELECTION_SOURCE=
 MODEL_VARIANT="${MODEL_VARIANT:-7b-base}"
@@ -47,6 +48,7 @@ usage() {
     '  --model-variant NAME       7b-base (default) or 7b-1m' \
     '  --sampling-selection PATH  Copy and use a sampling-selection YAML' \
     '  --prepare-only             Prepare public inputs/tools/controls, then stop' \
+    '  --calibrate-only           Stop after calibration scoring for sampling review' \
     '  --resume-from ID           Start at stage 00, 10, 20, 30, 40, or 50' \
     '  --dry-run                  Record and print commands without external work' \
     '  -h, --help                 Show this help'
@@ -58,6 +60,7 @@ while (($#)); do
     --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
     --sampling-selection) SAMPLING_SELECTION_SOURCE="$2"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
+    --calibrate-only) CALIBRATE_ONLY=1; shift ;;
     --resume-from) RESUME_FROM="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -65,6 +68,14 @@ while (($#)); do
   esac
 done
 case "${RESUME_FROM}" in 00|10|20|30|40|50) ;; *) printf 'Invalid stage: %s\n' "${RESUME_FROM}" >&2; exit 2 ;; esac
+if [[ "${PREPARE_ONLY}" == "1" && "${CALIBRATE_ONLY}" == "1" ]]; then
+  printf '%s\n' '--prepare-only and --calibrate-only are mutually exclusive' >&2
+  exit 2
+fi
+if [[ "${CALIBRATE_ONLY}" == "1" ]] && ((10#${RESUME_FROM} > 30)); then
+  printf '%s\n' '--calibrate-only requires --resume-from 00, 10, 20, or 30' >&2
+  exit 2
+fi
 case "${MODEL_VARIANT}" in
   7b-base)
     BASE_CHECKPOINT_RESOURCE='evo2/7b-8k:1.0'
@@ -540,6 +551,10 @@ stage_30() {
     monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-scoring.done"
   fi
+  if [[ "${CALIBRATE_ONLY}" == "1" ]]; then
+    note "calibration review requested; inspect ${evidence}, write a reviewed sampling-selection YAML, then rerun without --calibrate-only"
+    return
+  fi
   if [[ -s "${SAMPLING_SELECTION}" ]]; then
     if [[ "${SAMPLING_SELECTION_OVERRIDDEN}" == "1" ]]; then
       note "using explicit sampling selection: ${SAMPLING_SELECTION}"
@@ -619,9 +634,19 @@ PY
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422_1.fna --control-dir "${control}"
     local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
-    monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
-    run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
-    check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
+    if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
+      note 'substage 40-pilot already complete'
+    else
+      monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
+      [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot.done"
+    fi
+    if [[ -f "${STAGE_DIR}/40-pilot-check.done" ]]; then
+      note 'substage 40-pilot-check already complete'
+    else
+      run evo2_phage_monitor_objectives --tensorboard-root "${RESULT_ROOT}/rl-pilot/logs" --config configs/gdpo_phage_megatron.yaml --minimum-events 1 --output "${RESULT_ROOT}/rl-pilot/objective-health.json"
+      check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
+      [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot-check.done"
+    fi
     monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-rl.done"
   fi
@@ -954,11 +979,14 @@ PY
   fi
 }
 
-printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/train/monitor/select GDPO' '50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
+printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO' '50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
 for id in 00 10 20 30 40 50; do
   ((10#${id} < 10#${RESUME_FROM})) && continue
   [[ "${PREPARE_ONLY}" == "1" && "${id}" != 00 ]] && continue
+  [[ "${CALIBRATE_ONLY}" == "1" ]] && ((10#${id} > 30)) && continue
   [[ -f "${STAGE_DIR}/${id}.done" ]] && { note "stage ${id} already complete"; continue; }
-  note "starting stage ${id}"; "stage_${id}"; [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/${id}.done"
+  note "starting stage ${id}"; "stage_${id}"
+  [[ "${CALIBRATE_ONLY}" == "1" && "${id}" == 30 ]] && continue
+  [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/${id}.done"
 done
 note 'requested stages complete'

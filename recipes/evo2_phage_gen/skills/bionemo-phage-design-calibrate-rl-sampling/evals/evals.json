@@ -65,9 +65,23 @@
       "assertions": [
         "The response inspects calibration/scoring/selection-evidence.csv and the underlying score and novelty evidence before choosing settings.",
         "It writes the reviewed choice to calibration/sampling-selection.yaml with the complete script-supported schema and records its rationale.",
-        "It reruns the same top-level command and result root so completed calibration substages are reused.",
+        "It follows the current example README's selection handoff and restart markers when that launcher is compatible, while retaining completed calibration evidence if execution must be adapted.",
         "It does not pass examples/default-sampling-selection.yaml merely to bypass the failed hard check.",
         "It distinguishes a user-requested --sampling-selection override from the agent's evidence-based autonomous path."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": "examples/phix174_8xh100.sh"
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-006-intentional-review-stop",
+      "prompt": "Run the PhiX example through fresh sampling calibration, but stop before RL so I can inspect the evidence and let the agent choose custom settings. The eventual GPU environment may differ from the example host.",
+      "expected_output": "Follow the current PhiX review workflow, choose from evidence, and adapt execution without changing scientific semantics.",
+      "assertions": [
+        "The response reads evo2_phage_gen/examples/README.md as the source of truth for the current review and resume procedure.",
+        "It inspects calibration/scoring/selection-evidence.csv and the neighboring score and novelty evidence before choosing settings.",
+        "It creates an intentional review boundary before RL prompt materialization or RL launch and records the selected settings durably.",
+        "It uses examples/default-sampling-selection.yaml only as the complete schema or as an explicitly chosen historical override.",
+        "It may adapt topology, batch, workers, scheduler integration, or launch commands to measured hardware while preserving whole-genome context, effective batch, sampling semantics, and validation independence."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": "examples/phix174_8xh100.sh"

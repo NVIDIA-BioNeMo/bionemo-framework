@@ -125,6 +125,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-010-pilot-substage-resume",
+      "prompt": "A one-step PhiX GDPO pilot completed successfully, but the next objective monitor failed with `no usable validation events`. The run predates separate pilot markers, and TensorBoard has task-scoped validation tags. Avoid repeating the 18-minute pilot and continue safely.",
+      "expected_output": "Record the confirmed pilot separately, repair and run its telemetry check, then enter the full RL run.",
+      "assertions": [
+        "The response treats the successful pilot, pilot objective-health check, and full RL run as three distinct states.",
+        "It permits creating stages/40-pilot.done only because the run log explicitly records successful pilot completion.",
+        "It does not create stages/40-pilot-check.done until the objective monitor parses and accepts the pilot telemetry, and it does not create stages/40-rl.done.",
+        "The monitor discovers the newest complete task-scoped validation namespace using mean_reward and num_sequences instead of requiring validation/mean_reward.",
+        "It resumes stage 40 from the same result root, skips the pilot, performs the repaired check, and then launches the full run."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

@@ -104,6 +104,16 @@ def test_phage_design_skills_default_new_runs_to_evo2_7b_1m() -> None:
         assert "mid-run" in skill
 
 
+def test_controller_keeps_phix_rerun_orchestration_agent_directed() -> None:
+    """The realized launcher is a useful reference, not a mandatory orchestration interface."""
+    controller = " ".join((SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text().split())
+
+    assert "reference implementation of the realized DAG" in controller
+    assert "may run it directly, adapt or wrap it" in controller
+    assert "stage subskills" in controller
+    assert "let the task and execution environment determine the orchestration" in controller
+
+
 @pytest.mark.skipif(RUNNING_IN_CI, reason="Skill eval planning is intentionally local-only.")
 def test_all_skill_evals_are_discovered_and_plannable(tmp_path: Path) -> None:
     """Run every skill eval through the no-model-call planning path."""

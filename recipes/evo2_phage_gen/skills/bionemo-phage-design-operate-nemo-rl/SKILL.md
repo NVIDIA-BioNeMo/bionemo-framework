@@ -15,6 +15,11 @@ Treat materialized training and validation prompt banks as run artifacts: readin
 
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 
+For the realized PhiX pilot and resume procedure, read the
+[example README](../../examples/README.md) as the source of truth. Preserve separate durable states
+for the pilot, its objective-health check, and the full RL run; skip a state only after its output
+is known to have completed successfully.
+
 Save native Megatron-Bridge `torch_dist` checkpoints: set `checkpointing.model_save_format: null`, keep `checkpointing.save_consolidated: false`, `policy.megatron_cfg.enabled: true`, and `policy.dtensor_cfg.enabled: false`, and omit `_v2`. NeMo-RL writes `step_N/policy/weights/iter_0000000`, which this recipe resumes from and gives directly to Megatron rollout. Named formats such as `safetensors` belong to the Automodel/DTensor path, not this worker. Updating this recipe config in an editable checkout does not require `evo2_phage_setup_nemo_rl --force-reinstall`; rerun the failed pilot from the same top-level result root.
 
 Validate the configured checkpoint-selection metric against the actual validation metric names.
@@ -26,6 +31,11 @@ keys and NeMo-RL adds that task namespace exactly once, so the strict PhiX check
 rather than encoding the path into the checkpoint metric. Timing-marker keys remain unnamespaced
 for phase reporting. A missing metric is an integration error to diagnose; do not switch to another
 target environment or biological profile merely to make a key appear.
+
+TensorBoard objective monitoring must discover the newest complete validation namespace containing
+both `mean_reward` and `num_sequences`. Current recipe runs normally emit `validation/phage_qc/...`,
+while older path-named runs may emit `validation/rl-validation/...`; do not hard-code the unscoped
+`validation/mean_reward` path or confuse these logging paths with the configured checkpoint metric.
 
 Choose topology and batch settings from measured full-genome behavior. Preserve complete-genome context and the intended effective batch. Use GDPO and 99%-cluster inverse-frequency diversity for the default case study unless evidence supports another approved method.
 

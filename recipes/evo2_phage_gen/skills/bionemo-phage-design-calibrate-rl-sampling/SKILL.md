@@ -17,26 +17,16 @@ Choose a robust quality-diversity plateau rather than a noisy maximum. Prefer te
 
 Keep calibration samples separate from the fixed RL-validation bank and final rollout. Record prompt construction, seeds, sampling settings, sample counts, score summaries, uncertainty, chosen mixture, and rationale in the stage summary and `RUNLOG.md`.
 
-For the realized `examples/phix174_8xh100.sh` workflow, treat
-`<result_root>/calibration/sampling-selection.yaml` as the durable selection handoff. On re-entry
-after calibration generation or scoring, inspect `calibration/scoring/selection-evidence.csv` and
-the underlying score/novelty artifacts, choose settings by the criteria above, and write the
-canonical YAML with `temperature`, `top_k`, `top_p`, `max_new_tokens`, `prompt_lengths`, `rl_seed`,
-`rollout_seed`, and `seed_stride`. The prompt lengths are an equal mixture and their count must tile
-the training bank, validation bank, final rollout, and GPU count. Record the evidence and rationale,
-then rerun the original top-level command with the same result root; the narrow completion markers
-reuse completed calibration work and the existing canonical file skips the historical-default
-hard check.
+For the realized PhiX workflow, read the
+[example README](../../examples/README.md) before planning or rerunning it. Treat that document as
+the source of truth for the current review stop, evidence paths, selection schema and handoff,
+completion markers, and resume procedure. When the user delegates selection, make the
+evidence-based choice described there and record its rationale; use the bundled historical choice
+only when the user explicitly selects it.
 
-`--sampling-selection PATH` is an explicit operator-override path: the script validates and copies
-that file to the canonical location whether supplied on the first invocation or a rerun. When the
-skill is operating the demo autonomously, do not pass
-`examples/default-sampling-selection.yaml` merely to get past a calibration stop. Make the
-evidence-based decision and write the canonical file directly. Use the bundled default override
-only when the user explicitly chooses historical settings despite the warning.
-
-On an old or active RL result root, supply the override again only when it is identical to the
-recorded canonical selection. Do not replace prompt lengths, temperature, seeds, or related
-sampling settings in place: that can introduce training/validation drift after the run has begun.
-Start a new result root and SFT-anchored RL attempt for a material change, retaining the earlier run
-as evidence.
+The example shell script is a reference implementation, not a mandatory launcher. On a different
+GPU or scheduler environment, inspect the available hardware and adapt topology, batch and worker
+settings, or the launch method itself while preserving whole-genome context, effective batch,
+sampling semantics, validation independence, and the durable selection record. Do not alter an
+active run's sampling semantics in place; use a new result root and SFT-anchored RL attempt for a
+material change, retaining the earlier run as evidence.

@@ -1,246 +1,106 @@
 # PhiX174 whole-genome example on 8×H100
 
-[`phix174_8xh100.sh`](phix174_8xh100.sh) is the agent-free realization of the current recipe. It
-prepares public inputs and tools, trains SFT and GDPO, generates 1,000 complete genomes, scores
-every design with the selected SFT, and applies the current sequence-safety and PhiX174 design
-screens. These are computational candidates, not
-evidence of bootability, therapeutic fitness, or wet-lab safety.
+[`phix174_8xh100.sh`](phix174_8xh100.sh) prepares public inputs, trains SFT and GDPO,
+generates 1,000 complete genomes, and applies the current safety and PhiX174 design screens.
+Outputs are computational candidates, not evidence of bootability or wet-lab safety.
 
-The reference command was tested from `recipes/evo2_phage_gen` on eight H100 80 GB GPUs:
+## Quick start
+
+Run from `recipes/evo2_phage_gen`. The publication-style reproduction uses 7B-base:
 
 ```bash
 ./.ci_build.sh
-
-# Recommended when a durable batch scheduler is not keeping the process alive.
 tmux new -s phix174-e2e
-
-./examples/phix174_8xh100.sh \
-  --model-variant 7b-base \
-  --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
 ```
 
-The build creates the virtual env used by `.ci_test_env.sh`, which the example sources internally.
-The primary command uses `evo2/7b-8k:1.0`, model size `evo2_7b_base`, because the published
-Microviridae work and the realized PhiX case-study lineage used the 7B-base family. For a fresh
-PhiX experiment, the trained-further 1M checkpoint is probably the better starting point and can
-still run at this example's shorter 10,240-token sequence length:
+For a fresh PhiX experiment, use the trained-further 7B-1M model and a new result root:
 
 ```bash
-./examples/phix174_8xh100.sh \
-  --model-variant 7b-1m \
-  --result-root "$PWD/results/phix174-7b-1m"
+./examples/phix174_8xh100.sh --model-variant 7b-1m --result-root "$PWD/results/phix174-7b-1m"
 ```
 
-That selects `evo2/7b-1m:1.0`, model size `evo2_7b`, and the matching NeMo-RL provider name.
-Checkpoint lineage is authoritative; a mislabeled `policy.model_name` in old run metadata does not
-change which pretrained weights were used. Nevertheless, keep the provider name consistent in new
-configs. A result root that already contains a 7B-base SFT run must remain on that family when
-resuming. Moving to 1M is a new result root and SFT-anchored attempt, not a mid-run override.
-`NUM_GPUS` defaults to 8 and controls SFT processes, RL topology, calibration GPUs, rollout
-workers, and likelihood scoring. `NUM_CPUS` defaults to `nproc` and sets the Ray logical-CPU budget.
-The script checks the configured GPU count. Other accelerator models are allowed with a warning
-because memory, batch, and parallelism settings may need tuning; the reference settings are not a
-performance claim for another topology. `NUM_GPUS` must currently be even for the SFT
-tensor-parallel layout. Restricted agent sandboxes often hide `nvidia-smi`, so launch on the
-allocated compute node. Use a scratch clone or worktree when a run needs code or config changes.
+`7b-base` is the default and matches the published Microviridae lineage. `7b-1m` selects
+`evo2/7b-1m:1.0` and provider `evo2_7b`. Checkpoint lineage is authoritative, and the script
+refuses to change model families within an existing result root.
 
-Useful controls:
+## Common operations
 
 ```bash
-# Inspect all commands without downloads or GPUs.
+# Inspect commands without downloads or GPUs.
 ./examples/phix174_8xh100.sh --dry-run --result-root /tmp/phix174-plan
 
-# Download public data/tools and run safety controls before allocating the full training window.
-./examples/phix174_8xh100.sh --prepare-only \
-  --result-root "$PWD/results/phix174-8xh100"
+# Prepare public inputs, tools, databases, and controls only.
+./examples/phix174_8xh100.sh --prepare-only --result-root "$PWD/results/phix174-8xh100"
 
-# Resume at a stage boundary; completed stages are skipped automatically.
-./examples/phix174_8xh100.sh --resume-from 30 \
-  --model-variant 7b-base \
-  --result-root "$PWD/results/phix174-8xh100"
+# Resume the RL stage of the 7B-base run.
+./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
 
-# Continue an interrupted 7B-base run whose stage-40 pilot did not complete.
-./examples/phix174_8xh100.sh --resume-from 40 \
-  --model-variant 7b-base \
-  --result-root "$PWD/results/phix174-8xh100"
-
-# Explicitly use the historical case-study settings instead of requiring fresh calibration support.
-./examples/phix174_8xh100.sh \
-  --result-root "$PWD/results/phix174-8xh100" \
-  --sampling-selection examples/default-sampling-selection.yaml
+# Use an explicitly reviewed sampling selection.
+./examples/phix174_8xh100.sh --sampling-selection examples/default-sampling-selection.yaml --result-root "$PWD/results/phix174-8xh100"
 ```
 
-If an unfinished stage is interrupted, rerun the original command with the same result root. The
-script reuses completed stages and cached or partial downloads, so the run directory need not be
-deleted. Only one invocation may use a result root at a time. If AMRFinder fails, its captured
-output is retained as `amrfinder/amrfinder.log` below that scan directory.
+Completed stages and substages are skipped. Reuse the same result root and sampling selection when
+resuming; a material sampling or model change should start a new run.
 
-### Choose or override sampling settings
+### Choose sampling settings
 
-Stage 30 uses `${RESULT_ROOT}/calibration/sampling-selection.yaml` as the canonical sampling
-selection. When `--sampling-selection PATH` is supplied, the script validates the file and copies
-it to that location before running any stage. The supplied file therefore works both on the first
-invocation and when resuming after calibration. If the canonical file already exists, stage 30
-uses it and skips the hard check against the bundled historical choice. Without either file, the
-script writes the bundled default only when fresh calibration supports it; otherwise it stops for
-review without repeating completed calibration generation or scoring.
-
-After a selection is available, stage 30 creates `${RESULT_ROOT}/rl/train.jsonl` and
-`${RESULT_ROOT}/rl/validation.jsonl`. Stage 40 automatically checks the run-specific training bank
-and passes both files to training; do not create the template `data/phix174_rl_*` files manually.
-A rerun with the same result root recreates either prompt bank if needed while reusing completed
-calibration work.
-
-For the specific post-calibration stop caused by an unsupported historical choice, either accept
-the historical settings explicitly:
+[`default-sampling-selection.yaml`](default-sampling-selection.yaml) is both the historical PhiX
+choice and the schema for a custom selection. To stop after the sweep and scoring, before prompt
+banks or RL are created, run:
 
 ```bash
-./examples/phix174_8xh100.sh \
-  --result-root "$PWD/results/phix174-8xh100" \
-  --sampling-selection examples/default-sampling-selection.yaml
+./examples/phix174_8xh100.sh --calibrate-only --result-root "$PWD/results/phix174-8xh100"
 ```
 
-This logs a warning because the selection is an operator override, not a conclusion from the new
-calibration. Subsequent reruns with the same result root may omit `--sampling-selection`; the copied
-canonical file remains in the run record.
-
-To make an evidence-based selection instead, inspect
-`calibration/scoring/selection-evidence.csv`. Exclude rows where `eligible` or
-`metric_environment_ok` is false, confirm the external measurements are available, compare the
-aggregate reward and target-signal confidence intervals, and reject settings whose apparent yield
-comes from high target/SFT copy rates or weak within-setting diversity. Prefer a stable
-quality-diversity plateau over a noisy maximum, and prefer temperature 1.0 only when it is
-practically comparable. Prompt lengths in one file share one temperature and are deployed as an
-equal mixture.
-
-Copy `examples/default-sampling-selection.yaml` as a schema example and edit every value:
-
-```yaml
-temperature: 0.9
-top_k: 4
-top_p: 1.0
-max_new_tokens: 5976
-prompt_lengths: [12, 24]
-rl_seed: 42
-rollout_seed: 7
-seed_stride: 1000003
-```
-
-The file must contain exactly these keys. Temperatures and token counts must be positive, `top_p`
-must be in `(0, 1]`, prompt lengths must be unique PhiX174 prefixes between 0 and 65 nt, and the
-longest prompt plus `max_new_tokens` must fit the 10,240-token context. This example uses equal
-prompt strata, so their count must divide the 12-record training bank, 96-record validation bank,
-1,000-record final rollout, and configured GPU count. One, two, or four strata work with the
-reference eight-GPU shape.
-
-You may write the reviewed file directly to
-`results/phix174-8xh100/calibration/sampling-selection.yaml` and rerun the original command, or
-keep it elsewhere and pass `--sampling-selection PATH`. On an old or active RL result root, pass
-that option again only for the identical reviewed selection. Replacing it in place can introduce
-prompt, validation, and sampling drift partway through RL. A material change belongs in a new
-result root and RL attempt from the selected SFT checkpoint, with the earlier run retained as
-evidence.
-
-Long-running work also writes narrower completion markers: `20-sft.done`,
-`30-calibration-generation.done`, `30-calibration-scoring.done`, `40-rl.done`, and
-stage-50 markers for `rollout`, `deduplication`, `sft-likelihood`, `sequence-safety`,
-`target-profile`, `filter7-diagnostic`, `final-clustering`, and `report`. These let a resumed run
-skip an accepted result while still performing its downstream selection, evaluation, screening,
-clustering, and reporting. Each completed stage-50 marker is checked against its required output
-before it is reused. For example, after inspecting
-checkpoints from an interrupted SFT run:
+Inspect `results/phix174-8xh100/calibration/scoring/selection-evidence.csv` and its neighboring
+score/novelty artifacts. Prefer eligible settings with working metrics, useful hard-QC signal,
+low copying, diverse outputs, and a stable quality-diversity plateau. An agent may perform this
+review and write the custom choice when the user delegates it. Copy the example YAML, edit all
+eight fields, then continue without repeating the completed sweep:
 
 ```bash
-touch results/phix174-8xh100/stages/20-sft.done
-./examples/phix174_8xh100.sh --resume-from 20 \
-  --result-root "$PWD/results/phix174-8xh100"
+cp examples/default-sampling-selection.yaml /tmp/phix174-sampling.yaml
+# Edit /tmp/phix174-sampling.yaml, then:
+./examples/phix174_8xh100.sh --resume-from 30 --sampling-selection /tmp/phix174-sampling.yaml --result-root "$PWD/results/phix174-8xh100"
 ```
 
-Create a narrow marker manually only when that substage's outputs are complete enough to accept;
-ordinary successful runs create it automatically.
+The script validates and records the file as `calibration/sampling-selection.yaml`. Do not replace
+that canonical selection after RL has begun; a material change should use a new result root.
 
-The six dependency-ordered stages are input/control preparation, SFT safety and splitting, SFT
-training and selection, sampling calibration, model-only SFT-to-RL checkpoint preparation plus
-GDPO pilot/training, and final generation, biological deduplication, SFT likelihood scoring,
-hard-QC screening, post-QC clustering, and reporting.
-Calibration uses `NUM_GPUS` in parallel; SFT, GDPO, rollout generation, and likelihood scoring use
-the same configured count. On the reference node, where `nproc` reports 160 logical CPUs, the large safety
-scans use 128-record batches, 32 parallel ORF predictions, 32 threads for AMRFinder/DIAMOND, and 64
-for the PHROGs MMseqs search. The GDPO reward phases are sequential and use at most 64 tool threads;
-`NUM_CPUS` sets the Ray CPU budget. `CALIBRATION_WORKERS` and the existing `SAFETY_*`
-environment variables can lower the CPU sub-budgets on a smaller or shared node. Recheck global
-batch divisibility and memory use when changing GPU topology.
-Long commands remain supervised by the top-level process, with a meaningful liveness update every
-ten minutes. Run that process in tmux or a scheduler so it survives a disconnected chat or shell.
+### Stage-40 pilot recovery
 
-The realized example defaults to the Pharokka v1.11.0 Zenodo bundle through public
-`PHAROKKA_DATABASE_*` environment variables. Override the three values together when using another compatible release. It uses the bundle’s PHROGs v4 profiles and
-annotations, derives the consensus database used by Arc, and logs progress to
-`inputs/external-assets.log`. The transfer is bounded and resumable. Databases are refreshed rather
-than pinned to the historical run: the script records the installed state and reruns positive,
-review, and negative controls; changed behavior stops for review instead of silently selecting an
-older database. Required detector failures remain INDETERMINATE.
-The previous SFT-corpus audit observed 14,465 PASS and one lysogeny-review INDETERMINATE among
-14,466 inputs; every new run records and uses its own result.
-
-SFT selection uses optimizer-step validation. A larger global batch can complete an epoch before
-enough optimizer updates exist to show overfitting, so a best value at the run boundary stops for
-more follow-up even if that requires several epochs.
-The SFT command keeps the best three validation-loss checkpoints plus the latest resume point.
-`validation_metrics.json` stores all scalar validation measurements, and `checkpoint_metrics.json`
-stores each save-time metric assignment and a `best_checkpoint` relative directory pointer. The
-example requires the raw `lm loss` key; the corresponding TensorBoard tag is `lm loss validation`.
-Before the GDPO pilot, stage 40 runs:
+Stage 40 writes `stages/40-pilot.done` immediately after the one-step GDPO pilot succeeds and
+`stages/40-pilot-check.done` after its objective-health check succeeds. The 500-step training then
+writes `stages/40-rl.done`; the outer `stages/40.done` is written only after monitoring and
+checkpoint selection also finish. If a run made with an older script stopped after logging
+`one-step GDPO pilot complete`, accept that completed pilot and resume at its check with:
 
 ```bash
-evo2_phage_prepare_sft_checkpoint_for_rl \
-  --source-checkpoint results/phix174-8xh100/sft/train/evo2/checkpoints/iter_NNNNNNN \
-  --output-dir results/phix174-8xh100/rl/sft-checkpoint
+touch results/phix174-8xh100/stages/40-pilot.done && ./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
 ```
 
-The command rewrites the distributed checkpoint without optimizer, scheduler, or RNG state,
-removes `train_state.pt`, and nulls process-local model callbacks and timers in the copied
-`run_config.yaml`. It leaves the selected SFT checkpoint unchanged and writes
-`rl/sft-checkpoint/preparation-manifest.json`; the script then uses the manifest's direct
-`iter_*` path for RL readiness, policy initialization, and the fixed SFT KL anchor. Rerunning the
-same top-level command validates and reuses a matching prepared checkpoint. An existing but
-mismatched or incomplete prepared checkpoint stops for review rather than being overwritten. A
-matching schema-1 preparation is rebuilt atomically because that older reducer could omit
-serialized Transformer Engine model state required by strict checkpoint loading.
+Do not create either marker unless the corresponding operation is known to have completed.
 
-PhiX174 reference runs through the exact configured RL environment and every enabled external,
-diversity, and safety measurement must report support. The pilot then checks training and checkpoint
-behavior; rewards stay in `[0, 1]`, baseline/chance means `0`, missing or failed measurements cannot
-look favorable, and the selected SFT checkpoint remains the KL anchor.
+## Workflow and outputs
 
-Stage 50 scores all 1,000 raw designs with the selected pre-RL SFT checkpoint and its `+~`
-conditioning prefix, while exact, circular, and reverse-complement biological equivalents are
-collapsed before expensive safety and Arc screening. Arc's internal clustering is disabled. Only
-safety-PASS representatives that pass the target hard-QC branch enter the final MMseqs clustering
-at 99% identity, 80% coverage, coverage mode 0, and cluster mode 0; filter 7 remains a separate
-diagnostic branch. `rollout/sft-likelihood/ranked-designs.csv` therefore retains raw-design total
-and mean per-nucleotide log probability, while `rollout/final-designs.json` reconciles the raw,
-biological-representative, hard-QC, and post-QC-cluster denominators. `accepted_candidates.fasta`
-contains one representative per final cluster and follows the SFT ranking when it is usable. The
-report also computes Spearman correlation between length and the normalized score.
-At absolute rho 0.5 or greater, it preserves the likelihood results but keeps the accepted FASTA in
-generation order because residual length bias makes the likelihood ordering unreliable.
+| Stage | Work                                                                                        |
+| ----- | ------------------------------------------------------------------------------------------- |
+| 00    | Download inputs, tools, databases, and run controls                                         |
+| 10    | Safety-screen inputs and build leakage-controlled SFT splits                                |
+| 20    | Train, select, and evaluate SFT                                                             |
+| 30    | Calibrate generation and materialize RL prompt banks                                        |
+| 40    | Prepare the model-only SFT checkpoint, run the pilot/check, train GDPO, and select RL       |
+| 50    | Generate, deduplicate, SFT-score, safety-screen, hard-QC, cluster, and report 1,000 genomes |
 
-This use is supported—but not validated as a selection rule for a new campaign—by
-[Black et al.](https://doi.org/10.64898/2026.06.12.731871), who found that Evo 2 likelihood
-separated experimentally bootable from non-bootable PhiX174 designs. Both that paper and the local
-scorer comparison support within-protocol enrichment, not a universal threshold or proof of
-bootability; raw total log probability is retained for inspection but is not the ranking score
-because it scales with sequence length.
+The result root is the computational notebook. `RUNLOG.md` records commands and liveness;
+`settings.json` records key settings; `SUMMARY.md` and `rollout/final-designs.json` reconcile
+selected checkpoints, safety outcomes, QC denominators, clustering, and accepted candidates.
+The original SFT checkpoint remains available for exact resume and likelihood scoring; RL uses
+the smaller prepared checkpoint under `rl/sft-checkpoint/`.
 
-The result root is the electronic lab notebook. `RUNLOG.md` records commands, liveness, failures, and
-stage completion; `settings.json` contains only the small scientific setting allowlist. Checkpoint
-selection, calibration, objective-health, likelihood scores, safety summaries, target and diagnostic
-Arc waterfalls, deduplication mapping, hard-QC set, final cluster memberships, accepted candidates,
-and the final `SUMMARY.md` remain beside their stage outputs. The final report carries the selected
-checkpoints and sampling settings plus concise safety tool/database and clustering provenance. A
-boundary-best checkpoint, changed safety control, unsupported calibration choice, or unhealthy RL
-objective is an intentional review stop; routine setup and execution need no agent intervention.
+The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and must be even for
+the SFT layout; `NUM_CPUS` defaults to `nproc`. Use tmux or a scheduler for the long stages.
 
 ## Current PhiX174 GDPO score definitions
 

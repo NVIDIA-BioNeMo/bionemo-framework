@@ -244,6 +244,32 @@ def test_extract_validation_history_derives_only_emitted_gdpo_objectives(monkeyp
     assert objectives["gc_content"]["missing_rate"] == 0.0
 
 
+def test_extract_validation_history_uses_newest_task_scoped_namespace(monkeypatch, tmp_path):
+    points = {
+        "validation/rl-validation/mean_reward": {1: (1.0, 0.1)},
+        "validation/rl-validation/num_sequences": {1: (1.0, 96.0)},
+        "validation/rl-validation/gdpo/tropism_mean": {1: (1.0, 0.1)},
+        "validation/rl-validation/gdpo/tropism_std": {1: (1.0, 0.1)},
+        "validation/rl-validation/gdpo/tropism_nonzero_rate": {1: (1.0, 0.1)},
+        "validation/phage_qc/mean_reward": {1: (10.0, 0.8)},
+        "validation/phage_qc/num_sequences": {1: (10.0, 96.0)},
+        "validation/phage_qc/gdpo/tropism_mean": {1: (10.0, 0.7)},
+        "validation/phage_qc/gdpo/tropism_std": {1: (10.0, 0.2)},
+        "validation/phage_qc/gdpo/tropism_nonzero_rate": {1: (10.0, 0.9)},
+        "validation/phage_qc/tropism_measurement_available_rate": {1: (10.0, 0.75)},
+        "validation/phage_qc/tropism_pass_rate": {1: (10.0, 0.5)},
+    }
+    monkeypatch.setattr(objective_monitor, "_load_scalar_points", lambda _root: points)
+
+    history = extract_validation_history(tmp_path)
+
+    assert len(history) == 1
+    assert history[0]["aggregate_reward"] == 0.8
+    assert history[0]["objectives"]["tropism"]["reward_mean"] == 0.7
+    assert history[0]["objectives"]["tropism"]["support_rate"] == 0.75
+    assert history[0]["objectives"]["tropism"]["hard_pass_rate"] == 0.5
+
+
 def test_main_rejects_missing_tensorboard_root_before_writing(monkeypatch, tmp_path):
     output = tmp_path / "report.json"
     monkeypatch.setattr(

@@ -283,8 +283,26 @@ def _scalar(points: Mapping[str, Mapping[int, tuple[float, float]]], tag: str, s
     return None if record is None else float(record[1])
 
 
-def _emitted_objective_names(points: Mapping[str, object]) -> tuple[str, ...]:
-    prefix = "validation/gdpo/"
+def _validation_prefix(points: Mapping[str, Mapping[int, tuple[float, float]]]) -> str:
+    """Select the newest validation namespace with reward and denominator events."""
+    candidates: list[tuple[float, str]] = []
+    suffix = "/mean_reward"
+    for tag, reward_points in points.items():
+        if not tag.startswith("validation/") or not tag.endswith(suffix):
+            continue
+        prefix = tag[: -len(suffix)]
+        denominator_points = points.get(f"{prefix}/num_sequences", {})
+        shared_steps = reward_points.keys() & denominator_points.keys()
+        if shared_steps:
+            latest_wall_time = max(reward_points[step][0] for step in shared_steps)
+            candidates.append((latest_wall_time, prefix))
+    if candidates:
+        return max(candidates)[1]
+    return "validation"
+
+
+def _emitted_objective_names(points: Mapping[str, object], validation_prefix: str = "validation") -> tuple[str, ...]:
+    prefix = f"{validation_prefix}/gdpo/"
     suffixes = ("_mean", "_std", "_min", "_max", "_nonzero_rate")
     names = set()
     for tag in points:
@@ -296,6 +314,20 @@ def _emitted_objective_names(points: Mapping[str, object]) -> tuple[str, ...]:
                 names.add(metric_name[: -len(suffix)])
                 break
     return tuple(sorted(name for name in names if name))
+
+
+def _phage_scalar(
+    points: Mapping[str, Mapping[int, tuple[float, float]]],
+    validation_prefix: str,
+    metric_name: str,
+    step: int,
+) -> float | None:
+    """Read flattened or legacy nested phage telemetry from one validation namespace."""
+    for tag in (f"{validation_prefix}/{metric_name}", f"{validation_prefix}/phage_qc/{metric_name}"):
+        value = _scalar(points, tag, step)
+        if value is not None:
+            return value
+    return None
 
 
 def _configured_objective_names(path: Path) -> tuple[str, ...]:
@@ -323,57 +355,66 @@ def extract_validation_history(
 ) -> list[dict[str, Any]]:
     """Normalize complete validation events from one or more TensorBoard files."""
     points = _load_scalar_points(tensorboard_root)
-    selected_objectives = tuple(objective_names) if objective_names is not None else _emitted_objective_names(points)
-    reward_tag = "validation/mean_reward"
+    validation_prefix = _validation_prefix(points)
+    selected_objectives = (
+        tuple(objective_names) if objective_names is not None else _emitted_objective_names(points, validation_prefix)
+    )
+    reward_tag = f"{validation_prefix}/mean_reward"
     steps = sorted(points.get(reward_tag, {}))
     events: list[dict[str, Any]] = []
     for step in steps:
-        denominator = _scalar(points, "validation/num_sequences", step)
+        denominator = _scalar(points, f"{validation_prefix}/num_sequences", step)
         if denominator is None:
             continue
         objectives: dict[str, Any] = {}
         for name in selected_objectives:
-            prefix = f"validation/gdpo/{name}"
+            prefix = f"{validation_prefix}/gdpo/{name}"
             values: dict[str, Any] = {
                 "reward_mean": _scalar(points, f"{prefix}_mean", step),
                 "reward_std": _scalar(points, f"{prefix}_std", step),
                 "nonzero_rate": _scalar(points, f"{prefix}_nonzero_rate", step),
                 "eligible_denominator": denominator,
-                "hard_pass_rate": _scalar(points, f"validation/phage_qc/{name}_pass_rate", step),
+                "hard_pass_rate": _phage_scalar(points, validation_prefix, f"{name}_pass_rate", step),
             }
             support_prefix = EXTERNAL_SUPPORT_PREFIX.get(name)
             if support_prefix:
-                support = _scalar(
+                support = _phage_scalar(
                     points,
-                    f"validation/phage_qc/{support_prefix}_measurement_available_rate",
+                    validation_prefix,
+                    f"{support_prefix}_measurement_available_rate",
                     step,
                 )
                 values["support_rate"] = support
-                values["measured_count"] = _scalar(
+                values["measured_count"] = _phage_scalar(
                     points,
-                    f"validation/phage_qc/{support_prefix}_n_measured",
+                    validation_prefix,
+                    f"{support_prefix}_n_measured",
                     step,
                 )
-                values["stage_reached_rate"] = _scalar(
+                values["stage_reached_rate"] = _phage_scalar(
                     points,
-                    f"validation/phage_qc/{support_prefix}_stage_reached_rate",
+                    validation_prefix,
+                    f"{support_prefix}_stage_reached_rate",
                     step,
                 )
-                values["missing_artifact_count"] = _scalar(
+                values["missing_artifact_count"] = _phage_scalar(
                     points,
-                    f"validation/phage_qc/{support_prefix}_missing_artifact_count",
+                    validation_prefix,
+                    f"{support_prefix}_missing_artifact_count",
                     step,
                 )
             elif name == "mmseqs_cluster_diversity":
-                support = _scalar(
+                support = _phage_scalar(
                     points,
-                    "validation/phage_qc/mmseqs_cluster_valid_for_clustering_mean",
+                    validation_prefix,
+                    "mmseqs_cluster_valid_for_clustering_mean",
                     step,
                 )
                 values["support_rate"] = support
-                values["missing_from_output_rate"] = _scalar(
+                values["missing_from_output_rate"] = _phage_scalar(
                     points,
-                    "validation/phage_qc/mmseqs_cluster_missing_from_output_mean",
+                    validation_prefix,
+                    "mmseqs_cluster_missing_from_output_mean",
                     step,
                 )
             else:

@@ -27,6 +27,7 @@
         "Before RL, it prepares and records a model-only, optimizer-free, runtime-sanitized SFT checkpoint while retaining the original full-state SFT checkpoint for SFT resume.",
         "It uses a worker and monitoring facility that survives the chat process and can be reattached by job identifier.",
         "It respects stage dependencies while overlapping independent evidence, preparation, or objective work when resources and write scopes permit.",
+        "It treats the example launcher as a reference implementation that may be run, adapted, wrapped, or replaced, using the README, stage subskills, and dependency DAG without prescribing one orchestration.",
         "It runs every enabled reward and QC component with positive and failure controls and records useful progress in RUNLOG.md.",
         "It generates and screens the requested full genomes and reports the final denominator and limitations."
       ],
