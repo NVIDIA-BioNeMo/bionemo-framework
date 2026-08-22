@@ -4,6 +4,7 @@ deepspeed
 hydra-core
 lm-eval
 megatron-fsdp
+ml_collections
 peft
 pytest
 torch

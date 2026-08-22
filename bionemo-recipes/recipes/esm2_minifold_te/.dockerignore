@@ -1,0 +1,38 @@
+# Docker
+Dockerfile
+Dockerfile.*
+.dockerignore
+
+# Docs
+README.md
+
+# Python caches
+__pycache__
+.pytest_cache
+.ruff_cache
+.venv/
+
+# Linting
+.ruff.toml
+
+# Profiling & debugging artifacts
+memory_snapshots/
+nsight_profiling/
+*.nsys-rep
+*.sqlite
+logs/
+wandb/
+
+# Downloaded CIF files (reproduced by data/prepare_*.py scripts)
+data/cif_files/
+data/eval_cif_files/
+
+# Hydra / training outputs
+outputs/
+checkpoints/
+
+# Checkpoint export
+checkpoint_export/
+
+# Temp / scratch
+j/
