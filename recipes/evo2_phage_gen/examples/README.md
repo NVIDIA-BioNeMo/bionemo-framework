@@ -99,8 +99,11 @@ selected checkpoints, safety outcomes, QC denominators, clustering, and accepted
 The original SFT checkpoint remains available for exact resume and likelihood scoring; RL uses
 the smaller prepared checkpoint under `rl/sft-checkpoint/`.
 
-The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and must be even for
-the SFT layout; `NUM_CPUS` defaults to `nproc`. Use tmux or a scheduler for the long stages.
+The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and `NUM_CPUS` to
+`nproc`. SFT tensor parallelism defaults to 1 on a single GPU and 2 otherwise; override
+`SFT_TENSOR_PARALLEL_SIZE` only after a full-shape smoke test. When there are fewer GPUs than
+prompt strata, the final rollout preserves the full mixture by running deterministic GPU waves.
+Use tmux or a scheduler for the long stages.
 
 ## Current PhiX174 GDPO score definitions
 

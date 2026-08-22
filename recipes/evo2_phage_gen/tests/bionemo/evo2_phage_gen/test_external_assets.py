@@ -16,7 +16,11 @@
 import hashlib
 import io
 import json
+import sys
+import tarfile
 import time
+import types
+import zipfile
 from pathlib import Path
 from typing import ClassVar
 
@@ -96,6 +100,75 @@ def test_pyrodigal_wrapper_is_a_normal_executable(tmp_path: Path) -> None:
     prepared = prepare_pyrodigal_wrapper(tmp_path / "bin")
     assert prepared.path.stat().st_mode & 0o111
     assert "exec pyrodigal" in prepared.path.read_text()
+
+
+def test_native_tool_archives(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(assets, "_architecture", lambda: "x86_64")
+    assert assets._select_tool_archive("mmseqs2-gpu", None) == (assets.DEFAULT_MMSEQS_GPU_URL, None)
+    assert assets._select_tool_archive("diamond", None) == (assets.DEFAULT_DIAMOND_URL, None)
+    assert assets._select_tool_archive("hmmer", None) == (assets.DEFAULT_HMMER_URL, None)
+    assert assets._select_tool_archive("amrfinder", None) == (assets.DEFAULT_AMRFINDER_URL, None)
+    assert assets._tool_extract_dir(tmp_path, "diamond").name == "diamond"
+
+    monkeypatch.setattr(assets, "_architecture", lambda: "aarch64")
+    assert assets._select_tool_archive("mmseqs2-gpu", None) == (
+        "https://mmseqs.com/latest/mmseqs-linux-gpu-arm64.tar.gz",
+        None,
+    )
+    assert assets._select_tool_archive("diamond", None) == (
+        "https://conda.anaconda.org/bioconda/linux-aarch64/diamond-2.1.24-heed1f17_0.conda",
+        "7c095bb36b6f99c494b7ae90757df423",
+    )
+    assert assets._select_tool_archive("hmmer", None) == (
+        "https://conda.anaconda.org/bioconda/linux-aarch64/hmmer-3.4-hfe13ca0_4.tar.bz2",
+        "6f0a04231ef9418215c516bd56ae6e68",
+    )
+    assert assets._select_tool_archive("amrfinder", None) == (
+        "https://conda.anaconda.org/bioconda/linux-aarch64/ncbi-amrfinderplus-4.2.7-h9686939_0.conda",
+        "592621df3f59ce1b562b962a6190496e",
+    )
+    assert assets._tool_extract_dir(tmp_path, "diamond").name == "diamond-aarch64"
+
+
+def test_tool_archive_override(monkeypatch) -> None:
+    monkeypatch.setattr(assets, "_architecture", lambda: "aarch64")
+
+    assert assets._select_tool_archive("diamond", "https://example.test/custom.tar.gz") == (
+        "https://example.test/custom.tar.gz",
+        None,
+    )
+
+    monkeypatch.setattr(assets, "_architecture", lambda: "riscv64")
+    with pytest.raises(RuntimeError, match="No diamond download is configured for riscv64"):
+        assets._select_tool_archive("diamond", None)
+
+
+def test_conda_payload_extraction(tmp_path: Path, monkeypatch) -> None:
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w") as archive:
+        payload = b"native executable"
+        member = tarfile.TarInfo("bin/tool")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    package = tmp_path / "tool.conda"
+    with zipfile.ZipFile(package, mode="w") as archive:
+        archive.writestr("pkg-tool-0.tar.zst", tar_buffer.getvalue())
+
+    class _IdentityDecompressor:
+        @staticmethod
+        def stream_reader(source):
+            return source
+
+    monkeypatch.setitem(
+        sys.modules,
+        "zstandard",
+        types.SimpleNamespace(ZstdDecompressor=_IdentityDecompressor),
+    )
+
+    extracted = assets._extract_archive(package, tmp_path / "extracted")
+
+    assert (extracted / "bin" / "tool").read_bytes() == b"native executable"
 
 
 def test_derives_phrogs_consensus_from_pharokka_profiles(tmp_path: Path, monkeypatch) -> None:

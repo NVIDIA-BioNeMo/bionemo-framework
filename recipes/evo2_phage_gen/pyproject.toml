@@ -68,6 +68,11 @@ dependencies = [
     "bcbio-gff",
     "biopython",
     "biotite",
+    # ARM64 packaging fallback, validated 2026-08-21; leave disabled for normal
+    # x86_64 builds. Replace the preceding entry with the first example and
+    # enable the second dependency plus its matching source example below:
+    # "biotite==0.41.2",
+    # "biotraj==1.2.2",
     "checkv",
     "lovis4u==0.2.0",
     "openpyxl",
@@ -81,6 +86,8 @@ dependencies = [
     "scikit-learn",
     "scipy",
     "seaborn",
+    # Extracts native tools distributed as modern .conda packages.
+    "zstandard",
 ]
 
 [project.optional-dependencies]
@@ -181,6 +188,9 @@ override-dependencies = [
 # 1.6.1 fixes a custom-op no-storage failure in no-grad/frozen forward paths.
 causal_conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git", tag = "v1.6.1" }
 nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v1.1.4.post6" }
+# ARM64 fallback paired with the commented dependency above. PyPI's 1.2.2
+# aarch64 sdist reported version 0.0.0 in the validated 2026-08-21 build:
+# biotraj = { git = "https://github.com/biotite-dev/biotraj.git", rev = "75ff7be1325b549f1ff5510ecb3982822c835ee4" }
 
 # nvidia-resiliency-ext is intentionally left to Megatron-Bridge so its transitive version stays consistent.
 # .ci_build.sh repairs upstream package discovery and applies patches/nemo-rl-evo2-mbridge-grpo.patch.

@@ -114,8 +114,8 @@ def test_controller_keeps_phix_rerun_orchestration_agent_directed() -> None:
     assert "let the task and execution environment determine the orchestration" in controller
 
 
-def test_adapt_execution_documents_gpu_container_path() -> None:
-    """GPU workstations should use the supported NVIDIA container build environment."""
+def test_adapt_execution_documents_portable_container_path() -> None:
+    """GPU workstations should use the tested container and native architecture assets."""
     guidance = (
         SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "infrastructure-guidance.md"
     ).read_text()
@@ -127,10 +127,14 @@ def test_adapt_execution_documents_gpu_container_path() -> None:
         "./.ci_build.sh",
         ".ci_test_env.sh",
         "x86_64",
+        "aarch64",
         "MMseqs2-GPU",
         "DIAMOND",
         "HMMER",
-        "non-x86_64",
+        "AMRFinderPlus",
+        "biotite 0.41.2",
+        "biotraj 1.2.2",
+        "2026-08-21",
     ):
         assert marker in guidance
 

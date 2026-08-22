@@ -74,12 +74,13 @@
     {
       "id": "bionemo-phage-design-adapt-execution-006-non-x86-assets",
       "prompt": "An ARM64 GPU workstation can run an NVIDIA PyTorch container. Determine whether the current Evo 2 phage external-asset setup can run unchanged.",
-      "expected_output": "An architecture-aware setup assessment that identifies the native binary work required before execution.",
+      "expected_output": "An architecture-aware ARM setup using the maintained native downloads and the documented Python packaging fallback.",
       "assertions": [
-        "The response identifies the current MMseqs2-GPU, DIAMOND, and HMMER downloads as Linux x86_64 binaries.",
-        "It requires updates to the corresponding external-asset download and selection logic for non-x86_64 execution.",
-        "It validates native replacement binaries before scientific stages use them.",
-        "It does not claim that selecting an ARM-compatible base container alone makes the current setup supported."
+        "The response uses the installer's architecture-selected aarch64 downloads for MMseqs2-GPU, DIAMOND, HMMER, and AMRFinderPlus rather than reusing x86_64 tool caches.",
+        "It enables the dated biotite 0.41.2 and pinned biotraj 1.2.2 source-build fallback documented beside pyproject.toml when the ARM Python resolver encounters the known wheel and sdist metadata gap.",
+        "It includes the documented Hatchling, hatch-vcs, and hatch-cython build helpers needed by that no-build-isolation fallback.",
+        "It validates native architecture and executable versions before scientific stages use the tools.",
+        "It records the image, architecture, dependency fallback if used, and resolved tool paths in RUNLOG.md."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null

@@ -23,8 +23,20 @@ for resource_name in NUM_GPUS NUM_CPUS; do
     exit 2
   fi
 done
-if ((NUM_GPUS % 2 != 0)); then
-  printf 'NUM_GPUS must be even for the example SFT tensor-parallel layout; got %s\n' "${NUM_GPUS}" >&2
+if [[ -z "${SFT_TENSOR_PARALLEL_SIZE:-}" ]]; then
+  if ((NUM_GPUS == 1)); then
+    SFT_TENSOR_PARALLEL_SIZE=1
+  else
+    SFT_TENSOR_PARALLEL_SIZE=2
+  fi
+fi
+if [[ ! "${SFT_TENSOR_PARALLEL_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'SFT_TENSOR_PARALLEL_SIZE must be a positive integer; got %q\n' "${SFT_TENSOR_PARALLEL_SIZE}" >&2
+  exit 2
+fi
+if ((NUM_GPUS % SFT_TENSOR_PARALLEL_SIZE != 0)); then
+  printf 'NUM_GPUS (%s) must be divisible by SFT_TENSOR_PARALLEL_SIZE (%s)\n' \
+    "${NUM_GPUS}" "${SFT_TENSOR_PARALLEL_SIZE}" >&2
   exit 2
 fi
 GPU_IDS=
@@ -210,12 +222,20 @@ try:
         raise ValueError("prompt_lengths must be between 0 and the 65-nt PhiX174 reference prefix")
     strata = len(prompt_lengths)
     deployment_sizes = {"12-record RL training bank": 12, "96-record RL validation bank": 96,
-                        "1,000-record final rollout": 1000, "GPU count": num_gpus}
+                        "1,000-record final rollout": 1000}
     incompatible = [name for name, size in deployment_sizes.items() if size % strata]
     if incompatible:
         raise ValueError(
             f"{strata} prompt strata do not tile the equal-mixture deployment shapes: {', '.join(incompatible)}"
         )
+    if num_gpus >= strata:
+        if num_gpus % strata:
+            raise ValueError(f"{strata} prompt strata do not tile {num_gpus} GPUs")
+        ranks_per_prompt = num_gpus // strata
+    else:
+        if strata % num_gpus:
+            raise ValueError(f"{strata} prompt strata cannot be scheduled in waves over {num_gpus} GPUs")
+        ranks_per_prompt = 1
     if max_new_tokens + max(prompt_lengths) > 10240:
         raise ValueError("max_new_tokens plus the longest prompt exceeds the 10,240-token model context")
 except (OSError, ValueError, yaml.YAMLError) as error:
@@ -235,7 +255,7 @@ fields = (
     str(12 // strata),
     str(96 // strata),
     str(1000 // strata),
-    str(num_gpus // strata),
+    str(ranks_per_prompt),
 )
 print("\t".join(fields))
 PY
@@ -431,9 +451,9 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     printf 'Warning: this example was tested on 8 H100 80GB GPUs. Detected:\n%s\nTune memory, batch, and parallelism settings for this topology.\n' "${gpu_info}" >&2
   fi
 fi
-note "planned topology: ${NUM_GPUS} GPUs, ${NUM_CPUS} logical CPUs"
-printf '{"gpu_count":%s,"cpu_count":%s,"gpu_type":"%s","model_variant":"%s","base_checkpoint":"%s","model_size":"%s","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}\n' \
-  "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
+note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs"
+printf '{"gpu_count":%s,"cpu_count":%s,"gpu_type":"%s","sft_tensor_parallel_size":%s,"model_variant":"%s","base_checkpoint":"%s","model_size":"%s","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}\n' \
+  "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" "${SFT_TENSOR_PARALLEL_SIZE}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
   > "${RESULT_ROOT}/settings.json"
 cd "${RECIPE_ROOT}"
 
@@ -517,7 +537,7 @@ PY
 stage_20() {
   local prep base_nemo base_mbridge="${RESULT_ROOT}/checkpoints/${BASE_CHECKPOINT_DIR}" sft="${RESULT_ROOT}/sft/train" selected
   prep="$(read_state sft-prepared)"
-  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size 2 --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
+  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size "${SFT_TENSOR_PARALLEL_SIZE}" --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
   if [[ -f "${STAGE_DIR}/20-sft.done" ]]; then
     note 'substage 20-sft already complete'
   else
@@ -682,13 +702,15 @@ stage_50() {
     run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" \
       --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-prompts "${SAMPLING_FINAL_PER_LENGTH}" \
       --id-prefix final
-  local shard_dir="${rollout}/prompts/dp${NUM_GPUS}" rank started waited alive failed=0 printable pid prompt_length
+  local shard_dir="${rollout}/prompts/dp${NUM_GPUS}" rank started waited alive failed=0 printable prompt_length
+  local worker_count wave_start wave_end wave_size gpu_index
   local -a command=() outputs=() pids=() logs=() prompt_files=()
   for prompt_length in "${SAMPLING_PROMPT_LENGTHS[@]}"; do
     prompt_files+=("${rollout}/prompts/final_prompt${prompt_length}_${SAMPLING_FINAL_PER_LENGTH}.jsonl")
   done
+  worker_count="$((SAMPLING_RANKS_PER_PROMPT * ${#prompt_files[@]}))"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    note "split the equal prompt mixture (${SAMPLING_PROMPT_LENGTHS_TEXT}) into ${NUM_GPUS} homogeneous GPU shards"
+    note "split the equal prompt mixture (${SAMPLING_PROMPT_LENGTHS_TEXT}) into ${worker_count} deterministic shards over ${NUM_GPUS} GPU(s)"
   else
     python - "${shard_dir}" "${NUM_GPUS}" "${SAMPLING_RANKS_PER_PROMPT}" "${prompt_files[@]}" <<'PY'
 import json, sys
@@ -702,8 +724,9 @@ if [len(group) for group in records] != [expected_per_group] * len(inputs):
 all_records = [record for group in records for record in group]
 if len({record["id"] for record in all_records}) != 1000:
     raise SystemExit("final prompt IDs are not unique")
-if ranks_per_prompt * len(records) != num_gpus:
-    raise SystemExit("sampling selection does not tile the configured GPUs")
+worker_count = ranks_per_prompt * len(records)
+if worker_count < num_gpus or worker_count % num_gpus:
+    raise SystemExit("sampling selection shards cannot be scheduled in complete GPU waves")
 output.mkdir(parents=True, exist_ok=True)
 for group_index, group in enumerate(records):
     for local_rank in range(ranks_per_prompt):
@@ -715,38 +738,52 @@ for group_index, group in enumerate(records):
 PY
   fi
   started=${SECONDS}
-  for ((rank=0; rank<NUM_GPUS; rank++)); do
-    outputs+=("${rollout}/jsonl/dp${rank}.jsonl")
-    logs+=("${rollout}/logs/dp${rank}.log")
-    command=(env CUDA_VISIBLE_DEVICES="${rank}" torchrun --nproc_per_node 1 --nnodes 1 \
-      --master_port "$((29544 + rank))" "${infer}" --ckpt-dir "${selected}" \
-      --prompt-file "${shard_dir}/dp${rank}.jsonl" --max-new-tokens "${SAMPLING_MAX_NEW_TOKENS}" \
-      --temperature "${SAMPLING_TEMPERATURE}" --top-k "${SAMPLING_TOP_K}" \
-      --top-p "${SAMPLING_TOP_P}" --seed "$((SAMPLING_ROLLOUT_SEED + rank * SAMPLING_SEED_STRIDE))" \
-      --tensor-parallel-size 1 \
-      --max-seq-length 10240 --prompt-batch-size 16 --strict-generation --stream-output \
-      --output-file "${outputs[-1]}")
-    printf -v printable '%q ' "${command[@]}"; note "command: ${printable}"
+  for ((wave_start=0; wave_start<worker_count; wave_start+=NUM_GPUS)); do
+    wave_end="$((wave_start + NUM_GPUS))"
+    ((wave_end > worker_count)) && wave_end="${worker_count}"
+    wave_size="$((wave_end - wave_start))"
+    pids=()
+    for ((rank=wave_start; rank<wave_end; rank++)); do
+      gpu_index="$((rank - wave_start))"
+      outputs[rank]="${rollout}/jsonl/dp${rank}.jsonl"
+      logs[rank]="${rollout}/logs/dp${rank}.log"
+      command=(env CUDA_VISIBLE_DEVICES="${gpu_index}" torchrun --nproc_per_node 1 --nnodes 1 \
+        --master_port "$((29544 + gpu_index))" "${infer}" --ckpt-dir "${selected}" \
+        --prompt-file "${shard_dir}/dp${rank}.jsonl" --max-new-tokens "${SAMPLING_MAX_NEW_TOKENS}" \
+        --temperature "${SAMPLING_TEMPERATURE}" --top-k "${SAMPLING_TOP_K}" \
+        --top-p "${SAMPLING_TOP_P}" --seed "$((SAMPLING_ROLLOUT_SEED + rank * SAMPLING_SEED_STRIDE))" \
+        --tensor-parallel-size 1 \
+        --max-seq-length 10240 --prompt-batch-size 16 --strict-generation --stream-output \
+        --output-file "${outputs[rank]}")
+      printf -v printable '%q ' "${command[@]}"; note "command: ${printable}"
+      if [[ "${DRY_RUN}" != "1" ]]; then
+        mkdir -p "$(dirname -- "${outputs[rank]}")" "$(dirname -- "${logs[rank]}")"
+        "${command[@]}" > "${logs[rank]}" 2>&1 & pids[rank]="$!"
+      fi
+    done
     if [[ "${DRY_RUN}" != "1" ]]; then
-      mkdir -p "$(dirname -- "${outputs[-1]}")" "$(dirname -- "${logs[-1]}")"
-      "${command[@]}" > "${logs[-1]}" 2>&1 & pids+=("$!")
+      while :; do
+        alive=0
+        for ((rank=wave_start; rank<wave_end; rank++)); do
+          kill -0 "${pids[rank]}" 2>/dev/null && alive=$((alive + 1))
+        done
+        ((alive == 0)) && break
+        waited=0
+        while ((waited < MONITOR_INTERVAL_SECONDS && alive > 0)); do
+          sleep 10; waited=$((waited + 10)); alive=0
+          for ((rank=wave_start; rank<wave_end; rank++)); do
+            kill -0 "${pids[rank]}" 2>/dev/null && alive=$((alive + 1))
+          done
+        done
+        ((alive > 0)) && note "generation wave: ${alive}/${wave_size} workers still running after $((SECONDS - started))s"
+      done
+      for ((rank=wave_start; rank<wave_end; rank++)); do
+        if ! wait "${pids[rank]}"; then tail -n 30 "${logs[rank]}" >&2; failed=1; fi
+      done
     fi
+    ((failed == 0)) || return 1
   done
   if [[ "${DRY_RUN}" != "1" ]]; then
-    while :; do
-      alive=0; for pid in "${pids[@]}"; do kill -0 "${pid}" 2>/dev/null && alive=$((alive + 1)); done
-      ((alive == 0)) && break
-      waited=0
-      while ((waited < MONITOR_INTERVAL_SECONDS && alive > 0)); do
-        sleep 10; waited=$((waited + 10)); alive=0
-        for pid in "${pids[@]}"; do kill -0 "${pid}" 2>/dev/null && alive=$((alive + 1)); done
-      done
-      ((alive > 0)) && note "generation: ${alive}/${NUM_GPUS} workers still running after $((SECONDS - started))s"
-    done
-    for ((rank=0; rank<NUM_GPUS; rank++)); do
-      if ! wait "${pids[rank]}"; then tail -n 30 "${logs[rank]}" >&2; failed=1; fi
-    done
-    ((failed == 0)) || return 1
     python - "${outputs[@]}" <<'PY'
 import json, sys
 seen = set()

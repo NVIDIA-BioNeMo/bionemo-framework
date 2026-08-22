@@ -30,6 +30,7 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,33 @@ DEFAULT_AMRFINDER_RELEASE = "amrfinder_v4.2.7"
 DEFAULT_AMRFINDER_URL = (
     "https://github.com/ncbi/amr/releases/download/amrfinder_v4.2.7/amrfinder_binaries_v4.2.7.tar.gz"
 )
+_TOOL_ARCHIVES: dict[str, dict[str, tuple[str, str | None]]] = {
+    "mmseqs2-gpu": {
+        "x86_64": (DEFAULT_MMSEQS_GPU_URL, None),
+        "aarch64": ("https://mmseqs.com/latest/mmseqs-linux-gpu-arm64.tar.gz", None),
+    },
+    "diamond": {
+        "x86_64": (DEFAULT_DIAMOND_URL, None),
+        "aarch64": (
+            "https://conda.anaconda.org/bioconda/linux-aarch64/diamond-2.1.24-heed1f17_0.conda",
+            "7c095bb36b6f99c494b7ae90757df423",
+        ),
+    },
+    "hmmer": {
+        "x86_64": (DEFAULT_HMMER_URL, None),
+        "aarch64": (
+            "https://conda.anaconda.org/bioconda/linux-aarch64/hmmer-3.4-hfe13ca0_4.tar.bz2",
+            "6f0a04231ef9418215c516bd56ae6e68",
+        ),
+    },
+    "amrfinder": {
+        "x86_64": (DEFAULT_AMRFINDER_URL, None),
+        "aarch64": (
+            "https://conda.anaconda.org/bioconda/linux-aarch64/ncbi-amrfinderplus-4.2.7-h9686939_0.conda",
+            "592621df3f59ce1b562b962a6190496e",
+        ),
+    },
+}
 DEFAULT_UNIPROT_TOXIN_QUERY = (
     "reviewed:true AND keyword:KW-0800 AND ((keyword:KW-0843 AND NOT keyword:KW-0078) OR taxonomy_id:2759)"
 )
@@ -194,6 +222,31 @@ def _extract_tar(archive_path: Path, output_dir: Path, *, overwrite: bool = Fals
     return output_dir
 
 
+def _extract_archive(archive_path: Path, output_dir: Path, *, overwrite: bool = False) -> Path:
+    """Extract tar archives and the payload layer from modern ``.conda`` packages."""
+    archive_path = Path(archive_path)
+    output_dir = Path(output_dir)
+    if archive_path.suffix != ".conda":
+        return _extract_tar(archive_path, output_dir, overwrite=overwrite)
+    if output_dir.is_dir() and any(output_dir.iterdir()) and not overwrite:
+        return output_dir
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+    import zstandard
+
+    with zipfile.ZipFile(archive_path) as package:
+        payloads = [name for name in package.namelist() if name.startswith("pkg-") and name.endswith(".tar.zst")]
+        if len(payloads) != 1:
+            raise ValueError(f"Expected one payload archive in {archive_path}, found {len(payloads)}")
+        with package.open(payloads[0]) as compressed:
+            with zstandard.ZstdDecompressor().stream_reader(compressed) as reader:
+                with tarfile.open(fileobj=reader, mode="r|") as payload:
+                    payload.extractall(output_dir, filter="data")
+    return output_dir
+
+
 def _find_file(root: Path, name: str) -> Path:
     candidates = sorted(path for path in Path(root).rglob(name) if path.is_file())
     if not candidates:
@@ -227,6 +280,24 @@ def _architecture() -> str:
     return aliases.get(machine, machine)
 
 
+def _select_tool_archive(tool: str, override_url: str | None) -> tuple[str, str | None]:
+    """Select a native tool archive and its provider-published MD5 checksum."""
+    if override_url is not None:
+        return override_url, None
+    architecture = _architecture()
+    try:
+        return _TOOL_ARCHIVES[tool][architecture]
+    except KeyError as error:
+        raise RuntimeError(f"No {tool} download is configured for {architecture}") from error
+
+
+def _tool_extract_dir(external_dir: Path, tool: str) -> Path:
+    """Keep non-x86 tools separate from stale archives copied from x86 hosts."""
+    architecture = _architecture()
+    directory = tool if architecture == "x86_64" else f"{tool}-{architecture}"
+    return Path(external_dir) / "tools" / directory
+
+
 def prepare_pyrodigal_wrapper(bin_dir: Path = DEFAULT_BIN_DIR) -> PreparedAsset:
     """Install a Prodigal-compatible wrapper backed by Pyrodigal."""
     path = Path(bin_dir) / "prodigal"
@@ -240,17 +311,19 @@ def prepare_mmseqs_gpu(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
     bin_dir: Path | None = None,
-    mmseqs_url: str = DEFAULT_MMSEQS_GPU_URL,
+    mmseqs_url: str | None = None,
     overwrite: bool = False,
 ) -> PreparedAsset:
-    """Download and unpack MMseqs2-GPU."""
+    """Download and unpack the native MMseqs2-GPU build."""
     external_dir = Path(external_dir)
+    selected_url, published_md5 = _select_tool_archive("mmseqs2-gpu", mmseqs_url)
     archive, _ = _download(
-        mmseqs_url,
-        external_dir / "downloads" / Path(mmseqs_url).name,
+        selected_url,
+        external_dir / "downloads" / Path(selected_url).name,
         overwrite=overwrite,
+        published_md5=published_md5,
     )
-    extracted = _extract_tar(archive, external_dir / "tools" / "mmseqs2-gpu", overwrite=overwrite)
+    extracted = _extract_archive(archive, _tool_extract_dir(external_dir, "mmseqs2-gpu"), overwrite=overwrite)
     source = _find_file(extracted, "mmseqs")
     target = _expose(source, (Path(bin_dir) if bin_dir else external_dir / "bin") / "mmseqs")
     return PreparedAsset("mmseqs2_gpu", target, _tool_version(target, "version"))
@@ -299,17 +372,19 @@ def prepare_diamond(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
     bin_dir: Path | None = None,
-    diamond_url: str = DEFAULT_DIAMOND_URL,
+    diamond_url: str | None = None,
     overwrite: bool = False,
 ) -> PreparedAsset:
-    """Download and unpack DIAMOND."""
+    """Download and unpack the native DIAMOND build."""
     external_dir = Path(external_dir)
+    selected_url, published_md5 = _select_tool_archive("diamond", diamond_url)
     archive, _ = _download(
-        diamond_url,
-        external_dir / "downloads" / Path(diamond_url).name,
+        selected_url,
+        external_dir / "downloads" / Path(selected_url).name,
         overwrite=overwrite,
+        published_md5=published_md5,
     )
-    extracted = _extract_tar(archive, external_dir / "tools" / "diamond", overwrite=overwrite)
+    extracted = _extract_archive(archive, _tool_extract_dir(external_dir, "diamond"), overwrite=overwrite)
     target = _expose(
         _find_file(extracted, "diamond"), (Path(bin_dir) if bin_dir else external_dir / "bin") / "diamond"
     )
@@ -320,17 +395,19 @@ def prepare_hmmer(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
     bin_dir: Path | None = None,
-    hmmer_url: str = DEFAULT_HMMER_URL,
+    hmmer_url: str | None = None,
     overwrite: bool = False,
 ) -> PreparedAsset:
-    """Download and unpack HMMER."""
+    """Download and unpack the native HMMER build."""
     external_dir = Path(external_dir)
+    selected_url, published_md5 = _select_tool_archive("hmmer", hmmer_url)
     archive, _ = _download(
-        hmmer_url,
-        external_dir / "downloads" / Path(hmmer_url).name,
+        selected_url,
+        external_dir / "downloads" / Path(selected_url).name,
         overwrite=overwrite,
+        published_md5=published_md5,
     )
-    extracted = _extract_tar(archive, external_dir / "tools" / "hmmer", overwrite=overwrite)
+    extracted = _extract_archive(archive, _tool_extract_dir(external_dir, "hmmer"), overwrite=overwrite)
     target_bin = Path(bin_dir) if bin_dir else external_dir / "bin"
     for name in ("hmmpress", "hmmsearch"):
         _expose(_find_file(extracted, name), target_bin / name)
@@ -365,20 +442,26 @@ def prepare_amrfinder_plus(
     external_dir: Path = DEFAULT_EXTERNAL_DIR,
     *,
     bin_dir: Path | None = None,
-    amrfinder_url: str = DEFAULT_AMRFINDER_URL,
+    amrfinder_url: str | None = None,
     amrfinder_release: str = DEFAULT_AMRFINDER_RELEASE,
     database_dir: Path | None = None,
     overwrite: bool = False,
 ) -> PreparedAsset:
-    """Install AMRFinderPlus and its current database."""
+    """Install the native AMRFinderPlus build and its current database."""
     external_dir = Path(external_dir)
     target_bin = Path(bin_dir) if bin_dir else external_dir / "bin"
+    selected_url, published_md5 = _select_tool_archive("amrfinder", amrfinder_url)
     archive, _ = _download(
-        amrfinder_url,
-        external_dir / "downloads" / Path(amrfinder_url).name,
+        selected_url,
+        external_dir / "downloads" / Path(selected_url).name,
+        overwrite=overwrite,
+        published_md5=published_md5,
+    )
+    extracted = _extract_archive(
+        archive,
+        _tool_extract_dir(external_dir, amrfinder_release),
         overwrite=overwrite,
     )
-    extracted = _extract_tar(archive, external_dir / "tools" / amrfinder_release, overwrite=overwrite)
     for name in AMRFINDER_RUNTIME_FILES:
         _expose(_find_file(extracted, name), target_bin / name)
     for name in ("blastn", "blastp", "blastx", "makeblastdb", "tblastn", "hmmpress", "hmmsearch"):
@@ -409,7 +492,7 @@ def prepare_amrfinder_plus(
         "tool_version": _tool_version(target_bin / "amrfinder"),
         "database_path": str(database),
         "database_version": version,
-        "release_url": amrfinder_url,
+        "release_url": selected_url,
     }
     state_path = root / "state.json"
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
@@ -857,14 +940,14 @@ def prepare_external_assets(
     configure_lovis4u: bool = True,
     with_safety: bool = False,
     safety_manifest: Path | None = None,
-    mmseqs_url: str = DEFAULT_MMSEQS_GPU_URL,
+    mmseqs_url: str | None = None,
     blast_plus_url: str | None = None,
-    diamond_url: str = DEFAULT_DIAMOND_URL,
-    hmmer_url: str = DEFAULT_HMMER_URL,
+    diamond_url: str | None = None,
+    hmmer_url: str | None = None,
     pharokka_database_url: str = DEFAULT_PHAROKKA_DATABASE_URL,
     pharokka_database_md5: str | None = DEFAULT_PHAROKKA_DATABASE_MD5,
     pharokka_database_release: str = DEFAULT_PHAROKKA_DATABASE_RELEASE,
-    amrfinder_url: str = DEFAULT_AMRFINDER_URL,
+    amrfinder_url: str | None = None,
     amrfinder_release: str = DEFAULT_AMRFINDER_RELEASE,
     arc_evo2_repo_url: str = DEFAULT_ARC_EVO2_REPO_URL,
     arc_evo2_repo_rev: str = DEFAULT_ARC_EVO2_REPO_REV,
@@ -994,14 +1077,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prepare-phrogs-consensus-database", action="store_true")
     parser.add_argument("--with-safety", action="store_true")
     parser.add_argument("--safety-manifest", type=Path)
-    parser.add_argument("--mmseqs-url", default=DEFAULT_MMSEQS_GPU_URL)
+    parser.add_argument("--mmseqs-url")
     parser.add_argument("--blast-plus-url")
-    parser.add_argument("--diamond-url", default=DEFAULT_DIAMOND_URL)
-    parser.add_argument("--hmmer-url", default=DEFAULT_HMMER_URL)
+    parser.add_argument("--diamond-url")
+    parser.add_argument("--hmmer-url")
     parser.add_argument("--pharokka-database-url", default=DEFAULT_PHAROKKA_DATABASE_URL)
     parser.add_argument("--pharokka-database-md5", default=DEFAULT_PHAROKKA_DATABASE_MD5)
     parser.add_argument("--pharokka-database-release", default=DEFAULT_PHAROKKA_DATABASE_RELEASE)
-    parser.add_argument("--amrfinder-url", default=DEFAULT_AMRFINDER_URL)
+    parser.add_argument("--amrfinder-url")
     parser.add_argument("--amrfinder-release", default=DEFAULT_AMRFINDER_RELEASE)
     parser.add_argument("--arc-evo2-repo-url", default=DEFAULT_ARC_EVO2_REPO_URL)
     parser.add_argument("--arc-evo2-repo-rev", default=DEFAULT_ARC_EVO2_REPO_REV)

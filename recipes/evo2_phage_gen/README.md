@@ -41,7 +41,8 @@ Do not change model families within an existing result root. Resume an interrupt
 ./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
 ```
 
-Use tmux or a scheduler for long runs. `NUM_GPUS` defaults to 8 and `NUM_CPUS` to `nproc`.
+Use tmux or a scheduler for long runs. `NUM_GPUS` defaults to 8, `NUM_CPUS` to `nproc`, and
+`SFT_TENSOR_PARALLEL_SIZE` may adapt a measured smaller topology.
 The [8×H100 example](examples/README.md) documents dry runs, preparation-only mode, stage markers,
 sampling overrides, outputs, and all RL objectives.
 

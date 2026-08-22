@@ -134,6 +134,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "cpu_count": 96,
         "gpu_count": 8,
         "gpu_type": "not queried (dry run)",
+        "sft_tensor_parallel_size": 2,
         "model_variant": "7b-base",
         "base_checkpoint": "evo2/7b-8k:1.0",
         "model_size": "evo2_7b_base",
@@ -279,6 +280,49 @@ def test_dry_run(tmp_path: Path) -> None:
     )
     assert conversion[conversion.index("--nemo2-ckpt-dir") + 1] == "<downloaded-evo2-7b-8k>"
     assert conversion[conversion.index("--model-size") + 1] == "evo2_7b_base"
+
+
+def test_single_gpu_plan(tmp_path: Path) -> None:
+    result_root = tmp_path / "single-gpu"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"MODEL_VARIANT", "NUM_CPUS", "NUM_GPUS", "SFT_TENSOR_PARALLEL_SIZE"}
+    }
+    env["NUM_GPUS"] = "1"
+    env["NUM_CPUS"] = "72"
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["gpu_count"] == 1
+    assert settings["sft_tensor_parallel_size"] == 1
+
+    log = (result_root / "RUNLOG.md").read_text()
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    sft = next(command for command in commands if command[:1] == ["torchrun"] and "--max-steps" in command)
+    assert sft[sft.index("--nproc-per-node") + 1] == "1"
+    assert sft[sft.index("--tensor-model-parallel-size") + 1] == "1"
+    assert sft[sft.index("--global-batch-size") + 1] == "32"
+    assert sft[sft.index("--seq-length") + 1] == "10240"
+
+    rollout = [command for command in commands if command[:1] == ["env"] and "--prompt-file" in command]
+    assert len(rollout) == 2
+    assert [command[1] for command in rollout] == ["CUDA_VISIBLE_DEVICES=0", "CUDA_VISIBLE_DEVICES=0"]
+    assert [Path(command[command.index("--prompt-file") + 1]).name for command in rollout] == [
+        "dp0.jsonl",
+        "dp1.jsonl",
+    ]
+    assert [command[command.index("--seed") + 1] for command in rollout] == ["7", "1000010"]
+    assert "split the equal prompt mixture (16 24) into 2 deterministic shards over 1 GPU(s)" in log
 
 
 def test_dry_run_supports_preferred_7b_1m_variant(tmp_path: Path) -> None:
@@ -667,6 +711,7 @@ def test_topology_env(tmp_path: Path) -> None:
             **os.environ,
             "NUM_GPUS": "4",
             "NUM_CPUS": "48",
+            "SFT_TENSOR_PARALLEL_SIZE": "1",
             "NEMO_RL_RAY_NUM_CPUS": "",
         },
         check=False,
@@ -679,10 +724,13 @@ def test_topology_env(tmp_path: Path) -> None:
     settings = json.loads((result_root / "settings.json").read_text())
     assert settings["gpu_count"] == 4
     assert settings["cpu_count"] == 48
+    assert settings["sft_tensor_parallel_size"] == 1
     log = (result_root / "RUNLOG.md").read_text()
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
     distributed = [command for command in commands if command[:1] == ["torchrun"] and "--nproc-per-node" in command]
     assert {command[command.index("--nproc-per-node") + 1] for command in distributed} == {"4"}
+    sft = next(command for command in distributed if "--max-steps" in command)
+    assert sft[sft.index("--tensor-model-parallel-size") + 1] == "1"
     calibration = next(command for command in commands if "scripts/calibration/run_sft_sampling_sweep.sh" in command)
     assert "GPU_IDS=0 1 2 3" in calibration
     rollout = [
