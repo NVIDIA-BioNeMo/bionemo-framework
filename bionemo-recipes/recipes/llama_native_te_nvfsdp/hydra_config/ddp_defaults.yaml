@@ -1,0 +1,44 @@
+# DDP configuration for LLAMA3 genomic training
+defaults:
+  - defaults
+
+# Model configuration optimized for DDP
+model:
+  hidden_size: 1024
+  intermediate_size: 2048  
+  num_layers: 12
+  num_attention_heads: 16
+  max_position_embeddings: 8192
+  seq_length: 8192
+
+# Dataset configuration optimized for DDP
+dataset:
+  seq_length: 8192
+  batch_size: 8  # Larger batch size for DDP
+  num_workers: 8
+  stride: 4096
+  min_window_length: 1000
+  rc_augmentation: false
+  seed: 42
+
+# Training configuration
+num_train_steps: 1000
+use_meta_device: false  # DDP typically doesn't use meta device
+
+# Optimizer configuration
+adamw_kwargs:
+  lr: 5.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+
+# Learning rate scheduler
+lr_scheduler_kwargs:
+  num_warmup_steps: 100
+  num_training_steps: ${num_train_steps}
+
+# Weights and Biases logging
+wandb_init_args:
+  project: "llama3-genomic-pretraining"
+  name: "llama3-ddp-8k-genomic"
+  notes: "LLAMA3 DDP training on genomic sequences with ASCII tokenization and 8k windowing"
+  tags: ["llama3", "genomic", "ascii-tokenizer", "ddp", "production"]

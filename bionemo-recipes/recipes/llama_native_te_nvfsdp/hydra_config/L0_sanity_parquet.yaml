@@ -1,0 +1,39 @@
+# Sanity test configuration for LLAMA3 genomic training with Parquet dataset
+defaults:
+  - defaults
+
+# Reduced model architecture for memory constraints
+model_layers: 4   # Reduce from 32 to 4 layers for memory constraints
+hidden_size: 2048 # Reduce from 4096 to 2048 for memory constraints
+
+dataset:
+  # Use parquet files instead of SQLite database
+  parquet_files: 
+    - "/workspace/data/parquet_shards/genomic_sequences_shard_0000.parquet"
+  max_seq_len: 8192  # Maximum sequence length for windowing
+  micro_batch_size: 1
+  num_workers: 0  # Single-threaded for debugging
+  window_stride: 7992  # EVO2-style: 8192 - 200 = 7992 (consistent 200bp overlap)
+  shuffle_buffer_size: 10000  # Smaller buffer for sanity test
+  collator_mode: "thd_packing"  # Use HuggingFace DataCollatorWithFlattening
+  seed: 42
+
+# Quick training run
+num_train_steps: 25  # More steps to see continued learning
+
+# Learning rate scheduler
+lr_scheduler_kwargs:
+  num_warmup_steps: 2  # Minimal warmup for sanity test
+  num_training_steps: ${num_train_steps}
+
+# Wandb config for testing
+wandb_init_args:
+  project: "llama3-genomic-pretraining"  
+  name: "l0-sanity-test-parquet"
+  notes: "Sanity test for LLAMA3 genomic training pipeline with Parquet dataset"
+  tags: ["llama3", "genomic", "sanity-test", "ascii-tokenizer", "parquet"]
+
+
+
+
+

@@ -1,0 +1,57 @@
+# Bruno's FSDP configuration adapted for genomic training
+defaults:
+  - _self_
+
+# Model configuration (Bruno's style)
+model_name: "meta-llama/Llama-2-7b-hf"
+max_seq_length: 8192
+
+# Dataset configuration (genomic-specific) 
+dataset:
+  database_path: "/workspace/data/glm_dataset_opengenome2-metagenome_1024.sqlite"
+  seq_length: 8192
+  batch_size: 4
+  num_workers: 8
+  stride: 7992  # EVO2-style minimal overlap (follow Bruno's performance focus)
+  min_window_length: 1000
+  rc_augmentation: false
+  seed: 42
+
+# Training configuration
+micro_batch_size: 2
+num_train_steps: 1000
+
+# FSDP config (Bruno's approach)
+use_fsdp: true
+fully_shard_kwargs:
+  zero_dp_strategy: "optim_grads_params"
+  calculate_per_token_loss: false
+  init_model_with_meta_device: true
+  check_for_nan_in_grad: true
+  grad_reduce_in_fp32: false
+  preserve_fp32_weights: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  sync_grads_each_step: true
+  average_in_collective: false
+
+# Optimizer config (Bruno's settings)
+adamw_kwargs:
+  lr: 4.0e-4
+  fused: true
+  betas: [0.9, 0.98]
+  eps: 1.0e-8
+  weight_decay: 0.1
+
+# Learning rate scheduler
+lr_scheduler_kwargs:
+  num_warmup_steps: 100
+  num_training_steps: ${num_train_steps}
+
+# Weights and Biases logging
+wandb_init_args:
+  project: "llama3-genomic-pretraining"
+  name: "llama3-ascii-tokenization-8k-fsdp"
+  notes: "LLAMA3 training on genomic sequences with Bruno's FSDP setup + genomic dataloader"
+  tags: ["llama3", "genomic", "ascii-tokenizer", "fsdp", "bruno-recipe"]
+  mode: "online"  # Can be overridden to "disabled" for testing
