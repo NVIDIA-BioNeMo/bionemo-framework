@@ -14,6 +14,11 @@ CALIBRATE_ONLY=0
 RESUME_FROM=00
 SAMPLING_SELECTION_SOURCE=
 MODEL_VARIANT="${MODEL_VARIANT:-7b-base}"
+WANDB_ENABLED=0
+WANDB_OPTION_CONFIGURED=0
+WANDB_ENTITY_NAME="${WANDB_ENTITY:-}"
+WANDB_SFT_PROJECT_NAME='evo2-phage-design-sft'
+WANDB_RL_PROJECT_NAME='evo2-phage-design-gdpo'
 NUM_GPUS="${NUM_GPUS:-8}"
 NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}}"
 for resource_name in NUM_GPUS NUM_CPUS; do
@@ -59,6 +64,10 @@ usage() {
     '  --result-root PATH         Result directory (default: results/phix174-8xh100)' \
     '  --model-variant NAME       7b-base (default) or 7b-1m' \
     '  --sampling-selection PATH  Copy and use a sampling-selection YAML' \
+    '  --wandb                    Log the full SFT and GDPO runs to W&B' \
+    '  --wandb-entity NAME        W&B entity/team (or use WANDB_ENTITY)' \
+    '  --wandb-sft-project NAME   SFT project (default: evo2-phage-design-sft)' \
+    '  --wandb-rl-project NAME    GDPO project (default: evo2-phage-design-gdpo)' \
     '  --prepare-only             Prepare public inputs/tools/controls, then stop' \
     '  --calibrate-only           Stop after calibration scoring for sampling review' \
     '  --resume-from ID           Start at stage 00, 10, 20, 30, 40, or 50' \
@@ -71,6 +80,25 @@ while (($#)); do
     --result-root) RESULT_ROOT="$2"; shift 2 ;;
     --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
     --sampling-selection) SAMPLING_SELECTION_SOURCE="$2"; shift 2 ;;
+    --wandb) WANDB_ENABLED=1; shift ;;
+    --wandb-entity)
+      if (($# < 2)) || [[ -z "$2" ]]; then
+        printf '%s\n' '--wandb-entity requires a value' >&2; exit 2
+      fi
+      WANDB_ENTITY_NAME="$2"; WANDB_OPTION_CONFIGURED=1; shift 2
+      ;;
+    --wandb-sft-project)
+      if (($# < 2)) || [[ -z "$2" ]]; then
+        printf '%s\n' '--wandb-sft-project requires a value' >&2; exit 2
+      fi
+      WANDB_SFT_PROJECT_NAME="$2"; WANDB_OPTION_CONFIGURED=1; shift 2
+      ;;
+    --wandb-rl-project)
+      if (($# < 2)) || [[ -z "$2" ]]; then
+        printf '%s\n' '--wandb-rl-project requires a value' >&2; exit 2
+      fi
+      WANDB_RL_PROJECT_NAME="$2"; WANDB_OPTION_CONFIGURED=1; shift 2
+      ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     --calibrate-only) CALIBRATE_ONLY=1; shift ;;
     --resume-from) RESUME_FROM="$2"; shift 2 ;;
@@ -79,6 +107,10 @@ while (($#)); do
     *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
+if [[ "${WANDB_ENABLED}" != "1" && "${WANDB_OPTION_CONFIGURED}" == "1" ]]; then
+  printf '%s\n' '--wandb-entity and project overrides require --wandb' >&2
+  exit 2
+fi
 case "${RESUME_FROM}" in 00|10|20|30|40|50) ;; *) printf 'Invalid stage: %s\n' "${RESUME_FROM}" >&2; exit 2 ;; esac
 if [[ "${PREPARE_ONLY}" == "1" && "${CALIBRATE_ONLY}" == "1" ]]; then
   printf '%s\n' '--prepare-only and --calibrate-only are mutually exclusive' >&2
@@ -108,6 +140,27 @@ case "${MODEL_VARIANT}" in
     exit 2
     ;;
 esac
+
+WANDB_RUN_STEM="$(basename -- "${RESULT_ROOT}")-${MODEL_VARIANT}"
+WANDB_SFT_RUN_NAME="${WANDB_RUN_STEM}-sft"
+WANDB_RL_RUN_NAME="${WANDB_RUN_STEM}-gdpo"
+declare -a SFT_WANDB_ARGS=()
+declare -a RL_WANDB_ARGS=(logger.wandb_enabled=false)
+if [[ "${WANDB_ENABLED}" == "1" ]]; then
+  SFT_WANDB_ARGS=(
+    --wandb-project "${WANDB_SFT_PROJECT_NAME}"
+    --wandb-run-name "${WANDB_SFT_RUN_NAME}"
+  )
+  if [[ -n "${WANDB_ENTITY_NAME}" ]]; then
+    SFT_WANDB_ARGS+=(--wandb-entity "${WANDB_ENTITY_NAME}")
+    export WANDB_ENTITY="${WANDB_ENTITY_NAME}"
+  fi
+  RL_WANDB_ARGS=(
+    logger.wandb_enabled=true
+    logger.wandb.project="${WANDB_RL_PROJECT_NAME}"
+    logger.wandb.name="${WANDB_RL_RUN_NAME}"
+  )
+fi
 
 STATE_DIR="${RESULT_ROOT}/state"
 STAGE_DIR="${RESULT_ROOT}/stages"
@@ -514,9 +567,51 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   fi
 fi
 note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs"
-printf '{"gpu_count":%s,"cpu_count":%s,"gpu_type":"%s","sft_tensor_parallel_size":%s,"model_variant":"%s","base_checkpoint":"%s","model_size":"%s","whole_genome":true,"safety_screen":"current configured databases","final_generation_count":1000}\n' \
-  "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" "${SFT_TENSOR_PARALLEL_SIZE}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
-  > "${RESULT_ROOT}/settings.json"
+python - "${RESULT_ROOT}/settings.json" "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" \
+  "${SFT_TENSOR_PARALLEL_SIZE}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
+  "${WANDB_ENABLED}" "${WANDB_ENTITY_NAME}" "${WANDB_SFT_PROJECT_NAME}" "${WANDB_RL_PROJECT_NAME}" \
+  "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    output,
+    gpu_count,
+    cpu_count,
+    gpu_type,
+    sft_tensor_parallel_size,
+    model_variant,
+    base_checkpoint,
+    model_size,
+    wandb_enabled,
+    wandb_entity,
+    wandb_sft_project,
+    wandb_rl_project,
+    wandb_sft_run_name,
+    wandb_rl_run_name,
+) = sys.argv[1:]
+wandb_is_enabled = wandb_enabled == "1"
+settings = {
+    "gpu_count": int(gpu_count),
+    "cpu_count": int(cpu_count),
+    "gpu_type": gpu_type,
+    "sft_tensor_parallel_size": int(sft_tensor_parallel_size),
+    "model_variant": model_variant,
+    "base_checkpoint": base_checkpoint,
+    "model_size": model_size,
+    "whole_genome": True,
+    "safety_screen": "current configured databases",
+    "final_generation_count": 1000,
+    "wandb_enabled": wandb_is_enabled,
+    "wandb_entity": (wandb_entity or None) if wandb_is_enabled else None,
+    "wandb_sft_project": wandb_sft_project,
+    "wandb_rl_project": wandb_rl_project,
+    "wandb_sft_run_name": wandb_sft_run_name,
+    "wandb_rl_run_name": wandb_rl_run_name,
+}
+Path(output).write_text(json.dumps(settings, indent=2) + "\n")
+PY
 cd "${RECIPE_ROOT}"
 
 stage_00() {
@@ -608,7 +703,7 @@ stage_20() {
       run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size "${MODEL_SIZE}" --seq-length 10240 --mixed-precision-recipe bf16_mixed
     fi
     monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
-    monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2
+    monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2 "${SFT_WANDB_ARGS[@]}"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft.done"
   fi
   [[ "${DRY_RUN}" == "1" ]] && selected='<selected-sft>' || selected="$(select_checkpoint sft "${sft}/evo2/tb_logs" "${sft}/evo2/checkpoints" "${RESULT_ROOT}/sft/checkpoint-selection.json")"
@@ -715,11 +810,11 @@ PY
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422_1.fna --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" logger.wandb_enabled=false policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else
-      monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
+      monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot.done"
     fi
     if [[ -f "${STAGE_DIR}/40-pilot-check.done" ]]; then
@@ -729,7 +824,7 @@ PY
       check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot-check.done"
     fi
-    monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
+    monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" "${RL_WANDB_ARGS[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-rl.done"
   fi
   run evo2_phage_monitor_objectives --tensorboard-root "${rl}/logs" --config configs/gdpo_phage_megatron.yaml --output "${rl}/objective-health.json" --history-output "${rl}/objective-history.json"

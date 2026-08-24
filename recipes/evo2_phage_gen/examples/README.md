@@ -45,6 +45,22 @@ loss; the biological sequence immediately after it remains supervised.
 Completed stages and substages are skipped. Reuse the same result root and sampling selection when
 resuming; a material sampling or model change should start a new run.
 
+### Optional W&B logging
+
+Authenticate with `wandb login` (or provide `WANDB_API_KEY` through a secret manager), then opt in:
+
+```bash
+./examples/phix174_8xh100.sh --wandb --wandb-entity YOUR_ENTITY \
+  --wandb-sft-project evo2-phage-design-sft \
+  --wandb-rl-project evo2-phage-design-gdpo \
+  --result-root "$PWD/results/phix174-8xh100"
+```
+
+The project flags are optional and show their defaults. Run names are derived from the result-root
+name and model variant. W&B covers the full SFT and GDPO runs; smoke tests, held-out evaluation,
+and the one-step GDPO pilot remain local. Never pass an API key as a launcher argument. Completed
+stages are not uploaded retroactively.
+
 ### Choose sampling settings
 
 [`default-sampling-selection.yaml`](default-sampling-selection.yaml) is both the historical PhiX

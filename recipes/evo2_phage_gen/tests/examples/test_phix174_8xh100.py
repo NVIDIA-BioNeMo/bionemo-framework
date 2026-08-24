@@ -142,6 +142,12 @@ def test_dry_run(tmp_path: Path) -> None:
         "whole_genome": True,
         "safety_screen": "current configured databases",
         "final_generation_count": 1000,
+        "wandb_enabled": False,
+        "wandb_entity": None,
+        "wandb_sft_project": "evo2-phage-design-sft",
+        "wandb_rl_project": "evo2-phage-design-gdpo",
+        "wandb_sft_run_name": "result-7b-base-sft",
+        "wandb_rl_run_name": "result-7b-base-gdpo",
     }
     log = (result_root / "RUNLOG.md").read_text()
     for command in (
@@ -240,6 +246,7 @@ def test_dry_run(tmp_path: Path) -> None:
     assert sft_command[sft_command.index("--checkpoint-metric-name") + 1] == "lm loss"
     assert "--strict-checkpoint-metric" in sft_command
     assert sft_command[sft_command.index("--checkpoint-metric-step-tolerance") + 1] == "1"
+    assert "--wandb-project" not in sft_command
 
     heldout_command = next(
         shlex.split(line.partition("command: ")[2])
@@ -270,11 +277,14 @@ def test_dry_run(tmp_path: Path) -> None:
     assert preparation < log.index("command: evo2_phage_check_rl")
     assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
 
-    gdpo = next(
+    gdpo_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
         if "command: evo2_phage_run_gdpo " in line
-    )
+    ]
+    assert len(gdpo_commands) == 2
+    assert all("logger.wandb_enabled=false" in command for command in gdpo_commands)
+    gdpo = gdpo_commands[0]
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
     assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
 
@@ -285,6 +295,61 @@ def test_dry_run(tmp_path: Path) -> None:
     )
     assert conversion[conversion.index("--nemo2-ckpt-dir") + 1] == "<downloaded-evo2-7b-8k>"
     assert conversion[conversion.index("--model-size") + 1] == "evo2_7b_base"
+
+
+def test_wandb_dry_run(tmp_path: Path) -> None:
+    result_root = tmp_path / "wandb-result"
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--wandb",
+            "--wandb-entity",
+            "example-team",
+            "--wandb-sft-project",
+            "custom-sft",
+            "--wandb-rl-project",
+            "custom-gdpo",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "WANDB_API_KEY": "do-not-record"},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["wandb_enabled"] is True
+    assert settings["wandb_entity"] == "example-team"
+    assert settings["wandb_sft_project"] == "custom-sft"
+    assert settings["wandb_rl_project"] == "custom-gdpo"
+    assert settings["wandb_sft_run_name"] == "wandb-result-7b-base-sft"
+    assert settings["wandb_rl_run_name"] == "wandb-result-7b-base-gdpo"
+
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "do-not-record" not in log
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    sft_commands = [command for command in commands if "train_evo2" in command]
+    full_sft = next(command for command in sft_commands if command[command.index("--max-steps") + 1] == "12000")
+    assert full_sft[full_sft.index("--wandb-entity") + 1] == "example-team"
+    assert full_sft[full_sft.index("--wandb-project") + 1] == "custom-sft"
+    assert full_sft[full_sft.index("--wandb-run-name") + 1] == "wandb-result-7b-base-sft"
+    assert all("--wandb-project" not in command for command in sft_commands if command is not full_sft)
+
+    gdpo_commands = [command for command in commands if command[:1] == ["evo2_phage_run_gdpo"]]
+    assert len(gdpo_commands) == 2
+    pilot = next(command for command in gdpo_commands if "grpo.max_num_steps=1" in command)
+    full_gdpo = next(command for command in gdpo_commands if command is not pilot)
+    assert "logger.wandb_enabled=false" in pilot
+    assert not any(part.startswith("logger.wandb.project=") for part in pilot)
+    assert "logger.wandb_enabled=true" in full_gdpo
+    assert "logger.wandb.project=custom-gdpo" in full_gdpo
+    assert "logger.wandb.name=wandb-result-7b-base-gdpo" in full_gdpo
 
 
 def test_single_gpu_plan(tmp_path: Path) -> None:
