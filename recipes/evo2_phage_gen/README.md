@@ -1,47 +1,44 @@
 # Evo 2 Phage Design
 
-This recipe fine-tunes Evo 2 on phage genomes, runs GDPO, generates complete candidate genomes,
-and applies sequence-safety and design screens. Results are computational candidates, not evidence
-of bootability, therapeutic fitness, or wet-lab safety.
+This recipe fine-tunes Evo 2 on phage genomes, runs
+[GDPO](https://arxiv.org/abs/2601.05242)—an NVIDIA-developed method for stable multi-reward policy
+optimization—generates complete candidate genomes, and applies sequence-safety and design screens.
+A key extension beyond the
+[original published workflow](https://www.science.org/doi/10.1126/science.aec2657) is the
+reinforcement learning (RL) stage, which optimizes generation toward user-defined computational
+design criteria rather than relying only on post-generation filtering.
 
-## Latest completed PhiX174 result
+The included PhiX174 example follows Samuel King's recommended set of filters (1–6, 8, and 9) from
+[Figure 2H](https://www.science.org/doi/10.1126/science.aec2657#F2). These become RL objectives with
+partial credit for candidates that approach each threshold. See the
+[PhiX174 GDPO score definitions](examples/README.md#current-phix174-gdpo-score-definitions) for the
+objective definitions and partial-credit rules. The publication reported 15 filter passers among
+110,000 generated sequences. An earlier completed end-to-end GDPO run produced 610 target-profile
+passes among 1,000 designs, while the latest run retained 511 post-QC accepted representatives among
+1,000 designs. These results are descriptive rather than a controlled enrichment comparison because
+the runs used different checkpoints, screening pipelines, and selection procedures.
 
-The 8×H100 rerun completed on 2026-08-24:
+| Run                                                  | Reported computational outcome                     |
+| :--------------------------------------------------- | :------------------------------------------------- |
+| GDPO replication using Arc's Microviridae checkpoint | 358/1,000 target-profile passes (35.8%)            |
+| End-to-end GDPO replication 1                        | 610/1,000 target-profile passes (61.0%)            |
+| End-to-end GDPO replication 2                        | 511/1,000 post-QC accepted representatives (51.1%) |
+| Published workflow without RL                        | 15/110,000 filter passers (approximately 0.014%)   |
 
-| Final-rollout denominator                                  |       Count |
-| ---------------------------------------------------------- | ----------: |
-| Raw generated and SFT-likelihood scored                    |       1,000 |
-| Biological representatives after circular/RC deduplication |       1,000 |
-| Submitted to safety / excluded by pre-safety QC            |     991 / 9 |
-| Safety PASS / FAIL / INDETERMINATE                         | 989 / 0 / 2 |
-| Safety-PASS target hard-QC representatives                 |         513 |
-| Post-QC 99%-identity clusters and accepted representatives |         511 |
-
-The denominators proceed from raw generation through biological deduplication, safety and hard QC,
-then post-QC clustering. Likelihood is a within-protocol ranking signal; these computational
-candidates are not evidence of bootability or wet-lab safety. See the
-[example README](examples/README.md) for the workflow and
-[case-study notes](skills/bionemo-phage-design/references/case-study-results.md) for historical context.
+The recipe includes agent skills led by the top-level `bionemo-phage-design` skill. They can adapt
+the example launcher to the available GPU environment, help plan and implement related design
+tasks, and monitor long-running jobs.
 
 ## Quick start
 
-Run from `recipes/evo2_phage_gen`. The publication-style reproduction uses 7B-base:
+See the [example README](examples/README.md) for additional launch options and operational details.
+
+Run the following from `recipes/evo2_phage_gen` to reproduce the 7B-base end-to-end configuration
+summarized above:
 
 ```bash
 ./.ci_build.sh
 ./examples/phix174_8xh100.sh --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
-```
-
-For a fresh experiment, the trained-further 7B-1M model is generally preferred:
-
-```bash
-./examples/phix174_8xh100.sh --model-variant 7b-1m --result-root "$PWD/results/phix174-7b-1m"
-```
-
-Do not change model families within an existing result root. Resume an interrupted base run with:
-
-```bash
-./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
 ```
 
 Use tmux or a scheduler for long runs. `NUM_GPUS` defaults to 8, `NUM_CPUS` to `nproc`, and
@@ -51,34 +48,11 @@ sampling overrides, outputs, and all RL objectives.
 
 ## Run with an agent
 
-From the repository root, the portable skill locates a compatible checkout:
+From the repository root, ask your preferred coding agent to adapt and run the workflow:
 
-```bash
-codex 'Use $bionemo-phage-generation to begin interactive planning for the PhiX174 GDPO case study.'
+```text
+Use $bionemo-phage-generation to adapt the PhiX174 example for this GB300 node, run and monitor it, and use the 7B-1M checkpoint instead of 7B-8K.
 ```
-
-From this recipe directory, the local controller can inspect or execute a run:
-
-```bash
-codex 'Use $bionemo-phage-design in interactive case-study-replication mode. Inspect existing results and propose the plan before launching jobs.'
-```
-
-The recipe-local skill bundle is also exposed through [.codex-plugin/plugin.json](.codex-plugin/plugin.json).
-
-## Useful commands
-
-```bash
-# Inspect the complete command plan without downloads or GPUs.
-./examples/phix174_8xh100.sh --dry-run --result-root /tmp/phix174-plan
-
-# Download and preprocess the publication-era SFT inputs directly.
-evo2_phage_download_sft_data --include-raw
-preprocess_evo2 --config configs/sft_microviridae_preprocess.yaml
-```
-
-If an entrypoint is missing, rerun `./.ci_build.sh` and source `.ci_test_env.sh`. For GPU memory or
-topology changes, preserve whole-genome context and effective batch size; see the
-[compute guidance](skills/bionemo-phage-design-adapt-execution/references/compute-guidance.md).
 
 ## References
 
@@ -89,6 +63,6 @@ topology changes, preserve whole-genome context and effective batch size; see th
 
 ## Acknowledgements
 
-Thanks to Samuel King, Jessica Sacher, Jan Zheng, Avery Noonan, Michael Poon and colleagues at
-Tabula Bio, and Eric Bastien and Nick Conley at Locus Biosciences for discussions and feedback that
-shaped the recipe and its safety controls.
+Thanks to Samuel King, Jessica Sacher, Jan Zheng, Avery Noonan, Michael Poon, and colleagues at
+Tabula Bio, and to Eric Bastien and Nick Conley at Locus Biosciences, for discussions, guidance, and
+feedback that shaped the recipe and its safety controls.

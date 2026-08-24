@@ -1,8 +1,36 @@
 # PhiX174 whole-genome example on 8×H100
 
-[`phix174_8xh100.sh`](phix174_8xh100.sh) prepares public inputs, trains SFT and GDPO,
-generates 1,000 complete genomes, and applies the current safety and PhiX174 design screens.
-Outputs are computational candidates, not evidence of bootability or wet-lab safety.
+[`phix174_8xh100.sh`](phix174_8xh100.sh) prepares public inputs, performs supervised fine-tuning
+(SFT), and optimizes the model with [GDPO](https://arxiv.org/abs/2601.05242), a multi-reward
+reinforcement learning (RL) method. It then generates a rollout of 1,000 complete genomes and
+applies the current safety and PhiX174 design screens. This reference launcher has been tested on an
+8×H100 server. Other topologies may require adjusted settings. The `bionemo-phage-design` skill can
+adapt the settings and help run and monitor the job.
+
+This example uses filters 1–6, 8, and 9 from
+[Figure 2H](https://www.science.org/doi/10.1126/science.aec2657#F2), following Samuel King's
+recommendation (personal correspondence). For RL, these filters become separate scores with partial
+credit as candidates approach their passing thresholds. See the
+[PhiX174 GDPO score definitions](#current-phix174-gdpo-score-definitions) section below for
+more information on these RL scores and how partial credit is assigned.
+
+## Latest completed PhiX174 result
+
+The 8×H100 rerun completed on 2026-08-24:
+
+| Final-rollout denominator                                  |       Count |
+| ---------------------------------------------------------- | ----------: |
+| Raw generated and SFT-likelihood scored                    |       1,000 |
+| Biological representatives after circular/RC deduplication |       1,000 |
+| Submitted to safety / excluded by pre-safety QC            |     991 / 9 |
+| Safety PASS / FAIL / INDETERMINATE                         | 989 / 0 / 2 |
+| Safety-PASS target hard-QC representatives                 |         513 |
+| Post-QC 99%-identity clusters and accepted representatives |         511 |
+
+The denominators proceed from raw generation through biological deduplication, safety screening,
+and target hard QC, then post-QC clustering. Likelihood is a within-protocol ranking signal; these
+computational candidates are not evidence of bootability or wet-lab safety. See the
+[case-study notes](../skills/bionemo-phage-design/references/case-study-results.md) for historical context.
 
 ## Quick start
 
@@ -86,21 +114,7 @@ cp examples/default-sampling-selection.yaml /tmp/phix174-sampling.yaml
 The script validates and records the file as `calibration/sampling-selection.yaml`. Do not replace
 that canonical selection after RL has begun; a material change should use a new result root.
 
-### Stage-40 pilot recovery
-
-Stage 40 writes `stages/40-pilot.done` immediately after the one-step GDPO pilot succeeds and
-`stages/40-pilot-check.done` after its objective-health check succeeds. The 500-step training then
-writes `stages/40-rl.done`; the outer `stages/40.done` is written only after monitoring and
-checkpoint selection also finish. If a run made with an older script stopped after logging
-`one-step GDPO pilot complete`, accept that completed pilot and resume at its check with:
-
-```bash
-touch results/phix174-8xh100/stages/40-pilot.done && ./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
-```
-
-Do not create either marker unless the corresponding operation is known to have completed.
-
-## Workflow and outputs
+## Script workflow and outputs
 
 | Stage | Work                                                                                        |
 | ----- | ------------------------------------------------------------------------------------------- |
@@ -117,7 +131,15 @@ selected checkpoints, safety outcomes, QC denominators, clustering, and accepted
 The terminal and `RUNLOG.md` end with `RUN COMPLETE`, `RUN PAUSED`, or `RUN FAILED` plus stage
 progress; only `RUN COMPLETE` denotes successful completion of the requested invocation.
 The original SFT checkpoint remains available for exact resume and likelihood scoring; RL uses
-the smaller prepared checkpoint under `rl/sft-checkpoint/`.
+the smaller prepared checkpoint under `rl/sft-checkpoint/`. The `rollout/accepted_candidates.fasta`
+contains the final filter-passing, deduplicated candidates for further analysis. When its scores are
+informative and not strongly length-associated, this FASTA is ordered by mean per-nucleotide
+likelihood under the selected SFT model; otherwise, generation order is retained.
+[Black et al., “Quantifying evolutionary novelty and design efficiency in generative genome
+design”](https://www.biorxiv.org/content/10.64898/2026.06.12.731871v1.full) found that Evo 2
+likelihood predicted experimental viability within a previously filtered PhiX174 dataset, but the
+score used here remains a within-protocol ranking signal rather than a bootability probability or
+transferable threshold.
 
 The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and `NUM_CPUS` to
 `nproc`. SFT tensor parallelism defaults to 1 on a single GPU and 2 otherwise; override
