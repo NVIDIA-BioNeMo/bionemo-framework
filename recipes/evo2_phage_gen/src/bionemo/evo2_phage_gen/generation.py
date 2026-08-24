@@ -560,6 +560,7 @@ def main() -> None:
         help="Intersect safety-PASS representatives with target-profile hard-QC passers",
     )
     hard_qc_parser.add_argument("--representative-fasta", type=Path, required=True)
+    hard_qc_parser.add_argument("--safety-input-fasta", type=Path)
     hard_qc_parser.add_argument("--safety-manifest", type=Path, required=True)
     hard_qc_parser.add_argument("--target-fasta", type=Path, required=True)
     hard_qc_parser.add_argument("--output-fasta", type=Path, required=True)
@@ -582,6 +583,7 @@ def main() -> None:
         help="Join likelihood and final QC evidence into the ranked rollout report",
     )
     final_parser.add_argument("--generated-fasta", type=Path, required=True)
+    final_parser.add_argument("--safety-input-fasta", type=Path)
     final_parser.add_argument("--safety-manifest", type=Path, required=True)
     final_parser.add_argument("--target-fasta", type=Path, required=True)
     final_parser.add_argument("--likelihood-csv", type=Path, required=True)
@@ -673,6 +675,7 @@ def main() -> None:
                 args.target_fasta,
                 args.output_fasta,
                 args.report,
+                safety_input_fasta=args.safety_input_fasta,
             )
         )
     elif args.command == "cluster-post-qc":
@@ -737,6 +740,7 @@ def main() -> None:
                     diagnostic_report=args.diagnostic_report,
                     clustering_report=args.clustering_report,
                     run_log=args.run_log,
+                    safety_input_fasta=args.safety_input_fasta,
                 )
             )
 

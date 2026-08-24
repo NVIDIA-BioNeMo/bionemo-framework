@@ -1039,6 +1039,7 @@ PY
   else
     run evo2_phage_generation select-hard-qc-passers \
       --representative-fasta "${dedup}/representatives.fasta" \
+      --safety-input-fasta "${safety}/input-qc/qc2_nt_filter_seqs.fasta" \
       --safety-manifest "${safety}/scan/manifest.json" \
       --target-fasta "${target}/arc/qc6_synteny_filter_seqs.fasta" \
       --output-fasta "${hard_qc}/passers.fasta" --report "${hard_qc}/report.json"
@@ -1060,6 +1061,7 @@ PY
     note 'record the raw and representative denominators, hard-QC waterfall, post-QC clusters, and limitations'
     run evo2_phage_generation finalize-rollout \
       --generated-fasta "${fasta}" --deduplication-mapping "${dedup}/mapping.csv" \
+      --safety-input-fasta "${safety}/input-qc/qc2_nt_filter_seqs.fasta" \
       --safety-manifest "${safety}/scan/manifest.json" \
       --target-fasta "${target}/arc/qc6_synteny_filter_seqs.fasta" \
       --diagnostic-fasta "${diagnostic}/arc/qc6_synteny_filter_seqs.fasta" \

@@ -23,6 +23,7 @@
         "The response records the checkpoint, prompt mixture, sampling settings, target length, seeds or prompt IDs, and tool/data versions that affect interpretation.",
         "It scores all 1,000 raw designs when SFT likelihood is requested, removes exact/circular/reverse-complement biological duplicates before expensive QC, runs every required component on representatives, then applies the approved all/any logic.",
         "Positive controls confirm each enabled filter executed; missing required evidence or tool failure becomes INDETERMINATE rather than PASS.",
+        "When pre-safety QC excludes representatives, the response preserves those exclusions in the representative denominator and requires exact manifest coverage for the sequences actually submitted to safety.",
         "Short genomes, no ORFs, missing genes, and empty or header-only tool output do not crash or silently skip QC.",
         "It disables pre-QC clustering, clusters only the safety-PASS hard-QC set, preserves complete candidate-to-result and cluster mapping, and reports raw, representative, PASS, FAIL, INDETERMINATE, hard-QC, and clustered counts.",
         "It reports total and mean per-nucleotide selected-SFT log probability for every design, checks residual score-length correlation, and uses likelihood ordering only when that diagnostic supports it.",

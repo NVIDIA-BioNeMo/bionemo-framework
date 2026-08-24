@@ -21,6 +21,8 @@
 import csv
 import json
 
+import pytest
+
 from bionemo.evo2_phage_gen.rollout_evidence import (
     cluster_post_qc_fasta,
     deduplicate_fasta,
@@ -97,6 +99,54 @@ def test_hard_qc_requires_safety_and_target_pass(tmp_path):
     assert report["safety_states"] == {"PASS": 1, "FAIL": 1, "INDETERMINATE": 1}
     assert report["target_profile_pass"] == 2
     assert report["hard_qc_pass"] == 1
+
+
+def test_hard_qc_preserves_declared_pre_safety_qc_exclusions(tmp_path):
+    representatives = tmp_path / "representatives.fasta"
+    representatives.write_text(">screened\nAACG\n>invalid-before-safety\nAANN\n")
+    safety_input = tmp_path / "safety-input.fasta"
+    safety_input.write_text(">screened\nAACG\n")
+    safety = tmp_path / "safety.json"
+    safety.write_text(json.dumps({"records": [{"record_id": "screened", "state": "PASS"}]}))
+    target = tmp_path / "target.fasta"
+    target.write_text(">target-screened\nAACG\n>target-invalid\nAANN\n")
+
+    select_hard_qc_passers(
+        representatives,
+        safety,
+        target,
+        tmp_path / "hard-qc.fasta",
+        tmp_path / "hard-qc.json",
+        safety_input_fasta=safety_input,
+    )
+
+    assert (tmp_path / "hard-qc.fasta").read_text() == ">screened\nAACG\n"
+    report = json.loads((tmp_path / "hard-qc.json").read_text())
+    assert report["input_representatives"] == 2
+    assert report["safety_input_representatives"] == 1
+    assert report["pre_safety_qc_excluded_representatives"] == 1
+    assert report["safety_states"] == {"PASS": 1, "FAIL": 0, "INDETERMINATE": 0}
+
+
+def test_hard_qc_still_rejects_missing_manifest_rows_for_safety_input(tmp_path):
+    representatives = tmp_path / "representatives.fasta"
+    representatives.write_text(">recorded\nAACG\n>missing\nGGTT\n>excluded\nAANN\n")
+    safety_input = tmp_path / "safety-input.fasta"
+    safety_input.write_text(">recorded\nAACG\n>missing\nGGTT\n")
+    safety = tmp_path / "safety.json"
+    safety.write_text(json.dumps({"records": [{"record_id": "recorded", "state": "PASS"}]}))
+    target = tmp_path / "target.fasta"
+    target.write_text(">recorded\nAACG\n")
+
+    with pytest.raises(ValueError, match=r"safety/input mismatch: missing=\['missing'\], extra=\[\]"):
+        select_hard_qc_passers(
+            representatives,
+            safety,
+            target,
+            tmp_path / "hard-qc.fasta",
+            tmp_path / "hard-qc.json",
+            safety_input_fasta=safety_input,
+        )
 
 
 def test_post_qc_clustering_pins_contract(tmp_path):
@@ -207,12 +257,13 @@ def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
                 "databases": {"phrogs": {"version": "test-phrogs"}},
                 "records": [
                     {"record_id": "a", "state": "PASS"},
-                    {"record_id": "b", "state": "FAIL"},
                     {"record_id": "c", "state": "PASS"},
                 ],
             }
         )
     )
+    safety_input = tmp_path / "safety-input.fasta"
+    safety_input.write_text(">a\nAACG\n>c\nTTGC\n")
     target = tmp_path / "target.fasta"
     target.write_text(">target-a\nACGA\n>target-c\nTTGC\n")
     diagnostic = tmp_path / "diagnostic.fasta"
@@ -248,6 +299,7 @@ def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
         model_checkpoint="sft/iter_0005200",
         rl_checkpoint="rl/step_400",
         sampling_selection=selection,
+        safety_input_fasta=safety_input,
     )
 
     payload = json.loads((tmp_path / "final-designs.json").read_text())
@@ -263,8 +315,10 @@ def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
         "raw_likelihood_scored": 4,
         "biological_representatives": 3,
         "duplicates_removed": 1,
+        "safety_input_representatives": 2,
+        "pre_safety_qc_excluded_representatives": 1,
         "safety_pass_representatives": 2,
-        "safety_fail_representatives": 1,
+        "safety_fail_representatives": 0,
         "safety_indeterminate_representatives": 0,
         "target_profile_pass_representatives": 2,
         "diagnostic_filter7_pass_representatives": 1,
@@ -276,6 +330,9 @@ def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
     assert duplicate["representative_id"] == "a"
     assert duplicate["safety_state"] == "NOT_EVALUATED_DUPLICATE"
     assert not duplicate["accepted"]
+    excluded = next(row for row in payload["records"] if row["record_id"] == "b")
+    assert excluded["safety_state"] == "NOT_SCREENED_PRE_SAFETY_QC"
+    assert excluded["representative_safety_state"] == "NOT_SCREENED_PRE_SAFETY_QC"
     assert payload["sampling_selection"] == {"temperature": 1.0, "prompt_lengths": [16, 24]}
     assert payload["sequence_safety_provenance"]["tools"] == {"mmseqs": {"version": "test-mmseqs"}}
     assert payload["sequence_safety_provenance"]["databases"] == {"phrogs": {"version": "test-phrogs"}}

@@ -340,8 +340,31 @@ def _safety_states(safety_manifest: Path, expected_ids: set[str]) -> tuple[dict[
     if set(states) != expected_ids:
         missing = sorted(expected_ids - set(states))
         extra = sorted(set(states) - expected_ids)
-        raise ValueError(f"safety/representative mismatch: missing={missing}, extra={extra}")
+        raise ValueError(f"safety/input mismatch: missing={missing}, extra={extra}")
     return states, Counter(states.values())
+
+
+def _reconcile_safety_input(
+    representatives: list[tuple[str, str]],
+    safety_manifest: Path,
+    safety_input_fasta: Path | None,
+) -> tuple[dict[str, str], Counter[str], set[str]]:
+    representative_by_id = dict(representatives)
+    safety_input = representatives if safety_input_fasta is None else read_fasta(safety_input_fasta, allow_empty=True)
+    safety_input_by_id = dict(safety_input)
+    unknown = sorted(set(safety_input_by_id) - set(representative_by_id))
+    sequence_mismatches = sorted(
+        record_id
+        for record_id, sequence in safety_input
+        if record_id in representative_by_id and representative_by_id[record_id] != sequence
+    )
+    if unknown or sequence_mismatches:
+        raise ValueError(
+            f"safety input/representative mismatch: unknown={unknown}, sequence_mismatches={sequence_mismatches}"
+        )
+    states, counts = _safety_states(safety_manifest, set(safety_input_by_id))
+    excluded = set(representative_by_id) - set(safety_input_by_id)
+    return states, counts, excluded
 
 
 def select_hard_qc_passers(
@@ -350,11 +373,16 @@ def select_hard_qc_passers(
     target_fasta: Path,
     output_fasta: Path,
     report_json: Path,
+    *,
+    safety_input_fasta: Path | None = None,
 ) -> Path:
     """Intersect safety-PASS representatives with the target Arc hard-QC branch."""
     representatives = read_fasta(representative_fasta, allow_empty=True)
-    expected_ids = {record_id for record_id, _ in representatives}
-    safety_by_id, state_counts = _safety_states(safety_manifest, expected_ids)
+    safety_by_id, state_counts, pre_safety_excluded = _reconcile_safety_input(
+        representatives,
+        safety_manifest,
+        safety_input_fasta,
+    )
     target_sequences = {
         canonical_circular_sequence(sequence) for _, sequence in read_fasta(target_fasta, allow_empty=True)
     }
@@ -366,19 +394,22 @@ def select_hard_qc_passers(
     hard_qc_records = [
         (record_id, sequence)
         for record_id, sequence in representatives
-        if safety_by_id[record_id] == "PASS" and record_id in target_pass_ids
+        if safety_by_id.get(record_id) == "PASS" and record_id in target_pass_ids
     ]
     _write_fasta(output_fasta, hard_qc_records)
     report = {
         "schema_version": 1,
         "state": "succeeded",
         "input_representatives": len(representatives),
+        "safety_input_representatives": len(representatives) - len(pre_safety_excluded),
+        "pre_safety_qc_excluded_representatives": len(pre_safety_excluded),
         "safety_states": {state: state_counts[state] for state in ("PASS", "FAIL", "INDETERMINATE")},
         "target_profile_pass": len(target_pass_ids),
         "hard_qc_pass": len(hard_qc_records),
         "definition": "safety PASS intersected with the target-profile Arc terminal pass set",
         "artifacts": {
             "representative_fasta": str(Path(representative_fasta).resolve()),
+            "safety_input_fasta": str(Path(safety_input_fasta or representative_fasta).resolve()),
             "safety_manifest": str(Path(safety_manifest).resolve()),
             "target_fasta": str(Path(target_fasta).resolve()),
             "hard_qc_fasta": str(Path(output_fasta).resolve()),
@@ -610,6 +641,7 @@ def finalize_rollout_report(
     diagnostic_report: Path | None = None,
     clustering_report: Path | None = None,
     run_log: Path | None = None,
+    safety_input_fasta: Path | None = None,
 ) -> Path:
     """Reconcile raw, representative, hard-QC, clustering, and ranking evidence."""
     raw_records = read_fasta(generated_fasta)
@@ -617,8 +649,15 @@ def finalize_rollout_report(
     sequence_by_id = dict(raw_records)
     generation_order = {record_id: index for index, record_id in enumerate(raw_ids)}
     mapping_by_id, representative_ids = _load_mapping(deduplication_mapping_csv, raw_ids)
-    representative_set = set(representative_ids)
-    safety_by_id, safety_counts = _safety_states(safety_manifest, representative_set)
+    representative_records = [(record_id, sequence_by_id[record_id]) for record_id in representative_ids]
+    safety_by_id, safety_counts, pre_safety_excluded = _reconcile_safety_input(
+        representative_records,
+        safety_manifest,
+        safety_input_fasta,
+    )
+    safety_state_by_representative = {
+        record_id: safety_by_id.get(record_id, "NOT_SCREENED_PRE_SAFETY_QC") for record_id in representative_ids
+    }
     target_sequences = {
         canonical_circular_sequence(sequence) for _, sequence in read_fasta(target_fasta, allow_empty=True)
     }
@@ -635,7 +674,7 @@ def finalize_rollout_report(
         for record_id in representative_ids
         if canonical_circular_sequence(sequence_by_id[record_id]) in diagnostic_sequences
     }
-    hard_qc_ids = {record_id for record_id in target_pass_ids if safety_by_id[record_id] == "PASS"}
+    hard_qc_ids = {record_id for record_id in target_pass_ids if safety_by_id.get(record_id) == "PASS"}
 
     with Path(cluster_memberships_csv).open(newline="") as handle:
         membership_rows = list(csv.DictReader(handle))
@@ -687,8 +726,10 @@ def finalize_rollout_report(
                 "scored_nucleotides": int(score["scored_nucleotides"]),
                 "total_log_probability": float(score["total_log_probability"]),
                 "mean_log_probability_per_nucleotide": float(score["mean_log_probability_per_nucleotide"]),
-                "safety_state": safety_by_id[record_id] if is_representative else "NOT_EVALUATED_DUPLICATE",
-                "representative_safety_state": safety_by_id[representative_id],
+                "safety_state": (
+                    safety_state_by_representative[record_id] if is_representative else "NOT_EVALUATED_DUPLICATE"
+                ),
+                "representative_safety_state": safety_state_by_representative[representative_id],
                 "target_profile_pass": record_id in target_pass_ids if is_representative else None,
                 "diagnostic_filter7_pass": record_id in diagnostic_pass_ids if is_representative else None,
                 "hard_qc_pass": record_id in hard_qc_ids if is_representative else None,
@@ -719,6 +760,8 @@ def finalize_rollout_report(
         "raw_likelihood_scored": len(score_rows),
         "biological_representatives": len(representative_ids),
         "duplicates_removed": duplicate_count,
+        "safety_input_representatives": len(representative_ids) - len(pre_safety_excluded),
+        "pre_safety_qc_excluded_representatives": len(pre_safety_excluded),
         "safety_pass_representatives": safety_counts["PASS"],
         "safety_fail_representatives": safety_counts["FAIL"],
         "safety_indeterminate_representatives": safety_counts["INDETERMINATE"],
@@ -739,6 +782,9 @@ def finalize_rollout_report(
             "raw_generated_fasta": str(Path(generated_fasta).resolve()),
             "deduplication_mapping": str(Path(deduplication_mapping_csv).resolve()),
             "raw_sft_likelihoods": str(Path(likelihood_csv).resolve()),
+            "safety_input_fasta": (
+                str(Path(safety_input_fasta).resolve()) if safety_input_fasta is not None else None
+            ),
             "target_profile_terminal_fasta": str(Path(target_fasta).resolve()),
             "filter7_diagnostic_terminal_fasta": str(Path(diagnostic_fasta).resolve()),
             "post_qc_cluster_memberships": str(Path(cluster_memberships_csv).resolve()),
@@ -776,6 +822,8 @@ def finalize_rollout_report(
         "# PhiX174 run summary\n\n"
         f"- Raw generated and SFT-likelihood scored: {counts['raw_generated']}\n"
         f"- Biological representatives after exact/circular/RC deduplication: {counts['biological_representatives']}\n"
+        f"- Representatives submitted to safety / excluded by pre-safety QC: "
+        f"{counts['safety_input_representatives']} / {counts['pre_safety_qc_excluded_representatives']}\n"
         f"- Safety states (PASS / FAIL / INDETERMINATE): {counts['safety_pass_representatives']} / "
         f"{counts['safety_fail_representatives']} / {counts['safety_indeterminate_representatives']}\n"
         f"- Safety-PASS target hard-QC representatives: {counts['hard_qc_pass_representatives']}\n"

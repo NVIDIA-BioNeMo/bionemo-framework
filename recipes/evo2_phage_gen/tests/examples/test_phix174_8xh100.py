@@ -162,6 +162,10 @@ def test_dry_run(tmp_path: Path) -> None:
         "finalize-rollout",
     ):
         assert command in log
+    safety_input_argument = (
+        f"--safety-input-fasta {result_root}/rollout/sequence-safety/input-qc/qc2_nt_filter_seqs.fasta"
+    )
+    assert log.count(safety_input_argument) == 2
     assert "do-not-record" not in log
     assert "monitor: external asset preparation" in log
     assert "--prepare-phrogs-consensus-database" in log
