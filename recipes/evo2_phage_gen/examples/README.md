@@ -14,6 +14,8 @@ credit as candidates approach their passing thresholds. See the
 [PhiX174 GDPO score definitions](#current-phix174-gdpo-score-definitions) section below for
 more information on these RL scores and how partial credit is assigned.
 
+The end-to-end run takes approximately 4 days on a server with 8 H100 GPUs, and uses 1.5TB of storage.
+
 ## Latest completed PhiX174 result
 
 The 8×H100 rerun completed on 2026-08-24:

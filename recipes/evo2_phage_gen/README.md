@@ -33,6 +33,8 @@ tasks, and monitor long-running jobs.
 
 See the [example README](examples/README.md) for additional launch options and operational details.
 
+The end-to-end run takes approximately 4 days on a server with 8 H100 GPUs, and uses 1.5TB of storage.
+
 Run the following from `recipes/evo2_phage_gen` to reproduce the 7B-base end-to-end configuration
 summarized above:
 
