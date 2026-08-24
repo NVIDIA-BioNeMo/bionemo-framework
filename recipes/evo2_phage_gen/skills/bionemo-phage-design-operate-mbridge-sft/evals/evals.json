@@ -9,6 +9,7 @@
         "The response rejects a failed leakage check and resolves current commands from the maintained entry points, help, source, configs, tests, and README.",
         "Publication settings are historical evidence; the SFT context comes from an agreed upper bound of collected tokenized genome lengths with full-genome samples and masked padding.",
         "The response benchmarks a DP-first target-length fit and adds TP, PP, or CP only when memory or measured throughput requires it while preserving the approved effective token batch.",
+        "Its real-record smoke test verifies that conditioning-prefix targets are loss-masked while the following biological targets remain active at document and packed-sample boundaries.",
         "For a new 7B phage project the response uses public NGC checkpoint evo2/7b-1m:1.0 with model size evo2_7b, records provider, version, and format, and uses a public Arc conversion only as a tested fallback.",
         "It does not switch an existing evo2_7b_base run to evo2_7b mid-run; that model-family change starts a new result root and attempt.",
         "The response treats 12,000 steps as a historical starting hypothesis, recalibrates a ceiling from usable corpus and effective batch, schedules enough comparable validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint.",

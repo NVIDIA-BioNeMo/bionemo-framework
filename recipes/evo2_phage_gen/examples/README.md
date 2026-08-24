@@ -23,6 +23,8 @@ For a fresh PhiX experiment, use the trained-further 7B-1M model and a new resul
 `7b-base` is the default and matches the published Microviridae lineage. `7b-1m` selects
 `evo2/7b-1m:1.0` and provider `evo2_7b`. Checkpoint lineage is authoritative, and the script
 refuses to change model families within an existing result root.
+The two-character SFT conditioning prefix remains input context but is excluded from next-token
+loss; the biological sequence immediately after it remains supervised.
 
 ## Common operations
 

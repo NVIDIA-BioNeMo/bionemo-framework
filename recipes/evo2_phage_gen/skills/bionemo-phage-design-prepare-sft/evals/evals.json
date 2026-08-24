@@ -11,6 +11,7 @@
         "It independently checks validation and test against train at the chosen identity and coverage boundary and requires zero leakage matches.",
         "It keeps target-derived prompting examples in training when required by the RL design.",
         "It sizes context from tokenized full-genome lengths plus conditioning and end-of-sequence overhead.",
+        "It keeps conditioning prefixes as input context while loss-masking their label targets and verifies that the following biological nucleotide remains supervised across causal sample alignments.",
         "It writes explicit split inputs, cluster assignments, conditioning, serialization, exclusions, and leakage results."
       ],
       "expected_skill": "bionemo-phage-design-prepare-sft",

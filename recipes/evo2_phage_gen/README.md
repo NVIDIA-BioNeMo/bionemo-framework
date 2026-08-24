@@ -6,19 +6,22 @@ of bootability, therapeutic fitness, or wet-lab safety.
 
 ## Latest completed PhiX174 result
 
-| Stage                                   |                                                   Result |
-| --------------------------------------- | -------------------------------------------------------: |
-| SFT split                               |                 14,266 train / 100 validation / 100 test |
-| Selected SFT checkpoint                 | step 5,600; validation loss 0.750670; test loss 0.798180 |
-| Selected GDPO checkpoint                |                                          step 430 of 500 |
-| Target-profile rollout                  |                                        610/1,000 (61.0%) |
-| Full Arc diagnostic, including filter 7 |                                          22/1,000 (2.2%) |
+The 8×H100 rerun completed on 2026-08-24:
 
-The previous retrospective safety scan found 997 PASS, no biological FAIL, one INDETERMINATE
-short sequence, and two nucleotide-QC rejects. These numbers describe the latest completed run and
-should be refreshed after the current end-to-end run finishes. See the
+| Final-rollout denominator                                  |       Count |
+| ---------------------------------------------------------- | ----------: |
+| Raw generated and SFT-likelihood scored                    |       1,000 |
+| Biological representatives after circular/RC deduplication |       1,000 |
+| Submitted to safety / excluded by pre-safety QC            |     991 / 9 |
+| Safety PASS / FAIL / INDETERMINATE                         | 989 / 0 / 2 |
+| Safety-PASS target hard-QC representatives                 |         513 |
+| Post-QC 99%-identity clusters and accepted representatives |         511 |
+
+The denominators proceed from raw generation through biological deduplication, safety and hard QC,
+then post-QC clustering. Likelihood is a within-protocol ranking signal; these computational
+candidates are not evidence of bootability or wet-lab safety. See the
 [example README](examples/README.md) for the workflow and
-[case-study notes](skills/bionemo-phage-design/references/case-study-results.md) for provenance.
+[case-study notes](skills/bionemo-phage-design/references/case-study-results.md) for historical context.
 
 ## Quick start
 

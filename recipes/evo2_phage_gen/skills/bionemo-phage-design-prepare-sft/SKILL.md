@@ -15,6 +15,8 @@ Cluster unprefixed full genomes before splitting. The current default uses MMseq
 
 For one clear target, apply the documented target-similarity conditioning consistently and freeze assignments before splitting. Serialize prefixes only after the unprefixed split is fixed. Run an independent final leakage check with the same full-genome identity/coverage semantics and require zero validation/test matches to training at or above the boundary.
 
+Keep conditioning-prefix tokens in the model input but exclude their next-token labels from SFT loss; verify that the following biological nucleotide remains loss-bearing at document and packed-sample boundaries.
+
 Run the configured sequence-safety screen with its positive controls. Report PASS, FAIL, and INDETERMINATE counts separately, including the main failure classes and a count reconciliation to the input collection. A representative-only optimization must still distinguish unique-sequence counts from source-record counts. These are computational sequence-screening results, not clinical conclusions.
 
 Choose SFT context from the tokenized genome-length distribution plus conditioning and end-of-sequence overhead. Set a provisional training budget from distinct usable genomes, loss-bearing tokens, effective batch, and expected exposures. Treat 12,000 steps as historical context rather than an automatic ceiling, and plan enough validation/checkpoint opportunities to detect under- and overfitting.
