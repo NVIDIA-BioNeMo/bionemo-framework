@@ -139,6 +139,37 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-011-train-validation-monitoring",
+      "prompt": "Mean reward alternates between two bands during RL. The training and validation banks differ by prompt starts and generation seeds, not by biological labels. Validation is infrequent, and the monitoring helper requests metric names the runtime never emits. Diagnose progress.",
+      "expected_output": "A prompt-aware monitor that uses both on-policy training evidence and a fixed validation comparison without guessing metric names.",
+      "assertions": [
+        "The response treats training-rollout rewards, component scores, and QC as valid scientific observations rather than discarding them as optimizer-only diagnostics.",
+        "It uses the fixed validation bank for longitudinal comparability and does not describe this seed or prompt split as a biological-label holdout.",
+        "It examines prompt position, length, composition, and cohort counts in both streams before attributing the alternating bands to policy learning.",
+        "It reports terminal hard-QC yield, component means and support, measurement availability or failure, safety states, diversity, and copying so mean reward cannot hide inactive terms.",
+        "It reconciles the approved objective artifact, configured objective set, and emitted component telemetry; discrepancies trigger diagnosis and a decision record rather than an automatic stop or user wait.",
+        "It discovers and records the task-scoped metric keys actually emitted by the installed runtime instead of asserting names owned by another layer.",
+        "Checkpoint decisions use sustained fixed-bank movement corroborated by training-rollout behavior and preserve both the best scientific and latest resumable checkpoints."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-012-autonomous-objective-evolution",
+      "prompt": "Three days into an autonomous whole-genome RL run, one agreed objective stops producing usable measurements and the user is offline. Diagnosis may take time. Literature review and the partial trajectory also support adding a new graded shaping objective that could improve progress toward the same endpoint.",
+      "expected_output": "A forward-moving, versioned objective decision that treats removal as a last resort and evidence-backed addition as important work.",
+      "assertions": [
+        "The response continues autonomously rather than pausing the late-stage run solely to await user approval.",
+        "It first diagnoses or repairs the failed agreed objective and treats dropping it as a last resort, while allowing a documented temporary omission when that is the strongest scientifically defensible path.",
+        "It treats adding the literature- or partial-run-supported shaping objective as important, implements calibrated partial credit and controls, and verifies that it advances the same desired endpoint.",
+        "It versions the active objective set and does not compare aggregate rewards across different component sets as if they were the same metric.",
+        "It records the evidence, consequences, controls, restoration criteria, and exact change point without blocking useful work.",
+        "The next natural status update gives the user a concise FYI summary of key autonomous decisions since the previous check-in."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

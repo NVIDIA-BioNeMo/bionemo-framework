@@ -121,6 +121,7 @@ def test_dry_run(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert "RUN COMPLETE: dry run finished; 6/6 steps planned" in completed.stdout
     assert (result_root / "stage-plan.txt").read_text().splitlines() == [
         "00 prepare inputs/tools/controls",
         "10 safety-screen and prepare SFT",
@@ -481,6 +482,43 @@ def test_calibrate_only_stops_after_scoring_for_sampling_review(tmp_path: Path) 
     assert str(result_root / "calibration/scoring/selection-evidence.csv") in log
     assert "write-rl-prompts" not in log
     assert "evo2_phage_run_gdpo" not in log
+    assert "RUN PAUSED after step 4/6 (stage 30: calibrate sampling)" in log
+
+
+def test_failure_footer_reports_stage_progress(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    stage_root = result_root / "stages"
+    stage_root.mkdir(parents=True)
+    for stage in ("00", "10", "20"):
+        (stage_root / f"{stage}.done").touch()
+    selection = result_root / "calibration/sampling-selection.yaml"
+    selection.parent.mkdir(parents=True)
+    selection.write_text("temperature: 0.9\n")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--resume-from",
+            "30",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode != 0
+    expected = (
+        "RUN FAILED during step 4/6 (stage 30: calibrate sampling); "
+        f"3/6 steps complete; exit code {completed.returncode}; see {result_root / 'RUNLOG.md'}"
+    )
+    assert expected in completed.stderr
+    assert expected in (result_root / "RUNLOG.md").read_text()
 
 
 def test_existing_sampling_selection_is_reused(tmp_path: Path) -> None:

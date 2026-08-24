@@ -71,6 +71,21 @@
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-006-mixed-batch-controls",
+      "prompt": "Harden a whole-genome reward portfolio. Empty generations currently get vacuous composition credit, one invalid row can disrupt valid rows in the same scorer batch, and mixed safety states sometimes coerce a numeric column to strings. A refactor also changed scorer concurrency.",
+      "expected_output": "A total, row-isolated, type-stable reward implementation whose optimized path preserves scientific behavior.",
+      "assertions": [
+        "Empty and invalid genomes receive explicit zeroes across every applicable objective and cannot enter paths that assume genes or reference-length evidence.",
+        "Invalid rows are isolated and zeroed while valid rows in the same batch continue to score, with results invariant to batch composition and row order.",
+        "Numeric reward and safety columns are initialized with stable numeric dtypes before mixed PASS, FAIL, INDETERMINATE, missing, and measured updates.",
+        "Successful no-hit is distinguished from scorer or tool failure, and failure cannot become PASS or vacuous positive credit.",
+        "The exact enabled portfolio is exercised on a reference, equivalent circular representations where relevant, empty and targeted negative controls, and mixed-validity batches.",
+        "Reference and optimized paths agree on formulas, controls, record mapping, and outputs; concurrency changes are measured rather than silently serialized."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
     }
   ]
 }

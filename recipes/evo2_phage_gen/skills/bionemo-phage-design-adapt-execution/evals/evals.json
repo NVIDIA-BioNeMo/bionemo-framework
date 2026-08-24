@@ -84,6 +84,22 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-007-coherent-memory-node",
+      "prompt": "Adapt training to an ARM64 coherent-memory NVIDIA node. The model fits before checkpointing, but HBM fills after saves even though CUDA process allocation is modest. The non-root runtime also tries to compile a dataset helper into the root-owned environment, and nested tools oversubscribe CPUs.",
+      "expected_output": "An architecture-correct image and memory-placement plan validated across repeated checkpoint and restart boundaries.",
+      "assertions": [
+        "The response inspects CPU, HBM, and NUMA topology and recognizes that clean checkpoint page cache on a memory-only HBM node may not appear in CUDA process allocation.",
+        "It keeps device-required memory nodes visible, deliberately places CPU, offload, and cache allocations on CPU-attached memory with supported controls, and verifies actual residency.",
+        "The full-shape smoke crosses a first save, following step, second save, and exact restart; a pre-save fit is not accepted as sufficient.",
+        "Architecture-specific compiled helpers are built while the image is writable and import-tested as the actual non-root runtime user.",
+        "Large generated artifacts stay outside the image build context and are mounted at runtime.",
+        "Concurrency accounts for outer workers, nested subprocesses, and explicit tool thread limits so defaults cannot consume all visible CPUs.",
+        "If checkpoint headroom remains poor, supported optimizer offload and nonpersistent checkpoint workers are benchmarked before reducing scientific context or effective batch."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

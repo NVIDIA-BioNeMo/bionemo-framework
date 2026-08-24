@@ -503,6 +503,54 @@ def validate_manifest_file(path: Path, *, expected_type: str | None = None, **_:
     return manifest
 
 
+def validate_detector_execution(
+    manifest: Mapping[str, object],
+    *,
+    allow_no_primary_gene_candidates: bool = False,
+) -> tuple[tuple[str, str, str], ...]:
+    """Require completed detectors, optionally retaining invalid no-gene candidates as non-passers."""
+    records = manifest.get("records")
+    if not isinstance(records, list):
+        raise CLIValidationError("scan manifest has no records")
+    tolerated: list[tuple[str, str, str]] = []
+    incomplete: list[tuple[object, object, object]] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise CLIValidationError("scan manifest contains an invalid record")
+        record_id = record.get("record_id")
+        class_results = record.get("class_results")
+        attempts = record.get("adapter_attempts")
+        if not isinstance(class_results, list) or not isinstance(attempts, list):
+            raise CLIValidationError("scan record lacks detector execution details")
+        class_by_name = {result.get("safety_class"): result for result in class_results if isinstance(result, Mapping)}
+        for attempt in attempts:
+            if not isinstance(attempt, Mapping):
+                incomplete.append((record_id, None, None))
+                continue
+            safety_class = attempt.get("safety_class")
+            status = attempt.get("execution_status")
+            if status == "COMPLETED_AND_PARSED":
+                continue
+            result = class_by_name.get(safety_class)
+            no_primary_genes = (
+                allow_no_primary_gene_candidates
+                and safety_class == "lysogeny"
+                and status == "NOT_RUN"
+                and record.get("state") != "PASS"
+                and isinstance(result, Mapping)
+                and result.get("state") == "INDETERMINATE"
+                and result.get("findings") == []
+                and result.get("reason_codes") == ["PHROGS_NO_PREDICTED_GENES"]
+            )
+            if no_primary_genes and isinstance(record_id, str):
+                tolerated.append((record_id, "lysogeny", "PHROGS_NO_PREDICTED_GENES"))
+            else:
+                incomplete.append((record_id, safety_class, status))
+    if incomplete:
+        raise CLIValidationError(f"incomplete safety detector execution: {incomplete[:10]}")
+    return tuple(tolerated)
+
+
 def _validate_scan_manifest(manifest: dict[str, object]) -> None:
     if manifest.get("schema_version") != 2:
         raise CLIValidationError("unsupported scan schema")

@@ -183,6 +183,37 @@
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-014-portfolio-contract",
+      "prompt": "An approved whole-genome RL plan has twelve complementary objectives. The launch config contains eleven, and telemetry exposes only ten; one omitted term was considered sparse and another metric was renamed. Decide whether to launch.",
+      "expected_output": "An autonomous, evidence-tracked objective decision that preserves progress without casually discarding scientific intent.",
+      "assertions": [
+        "The response compares the approved, configured, and emitted objective sets before launch and identifies both discrepancies.",
+        "It diagnoses or repairs a missing agreed objective before considering omission, but does not create a late-stage user wait solely because a term is unavailable or a prerequisite baseline is unmet.",
+        "Dropping an agreed objective is a last resort; if omission is the strongest defensible path, the run continues with its evidence, scientific impact, scope, and restoration criteria recorded.",
+        "It preserves complementary nonredundant evidence at different biological scopes instead of substituting one convenient metric for the portfolio.",
+        "Proactively adding a well-supported shaping objective is important when literature review or partial-run evidence indicates that it will guide the project toward the desired endpoint.",
+        "It versions the active objective set, does not compare aggregate rewards across different sets as the same metric, and includes important autonomous decisions in the next user update.",
+        "Telemetry exposes component values, support, availability, and failure state for the active portfolio so aggregate reward cannot hide omissions."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-015-invent-target-scores",
+      "prompt": "The user wants an adapted whole-genome phage product whose defining phenotype has no existing reward function in the recipe. Several validated rewards cover general genome quality and parts of the endpoint. Plan the objective set without turning the task into a simple experiment rerun.",
+      "expected_output": "A scientifically grounded mix of modified tested rewards and newly invented target-specific functions.",
+      "assertions": [
+        "The response starts from validated reward machinery that truly transfers and modifies it rather than replacing it without reason.",
+        "It treats the existing reward catalog as open and expects novel reward invention for important product requirements beyond a faithful rerun.",
+        "It creatively derives new measurable terminal and intermediate functions from literature, biological mechanism, references, available tools, and prior-run evidence.",
+        "It does not force the desired phenotype into an existing but scientifically mismatched proxy.",
+        "Every invented function defines zero and full-credit anchors, carefully considered partial credit, controls, telemetry, missing and failure behavior, and relationship to final QC.",
+        "It records citations, assumptions, unresolved limitations, and the rationale connecting the score portfolio to the user's desired final product."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
     }
   ]
 }

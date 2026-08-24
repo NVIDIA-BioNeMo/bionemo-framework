@@ -398,3 +398,81 @@ def test_cli_error_is_distinct_from_indeterminate(tmp_path: Path) -> None:
     missing = tmp_path / "missing.json"
 
     assert cli.main(["validate-manifest", "--manifest", str(missing)]) == 4
+
+
+def test_detector_execution_tolerates_only_unscorable_invalid_candidates() -> None:
+    manifest = {
+        "records": [
+            {
+                "record_id": "no-primary-genes",
+                "state": "INDETERMINATE",
+                "class_results": [
+                    {
+                        "safety_class": "amr",
+                        "state": "PASS",
+                        "required": True,
+                        "findings": [],
+                        "reason_codes": ["AMRFINDER_MEASURED_NO_AMR_HIT"],
+                    },
+                    {
+                        "safety_class": "toxin",
+                        "state": "PASS",
+                        "required": True,
+                        "findings": [],
+                        "reason_codes": ["TOXIN_MEASURED_NO_REVIEW_HIT"],
+                    },
+                    {
+                        "safety_class": "lysogeny",
+                        "state": "INDETERMINATE",
+                        "required": True,
+                        "findings": [],
+                        "reason_codes": ["PHROGS_NO_PREDICTED_GENES"],
+                    },
+                ],
+                "adapter_attempts": [
+                    {"safety_class": "amr", "execution_status": "COMPLETED_AND_PARSED"},
+                    {"safety_class": "toxin", "execution_status": "COMPLETED_AND_PARSED"},
+                    {"safety_class": "lysogeny", "execution_status": "NOT_RUN"},
+                ],
+            }
+        ]
+    }
+
+    with pytest.raises(cli.CLIValidationError, match="incomplete safety detector execution"):
+        cli.validate_detector_execution(manifest)
+
+    assert cli.validate_detector_execution(manifest, allow_no_primary_gene_candidates=True) == (
+        ("no-primary-genes", "lysogeny", "PHROGS_NO_PREDICTED_GENES"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        ("FAILED", "PHROGS_EXECUTION_TIMEOUT"),
+        ("PARSER_ERROR", "PHROGS_PARSER_ERROR"),
+        ("NOT_RUN", "PHROGS_DATABASE_UNAVAILABLE"),
+    ],
+)
+def test_detector_execution_never_tolerates_detector_failures(status: str, reason: str) -> None:
+    manifest = {
+        "records": [
+            {
+                "record_id": "candidate",
+                "state": "INDETERMINATE",
+                "class_results": [
+                    {
+                        "safety_class": "lysogeny",
+                        "state": "INDETERMINATE",
+                        "required": True,
+                        "findings": [],
+                        "reason_codes": [reason],
+                    }
+                ],
+                "adapter_attempts": [{"safety_class": "lysogeny", "execution_status": status}],
+            }
+        ]
+    }
+
+    with pytest.raises(cli.CLIValidationError, match="incomplete safety detector execution"):
+        cli.validate_detector_execution(manifest, allow_no_primary_gene_candidates=True)

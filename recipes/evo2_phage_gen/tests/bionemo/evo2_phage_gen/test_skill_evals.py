@@ -69,6 +69,20 @@ def test_rl_skill_scopes_safety_objectives() -> None:
     assert "locus or module" in skill
 
 
+def test_controller_treats_reward_invention_as_core() -> None:
+    """Adapted designs should reuse sound reward machinery without treating it as a closed catalog."""
+    controller = (SKILL_ROOT / "bionemo-phage-design" / "SKILL.md").read_text()
+    planner = (SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text()
+
+    for skill in (controller, planner):
+        assert "core agentic capability" in skill
+        assert "Prefer modifying tested rewards" in skill
+        assert "beyond a faithful experiment rerun" in skill
+        assert "novel reward functions" in skill
+    assert "not a closed catalog" in controller
+    assert "creatively invent" in planner
+
+
 def test_rl_objective_skills_require_a_human_score_definition_artifact() -> None:
     """Planning and implementation should leave the resolved score contract in the run record."""
     plan_skill = (SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text()
@@ -137,6 +151,58 @@ def test_adapt_execution_documents_portable_container_path() -> None:
         "2026-08-21",
     ):
         assert marker in guidance
+
+
+def test_rl_skills_keep_cross_stage_contracts() -> None:
+    """Objective, prompt, scorer, and monitoring contracts should survive handoffs."""
+    plan = (SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text()
+    implement = (SKILL_ROOT / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md").read_text()
+    calibrate = (SKILL_ROOT / "bionemo-phage-design-calibrate-rl-sampling" / "SKILL.md").read_text()
+    monitor = (
+        SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "references" / "monitoring-guidance.md"
+    ).read_text()
+    operate = (SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "SKILL.md").read_text()
+
+    assert "scientific baseline" in plan
+    assert "planned, configured, and emitted" in plan
+    assert "continue autonomously" in plan
+    assert "last resort" in plan
+    assert "adding well-supported shaping objectives is important" in plan
+    assert "literature review or partial-run evidence" in plan
+    assert "mixed valid and invalid" in implement
+    assert "numeric reward columns" in implement
+    assert "batch and row order" in implement
+    assert "global rollout batch" in calibrate
+    assert "regions intended to change" in calibrate
+    assert "training rollouts" in monitor
+    assert "fixed validation bank" in monitor
+    assert "prompt composition" in monitor
+    assert "emitted metric keys" in monitor
+    assert "not an automatic stop or user wait" in operate
+    assert "strongest scientifically defensible portfolio" in operate
+    assert "next user update" in operate
+
+
+def test_infra_guidance_covers_coherent_memory() -> None:
+    """Portable infrastructure advice should include ARM builds and coherent-memory nodes."""
+    infrastructure = (
+        SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "infrastructure-guidance.md"
+    ).read_text()
+    compute = (SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "references" / "compute-guidance.md").read_text()
+
+    for marker in (
+        "architecture-specific compiled extensions",
+        "runtime UID",
+        "coherent-memory",
+        "memory-only NUMA",
+        "checkpoint page cache",
+        "second save",
+        "exact restart",
+        "image build context",
+    ):
+        assert marker in infrastructure
+    assert "nested subprocess" in compute
+    assert "all visible CPUs" in compute
 
 
 @pytest.mark.skipif(RUNNING_IN_CI, reason="Skill eval planning is intentionally local-only.")

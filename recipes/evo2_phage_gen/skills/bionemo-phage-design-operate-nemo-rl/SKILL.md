@@ -13,6 +13,10 @@ The preparation manifest must have `schema_version: 2` and `model_object_state_p
 
 Treat materialized training and validation prompt banks as run artifacts: readiness must check the result-root training bank, and the launch must use the matching result-root train/validation paths. When resuming the PhiX174 example, rerunning the same top-level command recreates missing banks and creates or reuses the prepared SFT checkpoint without repeating completed calibration; do not satisfy readiness by copying a run-specific bank into the shared template path. When adapting to a different NeMo-RL release or infrastructure, inspect the installed configuration classes and that release's upstream `examples/configs`; wheels may omit the examples.
 
+At the pilot and before full launch, reconcile the approved objective artifact, configured objective set, and emitted telemetry. A discrepancy is a diagnosis input, not an automatic stop or user wait. Continue with the strongest scientifically defensible portfolio, treating removal of an agreed term as a last resort and keeping unavailable terms visible in telemetry.
+
+Record added, omitted, or redefined terms; their evidence and consequences; controls or restoration criteria; and the objective-set version and change point. Summarize key decisions in the next user update and whenever asked, without pausing useful work merely to obtain acknowledgment.
+
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 
 For the realized PhiX pilot and resume procedure, read the

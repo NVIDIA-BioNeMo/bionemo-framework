@@ -9,7 +9,9 @@ metadata:
 
 Work inside the selected recipe checkout and follow its existing code and test patterns. Implement only the approved scientific behavior, keeping online rewards and final QC definitions aligned where they are intended to match.
 
-Keep rewards bounded on `[0, 1]`, with the objective plan's meaningful baseline at zero and target at one. Handle short genomes, absent genes or ORFs, empty tool output, missing observations, invalid values, and tool failures explicitly. Do not let an exception, default value, or skipped branch create positive credit.
+Keep rewards bounded on `[0, 1]`, with the objective plan's meaningful baseline at zero and target at one. Handle short genomes, absent genes or ORFs, empty tool output, missing observations, invalid values, and tool failures explicitly. Empty or invalid genomes receive explicit zero credit across every applicable objective. In mixed valid and invalid batches, isolate invalid rows so valid rows still score; initialize numeric reward columns with stable numeric dtypes, distinguish a successful no-hit from measurement failure, and make results invariant to batch and row order. Do not let an exception, default value, or skipped branch create positive credit.
+
+Preserve formulas, controls, record mapping, and verified scoring concurrency when refactoring or optimizing a scorer; compare the reference and optimized paths on the same cases.
 
 For learned or stacked scorers, construct upstream features from deployment-matched out-of-fold predictions. Test ranking and calibration in the high-reward tail, scorer-training versus policy-candidate shift, and model/seed disagreement; treat unsupported candidates as missing or out of domain rather than extrapolating confidently.
 
@@ -17,6 +19,8 @@ Add focused tests that demonstrate:
 
 - each enabled component runs and is logged for a known positive control;
 - reference, random/baseline, desired, boundary, missing/empty/no-hit, too-short, missing-gene, and tool-failure behavior as applicable;
+- the complete enabled portfolio runs on the reference, equivalent circular representations where relevant, targeted negatives, and mixed-validity batches;
+- reordered mixed-validity batches preserve valid-row scores, zero invalid rows, and stable numeric dtypes;
 - combined objectives do not hide a skipped or fixed-zero component and preserve intended ordering;
 - online scoring and final QC agree where promised;
 - the installed runtime accepts the expected names, shapes, dtypes, devices, and reductions; and

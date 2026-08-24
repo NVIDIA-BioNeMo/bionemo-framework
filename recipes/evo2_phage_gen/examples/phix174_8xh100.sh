@@ -141,6 +141,49 @@ note() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "${RUNLOG}"
 }
 
+TOTAL_STAGES=6
+CURRENT_STAGE_ID=initialization
+CURRENT_STAGE_ORDINAL=0
+CURRENT_STAGE_DESCRIPTION='initialize run'
+RUN_COMPLETION_REPORTED=0
+
+completed_stage_count() {
+  local count=0 stage
+  for stage in 00 10 20 30 40 50; do
+    [[ -f "${STAGE_DIR}/${stage}.done" ]] && count=$((count + 1))
+  done
+  printf '%s\n' "${count}"
+}
+
+set_current_stage() {
+  CURRENT_STAGE_ID="$1"
+  case "$1" in
+    00) CURRENT_STAGE_ORDINAL=1; CURRENT_STAGE_DESCRIPTION='prepare inputs, tools, and controls' ;;
+    10) CURRENT_STAGE_ORDINAL=2; CURRENT_STAGE_DESCRIPTION='safety-screen and prepare SFT' ;;
+    20) CURRENT_STAGE_ORDINAL=3; CURRENT_STAGE_DESCRIPTION='train and select SFT' ;;
+    30) CURRENT_STAGE_ORDINAL=4; CURRENT_STAGE_DESCRIPTION='calibrate sampling' ;;
+    40) CURRENT_STAGE_ORDINAL=5; CURRENT_STAGE_DESCRIPTION='train and select GDPO' ;;
+    50) CURRENT_STAGE_ORDINAL=6; CURRENT_STAGE_DESCRIPTION='generate, screen, and report' ;;
+  esac
+}
+
+report_run_exit() {
+  local status=$? completed
+  trap - EXIT
+  if [[ "${status}" != 0 && "${RUN_COMPLETION_REPORTED}" != 1 ]]; then
+    set +e
+    completed="$(completed_stage_count)"
+    if ((CURRENT_STAGE_ORDINAL > 0)); then
+      note "RUN FAILED during step ${CURRENT_STAGE_ORDINAL}/${TOTAL_STAGES} (stage ${CURRENT_STAGE_ID}: ${CURRENT_STAGE_DESCRIPTION}); ${completed}/${TOTAL_STAGES} steps complete; exit code ${status}; see ${RUNLOG}" >&2
+    else
+      note "RUN FAILED before step 1/${TOTAL_STAGES} (${CURRENT_STAGE_DESCRIPTION}); ${completed}/${TOTAL_STAGES} steps complete; exit code ${status}; see ${RUNLOG}" >&2
+    fi
+  fi
+  exit "${status}"
+}
+
+trap report_run_exit EXIT
+
 MODEL_VARIANT_STATE="${STATE_DIR}/model-variant"
 if [[ -s "${MODEL_VARIANT_STATE}" ]]; then
   RECORDED_MODEL_VARIANT="$(sed -n '1p' "${MODEL_VARIANT_STATE}")"
@@ -344,14 +387,33 @@ state() { printf '%s\n' "$2" > "${STATE_DIR}/$1"; }
 read_state() { [[ "${DRY_RUN}" == "1" ]] && printf '<%s>\n' "$1" || sed -n '1p' "${STATE_DIR}/$1"; }
 
 check_scan() {
+  local mode="${2:-strict}" tolerated
   [[ "${DRY_RUN}" == "1" ]] && return
-  python - "$1" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-bad = [(r["record_id"], a.get("safety_class"), a.get("execution_status")) for r in data["records"] for a in r["adapter_attempts"] if a.get("execution_status") != "COMPLETED_AND_PARSED"]
-if bad:
-    raise SystemExit(f"incomplete safety detector execution: {bad[:10]}")
+  case "${mode}" in strict|allow-no-primary-gene-candidates) ;; *) printf 'invalid safety validation mode: %s\n' "${mode}" >&2; return 2 ;; esac
+  tolerated="$(python - "$1" "${mode}" <<'PY'
+import sys
+from pathlib import Path
+
+from bionemo.evo2_phage_gen.sequence_safety_cli import (
+    CLIValidationError,
+    validate_detector_execution,
+    validate_manifest_file,
+)
+
+manifest = validate_manifest_file(Path(sys.argv[1]), expected_type="sequence_safety_scan")
+try:
+    allowed = validate_detector_execution(
+        manifest,
+        allow_no_primary_gene_candidates=sys.argv[2] == "allow-no-primary-gene-candidates",
+    )
+except CLIValidationError as error:
+    raise SystemExit(str(error)) from None
+print(len({record_id for record_id, _safety_class, _reason in allowed}))
 PY
+  )"
+  if [[ "${tolerated}" != 0 ]]; then
+    note "final safety scan retained ${tolerated} no-primary-gene candidate(s) as INDETERMINATE; they remain ineligible for hard-QC PASS"
+  fi
 }
 
 require_file() {
@@ -845,7 +907,7 @@ PY
     note 'substage 50-sequence-safety already complete'
     require_file "${safety}/scan/manifest.json" 'sequence-safety manifest'
     require_file "${safety}/summary.json" 'sequence-safety summary'
-    check_scan "${safety}/scan/manifest.json"
+    check_scan "${safety}/scan/manifest.json" allow-no-primary-gene-candidates
   else
     run evo2_phage_nucleotide_qc --input-fasta "${dedup}/representatives.fasta" --output-dir "${safety}/input-qc" \
       --genome-length-min 1 --genome-length-max 1000000 --gc-content-min 0 --gc-content-max 100 \
@@ -857,7 +919,7 @@ PY
       --host-domain BACTERIA --host-evidence-json "${evidence}" --strict-lysis \
       --batch-size "${SAFETY_BATCH_SIZE}" --orf-workers "${SAFETY_ORF_WORKERS}" \
       --threads "${SAFETY_THREADS}" --phrogs-threads "${SAFETY_PHROGS_THREADS}" --timeout 1800 --overwrite
-    check_scan "${safety}/scan/manifest.json"
+    check_scan "${safety}/scan/manifest.json" allow-no-primary-gene-candidates
     run evo2_phage_summarize_safety_manifest --manifest "${safety}/scan/manifest.json" --output "${safety}/summary.json"
     require_file "${safety}/summary.json" 'sequence-safety summary'
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-sequence-safety.done"
@@ -1021,9 +1083,24 @@ for id in 00 10 20 30 40 50; do
   ((10#${id} < 10#${RESUME_FROM})) && continue
   [[ "${PREPARE_ONLY}" == "1" && "${id}" != 00 ]] && continue
   [[ "${CALIBRATE_ONLY}" == "1" ]] && ((10#${id} > 30)) && continue
+  set_current_stage "${id}"
   [[ -f "${STAGE_DIR}/${id}.done" ]] && { note "stage ${id} already complete"; continue; }
   note "starting stage ${id}"; "stage_${id}"
   [[ "${CALIBRATE_ONLY}" == "1" && "${id}" == 30 ]] && continue
   [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/${id}.done"
 done
-note 'requested stages complete'
+if [[ "${CALIBRATE_ONLY}" == "1" ]]; then
+  note 'RUN PAUSED after step 4/6 (stage 30: calibrate sampling); review the calibration evidence and provide a sampling selection before RL'
+elif [[ "${DRY_RUN}" == "1" ]]; then
+  note 'RUN COMPLETE: dry run finished; 6/6 steps planned'
+elif [[ "${PREPARE_ONLY}" == "1" ]]; then
+  note 'RUN COMPLETE: preparation request finished; step 1/6 complete'
+else
+  completed="$(completed_stage_count)"
+  if [[ "${completed}" == "${TOTAL_STAGES}" ]]; then
+    note "RUN COMPLETE: ${completed}/${TOTAL_STAGES} steps complete; results: ${RESULT_ROOT}"
+  else
+    note "RUN COMPLETE: requested stages finished; ${completed}/${TOTAL_STAGES} step markers present; results: ${RESULT_ROOT}"
+  fi
+fi
+RUN_COMPLETION_REPORTED=1

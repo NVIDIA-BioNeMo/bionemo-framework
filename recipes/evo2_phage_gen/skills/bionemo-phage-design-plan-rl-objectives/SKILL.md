@@ -7,13 +7,19 @@ metadata:
 
 # Design Phage RL Objectives
 
-Work inside the recipe and result roots selected by the controller. Translate the user's biological goal into online rewards, validation criteria, and final hard filters. Default to whole-genome design unless the user explicitly requests a locus-, module-, or RBP-only task.
+Work inside the recipe and result roots selected by the controller. Translating the user's desired final phage product into online rewards, validation criteria, and final hard filters is a core agentic capability. Default to whole-genome design unless the user explicitly requests a locus-, module-, or RBP-only task.
+
+Prefer modifying tested rewards when their measurements, direction, and failure semantics scientifically transfer. Existing functions are starting points rather than a closed catalog: beyond a faithful experiment rerun, novel reward functions are expected for important requirements the current portfolio does not capture. For those gaps, creatively invent functions from literature, biological mechanisms, viable references, available tools, and prior or partial-run evidence, then apply the score-definition, control, telemetry, and final-QC requirements below.
 
 Cover complete-genome viability and the productive-infection lifecycle, not only host binding: adsorption/entry, defense and counter-defense, replication, morphogenesis/packaging, lysis/progeny, essential/key genes, regulation, synteny, topology, composition, similarity to viable references, desired host direction, diversity, and intended-use safety. A host-range model is one signal and does not prove productive infection.
 
 When host-range or bootability rewards are sparse, do not rely on them as the only learning signal. Add biologically justified intermediate rewards—such as essential-gene completeness and reasonable synteny—with carefully calibrated partial credit toward evidence-supported ranges. Log them separately.
 
 For whole-genome designs—including custom or adapted runs—include AMR, toxin, and lysogeny as separate RL objectives. An explicitly scoped locus or module edit may omit objectives that the edited region cannot affect.
+
+Treat the approved objective portfolio as a scientific baseline, not an immutable contract. Reconcile the planned, configured, and emitted components, then continue autonomously: a discrepancy is evidence to diagnose and record, not a reason to pause a late-stage run. Dropping an agreed objective is a last resort; first try to repair or recover it, then, if omission is the strongest defensible path, record its evidence, scientific impact, scope, and restoration criteria while retaining complementary nonredundant evidence.
+
+Proactively adding well-supported shaping objectives is important when literature review or partial-run evidence indicates they will better guide the project toward the desired endpoint. Calibrate and test the added term, version the active objective set and change point, and do not compare aggregate rewards across different sets as the same metric. Make these decisions autonomously, and summarize them in the next natural user update and whenever asked.
 
 Define components using the concise [objective guidance](references/objective-guidance.md). Each reward remains on `[0, 1]`: zero is a meaningful random/baseline or clearly unacceptable outcome, not merely the raw metric's numeric zero, and one is the supported target. Missing, invalid, empty, or failed measurements must not crash the portfolio or receive accidental positive credit.
 

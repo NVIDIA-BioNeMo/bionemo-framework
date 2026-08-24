@@ -11,7 +11,9 @@ Work inside the recipe and result roots selected by the controller. Calibrate th
 
 Reconstruct the actual SFT prompt serialization and tokenization, including conditioning, orientation, wrappers, BOS/EOS, padding/masking, and continuation boundary. Use only cues the SFT model saw.
 
-Sweep a reasonable range of temperatures and prefix lengths with paired seeds and enough samples to compare uncertainty. Materialize the selected top-k/top-p, completion length, and prompt mixture in the commands. Score raw and cluster-deduplicated hard-QC yield, target/lifecycle evidence, complete-genome integrity, copying, diversity, and every enabled objective. Use positive and failure controls to confirm each score is measurable; diagnose unexplained missing or fixed-zero components rather than dropping them.
+Sweep a reasonable range of temperatures and prefix lengths with paired seeds and enough samples to compare uncertainty. Materialize the selected top-k/top-p, completion length, and prompt mixture in the commands. Distribute prompt starts around circular genomes, shuffle or interleave strata, and make each global rollout batch representative rather than cycling through fixed cohorts. Keep prompts short enough not to lock complete genes or regions intended to change, and do not center them on such regions. When step metrics oscillate, stratify by prompt position, length, and composition before attributing the pattern to the policy.
+
+Score raw and cluster-deduplicated hard-QC yield, target/lifecycle evidence, complete-genome integrity, copying, diversity, and every enabled objective. A successful wrapper is insufficient: require every configured external measurement used for selection to be available, distinguish a biological no-hit from scorer failure, and diagnose unexplained missing or fixed-zero components rather than dropping them. Use positive and failure controls to confirm each score is measurable.
 
 Choose a robust quality-diversity plateau rather than a noisy maximum. Prefer temperature 1.0 when it is practically equivalent, and retain multiple prompt strata only when they improve the frontier and tile the deployed batch shape cleanly.
 

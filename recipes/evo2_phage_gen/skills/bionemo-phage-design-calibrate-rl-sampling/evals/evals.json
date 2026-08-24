@@ -85,6 +85,21 @@
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": "examples/phix174_8xh100.sh"
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-007-prompt-cohort-bias",
+      "prompt": "A whole-genome RL run uses long prompts centered on a region the model should be free to redesign. Fixed-order prompt cohorts produce a repeating reward sawtooth every few steps. Redesign the train and validation prompt banks without changing the endpoint.",
+      "expected_output": "Short, distributed, shuffled prompt banks whose rollout batches do not confound prompt composition with learning.",
+      "assertions": [
+        "The response distributes starts around the circular genome rather than centering prompts on key regions intended to change.",
+        "It selects prompts short enough not to lock complete key or essential features while preserving the checkpoint's actual conditioning format.",
+        "Training starts are shuffled or interleaved and each global rollout batch represents the intended position and length mixture instead of cycling through fixed cohorts.",
+        "The fixed validation bank is independent but comparably distributed, with seeds and starts recorded.",
+        "It stratifies existing metrics by prompt position, length, and composition before interpreting the sawtooth as policy improvement or regression.",
+        "Every configured external measurement must be available for selectable calibration cells; successful no-hit and scorer failure remain distinct."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
     }
   ]
 }

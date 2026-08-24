@@ -60,6 +60,21 @@
       ],
       "expected_skill": "bionemo-phage-design",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-005-novel-reward-portfolio",
+      "prompt": "Plan an adapted whole-genome phage product with a biological endpoint that the recipe's existing rewards only partially describe. Two tested reward implementations are relevant but neither captures the complete goal. Decide how to construct the RL portfolio.",
+      "expected_output": "A portfolio that reuses sound tested machinery while inventing the target-specific scores needed to express the requested product.",
+      "assertions": [
+        "The response identifies translating the desired final product into complementary measurable RL scores as a core agentic task.",
+        "It prefers modifying tested reward implementations when their measurements and failure semantics genuinely fit the new goal instead of rewriting them needlessly.",
+        "Because this is beyond a faithful experiment rerun, it expects to invent novel terminal or intermediate reward functions for important aspects not captured by the existing portfolio.",
+        "New scores are creatively grounded in relevant literature, biological reasoning, viable references, domain tools, and prior or partial-run evidence rather than forced from an ill-fitting proxy.",
+        "Each new or modified score has a documented endpoint relationship, zero and target anchors, calibrated partial credit, controls, telemetry, missing or failure behavior, and final-QC role.",
+        "It preserves component-level interpretability and versions the objective set as evidence changes."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
     }
   ]
 }

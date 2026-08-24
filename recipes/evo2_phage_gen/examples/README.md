@@ -96,6 +96,8 @@ Do not create either marker unless the corresponding operation is known to have 
 The result root is the computational notebook. `RUNLOG.md` records commands and liveness;
 `settings.json` records key settings; `SUMMARY.md` and `rollout/final-designs.json` reconcile
 selected checkpoints, safety outcomes, QC denominators, clustering, and accepted candidates.
+The terminal and `RUNLOG.md` end with `RUN COMPLETE`, `RUN PAUSED`, or `RUN FAILED` plus stage
+progress; only `RUN COMPLETE` denotes successful completion of the requested invocation.
 The original SFT checkpoint remains available for exact resume and likelihood scoring; RL uses
 the smaller prepared checkpoint under `rl/sft-checkpoint/`.
 
