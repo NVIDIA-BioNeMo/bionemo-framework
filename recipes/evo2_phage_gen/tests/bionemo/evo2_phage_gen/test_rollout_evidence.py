@@ -103,13 +103,13 @@ def test_hard_qc_requires_safety_and_target_pass(tmp_path):
 
 def test_hard_qc_preserves_declared_pre_safety_qc_exclusions(tmp_path):
     representatives = tmp_path / "representatives.fasta"
-    representatives.write_text(">screened\nAACG\n>invalid-before-safety\nAANN\n")
+    representatives.write_text(">screened\nAACG\n>invalid-before-safety\nAA~N\n")
     safety_input = tmp_path / "safety-input.fasta"
     safety_input.write_text(">screened\nAACG\n")
     safety = tmp_path / "safety.json"
     safety.write_text(json.dumps({"records": [{"record_id": "screened", "state": "PASS"}]}))
     target = tmp_path / "target.fasta"
-    target.write_text(">target-screened\nAACG\n>target-invalid\nAANN\n")
+    target.write_text(">target-screened\nAACG\n")
 
     select_hard_qc_passers(
         representatives,
@@ -126,6 +126,7 @@ def test_hard_qc_preserves_declared_pre_safety_qc_exclusions(tmp_path):
     assert report["safety_input_representatives"] == 1
     assert report["pre_safety_qc_excluded_representatives"] == 1
     assert report["safety_states"] == {"PASS": 1, "FAIL": 0, "INDETERMINATE": 0}
+    assert report["target_profile_pass"] == 1
 
 
 def test_hard_qc_still_rejects_missing_manifest_rows_for_safety_input(tmp_path):
@@ -139,6 +140,27 @@ def test_hard_qc_still_rejects_missing_manifest_rows_for_safety_input(tmp_path):
     target.write_text(">recorded\nAACG\n")
 
     with pytest.raises(ValueError, match=r"safety/input mismatch: missing=\['missing'\], extra=\[\]"):
+        select_hard_qc_passers(
+            representatives,
+            safety,
+            target,
+            tmp_path / "hard-qc.fasta",
+            tmp_path / "hard-qc.json",
+            safety_input_fasta=safety_input,
+        )
+
+
+def test_hard_qc_does_not_hide_malformed_sequences_submitted_to_safety(tmp_path):
+    representatives = tmp_path / "representatives.fasta"
+    representatives.write_text(">malformed\nAA~N\n")
+    safety_input = tmp_path / "safety-input.fasta"
+    safety_input.write_text(">malformed\nAA~N\n")
+    safety = tmp_path / "safety.json"
+    safety.write_text(json.dumps({"records": [{"record_id": "malformed", "state": "PASS"}]}))
+    target = tmp_path / "target.fasta"
+    target.write_text(">other\nAACG\n")
+
+    with pytest.raises(ValueError, match=r"unsupported IUPAC symbols: ~"):
         select_hard_qc_passers(
             representatives,
             safety,
@@ -237,7 +259,7 @@ def test_arc_summary_omits_internal_clustering(tmp_path):
 
 def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
     raw = tmp_path / "raw.fasta"
-    raw.write_text(">a\nAACG\n>a-rotation\nACGA\n>b\nGGTT\n>c\nTTGC\n")
+    raw.write_text(">a\nAACG\n>a-rotation\nACGA\n>b\nGG~T\n>c\nTTGC\n")
     mapping = tmp_path / "mapping.csv"
     mapping.write_text(
         "raw_index,record_id,representative_id,is_representative,duplicate_reason,length_nt\n"
@@ -333,6 +355,8 @@ def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
     excluded = next(row for row in payload["records"] if row["record_id"] == "b")
     assert excluded["safety_state"] == "NOT_SCREENED_PRE_SAFETY_QC"
     assert excluded["representative_safety_state"] == "NOT_SCREENED_PRE_SAFETY_QC"
+    assert not excluded["target_profile_pass"]
+    assert not excluded["hard_qc_pass"]
     assert payload["sampling_selection"] == {"temperature": 1.0, "prompt_lengths": [16, 24]}
     assert payload["sequence_safety_provenance"]["tools"] == {"mmseqs": {"version": "test-mmseqs"}}
     assert payload["sequence_safety_provenance"]["databases"] == {"phrogs": {"version": "test-phrogs"}}

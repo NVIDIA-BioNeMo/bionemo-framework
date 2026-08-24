@@ -367,6 +367,22 @@ def _reconcile_safety_input(
     return states, counts, excluded
 
 
+def _canonical_representatives(
+    representatives: list[tuple[str, str]],
+    *,
+    allow_unsupported_ids: set[str],
+) -> dict[str, str | None]:
+    canonical_by_id: dict[str, str | None] = {}
+    for record_id, sequence in representatives:
+        try:
+            canonical_by_id[record_id] = canonical_circular_sequence(sequence)
+        except ValueError:
+            if record_id not in allow_unsupported_ids:
+                raise
+            canonical_by_id[record_id] = None
+    return canonical_by_id
+
+
 def select_hard_qc_passers(
     representative_fasta: Path,
     safety_manifest: Path,
@@ -386,10 +402,12 @@ def select_hard_qc_passers(
     target_sequences = {
         canonical_circular_sequence(sequence) for _, sequence in read_fasta(target_fasta, allow_empty=True)
     }
+    representative_canonical = _canonical_representatives(
+        representatives,
+        allow_unsupported_ids=pre_safety_excluded,
+    )
     target_pass_ids = {
-        record_id
-        for record_id, sequence in representatives
-        if canonical_circular_sequence(sequence) in target_sequences
+        record_id for record_id, canonical in representative_canonical.items() if canonical in target_sequences
     }
     hard_qc_records = [
         (record_id, sequence)
@@ -664,15 +682,15 @@ def finalize_rollout_report(
     diagnostic_sequences = {
         canonical_circular_sequence(sequence) for _, sequence in read_fasta(diagnostic_fasta, allow_empty=True)
     }
+    representative_canonical = _canonical_representatives(
+        representative_records,
+        allow_unsupported_ids=pre_safety_excluded,
+    )
     target_pass_ids = {
-        record_id
-        for record_id in representative_ids
-        if canonical_circular_sequence(sequence_by_id[record_id]) in target_sequences
+        record_id for record_id, canonical in representative_canonical.items() if canonical in target_sequences
     }
     diagnostic_pass_ids = {
-        record_id
-        for record_id in representative_ids
-        if canonical_circular_sequence(sequence_by_id[record_id]) in diagnostic_sequences
+        record_id for record_id, canonical in representative_canonical.items() if canonical in diagnostic_sequences
     }
     hard_qc_ids = {record_id for record_id in target_pass_ids if safety_by_id.get(record_id) == "PASS"}
 
