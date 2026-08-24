@@ -86,6 +86,47 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-mbridge-sft-007-smooth-divergence",
+      "prompt": "An agent-operated SFT run has a 12,000-step maximum and validates every 400 steps. Validation loss was best at step 1,200 (0.7363), then rose at 1,600 (0.7921), 2,000 (0.8087), and 2,400 (0.9133), while training loss fell from 0.4188 at 1,600 to 0.3137 and 0.2181. Best-K retention still protects step 1,200, and the supervisor is ready to relaunch through step 12,000. Decide what happens at each boundary.",
+      "expected_output": "Stop SFT at step 2,400, preserve step 1,200 as the selected checkpoint, and prevent an unconditional relaunch.",
+      "assertions": [
+        "The response treats 12,000 as a safety ceiling rather than a completion target and treats retention as separate from continuation.",
+        "It records step 1,600 as a warning and continuation, step 2,000 as a divergence candidate, and step 2,400 as stop evidence.",
+        "It recognizes three consecutive material post-best validation regressions while training continues strongly downward as clear overfitting evidence.",
+        "It stops within 1,000 optimizer steps of the first regression; uncertainty may justify no more than one additional validation interval.",
+        "It distinguishes the best scientific checkpoint at step 1,200 from the later stopping-evidence checkpoint and preserves both as needed.",
+        "The durable supervisor does not relaunch after the stop decision merely because best-K retention protects the earlier weights."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-mbridge-sft-008-one-noisy-regression",
+      "prompt": "SFT training loss is still falling. The newest comparable validation is modestly worse than the best, but it is the first post-best regression and lies close to the observed validation-noise band. The supervisor needs a continuation decision.",
+      "expected_output": "Record a warning and continue to the next planned validation rather than stopping on one noisy regression.",
+      "assertions": [
+        "The response compares the change with the declared ordinary-noise or minimum-material-change band.",
+        "It does not stop on one post-best regression while measurements remain comparable and healthy.",
+        "It records a durable continue decision and the evidence needed at the next validation boundary.",
+        "It preserves the current best-validation checkpoint independently of the continuation decision."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-mbridge-sft-009-short-plateau",
+      "prompt": "Three recent comparable SFT validation losses form a short plateau inside the observed noise band while training remains finite and stable. The planned exposure ceiling has not been reached. Decide whether the agent should stop now.",
+      "expected_output": "Continue through the next decision boundary because a short plateau is not sustained overfitting.",
+      "assertions": [
+        "The response distinguishes a short plateau from material train-validation divergence.",
+        "It continues within the evidence-based safety ceiling and records the next validation decision boundary.",
+        "It does not use training loss alone or the latest checkpoint as the selection criterion.",
+        "It retains the lowest credible validation-loss checkpoint while gathering more evidence."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
+      "expected_script": null
     }
   ]
 }

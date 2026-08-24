@@ -214,6 +214,21 @@
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-016-prompt-and-control-handoff",
+      "prompt": "Plan objectives for a circular whole-genome phage design. Several annotated elements are explicit redesign targets, circular prefix prompting will likely be used, and two reward functions must be newly invented. Define the sampling and validation handoff before implementation.",
+      "expected_output": "An objective plan that preserves editable target bases, minimizes fixed prompt sequence, and gives every reward meaningful biological controls.",
+      "assertions": [
+        "The response records circular coordinates and uncertainty for all intended-to-change elements as prompt-exclusion intervals, including intervals that cross the chosen origin.",
+        "It identifies neutral anchor intervals or requires a different prompt strategy rather than silently fixing part of a redesign target.",
+        "It requires prompt size to be reported in bases and as a genome fraction, starts from the shortest model-compatible prompt, and does not scale length linearly with genome size by default.",
+        "A longer prompt requires a model- and design-specific rationale plus calibration evidence rather than convenience or an evenly spaced grid alone.",
+        "Every new or modified reward names biologically relevant known or expected high- and low-scoring genomes or counterfactuals, with provenance and expected ordering.",
+        "Boundary, missing, invalid, empty, no-hit, and tool-failure controls remain explicit in addition to the strong positive and negative controls."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
     }
   ]
 }

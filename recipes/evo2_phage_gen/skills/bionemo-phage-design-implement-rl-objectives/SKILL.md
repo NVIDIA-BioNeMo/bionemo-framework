@@ -13,6 +13,8 @@ Keep rewards bounded on `[0, 1]`, with the objective plan's meaningful baseline 
 
 Preserve formulas, controls, record mapping, and verified scoring concurrency when refactoring or optimizing a scorer; compare the reference and optimized paths on the same cases.
 
+For every new or modified function, run biological positive and negative controls—not only arithmetic unit tests. Use known or evidence-supported expected high- and low-scoring genomes or targeted counterfactuals, record their provenance and expected ordering, and exercise them through the exact installed scorer and combined portfolio.
+
 For learned or stacked scorers, construct upstream features from deployment-matched out-of-fold predictions. Test ranking and calibration in the high-reward tail, scorer-training versus policy-candidate shift, and model/seed disagreement; treat unsupported candidates as missing or out of domain rather than extrapolating confidently.
 
 Add focused tests that demonstrate:

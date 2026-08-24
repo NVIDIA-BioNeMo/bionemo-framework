@@ -170,6 +170,47 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-013-noisy-recovery",
+      "prompt": "A GDPO run validates every 10 optimizer steps. Fixed-bank quality falls sharply and remains below its prior band for 50 steps, then recovers over the next 30 steps; on-policy training-rollout quality shows the same recovery. All objectives continue to produce valid measurements, including the three safety terms. Decide whether to stop.",
+      "expected_output": "Continue the RL run and record the recovered excursion rather than applying an SFT-style patience rule.",
+      "assertions": [
+        "The response treats a sharp but recovered drop as compatible with noisy RL rather than proof of irreversible damage.",
+        "It reads fixed-bank validation and on-policy training-rollout trends together and checks prompt composition and component support.",
+        "It does not stop because safety scores were temporarily low when their measurements remained valid.",
+        "It records a durable continue decision while preserving the best scientific and latest resumable checkpoints."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-014-sustained-decline",
+      "prompt": "A GDPO run validates every 10 optimizer steps. Across the last 10 comparable fixed-bank validations, roughly 100 optimizer steps, quality and several supported components have remained materially below their earlier rolling bands; training-rollout windows corroborate the decline. Prompt composition, objective definitions, and measurement availability are stable, with no rebound. The 500-step maximum is still far away.",
+      "expected_output": "Stop pushing the declining trajectory, preserve checkpoints, diagnose its onset, and autonomously choose a scientifically compatible restart or new attempt.",
+      "assertions": [
+        "The response treats max_num_steps as a ceiling and does not continue merely to reach 500 steps.",
+        "It requires the approximately 100-step sustained, corroborated pattern rather than reacting to one point or a short excursion.",
+        "It uses rolling fixed-bank and training-rollout evidence with component support, uncertainty, prompt composition, and objective-set stability.",
+        "It preserves the best scientific and latest resumable checkpoints and investigates the decline onset before choosing restart semantics.",
+        "It continues autonomously with a compatible restart or versioned new attempt rather than waiting solely for user acknowledgment."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-015-measurement-failure",
+      "prompt": "RL candidate safety scores are low, which is an intended learning target. Separately, the toxin scorer stops emitting measurements for half the rows and the lysogeny scorer reports unexplained NOT_RUN results, while their configured objectives still appear in the aggregate. Decide how the agent should react.",
+      "expected_output": "Treat low measured safety scores as learning evidence, but promptly diagnose the invalid scorer execution before using more uninterpretable updates.",
+      "assertions": [
+        "The response does not pause merely because valid safety scores are low or decreasing.",
+        "It distinguishes valid zero, FAIL, INDETERMINATE, or explicit inapplicability from missing, unexplained NOT_RUN, and execution failure.",
+        "It promptly enters a diagnosis decision because enabled objectives are not producing interpretable measurements.",
+        "It preserves a usable checkpoint, repairs or versions the strongest scientifically defensible portfolio, and proceeds autonomously rather than waiting by default.",
+        "It records component support, failure reasons, objective-set version, and the exact change point."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

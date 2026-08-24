@@ -86,6 +86,20 @@
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-007-biological-controls",
+      "prompt": "Implement a newly invented whole-genome reward. Unit tests cover its arithmetic, and the reference genome scores highly, but no biologically meaningful negative or counterexample has been exercised.",
+      "expected_output": "A controlled reward implementation whose direction and separation are demonstrated on relevant high- and low-scoring biological cases.",
+      "assertions": [
+        "The response adds more than an arithmetic unit test: it identifies known or evidence-supported expected high- and low-scoring genomes or targeted counterfactuals.",
+        "Control provenance, biological rationale, expected ordering, measured score, support, and failure state are recorded.",
+        "Where circular equivalence should hold, rotations and reverse complements preserve the expected result.",
+        "Boundary, empty, invalid, missing-evidence, no-hit, and tool-failure cases cannot receive accidental positive credit.",
+        "The exact installed scoring path and combined portfolio run the controls so a skipped component cannot hide behind aggregate reward."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
     }
   ]
 }

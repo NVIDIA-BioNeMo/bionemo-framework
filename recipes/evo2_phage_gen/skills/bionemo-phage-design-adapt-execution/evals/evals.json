@@ -38,6 +38,7 @@
         "It retains a stable job identifier and provides launch, status, log, cancel, and resume information using the chosen environment.",
         "It observes startup and later meaningful progress and does not call submission completion.",
         "It chooses monitoring intervals from expected progress and decision timing rather than continuously polling a stable job.",
+        "For segmented training, it persists the stage operator's scientific continuation decision and does not relaunch unconditionally through the configured ceiling.",
         "A later session can reattach and determine terminal success or failure without launching a duplicate."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",

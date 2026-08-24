@@ -13,7 +13,8 @@ For each reward, record:
 - partial-credit behavior and valid range;
 - the observations/denominator needed to compute it;
 - missing, empty, no-hit, too-short, missing-gene, invalid, and tool-failure behavior;
-- positive, baseline, boundary, and counterexample controls; and
+- biologically relevant controls known or expected high-scoring and known or expected low-scoring, with provenance and expected ordering;
+- baseline, boundary, counterexample, missing, and failure controls; and
 - its relationship to final hard QC and experimental validation.
 
 Keep component scores visible. Test for duplicated evidence, scale dominance, opposing directions, sparse support, and combinations that favor the wrong endpoint. A required safety or viability check remains a final exclusion or INDETERMINATE result even when an online proxy is useful for shaping.

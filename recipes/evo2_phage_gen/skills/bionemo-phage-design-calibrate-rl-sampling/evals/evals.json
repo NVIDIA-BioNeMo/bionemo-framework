@@ -100,6 +100,21 @@
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-008-circular-editable-regions",
+      "prompt": "Build circular RL prompt banks for a long phage. An evenly spaced candidate grid uses prompts equal to 0.5% of the genome, but several intervals partially overlap genes and modules that RL is supposed to redesign. Longer prompts are operationally convenient. Choose the prompt strategy.",
+      "expected_output": "Short, percentage-aware prompts placed in neutral circular intervals so redesign targets remain generated rather than fixed.",
+      "assertions": [
+        "The response treats every prompt base as fixed sequence and checks circular interval overlap, including origin-wrapping prompts.",
+        "It excludes any overlap with intended-to-change bases, not only prompts containing a complete target gene or centered on one.",
+        "It reports prompt bases and genome fraction and recognizes that even a sub-percent prompt may fix substantial sequence on a smaller genome.",
+        "It starts from the shortest prompt compatible with the selected SFT serialization and does not scale prompt length linearly with genome size.",
+        "A longer prompt is retained only with a model- and design-specific rationale supported by calibration evidence.",
+        "If neutral anchors cannot support the bank, it revisits the prompt strategy rather than locking target elements; selected training starts remain shuffled or interleaved and validation stays fixed and independent."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
     }
   ]
 }

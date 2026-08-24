@@ -183,6 +183,100 @@ def test_rl_skills_keep_cross_stage_contracts() -> None:
     assert "next user update" in operate
 
 
+def test_sft_operator_requires_checkpoint_boundary_stop_decisions() -> None:
+    """SFT supervisors should act on sustained train/validation divergence."""
+    operate = (SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "SKILL.md").read_text()
+    guidance = (
+        SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "references" / "training-guidance.md"
+    ).read_text()
+    execution = (SKILL_ROOT / "bionemo-phage-design-adapt-execution" / "SKILL.md").read_text()
+
+    assert "`max_steps` is a safety ceiling" in operate
+    assert "`continue | one_more | stop`" in operate
+    assert "three consecutive post-best" in guidance
+    assert "approximately 1,000 optimizer steps" in guidance
+    assert "one additional validation interval" in guidance
+    assert "retention does not authorize continuation" in guidance
+    assert "unconditional relaunch" in execution
+
+
+def test_rl_operator_uses_a_noise_tolerant_continuation_contract() -> None:
+    """RL should tolerate score noise while detecting failed measurement and sustained decline."""
+    operate = (SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "SKILL.md").read_text()
+    guidance = (
+        SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "references" / "monitoring-guidance.md"
+    ).read_text()
+
+    assert "`max_num_steps` is a safety ceiling" in operate
+    assert "`continue | diagnose | stop | restart`" in operate
+    assert "Do not apply the SFT rule to RL" in guidance
+    assert "approximately ten comparable validation events" in guidance
+    assert "about 100 optimizer steps" in guidance
+    assert "single sharp drop" in guidance
+    assert "low safety scores" in guidance
+    assert "failure to execute" in guidance
+
+
+def test_early_stopping_eval_matrix_covers_sft_and_rl_patterns() -> None:
+    """Skill evals should distinguish clean SFT divergence from noisy RL movement."""
+    sft = json.loads((SKILL_ROOT / "bionemo-phage-design-operate-mbridge-sft" / "evals" / "evals.json").read_text())
+    rl = json.loads((SKILL_ROOT / "bionemo-phage-design-operate-nemo-rl" / "evals" / "evals.json").read_text())
+    sft_ids = {case["id"] for case in sft["evals"]}
+    rl_ids = {case["id"] for case in rl["evals"]}
+
+    assert {
+        "bionemo-phage-design-operate-mbridge-sft-007-smooth-divergence",
+        "bionemo-phage-design-operate-mbridge-sft-008-one-noisy-regression",
+        "bionemo-phage-design-operate-mbridge-sft-009-short-plateau",
+    } <= sft_ids
+    assert {
+        "bionemo-phage-design-operate-nemo-rl-013-noisy-recovery",
+        "bionemo-phage-design-operate-nemo-rl-014-sustained-decline",
+        "bionemo-phage-design-operate-nemo-rl-015-measurement-failure",
+    } <= rl_ids
+
+
+def test_rl_planning_preserves_editable_regions_and_strong_controls() -> None:
+    """Objective planning should constrain prompt placement and require biological controls."""
+    plan = (SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "SKILL.md").read_text()
+    objective_guidance = (
+        SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "references" / "objective-guidance.md"
+    ).read_text()
+    implement = (SKILL_ROOT / "bionemo-phage-design-implement-rl-objectives" / "SKILL.md").read_text()
+    calibrate = (SKILL_ROOT / "bionemo-phage-design-calibrate-rl-sampling" / "SKILL.md").read_text()
+
+    assert "prompt-exclusion intervals" in plan
+    assert "known or expected high-scoring" in objective_guidance
+    assert "known or expected low-scoring" in objective_guidance
+    assert "biological positive and negative controls" in implement
+    assert "prompt bases and fraction" in calibrate
+    assert "any intended-to-change bases" in calibrate
+    assert "shortest workable prompt" in calibrate
+    assert "scale prompt length linearly" in calibrate
+    assert "longer prompt" in calibrate and "rationale" in calibrate
+
+
+def test_rl_prompt_and_control_evals_cover_the_new_contract() -> None:
+    """Pressure cases should exercise circular prompts and meaningful scorer controls."""
+    plan = json.loads((SKILL_ROOT / "bionemo-phage-design-plan-rl-objectives" / "evals" / "evals.json").read_text())
+    implement = json.loads(
+        (SKILL_ROOT / "bionemo-phage-design-implement-rl-objectives" / "evals" / "evals.json").read_text()
+    )
+    calibrate = json.loads(
+        (SKILL_ROOT / "bionemo-phage-design-calibrate-rl-sampling" / "evals" / "evals.json").read_text()
+    )
+
+    assert "bionemo-phage-design-plan-rl-objectives-016-prompt-and-control-handoff" in {
+        case["id"] for case in plan["evals"]
+    }
+    assert "bionemo-phage-design-implement-rl-objectives-007-biological-controls" in {
+        case["id"] for case in implement["evals"]
+    }
+    assert "bionemo-phage-design-calibrate-rl-sampling-008-circular-editable-regions" in {
+        case["id"] for case in calibrate["evals"]
+    }
+
+
 def test_infra_guidance_covers_coherent_memory() -> None:
     """Portable infrastructure advice should include ARM builds and coherent-memory nodes."""
     infrastructure = (
