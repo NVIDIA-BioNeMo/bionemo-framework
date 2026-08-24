@@ -1,0 +1,15 @@
+# Safe floors for scanner-reported transitive dependencies. Constraints do not
+# install packages that the recipe does not otherwise require.
+black>=26.3.1
+bleach>=6.4.0
+cryptography>=46.0.6,<47
+GitPython>=3.1.59
+jupyter-server>=2.20.0
+jupyterlab>=4.5.10
+mistune>=3.3.4
+nbconvert>=7.17.1
+notebook>=7.5.6
+Pygments>=2.20.0
+python-multipart>=0.0.22
+transformers>=5.8.1
+urllib3>=2.7.0
