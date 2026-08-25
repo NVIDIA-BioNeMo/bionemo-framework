@@ -36,18 +36,26 @@ computational candidates are not evidence of bootability or wet-lab safety. See 
 
 ## Quick start
 
-Run from `recipes/evo2_phage_gen`. The publication-style reproduction uses 7B-base:
+Run from `recipes/evo2_phage_gen`. The publication-style reproduction uses `7b-base`, and for this run
+we supply our default RL sampling selection settings, skipping the part where we stall for user
+input if these settings are not the best by supplying a `--sampling-selection` file:
 
 ```bash
 ./.ci_build.sh
 tmux new -s phix174-e2e
-./examples/phix174_8xh100.sh --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh \
+  --model-variant 7b-base \
+  --sampling-selection "examples/default-sampling-selection.yaml" \
+  --result-root "$PWD/results/phix174-8xh100"
 ```
 
 For a fresh PhiX experiment, use the trained-further 7B-1M model and a new result root:
 
 ```bash
-./examples/phix174_8xh100.sh --model-variant 7b-1m --result-root "$PWD/results/phix174-7b-1m"
+./examples/phix174_8xh100.sh \
+  --model-variant 7b-1m \
+  --sampling-selection "examples/default-sampling-selection.yaml" \
+  --result-root "$PWD/results/phix174-7b-1m"
 ```
 
 `7b-base` is the default and matches the published Microviridae lineage. `7b-1m` selects
@@ -65,10 +73,12 @@ loss; the biological sequence immediately after it remains supervised.
 # Prepare public inputs, tools, databases, and controls only.
 ./examples/phix174_8xh100.sh --prepare-only --result-root "$PWD/results/phix174-8xh100"
 
-# Resume the RL stage of the 7B-base run.
+# Resume the RL stage of the 7b-base run.
 ./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
 
-# Use an explicitly reviewed sampling selection.
+# Use an explicitly reviewed sampling selection, without blocking if the automatically identified
+#  top setting differs. In practice automatic selection can be noisy, and these settings should work
+#  well for phix174.
 ./examples/phix174_8xh100.sh --sampling-selection examples/default-sampling-selection.yaml --result-root "$PWD/results/phix174-8xh100"
 ```
 

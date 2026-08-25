@@ -35,12 +35,15 @@ See the [example README](examples/README.md) for additional launch options and o
 
 The end-to-end run takes approximately 4 days on a server with 8 H100 GPUs, and uses 1.5TB of storage.
 
-Run the following from `recipes/evo2_phage_gen` to reproduce the 7B-base end-to-end configuration
+Run the following from `recipes/evo2_phage_gen` to reproduce the `7b-base` end-to-end configuration
 summarized above:
 
 ```bash
 ./.ci_build.sh
-./examples/phix174_8xh100.sh --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh \
+  --model-variant 7b-base  \
+  --sampling-selection "examples/default-sampling-selection.yaml" \
+  --result-root "$PWD/results/phix174-8xh100"
 ```
 
 Use tmux or a scheduler for long runs. `NUM_GPUS` defaults to 8, `NUM_CPUS` to `nproc`, and
