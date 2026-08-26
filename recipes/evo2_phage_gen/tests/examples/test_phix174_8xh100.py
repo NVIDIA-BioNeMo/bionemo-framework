@@ -151,6 +151,8 @@ def test_dry_run(tmp_path: Path) -> None:
         "wandb_rl_run_name": "result-7b-base-gdpo",
     }
     log = (result_root / "RUNLOG.md").read_text()
+    assert "TARGET_LENGTH=7000" in log
+    assert "sampling selection: temperature=1.0, prompt lengths=16 24, max new tokens=6976" in log
     for command in (
         "evo2_phage_prepare_external_assets",
         "evo2_phage_sequence_safety",
@@ -788,7 +790,7 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: RL environment control" not in log
     assert "substage 50-rollout already complete" in log
     assert "evo2_phage_generation write-prompts" not in log
-    assert "--max-new-tokens 5976" not in log
+    assert "--max-new-tokens 6976" not in log
     assert "monitor: selected-SFT likelihood scoring" in log
     assert "monitor: one-step GDPO pilot" not in log
     assert "monitor: 500-step DP8 GDPO" not in log

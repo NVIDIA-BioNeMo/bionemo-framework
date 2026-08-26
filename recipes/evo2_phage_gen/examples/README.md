@@ -107,9 +107,11 @@ stages are not uploaded retroactively.
 
 ### Choose sampling settings
 
-[`default-sampling-selection.yaml`](default-sampling-selection.yaml) is both the historical PhiX
-choice and the schema for a custom selection. To stop after the sweep and scoring, before prompt
-banks or RL are created, run:
+[`default-sampling-selection.yaml`](default-sampling-selection.yaml) contains the current PhiX
+defaults and is the schema for a custom selection. Its decoder ceiling reaches approximately
+7,000 nt, where the unchanged length reward has fallen to 0.5, so stopping before the 6,000-nt
+hard acceptance boundary has a learnable advantage. To stop after the sweep and scoring, before
+prompt banks or RL are created, run:
 
 ```bash
 ./examples/phix174_8xh100.sh --calibrate-only --result-root "$PWD/results/phix174-8xh100"

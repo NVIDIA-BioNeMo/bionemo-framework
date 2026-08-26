@@ -384,7 +384,7 @@ if [[ -n "${SAMPLING_SELECTION_SOURCE}" ]]; then
   fi
   SAMPLING_SELECTION_OVERRIDDEN=1
   if [[ "${SAMPLING_SELECTION_SOURCE}" -ef "${DEFAULT_SAMPLING_SELECTION}" ]]; then
-    note "WARNING: using bundled historical sampling settings from ${SAMPLING_SELECTION_SOURCE}; they override rather than derive from fresh calibration"
+    note "WARNING: using bundled sampling defaults from ${SAMPLING_SELECTION_SOURCE}; they override rather than derive from fresh calibration"
   else
     note "WARNING: copied explicit sampling selection from ${SAMPLING_SELECTION_SOURCE} to ${SAMPLING_SELECTION}; fresh calibration compatibility will not be enforced"
   fi
@@ -718,7 +718,7 @@ stage_30() {
   if [[ -f "${STAGE_DIR}/30-calibration-generation.done" ]]; then
     note 'substage 30-calibration-generation already complete'
   else
-    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
+    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=7000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-generation.done"
   fi
   if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then

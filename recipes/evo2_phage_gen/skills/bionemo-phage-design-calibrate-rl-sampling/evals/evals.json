@@ -9,6 +9,7 @@
         "The response reconstructs the SFT conditioning, orientation, wrappers, BOS/EOS, padding, masking, tokenization, and continuation boundary.",
         "It uses only cues present during SFT and does not copy the paper format when the selected checkpoint differs.",
         "It sweeps a reasonable temperature and prefix range with paired seeds and enough samples to compare uncertainty.",
+        "It places the decoder and calibration ceiling meaningfully inside any declining overlength reward region rather than exactly on the full-credit boundary, while preserving the separate hard acceptance interval and model context.",
         "It materializes the selected prompt mixture and sampling settings in the eventual commands and treats simultaneous nonzero top-k/top-p as temperature, then top-k, then top-p.",
         "Calibration samples remain separate from RL validation and final rollout."
       ],
@@ -60,8 +61,8 @@
     },
     {
       "id": "bionemo-phage-design-calibrate-rl-sampling-005-resume-selection",
-      "prompt": "The realized PhiX174 script completed calibration generation and scoring, then stopped because the new evidence does not support its historical default. I approved autonomous evidence-based continuation and am offline. Resume it.",
-      "expected_output": "An evidence-based canonical sampling selection and a marker-aware rerun, not a silent historical-default override.",
+      "prompt": "The realized PhiX174 script completed calibration generation and scoring, then stopped because the new evidence does not support its bundled default. I approved autonomous evidence-based continuation and am offline. Resume it.",
+      "expected_output": "An evidence-based canonical sampling selection and a marker-aware rerun, not a silent bundled-default override.",
       "assertions": [
         "The response inspects calibration/scoring/selection-evidence.csv and the underlying score and novelty evidence before choosing settings.",
         "It writes the reviewed choice to calibration/sampling-selection.yaml with the complete script-supported schema and records its rationale.",
@@ -80,7 +81,7 @@
         "The response reads evo2_phage_gen/examples/README.md as the source of truth for the current review and resume procedure.",
         "It inspects calibration/scoring/selection-evidence.csv and the neighboring score and novelty evidence before choosing settings.",
         "It creates an intentional review boundary before RL prompt materialization or RL launch and records the selected settings durably.",
-        "It uses examples/default-sampling-selection.yaml only as the complete schema or as an explicitly chosen historical override.",
+        "It uses examples/default-sampling-selection.yaml only as the complete schema or as an explicitly chosen current default.",
         "It may adapt topology, batch, workers, scheduler integration, or launch commands to measured hardware while preserving whole-genome context, effective batch, sampling semantics, and validation independence."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",

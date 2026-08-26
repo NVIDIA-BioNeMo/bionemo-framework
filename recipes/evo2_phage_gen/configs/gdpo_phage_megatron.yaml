@@ -57,7 +57,7 @@ policy:
     scheduler:
       lr_warmup_init: 1.0e-7
   generation:
-    max_new_tokens: 5976
+    max_new_tokens: 6976
     temperature: 1.0
     top_p: 1.0
     top_k: 4

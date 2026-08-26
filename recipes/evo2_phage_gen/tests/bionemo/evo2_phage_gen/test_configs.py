@@ -82,7 +82,10 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     tensor_model_parallel_size = config["policy"]["megatron_cfg"]["tensor_model_parallel_size"]
     train_data = config["data"]["train"]
 
-    assert generation_config["max_new_tokens"] == config["env"]["phage_qc"]["genome_length_max"] - 4
+    assert config["env"]["phage_qc"]["genome_length_max"] == 6000
+    assert generation_config["max_new_tokens"] + 16 == 7000
+    assert generation_config["max_new_tokens"] > config["env"]["phage_qc"]["genome_length_max"]
+    assert config["policy"]["max_total_sequence_length"] >= generation_config["max_new_tokens"] + 16
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 0.0
     assert config["env"]["phage_qc"]["dustmask_filter"] is True
     assert config["env"]["phage_qc"]["dustmasker_bin"] == "dustmasker"
@@ -208,6 +211,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["policy"]["train_micro_batch_size"] == 1
     assert config["policy"]["generation_batch_size"] == 96
     assert config["policy"]["logprob_batch_size"] == 1
+    assert config["policy"]["generation"]["max_new_tokens"] + 24 == 7000
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
     assert mcore_generation_config["prompt_batch_size"] == 12
     assert mcore_generation_config["max_requests"] == 12

@@ -186,7 +186,7 @@ policy:
     port_range_low: 11001
     port_range_high: 15000
     backend: megatron
-    max_new_tokens: 5996
+    max_new_tokens: 6984
     temperature: 0.8
     top_p: 1.0
     top_k: null

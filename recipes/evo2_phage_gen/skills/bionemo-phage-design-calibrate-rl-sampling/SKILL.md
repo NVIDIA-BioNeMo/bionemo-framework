@@ -13,6 +13,8 @@ Reconstruct the actual SFT prompt serialization and tokenization, including cond
 
 Sweep a reasonable range of temperatures and prefix lengths with paired seeds and enough samples to compare uncertainty. Materialize the selected top-k/top-p, completion length, and prompt mixture in the commands; when both filters are nonzero, Evo 2 applies temperature, then top-k, then top-p. Treat every prompt base as fixed rather than designed: consume the objective plan's exclusions for genes or regions intended to change and reject circular prompts—including origin-wrapping intervals—that overlap any intended-to-change bases. If neutral anchors cannot support the bank, revisit the prompt strategy.
 
+Set the decoder and calibration ceilings from the reward curve, not its full-credit boundary. When overlength outputs receive declining partial credit, let generation reach meaningfully into that region while keeping the full prompt-plus-completion length within the model context; retain the separate hard acceptance interval.
+
 Report prompt bases and fraction of the genome fixed. Start with the shortest workable prompt consistent with the selected SFT serialization and measured generation quality; do not scale prompt length linearly with genome size by default, because even a sub-percent prompt can be substantial on a small genome. Retain a longer prompt only with a model- and design-specific rationale supported by calibration evidence. Distribute eligible starts around circular genomes, shuffle or interleave strata, and make each global rollout batch representative rather than cycling through fixed cohorts. When step metrics oscillate, stratify by prompt position, length, and composition before attributing the pattern to the policy.
 
 Score raw and cluster-deduplicated hard-QC yield, target/lifecycle evidence, complete-genome integrity, copying, diversity, and every enabled objective. A successful wrapper is insufficient: require every configured external measurement used for selection to be available, distinguish a biological no-hit from scorer failure, and diagnose unexplained missing or fixed-zero components rather than dropping them. Use positive and failure controls to confirm each score is measurable.
@@ -25,8 +27,8 @@ For the realized PhiX workflow, read the
 [example README](../../examples/README.md) before planning or rerunning it. Treat that document as
 the source of truth for the current review stop, evidence paths, selection schema and handoff,
 completion markers, and resume procedure. When the user delegates selection, make the
-evidence-based choice described there and record its rationale; use the bundled historical choice
-only when the user explicitly selects it.
+evidence-based choice described there and record its rationale; use the bundled default only when
+the user explicitly selects it.
 
 The example shell script is a reference implementation, not a mandatory launcher. On a different
 GPU or scheduler environment, inspect the available hardware and adapt topology, batch and worker

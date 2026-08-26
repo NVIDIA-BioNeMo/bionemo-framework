@@ -1,9 +1,9 @@
-# Historical PhiX174 case-study settings. Supplying this file explicitly bypasses
+# Current PhiX174 case-study defaults. Supplying this file explicitly bypasses
 # the fresh-calibration compatibility check; see examples/README.md.
 temperature: 1.0
 top_k: 4
 top_p: 1.0
-max_new_tokens: 5976
+max_new_tokens: 6976
 prompt_lengths:
   - 16
   - 24
