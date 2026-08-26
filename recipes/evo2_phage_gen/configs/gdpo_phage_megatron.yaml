@@ -178,7 +178,9 @@ env:
       synteny_mode: "full"
       enable_average_protein_identity: true
       enable_required_genes: true
-      required_genes_evidence_target: 9.0
+      required_genes_evidence_target: 10.0
+      protein_match_min_reciprocal_coverage: 0.75
+      tropism_match_min_reciprocal_coverage: 0.95
       # Per external-QC reward run; set lower if several environment actors score concurrently.
       lovis4u_parallel_jobs: 32
       lovis4u_mmseqs_threads: 8

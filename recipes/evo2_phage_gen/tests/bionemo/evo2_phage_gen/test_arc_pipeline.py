@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from Bio import SeqIO
+from Bio.Seq import Seq
 
 import bionemo.evo2_phage_gen.arc_pipeline as arc_pipeline
 from bionemo.evo2_phage_gen.arc_pipeline import (
@@ -70,6 +72,84 @@ def _load_prepared_arc_pipeline(tmp_path: Path, module_name: str, monkeypatch):
     )
     pipeline_path = workdir / "genome_design_filtering_pipeline.py"
     monkeypatch.syspath_prepend(str(pipeline_path.parent))
+    spec = importlib.util.spec_from_file_location(module_name, pipeline_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_synthetic_mmseqs_pipeline(tmp_path: Path, module_name: str):
+    """Load the Arc protein-search fragment after applying the runtime evidence patch."""
+    pipeline_path = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_path.write_text(
+        """import os
+import subprocess
+import time
+
+import pandas as pd
+from Bio import SeqIO
+
+
+def mmseqs_search_proteins(query_fasta: str, mmseqs_db: str, results_dir: str, threads: int=8, split: int=0, sensitivity: float=4.0) -> None:
+    os.makedirs(results_dir, exist_ok=True)
+    mmseqs_out = os.path.join(results_dir, "mmseqs_result.m8")
+    log_file = os.path.join(results_dir, "mmseqs_search.log")
+    cmd = f"mmseqs easy-search {query_fasta} {mmseqs_db} {mmseqs_out} {results_dir} --threads {threads} --split {split} -s {sensitivity} --remove-tmp-files 1 --format-output 'query,target,evalue,pident'"
+    start_time = time.time()
+    with open(log_file, "w") as log:
+        subprocess.run(cmd, shell=True, check=True, stdout=log, stderr=log, text=True)
+    end_time = time.time()
+    print(f"MMseqs2 search completed in {end_time - start_time:.2f} seconds.")
+    if not os.path.isfile(mmseqs_out):
+        raise FileNotFoundError(f"Output file not found: {mmseqs_out}")
+    return mmseqs_out
+
+
+def parse_mmseqs_results(mmseqs_out):
+    hits = []
+    with open(mmseqs_out, "r") as f:
+        for line in f:
+            query, target, evalue, pident = line.strip().split('\\t')
+            hits.append((query, target, float(evalue), float(pident)))
+    return hits
+
+
+def mmseqs_results_to_df(hits, query_fasta: str, output_csv: str, descriptive_prefix: str, only_top_hits: bool=True) -> pd.DataFrame:
+    sequences = {record.id: record.seq for record in SeqIO.parse(query_fasta, "fasta")}
+    data = []
+    for query, target, evalue, pident in hits:
+        if query in sequences:
+            data.append([query, sequences[query], target, evalue, pident])
+    df = pd.DataFrame(data, columns=["id_prompt", "sequence", f"{descriptive_prefix}_mmseqs_target", f"{descriptive_prefix}_mmseqs_e_value", f"{descriptive_prefix}_mmseqs_percent_identity"])
+    if only_top_hits==True and not df.empty:
+        df = df.loc[df.groupby("id_prompt")[f"{descriptive_prefix}_mmseqs_e_value"].idxmin()]
+    df.to_csv(output_csv, index=False)
+    return df
+
+
+def run_mmseqs_search_proteins(query_fasta: str, mmseqs_db: str, results_dir: str, output_csv: str, descriptive_prefix: str, threads: int=8, split: int=0, sensitivity: float=4.0, only_top_hits: bool=True) -> pd.DataFrame:
+    try:
+        mmseqs_out = mmseqs_search_proteins(query_fasta, mmseqs_db, results_dir, threads, split, sensitivity)
+        hits = parse_mmseqs_results(mmseqs_out)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        hits = []
+    if not hits:
+        df = pd.DataFrame(
+            columns=[
+                "id_prompt",
+                "sequence",
+                f"{descriptive_prefix}_mmseqs_target",
+                f"{descriptive_prefix}_mmseqs_e_value",
+                f"{descriptive_prefix}_mmseqs_percent_identity",
+            ]
+        )
+        df.to_csv(output_csv, index=False)
+        return df
+    return mmseqs_results_to_df(hits, query_fasta, output_csv, descriptive_prefix, only_top_hits)
+"""
+    )
+    arc_pipeline._apply_mmseqs_protein_evidence_patch(tmp_path)
     spec = importlib.util.spec_from_file_location(module_name, pipeline_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -189,6 +269,102 @@ def test_prepare_arc_pipeline_resolves_reference_path_before_runtime_cwd_changes
     assert str(phix174_fasta.resolve()) in prepared
 
 
+@pytest.mark.parametrize(
+    ("header", "expected_start", "expected_end"),
+    [
+        ("candidate_ORF.1 [567-843](+)", "568", "843"),
+        ("candidate_ORF.2 [9-90](-)", "10", "90"),
+    ],
+)
+def test_prepared_arc_writes_orfipy_intervals_as_one_based_inclusive_gff(
+    tmp_path,
+    header,
+    expected_start,
+    expected_end,
+):
+    """ORFipy's zero-based half-open interval must not shift GFF translations by one base."""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    pipeline_source = """import re
+
+from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.SeqFeature import FeatureLocation, SeqFeature
+from Bio.SeqRecord import SeqRecord
+
+def render_orfipy_interval_as_gff(header):
+    match = re.search(r"\\[(\\d+)-(\\d+)\\]", header)
+    if match:
+        start, end = match.groups()
+        orf_entry = {
+            "seq_id": "candidate",
+            "feature_type": "CDS",
+            "start": start,
+            "end": end,
+        }
+        return (
+            f"{orf_entry['seq_id']}\\tcaller\\t{orf_entry['feature_type']}\\t"
+            f"{orf_entry['start']}\\t{orf_entry['end']}\\t.\\t+\\t0\\tID=ORF.1"
+        )
+    raise ValueError("missing ORFipy interval")
+
+
+def convert_gff_to_gbk(sequence, start, end, output_path, strand=1):
+    record = SeqRecord(Seq(sequence), id="candidate", name="candidate")
+    record.annotations["molecule_type"] = "DNA"
+    feature = SeqFeature(
+        location=FeatureLocation(start, end, strand=strand),
+        type="CDS",
+    )
+    feature.qualifiers["translation"] = [str(feature.extract(record.seq).translate())]
+    record.features = [feature]
+    SeqIO.write(record, output_path, "genbank")
+"""
+    for filename in ARC_PIPELINE_FILES:
+        content = pipeline_source if filename == "genome_design_filtering_pipeline.py" else "print('ok')\n"
+        if filename == "genetic_architecture.py":
+            content = f'fasta_file = "{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"\n'
+        (source_dir / filename).write_text(content)
+    reference_fasta = tmp_path / "reference.fna"
+    reference_fasta.write_text(">reference\nACGT\n")
+    workdir = tmp_path / "prepared"
+
+    prepare_arc_pipeline_workdir(
+        source_dir,
+        workdir,
+        phix174_fasta=reference_fasta,
+        pipeline_patch=None,
+    )
+    pipeline_path = workdir / "genome_design_filtering_pipeline.py"
+    spec = importlib.util.spec_from_file_location("coordinate_corrected_arc_pipeline", pipeline_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    fields = module.render_orfipy_interval_as_gff(header).split("\t")
+    assert fields[3:5] == [expected_start, expected_end]
+    start = int(expected_start) - 1
+    coding_length = int(expected_end) - start
+    if header.startswith("candidate_ORF.1"):
+        coding_sequence = Seq(
+            "ATGGTACGCTGGACTTTGTGGGATACCCTCGCTTTCCTGCTCCTGTTGAGTTTATTGCTGCCGTCATTGCTTATTATGTT"
+            "CATCCCGTCAACATTCAAACGGCCTGTCTCATCATGGAAGGCGCTGAATTTACGGAAAACATTATTAATGGCGTCGAGCGT"
+            "CCGGTTAAAGCCGCTGAATTGTTCGCGTTTACCTTGCGTGTACGCGCAGGAAACACTGACGTTCTTACTGACGCAGAAGAA"
+            "AACGTGCGTCAAAAATTACGTGCGGAAGGAGTGA"
+        )
+    else:
+        coding_sequence = Seq("ATG" + "GCT" * (coding_length // 3 - 2) + "TAA")
+    genome = Seq("A" * start) + coding_sequence
+    gbk_path = tmp_path / f"{expected_start}.gbk"
+    module.convert_gff_to_gbk(str(genome), int(fields[3]), int(fields[4]), gbk_path)
+
+    converted = SeqIO.read(gbk_path, "genbank")
+    for feature in (feature for feature in converted.features if feature.type == "CDS"):
+        assert (int(feature.location.start), int(feature.location.end)) == (start, int(expected_end))
+        assert len(feature) % 3 == 0
+        assert "*" not in feature.qualifiers["translation"][0][:-1]
+
+
 def test_prepare_arc_pipeline_requires_compatible_arc_revision(tmp_path, monkeypatch):
     """The maintained Arc patch should only apply to its compatible Arc source revision."""
     source_dir = tmp_path / "source" / "phage_gen" / "pipelines"
@@ -301,7 +477,266 @@ def test_patched_arc_required_gene_measurement_does_not_filter_or_delete(tmp_pat
     assert (gff_dir / "genome_1.gff").exists()
     assert (gbk_dir / "genome_1.gbk").exists()
     metrics = pd.read_csv(metrics_csv)
-    assert metrics["required_genes_matched_count"].tolist() == [1]
+    assert metrics["required_genes_matched_count"].tolist() == [0]
+
+
+def test_patched_arc_required_gene_evidence_is_fractional_duplicate_safe_and_shared_with_hard_qc(tmp_path):
+    """Online required-family credit and offline rejection must use the same reciprocal-coverage evidence."""
+    pipeline_path = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_path.write_text(
+        """import os
+import shutil
+
+import pandas as pd
+
+
+def valid_gene_annotations(input_gff_dir, input_gbk_dir, required_products, sequences_df, metrics_csv=None, filter_results=True):
+    return sequences_df
+
+
+##############################
+### RUN FILTERING PIPELINE ###
+##############################
+"""
+    )
+    arc_pipeline._apply_required_gene_evidence_patch(tmp_path)
+    spec = importlib.util.spec_from_file_location("patched_required_gene_evidence", pipeline_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    gff_dir = tmp_path / "gff"
+    gbk_dir = tmp_path / "gbk"
+    gff_dir.mkdir()
+    gbk_dir.mkdir()
+    (gff_dir / "genome_1.gff").write_text("##gff-version 3\n")
+    (gbk_dir / "genome_1.gbk").write_text("LOCUS genome_1\n")
+    sequences = pd.DataFrame({"id_prompt": ["umi1"], "genome_id": ["genome_1"], "sequence": ["ACGT"]})
+    hits = pd.DataFrame(
+        {
+            "id_prompt": ["umi1_ORF.1", "umi1_ORF.2", "umi1_ORF.3"],
+            "annot": ["gene A", "gene A", "gene B"],
+            "protein_database_mmseqs_target": ["family_A", "family_A", "family_B"],
+            "protein_database_mmseqs_percent_identity": [100.0, 100.0, 100.0],
+            "protein_database_mmseqs_alignment_length": [100, 100, 50],
+            "protein_database_mmseqs_query_length": [100, 100, 50],
+            "protein_database_mmseqs_target_length": [100, 100, 100],
+        }
+    )
+    metrics_csv = tmp_path / "required.csv"
+
+    measured = module.valid_gene_annotations(
+        input_gff_dir=str(gff_dir),
+        input_gbk_dir=str(gbk_dir),
+        required_products=("gene A", "gene B"),
+        sequences_df=sequences,
+        metrics_csv=str(metrics_csv),
+        filter_results=False,
+        protein_database_hits_df=hits,
+        minimum_reciprocal_coverage=0.95,
+    )
+
+    assert measured["id_prompt"].tolist() == ["umi1"]
+    metrics = pd.read_csv(metrics_csv)
+    assert metrics["required_genes_matched_count"].tolist() == [2]
+    assert metrics["required_genes_integrity_sum"].tolist() == pytest.approx([1.5])
+    assert metrics["required_genes_full_length_count"].tolist() == [1]
+    assert (gff_dir / "genome_1.gff").exists()
+    assert (gbk_dir / "genome_1.gbk").exists()
+
+    filtered = module.valid_gene_annotations(
+        input_gff_dir=str(gff_dir),
+        input_gbk_dir=str(gbk_dir),
+        required_products=("gene A", "gene B"),
+        sequences_df=sequences,
+        metrics_csv=str(metrics_csv),
+        filter_results=True,
+        protein_database_hits_df=hits,
+        minimum_reciprocal_coverage=0.95,
+    )
+
+    assert filtered.empty
+    assert not (gff_dir / "genome_1.gff").exists()
+    assert not (gbk_dir / "genome_1.gbk").exists()
+
+
+def test_required_gene_patch_preserves_composed_hard_gate_imports(tmp_path):
+    """The production patch chain must leave every injected protein gate bound."""
+    pipeline_path = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_path.write_text(
+        """import os
+import shutil
+
+import pandas as pd
+
+
+def valid_gene_annotations(input_gff_dir, input_gbk_dir, required_products, sequences_df, metrics_csv=None):
+    return sequences_df
+
+
+##############################
+### RUN FILTERING PIPELINE ###
+##############################
+"""
+    )
+    arc_pipeline._apply_protein_hard_gate_patch(tmp_path)
+    arc_pipeline._apply_required_gene_evidence_patch(tmp_path)
+
+    spec = importlib.util.spec_from_file_location("composed_protein_gate_patches", pipeline_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert callable(module.valid_coverage_aware_protein_database_hit_count)
+    assert callable(module.valid_coverage_aware_mmseqs_pident)
+
+
+def test_patched_arc_aai_excludes_truncated_proteins(tmp_path):
+    pipeline_path = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_path.write_text(
+        """import os
+
+import pandas as pd
+
+
+def valid_average_protein_percent_identity(gff_directory, gbk_directory, results_csv, output_csv, identity_range):
+    pass
+
+
+def count_total_num_genes(gff_directory, results_csv):
+    pass
+"""
+    )
+    arc_pipeline._apply_aai_evidence_patch(tmp_path)
+    spec = importlib.util.spec_from_file_location("patched_aai_evidence", pipeline_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    metrics_csv = tmp_path / "metrics.csv"
+    pd.DataFrame(
+        {
+            "id_prompt": ["truncated", "complete"],
+            "genome_id": ["genome_1", "genome_2"],
+        }
+    ).to_csv(input_csv, index=False)
+    hits = pd.DataFrame(
+        {
+            "id_prompt": ["truncated_ORF.1", "complete_ORF.1"],
+            "protein_database_mmseqs_target": ["family_A", "family_A"],
+            "protein_database_mmseqs_percent_identity": [100.0, 80.0],
+            "protein_database_mmseqs_alignment_length": [50, 100],
+            "protein_database_mmseqs_query_length": [50, 100],
+            "protein_database_mmseqs_target_length": [100, 100],
+        }
+    )
+
+    module.valid_average_protein_percent_identity(
+        str(tmp_path / "gff"),
+        str(tmp_path / "gbk"),
+        str(input_csv),
+        str(output_csv),
+        (0, 95),
+        filter_results=False,
+        protein_database_hits_df=hits,
+        minimum_reciprocal_coverage=0.75,
+        metrics_csv=str(metrics_csv),
+    )
+
+    metrics = pd.read_csv(metrics_csv)
+    assert metrics["average_protein_percent_identity"].tolist() == [0.0, 80.0]
+    assert metrics["average_protein_identity_gene_count"].tolist() == [0, 1]
+
+
+def test_reference_cluster_patch_replaces_arc_edge_counter(tmp_path):
+    pipeline_path = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_path.write_text(
+        """def count_syntenic_genes_all(root_dir, gff_dir, input_csv, output_csv):
+    raise NotImplementedError
+
+
+def valid_syntenic_gene_count(input_csv, output_csv):
+    pass
+"""
+    )
+
+    arc_pipeline._apply_reference_cluster_evidence_patch(tmp_path)
+
+    patched = pipeline_path.read_text()
+    compile(patched, str(pipeline_path), "exec")
+    assert "measure_reference_cluster_architecture" in patched
+    assert "raise NotImplementedError" not in patched
+
+
+def test_patched_arc_hard_protein_gates_require_unique_full_length_families(tmp_path):
+    """Final Arc protein-count and tropism gates must reject duplicates and high-identity fragments."""
+    pipeline_path = tmp_path / "genome_design_filtering_pipeline.py"
+    pipeline_path.write_text(
+        """import pandas as pd
+
+
+##############################
+### RUN FILTERING PIPELINE ###
+##############################
+"""
+    )
+    arc_pipeline._apply_protein_hard_gate_patch(tmp_path)
+    spec = importlib.util.spec_from_file_location("patched_protein_hard_gates", pipeline_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    sequences = pd.DataFrame({"id_prompt": ["duplicate", "complete"], "sequence": ["ACGT", "ACGT"]})
+    protein_hits = pd.DataFrame(
+        {
+            "id_prompt": [
+                "duplicate_ORF.1",
+                "duplicate_ORF.2",
+                "duplicate_ORF.3",
+                "complete_ORF.1",
+                "complete_ORF.2",
+            ],
+            "protein_database_mmseqs_target": ["family_A", "family_A", "family_B", "family_A", "family_B"],
+            "protein_database_mmseqs_percent_identity": [100.0, 100.0, 100.0, 100.0, 100.0],
+            "protein_database_mmseqs_alignment_length": [100, 100, 50, 100, 100],
+            "protein_database_mmseqs_query_length": [100, 100, 50, 100, 100],
+            "protein_database_mmseqs_target_length": [100, 100, 100, 100, 100],
+        }
+    )
+
+    protein_pass = module.valid_coverage_aware_protein_database_hit_count(
+        protein_hits,
+        sequences,
+        id_column="id_prompt",
+        min_hits=2,
+        minimum_reciprocal_coverage=0.95,
+    )
+
+    assert protein_pass["id_prompt"].tolist() == ["complete"]
+    assert protein_pass["protein_database_hit_count"].tolist() == [2]
+
+    tropism_hits = pd.DataFrame(
+        {
+            "id_prompt": ["duplicate_ORF.1", "complete_ORF.1"],
+            "tropism_protein_mmseqs_percent_identity": [100.0, 60.0],
+            "tropism_protein_mmseqs_alignment_length": [50, 100],
+            "tropism_protein_mmseqs_query_length": [50, 100],
+            "tropism_protein_mmseqs_target_length": [100, 100],
+        }
+    )
+
+    tropism_pass = module.valid_coverage_aware_mmseqs_pident(
+        tropism_hits,
+        "tropism_protein",
+        [60, 100],
+        sequences,
+        minimum_reciprocal_coverage=0.95,
+    )
+
+    assert tropism_pass["id_prompt"].tolist() == ["complete"]
+    assert tropism_pass["tropism_protein_mmseqs_percent_identity"].tolist() == [60.0]
 
 
 def test_patched_arc_synteny_missing_lovis4u_output_receives_zero_credit(tmp_path, monkeypatch):
@@ -413,7 +848,7 @@ def test_patched_arc_mmseqs_protein_search_rejects_missing_output(tmp_path, monk
 
 def test_patched_arc_mmseqs_protein_search_allows_successful_empty_hits(tmp_path, monkeypatch):
     """A successful MMseqs run with no hits should still produce an empty hit table."""
-    module = _load_prepared_arc_pipeline(tmp_path, "patched_arc_pipeline_empty_mmseqs_test", monkeypatch)
+    module = _load_synthetic_mmseqs_pipeline(tmp_path, "patched_arc_pipeline_empty_mmseqs_test")
     query_fasta = tmp_path / "query.fasta"
     query_fasta.write_text(">umi1_ORF.1\nM\n")
     mmseqs_db = tmp_path / "mmseqs_db"
@@ -440,5 +875,59 @@ def test_patched_arc_mmseqs_protein_search_allows_successful_empty_hits(tmp_path
         "protein_database_mmseqs_target",
         "protein_database_mmseqs_e_value",
         "protein_database_mmseqs_percent_identity",
+        "protein_database_mmseqs_alignment_length",
+        "protein_database_mmseqs_query_length",
+        "protein_database_mmseqs_target_length",
     ]
     assert output_csv.exists()
+
+
+def test_patched_arc_mmseqs_protein_search_carries_alignment_lengths(tmp_path, monkeypatch):
+    """Arc must retain the MMseqs lengths needed to distinguish fragments from intact proteins."""
+    module = _load_synthetic_mmseqs_pipeline(tmp_path, "patched_arc_pipeline_coverage_test")
+    query_fasta = tmp_path / "query.fasta"
+    query_fasta.write_text(">umi1_ORF.1\n" + "M" * 80 + "\n")
+    mmseqs_db = tmp_path / "mmseqs_db"
+    mmseqs_db.mkdir()
+    output_csv = tmp_path / "hits.csv"
+    mmseqs_out = tmp_path / "mmseqs_results" / "mmseqs_out.tsv"
+    mmseqs_out.parent.mkdir()
+    mmseqs_out.write_text("umi1_ORF.1\tphrog_1\t1e-20\t75.0\t40\t80\t100\n")
+
+    monkeypatch.setattr(module, "mmseqs_search_proteins", lambda *_args, **_kwargs: str(mmseqs_out))
+
+    hits = module.run_mmseqs_search_proteins(
+        query_fasta=str(query_fasta),
+        mmseqs_db=str(mmseqs_db),
+        results_dir=str(tmp_path / "mmseqs_results"),
+        output_csv=str(output_csv),
+        descriptive_prefix="protein_database",
+    )
+
+    assert hits.loc[0, "protein_database_mmseqs_alignment_length"] == 40
+    assert hits.loc[0, "protein_database_mmseqs_query_length"] == 80
+    assert hits.loc[0, "protein_database_mmseqs_target_length"] == 100
+
+
+def test_patched_arc_mmseqs_search_requests_alignment_length_fields(tmp_path, monkeypatch):
+    """The MMseqs command contract must request reciprocal-coverage inputs explicitly."""
+    module = _load_synthetic_mmseqs_pipeline(tmp_path, "patched_arc_pipeline_command_test")
+    query_fasta = tmp_path / "query.fasta"
+    query_fasta.write_text(">umi1_ORF.1\nM\n")
+    mmseqs_db = tmp_path / "mmseqs_db"
+    mmseqs_db.mkdir()
+    results_dir = tmp_path / "mmseqs_results"
+
+    def fake_run(cmd, **_kwargs):
+        assert "--format-output 'query,target,evalue,pident,alnlen,qlen,tlen'" in cmd
+        (results_dir / "mmseqs_result.m8").write_text("")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    observed_path = module.mmseqs_search_proteins(
+        query_fasta=str(query_fasta),
+        mmseqs_db=str(mmseqs_db),
+        results_dir=str(results_dir),
+    )
+
+    assert observed_path == str(results_dir / "mmseqs_result.m8")

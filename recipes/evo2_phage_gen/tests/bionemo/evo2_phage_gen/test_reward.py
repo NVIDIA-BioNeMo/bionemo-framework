@@ -26,9 +26,16 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
+from Bio.Seq import Seq
 
 from bionemo.evo2_phage_gen import sequence_safety_cli
 from bionemo.evo2_phage_gen.design_scope import HostDomain, HostEvidence
+from bionemo.evo2_phage_gen.protein_evidence import (
+    measure_reference_cluster_architecture,
+    protein_alignment_integrity,
+    stage_coordinate_normalized_reference_gff,
+    summarize_required_gene_evidence,
+)
 from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
 from bionemo.evo2_phage_gen.reward import (
     REWARD_COMPONENTS,
@@ -1095,6 +1102,21 @@ def test_score_fasta_writes_reward_csv(tmp_path, monkeypatch):
 
 def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     """AAI and required-gene rewards should make Arc run the final paper-stage filters."""
+    reference_gff = tmp_path / "reference.gff"
+    native_e = (
+        "ATGGTACGCTGGACTTTGTGGGATACCCTCGCTTTCCTGCTCCTGTTGAGTTTATTGCTGCCGTCATTGCTTATTATGTT"
+        "CATCCCGTCAACATTCAAACGGCCTGTCTCATCATGGAAGGCGCTGAATTTACGGAAAACATTATTAATGGCGTCGAGCGT"
+        "CCGGTTAAAGCCGCTGAATTGTTCGCGTTTACCTTGCGTGTACGCGCAGGAAACACTGACGTTCTTACTGACGCAGAAGAA"
+        "AACGTGCGTCAAAAATTACGTGCGGAAGGAGTGA"
+    )
+    reference_sequence = "A" * 567 + native_e
+    reference_gff.write_text(
+        "##gff-version 3\n"
+        "##sequence-region reference 1 843\n"
+        "reference\tcaller\tregion\t1\t843\t.\t+\t.\tID=reference\n"
+        "reference\tcaller\tCDS\t567\t843\t.\t+\t0\tID=E\n"
+        f"##FASTA\n>reference\n{reference_sequence}\n"
+    )
     base_config = {
         "results_save_dir": "unused",
         "current_config_file": "unused",
@@ -1107,7 +1129,7 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
         "mmseqs_db_tropism_protein": "",
         "genetic_architecture_visualization_script": "",
         "protein_annotation_file": "",
-        "reference_genome_gff_file_save_location": "reference.gff",
+        "reference_genome_gff_file_save_location": str(reference_gff),
     }
     base_config_path = tmp_path / "arc_config.yaml"
     base_config_path.write_text(yaml.safe_dump(base_config))
@@ -1123,6 +1145,7 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
             synteny_mode="full",
             enable_average_protein_identity=True,
             enable_required_genes=True,
+            protein_match_min_reciprocal_coverage=0.9,
         ),
     )
 
@@ -1142,8 +1165,42 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     assert run_config["lovis4u_metrics_only"] is False
     assert run_config["lovis4u_collect_pdfs"] is False
     assert run_config["use_reference_genome"] is True
-    assert run_config["reference_genome_gff_file_save_location"].endswith("reference.gff")
+    staged_reference = Path(run_config["reference_genome_gff_file_save_location"])
+    assert staged_reference.parent == tmp_path / "run"
+    staged_lines = staged_reference.read_text().splitlines()
+    assert "reference\tcaller\tregion\t1\t843\t.\t+\t.\tID=reference" in staged_lines
+    assert "reference\tcaller\tCDS\t568\t843\t.\t+\t0\tID=E" in staged_lines
+    cds = reference_sequence[567:843]
+    assert len(cds) % 3 == 0
+    assert "*" not in str(Seq(cds).translate())[:-1]
+    assert "reference\tcaller\tCDS\t567\t843\t.\t+\t0\tID=E" in reference_gff.read_text()
     assert run_config["online_measurement_mode"] is True
+    assert run_config["protein_match_min_reciprocal_coverage"] == 0.9
+    assert run_config["tropism_match_min_reciprocal_coverage"] == 0.95
+
+
+def test_reference_gff_staging_removes_a_redundant_pseudocircular_tail(tmp_path):
+    """A duplicated prefix ORF must not become an impossible extra reference locus."""
+    reference_gff = tmp_path / "reference.gff"
+    true_sequence = "ATGTAAATGAAA"
+    reference_gff.write_text(
+        "##gff-version 3\n"
+        "##sequence-region reference 1 18\n"
+        "reference\tcaller\tCDS\t1\t6\t.\t+\t0\tID=A_tail;product=replication\n"
+        "reference\tcaller\tCDS\t7\t18\t.\t+\t0\tID=A;product=replication\n"
+        f"##FASTA\n>reference\n{true_sequence}{true_sequence[:6]}\n"
+    )
+    staged_reference = tmp_path / "staged.gff"
+
+    stage_coordinate_normalized_reference_gff(
+        reference_gff,
+        staged_reference,
+        circular_genome_length=len(true_sequence),
+    )
+
+    staged = staged_reference.read_text()
+    assert "ID=A_tail" not in staged
+    assert "ID=A;product=replication" in staged
 
 
 def test_external_qc_env_prepends_run_specific_tool_directory(tmp_path):
@@ -1184,11 +1241,184 @@ def test_successful_tropism_search_without_hits_is_a_measured_zero(tmp_path):
     assert observed["reward_external_tropism"].tolist() == [0.0]
 
 
+@pytest.mark.parametrize(
+    ("percent_identity", "alignment_length", "query_length", "target_length", "expected"),
+    [
+        (100.0, 100, 100, 100, 1.0),
+        (80.0, 100, 100, 100, 1.0),
+        (100.0, 50, 50, 100, 0.5),
+        (100.0, 50, 100, 50, 0.5),
+        (75.0, 40, 80, 100, 0.4),
+        (100.0, 0, 100, 100, 0.0),
+        (100.0, 100, 0, 100, 0.0),
+        (float("nan"), 100, 100, 100, 0.0),
+        (-1.0, 100, 100, 100, 0.0),
+        (101.0, 100, 100, 100, 0.0),
+    ],
+)
+def test_protein_alignment_integrity_penalizes_partial_matches(
+    percent_identity,
+    alignment_length,
+    query_length,
+    target_length,
+    expected,
+):
+    """Presence credit follows coverage while identity remains a separate AAI measurement."""
+    observed = protein_alignment_integrity(
+        percent_identity,
+        alignment_length,
+        query_length,
+        target_length,
+    )
+
+    assert observed == pytest.approx(expected)
+
+
+def test_required_gene_evidence_fails_closed_without_annotations():
+    hits = pd.DataFrame(
+        {
+            "id_prompt": ["umi1_ORF.1"],
+            "protein_database_mmseqs_percent_identity": [100.0],
+            "protein_database_mmseqs_alignment_length": [100],
+            "protein_database_mmseqs_query_length": [100],
+            "protein_database_mmseqs_target_length": [100],
+        }
+    )
+    sequences = pd.DataFrame({"id_prompt": ["umi1"], "genome_id": ["genome_1"]})
+
+    observed = summarize_required_gene_evidence(hits, sequences, ("terminase",))
+
+    assert observed["required_genes_alignment_evidence_available"].tolist() == [False]
+    assert observed["required_genes_integrity_sum"].tolist() == [0.0]
+    assert observed["required_genes_full_length_count"].tolist() == [0]
+
+
+def test_required_gene_evidence_requires_distinct_orfs_for_repeated_labels():
+    hits = pd.DataFrame(
+        {
+            "id_prompt": [
+                "single_ORF.1",
+                "double_ORF.1",
+                "double_ORF.2",
+                "duplicate_ORF.1",
+                "duplicate_ORF.2",
+            ],
+            "annot": ["head morphogenesis"] * 5,
+            "protein_database_mmseqs_target": ["D", "B", "D", "D", "D"],
+            "protein_database_mmseqs_percent_identity": [30.0] * 5,
+            "protein_database_mmseqs_alignment_length": [100] * 5,
+            "protein_database_mmseqs_query_length": [100] * 5,
+            "protein_database_mmseqs_target_length": [100] * 5,
+        }
+    )
+    sequences = pd.DataFrame(
+        {
+            "id_prompt": ["single", "double", "duplicate"],
+            "genome_id": ["genome_1", "genome_2", "genome_3"],
+        }
+    )
+
+    observed = summarize_required_gene_evidence(
+        hits,
+        sequences,
+        ("head morphogenesis", "head morphogenesis"),
+    )
+
+    assert observed["required_genes_total_count"].tolist() == [2, 2, 2]
+    assert observed["required_genes_integrity_sum"].tolist() == [1.0, 2.0, 1.0]
+    assert observed["required_genes_full_length_count"].tolist() == [1, 2, 1]
+
+
+def test_protein_hit_reward_is_fractional_and_duplicate_safe_by_target_family(tmp_path):
+    """Split or duplicated hits to one family cannot replace a missing reference family."""
+    annotation_file = tmp_path / "phrog_annot.tsv"
+    annotation_file.write_text("phrog\tannot\tcategory\nphrog_1\tgene one\tother\nphrog_2\tgene two\tother\n")
+    phrogs_dir = tmp_path / "phrogs"
+    phrogs_dir.mkdir()
+    pd.DataFrame(
+        {
+            "id_prompt": ["umi1_ORF.1", "umi1_ORF.2", "umi1_ORF.3"],
+            "sequence": ["M" * 100, "M" * 100, "M" * 50],
+            "protein_database_mmseqs_target": ["phrog_1", "phrog_1", "phrog_2"],
+            "protein_database_mmseqs_e_value": [1e-20, 1e-20, 1e-20],
+            "protein_database_mmseqs_percent_identity": [30.0, 30.0, 100.0],
+            "protein_database_mmseqs_alignment_length": [100, 100, 50],
+            "protein_database_mmseqs_query_length": [100, 100, 50],
+            "protein_database_mmseqs_target_length": [100, 100, 100],
+        }
+    ).to_csv(phrogs_dir / "mmseqs2_hits.csv", index=False)
+    scored = pd.DataFrame({"id_prompt": ["umi1"], "reward_external_protein_hit_count": [0.0]})
+
+    observed = _add_mmseqs_hit_rewards(
+        scored,
+        tmp_path,
+        {
+            "mmseqs_protein_database_results_dir_save_location": "phrogs",
+            "protein_database_hit_count": 2,
+            "protein_annotation_file": str(annotation_file),
+            "protein_match_min_reciprocal_coverage": 0.95,
+        },
+    )
+
+    assert observed["protein_database_hit_count"].tolist() == [3]
+    assert observed["protein_database_unique_family_count"].tolist() == [2]
+    assert observed["protein_database_effective_family_count"].tolist() == pytest.approx([1.5])
+    assert observed["protein_database_full_length_family_count"].tolist() == [1]
+    assert observed["reward_external_protein_hit_count"].tolist() == pytest.approx([0.75])
+    assert observed["reward_external_protein_hit_count_pass"].tolist() == [0.0]
+
+
+def test_tropism_reward_requires_reciprocal_coverage_for_full_credit_and_pass(tmp_path):
+    """A perfect half-length spike hit earns half reward and cannot pass the hard presence gate."""
+    tropism_dir = tmp_path / "tropism"
+    tropism_dir.mkdir()
+    pd.DataFrame(
+        {
+            "id_prompt": ["partial_ORF.1", "full_ORF.1"],
+            "sequence": ["M" * 50, "M" * 100],
+            "tropism_protein_mmseqs_target": ["G", "G"],
+            "tropism_protein_mmseqs_e_value": [1e-20, 1e-20],
+            "tropism_protein_mmseqs_percent_identity": [100.0, 60.0],
+            "tropism_protein_mmseqs_alignment_length": [50, 100],
+            "tropism_protein_mmseqs_query_length": [50, 100],
+            "tropism_protein_mmseqs_target_length": [100, 100],
+        }
+    ).to_csv(tropism_dir / "mmseqs2_hits.csv", index=False)
+    scored = pd.DataFrame(
+        {
+            "id_prompt": ["partial", "full"],
+            "reward_external_tropism": [0.0, 0.0],
+        }
+    )
+
+    observed = _add_mmseqs_hit_rewards(
+        scored,
+        tmp_path,
+        {
+            "mmseqs_tropism_protein_results_dir_save_location": "tropism",
+            "tropism_protein_sequence_identity_range": [60, 100],
+            "protein_match_min_reciprocal_coverage": 0.95,
+        },
+    )
+
+    assert observed["tropism_protein_mmseqs_percent_identity"].tolist() == [100.0, 60.0]
+    assert observed["tropism_protein_min_reciprocal_coverage"].tolist() == [0.5, 1.0]
+    assert observed["reward_external_tropism"].tolist() == pytest.approx([0.5, 1.0])
+    assert observed["reward_external_tropism_pass"].tolist() == [0.0, 1.0]
+
+
 def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monkeypatch):
     """The external Arc wrapper should map staged outputs back to per-sequence rewards."""
     annotation_file = tmp_path / "phrog_annot_v4.tsv"
     annotation_file.write_text(
         "phrog\tannot\tcategory\nphrog_1\tterminase\tpackaging\nphrog_2\tendolysin\tlysis\nphrog_3\tnan\tunknown\n"
+    )
+    reference_sequence = "ATG" + "AAA" * 28 + "TAA"
+    reference_gff = tmp_path / "reference.gff"
+    reference_gff.write_text(
+        "##gff-version 3\n"
+        "reference\ttest\tCDS\t1\t90\t.\t+\t0\tID=reference_ORF.1;product=terminase\n"
+        f"##FASTA\n>reference\n{reference_sequence}\n"
     )
     base_config = {
         "results_save_dir": "unused",
@@ -1206,6 +1436,7 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
         "synteny_metrics_file_save_location": "qc6_synteny_filter_metrics.csv",
         "protein_database_hit_count": 2,
         "protein_annotation_file": str(annotation_file),
+        "reference_genome_gff_file_save_location": str(reference_gff),
         "required_genes_list": ["terminase", "endolysin"],
         "total_gene_count_range": [2, 2],
         "tropism_protein_sequence_identity_range": [60, 100],
@@ -1240,6 +1471,9 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
                 "protein_database_mmseqs_target": ["phrog_1", "phrog_2", "phrog_3"],
                 "protein_database_mmseqs_e_value": [1e-5, 1e-6, 1e-4],
                 "protein_database_mmseqs_percent_identity": [80.0, 75.0, 70.0],
+                "protein_database_mmseqs_alignment_length": [1, 1, 1],
+                "protein_database_mmseqs_query_length": [1, 1, 1],
+                "protein_database_mmseqs_target_length": [1, 1, 1],
             }
         ).to_csv(phrogs_dir / "mmseqs2_hits.csv", index=False)
         tropism_dir = run_dir / "qc4_mmseqs_results_tropism_protein"
@@ -1251,6 +1485,9 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
                 "tropism_protein_mmseqs_target": ["G", "G"],
                 "tropism_protein_mmseqs_e_value": [1e-5, 1e-4],
                 "tropism_protein_mmseqs_percent_identity": [90.0, 30.0],
+                "tropism_protein_mmseqs_alignment_length": [1, 1],
+                "tropism_protein_mmseqs_query_length": [1, 1],
+                "tropism_protein_mmseqs_target_length": [1, 1],
             }
         ).to_csv(tropism_dir / "mmseqs2_hits.csv", index=False)
         pd.DataFrame(
@@ -1265,6 +1502,8 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
                 "id_prompt": ["umi1", "umi2"],
                 "required_genes_matched_count": [2, 1],
                 "required_genes_total_count": [2, 2],
+                "required_genes_integrity_sum": [2.0, 1.0],
+                "required_genes_full_length_count": [2, 1],
             }
         ).to_csv(run_dir / "qc6_required_genes_metrics.csv", index=False)
         pd.DataFrame(
@@ -1272,6 +1511,8 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
                 "id_prompt": ["umi1", "umi2"],
                 "num_syntenic_genes": [10, 11],
                 "total_num_genes": [10, 11],
+                "reference_num_genes": [10, 11],
+                "duplicate_reference_gene_count": [0, 1],
             }
         ).to_csv(run_dir / "qc6_synteny_filter_metrics.csv", index=False)
 
@@ -1305,7 +1546,7 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
         ),
     )
 
-    assert scored.loc[0, "reward_historical"] == 1.0
+    assert scored.loc[0, "reward_historical"] == pytest.approx(0.84)
     assert 0.0 < scored.loc[1, "reward_historical"] < 1.0
     assert scored["reward"].tolist() == [0.0, 0.0]
     assert scored["reward_binary_historical_core_pass"].tolist() == [1.0, 0.0]
@@ -1315,9 +1556,9 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     assert scored["reward_binary_historical_full_qc_cluster_deduplicated_pass"].tolist() == [1.0, 0.0]
     assert scored["reward_binary_full_qc_cluster_deduplicated_pass"].tolist() == [0.0, 0.0]
     assert scored.loc[0, "reward_external_synteny"] == 1.0
-    assert scored.loc[0, "reward_external_average_protein_identity"] == 1.0
+    assert scored.loc[0, "reward_external_average_protein_identity"] == pytest.approx(0.2)
     assert scored.loc[0, "reward_external_required_genes"] == 1.0
-    assert scored.loc[1, "reward_external_protein_hit_count"] == 0.5
+    assert scored.loc[1, "reward_external_protein_hit_count"] == pytest.approx(0.5)
     assert scored.loc[1, "reward_external_tropism"] == 0.5
     assert scored.loc[1, "reward_external_synteny"] == 0.5
     assert scored["predicted_orf_count"].tolist() == [3, 1]
@@ -1423,21 +1664,23 @@ def test_external_qc_subprocess_failure_raises_by_default_and_retains_artifacts(
     assert any((tmp_path / "work").glob("batch_*"))
 
 
-def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):
-    """Full synteny mode should score distance to Arc-valid gene-count pairs."""
+def test_full_synteny_reward_uses_fixed_reference_denominator_and_copy_balance(tmp_path):
+    """Deleting a reference gene or duplicating homologs must reduce architecture credit."""
     run_dir = tmp_path / "arc_run"
     run_dir.mkdir()
     pd.DataFrame(
         {
-            "id_prompt": ["valid_a", "valid_b", "reference_like", "low_neighbor", "high_neighbor", "invalid"],
-            "num_syntenic_genes": [10, 11, 11, 9, 12, 13],
-            "total_num_genes": [10, 12, 11, 10, 13, 12],
+            "id_prompt": ["complete", "gene_deleted", "duplicated", "delete_and_duplicate", "invalid"],
+            "num_syntenic_genes": [11, 10, 11, 10, 12],
+            "total_num_genes": [11, 10, 12, 12, 12],
+            "reference_num_genes": [11] * 5,
+            "duplicate_reference_gene_count": [0, 0, 1, 2, 0],
         }
     ).to_csv(run_dir / "qc6_synteny_filter_metrics.csv", index=False)
     df = pd.DataFrame(
         {
-            "arc_qc_id": ["valid_a", "valid_b", "reference_like", "low_neighbor", "high_neighbor", "invalid"],
-            "reward_external_synteny": [0.0] * 6,
+            "arc_qc_id": ["complete", "gene_deleted", "duplicated", "delete_and_duplicate", "invalid"],
+            "reward_external_synteny": [0.0] * 5,
         }
     )
 
@@ -1450,8 +1693,9 @@ def test_full_synteny_reward_uses_arc_valid_pair_distance_metric(tmp_path):
         },
     )
 
-    assert scored["reward_external_synteny"].tolist() == [1.0, 1.0, 0.5, 0.5, 0.25, 0.0]
-    assert scored["synteny_pair_distance"].tolist() == [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+    assert scored["reward_external_synteny"].tolist() == pytest.approx([1.0, 10 / 11, 0.5, 10 / 33, 0.0])
+    assert scored["synteny_reference_coverage_score"].tolist() == pytest.approx([1.0, 10 / 11, 1.0, 10 / 11, 0.0])
+    assert scored["synteny_copy_balance_score"].tolist() == [1.0, 1.0, 0.5, 1 / 3, 0.0]
 
 
 def test_online_synteny_pass_uses_metrics_not_measurement_survivor_csv(tmp_path):
@@ -1459,8 +1703,10 @@ def test_online_synteny_pass_uses_metrics_not_measurement_survivor_csv(tmp_path)
     pd.DataFrame(
         {
             "id_prompt": ["valid", "invalid"],
-            "num_syntenic_genes": [10, 0],
-            "total_num_genes": [10, 5],
+            "num_syntenic_genes": [11, 10],
+            "total_num_genes": [11, 12],
+            "reference_num_genes": [11, 11],
+            "duplicate_reference_gene_count": [0, 2],
             "missing_synteny_output": [False, False],
         }
     ).to_csv(tmp_path / "metrics.csv", index=False)
@@ -1488,6 +1734,8 @@ def test_full_synteny_reward_does_not_score_unmeasured_rows(tmp_path):
             "id_prompt": ["measured", "artifact_missing"],
             "num_syntenic_genes": [10, 0],
             "total_num_genes": [10, 0],
+            "reference_num_genes": [10, 10],
+            "duplicate_reference_gene_count": [0, 0],
             "missing_synteny_output": [False, True],
         }
     ).to_csv(run_dir / "qc6_synteny_filter_metrics.csv", index=False)
@@ -1515,14 +1763,152 @@ def test_full_synteny_reward_does_not_score_unmeasured_rows(tmp_path):
     assert pd.isna(scored.loc[1, "synteny_pair_score"])
 
 
-def test_synteny_distance_score_matches_planned_examples():
-    """The standalone synteny score should match the reviewed table examples."""
-    assert _synteny_distance_score(10, 11)[0] == 1.0
-    assert _synteny_distance_score(11, 12)[0] == 1.0
-    assert _synteny_distance_score(11, 11)[0] == 0.5
-    assert _synteny_distance_score(9, 10)[0] == 0.5
-    assert _synteny_distance_score(12, 13)[0] == 0.25
-    assert _synteny_distance_score(13, 12)[0] == 0.0
+def test_synteny_distance_score_uses_fixed_reference_denominator():
+    assert _synteny_distance_score(11, 11, 0)[0] == 1.0
+    assert _synteny_distance_score(10, 11, 0)[0] == pytest.approx(10 / 11)
+    assert _synteny_distance_score(11, 11, 1)[0] == 0.5
+    assert _synteny_distance_score(10, 11, 2)[0] == pytest.approx(10 / 33)
+    assert _synteny_distance_score(12, 11, 0)[0] == 0.0
+
+
+def test_reference_cluster_architecture_rejects_deletion_hidden_by_duplicates(tmp_path):
+    root_dir = tmp_path / "lovis4u"
+    gff_dir = tmp_path / "gff"
+    root_dir.mkdir()
+    gff_dir.mkdir()
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "metrics.csv"
+    pd.DataFrame(
+        {
+            "id_prompt": ["complete", "delete_duplicate"],
+            "genome_id": ["genome_1", "genome_2"],
+            "total_num_genes": [2, 2],
+        }
+    ).to_csv(input_csv, index=False)
+    for genome_id, rows in {
+        "genome_1": [
+            ("reference_ORF.1", "reference_ORF.1"),
+            ("reference_ORF.2", "reference_ORF.2"),
+            ("genome_1-ORF.1", "reference_ORF.1"),
+            ("genome_1-ORF.2", "reference_ORF.2"),
+        ],
+        "genome_2": [
+            ("reference_ORF.1", "reference_ORF.1"),
+            ("reference_ORF.2", "reference_ORF.2"),
+            ("genome_2-ORF.1", "reference_ORF.2"),
+            ("genome_2-ORF.2", "reference_ORF.2"),
+        ],
+    }.items():
+        mmseqs_dir = root_dir / genome_id / "mmseqs"
+        mmseqs_dir.mkdir(parents=True)
+        pd.DataFrame(rows).to_csv(mmseqs_dir / "mmseqs_clustering.tsv", sep="\t", header=False, index=False)
+        (gff_dir / f"{genome_id}.gff").write_text(
+            "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=gene one\n"
+            "contig\ttool\tCDS\t91\t180\t.\t+\t0\tID=ORF.2;product=gene two\n"
+        )
+
+    measure_reference_cluster_architecture(root_dir, gff_dir, input_csv, output_csv)
+    metrics = pd.read_csv(output_csv)
+    assert metrics["num_syntenic_genes"].tolist() == [2, 1]
+    assert metrics["reference_num_genes"].tolist() == [2, 2]
+    assert metrics["duplicate_reference_gene_count"].tolist() == [0, 1]
+
+    scored = _add_full_synteny_rewards(
+        pd.DataFrame({"arc_qc_id": ["complete", "delete_duplicate"], "reward_external_synteny": [0.0, 0.0]}),
+        tmp_path,
+        {"synteny_metrics_file_save_location": "metrics.csv"},
+    )
+    assert scored["reward_external_synteny"].tolist() == [1.0, 0.25]
+    assert scored["reward_external_synteny_pass"].tolist() == [1.0, 0.0]
+
+
+def test_reference_cluster_architecture_ignores_reference_features_absent_from_staged_gff(tmp_path):
+    root_dir = tmp_path / "lovis4u"
+    gff_dir = tmp_path / "gff"
+    mmseqs_dir = root_dir / "genome_1" / "mmseqs"
+    mmseqs_dir.mkdir(parents=True)
+    gff_dir.mkdir()
+    pd.DataFrame(
+        [
+            ("reference_ORF.1", "reference_ORF.1"),
+            ("reference_ORF.artifact", "reference_ORF.artifact"),
+            ("genome_1-ORF.1", "reference_ORF.1"),
+            ("genome_1-ORF.2", "reference_ORF.artifact"),
+        ]
+    ).to_csv(mmseqs_dir / "mmseqs_clustering.tsv", sep="\t", header=False, index=False)
+    (gff_dir / "genome_1.gff").write_text(
+        "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=kept\n"
+        "contig\ttool\tCDS\t91\t180\t.\t+\t0\tID=ORF.2;product=artifact\n"
+    )
+    reference_gff = tmp_path / "reference.gff"
+    reference_gff.write_text("reference\ttool\tCDS\t1\t90\t.\t+\t0\tID=reference_ORF.1;product=kept\n")
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    pd.DataFrame({"id_prompt": ["candidate"], "genome_id": ["genome_1"]}).to_csv(input_csv, index=False)
+
+    measure_reference_cluster_architecture(root_dir, gff_dir, input_csv, output_csv, reference_gff)
+
+    observed = pd.read_csv(output_csv)
+    assert observed["num_syntenic_genes"].tolist() == [1]
+    assert observed["reference_num_genes"].tolist() == [1]
+    assert observed["duplicate_reference_gene_count"].tolist() == [0]
+    assert observed["non_syntenic_genes"].tolist() == ["ORF.2"]
+
+
+def test_reference_cluster_architecture_penalizes_reordered_loci(tmp_path):
+    root_dir = tmp_path / "lovis4u"
+    gff_dir = tmp_path / "gff"
+    gff_dir.mkdir()
+    reference_gff = tmp_path / "reference.gff"
+    reference_gff.write_text(
+        "reference\ttool\tCDS\t1\t90\t.\t+\t0\tID=reference_ORF.1;product=one\n"
+        "reference\ttool\tCDS\t91\t180\t.\t+\t0\tID=reference_ORF.2;product=two\n"
+        "reference\ttool\tCDS\t181\t270\t.\t+\t0\tID=reference_ORF.3;product=three\n"
+    )
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    pd.DataFrame(
+        {
+            "id_prompt": ["complete", "reordered"],
+            "genome_id": ["genome_1", "genome_2"],
+            "total_num_genes": [3, 3],
+        }
+    ).to_csv(input_csv, index=False)
+    cluster_rows = {
+        "genome_1": [(1, 1), (2, 2), (3, 3)],
+        "genome_2": [(1, 1), (2, 3), (3, 2)],
+    }
+    for genome_id, assignments in cluster_rows.items():
+        mmseqs_dir = root_dir / genome_id / "mmseqs"
+        mmseqs_dir.mkdir(parents=True)
+        rows = [(f"reference_ORF.{index}", f"reference_ORF.{index}") for index in range(1, 4)]
+        rows.extend(
+            (f"{genome_id}-ORF.{candidate}", f"reference_ORF.{reference}") for candidate, reference in assignments
+        )
+        pd.DataFrame(rows).to_csv(mmseqs_dir / "mmseqs_clustering.tsv", sep="\t", header=False, index=False)
+        (gff_dir / f"{genome_id}.gff").write_text(
+            "contig\ttool\tCDS\t1\t90\t.\t+\t0\tID=ORF.1;product=one\n"
+            "contig\ttool\tCDS\t91\t180\t.\t+\t0\tID=ORF.2;product=two\n"
+            "contig\ttool\tCDS\t181\t270\t.\t+\t0\tID=ORF.3;product=three\n"
+        )
+
+    measure_reference_cluster_architecture(root_dir, gff_dir, input_csv, output_csv, reference_gff)
+
+    observed = pd.read_csv(output_csv)
+    assert observed["num_syntenic_genes"].tolist() == [3, 3]
+    assert observed["reference_order_violation_count"].tolist() == [0, 3]
+    scored = _add_full_synteny_rewards(
+        pd.DataFrame(
+            {
+                "arc_qc_id": ["complete", "reordered"],
+                "reward_external_synteny": [0.0, 0.0],
+            }
+        ),
+        tmp_path,
+        {"synteny_metrics_file_save_location": "output.csv"},
+    )
+    assert scored["reward_external_synteny"].tolist() == [1.0, 0.25]
+    assert scored["reward_external_synteny_pass"].tolist() == [1.0, 0.0]
 
 
 def test_average_protein_identity_reward_uses_prefilter_metrics(tmp_path):
@@ -1594,6 +1980,57 @@ def test_average_protein_identity_reward_requires_evidence(tmp_path):
     assert scored["reward_external_average_protein_identity_pass"].tolist() == [0.0, 0.0, 0.0]
 
 
+def test_average_protein_identity_uses_unique_full_length_mmseqs_families(tmp_path):
+    """Duplicate and truncated hits must not inflate AAI evidence."""
+    run_dir = tmp_path / "arc_run"
+    phrogs_dir = run_dir / "phrogs"
+    phrogs_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "id_prompt": [
+                "umi1_ORF.1",
+                "umi1_ORF.2",
+                "umi1_ORF.3",
+                "umi2_ORF.1",
+                "umi2_ORF.2",
+            ],
+            "protein_database_mmseqs_target": ["family_A", "family_A", "family_B", "family_A", "family_A"],
+            "protein_database_mmseqs_percent_identity": [80.0, 70.0, 100.0, 70.0, 80.0],
+            "protein_database_mmseqs_alignment_length": [100, 100, 50, 100, 100],
+            "protein_database_mmseqs_query_length": [100, 100, 50, 100, 100],
+            "protein_database_mmseqs_target_length": [100, 100, 100, 100, 100],
+        }
+    ).to_csv(phrogs_dir / "mmseqs2_hits.csv", index=False)
+    pd.DataFrame(
+        {
+            "id_prompt": ["umi1", "umi2"],
+            "average_protein_percent_identity": [99.0, 99.0],
+            "average_protein_identity_gene_count": [3, 2],
+        }
+    ).to_csv(run_dir / "aai.csv", index=False)
+    df = pd.DataFrame(
+        {
+            "arc_qc_id": ["umi1", "umi2"],
+            "reward_external_average_protein_identity": [0.0, 0.0],
+        }
+    )
+
+    scored = _add_average_protein_identity_rewards(
+        df,
+        run_dir,
+        {
+            "average_protein_sequence_identity_metrics_file_save_location": "aai.csv",
+            "average_protein_sequence_identity_range": [0, 95],
+            "mmseqs_protein_database_results_dir_save_location": "phrogs",
+            "protein_match_min_reciprocal_coverage": 0.95,
+        },
+    )
+
+    assert scored["average_protein_percent_identity"].tolist() == [80.0, 80.0]
+    assert scored["average_protein_identity_gene_count"].tolist() == [1, 1]
+    assert scored["reward_external_average_protein_identity"].tolist() == pytest.approx([0.1, 0.1])
+
+
 def test_required_gene_reward_is_fractional_and_evidence_weighted(tmp_path):
     """Required-gene reward should stay gradual and give no credit without evidence."""
     run_dir = tmp_path / "arc_run"
@@ -1603,6 +2040,8 @@ def test_required_gene_reward_is_fractional_and_evidence_weighted(tmp_path):
             "id_prompt": ["umi1", "umi2", "umi3", "umi4"],
             "required_genes_matched_count": [9, 6, 4, 0],
             "required_genes_total_count": [9, 9, 6, 0],
+            "required_genes_integrity_sum": [9.0, 6.0, 4.0, 0.0],
+            "required_genes_full_length_count": [9, 6, 4, 0],
         }
     ).to_csv(run_dir / "qc6_required_genes_metrics.csv", index=False)
     df = pd.DataFrame(
@@ -1624,3 +2063,32 @@ def test_required_gene_reward_is_fractional_and_evidence_weighted(tmp_path):
     assert round(scored.loc[1, "reward_external_required_genes"], 6) == round(6 / 9, 6)
     assert round(scored.loc[2, "reward_external_required_genes"], 6) == round((4 / 6) * (6 / 9), 6)
     assert scored.loc[3, "reward_external_required_genes"] == 0.0
+
+
+def test_required_gene_reward_uses_fixed_family_denominator_and_full_length_gate(tmp_path):
+    """Duplicate and partial annotations cannot substitute for an intact missing family."""
+    run_dir = tmp_path / "arc_run"
+    run_dir.mkdir()
+    pd.DataFrame(
+        {
+            "id_prompt": ["umi1"],
+            "required_genes_matched_count": [3],
+            "required_genes_total_count": [2],
+            "required_genes_integrity_sum": [1.5],
+            "required_genes_full_length_count": [1],
+        }
+    ).to_csv(run_dir / "qc6_required_genes_metrics.csv", index=False)
+    df = pd.DataFrame({"arc_qc_id": ["umi1"], "reward_external_required_genes": [0.0]})
+
+    scored = _add_required_gene_rewards(
+        df,
+        run_dir,
+        {"required_genes_metrics_file_save_location": "qc6_required_genes_metrics.csv"},
+        evidence_target=2.0,
+    )
+
+    assert scored["required_genes_matched_count"].tolist() == [3.0]
+    assert scored["required_genes_integrity_sum"].tolist() == [1.5]
+    assert scored["required_genes_full_length_count"].tolist() == [1.0]
+    assert scored["reward_external_required_genes"].tolist() == pytest.approx([0.75])
+    assert scored["reward_external_required_genes_pass"].tolist() == [0.0]

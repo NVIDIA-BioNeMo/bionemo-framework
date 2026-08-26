@@ -13,6 +13,10 @@ Keep rewards bounded on `[0, 1]`, with the objective plan's meaningful baseline 
 
 Preserve formulas, controls, record mapping, and verified scoring concurrency when refactoring or optimizing a scorer; compare the reference and optimized paths on the same cases.
 
+For protein-match objectives, retain alignment, query, and target lengths. Give partial gene-presence credit from reciprocal coverage, keep identity in identity-specific objectives, and require the configured reciprocal-coverage threshold for intact-gene hard gates. Calibrate coverage thresholds against the actual database target type (for example, exact proteins versus profile consensuses). Count unique target families where the objective means distinct functions, and compute family-level AAI from one best coverage-qualified hit per family so fragments and duplicate ORFs cannot inflate evidence. Exercise embedded and overlapping genes explicitly because a general ORF caller may omit them even when the reference annotation contains them.
+
+For reference-architecture objectives, use one-to-one locus matching against a fixed callable-reference denominator, score circular order explicitly, and penalize excess homolog copies. Remove pseudocircular annotation artifacts from the denominator rather than making the reference fail its own gate.
+
 For every new or modified function, run biological positive and negative controls—not only arithmetic unit tests. Use known or evidence-supported expected high- and low-scoring genomes or targeted counterfactuals, record their provenance and expected ordering, and exercise them through the exact installed scorer and combined portfolio.
 
 For learned or stacked scorers, construct upstream features from deployment-matched out-of-fold predictions. Test ranking and calibration in the high-reward tail, scorer-training versus policy-candidate shift, and model/seed disagreement; treat unsupported candidates as missing or out of domain rather than extrapolating confidently.

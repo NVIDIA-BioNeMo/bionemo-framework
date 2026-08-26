@@ -100,6 +100,20 @@
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-008-partial-protein-hits",
+      "prompt": "A protein reward counts high-identity MMseqs hits, but many align only a short fragment and duplicate ORFs can hit the same family. AAI also averages every hit. Harden the online reward and final QC.",
+      "expected_output": "Coverage-aware, duplicate-safe protein evidence with aligned online and hard-QC semantics.",
+      "assertions": [
+        "The scorer retains alignment, query, and target lengths and reports reciprocal coverage rather than treating identity alone as gene presence.",
+        "Partial hits may receive bounded dense credit, but intact-gene hard gates require the configured reciprocal-coverage threshold on both query and target.",
+        "Distinct-family counts and family-level AAI use one best coverage-qualified hit per target family so duplicate ORFs and fragments cannot inflate evidence, and thresholds are calibrated for exact targets versus profile consensuses.",
+        "Missing alignment-length evidence fails closed rather than falling back to raw hit counts.",
+        "Focused tests include full-length, truncated, duplicate-family, missing-evidence, and overlapping or embedded-gene cases and compare online scoring with final QC."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
     }
   ]
 }

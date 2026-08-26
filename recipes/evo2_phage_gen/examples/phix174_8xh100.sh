@@ -1038,10 +1038,13 @@ PY
 from pathlib import Path
 import sys
 import yaml
+from Bio import SeqIO
+from bionemo.evo2_phage_gen.protein_evidence import stage_coordinate_normalized_reference_gff
 
 base, fasta, output = Path(sys.argv[1]), Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve()
 remove_filter = sys.argv[4] == "true"
 config = yaml.safe_load(base.read_text())
+output.mkdir(parents=True, exist_ok=True)
 config.update({
     "results_save_dir": str(output / "arc"),
     "current_config_file": str(output / "config.yaml"),
@@ -1059,7 +1062,19 @@ config.update({
     "genetic_architecture_visualization_and_synteny_filtering": True,
     "use_reference_genome": True,
 })
-output.mkdir(parents=True, exist_ok=True)
+repo_root = base.resolve().parents[3]
+reference_fasta = repo_root / config["genetic_architecture_reference_genome"]
+reference_gff = repo_root / config["reference_genome_gff_file_save_location"]
+reference_records = list(SeqIO.parse(reference_fasta, "fasta"))
+if len(reference_records) != 1:
+    raise ValueError("The Arc architecture reference FASTA must contain exactly one sequence")
+staged_reference_gff = output / "reference_genome.coordinate_normalized.gff"
+stage_coordinate_normalized_reference_gff(
+    reference_gff,
+    staged_reference_gff,
+    circular_genome_length=len(reference_records[0].seq),
+)
+config["reference_genome_gff_file_save_location"] = str(staged_reference_gff)
 (output / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
 PY
   }

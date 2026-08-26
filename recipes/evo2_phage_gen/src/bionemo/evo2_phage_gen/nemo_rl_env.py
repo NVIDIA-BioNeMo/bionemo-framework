@@ -851,7 +851,13 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 synteny_mode=str(external_qc_cfg.get("synteny_mode", "proxy")),
                 enable_average_protein_identity=bool(external_qc_cfg.get("enable_average_protein_identity", False)),
                 enable_required_genes=bool(external_qc_cfg.get("enable_required_genes", False)),
-                required_genes_evidence_target=float(external_qc_cfg.get("required_genes_evidence_target", 9.0)),
+                required_genes_evidence_target=float(external_qc_cfg.get("required_genes_evidence_target", 10.0)),
+                protein_match_min_reciprocal_coverage=float(
+                    external_qc_cfg.get("protein_match_min_reciprocal_coverage", 0.75)
+                ),
+                tropism_match_min_reciprocal_coverage=float(
+                    external_qc_cfg.get("tropism_match_min_reciprocal_coverage", 0.95)
+                ),
                 lovis4u_parallel_jobs=external_qc_cfg.get("lovis4u_parallel_jobs", 12),
                 lovis4u_chunk_size=external_qc_cfg.get("lovis4u_chunk_size"),
                 lovis4u_mmseqs_threads=external_qc_cfg.get("lovis4u_mmseqs_threads"),
