@@ -127,7 +127,7 @@
         "For the fixed-end linear dsDNA genome, it first reconstructs the biological termini and chosen packaged or deposited form rather than using an artifact deposit join, then calibrates both strand-equivalent terminal orientations without allowing arbitrary internal rotation.",
         "For each target, same-length generation batches mix eligible circular anchors or both fixed-end strand orientations, and each RL global batch contains the intended orientation-by-length mixture even if a decode microbatch cannot mix lengths.",
         "The fixed validation bank independently represents the same strata, with starts, lengths, seeds, and topology recorded.",
-        "It checks circular-origin invariance of reward and filter outcomes and does not use origin-dependent whole-sequence likelihood to globally rank mixed-origin designs."
+        "It checks circular-origin invariance for rewards and filters declared rotation-invariant, records any intentional origin-dependent exceptions, and does not use origin-dependent whole-sequence likelihood to globally rank mixed-origin designs."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": null

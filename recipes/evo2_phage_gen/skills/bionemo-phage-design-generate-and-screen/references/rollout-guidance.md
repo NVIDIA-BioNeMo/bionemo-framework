@@ -19,3 +19,7 @@ controls.
 Report raw, biological-representative, hard-QC, and post-QC-cluster counts,
 PASS/FAIL/INDETERMINATE denominators, uncertainty when comparing yields, and whether generation or
 filtering saturated before forecasting a larger experiment.
+
+- Apply valid gates as a cheap-to-expensive waterfall and retain each stage's input, PASS, FAIL, INDETERMINATE, survivor counts, and per-candidate reasons; a final conjunction alone is not diagnostic.
+- Use intrinsic properties for per-candidate PASS gates. Express rollout-relative diversity as a diagnostic or explicit set-level portfolio rule, not an intrinsic genome property; use saturated model maxima or narrow bands as gates only when controls validate a separating boundary.
+- Trace dataflow, then define and replay candidate gates on saved measurements first. A gate that fed an online reward shaped the historical policy, but only adopting its change in-loop requires a new RL attempt; a genuinely post-hoc gate may be versioned and reapplied without retraining.

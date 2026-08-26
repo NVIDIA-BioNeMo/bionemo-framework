@@ -278,6 +278,21 @@
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-020-hard-filter-controls",
+      "prompt": "Derive final hard filters alongside RL rewards for a therapeutic phage design. Most genome properties should remain biologically natural, host-range expansion to a new strain is an explicitly directional goal that may move out of the reference distribution, and intended-use safety exclusions still apply. Existing rewards already have narrow full-credit windows, but one target host has no known positive interaction controls.",
+      "expected_output": "Gate-specific control contracts that preserve naturalness by default without blocking an explicit directional goal.",
+      "assertions": [
+        "For non-directional properties, the response treats the viable-reference distribution as the default naturalness prior and requires the wild type and viable relatives to pass any corresponding viability gate.",
+        "For a hard gate meant to certify the directional host-range expansion, it allows the target property to leave the natural distribution, requires the wild type and known negatives to fail, and requires known positives to pass rather than using the reference as the positive control.",
+        "It validates directional thresholds as a confusion matrix over known positives and negatives; when no positive ground truth exists, it marks the gate provisional or unvalidatable rather than tuning around the model output.",
+        "It validates intended-use safety gates with suitable safe and hazardous controls rather than requiring every viable natural phage to pass a therapeutic profile.",
+        "It derives gate thresholds from the applicable control distribution and viable range, not by copying an RL full-credit plateau or a brittle narrow reward band.",
+        "Explicitly directional movement does not waive independent viability, naturalness on non-directional properties, or safety gates."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
     }
   ]
 }

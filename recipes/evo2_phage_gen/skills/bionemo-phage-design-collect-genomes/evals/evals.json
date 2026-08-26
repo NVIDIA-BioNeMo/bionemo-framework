@@ -86,7 +86,7 @@
       "prompt": "Resolve the termini of OY979411.1. LOCUS says circular and its deposited sequence has an exact 127-nt terminal overlap, but 127 is common across unrelated assemblies and properly terminated Drulisvirus relatives carry approximately 250-nt DTRs. State which molecular sequence should drive genome length and coding-density calculations.",
       "expected_output": "A linear fixed-end classification that rejects the 127-nt assembler artifact, recovers the collapsed biological DTR, and distinguishes deposited from packaged sequence forms.",
       "assertions": [
-        "The response rejects the 127-nt overlap as an assembler k-mer artifact rather than calling it the biological DTR, using its recurrence across unrelated sizes or families and hard cutoff under mismatch-tolerant extension.",
+        "The response rejects the 127-nt overlap as an assembler k-mer artifact rather than calling it the biological DTR, using recurrence across unrelated sizes or families plus its hard mismatch-tolerant cutoff as convergent evidence rather than treating k-mer length alone as decisive.",
         "It validates the detector against a published DTR and searches a broad congener corpus for properly terminated genomes rather than concluding from one small panel.",
         "It maps congener DTRs onto the collapsed deposit to recover the internal DTR copy and true origin while retaining the fixed-end Drulisvirus classification.",
         "It distinguishes the circularly permuted deposited repeat unit [DTR][unique] from the packaged genome [DTR][unique][DTR], whose length is the deposit plus one DTR copy.",

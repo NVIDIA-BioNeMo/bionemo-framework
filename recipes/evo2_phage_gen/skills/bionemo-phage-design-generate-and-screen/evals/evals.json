@@ -61,6 +61,21 @@
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-005-hard-filter-waterfall",
+      "prompt": "Screen a completed rollout with six approved criteria. The current report applies them as one conjunction and says zero passed. One proposed gate is rollout-relative singleton diversity, another is a classifier saturated at p=1, and the basic-feasibility mask also controlled whether diversity reward was earned during RL. Decide what can be changed post hoc and produce a diagnostic final passing set.",
+      "expected_output": "A cheap-to-expensive hard-filter waterfall that distinguishes valid candidate gates, diagnostics, and in-loop reward coupling.",
+      "assertions": [
+        "The response orders valid gates cheap-to-expensive and reports input, PASS, FAIL, INDETERMINATE, and surviving counts plus failure reasons at every stage rather than only the final conjunction.",
+        "It preserves per-candidate measurements so a post-hoc threshold can be reassessed without rerunning unaffected tools or hiding which stage eliminated the set.",
+        "It does not turn rollout-relative singleton diversity into an intrinsic genome gate, while allowing a separately reported set-level diversity rule when selecting a portfolio.",
+        "It does not use a saturated p=1 model output as a gate without validated positive-negative separation and treats a brittle narrow band similarly.",
+        "It traces the feasibility mask into the online diversity reward, but first permits a proposed replacement gate to be replayed on saved measurements; only adopting the change in-loop requires a new RL attempt, while genuinely post-hoc gates require no retraining.",
+        "Any relaxed or removed post-hoc criterion is versioned and reported rather than silently changed after seeing candidate outcomes."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
     }
   ]
 }

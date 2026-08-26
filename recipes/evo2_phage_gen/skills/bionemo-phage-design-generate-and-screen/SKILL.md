@@ -24,7 +24,7 @@ Process candidates in this order:
 3. remove exact biological duplicates, including circular and reverse-complement equivalents when applicable;
 4. run every required external and internal QC component with its configured positive controls on the representatives;
 5. treat missing required evidence or tool failure as INDETERMINATE rather than PASS;
-6. apply the approved target hard-filter profile;
+6. apply the approved target hard-filter profile as the cheap-to-expensive waterfall defined in the rollout guidance;
 7. cluster only the safety-PASS hard-QC set at 99% identity for diversity reporting; and
 8. rank cluster representatives only when the objective plan defines a defensible ranking.
 

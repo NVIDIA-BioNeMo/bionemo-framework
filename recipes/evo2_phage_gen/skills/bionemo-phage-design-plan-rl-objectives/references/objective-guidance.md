@@ -9,7 +9,7 @@ Apply the ML-training playbook when a learned or model-based RL scorer is explic
 Carry these phage-specific constraints into the portfolio:
 
 - Derive the packaging-length envelope from exact FASTA lengths of same-capsid congeners, usually at genus level; rounded kilobase metadata can erase a narrow distribution. Shape it asymmetrically where biology requires: capsid capacity is a hard upper constraint, while supported undersize can package (T7: about 85–103% of unit length).
-- Protect the adsorption/receptor-binding module explicitly: it determines host range but is commonly hypervariable and sorted into an unprotected variable tier. Normalize identity to a lower full-credit target than for core genes so specificity domains can diverge without losing the module.
+- Protect the adsorption/receptor-binding module explicitly: it is a primary determinant of adsorption specificity and often host range, but does not establish productive infection; it is also commonly hypervariable and sorted into an unprotected variable tier. Normalize identity to a lower full-credit target than for core genes so specificity domains can diverge without losing the module.
 - Treat DIAMOND, GenoPHI's 4,243 protein-family hashes, and PhageHostLearn's ESM2 RBP embeddings as blind to ribosome-binding sites, start-codon choice, codon usage, and restriction-site content; add nucleotide-level terms for required properties.
 - Score the non-coding leader/promoter that bootstraps infection and transcription terminators that set structural-protein stoichiometry; gene-level objectives cannot protect them.
 - Treat `Mu-like` packaging as a therapeutic exclusion: it signals a transposable temperate phage carrying host DNA at its packaged ends. Record no-host-derived-DNA evidence as a distinct composition/final-QC requirement that gene and protein screens do not satisfy.
@@ -28,5 +28,11 @@ For each reward, record:
 - its relationship to final hard QC and experimental validation.
 
 Keep component scores visible. Test for duplicated evidence, scale dominance, opposing directions, sparse support, and combinations that favor the wrong endpoint; use counterfactuals to ask whether a reward improves by deleting evidence, running to the generation cap, or relocating rather than preserving a feature. A required safety or viability check remains a final exclusion or INDETERMINATE result even when an online proxy is useful for shaping.
+
+Derive each hard gate with its own control contract:
+
+- For a non-directional viability property, use viable references as the default naturalness prior; the wild type and chosen viable controls must pass, and the gate comes from their viable range rather than an RL full-credit plateau or brittle narrow band.
+- For a hard gate meant to certify an explicitly directional change, require the wild type and known negatives to fail and known positives to pass in a confusion matrix; the natural range is a baseline, not a ceiling, while independent viability, safety, and non-directional naturalness gates remain.
+- For intended-use safety, require suitable safe controls to pass and hazards to fail. If ground-truth controls are absent or the model cannot reproduce them, mark the gate unvalidated rather than tuning the threshold around the result.
 
 Write the resolved human-readable record to `artifacts/RL_SCORE_DEFINITIONS.md` in the selected result root. Include exact zero/full-credit states and both-sided partial-credit behavior when applicable, plus concise biological rationale and evidence citations. Use the **Current PhiX174 GDPO score definitions** section in `examples/README.md` as a worked format only. An agent creates or refreshes this artifact when objectives are planned or implemented; it is not a stage of the fixed E2E script.
