@@ -390,6 +390,42 @@ def test_prepare_arc_pipeline_requires_compatible_arc_revision(tmp_path, monkeyp
         )
 
 
+def test_prepare_arc_pipeline_filters_extension_only_orfipy_calls(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    pipeline_source = """def run_pipeline(config, seq_fasta):
+    run_orfipy("circular.fasta",
+                config["orfipy_threads"],
+                config["orfipy_start_codons"],
+                config["orfipy_stop_codons"],
+                config["orfipy_strand"],
+                config["orfipy_min_max_orf_lengths"][0],
+                config["orfipy_min_max_orf_lengths"][1],
+                config["results_save_dir"],
+                config["orfipy_orfs_file_save_location"],
+                config["orfipy_tmp_proteins_file_save_location"],
+                config["orfipy_proteins_file_save_location"])
+"""
+    for filename in ARC_PIPELINE_FILES:
+        content = pipeline_source if filename == "genome_design_filtering_pipeline.py" else "print('ok')\n"
+        if filename == "genetic_architecture.py":
+            content = f'fasta_file = "{ARC_GENETIC_ARCHITECTURE_IMPORT_FASTA}"\n'
+        (source_dir / filename).write_text(content)
+    reference_fasta = tmp_path / "reference.fna"
+    reference_fasta.write_text(">reference\nACGT\n")
+
+    prepare_arc_pipeline_workdir(
+        source_dir,
+        tmp_path / "prepared",
+        phix174_fasta=reference_fasta,
+        pipeline_patch=None,
+    )
+
+    prepared = (tmp_path / "prepared" / "genome_design_filtering_pipeline.py").read_text()
+    assert "remove_pseudocircular_extension_orfs(" in prepared
+    assert "seq_fasta," in prepared
+
+
 def test_prepare_arc_pipeline_workdir_applies_maintained_patch(tmp_path):
     """The real Arc source should be patched from the tracked maintained patch."""
     if not DEFAULT_ARC_PIPELINE_SOURCE_DIR.exists() or not DEFAULT_PHIX174_FASTA.exists():

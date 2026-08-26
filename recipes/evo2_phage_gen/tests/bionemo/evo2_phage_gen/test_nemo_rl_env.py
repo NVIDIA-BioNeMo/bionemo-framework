@@ -228,6 +228,30 @@ def test_environment_requires_enabled_sequence_safety(tmp_path: Path):
         env_cls({"sequence_safety": disabled})
 
 
+def test_environment_maps_asymmetric_genome_length_reward_bounds(tmp_path: Path):
+    """The resolved RL environment must not fall back to the broad hard-QC interval."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
+    env = env_cls(
+        {
+            "sequence_safety": _sequence_safety_mapping(tmp_path),
+            "genome_length_reward_lower_zero": 5305,
+            "genome_length_reward_lower_full": 5359,
+            "genome_length_reward_upper_full": 5391,
+            "genome_length_reward_upper_zero": 5494,
+        }
+    )
+
+    assert (
+        env.config.genome_length_reward_lower_zero,
+        env.config.genome_length_reward_lower_full,
+        env.config.genome_length_reward_upper_full,
+        env.config.genome_length_reward_upper_zero,
+    ) == (5305.0, 5359.0, 5391.0, 5494.0)
+
+
 def test_gdpo_objective_scores_reduce_named_columns_positionally():
     """GDPO helper should build a stable [B, K] objective table without adding aggregate reward."""
     scored = pd.DataFrame(

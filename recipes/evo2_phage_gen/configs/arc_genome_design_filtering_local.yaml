@@ -35,7 +35,7 @@ initialized_seqs_fasta_file_save_location: "qc1_initial_seqs.fasta"
 nucleotide_filtering: true
 nucleotide_character_filter: true
 genome_length_filter: true
-genome_length_range: [4000, 6000]
+genome_length_range: [5306, 5493]
 gc_content_filter: true
 gc_content_range: [30, 65]
 nucleotide_homopolymer_filter: true

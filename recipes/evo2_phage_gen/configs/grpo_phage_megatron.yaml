@@ -186,7 +186,7 @@ policy:
     port_range_low: 11001
     port_range_high: 15000
     backend: megatron
-    max_new_tokens: 6984
+    max_new_tokens: 5450
     temperature: 0.8
     top_p: 1.0
     top_k: null
@@ -238,8 +238,13 @@ data:
     env_name: phage_qc
 env:
   phage_qc:
-    genome_length_min: 4000
-    genome_length_max: 6000
+    genome_length_min: 5306
+    genome_length_max: 5493
+    # PhiX/Sinsheimervirus FASTA lengths (n=155) span 5,339-5,388 nt.
+    genome_length_reward_lower_zero: 5305
+    genome_length_reward_lower_full: 5359
+    genome_length_reward_upper_full: 5391
+    genome_length_reward_upper_zero: 5494
     gc_content_min: 30.0
     gc_content_max: 65.0
     homopolymer_max: 10

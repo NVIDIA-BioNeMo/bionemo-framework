@@ -790,6 +790,26 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             self.config = NucleotideQCConfig(
                 genome_length_min=int(cfg.get("genome_length_min", 4000)),
                 genome_length_max=int(cfg.get("genome_length_max", 6000)),
+                genome_length_reward_lower_zero=(
+                    float(cfg["genome_length_reward_lower_zero"])
+                    if cfg.get("genome_length_reward_lower_zero") is not None
+                    else None
+                ),
+                genome_length_reward_lower_full=(
+                    float(cfg["genome_length_reward_lower_full"])
+                    if cfg.get("genome_length_reward_lower_full") is not None
+                    else None
+                ),
+                genome_length_reward_upper_full=(
+                    float(cfg["genome_length_reward_upper_full"])
+                    if cfg.get("genome_length_reward_upper_full") is not None
+                    else None
+                ),
+                genome_length_reward_upper_zero=(
+                    float(cfg["genome_length_reward_upper_zero"])
+                    if cfg.get("genome_length_reward_upper_zero") is not None
+                    else None
+                ),
                 gc_content_min=float(cfg.get("gc_content_min", 30.0)),
                 gc_content_max=float(cfg.get("gc_content_max", 65.0)),
                 homopolymer_max=int(cfg.get("homopolymer_max", 10)),

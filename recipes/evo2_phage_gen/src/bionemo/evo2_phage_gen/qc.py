@@ -45,6 +45,10 @@ class NucleotideQCConfig:
 
     genome_length_min: int = 4000
     genome_length_max: int = 6000
+    genome_length_reward_lower_zero: float | None = None
+    genome_length_reward_lower_full: float | None = None
+    genome_length_reward_upper_full: float | None = None
+    genome_length_reward_upper_zero: float | None = None
     gc_content_min: float = 30.0
     gc_content_max: float = 65.0
     homopolymer_min: int = 0

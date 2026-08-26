@@ -110,7 +110,7 @@ def normalize_prompted_fasta(source: Path, output: Path) -> Path:
 
 def _load_sweep(generation_root: Path) -> pd.DataFrame:
     rows = []
-    for path in sorted((generation_root / "jsonl").glob("prefix*_temp*.jsonl")):
+    for path in sorted((generation_root / "jsonl").glob("*prefix*_temp*.jsonl")):
         cell = path.stem
         frame = load_generation_records(path)
         frame["cell"] = cell
@@ -168,7 +168,7 @@ def _top_hits(path: Path, prefix: str) -> pd.DataFrame:
     return hits.rename(
         columns={
             "query": "id_prompt",
-            **{column: f"{prefix}_{column}" for column in SEARCH_COLUMNS if column not in {"query"}},
+            **{column: f"{prefix}_{column}" for column in SEARCH_COLUMNS if column != "query"},
         }
     )
 

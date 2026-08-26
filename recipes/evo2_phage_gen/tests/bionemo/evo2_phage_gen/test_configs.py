@@ -55,6 +55,7 @@ def test_arc_genome_design_filtering_local_config_is_safe_by_default():
     assert config["reference_tropism_protein"].endswith(
         "data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta"
     )
+    assert config["genome_length_range"] == [5306, 5493]
 
 
 def test_docs_and_configs_do_not_use_stale_workspace_paths():
@@ -82,9 +83,25 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     tensor_model_parallel_size = config["policy"]["megatron_cfg"]["tensor_model_parallel_size"]
     train_data = config["data"]["train"]
 
-    assert config["env"]["phage_qc"]["genome_length_max"] == 6000
-    assert generation_config["max_new_tokens"] + 16 == 7000
-    assert generation_config["max_new_tokens"] > config["env"]["phage_qc"]["genome_length_max"]
+    assert config["env"]["phage_qc"]["genome_length_min"] == 5306
+    assert config["env"]["phage_qc"]["genome_length_max"] == 5493
+    assert {
+        key: config["env"]["phage_qc"][key]
+        for key in (
+            "genome_length_reward_lower_zero",
+            "genome_length_reward_lower_full",
+            "genome_length_reward_upper_full",
+            "genome_length_reward_upper_zero",
+        )
+    } == {
+        "genome_length_reward_lower_zero": 5305,
+        "genome_length_reward_lower_full": 5359,
+        "genome_length_reward_upper_full": 5391,
+        "genome_length_reward_upper_zero": 5494,
+    }
+    assert generation_config["max_new_tokens"] + 16 == 5466
+    assert config["env"]["phage_qc"]["genome_length_reward_upper_full"] < generation_config["max_new_tokens"] + 16
+    assert generation_config["max_new_tokens"] + 16 < config["env"]["phage_qc"]["genome_length_reward_upper_zero"]
     assert config["policy"]["max_total_sequence_length"] >= generation_config["max_new_tokens"] + 16
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 0.0
     assert config["env"]["phage_qc"]["dustmask_filter"] is True
@@ -202,8 +219,8 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "threads": 64,
         "verbosity": 0,
     }
-    assert config["grpo"]["num_prompts_per_step"] == 2
-    assert config["grpo"]["num_generations_per_prompt"] == 48
+    assert config["grpo"]["num_prompts_per_step"] == 16
+    assert config["grpo"]["num_generations_per_prompt"] == 6
     assert config["grpo"]["num_prompts_per_step"] * config["grpo"]["num_generations_per_prompt"] == 96
     assert config["grpo"]["val_at_start"] is False
     assert config["grpo"]["val_at_end"] is True
@@ -211,7 +228,8 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["policy"]["train_micro_batch_size"] == 1
     assert config["policy"]["generation_batch_size"] == 96
     assert config["policy"]["logprob_batch_size"] == 1
-    assert config["policy"]["generation"]["max_new_tokens"] + 24 == 7000
+    assert config["policy"]["generation"]["max_new_tokens"] + 16 == 5466
+    assert config["policy"]["generation"]["max_new_tokens"] + 24 == 5474
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
     assert mcore_generation_config["prompt_batch_size"] == 12
     assert mcore_generation_config["max_requests"] == 12
@@ -234,6 +252,8 @@ def test_phix_example_documents_every_gdpo_objective():
     score_section = readme.split(heading, maxsplit=1)[1]
     for objective in config["env"]["phage_qc"]["gdpo_objectives"]:
         assert f"`{objective['name']}`" in score_section
+    for evidence in ("Sinsheimervirus", "5,339", "5,359", "5,388", "5,494", "FASTA"):
+        assert evidence in score_section
 
 
 def test_every_inherited_grpo_and_gdpo_config_keeps_mandatory_safety_enabled():

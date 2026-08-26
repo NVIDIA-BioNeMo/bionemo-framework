@@ -10,9 +10,11 @@ RUN_ROOT="${RUN_ROOT:?RUN_ROOT is required}"
 CKPT_DIR="${CKPT_DIR:?CKPT_DIR is required}"
 
 PROMPT_LENGTHS="${PROMPT_LENGTHS:-0 1 2 4 6 8 10 12 16 24 32}"
+PROMPT_ANCHORS="${PROMPT_ANCHORS:-}"
+REFERENCE_FASTA="${REFERENCE_FASTA:-}"
 TEMPERATURES="${TEMPERATURES:-0.3 0.5 0.7 0.9 1.0 1.1 1.3}"
 NUM_PROMPTS="${NUM_PROMPTS:-64}"
-TARGET_LENGTH="${TARGET_LENGTH:-7000}"
+TARGET_LENGTH="${TARGET_LENGTH:-5470}"
 MARKER="${MARKER:-+~}"
 TOP_K="${TOP_K:-4}"
 TOP_P="${TOP_P:-1.0}"
@@ -45,6 +47,7 @@ fi
 read -r -a PREFIX_ARRAY <<< "${PROMPT_LENGTHS}"
 read -r -a TEMPERATURE_ARRAY <<< "${TEMPERATURES}"
 read -r -a GPU_ARRAY <<< "${GPU_IDS}"
+read -r -a ANCHOR_ARRAY <<< "${PROMPT_ANCHORS}"
 if (( ${#GPU_ARRAY[@]} == 0 || ${#GPU_ARRAY[@]} % TENSOR_PARALLEL_SIZE != 0 )); then
   echo "GPU count must be non-zero and divisible by TENSOR_PARALLEL_SIZE" >&2
   exit 2
@@ -52,10 +55,22 @@ fi
 REPLICA_COUNT=$(( ${#GPU_ARRAY[@]} / TENSOR_PARALLEL_SIZE ))
 
 mkdir -p "${RUN_ROOT}/logs" "${RUN_ROOT}/runtime"
+PROMPT_ARGS=()
+if (( ${#ANCHOR_ARRAY[@]} > 0 )); then
+  [[ -n "${REFERENCE_FASTA}" ]] || { echo "REFERENCE_FASTA is required with PROMPT_ANCHORS" >&2; exit 2; }
+  PROMPT_ARGS+=(--reference-fasta "${REFERENCE_FASTA}")
+  for anchor in "${ANCHOR_ARRAY[@]}"; do
+    PROMPT_ARGS+=(--prompt-anchor "${anchor}")
+  done
+elif [[ -n "${REFERENCE_FASTA}" ]]; then
+  echo "PROMPT_ANCHORS is required with REFERENCE_FASTA" >&2
+  exit 2
+fi
 python -m bionemo.evo2_phage_gen.sampling_calibration materialize \
   --run-root "${RUN_ROOT}" \
   --checkpoint "${CKPT_DIR}" \
   --prefix-lengths "${PREFIX_ARRAY[@]}" \
+  "${PROMPT_ARGS[@]}" \
   --temperatures "${TEMPERATURE_ARRAY[@]}" \
   --num-prompts "${NUM_PROMPTS}" \
   --marker "${MARKER}" \
@@ -92,7 +107,7 @@ run_worker() {
   local worker_log="${RUN_ROOT}/logs/worker-${slot}.log"
   printf 'cell\tattempt\tstatus\tfinished_at\n' > "${worker_manifest}"
 
-  while IFS=$'\t' read -r -u 3 cell_index cell_key prefix_length temperature prompt_file output_file; do
+  while IFS=$'\t' read -r -u 3 cell_index cell_key prefix_length temperature prompt_file output_file _prompt_anchor _prompt_anchor_start; do
     [[ "${cell_index}" == "index" ]] && continue
     (( cell_index % REPLICA_COUNT == slot )) || continue
 

@@ -8,6 +8,7 @@
       "assertions": [
         "Each reward has a meaningful baseline or random anchor at 0, supported target at 1, and monotonic partial credit.",
         "The response checks duplicated evidence, scale dominance, opposing directions, sparse support, and combinations that favor the wrong design.",
+        "It uses counterfactuals to catch rewards improved by deleting evidence, running to the generation cap, or relocating rather than preserving a feature.",
         "It compares reference, baseline, desired, and counterexample genomes at component and aggregate levels.",
         "Missing, invalid, empty, no-hit, too-short, missing-gene, and tool-failure behavior cannot create positive credit.",
         "Final viability and safety exclusions remain independent of online shaping."
@@ -64,6 +65,10 @@
       "assertions": [
         "The response defaults to complete genomes and requires approval before a locus, RBP, fixed-backbone, or edit-count reduction.",
         "It covers adsorption and entry, defense and counter-defense, replication, morphogenesis and packaging, lysis and progeny, genome integrity, and intended-use safety.",
+        "It shapes tailed-phage length asymmetrically from packaging evidence: capsid capacity is a hard upper constraint while biologically supported undersize can remain packageable, rather than defaulting to absolute deviation from the reference.",
+        "It explicitly protects the adsorption or receptor-binding module even when family variability would place it in an unprotected variable tier, while allowing a lower identity target than conserved core genes so specificity domains can diverge.",
+        "It does not treat DIAMOND, protein-family hashes, or protein embeddings as evidence for ribosome-binding sites, start-codon choice, codon usage, or restriction-site content; required nucleotide properties get separate terms.",
+        "It explicitly covers the non-coding leader or promoter that bootstraps infection, transcription terminators controlling expression stoichiometry, and host restriction-site avoidance rather than assuming gene-level objectives can see them.",
         "It includes AMR, toxin, and lysogeny as separate RL objectives for whole-genome custom or adapted runs; an explicitly scoped locus or module edit may omit objectives that its edited region cannot affect.",
         "It defines target gain, original-host retention or loss, and disfavored-host avoidance as applicable.",
         "The host classifier remains one calibrated signal with deployment-matched validation and phenotype follow-up.",
@@ -74,12 +79,14 @@
     },
     {
       "id": "bionemo-phage-design-plan-rl-objectives-006-replication-profile",
-      "prompt": "Use the recipe's PhiX174 replication profile with filters 1–6, 8, and 9 enabled and filter 7 disabled, while retaining applicable safety objectives.",
+      "prompt": "Use the recipe's PhiX174 replication profile with filters 1–6, 8, and 9 enabled and filter 7 disabled, while retaining applicable safety objectives and recalibrating its genome-length reward.",
       "expected_output": "A customized profile whose changed component set remains separately interpretable.",
       "assertions": [
         "The response keeps filters 1–6, 8, and 9 enabled and filter 7 disabled for the target profile.",
         "Applicable measurable safety objectives remain separate components and hard safety endpoints stay in force.",
         "Historical and added components are reported separately and aggregates from different component sets are not directly compared.",
+        "The PhiX packaging envelope is derived from exact FASTA lengths of same-capsid congeners, normally at genus level, rather than a generic percentage band or INPHARED's rounded Genome Length (KB) metadata.",
+        "It recognizes that genuinely circular ssDNA Microviridae have no terminal repeat to add: for PhiX174 the deposited length is the packaged unit length, so no DTR molecular-form choice applies.",
         "Sparse support triggers diagnosis or calibrated shaping rather than silent removal.",
         "Filter 7 may be run separately as a diagnostic without overwriting the target result."
       ],
@@ -220,12 +227,54 @@
       "prompt": "Plan objectives for a circular whole-genome phage design. Several annotated elements are explicit redesign targets, circular prefix prompting will likely be used, and two reward functions must be newly invented. Define the sampling and validation handoff before implementation.",
       "expected_output": "An objective plan that preserves editable target bases, minimizes fixed prompt sequence, and gives every reward meaningful biological controls.",
       "assertions": [
+        "Before accepting circular prompting, the response requires a verified termini class and aligns ORF calling, prompt rotation, synteny, and any terminal-repeat reward with it rather than trusting LOCUS alone.",
         "The response records circular coordinates and uncertainty for all intended-to-change elements as prompt-exclusion intervals, including intervals that cross the chosen origin.",
         "It identifies neutral anchor intervals or requires a different prompt strategy rather than silently fixing part of a redesign target.",
         "It requires prompt size to be reported in bases and as a genome fraction, starts from the shortest model-compatible prompt, and does not scale length linearly with genome size by default.",
         "A longer prompt requires a model- and design-specific rationale plus calibration evidence rather than convenience or an evenly spaced grid alone.",
         "Every new or modified reward names biologically relevant known or expected high- and low-scoring genomes or counterfactuals, with provenance and expected ordering.",
         "Boundary, missing, invalid, empty, no-hit, and tool-failure controls remain explicit in addition to the strong positive and negative controls."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-017-collapsed-dtr-form",
+      "prompt": "Plan length, coding-density, terminal-repeat, prompt, and synteny objectives for a fixed-end DTR phage whose deposit is a circularly permuted [DTR][unique] repeat unit with the duplicate terminal copy collapsed.",
+      "expected_output": "One explicit molecular-form contract shared by every topology-sensitive objective.",
+      "assertions": [
+        "The response distinguishes the deposited repeat unit [DTR][unique] from the packaged genome [DTR][unique][DTR] and records which form the run designs.",
+        "Length, coding density, coordinates, prompts, synteny, and terminal-repeat logic all use that same form rather than encoding contradictory molecules.",
+        "If the packaged form is selected, its expected length is the deposit plus one DTR copy and its origin is reconstructed from biological DTR evidence rather than the artifact deposit join.",
+        "The fixed-end genome is not treated as rotation-permitted merely because the collapsed deposit is circularly permuted."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-018-mu-like-host-dna",
+      "prompt": "Plan therapeutic whole-genome objectives for a reference classified as Mu-like by PhageTerm. Protein screens find no AMR, toxin, or known lysogeny proteins, so can the reference proceed?",
+      "expected_output": "A therapeutic exclusion based on the Mu-like packaging mechanism and an explicit host-derived-DNA screening gap that protein-level safety objectives do not cover.",
+      "assertions": [
+        "The response recognizes Mu-like termini as packaged host DNA from a transposable temperate phage, not merely a coordinate or rotation class.",
+        "It rejects the reference for therapeutic design on both integrative-lifestyle and host-DNA-carriage grounds despite negative AMR, toxin, or protein-level lysogeny screens.",
+        "It identifies no-host-derived-DNA evidence as a distinct composition or final-QC requirement that gene and protein screens cannot satisfy.",
+        "Missing host-derived-DNA evidence remains an explicit safety gap rather than disappearing into an aggregate reward."
+      ],
+      "expected_skill": "bionemo-phage-design-plan-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-plan-rl-objectives-019-editable-functional-slot",
+      "prompt": "Plan family-copy and synteny objectives for a host-range design that may replace the reference capsule depolymerase with a functionally equivalent ORF from another phage. The specificity domain is expected to diverge, while a related modular tail fiber retains only a conserved adapter domain.",
+      "expected_output": "Slot-specific architecture evidence that uses mechanism, functional family, or domain identity for permitted swaps while retaining reference homology for protected genes.",
+      "assertions": [
+        "For the explicitly editable depolymerase slot, the response uses a curated functional-family HMM or profile, annotation-derived module identity, or another purpose-based assignment for copy number and synteny instead of requiring a best hit to the reference ORF.",
+        "It keeps reference-homology scoring for genes and slots that the design is required to preserve intact rather than weakening the whole genome's evidence standard.",
+        "It scores the incoming functional ORF as occupying the intended architectural slot even when neither nucleotide nor whole-protein similarity to the reference is detectable.",
+        "For the modular tail fiber, it uses domain-level matching and coverage rather than a whole-protein coverage gate that discards a conserved adapter plus divergent specificity domain.",
+        "It cites published evidence for the source phage and biological rationale while labeling panel-specific alignment statistics as a local reanalysis rather than attributing those exact values to the paper.",
+        "It validates the editable-slot matcher on known cross-species or module-swap positives and unrelated negatives, and keeps its evidence separate from protected-core homology."
       ],
       "expected_skill": "bionemo-phage-design-plan-rl-objectives",
       "expected_script": null

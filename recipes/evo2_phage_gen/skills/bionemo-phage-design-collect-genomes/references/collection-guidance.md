@@ -1,6 +1,6 @@
 # Collection guidance
 
-Define eligibility before retrieval and keep full genomes in the project result directory. Preserve source accession/version, retrieval query and date, license, host evidence, topology, and exclusion reason.
+Define eligibility before retrieval and keep full genomes in the project result directory. Preserve source accession/version, retrieval query and date, license, host evidence, verified termini class/topology and its evidence, and exclusion reason. For collapsed DTRs, keep the deposited repeat unit, recovered DTR/origin, and inferred packaged genome distinct.
 
 Validate FASTA structure, nucleotide alphabet, nonempty sequences, record counts, lengths, and ambiguous bases. Keep source duplicates visible until definitive biological deduplication and cluster splitting.
 

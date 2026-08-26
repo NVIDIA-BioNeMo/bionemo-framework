@@ -20,6 +20,7 @@ import json
 import pandas as pd
 import pytest
 
+from bionemo.evo2_phage_gen import calibration_scoring
 from bionemo.evo2_phage_gen.calibration_scoring import (
     load_generation_records,
     summarize_cell,
@@ -49,6 +50,39 @@ def test_load_generation_records_uses_fallback_for_null_ids(tmp_path):
         {"id_prompt": "null-ids_000000", "sequence": "ACGT"},
         {"id_prompt": "null-ids_000001", "sequence": "ACTG"},
     ]
+
+
+def test_score_cell_uses_the_phix_capsid_length_envelope(tmp_path, monkeypatch):
+    generation = tmp_path / "prefix16_temp1.0.jsonl"
+    generation.write_text(json.dumps({"id": "a", "prompt": "+~AC", "completion": "GT"}) + "\n")
+    arc_config = tmp_path / "arc.yaml"
+    arc_config.write_text("{}\n")
+    captured = {}
+
+    def fake_score(sequences, *, config, **_kwargs):
+        captured["config"] = config
+        return sequences.assign(reward_genome_length=1.0)
+
+    monkeypatch.setattr(calibration_scoring, "score_nucleotide_metrics", fake_score)
+
+    calibration_scoring.score_cell(
+        generation_jsonl=generation,
+        output_csv=tmp_path / "scores.csv",
+        arc_config=arc_config,
+        pipeline_script=tmp_path / "pipeline.py",
+        work_dir=tmp_path / "work",
+        tool_bin_dir=tmp_path / "bin",
+        threads=1,
+    )
+
+    config = captured["config"]
+    assert (config.genome_length_min, config.genome_length_max) == (5306, 5493)
+    assert (
+        config.genome_length_reward_lower_zero,
+        config.genome_length_reward_lower_full,
+        config.genome_length_reward_upper_full,
+        config.genome_length_reward_upper_zero,
+    ) == (5305, 5359, 5391, 5494)
 
 
 def test_summarize_cell_separates_measured_zero_from_missing_support():

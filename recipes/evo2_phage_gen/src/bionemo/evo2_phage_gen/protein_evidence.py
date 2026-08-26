@@ -21,7 +21,47 @@ from collections import Counter
 from pathlib import Path
 
 import pandas as pd
+from Bio import SeqIO
 from Bio.Seq import Seq
+
+
+ORFIPY_INTERVAL_RE = re.compile(r"\[(\d+)-(\d+)\]")
+
+
+def remove_pseudocircular_extension_orfs(
+    source_fasta: str | Path,
+    nucleotide_orfs_fasta: str | Path,
+    protein_orfs_fasta: str | Path,
+) -> None:
+    """Remove ORFipy calls that start wholly inside a pseudocircular extension."""
+    source_lengths = {record.id: len(record.seq) for record in SeqIO.parse(source_fasta, "fasta")}
+    if not source_lengths:
+        raise ValueError(f"No source genomes found in {source_fasta}")
+
+    nucleotide_orfs_fasta = Path(nucleotide_orfs_fasta)
+    protein_orfs_fasta = Path(protein_orfs_fasta)
+    nucleotide_records = list(SeqIO.parse(nucleotide_orfs_fasta, "fasta"))
+    protein_records = list(SeqIO.parse(protein_orfs_fasta, "fasta"))
+    if [record.id for record in nucleotide_records] != [record.id for record in protein_records]:
+        raise ValueError("ORFipy nucleotide and protein FASTAs contain different record IDs")
+
+    keep_ids: set[str] = set()
+    for record in nucleotide_records:
+        genome_id, separator, _ = record.id.rpartition("_ORF.")
+        interval = ORFIPY_INTERVAL_RE.search(record.description)
+        if not separator or genome_id not in source_lengths or interval is None:
+            raise ValueError(f"Cannot resolve ORFipy source interval for {record.id}")
+        start = int(interval.group(1))
+        if start < source_lengths[genome_id]:
+            keep_ids.add(record.id)
+
+    for path, records in (
+        (nucleotide_orfs_fasta, nucleotide_records),
+        (protein_orfs_fasta, protein_records),
+    ):
+        temporary = path.with_name(f"{path.name}.tmp")
+        SeqIO.write((record for record in records if record.id in keep_ids), temporary, "fasta")
+        temporary.replace(path)
 
 
 def _gff_cds_annotations(gff_path: Path) -> dict[str, str]:

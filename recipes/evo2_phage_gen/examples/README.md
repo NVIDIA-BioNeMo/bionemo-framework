@@ -34,11 +34,14 @@ and target hard QC, then post-QC clustering. Likelihood is a within-protocol ran
 computational candidates are not evidence of bootability or wet-lab safety. See the
 [case-study notes](../skills/bionemo-phage-design/references/case-study-results.md) for historical context.
 
+That completed run used the earlier single-origin prompt semantics. The current launcher starts a
+new `results/phix174-8xh100-mixed-anchors` result root and does not resume that run in place.
+
 ## Quick start
 
-Run from `recipes/evo2_phage_gen`. The publication-style reproduction uses `7b-base`, and for this run
-we supply our default RL sampling selection settings, skipping the part where we stall for user
-input if these settings are not the best by supplying a `--sampling-selection` file:
+Run from `recipes/evo2_phage_gen`. The PhiX follow-up uses the published-lineage `7b-base` checkpoint
+with the current mixed-anchor defaults. Supplying `--sampling-selection` explicitly skips the
+fresh-calibration review stop:
 
 ```bash
 ./.ci_build.sh
@@ -46,7 +49,7 @@ tmux new -s phix174-e2e
 ./examples/phix174_8xh100.sh \
   --model-variant 7b-base \
   --sampling-selection "examples/default-sampling-selection.yaml" \
-  --result-root "$PWD/results/phix174-8xh100"
+  --result-root "$PWD/results/phix174-8xh100-mixed-anchors"
 ```
 
 The build reuses the native Torch/CUDA/Transformer Engine stack already in the
@@ -75,15 +78,15 @@ loss; the biological sequence immediately after it remains supervised.
 ./examples/phix174_8xh100.sh --dry-run --result-root /tmp/phix174-plan
 
 # Prepare public inputs, tools, databases, and controls only.
-./examples/phix174_8xh100.sh --prepare-only --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh --prepare-only --result-root "$PWD/results/phix174-8xh100-mixed-anchors"
 
 # Resume the RL stage of the 7b-base run.
-./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh --resume-from 40 --model-variant 7b-base --result-root "$PWD/results/phix174-8xh100-mixed-anchors"
 
 # Use an explicitly reviewed sampling selection, without blocking if the automatically identified
 #  top setting differs. In practice automatic selection can be noisy, and these settings should work
 #  well for phix174.
-./examples/phix174_8xh100.sh --sampling-selection examples/default-sampling-selection.yaml --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh --sampling-selection examples/default-sampling-selection.yaml --result-root "$PWD/results/phix174-8xh100-mixed-anchors"
 ```
 
 Completed stages and substages are skipped. Reuse the same result root and sampling selection when
@@ -97,7 +100,7 @@ Authenticate with `wandb login` (or provide `WANDB_API_KEY` through a secret man
 ./examples/phix174_8xh100.sh --wandb --wandb-entity YOUR_ENTITY \
   --wandb-sft-project evo2-phage-design-sft \
   --wandb-rl-project evo2-phage-design-gdpo \
-  --result-root "$PWD/results/phix174-8xh100"
+  --result-root "$PWD/results/phix174-8xh100-mixed-anchors"
 ```
 
 The project flags are optional and show their defaults. Run names are derived from the result-root
@@ -109,24 +112,37 @@ stages are not uploaded retroactively.
 
 [`default-sampling-selection.yaml`](default-sampling-selection.yaml) contains the current PhiX
 defaults and is the schema for a custom selection. Its decoder ceiling reaches approximately
-7,000 nt, where the unchanged length reward has fallen to 0.5, so stopping before the 6,000-nt
-hard acceptance boundary has a learnable advantage. To stop after the sweep and scoring, before
-prompt banks or RL are created, run:
+5,466–5,474 nt across the prompt mixture, within the length reward's upper declining slope and below
+its 5,494-nt zero edge. The hard acceptance interval is the same positive-reward region,
+5,306–5,493 nt. For the circular PhiX reference, the deployed
+16- and 24-nt prompts start at 1-based positions 2,285 (`after_f`) and 3,918 (`after_h`). These
+intervals avoid annotated CDS/features and have lower overlapping-CDS occupancy than the old
+coordinate origin, but an unannotated regulatory element may still exist. The calibration also
+includes origin position 1 as a comparison control. This rotation strategy does not apply to a
+linear genome, whose biological endpoints must be preserved.
+
+Each 96-rollout GDPO update uses 16 prompt records × 6 generations. With DP8, each 12-request decode
+batch contains both anchors at one prompt length, while the global update contains all four
+anchor×length strata. Validation independently contains the same mixture. The 1,000-design final
+rollout uses 250 prompts per stratum: two 500-record, same-length files alternate anchors and combine
+to exactly 1,000 records.
+
+To stop after the sweep and scoring, before prompt banks or RL are created, run:
 
 ```bash
-./examples/phix174_8xh100.sh --calibrate-only --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh --calibrate-only --result-root "$PWD/results/phix174-8xh100-mixed-anchors"
 ```
 
-Inspect `results/phix174-8xh100/calibration/scoring/selection-evidence.csv` and its neighboring
+Inspect `results/phix174-8xh100-mixed-anchors/calibration/scoring/selection-evidence.csv` and its neighboring
 score/novelty artifacts. Prefer eligible settings with working metrics, useful hard-QC signal,
 low copying, diverse outputs, and a stable quality-diversity plateau. An agent may perform this
-review and write the custom choice when the user delegates it. Copy the example YAML, edit all
-eight fields, then continue without repeating the completed sweep:
+review and write the custom choice when the user delegates it. Copy the example YAML, including its
+named `prompt_anchors`, then continue without repeating the completed sweep:
 
 ```bash
 cp examples/default-sampling-selection.yaml /tmp/phix174-sampling.yaml
 # Edit /tmp/phix174-sampling.yaml, then:
-./examples/phix174_8xh100.sh --resume-from 30 --sampling-selection /tmp/phix174-sampling.yaml --result-root "$PWD/results/phix174-8xh100"
+./examples/phix174_8xh100.sh --resume-from 30 --sampling-selection /tmp/phix174-sampling.yaml --result-root "$PWD/results/phix174-8xh100-mixed-anchors"
 ```
 
 The script validates and records the file as `calibration/sampling-selection.yaml`. Do not replace
@@ -151,8 +167,10 @@ progress; only `RUN COMPLETE` denotes successful completion of the requested inv
 The original SFT checkpoint remains available for exact resume and likelihood scoring; RL uses
 the smaller prepared checkpoint under `rl/sft-checkpoint/`. The `rollout/accepted_candidates.fasta`
 contains the final filter-passing, deduplicated candidates for further analysis. When its scores are
-informative and not strongly length-associated, this FASTA is ordered by mean per-nucleotide
-likelihood under the selected SFT model; otherwise, generation order is retained.
+informative, not strongly length-associated, and drawn from one circular origin, this FASTA may be
+ordered by mean per-nucleotide likelihood under the selected SFT model. Mixed-origin runs retain
+generation order because whole-sequence language-model likelihood depends on the linearized origin;
+the scores remain recorded as diagnostics.
 The final rollout and the inner GDPO rollout both use packed dynamic prefill and batched recurrent
 decode for medium/long generation. GDPO assigns 12 requests to each of eight data-parallel replicas
 for its 96-sequence step and requires exact-length, EOS-suppressed completions. Final selected-SFT
@@ -170,6 +188,13 @@ design”](https://www.biorxiv.org/content/10.64898/2026.06.12.731871v1.full) fo
 likelihood predicted experimental viability within a previously filtered PhiX174 dataset, but the
 score used here remains a within-protocol ranking signal rather than a bootability probability or
 transferable threshold.
+
+Before GDPO, the exact configured environment scores the coordinate origin and both deployed
+reference rotations together and requires identical reward, filter, and measurement-support
+outcomes. Arc hard QC removes ORFipy calls beginning wholly inside its appended pseudocircular tail,
+while retaining cross-origin ORFs, so tail length cannot create rotation-dependent duplicate genes.
+Raw endpoint-local DUST fractions can differ by linear origin, but the tested PhiX rotations have
+the same reward and pass outcome; the exact control enforces the deployed outcome contract.
 
 The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and `NUM_CPUS` to
 `nproc`. SFT tensor parallelism defaults to 1 on a single GPU and 2 otherwise; override
@@ -199,14 +224,14 @@ the stricter safety-qualified, full-QC, cluster-deduplicated pass rate rather th
 
 ### Sequence feasibility
 
-| Objective (reward column)                    | Zero credit                                                                                          | Full credit                                                                                                                                | Partial credit and rationale                                                                                                                                                                                                                                                           |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `valid_nt_chars` (`reward_valid_nt_chars`)   | Any emitted character outside A/C/G/T.                                                               | No non-ACGT character is present.                                                                                                          | Binary. The raw helper regards an empty string as having no invalid character, but empty output fails length and aggregate nucleotide gates and cannot receive the safety-qualified GDPO objective. This prevents malformed sequence text from satisfying downstream biological tools. |
-| `genome_length` (`reward_genome_length`)     | Length at or below 2,000 nt, or at or above 8,000 nt.                                                | 4,000–6,000 nt inclusive.                                                                                                                  | Let *L* be length. Below 4,000: `max(0, 1 - (4000-L)/2000)`; above 6,000: `max(0, 1 - (L-6000)/2000)`. The target band brackets the 5,386-nt [PhiX174 reference genome](https://www.ncbi.nlm.nih.gov/nuccore/NC_001422.1).                                                             |
-| `gc_content` (`reward_gc_content`)           | Mathematically at or below −5% or at or above 100%; only the 100% endpoint is physically attainable. | 30–65% inclusive.                                                                                                                          | Below 30%: `max(0, 1 - (30-GC)/35)`; above 65%: `max(0, 1 - (GC-65)/35)`. Thus 0% GC still scores 1/7, while 100% scores 0. The broad band rejects extreme composition while leaving room around the PhiX reference.                                                                   |
-| `nt_homopolymer` (`reward_nt_homopolymer`)   | No finite positive run length reaches exactly zero; invalid or unavailable measurements score zero.  | Maximum nucleotide run *H* ≤ 10 bases.                                                                                                     | For *H* > 10, score `10/H`, decreasing asymptotically toward zero. Long homopolymers are discouraged because they are low-complexity and can complicate synthesis and sequencing.                                                                                                      |
-| `dustmask_end` (`reward_dustmask_end`)       | No valid masked fraction reaches zero; failed or invalid DUST measurement scores zero.               | Maximum DUST-masked fraction *F* over either terminal 200-nt window ≤ 0.9.                                                                 | For 0.9 < *F* ≤ 1, score `0.9/F` (0.9–1.0). The separate nucleotide-pass objective supplies the hard cutoff. DUST detects low-complexity sequence using the approach described by [Morgulis et al.](https://doi.org/10.1089/cmb.2006.13.1028).                                         |
-| `nucleotide_pass` (`reward_nucleotide_pass`) | Any component gate fails.                                                                            | All characters are A/C/G/T, length is 4,000–6,000 nt, GC is 30–65%, maximum homopolymer is ≤10, and both terminal DUST fractions are ≤0.9. | Binary conjunction. It supplies an explicit feasibility milestone in addition to the dense component objectives.                                                                                                                                                                       |
+| Objective (reward column)                    | Zero credit                                                                                          | Full credit                                                                                                                                | Partial credit and rationale                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `valid_nt_chars` (`reward_valid_nt_chars`)   | Any emitted character outside A/C/G/T.                                                               | No non-ACGT character is present.                                                                                                          | Binary. The raw helper regards an empty string as having no invalid character, but empty output fails length and aggregate nucleotide gates and cannot receive the safety-qualified GDPO objective. This prevents malformed sequence text from satisfying downstream biological tools.                                                  |
+| `genome_length` (`reward_genome_length`)     | Length at or below 5,305 nt, or at or above 5,494 nt.                                                | 5,359–5,391 nt inclusive.                                                                                                                  | Ramp linearly from 0 to 1 over 5,305–5,359 nt and from 1 to 0 over 5,391–5,494 nt. Exact FASTA lengths for 155 same-capsid Sinsheimervirus genomes span 5,339–5,388 nt (p5 5,359; median/reference 5,386); INPHARED's rounded kilobase field is not used. PhiX has no terminal repeat, so deposited and packaged lengths are identical. |
+| `gc_content` (`reward_gc_content`)           | Mathematically at or below −5% or at or above 100%; only the 100% endpoint is physically attainable. | 30–65% inclusive.                                                                                                                          | Below 30%: `max(0, 1 - (30-GC)/35)`; above 65%: `max(0, 1 - (GC-65)/35)`. Thus 0% GC still scores 1/7, while 100% scores 0. The broad band rejects extreme composition while leaving room around the PhiX reference.                                                                                                                    |
+| `nt_homopolymer` (`reward_nt_homopolymer`)   | No finite positive run length reaches exactly zero; invalid or unavailable measurements score zero.  | Maximum nucleotide run *H* ≤ 10 bases.                                                                                                     | For *H* > 10, score `10/H`, decreasing asymptotically toward zero. Long homopolymers are discouraged because they are low-complexity and can complicate synthesis and sequencing.                                                                                                                                                       |
+| `dustmask_end` (`reward_dustmask_end`)       | No valid masked fraction reaches zero; failed or invalid DUST measurement scores zero.               | Maximum DUST-masked fraction *F* over either terminal 200-nt window ≤ 0.9.                                                                 | For 0.9 < *F* ≤ 1, score `0.9/F` (0.9–1.0). The separate nucleotide-pass objective supplies the hard cutoff. DUST detects low-complexity sequence using the approach described by [Morgulis et al.](https://doi.org/10.1089/cmb.2006.13.1028).                                                                                          |
+| `nucleotide_pass` (`reward_nucleotide_pass`) | Any component gate fails.                                                                            | All characters are A/C/G/T, length is 5,306–5,493 nt, GC is 30–65%, maximum homopolymer is ≤10, and both terminal DUST fractions are ≤0.9. | Binary conjunction. It supplies an explicit feasibility milestone in addition to the dense component objectives.                                                                                                                                                                                                                        |
 
 ### Protein evidence, architecture, and diversity
 
@@ -215,7 +240,7 @@ the stricter safety-qualified, full-QC, cluster-deduplicated pass rate rather th
 | `protein_hit_count` (`reward_external_protein_hit_count`)               | No measured PHROGs hit, missing alignment lengths, missing output, or tool failure.                                                                     | Effective unique-family coverage ≥7; the hard gate separately requires at least 7 unique families meeting the calibrated coverage threshold. | For each PHROGs target family, retain the best `min(query_coverage,target_coverage)` and sum across unique families; reward `min(sum/7,1)`. Presence credit is identity-independent. The PHROG-consensus threshold is 0.75, calibrated because consensus lengths differ systematically from member proteins; the exact PhiX spike gate remains 0.95. Duplicate ORFs cannot inflate family evidence, and fragments cannot pass the hard gate. |
 | `tropism` (`reward_external_tropism`)                                   | No measured hit, missing alignment lengths, or 0% identity to the PhiX G spike protein.                                                                 | Best hit has identity *I* ≥60% and full reciprocal coverage; the hard gate uses ≥0.95 query and target coverage.                             | Score `min(I/60,1) × min(query_coverage,target_coverage)`. Thus a high-identity fragment receives partial shaping credit but cannot satisfy the intact-spike hard gate. This preserves the current Arc target-host-recognition proxy used by the [PhiX design workflow](https://www.science.org/doi/10.1126/science.aec2657).                                                                                                                |
 | `required_genes` (`reward_external_required_genes`)                     | Missing metrics, missing alignment lengths, an empty required-label definition, or zero evidence.                                                       | All 10 ORFipy-callable gene-copy slots have distinct ORF and PHROG-family evidence meeting the 0.75 coverage threshold.                      | Score `(coverage_sum/total) × min(total/10,1)`. Nine functional labels are used, with two one-to-one slots for head morphogenesis (B/D). One ORF or PHROG target cannot satisfy both copies; A\* remains outside this ORF-caller-based term, while the architecture gate distinguishes callable reference loci and penalizes extra homolog copies.                                                                                           |
-| `synteny` (`reward_external_synteny`)                                   | Missing output, invalid counts, or no matched reference locus.                                                                                          | Every callable reference CDS has a one-to-one cluster match, circular order is preserved, and there are no excess homologous candidate ORFs. | Score `(distinct matched reference loci/reference loci) × 1/(1+excess homolog copies) × 1/(1+order violations)`. Total called-ORF count is no longer part of this reward. Reference and candidate GFF coordinates are normalized before LoVis4u translation, and the redundant pseudocircular A-tail feature is excluded from the reference denominator.                                                                                     |
+| `synteny` (`reward_external_synteny`)                                   | Missing output, invalid counts, or no matched reference locus.                                                                                          | Every callable reference CDS has a one-to-one cluster match, circular order is preserved, and there are no excess homologous candidate ORFs. | Score `(distinct matched reference loci/reference loci) × 1/(1+excess homolog copies) × 1/(1+order violations)`. Total called-ORF count is no longer part of this reward. Reference and candidate GFF coordinates are normalized before LoVis4u translation; the redundant reference A-tail and candidate ORFs beginning wholly in the appended pseudocircular tail are excluded.                                                            |
 | `average_protein_identity` (`reward_external_average_protein_identity`) | Missing identity or alignment lengths, no coverage-qualified family hits, or tool failure.                                                              | PHROG-family mean identity ≤95% with at least 10 unique coverage-qualified families.                                                         | Compute mean identity from one best hit per target family after the 0.75 PHROG-consensus coverage gate, then score `novelty × min(family_count/10,1)`. Novelty is 1 through 95% and `max(0.25, (100-AAI)/5)` above 95%. Online reward and final Arc QC use the same hit set. This is family-level PHROG identity, not exact-reference AAI.                                                                                                   |
 | `mmseqs_cluster_diversity` (`reward_mmseqs_cluster_diversity`)          | The genome fails basic nucleotide feasibility, is missing from MMseqs output, or the tool fails. No finite cluster size otherwise reaches exactly zero. | A singleton within its prompt group.                                                                                                         | With 99% minimum sequence identity, a member of a cluster of size *N* scores `1/N`. This directly rewards within-batch sequence diversity; [MMseqs2](https://doi.org/10.1038/nbt.3988) provides the clustering implementation.                                                                                                                                                                                                               |
 

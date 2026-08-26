@@ -515,6 +515,33 @@ def _interval_score(value: float, lower: float, upper: float) -> float:
     return max(0.0, 1.0 - distance / width)
 
 
+def _genome_length_score(value: float, config: NucleotideQCConfig) -> float:
+    """Score length against an optional asymmetric envelope, else the hard-QC interval."""
+    bounds = (
+        config.genome_length_reward_lower_zero,
+        config.genome_length_reward_lower_full,
+        config.genome_length_reward_upper_full,
+        config.genome_length_reward_upper_zero,
+    )
+    if all(bound is None for bound in bounds):
+        return _interval_score(value, config.genome_length_min, config.genome_length_max)
+    if any(bound is None for bound in bounds):
+        raise ValueError("genome length reward bounds must all be configured")
+    lower_zero, lower_full, upper_full, upper_zero = (float(bound) for bound in bounds)
+    if not (
+        all(math.isfinite(bound) for bound in (lower_zero, lower_full, upper_full, upper_zero))
+        and lower_zero < lower_full <= upper_full < upper_zero
+    ):
+        raise ValueError("genome length reward bounds must satisfy lower_zero < lower_full <= upper_full < upper_zero")
+    if value <= lower_zero or value >= upper_zero:
+        return 0.0
+    if lower_full <= value <= upper_full:
+        return 1.0
+    if value < lower_full:
+        return (value - lower_zero) / (lower_full - lower_zero)
+    return (upper_zero - value) / (upper_zero - upper_full)
+
+
 def _upper_bound_ratio_score(value: float, upper: float) -> float:
     """Return a dense score for upper-bound-only metrics such as homopolymer length."""
     if value <= upper:
@@ -1072,9 +1099,7 @@ def score_nucleotide_metrics(
 
     phase_start = time.perf_counter()
     df["reward_valid_nt_chars"] = df["valid_nt_chars"].astype(float)
-    df["reward_genome_length"] = df["genome_length"].map(
-        lambda value: _interval_score(value, config.genome_length_min, config.genome_length_max)
-    )
+    df["reward_genome_length"] = df["genome_length"].map(lambda value: _genome_length_score(value, config))
     df["reward_gc_content"] = df["gc_content"].map(
         lambda value: _interval_score(value, config.gc_content_min, config.gc_content_max)
     )

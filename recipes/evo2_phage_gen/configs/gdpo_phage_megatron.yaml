@@ -18,8 +18,10 @@ checkpointing:
 
 grpo:
   max_num_epochs: 500
-  num_prompts_per_step: 2
-  num_generations_per_prompt: 48
+  # Each 12-request DP decode batch sees both anchors at one length; the full
+  # 96-rollout update covers both lengths and both anchors.
+  num_prompts_per_step: 16
+  num_generations_per_prompt: 6
   max_num_steps: 500
   val_period: 10
   val_batch_size: 96
@@ -57,7 +59,7 @@ policy:
     scheduler:
       lr_warmup_init: 1.0e-7
   generation:
-    max_new_tokens: 6976
+    max_new_tokens: 5450
     temperature: 1.0
     top_p: 1.0
     top_k: 4

@@ -259,6 +259,11 @@ ORFIPY_GFF_COORDINATE_ASSIGNMENT = re.compile(
 PATCHED_ORFIPY_GFF_START = "start = str(int(start) + 1)"
 ARC_GFF_TO_GBK_LOCATION = "location=FeatureLocation(start, end, strand=strand),"
 PATCHED_GFF_TO_GBK_LOCATION = "location=FeatureLocation(start - 1, end, strand=strand),"
+ORFIPY_CALL_PATTERN = re.compile(
+    r'^(?P<indent>[ ]*)run_orfipy\(.*?config\["orfipy_proteins_file_save_location"\]\)',
+    flags=re.MULTILINE | re.DOTALL,
+)
+PATCHED_PSEUDOCIRCULAR_ORF_CALL = "remove_pseudocircular_extension_orfs("
 ARC_MMSEQS_PROTEIN_FORMAT_OUTPUT = "--format-output 'query,target,evalue,pident'"
 PATCHED_MMSEQS_PROTEIN_FORMAT_OUTPUT = "--format-output 'query,target,evalue,pident,alnlen,qlen,tlen'"
 ARC_MMSEQS_PROTEIN_PARSE_FIELDS = "query, target, evalue, pident = line.strip().split('\\t')"
@@ -646,6 +651,32 @@ def _apply_orfipy_gff_coordinate_patch(output_dir: Path) -> None:
     pipeline_path.write_text(patched_text)
 
 
+def _apply_pseudocircular_orf_filter_patch(output_dir: Path) -> None:
+    """Exclude ORFipy calls that begin only in the appended circular extension."""
+    pipeline_path = output_dir / "genome_design_filtering_pipeline.py"
+    text = pipeline_path.read_text()
+    if PATCHED_PSEUDOCIRCULAR_ORF_CALL in text or "run_orfipy(" not in text:
+        return
+
+    def replacement(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        return (
+            f"{match.group(0)}\n"
+            f"{indent}from bionemo.evo2_phage_gen.protein_evidence import "
+            "remove_pseudocircular_extension_orfs\n"
+            f"{indent}remove_pseudocircular_extension_orfs(\n"
+            f"{indent}    seq_fasta,\n"
+            f"""{indent}    f'{{config["results_save_dir"]}}/{{config["orfipy_orfs_file_save_location"]}}',\n"""
+            f"""{indent}    f'{{config["results_save_dir"]}}/{{config["orfipy_proteins_file_save_location"]}}',\n"""
+            f"{indent})"
+        )
+
+    patched_text, replacement_count = ORFIPY_CALL_PATTERN.subn(replacement, text)
+    if replacement_count != 1:
+        raise ValueError(f"Expected exactly one ORFipy call in {pipeline_path}, found {replacement_count}.")
+    pipeline_path.write_text(patched_text)
+
+
 def _apply_mmseqs_protein_evidence_patch(output_dir: Path) -> None:
     """Retain MMseqs protein alignment lengths needed for reciprocal-coverage evidence."""
     pipeline_path = output_dir / "genome_design_filtering_pipeline.py"
@@ -850,6 +881,7 @@ def prepare_arc_pipeline_workdir(
     else:
         _apply_legacy_string_patches(output_dir)
     _apply_orfipy_gff_coordinate_patch(output_dir)
+    _apply_pseudocircular_orf_filter_patch(output_dir)
     _apply_online_measurement_patches(output_dir)
     _apply_mmseqs_protein_evidence_patch(output_dir)
     _apply_protein_hard_gate_patch(output_dir)

@@ -34,7 +34,10 @@ from bionemo.evo2_phage_gen.reward import (
 )
 
 
-CELL_RE = re.compile(r"prefix(?P<prefix>\d+)_temp(?P<temperature>\d+(?:\.\d+)?)$")
+CELL_RE = re.compile(
+    r"(?:(?P<anchor>[A-Za-z0-9][A-Za-z0-9_-]*)_)?"
+    r"prefix(?P<prefix>\d+)_temp(?P<temperature>\d+(?:\.\d+)?)$"
+)
 EXTERNAL_OBJECTIVES = {
     "protein_hit_count": "protein_database_hit_count",
     "tropism": "tropism",
@@ -100,6 +103,7 @@ def summarize_cell(cell: str, scored: pd.DataFrame) -> dict[str, float | int | s
     match = CELL_RE.fullmatch(cell)
     row: dict[str, float | int | str | bool | None] = {
         "cell": cell,
+        "prompt_anchor": match.group("anchor") if match and match.group("anchor") else "origin",
         "prefix_length": int(match.group("prefix")) if match else -1,
         "temperature": float(match.group("temperature")) if match else float("nan"),
         "records": len(scored),
@@ -181,6 +185,12 @@ def score_cell(
     scored = score_nucleotide_metrics(
         sequences,
         config=NucleotideQCConfig(
+            genome_length_min=5306,
+            genome_length_max=5493,
+            genome_length_reward_lower_zero=5305,
+            genome_length_reward_lower_full=5359,
+            genome_length_reward_upper_full=5391,
+            genome_length_reward_upper_zero=5494,
             dustmask_filter=True,
             dustmasker_bin=str((tool_bin_dir / "dustmasker").resolve()),
         ),
@@ -256,7 +266,7 @@ def main() -> None:
     ]
     if not rows:
         raise FileNotFoundError(f"no score CSVs under {args.score_dir}")
-    output = pd.DataFrame(rows).sort_values(["temperature", "prefix_length"])
+    output = pd.DataFrame(rows).sort_values(["temperature", "prefix_length", "prompt_anchor"])
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     output.to_csv(args.output_csv, index=False)
     print(args.output_csv)

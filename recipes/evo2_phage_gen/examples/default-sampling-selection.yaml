@@ -3,10 +3,16 @@
 temperature: 1.0
 top_k: 4
 top_p: 1.0
-max_new_tokens: 6976
+# Total caps are 5,466-5,474 nt for the 16/24-nt prompt mixture, within the upper reward slope.
+max_new_tokens: 5450
 prompt_lengths:
   - 16
   - 24
+prompt_anchors:
+  - name: after_f
+    start_1_based: 2285
+  - name: after_h
+    start_1_based: 3918
 rl_seed: 42
 rollout_seed: 7
 seed_stride: 1000003

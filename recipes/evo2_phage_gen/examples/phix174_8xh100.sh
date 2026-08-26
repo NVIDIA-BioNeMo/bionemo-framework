@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 RECIPE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-RESULT_ROOT="${RECIPE_ROOT}/results/phix174-8xh100"
+RESULT_ROOT="${RECIPE_ROOT}/results/phix174-8xh100-mixed-anchors"
 DRY_RUN=0
 PREPARE_ONLY=0
 CALIBRATE_ONLY=0
@@ -62,7 +62,7 @@ SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
 usage() {
   printf '%s\n' \
     'Usage: ./examples/phix174_8xh100.sh [OPTIONS]' \
-    '  --result-root PATH         Result directory (default: results/phix174-8xh100)' \
+    '  --result-root PATH         Result directory (default: results/phix174-8xh100-mixed-anchors)' \
     '  --model-variant NAME       7b-base (default) or 7b-1m' \
     '  --sampling-selection PATH  Copy and use a sampling-selection YAML' \
     '  --hopper-fp8-inference     Opt in to regular all-layer FP8 for calibration/rollout/scoring' \
@@ -180,19 +180,22 @@ STAGE_DIR="${RESULT_ROOT}/stages"
 RUNLOG="${RESULT_ROOT}/RUNLOG.md"
 SAMPLING_SELECTION="${RESULT_ROOT}/calibration/sampling-selection.yaml"
 DEFAULT_SAMPLING_SELECTION="${RECIPE_ROOT}/examples/default-sampling-selection.yaml"
+PHIX_REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
 SAMPLING_SELECTION_OVERRIDDEN=0
 SAMPLING_TEMPERATURE=
 SAMPLING_TOP_K=
 SAMPLING_TOP_P=
 SAMPLING_MAX_NEW_TOKENS=
 SAMPLING_PROMPT_LENGTHS_TEXT=
+SAMPLING_PROMPT_ANCHORS_TEXT=
 SAMPLING_RL_SEED=
 SAMPLING_ROLLOUT_SEED=
 SAMPLING_SEED_STRIDE=
 SAMPLING_PROMPT_LABEL=
 SAMPLING_TRAIN_RECORDS=
-SAMPLING_FINAL_PER_LENGTH=
+SAMPLING_FINAL_PER_STRATUM=
 declare -a SAMPLING_PROMPT_LENGTHS=()
+declare -a SAMPLING_PROMPT_ANCHORS=()
 mkdir -p "${RESULT_ROOT}" "${STATE_DIR}" "${STAGE_DIR}"
 exec 9> "${RESULT_ROOT}/.run.lock"
 if ! flock -n 9; then
@@ -268,6 +271,7 @@ note "model variant: ${MODEL_VARIANT} (${BASE_CHECKPOINT_RESOURCE}, model size $
 sampling_selection_fields() {
   python - "$1" <<'PY'
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -280,6 +284,7 @@ required = {
     "top_p",
     "max_new_tokens",
     "prompt_lengths",
+    "prompt_anchors",
     "rl_seed",
     "rollout_seed",
     "seed_stride",
@@ -325,9 +330,24 @@ try:
         raise ValueError("prompt_lengths must contain integers")
     if len(set(prompt_lengths)) != len(prompt_lengths):
         raise ValueError("prompt_lengths must be unique")
-    if any(value < 0 or value > 65 for value in prompt_lengths):
-        raise ValueError("prompt_lengths must be between 0 and the 65-nt PhiX174 reference prefix")
-    strata = len(prompt_lengths)
+    if any(value < 0 or value > 5386 for value in prompt_lengths):
+        raise ValueError("prompt_lengths must be between 0 and the 5,386-nt PhiX174 reference length")
+    prompt_anchors = data["prompt_anchors"]
+    if not isinstance(prompt_anchors, list) or not prompt_anchors:
+        raise ValueError("prompt_anchors must be a non-empty list")
+    anchors = []
+    for anchor in prompt_anchors:
+        if not isinstance(anchor, dict) or set(anchor) != {"name", "start_1_based"}:
+            raise ValueError("each prompt anchor must contain only name and start_1_based")
+        name, start = anchor["name"], anchor["start_1_based"]
+        if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) is None:
+            raise ValueError("prompt anchor names must be safe non-empty identifiers")
+        if isinstance(start, bool) or not isinstance(start, int) or not 1 <= start <= 5386:
+            raise ValueError("prompt anchor starts must be 1-based coordinates within PhiX174")
+        anchors.append((name, start))
+    if len({name for name, _ in anchors}) != len(anchors):
+        raise ValueError("prompt anchor names must be unique")
+    strata = len(prompt_lengths) * len(anchors)
     if max_new_tokens + max(prompt_lengths) > 10240:
         raise ValueError("max_new_tokens plus the longest prompt exceeds the 10,240-token model context")
 except (OSError, ValueError, yaml.YAMLError) as error:
@@ -340,10 +360,11 @@ fields = (
     str(top_p),
     str(max_new_tokens),
     " ".join(str(value) for value in prompt_lengths),
+    " ".join(f"{name}:{start}" for name, start in anchors),
     str(rl_seed),
     str(rollout_seed),
     str(seed_stride),
-    "-".join(str(value) for value in prompt_lengths),
+    "-".join([*(str(value) for value in prompt_lengths), *(name for name, _ in anchors)]),
     # Cover every selected stratum and retain complete two-prompt GDPO steps.
     str(max(12, 2 * ((strata + 1) // 2))),
     str((1000 + strata - 1) // strata),
@@ -363,10 +384,11 @@ load_sampling_selection() {
     return 2
   fi
   IFS=$'\t' read -r SAMPLING_TEMPERATURE SAMPLING_TOP_K SAMPLING_TOP_P \
-    SAMPLING_MAX_NEW_TOKENS SAMPLING_PROMPT_LENGTHS_TEXT SAMPLING_RL_SEED \
+    SAMPLING_MAX_NEW_TOKENS SAMPLING_PROMPT_LENGTHS_TEXT SAMPLING_PROMPT_ANCHORS_TEXT SAMPLING_RL_SEED \
     SAMPLING_ROLLOUT_SEED SAMPLING_SEED_STRIDE SAMPLING_PROMPT_LABEL \
-    SAMPLING_TRAIN_RECORDS SAMPLING_FINAL_PER_LENGTH <<< "${fields}"
+    SAMPLING_TRAIN_RECORDS SAMPLING_FINAL_PER_STRATUM <<< "${fields}"
   read -r -a SAMPLING_PROMPT_LENGTHS <<< "${SAMPLING_PROMPT_LENGTHS_TEXT}"
+  read -r -a SAMPLING_PROMPT_ANCHORS <<< "${SAMPLING_PROMPT_ANCHORS_TEXT}"
 }
 
 if [[ "${DRY_RUN}" != "1" ]]; then
@@ -714,11 +736,12 @@ stage_20() {
 
 stage_30() {
   local selected calibration="${RESULT_ROOT}/calibration" evidence
+  local -a prompt_anchor_args=()
   selected="$(read_state selected-sft)"; evidence="${calibration}/scoring/selection-evidence.csv"
   if [[ -f "${STAGE_DIR}/30-calibration-generation.done" ]]; then
     note 'substage 30-calibration-generation already complete'
   else
-    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=7000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
+    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='16 24' PROMPT_ANCHORS='origin:1 after_f:2285 after_h:3918' REFERENCE_FASTA="${PHIX_REFERENCE_FASTA}" TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=5470 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-generation.done"
   fi
   if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then
@@ -749,12 +772,14 @@ import yaml
 
 table = pd.read_csv(sys.argv[1])
 selection = yaml.safe_load(open(sys.argv[2]))
+anchor_names = [anchor["name"] for anchor in selection["prompt_anchors"]]
 chosen = table[
     (table.temperature == selection["temperature"])
     & table.prefix_length.isin(selection["prompt_lengths"])
+    & table.prompt_anchor.isin(anchor_names)
 ]
 supported = (
-    len(chosen) == len(selection["prompt_lengths"])
+    len(chosen) == len(selection["prompt_lengths"]) * len(anchor_names)
     and chosen[["eligible", "metric_environment_ok", "temperature_1_default_candidate"]].to_numpy().all()
 )
 if not supported:
@@ -769,19 +794,26 @@ PY
     note "fresh calibration supports the bundled default; wrote ${SAMPLING_SELECTION}"
   fi
   load_sampling_selection
-  note "sampling selection: temperature=${SAMPLING_TEMPERATURE}, prompt lengths=${SAMPLING_PROMPT_LENGTHS_TEXT}, max new tokens=${SAMPLING_MAX_NEW_TOKENS}"
+  for anchor in "${SAMPLING_PROMPT_ANCHORS[@]}"; do
+    prompt_anchor_args+=(--prompt-anchor "${anchor}")
+  done
+  note "sampling selection: temperature=${SAMPLING_TEMPERATURE}, prompt lengths=${SAMPLING_PROMPT_LENGTHS_TEXT}, anchors=${SAMPLING_PROMPT_ANCHORS_TEXT}, max new tokens=${SAMPLING_MAX_NEW_TOKENS}"
   run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/train.jsonl" \
     --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-records "${SAMPLING_TRAIN_RECORDS}" \
-    --id-prefix train
+    --reference-fasta "${PHIX_REFERENCE_FASTA}" "${prompt_anchor_args[@]}" --id-prefix train
   run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/validation.jsonl" \
     --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-records 96 \
-    --id-prefix validation
+    --reference-fasta "${PHIX_REFERENCE_FASTA}" "${prompt_anchor_args[@]}" --id-prefix validation
 }
 
 stage_40() {
   local selected rl="${RESULT_ROOT}/rl" control="${RESULT_ROOT}/rl/environment-control" chosen
   local prepared_sft_root="${RESULT_ROOT}/rl/sft-checkpoint" rl_checkpoint
+  local -a control_anchor_args=(--prompt-anchor coordinate_origin:1)
   load_sampling_selection
+  for anchor in "${SAMPLING_PROMPT_ANCHORS[@]}"; do
+    control_anchor_args+=(--prompt-anchor "${anchor}")
+  done
   if [[ -f "${STAGE_DIR}/40-rl.done" ]]; then
     note 'substage 40-rl already complete'
   else
@@ -806,10 +838,12 @@ PY
     export NEMO_RL_RAY_NUM_CPUS="${NUM_CPUS}"
     note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
     run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
+    run evo2_phage_generation write-reference-rotations --reference-fasta "${PHIX_REFERENCE_FASTA}" \
+      --output-fasta "${control}/reference-rotations.fasta" "${control_anchor_args[@]}"
     monitored 'RL environment control' "${control}/runner.log" \
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
-      --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422_1.fna --control-dir "${control}"
+      --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
     local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
@@ -837,7 +871,13 @@ stage_50() {
   local selected selected_sft rollout="${RESULT_ROOT}/rollout" fasta safety likelihood evidence infer
   local dedup target diagnostic hard_qc clustering
   local checkv_db repo_root
+  local final_per_length
+  local -a prompt_anchor_args=()
   load_sampling_selection
+  for anchor in "${SAMPLING_PROMPT_ANCHORS[@]}"; do
+    prompt_anchor_args+=(--prompt-anchor "${anchor}")
+  done
+  final_per_length="$((SAMPLING_FINAL_PER_STRATUM * ${#SAMPLING_PROMPT_ANCHORS[@]}))"
   selected="$(read_state selected-rl)"
   selected_sft="$(read_state selected-sft)"
   fasta="${rollout}/fasta/phix174_prompt${SAMPLING_PROMPT_LABEL}_temp${SAMPLING_TEMPERATURE}.n1000.fasta"
@@ -857,13 +897,13 @@ stage_50() {
     fi
   else
     run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" \
-      --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-prompts "${SAMPLING_FINAL_PER_LENGTH}" \
-      --id-prefix final
+      --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-prompts "${SAMPLING_FINAL_PER_STRATUM}" \
+      --reference-fasta "${PHIX_REFERENCE_FASTA}" "${prompt_anchor_args[@]}" --id-prefix final
   local shard_dir="${rollout}/prompts/dp${NUM_GPUS}" rank started waited alive failed=0 printable prompt_length
   local worker_count wave_start wave_end wave_size gpu_index
   local -a command=() outputs=() pids=() logs=() prompt_files=()
   for prompt_length in "${SAMPLING_PROMPT_LENGTHS[@]}"; do
-    prompt_files+=("${rollout}/prompts/final_prompt${prompt_length}_${SAMPLING_FINAL_PER_LENGTH}.jsonl")
+    prompt_files+=("${rollout}/prompts/final_prompt${prompt_length}_${final_per_length}.jsonl")
   done
   worker_count="${NUM_GPUS}"
   note "interleave prompt lengths (${SAMPLING_PROMPT_LENGTHS_TEXT}) across ${worker_count} deterministic mixed-length shard(s)"

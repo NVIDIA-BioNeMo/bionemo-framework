@@ -37,6 +37,9 @@ top_k: 17
 top_p: 0.85
 max_new_tokens: 5800
 prompt_lengths: [4, 8, 16, 24]
+prompt_anchors:
+  - {name: left, start_1_based: 100}
+  - {name: right, start_1_based: 4000}
 rl_seed: 101
 rollout_seed: 7
 seed_stride: 11
@@ -151,8 +154,11 @@ def test_dry_run(tmp_path: Path) -> None:
         "wandb_rl_run_name": "result-7b-base-gdpo",
     }
     log = (result_root / "RUNLOG.md").read_text()
-    assert "TARGET_LENGTH=7000" in log
-    assert "sampling selection: temperature=1.0, prompt lengths=16 24, max new tokens=6976" in log
+    assert "TARGET_LENGTH=5470" in log
+    assert (
+        "sampling selection: temperature=1.0, prompt lengths=16 24, "
+        "anchors=after_f:2285 after_h:3918, max new tokens=5450"
+    ) in log
     for command in (
         "evo2_phage_prepare_external_assets",
         "evo2_phage_sequence_safety",
@@ -280,7 +286,9 @@ def test_dry_run(tmp_path: Path) -> None:
         for line in log.splitlines()
         if "command: evo2_phage_check_rl " in line and "--control-fasta" in line
     )
-    assert rl_control[rl_control.index("--control-fasta") + 1].endswith("NC_001422_1.fna")
+    assert rl_control[rl_control.index("--control-fasta") + 1].endswith(
+        "/rl/environment-control/reference-rotations.fasta"
+    )
     assert rl_control[rl_control.index("--control-dir") + 1].endswith("/rl/environment-control")
     assert rl_control[rl_control.index("--prompt-data") + 1] == str(result_root / "rl/train.jsonl")
     assert rl_control[rl_control.index("--checkpoint") + 1] == "<rl-sft-checkpoint>"
@@ -600,7 +608,10 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
     log = (result_root / "RUNLOG.md").read_text()
     assert "WARNING: copied explicit sampling selection" in log
     assert "using explicit sampling selection" in log
-    assert "sampling selection: temperature=0.9, prompt lengths=4 8 16 24, max new tokens=5800" in log
+    assert (
+        "sampling selection: temperature=0.9, prompt lengths=4 8 16 24, "
+        "anchors=left:100 right:4000, max new tokens=5800"
+    ) in log
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
     prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
     assert len(prompt_banks) == 2
@@ -610,6 +621,7 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
     )
     assert prompt_banks[0][prompt_banks[0].index("--num-records") + 1] == "12"
     assert prompt_banks[1][prompt_banks[1].index("--num-records") + 1] == "96"
+    assert all(command.count("--prompt-anchor") == 2 for command in prompt_banks)
 
     gdpo = next(command for command in commands if command[:1] == ["evo2_phage_run_gdpo"])
     for override in (
@@ -630,7 +642,7 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
         assert command[command.index("--top-k") + 1] == "17"
         assert command[command.index("--top-p") + 1] == "0.85"
         assert command[command.index("--seed") + 1] == str(7 + rank * 11)
-    assert "phix174_prompt4-8-16-24_temp0.9.n1000.fasta" in log
+    assert "phix174_prompt4-8-16-24-left-right_temp0.9.n1000.fasta" in log
 
 
 def test_calibrate_only_stops_after_scoring_for_sampling_review(tmp_path: Path) -> None:
@@ -790,7 +802,7 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: RL environment control" not in log
     assert "substage 50-rollout already complete" in log
     assert "evo2_phage_generation write-prompts" not in log
-    assert "--max-new-tokens 6976" not in log
+    assert "--max-new-tokens 5450" not in log
     assert "monitor: selected-SFT likelihood scoring" in log
     assert "monitor: one-step GDPO pilot" not in log
     assert "monitor: 500-step DP8 GDPO" not in log

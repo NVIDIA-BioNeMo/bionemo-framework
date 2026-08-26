@@ -26,6 +26,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
+from Bio import SeqIO
 from Bio.Seq import Seq
 
 from bionemo.evo2_phage_gen import sequence_safety_cli
@@ -33,6 +34,7 @@ from bionemo.evo2_phage_gen.design_scope import HostDomain, HostEvidence
 from bionemo.evo2_phage_gen.protein_evidence import (
     measure_reference_cluster_architecture,
     protein_alignment_integrity,
+    remove_pseudocircular_extension_orfs,
     stage_coordinate_normalized_reference_gff,
     summarize_required_gene_evidence,
 )
@@ -309,6 +311,49 @@ def test_score_nucleotide_metrics_rewards_passing_sequence():
         assert scored.loc[0, f"safety_{safety_class}_required"] == 1.0
         assert scored.loc[0, f"safety_{safety_class}_measurement_available"] == 0.0
         assert scored.loc[0, f"reward_safety_{safety_class}"] == 0.0
+
+
+def test_score_nucleotide_metrics_uses_configured_asymmetric_genome_length_reward():
+    lengths = [5305, 5332, 5359, 5386, 5391, 5442, 5494, 5800]
+    scored = score_nucleotide_metrics(
+        pd.DataFrame(
+            {
+                "id_prompt": [f"length-{length}" for length in lengths],
+                "sequence": [_deterministic_dna(length) for length in lengths],
+            }
+        ),
+        config=NucleotideQCConfig(
+            genome_length_min=5306,
+            genome_length_max=5493,
+            genome_length_reward_lower_zero=5305,
+            genome_length_reward_lower_full=5359,
+            genome_length_reward_upper_full=5391,
+            genome_length_reward_upper_zero=5494,
+        ),
+    )
+
+    assert scored["reward_genome_length"].tolist() == pytest.approx([0.0, 0.5, 1.0, 1.0, 1.0, 52 / 103, 0.0, 0.0])
+    assert scored.loc[scored["genome_length"] == 5800, "reward_nucleotide_pass"].item() == 0.0
+
+
+@pytest.mark.parametrize(
+    "config_kwargs",
+    [
+        {"genome_length_reward_lower_zero": 5305},
+        {
+            "genome_length_reward_lower_zero": 5359,
+            "genome_length_reward_lower_full": 5305,
+            "genome_length_reward_upper_full": 5391,
+            "genome_length_reward_upper_zero": 5494,
+        },
+    ],
+)
+def test_score_nucleotide_metrics_rejects_incomplete_or_unordered_length_reward_bounds(config_kwargs):
+    with pytest.raises(ValueError, match="genome length reward bounds"):
+        score_nucleotide_metrics(
+            pd.DataFrame({"id_prompt": ["invalid-bounds"], "sequence": [_deterministic_dna(5386)]}),
+            config=NucleotideQCConfig(**config_kwargs),
+        )
 
 
 def test_disabled_sequence_safety_config_is_explicitly_indeterminate(tmp_path):
@@ -1201,6 +1246,31 @@ def test_reference_gff_staging_removes_a_redundant_pseudocircular_tail(tmp_path)
     staged = staged_reference.read_text()
     assert "ID=A_tail" not in staged
     assert "ID=A;product=replication" in staged
+
+
+def test_pseudocircular_orf_filter_keeps_cross_origin_calls_and_removes_extension_duplicates(tmp_path):
+    source = tmp_path / "genomes.fasta"
+    source.write_text(">genome\nAAAACCCC\n")
+    nucleotide_orfs = tmp_path / "orfs.fasta"
+    protein_orfs = tmp_path / "proteins.fasta"
+    records = (
+        ">genome_ORF.1 [1-6](+) type:complete length:6\nATGAAA\n"
+        ">genome_ORF.2 [6-12](+) type:complete length:6\nATGAAA\n"
+        ">genome_ORF.3 [9-14](+) type:complete length:6\nATGAAA\n"
+    )
+    nucleotide_orfs.write_text(records)
+    protein_orfs.write_text(records.replace("ATGAAA", "MK"))
+
+    remove_pseudocircular_extension_orfs(source, nucleotide_orfs, protein_orfs)
+
+    assert [record.id for record in SeqIO.parse(nucleotide_orfs, "fasta")] == [
+        "genome_ORF.1",
+        "genome_ORF.2",
+    ]
+    assert [record.id for record in SeqIO.parse(protein_orfs, "fasta")] == [
+        "genome_ORF.1",
+        "genome_ORF.2",
+    ]
 
 
 def test_external_qc_env_prepends_run_specific_tool_directory(tmp_path):

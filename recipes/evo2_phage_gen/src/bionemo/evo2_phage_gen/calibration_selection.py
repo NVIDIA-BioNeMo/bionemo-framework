@@ -67,6 +67,7 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
     cluster_count = _numeric(scored, "mmseqs_cluster_num_clusters").max()
     row: dict[str, float | int | str | bool] = {
         "cell": cell,
+        "prompt_anchor": match.group("anchor") if match and match.group("anchor") else "origin",
         "prefix_length": int(match.group("prefix")) if match else -1,
         "temperature": float(match.group("temperature")) if match else float("nan"),
         "records": len(scored),
@@ -132,7 +133,7 @@ def build_selection_table(
         & table["reward_practically_comparable"]
         & table["target_signal_practically_comparable"]
     )
-    return table.sort_values(["temperature", "prefix_length"]).reset_index(drop=True)
+    return table.sort_values(["temperature", "prefix_length", "prompt_anchor"]).reset_index(drop=True)
 
 
 def _parse_args() -> argparse.Namespace:
