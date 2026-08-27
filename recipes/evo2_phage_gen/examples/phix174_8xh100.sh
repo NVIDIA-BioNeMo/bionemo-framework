@@ -762,7 +762,7 @@ PY
 stage_20() {
   local prep base_nemo base_iteration base_mbridge="${RESULT_ROOT}/checkpoints/${BASE_CHECKPOINT_DIR}" sft="${RESULT_ROOT}/sft/train" selected
   prep="$(read_state sft-prepared)"
-  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size "${SFT_TENSOR_PARALLEL_SIZE}" --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
+  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size "${SFT_TENSOR_PARALLEL_SIZE}" --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --mixed-precision-recipe bf16_mixed)
   if [[ -f "${STAGE_DIR}/20-sft.done" ]]; then
     note 'substage 20-sft already complete'
   else

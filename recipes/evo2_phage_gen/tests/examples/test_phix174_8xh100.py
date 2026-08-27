@@ -283,11 +283,14 @@ def test_dry_run(tmp_path: Path) -> None:
     assert likelihood_command[likelihood_command.index("--micro-batch-size") + 1] == "8"
     assert "--use-subquadratic-ops" not in likelihood_command
 
-    sft_command = next(
+    sft_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
-        if "command: torchrun " in line and "--max-steps 12000" in line
-    )
+        if "command: torchrun " in line and "train_evo2" in line
+    ]
+    assert len(sft_commands) == 3
+    assert all("--eod-pad-in-loss-mask" not in command for command in sft_commands)
+    sft_command = next(command for command in sft_commands if "--max-steps" in command and "12000" in command)
     assert sft_command[sft_command.index("--keep-best-k") + 1] == "3"
     assert sft_command[sft_command.index("--model-size") + 1] == "evo2_7b_base"
     assert sft_command[sft_command.index("--most-recent-k") + 1] == "1"
@@ -297,11 +300,7 @@ def test_dry_run(tmp_path: Path) -> None:
     assert sft_command[sft_command.index("--checkpoint-metric-step-tolerance") + 1] == "1"
     assert "--wandb-project" not in sft_command
 
-    heldout_command = next(
-        shlex.split(line.partition("command: ")[2])
-        for line in log.splitlines()
-        if "command: torchrun " in line and "--experiment-name evo2-heldout" in line
-    )
+    heldout_command = next(command for command in sft_commands if "evo2-heldout" in command)
     assert heldout_command[heldout_command.index("--max-steps") + 1] == "0"
     assert heldout_command[heldout_command.index("--decay-steps") + 1] == "1"
 
