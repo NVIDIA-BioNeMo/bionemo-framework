@@ -79,7 +79,7 @@
       "assertions": [
         "The response uses the installer's architecture-selected aarch64 downloads for MMseqs2-GPU, DIAMOND, HMMER, and AMRFinderPlus rather than reusing x86_64 tool caches.",
         "It enables the dated biotite 0.41.2 and pinned biotraj 1.2.2 source-build fallback documented beside pyproject.toml when the ARM Python resolver encounters the known wheel and sdist metadata gap.",
-        "It includes the documented Hatchling, hatch-vcs, and hatch-cython build helpers needed by that no-build-isolation fallback.",
+        "It uses the active Hatchling, hatch-vcs, and hatch-cython build helpers required for source builds under --no-build-isolation.",
         "It validates native architecture and executable versions before scientific stages use the tools.",
         "It records the image, architecture, dependency fallback if used, and resolved tool paths in RUNLOG.md."
       ],

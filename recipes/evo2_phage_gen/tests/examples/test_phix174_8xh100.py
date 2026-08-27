@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -24,6 +25,8 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+
+import yaml
 
 
 RECIPE_ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +50,35 @@ seed_stride: 11
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return text
+
+
+def _write_mbridge_checkpoint(root: Path, *, iteration_number: int = 1) -> Path:
+    iteration = root / f"iter_{iteration_number:07d}"
+    iteration.mkdir(parents=True)
+    (root / "latest_checkpointed_iteration.txt").write_text(f"{iteration_number}\n")
+    (iteration / ".metadata").write_bytes(b"metadata")
+    (iteration / "__0_0.distcp").write_bytes(b"weights")
+    (iteration / "common.pt").write_bytes(b"common")
+    (iteration / "metadata.json").write_text("{}\n")
+    (iteration / "run_config.yaml").write_text("model: {}\noptimizer: {}\n")
+    return iteration
+
+
+def _write_prepared_sft_checkpoint(root: Path) -> Path:
+    iteration = _write_mbridge_checkpoint(root, iteration_number=5200)
+    files = [path for path in iteration.rglob("*") if path.is_file()]
+    manifest = {
+        "schema_version": 2,
+        "state": "succeeded",
+        "copy_mode": "model-only-dcp-rewrite",
+        "model_object_state_preserved": True,
+        "prepared_sft_checkpoint": str(iteration.resolve()),
+        "prepared_run_config_sha256": hashlib.sha256((iteration / "run_config.yaml").read_bytes()).hexdigest(),
+        "payload_file_count": len(files),
+        "payload_bytes": sum(path.stat().st_size for path in files),
+    }
+    (root / "preparation-manifest.json").write_text(json.dumps(manifest) + "\n")
+    return iteration
 
 
 def test_control_fasta_ids(tmp_path: Path, monkeypatch) -> None:
@@ -131,7 +163,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "20 train/select/evaluate SFT",
         "30 calibrate sampling",
         "40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO",
-        "50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes",
+        "50 generate, SFT-score, deduplicate, hard-QC, cluster, and report 1,000 genomes",
     ]
     settings = json.loads((result_root / "settings.json").read_text())
     assert settings == {
@@ -234,14 +266,14 @@ def test_dry_run(tmp_path: Path) -> None:
     assert f"Arc screening working directory: {RECIPE_ROOT.parents[1]}" in log
     assert "Arc internal MMseqs clustering disabled" in log
 
-    deduplication = log.index("command: evo2_phage_generation deduplicate-fasta")
     likelihood = log.index("monitor: selected-SFT likelihood scoring")
+    deduplication = log.index("command: evo2_phage_generation deduplicate-fasta")
     safety = log.index("command: evo2_phage_sequence_safety scan", likelihood)
     target = log.index("monitor: Arc target profile")
     diagnostic = log.index("monitor: Arc filter-7 diagnostic")
     clustering = log.index("command: evo2_phage_generation cluster-post-qc")
     reporting = log.index("command: evo2_phage_generation finalize-rollout")
-    assert deduplication < likelihood < safety < target < diagnostic < clustering < reporting
+    assert likelihood < deduplication < safety < target < diagnostic < clustering < reporting
     assert "/rollout/deduplication/representatives.fasta" in log
     likelihood_command = next(
         shlex.split(line.partition("command: ")[2])
@@ -276,10 +308,19 @@ def test_dry_run(tmp_path: Path) -> None:
     arc_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
-        if "command: evo2_phage_prepare_arc_pipeline " in line
+        if "command: " in line and "evo2_phage_prepare_arc_pipeline" in line
     ]
     assert len(arc_commands) == 2
-    assert all("--overwrite" in command for command in arc_commands)
+    expected_arc_prefix = [
+        "env",
+        "GIT_CONFIG_COUNT=1",
+        "GIT_CONFIG_KEY_0=safe.directory",
+        f"GIT_CONFIG_VALUE_0={RECIPE_ROOT}/data/external/arc_evo2",
+        "evo2_phage_prepare_arc_pipeline",
+    ]
+    for command in arc_commands:
+        assert command[: len(expected_arc_prefix)] == expected_arc_prefix
+        assert "--overwrite" in command
 
     rl_control = next(
         shlex.split(line.partition("command: ")[2])
@@ -295,6 +336,13 @@ def test_dry_run(tmp_path: Path) -> None:
     preparation = log.index("command: python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl")
     assert preparation < log.index("command: evo2_phage_check_rl")
     assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
+
+    likelihood_command = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: torchrun " in line and "predict_evo2" in line
+    )
+    assert likelihood_command[likelihood_command.index("--ckpt-dir") + 1] == "<rl-sft-checkpoint>"
 
     gdpo_commands = [
         shlex.split(line.partition("command: ")[2])
@@ -508,7 +556,7 @@ seed_stride: 11
     log = (result_root / "RUNLOG.md").read_text()
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
     prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
-    assert [command[command.index("--num-records") + 1] for command in prompt_banks] == ["14", "96"]
+    assert [command[command.index("--num-records") + 1] for command in prompt_banks] == ["96", "96"]
     assert "interleave prompt lengths (0 1 2 3 4 5 6 7 8 9 10 11 12)" in log
 
 
@@ -553,9 +601,9 @@ def test_dry_run_supports_preferred_7b_1m_variant(tmp_path: Path) -> None:
     assert "policy.model_name=bionemo/evo2_7b" in gdpo
 
 
-def test_existing_base_run_rejects_mid_run_switch_to_1m(tmp_path: Path) -> None:
-    """Historical result roots without a variant marker are known to be 7B-base runs."""
-    result_root = tmp_path / "existing-base"
+def test_resume_keeps_historical_unmarked_artifacts_on_7b_base(tmp_path: Path) -> None:
+    """Historical pre-marker result roots retain their established 7B-base interpretation."""
+    result_root = tmp_path / "unrecorded-model"
     (result_root / "state").mkdir(parents=True)
     (result_root / "state" / "selected-sft").write_text("/checkpoint/iter_0005200\n")
 
@@ -564,8 +612,65 @@ def test_existing_base_run_rejects_mid_run_switch_to_1m(tmp_path: Path) -> None:
             "bash",
             str(SCRIPT),
             "--dry-run",
+            "--resume-from",
+            "50",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["model_variant"] == "7b-base"
+    assert (result_root / "state/model-variant").read_text().strip() == "7b-base"
+
+
+def test_resume_uses_recorded_7b_1m_model_variant(tmp_path: Path) -> None:
+    result_root = tmp_path / "recorded-1m"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-1m\n")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--resume-from",
+            "50",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["model_variant"] == "7b-1m"
+    assert settings["base_checkpoint"] == "evo2/7b-1m:1.0"
+    assert settings["model_size"] == "evo2_7b"
+
+
+def test_resume_rejects_explicit_model_variant_change(tmp_path: Path) -> None:
+    result_root = tmp_path / "recorded-1m"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-1m\n")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
             "--model-variant",
-            "7b-1m",
+            "7b-base",
             "--result-root",
             str(result_root),
         ],
@@ -577,8 +682,7 @@ def test_existing_base_run_rejects_mid_run_switch_to_1m(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 2
-    assert "recorded model variant is 7b-base" in completed.stderr
-    assert "new result root" in completed.stderr
+    assert "recorded model variant is 7b-1m, not 7b-base" in completed.stderr
 
 
 def test_sampling_selection_override(tmp_path: Path) -> None:
@@ -613,17 +717,36 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
         "anchors=left:100 right:4000, max new tokens=5800"
     ) in log
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    calibration_scoring = next(
+        command for command in commands if "scripts/calibration/run_sampling_calibration_scoring.sh" in command
+    )
+    assert (
+        "SAFETY_ASSET_MANIFEST=" + str(RECIPE_ROOT / "data/external/safety/asset_manifest.yaml") in calibration_scoring
+    )
+    assert "SAFETY_POLICY=" + str(RECIPE_ROOT / "configs/phage_safety_policy.yaml") in calibration_scoring
+    assert "SAFETY_HOST_DOMAIN=BACTERIA" in calibration_scoring
+    safety_evidence_field = next(
+        field for field in calibration_scoring if field.startswith("SAFETY_HOST_EVIDENCE_JSON=")
+    )
+    calibration_evidence = json.loads(safety_evidence_field.partition("=")[2])
+    online_config = yaml.safe_load((RECIPE_ROOT / "configs/grpo_phage_megatron.yaml").read_text())
+    assert calibration_evidence == online_config["env"]["phage_qc"]["sequence_safety"]["host_evidence"]
     prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
     assert len(prompt_banks) == 2
     assert all(
         command[command.index("--prompt-lengths") + 1 : command.index("--num-records")] == ["4", "8", "16", "24"]
         for command in prompt_banks
     )
-    assert prompt_banks[0][prompt_banks[0].index("--num-records") + 1] == "12"
+    assert prompt_banks[0][prompt_banks[0].index("--num-records") + 1] == "96"
     assert prompt_banks[1][prompt_banks[1].index("--num-records") + 1] == "96"
     assert all(command.count("--prompt-anchor") == 2 for command in prompt_banks)
 
-    gdpo = next(command for command in commands if command[:1] == ["evo2_phage_run_gdpo"])
+    gdpo = next(
+        command
+        for command in commands
+        if command[:1] == ["evo2_phage_run_gdpo"]
+        and f"checkpointing.checkpoint_dir={result_root / 'rl/checkpoints'}" in command
+    )
     for override in (
         "policy.generation.max_new_tokens=5800",
         "policy.generation.temperature=0.9",
@@ -808,6 +931,119 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: 500-step DP8 GDPO" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "evo2_phage_sequence_safety scan" in log
+
+
+def test_stage20_reuses_valid_converted_base_without_download_or_conversion(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    _write_mbridge_checkpoint(result_root / "checkpoints/evo2-7b-8k-mbridge-10240")
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "20", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "evo2_convert_nemo2_to_mbridge" not in log
+    assert "download_bionemo_data" not in log
+
+
+def test_stage20_rejects_incomplete_converted_base(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    (result_root / "checkpoints/evo2-7b-8k-mbridge-10240").mkdir(parents=True)
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "20", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert "converted base checkpoint is incomplete" in completed.stderr
+
+
+def test_stage20_smoke_marker_skips_smoke_but_runs_full_sft(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    stage_root = result_root / "stages"
+    stage_root.mkdir(parents=True)
+    (result_root / "state").mkdir()
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    (stage_root / "20-sft-smoke.done").touch()
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "20", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "monitor: SFT smoke" not in log
+    assert "monitor: 12,000-step SFT" in log
+
+
+def test_stage40_reuses_validated_prepared_sft_without_source_state(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    prepared = _write_prepared_sft_checkpoint(result_root / "rl/sft-checkpoint")
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "40", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl" not in log
+    assert (result_root / "state/rl-sft-checkpoint").read_text().strip() == str(prepared)
+
+
+def test_stage50_validates_prepared_sft_before_likelihood(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    prepared = _write_prepared_sft_checkpoint(result_root / "rl/sft-checkpoint")
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "50", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    likelihood = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: torchrun " in line and "predict_evo2" in line
+    )
+    assert likelihood[likelihood.index("--ckpt-dir") + 1] == str(prepared)
 
 
 def test_stage40_pilot_marker_skips_pilot_but_runs_monitor_and_full_training(tmp_path: Path) -> None:

@@ -24,7 +24,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from bionemo.evo2_phage_gen.calibration_scoring import CELL_RE, EXTERNAL_OBJECTIVES
+from bionemo.evo2_phage_gen.calibration_scoring import (
+    CELL_RE,
+    EXTERNAL_OBJECTIVES,
+    safety_objective_interpretability,
+)
 
 
 def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -50,6 +54,7 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
     cell_seed = bootstrap_seed + int(hashlib.sha256(cell.encode()).hexdigest()[:8], 16)
     support_columns = [f"{prefix}_measurement_available" for prefix in EXTERNAL_OBJECTIVES.values()]
     support = pd.concat([_numeric(scored, column) for column in support_columns], axis=1).min(axis=1)
+    safety_environment_ok = bool(len(scored) and safety_objective_interpretability(scored).all().all())
     target_signal = pd.concat(
         [
             _numeric(scored, "reward_external_protein_hit_count"),
@@ -71,7 +76,9 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
         "prefix_length": int(match.group("prefix")) if match else -1,
         "temperature": float(match.group("temperature")) if match else float("nan"),
         "records": len(scored),
-        "metric_environment_ok": bool(len(scored) and (_numeric(scored, "external_qc_tool_succeeded") == 1.0).all()),
+        "metric_environment_ok": bool(
+            len(scored) and (_numeric(scored, "external_qc_tool_succeeded") == 1.0).all() and safety_environment_ok
+        ),
         "all_external_measurements_available_rate": float(support.mean()),
         "within_setting_99pct_cluster_count": int(cluster_count) if pd.notna(cluster_count) else 0,
         "within_setting_clusterable_count": int(_numeric(scored, "mmseqs_cluster_valid_for_clustering").sum()),

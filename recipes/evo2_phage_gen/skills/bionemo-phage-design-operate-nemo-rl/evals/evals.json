@@ -211,6 +211,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-017-mixed-prompt-batch-fallback",
+      "prompt": "A full-shape PhiX GDPO pilot reaches validation, then logs `batched decode group failed` because prompts have different lengths and falls back to single-request decode. No pilot marker or checkpoint exists. Continue without repeating SFT or calibration.",
+      "expected_output": "Reject the slow fallback, group mixed validation prompts by token length while preserving result order, and rerun the incomplete pilot from the same result root.",
+      "assertions": [
+        "The response treats single-request fallback as an operational pilot failure rather than accepting an impractically slow validation pass.",
+        "It stable-partitions inputs into homogeneous token-length groups and restores results to their original prompt indices.",
+        "It does not create the pilot or pilot-check completion marker.",
+        "It reruns stage 40 from the same result root, reusing completed SFT, calibration, prompt banks, and prepared SFT checkpoint.",
+        "It requires live evidence that every prompt-length stratum uses batched native prefill before accepting the pilot."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

@@ -19,6 +19,12 @@ Record added, omitted, or redefined terms; their evidence and consequences; cont
 
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 
+Treat a pilot log containing `batched decode group failed` with `requires same-length prompts` as
+an operational failure even if generation falls back successfully. Stable-partition native adapter
+inputs into same-token-length groups, restore results to their original indices, and rerun the
+uncompleted pilot from the same result root; accept its marker only after every calibrated stratum
+uses batched native prefill.
+
 For the realized PhiX pilot and resume procedure, read the
 [example README](../../examples/README.md) as the source of truth. Preserve separate durable states
 for the pilot, its objective-health check, and the full RL run; skip a state only after its output

@@ -13,6 +13,10 @@ PREPARE_ONLY=0
 CALIBRATE_ONLY=0
 RESUME_FROM=00
 SAMPLING_SELECTION_SOURCE=
+MODEL_VARIANT_EXPLICIT=0
+if [[ -v MODEL_VARIANT && -n "${MODEL_VARIANT}" ]]; then
+  MODEL_VARIANT_EXPLICIT=1
+fi
 MODEL_VARIANT="${MODEL_VARIANT:-7b-base}"
 HOPPER_FP8_INFERENCE=0
 WANDB_ENABLED=0
@@ -58,6 +62,7 @@ SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
 SAFETY_THREADS="${SAFETY_THREADS:-32}"
 SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
+PHIX174_HOST_EVIDENCE_JSON='{"source":"NCBI Datasets v2alpha genome dataset report","source_version":"NCBI Datasets v2alpha API","replication_host_domains":["BACTERIA"],"confirmed":true,"metadata":{"accession":"NC_001422.1","intended_design_context":"PhiX/Microviridae bacterial phage"}}'
 
 usage() {
   printf '%s\n' \
@@ -80,7 +85,7 @@ usage() {
 while (($#)); do
   case "$1" in
     --result-root) RESULT_ROOT="$2"; shift 2 ;;
-    --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
+    --model-variant) MODEL_VARIANT="$2"; MODEL_VARIANT_EXPLICIT=1; shift 2 ;;
     --sampling-selection) SAMPLING_SELECTION_SOURCE="$2"; shift 2 ;;
     --hopper-fp8-inference) HOPPER_FP8_INFERENCE=1; shift ;;
     --wandb) WANDB_ENABLED=1; shift ;;
@@ -123,6 +128,27 @@ if [[ "${CALIBRATE_ONLY}" == "1" ]] && ((10#${RESUME_FROM} > 30)); then
   printf '%s\n' '--calibrate-only requires --resume-from 00, 10, 20, or 30' >&2
   exit 2
 fi
+
+MODEL_VARIANT_STATE="${RESULT_ROOT}/state/model-variant"
+if [[ -s "${MODEL_VARIANT_STATE}" ]]; then
+  RECORDED_MODEL_VARIANT="$(sed -n '1p' "${MODEL_VARIANT_STATE}")"
+  if [[ "${MODEL_VARIANT_EXPLICIT}" == "1" && "${MODEL_VARIANT}" != "${RECORDED_MODEL_VARIANT}" ]]; then
+    printf 'This result root recorded model variant is %s, not %s; use the recorded variant or a new result root.\n' \
+      "${RECORDED_MODEL_VARIANT}" "${MODEL_VARIANT}" >&2
+    exit 2
+  fi
+  MODEL_VARIANT="${RECORDED_MODEL_VARIANT}"
+elif [[ -s "${RESULT_ROOT}/state/selected-sft" || -f "${RESULT_ROOT}/stages/20-sft.done" ]]; then
+  # Runs created before this selector existed used the publication-style 7B-base checkpoint.
+  RECORDED_MODEL_VARIANT='7b-base'
+  if [[ "${MODEL_VARIANT_EXPLICIT}" == "1" && "${MODEL_VARIANT}" != "${RECORDED_MODEL_VARIANT}" ]]; then
+    printf 'This result root recorded model variant is %s, not %s; use the recorded variant or a new result root.\n' \
+      "${RECORDED_MODEL_VARIANT}" "${MODEL_VARIANT}" >&2
+    exit 2
+  fi
+  MODEL_VARIANT="${RECORDED_MODEL_VARIANT}"
+fi
+
 case "${MODEL_VARIANT}" in
   7b-base)
     BASE_CHECKPOINT_RESOURCE='evo2/7b-8k:1.0'
@@ -251,20 +277,6 @@ report_run_exit() {
 
 trap report_run_exit EXIT
 
-MODEL_VARIANT_STATE="${STATE_DIR}/model-variant"
-if [[ -s "${MODEL_VARIANT_STATE}" ]]; then
-  RECORDED_MODEL_VARIANT="$(sed -n '1p' "${MODEL_VARIANT_STATE}")"
-elif [[ -s "${STATE_DIR}/selected-sft" || -f "${STAGE_DIR}/20-sft.done" ]]; then
-  # Runs created before this selector existed used the publication-style 7B-base checkpoint.
-  RECORDED_MODEL_VARIANT='7b-base'
-else
-  RECORDED_MODEL_VARIANT="${MODEL_VARIANT}"
-fi
-if [[ "${MODEL_VARIANT}" != "${RECORDED_MODEL_VARIANT}" ]]; then
-  printf 'This result root recorded model variant is %s, not %s; use the recorded variant or a new result root.\n' \
-    "${RECORDED_MODEL_VARIANT}" "${MODEL_VARIANT}" >&2
-  exit 2
-fi
 printf '%s\n' "${MODEL_VARIANT}" > "${MODEL_VARIANT_STATE}"
 note "model variant: ${MODEL_VARIANT} (${BASE_CHECKPOINT_RESOURCE}, model size ${MODEL_SIZE})"
 
@@ -365,8 +377,8 @@ fields = (
     str(rollout_seed),
     str(seed_stride),
     "-".join([*(str(value) for value in prompt_lengths), *(name for name, _ in anchors)]),
-    # Cover every selected stratum and retain complete two-prompt GDPO steps.
-    str(max(12, 2 * ((strata + 1) // 2))),
+    # The loader consumes 16 prompts per step; keep a full six-generation bank.
+    str(96),
     str((1000 + strata - 1) // strata),
 )
 print("\t".join(fields))
@@ -453,7 +465,16 @@ monitored() {
 }
 
 state() { printf '%s\n' "$2" > "${STATE_DIR}/$1"; }
-read_state() { [[ "${DRY_RUN}" == "1" ]] && printf '<%s>\n' "$1" || sed -n '1p' "${STATE_DIR}/$1"; }
+read_state() {
+  if [[ -s "${STATE_DIR}/$1" ]]; then
+    sed -n '1p' "${STATE_DIR}/$1"
+  elif [[ "${DRY_RUN}" == "1" ]]; then
+    printf '<%s>\n' "$1"
+  else
+    printf 'Missing required state: %s\n' "${STATE_DIR}/$1" >&2
+    return 2
+  fi
+}
 
 check_scan() {
   local mode="${2:-strict}" tolerated
@@ -515,6 +536,28 @@ import json, sys
 result = json.load(open(sys.argv[1]))
 if result["decision"] == "pause_for_diagnosis":
     raise SystemExit(f'RL objective monitor requested diagnosis: {result["reason"]}')
+PY
+}
+
+validate_mbridge_checkpoint() {
+  python - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+from bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl import validate_mbridge_checkpoint
+
+print(validate_mbridge_checkpoint(Path(sys.argv[1])))
+PY
+}
+
+validate_prepared_sft_checkpoint() {
+  python - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+from bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl import validate_prepared_sft_checkpoint
+
+print(validate_prepared_sft_checkpoint(Path(sys.argv[1])))
 PY
 }
 
@@ -644,7 +687,10 @@ stage_00() {
     --pharokka-database-url "${PHAROKKA_DATABASE_URL}" \
     --pharokka-database-md5 "${PHAROKKA_DATABASE_MD5}" \
     --pharokka-database-release "${PHAROKKA_DATABASE_RELEASE}"
-  run evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
+  # Root-owned containers otherwise reject the host-owned Arc bind mount; trust only this checkout for this command.
+  run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory \
+    GIT_CONFIG_VALUE_0="${RECIPE_ROOT}/data/external/arc_evo2" \
+    evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
   if [[ "${DRY_RUN}" == "1" || ! -s data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein.dbtype ]]; then
     run mkdir -p data/external/mmseqs/NC_001422_1_Gprotein
     run mmseqs createdb data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein
@@ -714,17 +760,37 @@ PY
 }
 
 stage_20() {
-  local prep base_nemo base_mbridge="${RESULT_ROOT}/checkpoints/${BASE_CHECKPOINT_DIR}" sft="${RESULT_ROOT}/sft/train" selected
+  local prep base_nemo base_iteration base_mbridge="${RESULT_ROOT}/checkpoints/${BASE_CHECKPOINT_DIR}" sft="${RESULT_ROOT}/sft/train" selected
   prep="$(read_state sft-prepared)"
   local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size "${SFT_TENSOR_PARALLEL_SIZE}" --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
   if [[ -f "${STAGE_DIR}/20-sft.done" ]]; then
     note 'substage 20-sft already complete'
   else
-    [[ "${DRY_RUN}" == "1" ]] && base_nemo="${BASE_DOWNLOAD_PLACEHOLDER}" || base_nemo="$(download_bionemo_data "${BASE_CHECKPOINT_RESOURCE}" | tail -n 1)"
-    if [[ "${DRY_RUN}" == "1" || ! -d "${base_mbridge}" ]]; then
+    if [[ -e "${base_mbridge}" ]]; then
+      if ! base_iteration="$(validate_mbridge_checkpoint "${base_mbridge}" 2>/dev/null)"; then
+        printf 'Existing converted base checkpoint is incomplete: %s; inspect it and remove it explicitly.\n' \
+          "${base_mbridge}" >&2
+        return 2
+      fi
+      note "reusing validated converted base checkpoint: ${base_iteration}"
+    else
+      if [[ "${DRY_RUN}" == "1" ]]; then
+        base_nemo="${BASE_DOWNLOAD_PLACEHOLDER}"
+      else
+        base_nemo="$(download_bionemo_data "${BASE_CHECKPOINT_RESOURCE}" | tail -n 1)"
+      fi
       run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size "${MODEL_SIZE}" --seq-length 10240 --mixed-precision-recipe bf16_mixed
+      if [[ "${DRY_RUN}" != "1" ]]; then
+        base_iteration="$(validate_mbridge_checkpoint "${base_mbridge}")"
+        note "validated converted base checkpoint: ${base_iteration}"
+      fi
     fi
-    monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
+    if [[ -f "${STAGE_DIR}/20-sft-smoke.done" ]]; then
+      note 'substage 20-sft-smoke already complete'
+    else
+      monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
+      [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft-smoke.done"
+    fi
     monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2 "${SFT_WANDB_ARGS[@]}"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft.done"
   fi
@@ -747,8 +813,11 @@ stage_30() {
   if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then
     note 'substage 30-calibration-scoring already complete'
   else
-    run evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
-    monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
+    # Scope Arc checkout trust to this preparer process; do not mutate container-global Git configuration.
+    run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory \
+      GIT_CONFIG_VALUE_0="${RECIPE_ROOT}/data/external/arc_evo2" \
+      evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
+    monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" SAFETY_ASSET_MANIFEST="${RECIPE_ROOT}/data/external/safety/asset_manifest.yaml" SAFETY_POLICY="${RECIPE_ROOT}/configs/phage_safety_policy.yaml" SAFETY_HOST_DOMAIN=BACTERIA SAFETY_HOST_EVIDENCE_JSON="${PHIX174_HOST_EVIDENCE_JSON}" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-scoring.done"
   fi
   if [[ "${CALIBRATE_ONLY}" == "1" ]]; then
@@ -817,21 +886,23 @@ stage_40() {
   if [[ -f "${STAGE_DIR}/40-rl.done" ]]; then
     note 'substage 40-rl already complete'
   else
-    selected="$(read_state selected-sft)"
-    # Use the editable source module so a post-calibration rerun works before console-script metadata is refreshed.
-    run python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl \
-      --source-checkpoint "${selected}" --output-dir "${prepared_sft_root}"
-    if [[ "${DRY_RUN}" == "1" ]]; then
-      rl_checkpoint='<rl-sft-checkpoint>'
+    if [[ -e "${prepared_sft_root}" ]]; then
+      if ! rl_checkpoint="$(validate_prepared_sft_checkpoint "${prepared_sft_root}")"; then
+        printf 'Existing prepared SFT checkpoint is incomplete: %s; inspect it and remove it explicitly.\n' \
+          "${prepared_sft_root}" >&2
+        return 2
+      fi
+      note "reusing validated prepared SFT checkpoint: ${rl_checkpoint}"
     else
-      rl_checkpoint="$(python - "${prepared_sft_root}/preparation-manifest.json" <<'PY'
-import json, sys
-manifest = json.load(open(sys.argv[1]))
-if manifest.get("state") != "succeeded":
-    raise SystemExit(f"SFT checkpoint preparation for RL is not complete: {sys.argv[1]}")
-print(manifest["prepared_sft_checkpoint"])
-PY
-)"
+      selected="$(read_state selected-sft)"
+      # Use the editable source module so a post-calibration rerun works before console-script metadata is refreshed.
+      run python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl \
+        --source-checkpoint "${selected}" --output-dir "${prepared_sft_root}"
+      if [[ "${DRY_RUN}" == "1" ]]; then
+        rl_checkpoint='<rl-sft-checkpoint>'
+      else
+        rl_checkpoint="$(validate_prepared_sft_checkpoint "${prepared_sft_root}")"
+      fi
     fi
     state rl-sft-checkpoint "${rl_checkpoint}"
     note "RL will use the prepared optimizer-free, runtime-sanitized SFT checkpoint: ${rl_checkpoint}"
@@ -869,7 +940,7 @@ PY
 
 stage_50() {
   local selected selected_sft rollout="${RESULT_ROOT}/rollout" fasta safety likelihood evidence infer
-  local dedup target diagnostic hard_qc clustering
+  local dedup target diagnostic hard_qc clustering prepared_sft_root="${RESULT_ROOT}/rl/sft-checkpoint"
   local checkv_db repo_root
   local final_per_length
   local -a prompt_anchor_args=()
@@ -879,7 +950,17 @@ stage_50() {
   done
   final_per_length="$((SAMPLING_FINAL_PER_STRATUM * ${#SAMPLING_PROMPT_ANCHORS[@]}))"
   selected="$(read_state selected-rl)"
-  selected_sft="$(read_state selected-sft)"
+  if [[ -e "${prepared_sft_root}" ]]; then
+    selected_sft="$(validate_prepared_sft_checkpoint "${prepared_sft_root}")"
+    state rl-sft-checkpoint "${selected_sft}"
+    note "validated prepared SFT checkpoint for likelihood: ${selected_sft}"
+  else
+    selected_sft="$(read_state rl-sft-checkpoint)"
+    if [[ "${selected_sft}" != '<rl-sft-checkpoint>' ]]; then
+      printf 'Prepared SFT checkpoint for likelihood is unavailable: %s\n' "${prepared_sft_root}" >&2
+      return 2
+    fi
+  fi
   fasta="${rollout}/fasta/phix174_prompt${SAMPLING_PROMPT_LABEL}_temp${SAMPLING_TEMPERATURE}.n1000.fasta"
   safety="${rollout}/sequence-safety"
   likelihood="${rollout}/sft-likelihood"
@@ -984,19 +1065,6 @@ PY
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-rollout.done"
   fi
 
-  if [[ -f "${STAGE_DIR}/50-deduplication.done" ]]; then
-    note 'substage 50-deduplication already complete'
-    require_nonempty_file "${dedup}/representatives.fasta" 'deduplicated representative FASTA'
-    require_nonempty_file "${dedup}/mapping.csv" 'deduplication mapping'
-    check_success_report "${dedup}/report.json"
-  else
-    run evo2_phage_generation deduplicate-fasta \
-      --input-fasta "${fasta}" --output-fasta "${dedup}/representatives.fasta" \
-      --mapping-csv "${dedup}/mapping.csv" --report "${dedup}/report.json"
-    check_success_report "${dedup}/report.json"
-    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-deduplication.done"
-  fi
-
   if [[ -f "${STAGE_DIR}/50-sft-likelihood.done" ]]; then
     note 'substage 50-sft-likelihood already complete'
     require_nonempty_file "${likelihood}/ranked-designs.csv" 'raw SFT likelihood table'
@@ -1014,6 +1082,19 @@ PY
       --output-csv "${likelihood}/ranked-designs.csv"
     require_nonempty_file "${likelihood}/ranked-designs.csv" 'raw SFT likelihood table'
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-sft-likelihood.done"
+  fi
+
+  if [[ -f "${STAGE_DIR}/50-deduplication.done" ]]; then
+    note 'substage 50-deduplication already complete'
+    require_nonempty_file "${dedup}/representatives.fasta" 'deduplicated representative FASTA'
+    require_nonempty_file "${dedup}/mapping.csv" 'deduplication mapping'
+    check_success_report "${dedup}/report.json"
+  else
+    run evo2_phage_generation deduplicate-fasta \
+      --input-fasta "${fasta}" --output-fasta "${dedup}/representatives.fasta" \
+      --mapping-csv "${dedup}/mapping.csv" --report "${dedup}/report.json"
+    check_success_report "${dedup}/report.json"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-deduplication.done"
   fi
 
   if [[ -f "${STAGE_DIR}/50-sequence-safety.done" ]]; then
@@ -1208,7 +1289,7 @@ PY
   fi
 }
 
-printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO' '50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
+printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO' '50 generate, SFT-score, deduplicate, hard-QC, cluster, and report 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
 for id in 00 10 20 30 40 50; do
   ((10#${id} < 10#${RESUME_FROM})) && continue
   [[ "${PREPARE_ONLY}" == "1" && "${id}" != 00 ]] && continue

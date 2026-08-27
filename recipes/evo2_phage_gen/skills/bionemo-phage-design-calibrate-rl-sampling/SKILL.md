@@ -21,6 +21,13 @@ Report prompt bases and fraction of the genome fixed. Start with the shortest wo
 
 Score raw and cluster-deduplicated hard-QC yield, target/lifecycle evidence, complete-genome integrity, copying, diversity, and every enabled objective. For circular prompt mixtures, run the reference rotations through the exact reward/filter environment and require equivalent outcomes for metrics declared rotation-invariant; record intentional origin-dependent exceptions. Audit secondary metrics separately: whole-sequence language-model likelihood depends on the chosen linear origin and must not globally rank mixed-origin designs without an origin-normalized method. A successful wrapper is insufficient: require every configured external measurement used for selection to be available, distinguish a biological no-hit from scorer failure, and diagnose unexplained missing or fixed-zero components rather than dropping them. Use positive and failure controls to confirm each score is measurable.
 
+Run calibration with the same sequence-safety policy, asset manifest, host domain, and confirmed,
+versioned host evidence as online RL. Reject selection when an enabled external or safety objective
+is neither measured consistently nor exactly documented as biologically inapplicable; explicit
+inapplicability remains `INDETERMINATE`, at zero affected-class credit, and hard-QC-ineligible.
+Missing configuration, malformed reasons, unexplained `NOT_RUN`, tool failure, or
+status/availability disagreement fails closed.
+
 Choose a robust quality-diversity plateau rather than a noisy maximum. Prefer temperature 1.0 when it is practically equivalent, and retain multiple prompt strata only when they improve the frontier. Packed dynamic prefill can mix arbitrary prompt lengths in one microbatch, so the number of length strata need not divide the request batch or GPU count; interleave a near-balanced mixture instead.
 
 Keep calibration samples separate from the fixed RL-validation bank and final rollout. Record prompt construction, seeds, sampling settings, sample counts, score summaries, uncertainty, chosen mixture, and rationale in the stage summary and `RUNLOG.md`.

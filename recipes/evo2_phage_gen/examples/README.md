@@ -91,7 +91,13 @@ loss; the biological sequence immediately after it remains supervised.
 ```
 
 Completed stages and substages are skipped. Reuse the same result root and sampling selection when
-resuming; a material sampling or model change should start a new run.
+resuming; `--resume-from` selects where checking resumes but does not create missing state or
+completion markers. A material prompt, reward, sampling, or model change should start a new result
+root. Stage 20 records its real-data restart smoke separately as `stages/20-sft-smoke.done`; it
+validates and reuses a complete converted base checkpoint instead of redownloading or reconverting
+it. Stage 40 likewise keeps `stages/40-pilot.done`, `stages/40-pilot-check.done`, and
+`stages/40-rl.done` distinct, and reuses only a validated schema-2 optimizer-free prepared SFT
+checkpoint. Do not create a marker unless its operation is known to have succeeded.
 
 ### Optional W&B logging
 
@@ -105,14 +111,17 @@ Authenticate with `wandb login` (or provide `WANDB_API_KEY` through a secret man
 ```
 
 The project flags are optional and show their defaults. Run names are derived from the result-root
-name and model variant. W&B covers the full SFT and GDPO runs; smoke tests, held-out evaluation,
-and the one-step GDPO pilot remain local. Never pass an API key as a launcher argument. Completed
+name and model variant. SFT has its own optional W&B run. The GDPO W&B run is not created until the
+full stage-40 training starts: calibration and the pilot stay offline, while the full run honors
+the entity, project, and name overrides. Never pass an API key as a launcher argument. Completed
 stages are not uploaded retroactively.
 
 ### Choose sampling settings
 
 [`default-sampling-selection.yaml`](default-sampling-selection.yaml) contains the current PhiX
-defaults and is the schema for a custom selection. Its decoder ceiling reaches approximately
+defaults and is the schema for a custom selection. Passing `--sampling-selection` is an explicit
+override, not a choice derived from the fresh calibration evidence. Its decoder ceiling reaches
+approximately
 5,466–5,474 nt across the prompt mixture, within the length reward's upper declining slope and below
 its 5,494-nt zero edge. The 5,359–5,391-nt full-credit band sits inside the broader
 5,306–5,493-nt hard acceptance interval. For the circular PhiX reference, the deployed
@@ -149,6 +158,11 @@ cp examples/default-sampling-selection.yaml /tmp/phix174-sampling.yaml
 The script validates and records the file as `calibration/sampling-selection.yaml`. Do not replace
 that canonical selection after RL has begun; a material change should use a new result root.
 
+Calibration scoring uses the same sequence-safety asset manifest, policy, bacterial host domain,
+and confirmed versioned PhiX host evidence as online RL. Sampling cells fail closed when required
+external or safety evidence is unexplained or unavailable; exact documented biological
+inapplicability remains candidate-level `INDETERMINATE`, not a safety `PASS`.
+
 ## Script workflow and outputs
 
 | Stage | Work                                                                                        |
@@ -158,15 +172,16 @@ that canonical selection after RL has begun; a material change should use a new 
 | 20    | Train, select, and evaluate SFT                                                             |
 | 30    | Calibrate generation and materialize RL prompt banks                                        |
 | 40    | Prepare the model-only SFT checkpoint, run the pilot/check, train GDPO, and select RL       |
-| 50    | Generate, deduplicate, SFT-score, safety-screen, hard-QC, cluster, and report 1,000 genomes |
+| 50    | Generate, SFT-score, deduplicate, safety-screen, hard-QC, cluster, and report 1,000 genomes |
 
 The result root is the computational notebook. `RUNLOG.md` records commands and liveness;
 `settings.json` records key settings; `SUMMARY.md` and `rollout/final-designs.json` reconcile
 selected checkpoints, safety outcomes, QC denominators, clustering, and accepted candidates.
 The terminal and `RUNLOG.md` end with `RUN COMPLETE`, `RUN PAUSED`, or `RUN FAILED` plus stage
 progress; only `RUN COMPLETE` denotes successful completion of the requested invocation.
-The original SFT checkpoint remains available for exact resume and likelihood scoring; RL uses
-the smaller prepared checkpoint under `rl/sft-checkpoint/`. The `rollout/accepted_candidates.fasta`
+Final likelihood scoring runs before deduplication and uses the validated direct model path in
+`rl/sft-checkpoint/preparation-manifest.json`, as does RL. The original full-state SFT checkpoint
+remains available for exact SFT resume. The `rollout/accepted_candidates.fasta`
 contains the final filter-passing, deduplicated candidates for further analysis. When its scores are
 informative, not strongly length-associated, and drawn from one circular origin, this FASTA may be
 ordered by mean per-nucleotide likelihood under the selected SFT model. Mixed-origin runs retain
