@@ -62,7 +62,8 @@ policy:
     max_new_tokens: 5450
     temperature: 1.0
     top_p: 1.0
-    top_k: 4
+    # Leave a fifth candidate slot so EOD can compete alongside A/C/G/T.
+    top_k: 5
     mcore_generation_config:
       max_requests: 12
       prompt_batch_size: 12

@@ -1,7 +1,8 @@
 # Current PhiX174 case-study defaults. Supplying this file explicitly bypasses
 # the fresh-calibration compatibility check; see examples/README.md.
 temperature: 1.0
-top_k: 4
+# Leave a fifth candidate slot so EOD can compete alongside A/C/G/T.
+top_k: 5
 top_p: 1.0
 # Total caps are 5,466-5,474 nt for the 16/24-nt prompt mixture, within the upper reward slope.
 max_new_tokens: 5450
