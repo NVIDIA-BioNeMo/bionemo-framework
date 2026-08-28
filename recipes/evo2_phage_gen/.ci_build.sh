@@ -17,6 +17,9 @@ source .venv/bin/activate
 
 # 3. Let subquadratic-ops select its compatible warp-lang dependency.
 # Pin warp-lang here in the future if subquadratic-ops has a verified compatibility issue.
+# Driver compatibility note: CUDA 13.x normally requires an R580+ host driver. For a temporary
+# 26.02/R550 test environment, constrain both subquadratic-ops-torch-cu13==0.2.1 and
+# warp-lang<1.13.0 locally; 0.2.1 uses the legacy Warp API removed in Warp 1.13.
 
 # 4. Install build requirements against the Transformer Engine already supplied by the image. An image without
 # Transformer Engine intentionally produces an empty constraints file.

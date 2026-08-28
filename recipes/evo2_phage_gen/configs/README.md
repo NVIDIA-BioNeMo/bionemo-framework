@@ -8,7 +8,10 @@ This directory contains the maintained inputs for the Microviridae workflow.
   training dataset under the chosen run directory.
 - `grpo_phage_megatron.yaml` is a self-contained Evo2/NeMo-RL base configuration.
   `gdpo_phage_megatron.yaml` inherits it and supplies the case-study objectives and training
-  settings.
+  settings. Its generation adapter shards the 96-sequence rollout across data-parallel replicas
+  and calls Evo2's packed dynamic prefill/batched recurrent decode directly. The separate
+  `policy.sequence_packing` switch remains off because it controls gradient-bearing policy and
+  loss execution, which requires its own qualification rather than inheriting inference results.
 - `arc_genome_design_filtering_local.yaml` configures downstream Arc screening.
 - The `phage_safety_*.yaml` files describe the sequence-safety policy, data sources, and
   reference controls.

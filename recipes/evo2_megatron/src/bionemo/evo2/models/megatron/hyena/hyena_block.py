@@ -34,7 +34,7 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import CudaGraphManager
-from megatron.core.transformer.enums import CudaGraphScope
+from megatron.core.transformer.enums import CudaGraphScope, InferenceCudaGraphScope
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import GraphableMegatronModule, MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
@@ -87,8 +87,10 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
     """A class for the HyenaStack."""
 
     def create_mcore_cudagraph_manager(self, config):
-        """Register this stack for full-iteration local CUDA graphs."""
-        if CudaGraphScope.full_iteration in (config.cuda_graph_scope or []):
+        """Register this stack for block-scoped inference or legacy full-iteration graphs."""
+        if config.inference_cuda_graph_scope == InferenceCudaGraphScope.block or CudaGraphScope.full_iteration in (
+            config.cuda_graph_scope or []
+        ):
             self.cudagraph_manager = CudaGraphManager(config)
 
     def __init__(
@@ -453,7 +455,10 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
             hasattr(self, "cudagraph_manager")
             and kwargs["attention_mask"] is None
             and (kwargs.get("inference_context") is not None or kwargs.get("inference_params") is not None)
-            and CudaGraphScope.full_iteration in (self.config.cuda_graph_scope or [])
+            and (
+                self.config.inference_cuda_graph_scope == InferenceCudaGraphScope.block
+                or CudaGraphScope.full_iteration in (self.config.cuda_graph_scope or [])
+            )
         ):
             if kwargs["inference_context"].is_static_batching():
                 using_cuda_graph = kwargs["inference_context"].is_decode_only()
@@ -467,19 +472,39 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
     def __call__(self, *args, **kwargs):
         """Capture the call to this function and first check whether to call the local cudagraph path."""
         if self._should_call_local_cudagraph(*args, **kwargs):
+            inference_context = kwargs["inference_context"]
             kwargs["hidden_states"] = (
                 kwargs["hidden_states"].unwrap()
                 if isinstance(kwargs["hidden_states"], WrappedTensor)
                 else kwargs["hidden_states"]
             )
+            if not self.pre_process and kwargs["hidden_states"] is None:
+                # Pipeline schedules deliver this stage's activation through set_input_tensor().
+                # Make it an explicit graph argument so replay copies every newly received tensor
+                # into the captured input buffer instead of retaining the first activation.
+                kwargs["hidden_states"] = self.input_tensor
             # dynamic_inference_decode_only is not a real argument to forward, it is only used
             # to differentiate the cuda graph used for decode from the one used for non-decode
             # inference.
-            dynamic_inference_decode_only = kwargs["inference_context"].is_decode_only()
-            # cudagraphmanager returns a singleton tuple, whereas the
-            # normal forward returns a tensor, therefore we need
-            # to extract the tensor from the tuple
-            return super().__call__(*args, dynamic_inference_decode_only=dynamic_inference_decode_only, **kwargs)[0]
+            kwargs["dynamic_inference_decode_only"] = inference_context.is_decode_only()
+            cache_key = None
+            if inference_context.is_static_batching():
+                cache_key = (
+                    "evo2-static",
+                    int(inference_context.max_batch_size),
+                    int(inference_context.max_sequence_length),
+                )
+            elif hasattr(inference_context, "evo2_max_batched_decode_requests"):
+                active_request_count = int(inference_context.total_request_count) - int(
+                    inference_context.paused_request_count
+                )
+                cache_key = (
+                    inference_context.padded_batch_dimensions,
+                    active_request_count,
+                    bool(getattr(inference_context, "evo2_batched_decode_enabled", False)),
+                )
+            # CudaGraphManager returns a singleton tuple, whereas the normal forward returns a tensor.
+            return self.cudagraph_manager(self, args, kwargs, cache_key=cache_key)[0]
         # If not calling the local cudagraph path, call the normal forward path.
         return super().__call__(*args, **kwargs)
 
@@ -544,7 +569,7 @@ class HyenaStack(GraphableMegatronModule, MegatronModule):
         if isinstance(hidden_states, WrappedTensor):
             hidden_states = hidden_states.unwrap()
 
-        if not self.pre_process:
+        if not self.pre_process and hidden_states is None:
             # See set_input_tensor()
             hidden_states = self.input_tensor
 

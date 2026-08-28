@@ -24,12 +24,14 @@
 
 import logging
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from einops import rearrange
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
@@ -44,9 +46,161 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     ParallelShortHyenaOperator,
     divide,
 )
+from bionemo.evo2.models.megatron.hyena.packed_kernels import (
+    PACKED_CAUSAL_CONV_AVAILABLE,
+    TRITON_AVAILABLE,
+    ModalChunkMetadata,
+    fused_hyena_decode_from_projection,
+    local_positions_from_cu_seqlens,
+    modal_chunk_metadata_from_cu_seqlens,
+    segmented_causal_conv1d,
+    segmented_fir_from_projection,
+    segmented_modal_from_projection,
+    segmented_tail,
+    sequence_ids_from_cu_seqlens,
+)
 
 
 logger = logging.getLogger(__name__)
+
+_PACKED_MODAL_CHUNK_SIZE = 512
+
+
+def _packed_sequence_boundaries(packed_seq_params: PackedSeqParams, total_tokens: int) -> tuple[int, ...]:
+    """Return physical THD boundaries, caching the one required device synchronization.
+
+    ``cu_seqlens_q_padded`` describes physical offsets when MCore inserts alignment
+    padding between sequences; otherwise ``cu_seqlens_q`` is already physical.  The
+    same ``PackedSeqParams`` object is passed through every layer, so cache the parsed
+    tuple on it rather than synchronizing the CUDA metadata once per Hyena layer.
+    """
+    if packed_seq_params.qkv_format != "thd":
+        raise ValueError(f"Packed Hyena only supports qkv_format='thd', got {packed_seq_params.qkv_format!r}")
+
+    cu_seqlens = packed_seq_params.cu_seqlens_q_padded
+    if cu_seqlens is None:
+        cu_seqlens = packed_seq_params.cu_seqlens_q
+    if not torch.is_tensor(cu_seqlens):
+        raise ValueError("Packed Hyena requires cu_seqlens_q metadata")
+    if cu_seqlens.ndim != 1:
+        raise ValueError(f"Packed Hyena requires one-dimensional cu_seqlens_q, got shape {tuple(cu_seqlens.shape)}")
+
+    cache_key = (cu_seqlens.data_ptr(), cu_seqlens._version, total_tokens)
+    cached = getattr(packed_seq_params, "_evo2_hyena_boundary_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    boundaries = tuple(int(boundary) for boundary in cu_seqlens.detach().cpu().tolist())
+    if len(boundaries) < 2:
+        raise ValueError("Packed Hyena requires at least one sequence")
+    if boundaries[0] != 0:
+        raise ValueError(f"Packed Hyena boundaries must start at zero, got {boundaries[0]}")
+    if any(end <= start for start, end in pairwise(boundaries)):
+        raise ValueError(f"Packed Hyena boundaries must be strictly increasing, got {boundaries}")
+    if boundaries[-1] > total_tokens:
+        raise ValueError(f"Packed Hyena boundary {boundaries[-1]} exceeds the physical token count {total_tokens}")
+    if boundaries[-1] < total_tokens:
+        # Match MCore's seq_idx convention: graph/dataset padding after the last
+        # declared sequence is an isolated extra sequence, never continuation.
+        boundaries = (*boundaries, total_tokens)
+
+    setattr(packed_seq_params, "_evo2_hyena_boundary_cache", (cache_key, boundaries))
+    return boundaries
+
+
+def _hyena_packed_bucket_length(sequence_length: int) -> int:
+    """Round a segment to a geometric bucket with less than 2x padding."""
+    return 1 << (sequence_length - 1).bit_length()
+
+
+def _packed_cuda_metadata(
+    packed_seq_params: PackedSeqParams, total_tokens: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, ModalChunkMetadata | None]:
+    """Return boundaries, positions, ids, and modal chunks cached for all layers."""
+    cu_seqlens = packed_seq_params.cu_seqlens_q_padded
+    if cu_seqlens is None:
+        cu_seqlens = packed_seq_params.cu_seqlens_q
+    if (
+        not torch.is_tensor(cu_seqlens)
+        or not cu_seqlens.is_cuda
+        or cu_seqlens.dtype != torch.int32
+        or cu_seqlens.ndim != 1
+        or not cu_seqlens.is_contiguous()
+    ):
+        raise ValueError("Fast packed Hyena requires contiguous CUDA int32 cu_seqlens_q")
+
+    cache_key = (cu_seqlens.data_ptr(), cu_seqlens._version, total_tokens)
+    cached = getattr(packed_seq_params, "_evo2_hyena_cuda_metadata_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    local_positions = local_positions_from_cu_seqlens(cu_seqlens, total_tokens)
+    sequence_ids = getattr(packed_seq_params, "seq_idx", None)
+    if (
+        torch.is_tensor(sequence_ids)
+        and sequence_ids.shape == (1, total_tokens)
+        and sequence_ids.dtype == torch.int32
+        and sequence_ids.is_cuda
+    ):
+        sequence_ids = sequence_ids[0]
+    else:
+        sequence_ids = sequence_ids_from_cu_seqlens(cu_seqlens, total_tokens)
+    max_sequence_length = packed_seq_params.max_seqlen_q
+    if torch.is_tensor(max_sequence_length):
+        max_sequence_length = int(max_sequence_length.item())
+    else:
+        max_sequence_length = int(max_sequence_length)
+    modal_chunks = None
+    if max_sequence_length > _PACKED_MODAL_CHUNK_SIZE:
+        modal_chunks = modal_chunk_metadata_from_cu_seqlens(
+            cu_seqlens,
+            chunk_size=_PACKED_MODAL_CHUNK_SIZE,
+        )
+    metadata = (cu_seqlens, local_positions, sequence_ids, modal_chunks)
+    setattr(packed_seq_params, "_evo2_hyena_cuda_metadata_cache", (cache_key, metadata))
+    return metadata
+
+
+def _packed_fir_weight(module) -> tuple[torch.Tensor, int]:
+    """Normalize an Evo2 grouped depthwise weight to contiguous ``[G,K]``."""
+    weight = module.short_conv_weight
+    if weight.ndim == 2:
+        return weight.contiguous(), module.group_dim
+    if weight.ndim != 3:
+        raise ValueError(f"Unsupported Hyena FIR weight shape {tuple(weight.shape)}")
+    if weight.shape[1] == 1:
+        return weight[:, 0].contiguous(), module.group_dim
+    return weight.reshape(-1, weight.shape[-1]).contiguous(), 1
+
+
+def _dynamic_packed_cuda_metadata(
+    inference_context, total_tokens: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, ModalChunkMetadata | None]:
+    """Reuse the dynamic attention scheduler's physical ragged prefill boundaries."""
+    active_request_count = int(inference_context.get_active_request_count())
+    cu_seqlens, _ = inference_context.cu_query_lengths()
+    cu_seqlens = cu_seqlens[: active_request_count + 1]
+    if cu_seqlens.dtype != torch.int32 or not cu_seqlens.is_cuda or not cu_seqlens.is_contiguous():
+        raise ValueError("Dynamic packed Hyena requires contiguous CUDA int32 cumulative query lengths")
+
+    active_slice = slice(inference_context.paused_request_count, inference_context.total_request_count)
+    query_lengths = tuple(int(length) for length in inference_context.request_query_lengths[active_slice].tolist())
+    cache_key = (cu_seqlens.data_ptr(), total_tokens, query_lengths)
+    cached = getattr(inference_context, "_evo2_hyena_cuda_metadata_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    local_positions = local_positions_from_cu_seqlens(cu_seqlens, total_tokens)
+    sequence_ids = sequence_ids_from_cu_seqlens(cu_seqlens, total_tokens)
+    modal_chunks = None
+    if max(query_lengths) > _PACKED_MODAL_CHUNK_SIZE:
+        modal_chunks = modal_chunk_metadata_from_cu_seqlens(
+            cu_seqlens,
+            chunk_size=_PACKED_MODAL_CHUNK_SIZE,
+        )
+    metadata = (cu_seqlens, local_positions, sequence_ids, modal_chunks)
+    setattr(inference_context, "_evo2_hyena_cuda_metadata_cache", (cache_key, metadata))
+    return metadata
 
 
 def _dynamic_context_real_token_count(inference_context, padded_token_count: int) -> int:
@@ -476,38 +630,15 @@ class HyenaMixer(MegatronModule):
             ssm_owner_id=id(ssm_owner),
         )
 
-    def forward(self, x, layer_past=None, inference_context=None, _hyena_use_cp=True):
-        """Applies the Hyena sequence mixing operation to input embeddings.
-
-        Args:
-            x: Input tensor of shape [L, B, D] (seq_len, batch_size, hidden_dim)
-            layer_past: Past layer state for inference (default: None)
-            inference_context: Parameters for inference (default: None)
-            _hyena_use_cp: Whether to use context parallelism (default: True)
-
-        Returns:
-            Tuple of (output tensor, bias)
-        """
-        # CP control: disable CP during inference because the inference path
-        # does not split sequences across CP ranks (the full sequence is on each rank).
-        # The AllToAll operations in Hyena operators assume sequence-split input which
-        # only happens during training.
-        if inference_context is not None:
-            _proj_use_cp = False
-        elif _hyena_use_cp:
-            cp_group = self.pg_collection.cp
-            cp_size = cp_group.size()
-            _proj_use_cp = cp_group is not None and cp_size > 1
-        else:
-            _proj_use_cp = False
-
-        features, _ = self.dense_projection(x)
-        if self.use_subquadratic_ops:
-            features = subquadratic_ops_rearrange(features, bhl_to_lbh=False)
-        else:
-            features = rearrange(features, "l b d -> b d l").contiguous()
-        features, padded_dynamic_token_count = _slice_padded_dynamic_context_tokens(features, inference_context)
-        features, dynamic_request_layout = _reshape_dynamic_context_requests(features, inference_context)
+    def _mix_projected_features(self, features, *, inference_context, _proj_use_cp):
+        """Apply the projection FIR and selected Hyena operator to ``[B, D, L]`` features."""
+        fused_decode = self._mix_fused_dynamic_decode(
+            features,
+            inference_context=inference_context,
+            _proj_use_cp=_proj_use_cp,
+        )
+        if fused_decode is not None:
+            return fused_decode
 
         is_b2b_eligible = self.use_subquadratic_ops and self.operator_type in [
             "hyena_short_conv",
@@ -523,17 +654,360 @@ class HyenaMixer(MegatronModule):
             z = self.b2b_kernel(features, _use_cp=_proj_use_cp)
             if is_prefill:
                 self._populate_b2b_inference_state(features, inference_context)
-        else:
-            features = self.hyena_proj_conv(
-                features, _use_cp=_proj_use_cp, inference_context=inference_context
-            )  # [B, D, L]
-            x1, x2, v = rearrange(features, "b (g dg p) l -> b (g dg) p l", p=3, g=self.num_groups_per_tp_rank).unbind(
-                dim=2
-            )
-            z = self.mixer(x1, x2, v, _hyena_use_cp=_proj_use_cp, inference_context=inference_context)
+            return z
 
-        z = _restore_dynamic_context_requests(z, dynamic_request_layout)
-        z = _pad_padded_dynamic_context_tokens(z, padded_dynamic_token_count)
+        features = self.hyena_proj_conv(
+            features, _use_cp=_proj_use_cp, inference_context=inference_context
+        )  # [B, D, L]
+        x1, x2, v = rearrange(
+            features,
+            "b (g dg p) l -> b (g dg) p l",
+            p=3,
+            g=self.num_groups_per_tp_rank,
+        ).unbind(dim=2)
+        return self.mixer(x1, x2, v, _hyena_use_cp=_proj_use_cp, inference_context=inference_context)
+
+    def _mix_fused_dynamic_decode(self, features, *, inference_context, _proj_use_cp):
+        """Run one stateful decode position with one projection-plus-mixer launch."""
+        if (
+            inference_context is None
+            or _proj_use_cp
+            or not TRITON_AVAILABLE
+            or torch.is_grad_enabled()
+            or not features.is_cuda
+            or features.dtype != torch.bfloat16
+            or features.ndim != 3
+            or features.shape[1] != 3 * self.hidden_size_per_partition
+            or features.shape[-1] != 1
+            or not 2 <= self.hyena_proj_conv.kernel_size <= 4
+            or self.operator_type not in {"hyena_short_conv", "hyena_medium_conv", "hyena"}
+        ):
+            return None
+        # Both dynamic paged decode and static FlashAttention decode expose the
+        # same per-request recurrent-state dictionaries.  The fused recurrence
+        # only depends on those stable tensors, not on the KV-cache layout.
+        if getattr(inference_context, "is_static_batching", None) is None:
+            return None
+
+        projection_state = getattr(inference_context, "fir_filter_state_dict", {}).get(id(self.hyena_proj_conv))
+        if projection_state is None or projection_state.shape[0] != features.shape[0]:
+            return None
+        projection_weight, projection_group_width = _packed_fir_weight(self.hyena_proj_conv)
+
+        if self.operator_type == "hyena_short_conv":
+            # The fused implementation currently models Evo2's standard gated short operator.
+            if not self.mixer.pregate or not self.mixer.postgate:
+                return None
+            mixer_state = getattr(inference_context, "fir_filter_state_dict", {}).get(id(self.mixer.short_conv))
+            mixer_weight, mixer_group_width = _packed_fir_weight(self.mixer.short_conv)
+            diagonal = self.mixer.conv_bias.contiguous() if self.mixer.use_conv_bias else None
+            diagonal_group_width = self.mixer.group_dim
+            operator = "short"
+            modal_parameter = mixer_weight
+            residues = gamma = poles_parameter = modal_parameter
+        elif self.operator_type == "hyena_medium_conv":
+            mixer_state = getattr(inference_context, "inner_fir_filter_state_dict", {}).get(id(self.mixer))
+            mixer_weight = self.mixer.filter(self.mixer.hyena_medium_conv_len)
+            if isinstance(mixer_weight, tuple):
+                mixer_weight = mixer_weight[0]
+            mixer_weight = mixer_weight.squeeze(0).contiguous()
+            mixer_group_width = self.mixer.group_dim
+            diagonal = self.mixer.conv_bias.contiguous()
+            diagonal_group_width = 1
+            operator = "medium"
+            modal_parameter = mixer_weight
+            residues = gamma = poles_parameter = modal_parameter
+        else:
+            if self.hyena_config.hyena_filter_order != 16:
+                return None
+            mixer_state = getattr(inference_context, "iir_filter_state_dict", {}).get(id(self.mixer))
+            mixer_weight = projection_weight  # unused by the modal constexpr branch
+            mixer_group_width = self.mixer.group_dim
+            diagonal = self.mixer.conv_bias.contiguous()
+            diagonal_group_width = 1
+            operator = "modal"
+            residues = self.mixer.filter.R.contiguous()
+            gamma = self.mixer.filter.gamma.contiguous()
+            poles_parameter = self.mixer.filter.p.contiguous()
+
+        if mixer_state is None or mixer_state.shape[0] != features.shape[0]:
+            return None
+        output = fused_hyena_decode_from_projection(
+            features[..., 0].contiguous(),
+            projection_state,
+            projection_weight,
+            mixer_state,
+            mixer_weight,
+            diagonal,
+            residues,
+            gamma,
+            poles_parameter,
+            projection_group_width=projection_group_width,
+            mixer_group_width=mixer_group_width,
+            operator=operator,
+            diagonal_group_width=diagonal_group_width,
+        )
+        return output.unsqueeze(-1)
+
+    def _mix_packed_projected_features(self, features, packed_seq_params):
+        """Mix THD segments in skew-safe length buckets with autograd-safe boundaries.
+
+        A causal FIR or FFT over the concatenated token stream leaks across sequence
+        boundaries. Materializing segments along the operator batch dimension lets
+        every existing short, medium, and long Hyena forward/backward path run
+        independently. Geometric buckets keep padding below 2x even for highly skewed
+        packs, and prevent one very long segment from inflating every short transform.
+        """
+        if features.shape[0] != 1:
+            raise ValueError(
+                "Packed Hyena expects MCore THD hidden states with batch dimension 1; "
+                f"got projected shape {tuple(features.shape)}"
+            )
+
+        boundaries = _packed_sequence_boundaries(packed_seq_params, features.shape[-1])
+        lengths = tuple(end - start for start, end in pairwise(boundaries))
+        buckets: dict[int, list[tuple[int, int, int]]] = {}
+        for index, (start, end) in enumerate(pairwise(boundaries)):
+            bucket_length = _hyena_packed_bucket_length(end - start)
+            buckets.setdefault(bucket_length, []).append((index, start, end))
+
+        output_segments: list[torch.Tensor | None] = [None] * len(lengths)
+        for bucket_length, entries in sorted(buckets.items()):
+            padded_segments = [
+                F.pad(features[..., start:end], (0, bucket_length - (end - start))) for _, start, end in entries
+            ]
+            batched_features = torch.cat(padded_segments, dim=0)
+            batched_output = self._mix_projected_features(
+                batched_features,
+                inference_context=None,
+                _proj_use_cp=False,
+            )
+            for bucket_index, (segment_index, start, end) in enumerate(entries):
+                output_segments[segment_index] = batched_output[bucket_index : bucket_index + 1, :, : end - start]
+
+        assert all(segment is not None for segment in output_segments)
+        return torch.cat(output_segments, dim=-1)
+
+    def _supports_flat_segmented_prefill(self, projection: torch.Tensor) -> bool:
+        """Whether the inference-only flat segmented kernels support this model instance."""
+        if not TRITON_AVAILABLE or not PACKED_CAUSAL_CONV_AVAILABLE:
+            return False
+        if torch.is_grad_enabled() or not projection.is_cuda or projection.dtype != torch.bfloat16:
+            return False
+        if projection.ndim != 3 or projection.shape[1] != 1:
+            return False
+        if projection.shape[-1] != 3 * self.hidden_size_per_partition:
+            return False
+        if self.hyena_proj_conv.kernel_size > 4:
+            return False
+        if self.operator_type == "hyena":
+            if self.mixer.bidirectional or self.hyena_config.hyena_filter_order != 16:
+                return False
+        return self.operator_type in {"hyena_short_conv", "hyena_medium_conv", "hyena"}
+
+    def _supports_flat_dynamic_prefill(self, projection: torch.Tensor, inference_context) -> bool:
+        """Select the initial ragged prefill step, leaving continuation/decode stateful."""
+        if inference_context is None or not self._supports_flat_segmented_prefill(projection):
+            return False
+        is_static_batching = getattr(inference_context, "is_static_batching", None)
+        if is_static_batching is None or is_static_batching():
+            return False
+        active_request_count = int(inference_context.get_active_request_count())
+        if active_request_count < 1:
+            return False
+        if int(getattr(inference_context, "num_prefill_requests", 0)) != active_request_count:
+            return False
+        projection_states = getattr(inference_context, "fir_filter_state_dict", {})
+        return projection_states.get(id(self.hyena_proj_conv)) is None
+
+    def _mix_flat_segmented_prefill(
+        self,
+        projection: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        local_positions: torch.Tensor,
+        sequence_ids: torch.Tensor,
+        modal_chunks: ModalChunkMetadata | None,
+        *,
+        inference_context=None,
+    ) -> torch.Tensor:
+        """Apply one unpadded THD Hyena prefill using shared ``cu_seqlens`` metadata."""
+        flat_projection = projection[:, 0, :]
+        if not flat_projection.is_contiguous():
+            flat_projection = flat_projection.contiguous()
+
+        projection_weight, projection_group_width = _packed_fir_weight(self.hyena_proj_conv)
+        projection_fir = segmented_causal_conv1d(
+            flat_projection,
+            projection_weight,
+            sequence_ids,
+            group_width=projection_group_width,
+        )
+
+        if self.operator_type == "hyena_short_conv":
+            mixer_weight, group_width = _packed_fir_weight(self.mixer.short_conv)
+            diagonal = None
+            if self.mixer.use_conv_bias:
+                diagonal = self.mixer.conv_bias.repeat_interleave(self.mixer.group_dim).contiguous()
+            output = segmented_fir_from_projection(
+                projection_fir,
+                mixer_weight,
+                local_positions,
+                group_width=group_width,
+                flip_filter=True,
+                pregate=self.mixer.pregate,
+                postgate=self.mixer.postgate,
+                diagonal=diagonal,
+            )
+        elif self.operator_type == "hyena_medium_conv":
+            mixer_weight = self.mixer.filter(self.mixer.hyena_medium_conv_len)
+            if isinstance(mixer_weight, tuple):
+                mixer_weight = mixer_weight[0]
+            mixer_weight = mixer_weight.squeeze(0).contiguous()
+            output = segmented_fir_from_projection(
+                projection_fir,
+                mixer_weight,
+                local_positions,
+                group_width=self.mixer.group_dim,
+                flip_filter=False,
+                diagonal=self.mixer.conv_bias.contiguous(),
+            )
+        else:
+            final_state = None
+            if inference_context is not None:
+                final_state = torch.empty(
+                    cu_seqlens.numel() - 1,
+                    self.hidden_size_per_partition,
+                    self.hyena_config.hyena_filter_order,
+                    dtype=torch.float32,
+                    device=projection.device,
+                )
+            output = segmented_modal_from_projection(
+                projection_fir,
+                self.mixer.conv_bias.contiguous(),
+                self.mixer.filter.R.contiguous(),
+                self.mixer.filter.gamma.contiguous(),
+                self.mixer.filter.p.contiguous(),
+                cu_seqlens,
+                group_width=self.mixer.group_dim,
+                final_state_out=final_state,
+                chunk_metadata=modal_chunks,
+            )
+
+        if inference_context is not None:
+            projection_state = segmented_tail(flat_projection, cu_seqlens, self.hyena_proj_conv.kernel_size - 1)
+            inference_context.fir_filter_state_dict[id(self.hyena_proj_conv)] = projection_state
+            if self.operator_type in {"hyena_short_conv", "hyena_medium_conv"}:
+                mixer_kernel_size = (
+                    self.mixer.short_conv.kernel_size
+                    if self.operator_type == "hyena_short_conv"
+                    else self.mixer.kernel_size
+                )
+                projected_tail = segmented_tail(
+                    projection_fir,
+                    cu_seqlens,
+                    mixer_kernel_size - 1,
+                    output_dtype=projection_fir.dtype,
+                )
+                batch_size, projected_channels, tail_length = projected_tail.shape
+                projected_tail = projected_tail.view(batch_size, projected_channels // 3, 3, tail_length)
+                mixer_state = (projected_tail[:, :, 1] * projected_tail[:, :, 2]).to(torch.float32)
+                if self.operator_type == "hyena_short_conv":
+                    inference_context.fir_filter_state_dict[id(self.mixer.short_conv)] = mixer_state
+                else:
+                    inference_context.inner_fir_filter_state_dict[id(self.mixer)] = mixer_state
+            else:
+                inference_context.iir_filter_state_dict[id(self.mixer)] = final_state
+        return output
+
+    def forward(
+        self,
+        x,
+        layer_past=None,
+        inference_context=None,
+        packed_seq_params: PackedSeqParams | None = None,
+        _hyena_use_cp=True,
+    ):
+        """Applies the Hyena sequence mixing operation to input embeddings.
+
+        Args:
+            x: Input tensor of shape [L, B, D] (seq_len, batch_size, hidden_dim)
+            layer_past: Past layer state for inference (default: None)
+            inference_context: Parameters for inference (default: None)
+            packed_seq_params: THD cumulative sequence boundaries (default: None)
+            _hyena_use_cp: Whether to use context parallelism (default: True)
+
+        Returns:
+            Tuple of (output tensor, bias)
+        """
+        # CP control: disable CP during inference because the inference path
+        # does not split sequences across CP ranks (the full sequence is on each rank).
+        # The AllToAll operations in Hyena operators assume sequence-split input which
+        # only happens during training.
+        cp_group = self.pg_collection.cp
+        cp_size = cp_group.size() if cp_group is not None else 1
+        if inference_context is not None:
+            _proj_use_cp = False
+        elif _hyena_use_cp:
+            _proj_use_cp = cp_group is not None and cp_size > 1
+        else:
+            _proj_use_cp = False
+
+        if packed_seq_params is not None and inference_context is not None:
+            raise ValueError(
+                "PackedSeqParams cannot share Hyena's stateful inference context; use native dynamic request "
+                "batching for generation or an ordinary no-state packed forward for scoring"
+            )
+        if packed_seq_params is not None and _proj_use_cp:
+            raise NotImplementedError("Packed Hyena with context parallel size greater than one is not yet supported")
+
+        features, _ = self.dense_projection(x)
+        if packed_seq_params is not None and self._supports_flat_segmented_prefill(features):
+            cu_seqlens, local_positions, sequence_ids, modal_chunks = _packed_cuda_metadata(
+                packed_seq_params, features.shape[0]
+            )
+            z = self._mix_flat_segmented_prefill(
+                features,
+                cu_seqlens,
+                local_positions,
+                sequence_ids,
+                modal_chunks,
+            )
+            y, bias = self.dense(z.unsqueeze(1))
+            return y, bias
+        if self._supports_flat_dynamic_prefill(features, inference_context):
+            real_token_count = _dynamic_context_real_token_count(inference_context, features.shape[0])
+            real_projection = features[:real_token_count]
+            cu_seqlens, local_positions, sequence_ids, modal_chunks = _dynamic_packed_cuda_metadata(
+                inference_context, real_token_count
+            )
+            z = self._mix_flat_segmented_prefill(
+                real_projection,
+                cu_seqlens,
+                local_positions,
+                sequence_ids,
+                modal_chunks,
+                inference_context=inference_context,
+            )
+            if real_token_count < features.shape[0]:
+                z = F.pad(z, (0, 0, 0, features.shape[0] - real_token_count))
+            y, bias = self.dense(z.unsqueeze(1))
+            return y, bias
+        if self.use_subquadratic_ops:
+            features = subquadratic_ops_rearrange(features, bhl_to_lbh=False)
+        else:
+            features = rearrange(features, "l b d -> b d l").contiguous()
+        if packed_seq_params is not None:
+            z = self._mix_packed_projected_features(features, packed_seq_params)
+        else:
+            features, padded_dynamic_token_count = _slice_padded_dynamic_context_tokens(features, inference_context)
+            features, dynamic_request_layout = _reshape_dynamic_context_requests(features, inference_context)
+            z = self._mix_projected_features(
+                features,
+                inference_context=inference_context,
+                _proj_use_cp=_proj_use_cp,
+            )
+            z = _restore_dynamic_context_requests(z, dynamic_request_layout)
+            z = _pad_padded_dynamic_context_tokens(z, padded_dynamic_token_count)
         if self.use_subquadratic_ops:
             z = subquadratic_ops_rearrange(z, bhl_to_lbh=True)
         else:

@@ -31,8 +31,10 @@ from bionemo.evo2.models.evo2_provider import (
     Hyena1bModelProvider,
     HyenaTestModelProvider,
     _patch_megatron_dataset_helper_compile,
+    bind_hyena_packed_views_to_static_context,
     build_evo2_mamba_inference_state_config,
     infer_model_type,
+    reset_hyena_packed_views_for_new_request,
 )
 from bionemo.evo2.utils.checkpoint.mbridge_to_vortex import _split_fc1, mbridge_to_vortex_state_dict
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import load_savanna_state_dict, savanna_to_mbridge_state_dict
@@ -86,6 +88,44 @@ def test_configure_runtime_context_parallel_comm_type_rejects_unknown_transport(
 
     with pytest.raises(ValueError, match="context-parallel communication type"):
         evo2_provider.configure_runtime_context_parallel_comm_type(provider, "all_gather")
+
+
+def test_static_hyena_state_binding_keeps_graph_stable_full_rings() -> None:
+    """Static prefill copies even short FIR tails into persistent full-ring views."""
+    shapes = SimpleNamespace(
+        conv_shape=(6, 2),
+        conv_owner_id=101,
+        ssm_shape=(2, 4),
+        ssm_kind="inner_fir",
+        ssm_owner_id=202,
+    )
+    layer = SimpleNamespace(
+        mixer=SimpleNamespace(hyena_state_shapes_per_request=lambda: shapes),
+    )
+    decoder = SimpleNamespace(
+        layers=[layer],
+        hyena_state_shapes_per_request=lambda: ((6, 2), (2, 4), [shapes]),
+    )
+    model = SimpleNamespace(decoder=decoder)
+    context = SimpleNamespace()
+
+    bind_hyena_packed_views_to_static_context(model, context, batch_size=2, device=torch.device("cpu"))
+    projection_tail = torch.arange(12, dtype=torch.float32).reshape(2, 6, 1)
+    context.fir_filter_state_dict[101] = projection_tail
+
+    first_view = context.fir_filter_state_dict[101]
+    assert first_view.shape == (2, 6, 2)
+    torch.testing.assert_close(first_view[..., 0], torch.zeros(2, 6))
+    torch.testing.assert_close(first_view[..., 1:], projection_tail)
+    first_ptr = first_view.data_ptr()
+
+    reset_hyena_packed_views_for_new_request(context)
+    assert 101 not in context.fir_filter_state_dict
+    assert torch.count_nonzero(context._evo2_hyena_conv_states) == 0
+
+    context.fir_filter_state_dict[101] = torch.full((2, 6, 2), 7.0)
+    assert context.fir_filter_state_dict[101].data_ptr() == first_ptr
+    torch.testing.assert_close(context.fir_filter_state_dict[101], torch.full((2, 6, 2), 7.0))
 
 
 def test_infer_model_type_hyena():

@@ -155,3 +155,20 @@ def test_simple_fasta_dataset_iteration(fasta_dataset: SimpleFastaDataset) -> No
         count += 1
 
     assert count == 10, "Should iterate through all 10 items"
+
+
+def test_token_count_uses_fasta_index_without_tokenizing(tmp_path: Path) -> None:
+    class _Tokenizer:
+        eod = 0
+
+        def tokenize(self, _sequence):
+            raise AssertionError("length lookup must not tokenize or construct the sample")
+
+    fasta_path = tmp_path / "indexed-lengths.fasta"
+    fasta_path.write_text(">empty\n>full\nACGT\n")
+
+    without_bos = SimpleFastaDataset(fasta_path, _Tokenizer(), prepend_bos=False)
+    with_bos = SimpleFastaDataset(fasta_path, _Tokenizer(), prepend_bos=True)
+
+    assert [without_bos.token_count(index) for index in range(len(without_bos))] == [0, 4]
+    assert [with_bos.token_count(index) for index in range(len(with_bos))] == [1, 5]

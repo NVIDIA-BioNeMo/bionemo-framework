@@ -20,13 +20,19 @@ r"""Prediction (inference) workflow for Evo2 using Megatron Bridge.
 
 This module provides functionality to run inference on Evo2 models using MBridge checkpoints.
 It supports various parallelism strategies (TP, CP, DP) and can output either full logits
-or collapsed log probabilities.
+or collapsed log probabilities. At context-parallel size one, variable-length batches are packed
+into one boundary-described prefill by default and unpacked only after the model forward.
 
 Usage (CLI):
     # Single GPU inference
     torchrun --nproc_per_node 1 -m bionemo.evo2.run.predict \
         --fasta input.fasta --ckpt-dir /path/to/mbridge/checkpoint \
         --output-dir /path/to/output
+
+    # Rectangular compatibility path (packing is otherwise the default at CP=1)
+    torchrun --nproc_per_node 1 -m bionemo.evo2.run.predict \
+        --fasta input.fasta --ckpt-dir /path/to/mbridge/checkpoint \
+        --output-dir /path/to/output --no-sequence-packing
 
     # Multi-GPU with tensor parallelism
     torchrun --nproc_per_node 2 -m bionemo.evo2.run.predict \
@@ -91,6 +97,7 @@ from megatron.bridge.utils.common_utils import (
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.core import dist_checkpointing, parallel_state, tensor_parallel
 from megatron.core.num_microbatches_calculator import init_num_microbatches_calculator
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel.mappings import _gather_along_last_dim, gather_from_sequence_parallel_region
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_batch_on_this_cp_rank
@@ -113,6 +120,24 @@ from bionemo.evo2.models.evo2_provider import (
     configure_runtime_context_parallel_comm_type,
 )
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
+from bionemo.evo2.run.low_precision import (
+    configure_global_fp8_layer_scope,
+    configure_prediction_sequence_parallel,
+    configure_quantized_parameter_storage,
+    inference_parameter_storage,
+    inference_precision_kind,
+    prepare_model_for_quantized_inference,
+    validate_inference_precision,
+)
+from bionemo.evo2.run.native_fp8 import (
+    prepare_model_for_native_fp8_inference,
+    validate_native_fp8_policy,
+    validate_native_fp8_precision,
+)
+from bionemo.evo2.run.native_nvfp4 import (
+    prepare_model_for_native_nvfp4_inference,
+    validate_native_nvfp4_policy,
+)
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -573,10 +598,18 @@ def parse_args() -> argparse.Namespace:
             "numerical parity. Any value serialized in the checkpoint is ignored."
         ),
     )
-    ap.add_argument(
+    sequence_parallel_group = ap.add_mutually_exclusive_group()
+    sequence_parallel_group.add_argument(
+        "--sequence-parallel-policy",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Sequence parallelism policy for TP > 1. Auto uses the qualified fast path; on delegates to the "
+        "installed MCore implementation for explicit re-qualification after upgrades.",
+    )
+    sequence_parallel_group.add_argument(
         "--no-sequence-parallel",
         action="store_true",
-        help="Disable sequence parallelism when using TP > 1",
+        help="Backward-compatible alias for --sequence-parallel-policy off.",
     )
 
     # Model/precision arguments
@@ -587,21 +620,68 @@ def parse_args() -> argparse.Namespace:
         help="Override mixed precision recipe (default: use checkpoint setting)",
     )
     ap.add_argument(
+        "--quantized-param-storage",
+        choices=["recipe", "bf16"],
+        default="recipe",
+        help="For FP8/FP4 recipes, preserve native quantized parameter storage or retain BF16 parameters "
+        "while quantizing GEMMs. BF16 storage reduces checkpoint-load peak memory and is a measured fallback.",
+    )
+    ap.add_argument(
+        "--fp8-all-layers",
+        action="store_true",
+        help="Apply the selected global TE FP8 recipe to every compatible linear, including the first/last blocks",
+    )
+    ap.add_argument(
         "--vortex-style-fp8",
         action="store_true",
         help="Use vortex-style FP8 (applies FP8 only to projection layers)",
     )
     ap.add_argument(
+        "--native-nvfp4",
+        choices=["off", "fc1", "expansion", "full"],
+        default="off",
+        help="Inference-only Blackwell W4A4 policy: MLP fc1, expansion projections, or all projections",
+    )
+    ap.add_argument(
+        "--native-nvfp4-activation-amax",
+        type=float,
+        default=None,
+        help="Optional activation range: raises strict RMSNorm bounds, and calibrates full-policy contractions",
+    )
+    ap.add_argument(
+        "--native-mxfp8",
+        choices=["off", "hyena", "fc1", "expansion"],
+        default="off",
+        help="Inference-only native Blackwell MXFP8 policy: Hyena input, MLP fc1, or all expansion projections",
+    )
+    ap.add_argument(
         "--use-subquadratic-ops",
         action="store_true",
-        help="Use subquadratic_ops for improved performance. Note, due to increased compilation time this is only "
-        "recommended for predicting on a larger number of input sequences.",
+        help="Use fused Hyena convolution kernels on the rectangular compatibility path; packed prediction uses "
+        "its segmented kernels instead.",
     )
 
     # Batch/sequence arguments
     ap.add_argument("--micro-batch-size", type=int, default=1, help="Batch size per forward pass")
     ap.add_argument("--min-length", type=int, help="Minimum sequence length (pad shorter sequences)")
     ap.add_argument("--prepend-bos", action="store_true", help="Prepend BOS token to sequences")
+    ap.add_argument(
+        "--no-sequence-packing",
+        action="store_true",
+        help="Use rectangular batches instead of flat cu_seqlens prefill; required for CP>1 and often faster for "
+        "uniform medium/long sequences",
+    )
+    ap.add_argument(
+        "--packed-token-budget",
+        type=int,
+        default=250_000,
+        help="Maximum aggregate tokens in one packed prediction call. A longer individual sequence is emitted alone.",
+    )
+    ap.add_argument(
+        "--no-packing-length-bucketing",
+        action="store_true",
+        help="Keep input order instead of grouping packed calls by geometric sequence-length bucket",
+    )
 
     # Output format arguments
     ap.add_argument(
@@ -741,6 +821,187 @@ def _padding_collate_fn(
     return {key: torch.stack(values) for key, values in padded_batch.items()}
 
 
+def _length_bucketed_batches(
+    lengths: list[int],
+    *,
+    max_records: int,
+    max_tokens: int,
+    bucket_by_length: bool,
+    data_parallel_rank: int,
+    data_parallel_size: int,
+) -> list[list[int]]:
+    """Plan packed calls once on CPU, without per-layer sorting or token movement."""
+    if max_records <= 0:
+        raise ValueError(f"max_records must be positive, got {max_records}")
+    if max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+    if not 0 <= data_parallel_rank < data_parallel_size:
+        raise ValueError("data_parallel_rank must be within data_parallel_size")
+    invalid_indices = [index for index, length in enumerate(lengths) if length <= 0]
+    if invalid_indices:
+        raise ValueError(
+            "prediction sequence lengths must be positive; empty or invalid record indices "
+            f"{invalid_indices}. Remove those FASTA records or pass --no-sequence-packing."
+        )
+
+    rank_indices = list(range(data_parallel_rank, len(lengths), data_parallel_size))
+    if bucket_by_length:
+        buckets: dict[int, list[int]] = {}
+        for index in rank_indices:
+            # Ceil-log2 buckets keep every non-singleton call within a 2x length ratio.
+            buckets.setdefault((lengths[index] - 1).bit_length(), []).append(index)
+        index_groups = [buckets[key] for key in sorted(buckets, reverse=True)]
+    else:
+        index_groups = [rank_indices]
+
+    batches: list[list[int]] = []
+    for indices in index_groups:
+        batch: list[int] = []
+        batch_tokens = 0
+        for index in indices:
+            length = lengths[index]
+            if batch and (len(batch) == max_records or batch_tokens + length > max_tokens):
+                batches.append(batch)
+                batch = []
+                batch_tokens = 0
+            batch.append(index)
+            batch_tokens += length
+            if len(batch) == max_records or batch_tokens >= max_tokens:
+                batches.append(batch)
+                batch = []
+                batch_tokens = 0
+        if batch:
+            batches.append(batch)
+    return batches
+
+
+def _packing_collate_fn_factory(
+    pad_token_id: int = 0,
+    min_length: Optional[int] = None,
+):
+    """Create the flat THD collator used by packed prediction prefill."""
+
+    def collate_fn(batch: list[dict[str, Tensor]]) -> dict[str, Tensor | int] | None:
+        return _packing_collate_fn(batch, pad_token_id, min_length)
+
+    return collate_fn
+
+
+def _packing_collate_fn(
+    batch: list[dict[str, Tensor]],
+    pad_token_id: int = 0,
+    min_length: Optional[int] = None,
+) -> dict[str, Tensor | int] | None:
+    """Concatenate variable-length requests once and attach physical THD metadata.
+
+    Unlike rectangular batching, each request is padded only when ``min_length``
+    explicitly asks for it. The model sees ``[1,total_tokens]`` plus cumulative
+    boundaries. Collapsed likelihoods are reduced directly from the flat output;
+    outputs that intrinsically expose a token axis are restored to the legacy
+    rectangular schema after the single model forward.
+    """
+    if not batch:
+        return None
+
+    target_lengths = [
+        max(int(sample["tokens"].shape[0]), min_length if min_length is not None else 0) for sample in batch
+    ]
+    packed_values: dict[str, list[Tensor]] = {key: [] for key in batch[0] if key != "seq_idx"}
+    for sample, target_length in zip(batch, target_lengths):
+        sequence_length = int(sample["tokens"].shape[0])
+        pad_length = target_length - sequence_length
+        for key, value in sample.items():
+            if key == "seq_idx":
+                continue
+            if key == "tokens":
+                packed = torch.nn.functional.pad(value, (0, pad_length), value=pad_token_id)
+            elif key == "position_ids" and pad_length > 0:
+                packed = torch.cat([value, torch.arange(sequence_length, target_length, dtype=value.dtype)])
+            elif pad_length > 0:
+                packed = torch.nn.functional.pad(value, (0, pad_length), value=0)
+            else:
+                packed = value
+            packed_values[key].append(packed)
+
+    lengths = torch.tensor(target_lengths, dtype=torch.int32)
+    cu_seqlens = torch.cat([torch.zeros(1, dtype=torch.int32), lengths.cumsum(0, dtype=torch.int32)])
+    sequence_ids = torch.repeat_interleave(
+        torch.arange(len(batch), dtype=torch.int32),
+        lengths.to(torch.int64),
+        output_size=int(sum(target_lengths)),
+    )
+    result = {key: torch.cat(values).unsqueeze(0) for key, values in packed_values.items()}
+    result.update(
+        {
+            "seq_idx": torch.stack([sample["seq_idx"] for sample in batch]),
+            "cu_seqlens": cu_seqlens,
+            "packed_sequence_ids": sequence_ids,
+            "packed_max_seqlen": max(target_lengths),
+            "packed_pad_token_id": pad_token_id,
+        }
+    )
+    return result
+
+
+def _unpack_packed_tensor(
+    tensor: Tensor,
+    *,
+    sequence_ids: Tensor,
+    local_positions: Tensor,
+    batch_size: int,
+    max_seqlen: int,
+    pad_value: int | float = 0,
+) -> Tensor:
+    """Restore one flat packed tensor to the prediction endpoint's padded schema."""
+    if tensor.ndim < 2 or tensor.shape[0] != 1:
+        raise ValueError(f"Packed prediction tensor must start with [1,T], got {tuple(tensor.shape)}")
+    if sequence_ids.shape != (tensor.shape[1],) or local_positions.shape != (tensor.shape[1],):
+        raise ValueError("Packed output metadata must contain one sequence id and position per token")
+    output = tensor.new_full((batch_size, max_seqlen, *tensor.shape[2:]), pad_value)
+    output[sequence_ids, local_positions] = tensor[0]
+    return output
+
+
+def _compute_packed_collapsed_log_probs(
+    *,
+    logits: Tensor,
+    tokens: Tensor,
+    loss_mask: Tensor,
+    sequence_ids: Tensor,
+    seq_idx: Tensor,
+    collapse_option: Literal["sum", "mean"],
+) -> dict[str, Tensor]:
+    """Reduce packed next-token log probabilities without rectangularizing ragged outputs."""
+    if collapse_option not in {"sum", "mean"}:
+        raise ValueError(f"Packed collapsed log probabilities require sum or mean, got {collapse_option!r}")
+    if logits.ndim != 3 or logits.shape[0] != 1:
+        raise ValueError(f"Packed logits must have shape [1,T,V], got {tuple(logits.shape)}")
+    if tokens.shape != logits.shape[:2] or loss_mask.shape != logits.shape[:2]:
+        raise ValueError("Packed tokens and loss mask must match the logits token dimensions")
+    if sequence_ids.shape != (logits.shape[1],):
+        raise ValueError("Packed sequence ids must contain one id per physical token")
+
+    batch_size = int(seq_idx.numel())
+    scores = torch.zeros(batch_size, dtype=torch.float32, device=logits.device)
+    counts = torch.zeros_like(scores)
+    if logits.shape[1] > 1:
+        source_sequence_ids = sequence_ids[:-1]
+        valid_boundary = source_sequence_ids == sequence_ids[1:]
+        target_tokens = tokens[0, 1:]
+        token_log_probs = -torch.nn.functional.cross_entropy(
+            logits[0, :-1].float(),
+            target_tokens,
+            reduction="none",
+        )
+        weights = loss_mask[0, 1:].float() * valid_boundary
+        scatter_ids = source_sequence_ids.to(torch.int64)
+        scores.scatter_add_(0, scatter_ids, token_log_probs * weights)
+        counts.scatter_add_(0, scatter_ids, weights)
+    if collapse_option == "mean":
+        scores = scores / counts.clamp_min_(1.0)
+    return {"log_probs_seqs": scores, "seq_idx": seq_idx}
+
+
 # =============================================================================
 # Prediction Step
 # =============================================================================
@@ -748,7 +1009,7 @@ def _padding_collate_fn(
 
 def _predict_step(
     model: torch.nn.Module,
-    batch: dict[str, Tensor],
+    batch: dict[str, Tensor | int],
     output_log_prob_seqs: bool = False,
     log_prob_collapse_option: Literal["sum", "mean", "per_token"] = "mean",
     context_parallel_size: int = 1,
@@ -780,10 +1041,23 @@ def _predict_step(
     if not parallel_state.is_pipeline_last_stage():
         return None
 
+    is_packed = "cu_seqlens" in batch
+    packed_seq_params = None
+    if is_packed:
+        packed_seq_params = PackedSeqParams(
+            qkv_format="thd",
+            cu_seqlens_q=batch["cu_seqlens"],
+            cu_seqlens_kv=batch["cu_seqlens"],
+            max_seqlen_q=batch["packed_max_seqlen"],
+            max_seqlen_kv=batch["packed_max_seqlen"],
+            seq_idx=batch["packed_sequence_ids"].unsqueeze(0),
+        )
+
     output_tensor = model(
         input_ids=batch["tokens"],
         position_ids=batch["position_ids"],
         attention_mask=None,
+        **({"packed_seq_params": packed_seq_params} if is_packed else {}),
     )
 
     # Gather across tensor parallel ranks
@@ -816,10 +1090,47 @@ def _predict_step(
     loss_mask_gathered = _gather_along_cp_dim(batch["loss_mask"])
     tokens_gathered = _gather_along_cp_dim(batch["tokens"])
 
+    if is_packed and output_log_prob_seqs and log_prob_collapse_option in {"sum", "mean"}:
+        return _compute_packed_collapsed_log_probs(
+            logits=forward_out_gathered,
+            tokens=tokens_gathered,
+            loss_mask=loss_mask_gathered,
+            sequence_ids=batch["packed_sequence_ids"],
+            seq_idx=batch["seq_idx"],
+            collapse_option=log_prob_collapse_option,
+        )
+
+    if is_packed:
+        sequence_ids = batch["packed_sequence_ids"]
+        local_positions = batch["position_ids"][0]
+
+        def unpack(tensor: Tensor) -> Tensor:
+            return _unpack_packed_tensor(
+                tensor,
+                sequence_ids=sequence_ids,
+                local_positions=local_positions,
+                batch_size=batch["seq_idx"].numel(),
+                max_seqlen=batch["packed_max_seqlen"],
+            )
+
+        if output_embeddings:
+            forward_out_gathered = unpack(forward_out_gathered.transpose(0, 1))
+        else:
+            forward_out_gathered = unpack(forward_out_gathered)
+        loss_mask_gathered = unpack(loss_mask_gathered)
+        tokens_gathered = _unpack_packed_tensor(
+            tokens_gathered,
+            sequence_ids=sequence_ids,
+            local_positions=local_positions,
+            batch_size=batch["seq_idx"].numel(),
+            max_seqlen=batch["packed_max_seqlen"],
+            pad_value=batch["packed_pad_token_id"],
+        )
+
     if output_embeddings:
         # When extracting embeddings, the model output is hidden states, not logits
         # Model outputs [S, B, H] (sequence-first format), transpose to [B, S, H] for consistency
-        hidden_embeddings = forward_out_gathered.transpose(0, 1).contiguous()
+        hidden_embeddings = forward_out_gathered if is_packed else forward_out_gathered.transpose(0, 1).contiguous()
         return {
             "hidden_embeddings": hidden_embeddings,
             "pad_mask": loss_mask_gathered,
@@ -1026,14 +1337,23 @@ def predict(
     context_parallel_size: int = 1,
     context_parallel_comm_type: Optional[ContextParallelCommType] = None,
     no_sequence_parallel: bool = False,
+    sequence_parallel_policy: Literal["auto", "on", "off"] = "auto",
     # Precision settings
     mixed_precision_recipe: Optional[str] = None,
+    quantized_param_storage: Literal["recipe", "bf16"] = "recipe",
+    fp8_all_layers: bool = False,
     vortex_style_fp8: bool = False,
+    native_nvfp4: Literal["off", "fc1", "expansion", "full"] = "off",
+    native_nvfp4_activation_amax: Optional[float] = None,
+    native_mxfp8: Literal["off", "hyena", "fc1", "expansion"] = "off",
     use_subquadratic_ops: bool = False,
     # Batch/sequence settings
     micro_batch_size: int = 1,
     min_length: Optional[int] = None,
     prepend_bos: bool = False,
+    sequence_packing: bool = True,
+    packed_token_budget: int = 250_000,
+    packing_length_bucketing: bool = True,
     # Output settings
     write_interval: Literal["epoch", "batch"] = "epoch",
     files_per_subdir: Optional[int] = None,
@@ -1062,14 +1382,32 @@ def predict(
         context_parallel_comm_type: Runtime TE attention transport. ``None`` selects
             P2P; A2A can be selected for tighter BF16 parity. Checkpoint metadata
             does not control this execution choice.
-        no_sequence_parallel: Disable sequence parallelism when using TP > 1.
+        no_sequence_parallel: Disable sequence parallelism when using TP > 1. Global FP8/FP4
+            prediction also disables it automatically to preserve ragged-batch correctness.
+        sequence_parallel_policy: Resolve TP sequence parallelism automatically, force the
+            installed upstream path on, or force it off. ``no_sequence_parallel`` remains an
+            alias for ``off``.
         mixed_precision_recipe: Override mixed precision recipe (default: use checkpoint).
+        quantized_param_storage: Preserve native quantized parameters from the selected recipe or
+            retain BF16 parameters while executing its quantized GEMMs.
+        fp8_all_layers: Remove BF16 first/last-block exclusions from the selected global TE FP8
+            recipe. This is the regular full-scope Hopper FP8 path for Evo2 7B.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
-        use_subquadratic_ops: Use subquadratic_ops for improved performance.
+        native_nvfp4: Inference-only native Blackwell W4A4 projection policy.
+        native_nvfp4_activation_amax: Optional activation range. Expansions retain a strict
+            no-clipping lower bound; full-policy contractions otherwise use the complete range.
+        native_mxfp8: Inference-only native Blackwell block-scaled FP8 projection policy. This is
+            distinct from Hopper/global Transformer Engine FP8 and vortex-style delayed scaling.
+        use_subquadratic_ops: Use fused Hyena convolution kernels for rectangular prediction.
         micro_batch_size: Batch size per forward pass.
         min_length: Minimum sequence length (pad shorter sequences to this).
         prepend_bos: Prepend BOS token to sequences.
+        sequence_packing: Pack variable-length requests into one flat prefill call. Disable it for
+            CP>1 or when a target-hardware benchmark favors rectangular uniform batches.
+        packed_token_budget: Maximum aggregate tokens per packed call; an individual
+            longer sequence is emitted alone.
+        packing_length_bucketing: Group similar lengths once before model execution.
         write_interval: When to write predictions: 'epoch' or 'batch'.
         files_per_subdir: Group output files into subdirectories (batch mode only).
         output_log_prob_seqs: Output log probabilities instead of raw logits.
@@ -1094,6 +1432,8 @@ def predict(
     """
     if pipeline_model_parallel_size != 1:
         raise ValueError("Pipeline parallelism > 1 is not currently supported for prediction.")
+    if packed_token_budget <= 0:
+        raise ValueError(f"packed_token_budget must be positive, got {packed_token_budget}")
 
     # -------------------------------------------------------------------------
     # Step 1: Resolve and load configuration from checkpoint
@@ -1115,7 +1455,6 @@ def predict(
     model_provider.pipeline_model_parallel_size = pipeline_model_parallel_size
     model_provider.context_parallel_size = context_parallel_size
     configure_runtime_context_parallel_comm_type(model_provider, context_parallel_comm_type)
-    model_provider.sequence_parallel = tensor_parallel_size > 1 and not no_sequence_parallel
 
     # Configure vortex-style FP8 (applies FP8 only to projection layers)
     if vortex_style_fp8:
@@ -1139,8 +1478,48 @@ def predict(
     else:
         mp_config = get_mixed_precision_config("bf16_mixed")
 
+    validate_native_nvfp4_policy(native_nvfp4, activation_amax=native_nvfp4_activation_amax)
+    validate_native_fp8_policy(native_mxfp8)
+    configure_global_fp8_layer_scope(mp_config, all_layers=fp8_all_layers)
+    configure_quantized_parameter_storage(mp_config, quantized_param_storage)
+    validate_inference_precision(
+        mp_config,
+        vortex_style_fp8=vortex_style_fp8,
+        native_nvfp4_policy=native_nvfp4,
+    )
+    sequence_parallel_enabled = configure_prediction_sequence_parallel(
+        model_provider,
+        mp_config,
+        policy=sequence_parallel_policy,
+        legacy_disabled=no_sequence_parallel,
+        selective_native_low_precision=native_nvfp4 != "off" or native_mxfp8 != "off",
+    )
+    effective_sequence_parallel_policy = "off" if no_sequence_parallel else sequence_parallel_policy
+    logger.info(
+        "Prediction sequence parallelism: %s (policy: %s)",
+        "enabled" if sequence_parallel_enabled else "disabled",
+        effective_sequence_parallel_policy,
+    )
+    if (
+        sequence_parallel_enabled
+        and sequence_parallel_policy == "on"
+        and (getattr(mp_config, "fp8", None) or getattr(mp_config, "fp4", None))
+    ):
+        logger.warning(
+            "Forced sequence parallelism delegates global FP8/FP4 padding to installed MCore; "
+            "verify correctness and throughput before production use"
+        )
+    if native_mxfp8 != "off":
+        validate_native_fp8_precision(
+            mp_config,
+            vortex_style_fp8=vortex_style_fp8,
+            native_nvfp4_policy=native_nvfp4,
+        )
+    precision_kind = inference_precision_kind(mp_config)
+    precision_parameter_storage = inference_parameter_storage(mp_config)
     mp_config.finalize()
     mp_config.setup(model_provider)
+    logger.info("Prediction precision: %s (parameter storage: %s)", precision_kind, precision_parameter_storage)
 
     # -------------------------------------------------------------------------
     # Step 3: Load tokenizer
@@ -1295,6 +1674,73 @@ def predict(
         )
     logger.info("Weights loaded successfully")
 
+    native_nvfp4_reports = [
+        prepare_model_for_native_nvfp4_inference(
+            model_module,
+            policy=native_nvfp4,
+            activation_amax=native_nvfp4_activation_amax,
+            decode_mode="nvfp4",
+        )
+        for model_module in model
+    ]
+    native_nvfp4_count = sum(report.converted_modules for report in native_nvfp4_reports)
+    if native_nvfp4_count:
+        packed_bytes = sum(report.quantized_weight_bytes for report in native_nvfp4_reports)
+        original_bytes = sum(report.original_weight_bytes for report in native_nvfp4_reports)
+        for model_module in model:
+            inner_model = getattr(model_module, "module", model_module)
+            inner_model.config.evo2_native_nvfp4_policy = native_nvfp4
+            inner_model.config.evo2_native_nvfp4_parameter_storage = "native-nvfp4-prepacked"
+        logger.info(
+            "Selective native NVFP4: converted %d projection modules; packed weights %.3f GiB replace %.3f GiB BF16",
+            native_nvfp4_count,
+            packed_bytes / (1024**3),
+            original_bytes / (1024**3),
+        )
+
+    native_mxfp8_reports = [
+        prepare_model_for_native_fp8_inference(
+            model_module,
+            policy=native_mxfp8,
+            decode_mode="none",
+        )
+        for model_module in model
+    ]
+    native_mxfp8_count = sum(report.converted_modules for report in native_mxfp8_reports)
+    if native_mxfp8_count:
+        packed_bytes = sum(report.quantized_weight_bytes for report in native_mxfp8_reports)
+        original_bytes = sum(report.original_weight_bytes for report in native_mxfp8_reports)
+        for model_module in model:
+            inner_model = getattr(model_module, "module", model_module)
+            inner_model.config.evo2_native_mxfp8_policy = native_mxfp8
+            inner_model.config.evo2_native_mxfp8_parameter_storage = "native-mxfp8-prepacked"
+        logger.info(
+            "Selective native MXFP8: converted %d expansion projections; packed weights %.3f GiB "
+            "replace %.3f GiB BF16",
+            native_mxfp8_count,
+            packed_bytes / (1024**3),
+            original_bytes / (1024**3),
+        )
+
+    # Packed prediction flattens ragged requests, so its aggregate token count is not necessarily a
+    # legal quantized GEMM dimension. Apply MCore's recipe-aware fallback after loading weights and
+    # before the first forward pass. Regular FP8 bypasses per-linear padding whenever the flattened
+    # sequence-times-batch rows already satisfy TE. It is a no-op for BF16 and vortex-style FP8.
+    quantized_model_count = sum(
+        int(prepare_model_for_quantized_inference(model_module, mp_config)) for model_module in model
+    )
+    if quantized_model_count:
+        aligned_fast_path_modules = sum(
+            int(getattr(model_module, "evo2_regular_fp8_aligned_fast_path_modules", 0)) for model_module in model
+        )
+        logger.info(
+            "%s recipe active: alignment fallback installed for %d model partition(s); "
+            "%d TE linears can bypass per-layer padding for legal flattened row counts",
+            precision_kind,
+            quantized_model_count,
+            aligned_fast_path_modules,
+        )
+
     # -------------------------------------------------------------------------
     # Step 6: Create dataset and dataloader
     # -------------------------------------------------------------------------
@@ -1309,23 +1755,68 @@ def predict(
     data_parallel_rank = parallel_state.get_data_parallel_rank()
     data_parallel_size = parallel_state.get_data_parallel_world_size()
 
-    dataloader = build_pretraining_data_loader(
-        dataset=dataset,
-        consumed_samples=0,
-        dataloader_type="single",
-        micro_batch_size=micro_batch_size,
-        num_workers=4,
-        data_sharding=False,
-        collate_fn=_padding_collate_fn_factory(
+    packed_prediction_enabled = sequence_packing and context_parallel_size == 1
+    if sequence_packing and context_parallel_size > 1:
+        logger.warning("Sequence-packed prediction currently falls back to rectangular batches for CP>1")
+    collate_fn = (
+        _packing_collate_fn_factory(
             pad_token_id=getattr(tokenizer, "pad_id", 0),
             min_length=min_length,
-        ),
-        pin_memory=True,
-        persistent_workers=False,
-        data_parallel_rank=data_parallel_rank,
-        data_parallel_size=data_parallel_size,
-        drop_last=False,
+        )
+        if packed_prediction_enabled
+        else _padding_collate_fn_factory(
+            pad_token_id=getattr(tokenizer, "pad_id", 0),
+            min_length=min_length,
+        )
     )
+    logger.info("Prediction sequence packing: %s", "enabled" if packed_prediction_enabled else "disabled")
+
+    if packed_prediction_enabled:
+        # TE's fused RoPE and FlashAttention-2 kernels become dramatically slower for
+        # extreme length mixtures and this image's FA2 path also has a finite aggregate
+        # THD span. Plan geometrically similar, token-capped calls once on CPU. Tokens
+        # remain in flat input order inside each call; no model layer sorts or reshuffles.
+        effective_lengths = [
+            max(dataset.token_count(index), min_length if min_length is not None else 0)
+            for index in range(len(dataset))
+        ]
+        packed_batches = _length_bucketed_batches(
+            effective_lengths,
+            max_records=micro_batch_size,
+            max_tokens=packed_token_budget,
+            bucket_by_length=packing_length_bucketing,
+            data_parallel_rank=data_parallel_rank,
+            data_parallel_size=data_parallel_size,
+        )
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=packed_batches,
+            num_workers=4,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            persistent_workers=False,
+        )
+        logger.info(
+            "Packed prediction schedule: %d call(s), token budget %d, length bucketing %s",
+            len(packed_batches),
+            packed_token_budget,
+            "enabled" if packing_length_bucketing else "disabled",
+        )
+    else:
+        dataloader = build_pretraining_data_loader(
+            dataset=dataset,
+            consumed_samples=0,
+            dataloader_type="single",
+            micro_batch_size=micro_batch_size,
+            num_workers=4,
+            data_sharding=False,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            persistent_workers=False,
+            data_parallel_rank=data_parallel_rank,
+            data_parallel_size=data_parallel_size,
+            drop_last=False,
+        )
 
     # -------------------------------------------------------------------------
     # Step 7: Run prediction loop
@@ -1441,14 +1932,23 @@ def main() -> None:
         context_parallel_size=args.context_parallel_size,
         context_parallel_comm_type=args.context_parallel_comm_type,
         no_sequence_parallel=args.no_sequence_parallel,
+        sequence_parallel_policy=args.sequence_parallel_policy,
         # Precision settings
         mixed_precision_recipe=args.mixed_precision_recipe,
+        quantized_param_storage=args.quantized_param_storage,
+        fp8_all_layers=args.fp8_all_layers,
         vortex_style_fp8=args.vortex_style_fp8,
+        native_nvfp4=args.native_nvfp4,
+        native_nvfp4_activation_amax=args.native_nvfp4_activation_amax,
+        native_mxfp8=args.native_mxfp8,
         use_subquadratic_ops=args.use_subquadratic_ops,
         # Batch/sequence settings
         micro_batch_size=args.micro_batch_size,
         min_length=args.min_length,
         prepend_bos=args.prepend_bos,
+        sequence_packing=not args.no_sequence_packing,
+        packed_token_budget=args.packed_token_budget,
+        packing_length_bucketing=not args.no_packing_length_bucketing,
         # Output settings
         write_interval=args.write_interval,
         files_per_subdir=args.files_per_subdir,

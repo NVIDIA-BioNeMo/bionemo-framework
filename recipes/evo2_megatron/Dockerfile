@@ -1,46 +1,26 @@
 # syntax=docker/dockerfile:1.4
+# Build from this recipe directory:
+# docker build -t evo2-megatron .
 FROM nvcr.io/nvidia/pytorch:26.07-py3
 
-# uv is pre-installed in the nvcr.io/nvidia/pytorch base image.
-# If using a base image without uv, uncomment the following line:
-#COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# .ci_build.sh invokes uv before the recipe virtual environment exists.
+COPY --from=ghcr.io/astral-sh/uv:0.12.4 /uv /uvx /bin/
 
-WORKDIR /workspace/bionemo
+WORKDIR /workspace/bionemo/recipes/evo2_megatron
 COPY . .
 
-# 2. Fix for "No such file or directory: /workspace/TransformerEngine"
-# This removes the "direct_url" reference that confuses tools when TE was installed from source in the base image.
-RUN rm -f /usr/local/lib/python*/dist-packages/transformer_engine-*.dist-info/direct_url.json
-
 ENV UV_LINK_MODE=copy
-# Ensure we use the venv by default for all future commands
-ENV VIRTUAL_ENV=/workspace/.venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV UV_NO_MANAGED_PYTHON=1
+ENV VIRTUAL_ENV=/workspace/bionemo/recipes/evo2_megatron/.venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-# 3. Create the venv with access to system packages (Torch, TE, etc.)
-# We create it one level up (/workspace/.venv) to keep it out of the source dir
 # Sandboxed agent CLIs use these helpers on Linux.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bubblewrap \
     uidmap \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN uv venv --system-site-packages --seed $VIRTUAL_ENV
-
-# Let subquadratic-ops select its compatible warp-lang dependency.
-# Pin warp-lang here in the future if subquadratic-ops has a verified compatibility issue.
-
-# 4. Pin transformer_engine to the version pre-installed in the base image.
-# Without this constraint uv may try to upgrade or rebuild TE, which breaks the build.
-RUN pip freeze | grep transformer_engine > pip-constraints.txt
-
-## Trying to workaround CAUSAL_CONV1D build issues
-ENV CAUSAL_CONV1D_FORCE_BUILD=1
-ENV PIP_NO_BINARY=causal-conv1d
-
-# 5. Install package and dependencies
+# Build the same editable, system-stack-backed environment used by CI.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    uv pip install -r build_requirements.txt --no-build-isolation && \
-    uv pip install -c pip-constraints.txt -e . --no-build-isolation
+    ./.ci_build.sh

@@ -59,6 +59,10 @@ class SimpleFastaDataset(torch.utils.data.Dataset):
         """Get the length of the dataset."""
         return len(self.seqids)
 
+    def token_count(self, idx: int) -> int:
+        """Return the indexed nucleotide token count without reading or tokenizing the sequence."""
+        return len(self.fasta[self.seqids[idx]]) + int(self.prepend_bos)
+
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Get an item from the dataset."""
         sequence = self.fasta[self.seqids[idx]].sequence().upper()

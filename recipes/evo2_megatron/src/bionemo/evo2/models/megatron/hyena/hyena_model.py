@@ -45,6 +45,26 @@ from bionemo.evo2.models.megatron.hyena.hyena_utils import (
     make_upper_case,
     reweighted_cross_entropy,
 )
+from bionemo.evo2.models.megatron.hyena.packed_rope import precompute_packed_rope_cos_sin
+
+
+def _static_sequence_len_offset(
+    inference_context: BaseInferenceContext,
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> Tensor:
+    """Update and return graph-stable device storage for FlashAttention cache offsets."""
+    sequence_len_offset = getattr(inference_context, "_evo2_sequence_len_offset_tensor", None)
+    if (
+        sequence_len_offset is None
+        or sequence_len_offset.shape != (batch_size,)
+        or sequence_len_offset.device != device
+    ):
+        sequence_len_offset = torch.empty(batch_size, dtype=torch.int32, device=device)
+        inference_context._evo2_sequence_len_offset_tensor = sequence_len_offset
+    sequence_len_offset.fill_(int(inference_context.sequence_len_offset))
+    return sequence_len_offset
 
 
 class HyenaModel(LanguageModule):
@@ -299,6 +319,18 @@ class HyenaModel(LanguageModule):
                     rotary_seq_len,
                     packed_seq=packed_seq_params is not None and packed_seq_params.qkv_format == "thd",
                 )
+                if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
+                    # Materialize local-position frequencies once per packed call. Attention
+                    # layers then use the flat fused pointwise kernel without reconstructing
+                    # positions (or reshuffling tokens) from cu_seqlens on every layer.
+                    # Sequence parallelism shards decoder_input here, but the column-parallel
+                    # attention projection gathers the full THD sequence before applying RoPE.
+                    rotary_pos_emb = precompute_packed_rope_cos_sin(
+                        rotary_pos_emb,
+                        position_ids,
+                        total_tokens=position_ids.numel(),
+                        dtype=decoder_input.dtype if decoder_input is not None else self.config.params_dtype,
+                    )
 
         if (
             in_inference_mode
@@ -307,10 +339,10 @@ class HyenaModel(LanguageModule):
             and inference_context.is_static_batching()
         ):
             current_batch_size = input_ids.shape[0]
-            sequence_len_offset = torch.tensor(
-                [inference_context.sequence_len_offset] * current_batch_size,
-                dtype=torch.int32,
-                device=rotary_pos_cos.device,  # Co-locate this with the rotary tensors
+            sequence_len_offset = _static_sequence_len_offset(
+                inference_context,
+                batch_size=current_batch_size,
+                device=rotary_pos_cos.device,
             )
         else:
             sequence_len_offset = None

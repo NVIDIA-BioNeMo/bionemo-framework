@@ -14,6 +14,7 @@ CALIBRATE_ONLY=0
 RESUME_FROM=00
 SAMPLING_SELECTION_SOURCE=
 MODEL_VARIANT="${MODEL_VARIANT:-7b-base}"
+HOPPER_FP8_INFERENCE=0
 WANDB_ENABLED=0
 WANDB_OPTION_CONFIGURED=0
 WANDB_ENTITY_NAME="${WANDB_ENTITY:-}"
@@ -64,6 +65,7 @@ usage() {
     '  --result-root PATH         Result directory (default: results/phix174-8xh100)' \
     '  --model-variant NAME       7b-base (default) or 7b-1m' \
     '  --sampling-selection PATH  Copy and use a sampling-selection YAML' \
+    '  --hopper-fp8-inference     Opt in to regular all-layer FP8 for calibration/rollout/scoring' \
     '  --wandb                    Log the full SFT and GDPO runs to W&B' \
     '  --wandb-entity NAME        W&B entity/team (or use WANDB_ENTITY)' \
     '  --wandb-sft-project NAME   SFT project (default: evo2-phage-design-sft)' \
@@ -80,6 +82,7 @@ while (($#)); do
     --result-root) RESULT_ROOT="$2"; shift 2 ;;
     --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
     --sampling-selection) SAMPLING_SELECTION_SOURCE="$2"; shift 2 ;;
+    --hopper-fp8-inference) HOPPER_FP8_INFERENCE=1; shift ;;
     --wandb) WANDB_ENABLED=1; shift ;;
     --wandb-entity)
       if (($# < 2)) || [[ -z "$2" ]]; then
@@ -141,6 +144,16 @@ case "${MODEL_VARIANT}" in
     ;;
 esac
 
+INFERENCE_PRECISION_NAME='bf16'
+declare -a INFERENCE_PRECISION_ARGS=()
+if [[ "${HOPPER_FP8_INFERENCE}" == "1" ]]; then
+  INFERENCE_PRECISION_NAME='hopper-regular-fp8-all-layers'
+  INFERENCE_PRECISION_ARGS=(
+    --mixed-precision-recipe bf16_with_fp8_current_scaling_mixed
+    --fp8-all-layers
+  )
+fi
+
 WANDB_RUN_STEM="$(basename -- "${RESULT_ROOT}")-${MODEL_VARIANT}"
 WANDB_SFT_RUN_NAME="${WANDB_RUN_STEM}-sft"
 WANDB_RL_RUN_NAME="${WANDB_RUN_STEM}-gdpo"
@@ -177,10 +190,8 @@ SAMPLING_RL_SEED=
 SAMPLING_ROLLOUT_SEED=
 SAMPLING_SEED_STRIDE=
 SAMPLING_PROMPT_LABEL=
-SAMPLING_TRAIN_REPEATS=
-SAMPLING_VALIDATION_REPEATS=
+SAMPLING_TRAIN_RECORDS=
 SAMPLING_FINAL_PER_LENGTH=
-SAMPLING_RANKS_PER_PROMPT=
 declare -a SAMPLING_PROMPT_LENGTHS=()
 mkdir -p "${RESULT_ROOT}" "${STATE_DIR}" "${STAGE_DIR}"
 exec 9> "${RESULT_ROOT}/.run.lock"
@@ -255,14 +266,14 @@ printf '%s\n' "${MODEL_VARIANT}" > "${MODEL_VARIANT_STATE}"
 note "model variant: ${MODEL_VARIANT} (${BASE_CHECKPOINT_RESOURCE}, model size ${MODEL_SIZE})"
 
 sampling_selection_fields() {
-  python - "$1" "${NUM_GPUS}" <<'PY'
+  python - "$1" <<'PY'
 import math
 import sys
 from pathlib import Path
 
 import yaml
 
-path, num_gpus = Path(sys.argv[1]), int(sys.argv[2])
+path = Path(sys.argv[1])
 required = {
     "temperature",
     "top_k",
@@ -317,21 +328,6 @@ try:
     if any(value < 0 or value > 65 for value in prompt_lengths):
         raise ValueError("prompt_lengths must be between 0 and the 65-nt PhiX174 reference prefix")
     strata = len(prompt_lengths)
-    deployment_sizes = {"12-record RL training bank": 12, "96-record RL validation bank": 96,
-                        "1,000-record final rollout": 1000}
-    incompatible = [name for name, size in deployment_sizes.items() if size % strata]
-    if incompatible:
-        raise ValueError(
-            f"{strata} prompt strata do not tile the equal-mixture deployment shapes: {', '.join(incompatible)}"
-        )
-    if num_gpus >= strata:
-        if num_gpus % strata:
-            raise ValueError(f"{strata} prompt strata do not tile {num_gpus} GPUs")
-        ranks_per_prompt = num_gpus // strata
-    else:
-        if strata % num_gpus:
-            raise ValueError(f"{strata} prompt strata cannot be scheduled in waves over {num_gpus} GPUs")
-        ranks_per_prompt = 1
     if max_new_tokens + max(prompt_lengths) > 10240:
         raise ValueError("max_new_tokens plus the longest prompt exceeds the 10,240-token model context")
 except (OSError, ValueError, yaml.YAMLError) as error:
@@ -348,10 +344,9 @@ fields = (
     str(rollout_seed),
     str(seed_stride),
     "-".join(str(value) for value in prompt_lengths),
-    str(12 // strata),
-    str(96 // strata),
-    str(1000 // strata),
-    str(ranks_per_prompt),
+    # Cover every selected stratum and retain complete two-prompt GDPO steps.
+    str(max(12, 2 * ((strata + 1) // 2))),
+    str((1000 + strata - 1) // strata),
 )
 print("\t".join(fields))
 PY
@@ -370,8 +365,7 @@ load_sampling_selection() {
   IFS=$'\t' read -r SAMPLING_TEMPERATURE SAMPLING_TOP_K SAMPLING_TOP_P \
     SAMPLING_MAX_NEW_TOKENS SAMPLING_PROMPT_LENGTHS_TEXT SAMPLING_RL_SEED \
     SAMPLING_ROLLOUT_SEED SAMPLING_SEED_STRIDE SAMPLING_PROMPT_LABEL \
-    SAMPLING_TRAIN_REPEATS SAMPLING_VALIDATION_REPEATS SAMPLING_FINAL_PER_LENGTH \
-    SAMPLING_RANKS_PER_PROMPT <<< "${fields}"
+    SAMPLING_TRAIN_RECORDS SAMPLING_FINAL_PER_LENGTH <<< "${fields}"
   read -r -a SAMPLING_PROMPT_LENGTHS <<< "${SAMPLING_PROMPT_LENGTHS_TEXT}"
 }
 
@@ -565,12 +559,16 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   if [[ "$(grep -c H100 <<< "${gpu_info}")" != "${NUM_GPUS}" ]]; then
     printf 'Warning: this example was tested on 8 H100 80GB GPUs. Detected:\n%s\nTune memory, batch, and parallelism settings for this topology.\n' "${gpu_info}" >&2
   fi
+  if [[ "${HOPPER_FP8_INFERENCE}" == "1" && "$(grep -Ec 'H100|H200' <<< "${gpu_info}")" != "${NUM_GPUS}" ]]; then
+    printf '%s\n' '--hopper-fp8-inference requires an all-Hopper H100/H200 allocation' >&2
+    exit 2
+  fi
 fi
-note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs"
+note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs; inference precision ${INFERENCE_PRECISION_NAME}"
 python - "${RESULT_ROOT}/settings.json" "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" \
   "${SFT_TENSOR_PARALLEL_SIZE}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
   "${WANDB_ENABLED}" "${WANDB_ENTITY_NAME}" "${WANDB_SFT_PROJECT_NAME}" "${WANDB_RL_PROJECT_NAME}" \
-  "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" <<'PY'
+  "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${INFERENCE_PRECISION_NAME}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -590,6 +588,7 @@ from pathlib import Path
     wandb_rl_project,
     wandb_sft_run_name,
     wandb_rl_run_name,
+    inference_precision,
 ) = sys.argv[1:]
 wandb_is_enabled = wandb_enabled == "1"
 settings = {
@@ -600,6 +599,7 @@ settings = {
     "model_variant": model_variant,
     "base_checkpoint": base_checkpoint,
     "model_size": model_size,
+    "inference_precision": inference_precision,
     "whole_genome": True,
     "safety_screen": "current configured databases",
     "final_generation_count": 1000,
@@ -718,7 +718,7 @@ stage_30() {
   if [[ -f "${STAGE_DIR}/30-calibration-generation.done" ]]; then
     note 'substage 30-calibration-generation already complete'
   else
-    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 scripts/calibration/run_sft_sampling_sweep.sh
+    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-generation.done"
   fi
   if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then
@@ -771,11 +771,11 @@ PY
   load_sampling_selection
   note "sampling selection: temperature=${SAMPLING_TEMPERATURE}, prompt lengths=${SAMPLING_PROMPT_LENGTHS_TEXT}, max new tokens=${SAMPLING_MAX_NEW_TOKENS}"
   run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/train.jsonl" \
-    --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --repeats-per-length "${SAMPLING_TRAIN_REPEATS}" \
+    --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-records "${SAMPLING_TRAIN_RECORDS}" \
     --id-prefix train
   run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/validation.jsonl" \
-    --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --repeats-per-length "${SAMPLING_VALIDATION_REPEATS}" \
-    --id-prefix validation --grouped
+    --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-records 96 \
+    --id-prefix validation
 }
 
 stage_40() {
@@ -865,35 +865,10 @@ stage_50() {
   for prompt_length in "${SAMPLING_PROMPT_LENGTHS[@]}"; do
     prompt_files+=("${rollout}/prompts/final_prompt${prompt_length}_${SAMPLING_FINAL_PER_LENGTH}.jsonl")
   done
-  worker_count="$((SAMPLING_RANKS_PER_PROMPT * ${#prompt_files[@]}))"
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    note "split the equal prompt mixture (${SAMPLING_PROMPT_LENGTHS_TEXT}) into ${worker_count} deterministic shards over ${NUM_GPUS} GPU(s)"
-  else
-    python - "${shard_dir}" "${NUM_GPUS}" "${SAMPLING_RANKS_PER_PROMPT}" "${prompt_files[@]}" <<'PY'
-import json, sys
-from pathlib import Path
-output, num_gpus, ranks_per_prompt = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-inputs = [Path(path) for path in sys.argv[4:]]
-records = [[json.loads(line) for line in path.read_text().splitlines() if line] for path in inputs]
-expected_per_group = 1000 // len(inputs)
-if [len(group) for group in records] != [expected_per_group] * len(inputs):
-    raise SystemExit(f"expected {expected_per_group} prompts for each prefix length")
-all_records = [record for group in records for record in group]
-if len({record["id"] for record in all_records}) != 1000:
-    raise SystemExit("final prompt IDs are not unique")
-worker_count = ranks_per_prompt * len(records)
-if worker_count < num_gpus or worker_count % num_gpus:
-    raise SystemExit("sampling selection shards cannot be scheduled in complete GPU waves")
-output.mkdir(parents=True, exist_ok=True)
-for group_index, group in enumerate(records):
-    for local_rank in range(ranks_per_prompt):
-        rank = group_index * ranks_per_prompt + local_rank
-        start = local_rank * len(group) // ranks_per_prompt
-        end = (local_rank + 1) * len(group) // ranks_per_prompt
-        shard = group[start:end]
-        (output / f"dp{rank}.jsonl").write_text("".join(json.dumps(record) + "\n" for record in shard))
-PY
-  fi
+  worker_count="${NUM_GPUS}"
+  note "interleave prompt lengths (${SAMPLING_PROMPT_LENGTHS_TEXT}) across ${worker_count} deterministic mixed-length shard(s)"
+  run evo2_phage_generation write-inference-shards --input-jsonl "${prompt_files[@]}" \
+    --output-dir "${shard_dir}" --num-records 1000 --num-shards "${worker_count}"
   started=${SECONDS}
   for ((wave_start=0; wave_start<worker_count; wave_start+=NUM_GPUS)); do
     wave_end="$((wave_start + NUM_GPUS))"
@@ -910,7 +885,9 @@ PY
         --temperature "${SAMPLING_TEMPERATURE}" --top-k "${SAMPLING_TOP_K}" \
         --top-p "${SAMPLING_TOP_P}" --seed "$((SAMPLING_ROLLOUT_SEED + rank * SAMPLING_SEED_STRIDE))" \
         --tensor-parallel-size 1 \
-        --max-seq-length 10240 --prompt-batch-size 16 --strict-generation --stream-output \
+        --max-seq-length 10240 --prompt-batch-size 16 --inference-backend dynamic \
+        ${INFERENCE_PRECISION_ARGS[@]+"${INFERENCE_PRECISION_ARGS[@]}"} \
+        --ignore-eos --strict-generation --stream-output \
         --output-file "${outputs[rank]}")
       printf -v printable '%q ' "${command[@]}"; note "command: ${printable}"
       if [[ "${DRY_RUN}" != "1" ]]; then
@@ -989,8 +966,9 @@ PY
     monitored 'selected-SFT likelihood scoring' "${likelihood}/predict.log" \
       torchrun --nproc-per-node "${NUM_GPUS}" --no-python predict_evo2 \
       --fasta "${likelihood}/sft-conditioned.fasta" --ckpt-dir "${selected_sft}" \
-      --output-dir "${likelihood}/predictions" --tensor-parallel-size 1 --micro-batch-size 1 \
-      --use-subquadratic-ops --output-log-prob-seqs --log-prob-collapse-option per_token
+      --output-dir "${likelihood}/predictions" --tensor-parallel-size 1 --micro-batch-size 8 \
+      ${INFERENCE_PRECISION_ARGS[@]+"${INFERENCE_PRECISION_ARGS[@]}"} \
+      --output-log-prob-seqs --log-prob-collapse-option per_token
     run evo2_phage_generation collect-sft-likelihood \
       --prediction-dir "${likelihood}/predictions" --source-fasta "${fasta}" \
       --output-csv "${likelihood}/ranked-designs.csv"

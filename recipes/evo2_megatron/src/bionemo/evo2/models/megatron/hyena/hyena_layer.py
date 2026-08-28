@@ -24,7 +24,7 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import CudaGraphManager
-from megatron.core.transformer.enums import CudaGraphScope
+from megatron.core.transformer.enums import CudaGraphScope, InferenceCudaGraphScope
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import GraphableMegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
@@ -117,7 +117,9 @@ class HyenaLayer(GraphableMegatronModule):
         ``cuda_graph_scope`` captures the whole layer, while ``CudaGraphScope.mamba``
         can be used by callers that only want the recurrent/mixer scope.
         """
-        if not self.config.cuda_graph_scope or CudaGraphScope.mamba in (self.config.cuda_graph_scope or []):
+        if self.config.inference_cuda_graph_scope != InferenceCudaGraphScope.block and (
+            not self.config.cuda_graph_scope or CudaGraphScope.mamba in (self.config.cuda_graph_scope or [])
+        ):
             self.cudagraph_manager = CudaGraphManager(config)
 
     def _should_call_local_cudagraph(self, *args, **kwargs):
@@ -133,6 +135,7 @@ class HyenaLayer(GraphableMegatronModule):
             and hasattr(self, "cudagraph_manager")
             and kwargs.get("attention_mask") is None
             and kwargs.get("inference_context") is not None
+            and self.config.inference_cuda_graph_scope != InferenceCudaGraphScope.block
             and (not self.config.cuda_graph_scope or CudaGraphScope.mamba in self.config.cuda_graph_scope)
         ):
             context = kwargs["inference_context"]
@@ -146,11 +149,13 @@ class HyenaLayer(GraphableMegatronModule):
         if self._should_call_local_cudagraph(*args, **kwargs):
             inference_context = kwargs.get("inference_context")
             cache_key = None
-            if (
-                inference_context is not None
-                and not inference_context.is_static_batching()
-                and hasattr(inference_context, "evo2_max_batched_decode_requests")
-            ):
+            if inference_context is not None and inference_context.is_static_batching():
+                cache_key = (
+                    "evo2-static",
+                    int(inference_context.max_batch_size),
+                    int(inference_context.max_sequence_length),
+                )
+            elif inference_context is not None and hasattr(inference_context, "evo2_max_batched_decode_requests"):
                 active_request_count = int(inference_context.total_request_count) - int(
                     inference_context.paused_request_count
                 )
@@ -201,7 +206,11 @@ class HyenaLayer(GraphableMegatronModule):
         hidden_states = hidden_states.to(dtype=self.transformer_config.params_dtype)
         hidden_states = self.norm(hidden_states)
 
-        mixer_out_with_bias = self.mixer(hidden_states, inference_context=inference_context)
+        mixer_out_with_bias = self.mixer(
+            hidden_states,
+            inference_context=inference_context,
+            packed_seq_params=packed_seq_params,
+        )
 
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.hyena_bda(self.training, self.transformer_config.bias_dropout_fusion)(

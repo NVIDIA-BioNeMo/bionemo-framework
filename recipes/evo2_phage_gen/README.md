@@ -46,6 +46,14 @@ summarized above:
   --result-root "$PWD/results/phix174-8xh100"
 ```
 
+Like the Evo 2 recipe, `.ci_build.sh` creates an editable Python 3.12 virtual
+environment with `--system-site-packages` and reuses the NVIDIA PyTorch
+container's Torch, TorchVision, Triton, Transformer Engine, CUDA, and cuDNN
+stack. The two recipes share the same Evo 2 runtime pins and native-extension
+fallback; this recipe then adds NeMo-RL and phage workflow dependencies. The
+example launcher sources `.ci_test_env.sh` itself; source it explicitly before
+running individual recipe commands by hand.
+
 Use tmux or a scheduler for long runs. `NUM_GPUS` defaults to 8, `NUM_CPUS` to `nproc`, and
 `SFT_TENSOR_PARALLEL_SIZE` may adapt a measured smaller topology.
 The [8×H100 example](examples/README.md) documents dry runs, preparation-only mode, stage markers,

@@ -47,6 +47,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from megatron.core.transformer.enums import InferenceCudaGraphScope
 
 import bionemo.evo2.run.infer as infer_module
 from bionemo.common.data.load import load as bionemo_load
@@ -60,6 +61,8 @@ from bionemo.evo2.run.infer import (
     _sampled_token_action,
     _sampling_log_probs_from_logits,
     _selected_log_probs_for_sampled_tokens,
+    _stop_token_mask,
+    _suppress_stop_token_logits,
     parse_args,
 )
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
@@ -91,14 +94,15 @@ def _read_jsonl_results(output_file: Path) -> list[dict]:
 
 
 @pytest.mark.parametrize(
-    ("requested_impl", "checkpoint_impl", "expected_enabled"),
+    ("requested_impl", "requested_scope", "checkpoint_impl", "expected_enabled", "expected_scope"),
     [
-        ("local", "none", True),
-        ("none", "local", False),
+        ("local", "block", "none", True, InferenceCudaGraphScope.block),
+        ("local", "layer", "none", True, InferenceCudaGraphScope.layer),
+        ("none", "block", "local", False, InferenceCudaGraphScope.none),
     ],
 )
 def test_configure_native_dynamic_cuda_graphs_normalizes_checkpoint_state(
-    requested_impl, checkpoint_impl, expected_enabled
+    requested_impl, requested_scope, checkpoint_impl, expected_enabled, expected_scope
 ):
     """The CLI choice must replace stale graph settings loaded from a checkpoint."""
     provider = SimpleNamespace(
@@ -107,12 +111,46 @@ def test_configure_native_dynamic_cuda_graphs_normalizes_checkpoint_state(
         inference_cuda_graph_scope="none" if requested_impl == "local" else "layer",
     )
 
-    enabled = infer_module._configure_native_dynamic_cuda_graphs(provider, rank=1, cuda_graph_impl=requested_impl)
+    enabled = infer_module._configure_native_dynamic_cuda_graphs(
+        provider,
+        rank=1,
+        cuda_graph_impl=requested_impl,
+        cuda_graph_scope=requested_scope,
+    )
 
     assert enabled is expected_enabled
     assert provider.cuda_graph_impl == requested_impl
-    assert provider.inference_cuda_graph_scope is None
+    assert provider.inference_cuda_graph_scope is expected_scope
     assert provider.cuda_graph_scope == []
+
+
+@pytest.mark.parametrize(
+    ("requested_scope", "cuda_graph_impl", "fp8_enabled", "fp4_enabled", "expected_scope"),
+    [
+        ("block", "local", False, False, "block"),
+        ("block", "local", True, False, "layer"),
+        ("block", "local", False, True, "layer"),
+        ("layer", "local", True, False, "layer"),
+        ("block", "none", True, False, "block"),
+    ],
+)
+def test_resolve_native_dynamic_cuda_graph_scope_uses_layers_for_global_quantization(
+    requested_scope: str,
+    cuda_graph_impl: str,
+    fp8_enabled: bool,
+    fp4_enabled: bool,
+    expected_scope: str,
+) -> None:
+    """Whole-stack MCore graphs cannot own the per-layer TE FP8/FP4 runtime state."""
+    assert (
+        infer_module._resolve_native_dynamic_cuda_graph_scope(
+            requested_scope,
+            cuda_graph_impl=cuda_graph_impl,
+            fp8_enabled=fp8_enabled,
+            fp4_enabled=fp4_enabled,
+        )
+        == expected_scope
+    )
 
 
 def test_graph_reset_clears_current_mcore_runner_cache(monkeypatch):
@@ -137,6 +175,93 @@ def test_graph_reset_clears_current_mcore_runner_cache(monkeypatch):
     assert manager.cudagraph_runners == []
     assert manager.custom_cudagraphs_lookup_table == {}
     assert delete_calls == [True]
+
+
+def test_static_flash_context_cache_invalidates_on_sequence_capacity_growth(monkeypatch):
+    created = []
+
+    class _StaticContext:
+        def __init__(self, *, max_batch_size, max_sequence_length):
+            self.max_batch_size = max_batch_size
+            self.max_sequence_length = max_sequence_length
+            self.reset_count = 0
+            created.append(self)
+
+        def reset(self):
+            self.reset_count += 1
+
+    monkeypatch.setattr("megatron.core.inference.contexts.StaticInferenceContext", _StaticContext)
+    monkeypatch.setattr(infer_module, "bind_hyena_packed_views_to_static_context", lambda *_args, **_kwargs: None)
+    reset_graphs = []
+    monkeypatch.setattr(infer_module, "_reset_layer_cuda_graphs", lambda _nd: reset_graphs.append(True))
+    nd = SimpleNamespace(
+        static_contexts={},
+        cuda_graphs_enabled=True,
+        hyena_model=object(),
+        shared_dyn_ctx=object(),
+        shared_dyn_ctx_key=(16, None, False),
+    )
+
+    first, _ = infer_module._get_or_build_static_flash_context(
+        nd,
+        batch_size=4,
+        max_sequence_length=64,
+        device=torch.device("cpu"),
+    )
+    grown, _ = infer_module._get_or_build_static_flash_context(
+        nd,
+        batch_size=4,
+        max_sequence_length=128,
+        device=torch.device("cpu"),
+    )
+
+    assert created == [first, grown]
+    assert nd.static_contexts == {(4, 128): grown}
+    assert reset_graphs == [True]
+    assert nd.shared_dyn_ctx is None
+    assert nd.shared_dyn_ctx_key is None
+
+
+def test_static_flash_context_cache_is_bounded_to_full_and_remainder_shapes(monkeypatch):
+    class _StaticContext:
+        def __init__(self, *, max_batch_size, max_sequence_length):
+            self.max_batch_size = max_batch_size
+            self.max_sequence_length = max_sequence_length
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr("megatron.core.inference.contexts.StaticInferenceContext", _StaticContext)
+    monkeypatch.setattr(infer_module, "bind_hyena_packed_views_to_static_context", lambda *_args, **_kwargs: None)
+    reset_graphs = []
+    monkeypatch.setattr(infer_module, "_reset_layer_cuda_graphs", lambda _nd: reset_graphs.append(True))
+    nd = SimpleNamespace(
+        static_contexts={},
+        cuda_graphs_enabled=True,
+        hyena_model=object(),
+        shared_dyn_ctx=None,
+        shared_dyn_ctx_key=None,
+    )
+
+    old_contexts = [
+        infer_module._get_or_build_static_flash_context(
+            nd,
+            batch_size=batch_size,
+            max_sequence_length=64,
+            device=torch.device("cpu"),
+        )[0]
+        for batch_size in (4, 3)
+    ]
+    newest, _ = infer_module._get_or_build_static_flash_context(
+        nd,
+        batch_size=2,
+        max_sequence_length=64,
+        device=torch.device("cpu"),
+    )
+
+    assert nd.static_contexts == {(2, 64): newest}
+    assert all(context not in nd.static_contexts.values() for context in old_contexts)
+    assert reset_graphs == [True]
 
 
 def test_batched_binding_rejects_permuted_contiguous_request_slots():
@@ -340,6 +465,253 @@ def test_infer_context_parallel_comm_type_cli(monkeypatch, extra_args, expected)
     monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt", *extra_args])
 
     assert parse_args().context_parallel_comm_type == expected
+
+
+def test_cuda_graph_cli_defaults_to_block_scope_with_layer_fallback(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = parse_args()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["infer", "--ckpt-dir", "/tmp/ckpt", "--cuda-graph-scope", "layer"],
+    )
+    layer = parse_args()
+
+    assert defaults.cuda_graph_scope == "block"
+    assert layer.cuda_graph_scope == "layer"
+
+
+def test_inference_backend_cli_defaults_dynamic_and_accepts_static_flash(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = parse_args()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["infer", "--ckpt-dir", "/tmp/ckpt", "--inference-backend", "static-flash"],
+    )
+    static_flash = parse_args()
+
+    assert defaults.inference_backend == "dynamic"
+    assert static_flash.inference_backend == "static-flash"
+
+
+def test_native_nvfp4_cli(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = parse_args()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "infer",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--native-nvfp4",
+            "full",
+            "--native-nvfp4-activation-amax",
+            "7.5",
+            "--native-nvfp4-decode",
+            "fp8",
+        ],
+    )
+    native = parse_args()
+
+    assert defaults.native_nvfp4 == "off"
+    assert defaults.native_nvfp4_activation_amax is None
+    assert defaults.native_nvfp4_decode == "bf16"
+    assert native.native_nvfp4 == "full"
+    assert native.native_nvfp4_activation_amax == 7.5
+    assert native.native_nvfp4_decode == "fp8"
+
+
+def test_native_mxfp8_cli(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = parse_args()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "infer",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--native-mxfp8",
+            "hyena",
+            "--native-mxfp8-decode",
+            "fp8",
+        ],
+    )
+    native = parse_args()
+
+    assert defaults.native_mxfp8 == "off"
+    assert defaults.native_mxfp8_decode == "bf16"
+    assert native.native_mxfp8 == "hyena"
+    assert native.native_mxfp8_decode == "fp8"
+
+
+def test_global_fp8_all_layers_cli(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = parse_args()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "infer",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--mixed-precision-recipe",
+            "bf16_with_fp8_current_scaling_mixed",
+            "--fp8-all-layers",
+        ],
+    )
+    fp8 = parse_args()
+
+    assert defaults.fp8_all_layers is False
+    assert fp8.fp8_all_layers is True
+
+
+def test_generate_dispatches_explicit_static_flash_backend(monkeypatch):
+    expected = [object()]
+    calls = []
+
+    def fake_static(*args, **kwargs):
+        calls.append((args, kwargs))
+        return expected
+
+    monkeypatch.setattr(infer_module, "_generate_static_flash", fake_static)
+
+    result = infer_module.generate(
+        SimpleNamespace(),
+        ["ACGT"],
+        max_new_tokens=2,
+        top_k=1,
+        inference_backend="static-flash",
+    )
+
+    assert result is expected
+    assert calls[0][1]["evo2_batched_decode_size"] == 1
+
+
+def test_reset_cuda_graphs_clears_current_and_legacy_manager_caches(monkeypatch):
+    """Context growth must not leave an installed-MCore custom-key runner alive."""
+    manager = SimpleNamespace(
+        cudagraph_runners=[object()],
+        custom_cudagraphs_lookup_table={"current": object()},
+        inference_cudagraphs_lookup_table={"legacy": object()},
+    )
+    model = SimpleNamespace(modules=lambda: [SimpleNamespace(cudagraph_manager=manager)])
+    deleted = []
+    monkeypatch.setattr(
+        "megatron.core.transformer.cuda_graphs.delete_cuda_graphs",
+        lambda: deleted.append(True),
+    )
+
+    infer_module._reset_layer_cuda_graphs(SimpleNamespace(hyena_model=model))
+
+    assert manager.cudagraph_runners == []
+    assert manager.custom_cudagraphs_lookup_table == {}
+    assert manager.inference_cudagraphs_lookup_table == {}
+    assert deleted == [True]
+
+
+def test_validate_cuda_graph_capture_records_every_block_graph_runner():
+    """A configured graph path must expose captured runners before serving user prompts."""
+    runners = [
+        SimpleNamespace(fwd_graph_recorded=True, cudagraph_created=True),
+        SimpleNamespace(fwd_graph_recorded=True, cudagraph_created=True),
+    ]
+    manager = SimpleNamespace(cudagraph_runners=runners)
+    model = SimpleNamespace(modules=lambda: [SimpleNamespace(cudagraph_manager=manager)])
+    native = SimpleNamespace(
+        hyena_model=model,
+        cuda_graph_scope="block",
+        cuda_graph_manager_count=1,
+        cuda_graph_runner_count=0,
+        cuda_graph_recorded_count=0,
+        cuda_graph_replay_verified=False,
+    )
+
+    infer_module._validate_cuda_graph_capture(native, expected_request_counts=2)
+
+    assert native.cuda_graph_runner_count == 2
+    assert native.cuda_graph_recorded_count == 2
+    assert native.cuda_graph_replay_verified is True
+
+
+def test_validate_layer_cuda_graph_capture_allows_one_fixed_attention_runner():
+    """Paged attention keeps one max-request graph while packed Hyena keys each request count."""
+
+    def manager(count):
+        return SimpleNamespace(
+            cudagraph_runners=[SimpleNamespace(fwd_graph_recorded=True, cudagraph_created=True) for _ in range(count)]
+        )
+
+    layer_managers = [manager(2), manager(1), manager(2)]
+    layers = [SimpleNamespace(cudagraph_manager=item) for item in layer_managers]
+    decoder = SimpleNamespace(layers=layers, layer_type_list=["M", "*", "M"])
+    model = SimpleNamespace(
+        decoder=decoder,
+        modules=lambda: [SimpleNamespace(cudagraph_manager=item) for item in layer_managers],
+    )
+    native = SimpleNamespace(
+        hyena_model=model,
+        cuda_graph_scope="layer",
+        cuda_graph_manager_count=0,
+        cuda_graph_runner_count=0,
+        cuda_graph_recorded_count=0,
+        cuda_graph_replay_verified=False,
+    )
+
+    infer_module._validate_cuda_graph_capture(native, expected_request_counts=2)
+
+    assert native.cuda_graph_manager_count == 3
+    assert native.cuda_graph_runner_count == 5
+    assert native.cuda_graph_recorded_count == 5
+    assert native.cuda_graph_replay_verified is True
+
+
+def test_validate_layer_cuda_graph_capture_rejects_missing_hyena_request_shape():
+    def manager(count):
+        return SimpleNamespace(
+            cudagraph_runners=[SimpleNamespace(fwd_graph_recorded=True, cudagraph_created=True) for _ in range(count)]
+        )
+
+    layer_managers = [manager(1), manager(1)]
+    layers = [SimpleNamespace(cudagraph_manager=item) for item in layer_managers]
+    decoder = SimpleNamespace(layers=layers, layer_type_list=["M", "*"])
+    model = SimpleNamespace(
+        decoder=decoder,
+        modules=lambda: [SimpleNamespace(cudagraph_manager=item) for item in layer_managers],
+    )
+    native = SimpleNamespace(hyena_model=model, cuda_graph_scope="layer")
+
+    with pytest.raises(RuntimeError, match="not fully captured"):
+        infer_module._validate_cuda_graph_capture(native, expected_request_counts=2)
+
+
+@pytest.mark.parametrize(
+    ("managers", "message"),
+    [
+        ([], "no CUDA graph manager"),
+        (
+            [SimpleNamespace(cudagraph_runners=[SimpleNamespace(fwd_graph_recorded=False, cudagraph_created=False)])],
+            "not fully captured",
+        ),
+    ],
+)
+def test_validate_cuda_graph_capture_rejects_a_configured_but_inactive_graph_path(managers, message):
+    modules = [SimpleNamespace(cudagraph_manager=manager) for manager in managers]
+    model = SimpleNamespace(modules=lambda: modules)
+    native = SimpleNamespace(
+        hyena_model=model,
+        cuda_graph_scope="block",
+        cuda_graph_manager_count=len(managers),
+        cuda_graph_runner_count=0,
+        cuda_graph_recorded_count=0,
+        cuda_graph_replay_verified=False,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        infer_module._validate_cuda_graph_capture(native, expected_request_counts=1)
 
 
 def test_max_batch_size_help_describes_prompt_file_chunking(monkeypatch, capsys):
@@ -710,7 +1082,7 @@ class _MockLoopTokenizer:
     def tokenize(text: str) -> list[int]:
         if text in {"<EOS>", "<EOD>", "<|endoftext|>"}:
             return [0]
-        return [3]
+        return [3] * len(text)
 
     @staticmethod
     def detokenize(token_ids: list[int]) -> str:
@@ -748,9 +1120,11 @@ class _MockNativeDynamicContext:
         self.update_count = 0
         self.reset_count = 0
         self.active = False
+        self.prefill_chunk_lengths = []
 
     def add_request(self, _request, *, prefill_chunk_length: int):
         assert prefill_chunk_length > 0
+        self.prefill_chunk_lengths.append(prefill_chunk_length)
         self.request_count += 1
         self.active = True
 
@@ -851,6 +1225,13 @@ def _run_mock_native_generation(
         sampling_rng=None,
         evo2_seed=17,
         cuda_graphs_enabled=False,
+        cuda_graph_scope="none",
+        cuda_graph_manager_count=0,
+        cuda_graph_runner_count=0,
+        cuda_graph_recorded_count=0,
+        cuda_graph_replay_verified=False,
+        precision_kind="bf16",
+        precision_parameter_storage="bf16",
         generation_call_index=0,
         engine_setup_stats=infer_module._CudaPhaseStats(),
         engine_setup_stats_pending=True,
@@ -937,6 +1318,28 @@ def test_ignore_eos_suppresses_stop_tokens_before_sampling(monkeypatch):
     assert forward_model.calls == 3
 
 
+def test_suppress_stop_token_logits_does_not_reduce_device_logits(monkeypatch):
+    """The forced-length decode path must not introduce a GPU-to-host sync per token."""
+
+    def fail_if_reduced(_tensor):
+        raise AssertionError("stop-token suppression reduced logits on the host")
+
+    logits = torch.tensor([[1.0, 2.0, 3.0]])
+    stop_token_mask = _stop_token_mask(logits, {0, 7})
+    monkeypatch.setattr(torch, "isneginf", fail_if_reduced)
+
+    filtered_logits = _suppress_stop_token_logits(logits, {0, 7}, stop_token_mask=stop_token_mask)
+
+    assert filtered_logits.tolist() == [[float("-inf"), 2.0, 3.0]]
+
+
+def test_suppress_stop_token_logits_rejects_suppressing_the_whole_vocabulary():
+    logits = torch.tensor([[1.0, 2.0, 3.0]])
+
+    with pytest.raises(RuntimeError, match="every tokenizer vocabulary entry"):
+        _suppress_stop_token_logits(logits, {0, 1, 2, 7})
+
+
 def test_native_single_loop_omits_ignored_eos_and_reaches_exact_length(monkeypatch):
     results, _context, forward_model = _run_mock_native_generation(
         monkeypatch,
@@ -971,6 +1374,20 @@ def test_native_batched_loop_omits_ignored_eos_and_reaches_exact_length(monkeypa
     results[0].memory["first_result_only"] = 1
     assert "first_result_only" not in results[1].timings
     assert "first_result_only" not in results[1].memory
+
+
+def test_native_batched_prefill_accepts_ragged_prompt_lengths(monkeypatch):
+    results, context, forward_model = _run_mock_native_generation(
+        monkeypatch,
+        prompts=["P", "QQQ"],
+        sampled_steps=[[1, 2]],
+        max_new_tokens=1,
+        evo2_batched_decode_size=2,
+    )
+
+    assert [result.generated_tokens for result in results] == [[1], [2]]
+    assert context.prefill_chunk_lengths == [1, 3]
+    assert forward_model.calls == 1
 
 
 def test_native_batched_prefill_enforces_total_token_budget(monkeypatch):
@@ -1179,6 +1596,12 @@ def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_cap
         lambda *_args, **_kwargs: events.append("capture"),
     )
 
+    def validate_capture(_nd, *, expected_request_counts):
+        assert expected_request_counts == 2
+        events.append("validate")
+
+    monkeypatch.setattr(infer_module, "_validate_cuda_graph_capture", validate_capture)
+
     context, context_setup, graph_capture = infer_module._get_or_build_shared_dynamic_context(
         nd,
         block_size_tokens=16,
@@ -1219,6 +1642,7 @@ def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_cap
         "sync",
         "reset_peak",
         "capture",
+        "validate",
         "sync",
         "reset",
     ]
@@ -1605,6 +2029,8 @@ def _run_infer_prompt_file(
         "1234",
         "--max-batch-size",
         str(max_batch_size),
+        "--evo2-batched-decode-size",
+        str(max_batch_size),
         "--max-seq-length",
         "512",
         "--return-log-probs",
@@ -1622,6 +2048,10 @@ def _run_infer_prompt_file(
     )
     _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
     assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    if max_batch_size > 1:
+        combined_output = f"{result.stdout}\n{result.stderr}"
+        assert "[evo2-native] opt-in batched decode active" in combined_output
+        assert "[evo2-native] batched prompt prefill: requests=2" in combined_output
     records = _read_jsonl_results(output_file)
     return {record["id"]: record for record in records}
 
@@ -1641,12 +2071,11 @@ def test_infer_evo2_short_prefill_is_prefix_invariant_across_batch_padding(
     tmp_path,
     infer_use_subquadratic_ops: bool,
 ):
-    """A short prefill should generate the same next token alone or in a padded batch.
+    """A short prefill should be invariant when packed with a longer prompt.
 
-    Routes through the native default engine. Native decodes each prompt as its own single-request
-    context (no static batch padding), so the short prompt's completion + logprob must match whether
-    it is submitted alone or alongside a longer prompt — the same "infer.py generates valid,
-    batch-independent DNA" invariant, now exercised on the working path.
+    The two-prompt run explicitly enables ragged batched prefill and decode in one dynamic context.
+    The short prompt's completion and log-prob must match whether it is submitted alone or alongside
+    a 256-token prompt.
     """
     if torch.cuda.device_count() < 1:
         pytest.skip("Inference prefill prefix-invariance test requires a GPU")
@@ -1791,6 +2220,111 @@ def run_infer_subprocess_parallel(
     return _read_jsonl_results(output_file)
 
 
+def _run_segmented_parallel_infer_probe(
+    *,
+    checkpoint_path: Path,
+    work_dir: Path,
+    tensor_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
+    context_parallel_size: int = 1,
+) -> tuple[dict[str, dict], list[dict]]:
+    """Run unequal prompts together and return outputs plus per-rank kernel proof."""
+    world_size = tensor_parallel_size * pipeline_parallel_size * context_parallel_size
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"Packed parallel probe needs {world_size} GPUs, found {torch.cuda.device_count()}")
+
+    prompt_file = work_dir / "prompts.jsonl"
+    output_file = work_dir / "outputs.jsonl"
+    probe_dir = work_dir / "kernel-proof"
+    _write_prompts_jsonl(
+        prompt_file,
+        [
+            ("short", "ACGTACGTACGTACGTA"),
+            ("long", "TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC"),
+        ],
+    )
+    launcher = Path(__file__).with_name("packed_parallel_probe.py")
+    command = [
+        "torchrun",
+        "--standalone",
+        "--nproc_per_node",
+        str(world_size),
+        "--nnodes",
+        "1",
+        str(launcher),
+        "infer",
+        "--ckpt-dir",
+        str(checkpoint_path),
+        "--prompt-file",
+        str(prompt_file),
+        "--output-file",
+        str(output_file),
+        "--prompt-batch-size",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--max-new-tokens",
+        "20",
+        "--max-seq-length",
+        "128",
+        "--temperature",
+        "1",
+        "--top-k",
+        "1",
+        "--seed",
+        "42",
+        "--ignore-eos",
+        "--strict-generation",
+        "--return-log-probs",
+        "--tensor-parallel-size",
+        str(tensor_parallel_size),
+        "--pipeline-model-parallel-size",
+        str(pipeline_parallel_size),
+        "--context-parallel-size",
+        str(context_parallel_size),
+    ]
+    env = copy.deepcopy(PRETEST_ENV)
+    env["EVO2_PACKED_PROBE_DIR"] = str(probe_dir)
+    env["PYTHONPATH"] = str(_recipe_root() / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=900, env=env)
+    assert result.returncode == 0, (
+        f"Packed parallel infer probe failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+    records = {record["id"]: record for record in _read_jsonl_results(output_file)}
+    proofs = [json.loads((probe_dir / f"rank-{rank}.json").read_text()) for rank in range(world_size)]
+    assert set(records) == {"short", "long"}
+    assert {proof["rank"] for proof in proofs} == set(range(world_size))
+    assert all(proof["calls"] > 0 for proof in proofs)
+    assert all(proof["max_segments"] == 2 for proof in proofs)
+    assert {operator for proof in proofs for operator in proof["operator_counts"]} == {
+        "hyena",
+        "hyena_medium_conv",
+        "hyena_short_conv",
+    }
+    for record in records.values():
+        assert record["usage"]["completion_tokens"] == 20
+        assert record["timings"]["timing_request_count"] == 2
+        assert record["timings"]["cuda_graph_scope"] == "block"
+        assert record["timings"]["cuda_graph_manager_count"] == 1
+        assert record["timings"]["cuda_graph_runner_count"] >= 2
+        assert record["timings"]["cuda_graph_recorded_count"] == record["timings"]["cuda_graph_runner_count"]
+        assert record["timings"]["cuda_graph_replay_verified"] is True
+    return records, proofs
+
+
+def _assert_parallel_probe_matches_baseline(actual: dict[str, dict], expected: dict[str, dict]) -> None:
+    assert set(actual) == set(expected)
+    for request_id in expected:
+        assert actual[request_id]["completion_token_ids"] == expected[request_id]["completion_token_ids"]
+        torch.testing.assert_close(
+            torch.tensor(actual[request_id]["logprobs"]["completion_logprobs"]),
+            torch.tensor(expected[request_id]["logprobs"]["completion_logprobs"]),
+            rtol=2e-2,
+            atol=5e-2,
+        )
+
+
 def test_identical_prompts_should_be_identical(mbridge_checkpoint_path, tmp_path):
     """Test that identical prompts produce identical sequences.
 
@@ -1827,16 +2361,23 @@ def test_identical_prompts_should_be_identical(mbridge_checkpoint_path, tmp_path
     assert generated_1["completion_token_ids"] == generated_2["completion_token_ids"]
 
 
-@pytest.mark.parametrize("cuda_graph_impl", ["none", "local"])
+@pytest.mark.parametrize(
+    ("cuda_graph_impl", "cuda_graph_scope"),
+    [("none", "block"), ("local", "layer"), ("local", "block")],
+)
 @pytest.mark.parametrize("use_subquadratic_ops", [False, True])
 def test_subquadratic_ops_with_cuda_graph_matches_baseline(
-    mbridge_checkpoint_path, tmp_path, use_subquadratic_ops, cuda_graph_impl
+    mbridge_checkpoint_path,
+    tmp_path,
+    use_subquadratic_ops,
+    cuda_graph_impl,
+    cuda_graph_scope,
 ):
-    """Every (subq-ops x CUDA-graph) combination matches the eager, non-subq baseline.
+    """Every (subq-ops x CUDA-graph scope) combination matches the eager baseline.
 
     The reference is the simplest path: standard kernels with CUDA graphs OFF (``cuda_graph_impl=none``).
     Greedy decoding (top_k=1) + a fixed seed make generation deterministic, so each of the four
-    combinations of {standard, subq-ops} x {eager, local CUDA graphs} must produce byte-identical output.
+    combinations of {standard, subq-ops} x {eager, layer graph, block graph} must produce byte-identical output.
 
     subquadratic-ops kernels cannot be captured into a CUDA graph (they SIGSEGV during capture), so
     ``setup_inference_engine`` makes them mutually exclusive: requesting both forces eager decode
@@ -1866,12 +2407,14 @@ def test_subquadratic_ops_with_cuda_graph_matches_baseline(
         seed=42,
         use_subquadratic_ops=use_subquadratic_ops,
         cuda_graph_impl=cuda_graph_impl,
+        extra_args=["--cuda-graph-scope", cuda_graph_scope],
     )
 
     assert baseline["completion"], "Baseline generation produced empty output"
     assert variant["completion"], "Variant generation produced empty output"
     assert variant["completion"] == baseline["completion"], (
-        f"subq_ops={use_subquadratic_ops}, cuda_graph_impl={cuda_graph_impl} diverged from the "
+        f"subq_ops={use_subquadratic_ops}, cuda_graph_impl={cuda_graph_impl}, "
+        f"cuda_graph_scope={cuda_graph_scope} diverged from the "
         f"eager non-subq baseline:\n  baseline={baseline['completion']!r}\n  variant ={variant['completion']!r}"
     )
 
@@ -1935,12 +2478,7 @@ def dna_sequences():
         # The 1b model only supports TP=1 through infer.py due to divisibility constraints
         # (15 attention heads and 128-width HyenaMixer). TP>1 requires the 7b model.
         pytest.param(1, 1, id="tp=1,cp=1"),
-        pytest.param(
-            1,
-            2,
-            id="tp=1,cp=2",
-            marks=pytest.mark.xfail(reason="CP>1 is known broken for inference", strict=False),
-        ),
+        pytest.param(1, 2, id="tp=1,cp=2"),
     ],
 )
 @pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI")
@@ -2016,8 +2554,8 @@ def test_parallel_inference_accuracy_evo2_batched_decode_same_prefix_preserves_a
 ):
     """Same-prefix batched decode may diverge from serial, but should preserve target accuracy.
 
-    The true Evo2 batched-decode path only accepts same-length prompts, so this uses a common prefix
-    length across the DNA accuracy prompts for both serial and batched subprocess inference. Greedy
+    This uses a common prefix length across the DNA accuracy prompts for both serial and batched
+    subprocess inference. Greedy
     serial-vs-batched completions can diverge after small numerical differences; when they do, the
     batched completion should remain similarly close to the real next-window target.
     """
@@ -2168,6 +2706,61 @@ def mbridge_checkpoint_7b_1m_path(tmp_path_factory) -> Path:
     return mbridge_ckpt_dir / "iter_0000001"
 
 
+@pytest.fixture(scope="module")
+def segmented_infer_baseline_1b(mbridge_checkpoint_path, tmp_path_factory) -> dict[str, dict]:
+    records, _ = _run_segmented_parallel_infer_probe(
+        checkpoint_path=mbridge_checkpoint_path,
+        work_dir=tmp_path_factory.mktemp("packed-infer-baseline-1b"),
+    )
+    return records
+
+
+@pytest.mark.parametrize(
+    ("pipeline_parallel_size", "context_parallel_size"),
+    [
+        pytest.param(1, 2, id="cp=2"),
+        pytest.param(2, 1, id="pp=2"),
+    ],
+)
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+def test_segmented_packed_infer_executes_on_every_cp_or_pp_rank(
+    mbridge_checkpoint_path,
+    segmented_infer_baseline_1b,
+    tmp_path,
+    pipeline_parallel_size: int,
+    context_parallel_size: int,
+) -> None:
+    """CP/PP cannot silently replace ragged segmented prefill with a rectangular path."""
+    records, _ = _run_segmented_parallel_infer_probe(
+        checkpoint_path=mbridge_checkpoint_path,
+        work_dir=tmp_path,
+        pipeline_parallel_size=pipeline_parallel_size,
+        context_parallel_size=context_parallel_size,
+    )
+    _assert_parallel_probe_matches_baseline(records, segmented_infer_baseline_1b)
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+@pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip 7b-1m checkpoint tests in CI due to disk space")
+def test_segmented_packed_infer_executes_on_every_tp_rank(
+    mbridge_checkpoint_7b_1m_path,
+    tmp_path_factory,
+) -> None:
+    """Production TP must execute every segmented operator family on every rank."""
+    baseline, _ = _run_segmented_parallel_infer_probe(
+        checkpoint_path=mbridge_checkpoint_7b_1m_path,
+        work_dir=tmp_path_factory.mktemp("packed-infer-baseline-7b"),
+    )
+    parallel, _ = _run_segmented_parallel_infer_probe(
+        checkpoint_path=mbridge_checkpoint_7b_1m_path,
+        work_dir=tmp_path_factory.mktemp("packed-infer-tp2-7b"),
+        tensor_parallel_size=2,
+    )
+    _assert_parallel_probe_matches_baseline(parallel, baseline)
+
+
 @pytest.mark.slow
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize(
@@ -2186,14 +2779,8 @@ def mbridge_checkpoint_7b_1m_path(tmp_path_factory) -> Path:
         # Combined TP+PP configs
         pytest.param(2, 2, 1, id="tp=2,pp=2,cp=1"),
         pytest.param(4, 2, 1, id="tp=4,pp=2,cp=1"),
-        # CP>1 configs (known broken)
-        pytest.param(
-            1,
-            1,
-            2,
-            id="tp=1,pp=1,cp=2",
-            marks=pytest.mark.xfail(reason="CP>1 is known broken for inference", strict=False),
-        ),
+        # CP-only config
+        pytest.param(1, 1, 2, id="tp=1,pp=1,cp=2"),
     ],
 )
 @pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip in CI")
@@ -2637,7 +3224,11 @@ def test_native_dynamic_full_fp8_runs_with_and_without_chunked_prefill(mbridge_c
     assert n_prompt_tokens > 2 * chunk_max_tokens, (
         f"LONG_DNA_PROMPT ({n_prompt_tokens} tokens) must exceed 2*chunk_max_tokens={2 * chunk_max_tokens}"
     )
-    fp8_args = ["--mixed-precision-recipe", "bf16_with_fp8_current_scaling_mixed"]
+    fp8_args = [
+        "--mixed-precision-recipe",
+        "bf16_with_fp8_current_scaling_mixed",
+        "--fp8-all-layers",
+    ]
 
     full = run_infer_subprocess(
         mbridge_checkpoint_path,

@@ -20,6 +20,7 @@
 
 import copy
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -35,7 +36,14 @@ import torch
 from bionemo.common.data.load import load as bionemo_load
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH_512
 from bionemo.evo2.data.test_utils.create_fasta_file import ALU_SEQUENCE, create_fasta_file
-from bionemo.evo2.run.predict import _predict_step, batch_collator
+from bionemo.evo2.run import predict as predict_module
+from bionemo.evo2.run.predict import (
+    _length_bucketed_batches,
+    _packing_collate_fn,
+    _predict_step,
+    _unpack_packed_tensor,
+    batch_collator,
+)
 from bionemo.evo2.run.predict import parse_args as parse_predict_args
 from bionemo.evo2.utils.checkpoint.nemo2_to_mbridge import run_nemo2_to_mbridge
 
@@ -44,6 +52,29 @@ from ..utils import check_fp8_support, is_a6000_gpu
 
 # Do this at collection time before we run any tests.
 PRETEST_ENV = copy.deepcopy(os.environ)
+
+
+def _load_profile_predict_aggregate():
+    profile_path = Path(__file__).parents[4] / "benchmarks" / "profile_predict.py"
+    spec = importlib.util.spec_from_file_location("_evo2_profile_predict", profile_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._aggregate_layout
+
+
+@pytest.mark.parametrize(
+    ("layouts", "expected"),
+    [
+        (["packed", "packed"], "length-aware-packed"),
+        (["rectangular"], "rectangular"),
+        (["packed", "rectangular"], "mixed"),
+    ],
+)
+def test_profile_predict_aggregate_layout_is_accurate(layouts: list[str], expected: str) -> None:
+    measurements = [{"layout": layout} for layout in layouts]
+
+    assert _load_profile_predict_aggregate()(measurements) == expected
 
 
 @pytest.mark.parametrize(
@@ -58,6 +89,39 @@ def test_predict_context_parallel_comm_type_cli(monkeypatch, extra_args, expecte
     )
 
     assert parse_predict_args().context_parallel_comm_type == expected
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_policy", "legacy_disabled"),
+    [
+        pytest.param([], "auto", False, id="default-auto"),
+        pytest.param(["--sequence-parallel-policy", "on"], "on", False, id="explicit-on"),
+        pytest.param(["--sequence-parallel-policy", "off"], "off", False, id="explicit-off"),
+        pytest.param(["--no-sequence-parallel"], "auto", True, id="legacy-off-alias"),
+    ],
+)
+def test_predict_sequence_parallel_policy_cli(monkeypatch, extra_args, expected_policy, legacy_disabled):
+    """Removing either the tri-state option or legacy alias breaks the prediction CLI contract."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["predict", "--fasta", "/tmp/input.fasta", "--ckpt-dir", "/tmp/ckpt", *extra_args],
+    )
+
+    args = parse_predict_args()
+
+    assert args.sequence_parallel_policy == expected_policy
+    assert args.no_sequence_parallel is legacy_disabled
+
+
+def test_predict_pp_fails_early() -> None:
+    """Prediction has no pipeline schedule, so PP must fail before reading the checkpoint."""
+    with pytest.raises(ValueError, match="Pipeline parallelism > 1 is not currently supported"):
+        predict_module.predict(
+            fasta_path=Path("/does/not/exist.fasta"),
+            ckpt_dir=Path("/does/not/exist.ckpt"),
+            pipeline_model_parallel_size=2,
+        )
 
 
 def test_predict_step_gathers_sequence_parallel_embeddings():
@@ -91,6 +155,262 @@ def test_predict_step_gathers_sequence_parallel_embeddings():
     torch.testing.assert_close(result["hidden_embeddings"], full_embeddings.transpose(0, 1))
 
 
+def test_packed_embedding_step_gathers_and_unpacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ragged packed embeddings must retain the legacy padded endpoint schema under TP."""
+    batch = _packing_collate_fn(
+        [_prediction_sample(2, [10, 11, 12]), _prediction_sample(7, [20])],
+        pad_token_id=0,
+    )
+    local_embeddings = torch.arange(4, dtype=torch.float32).reshape(2, 1, 2)
+    full_embeddings = torch.arange(8, dtype=torch.float32).reshape(4, 1, 2)
+    tp_group = object()
+    model = MagicMock(return_value=local_embeddings)
+    model.module.config.sequence_parallel = True
+
+    monkeypatch.setattr(predict_module.parallel_state, "is_pipeline_last_stage", lambda: True)
+    monkeypatch.setattr(predict_module.parallel_state, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(predict_module.parallel_state, "get_tensor_model_parallel_group", lambda: tp_group)
+    gather_tp = MagicMock(return_value=full_embeddings)
+    monkeypatch.setattr(predict_module, "gather_from_sequence_parallel_region", gather_tp)
+    monkeypatch.setattr(predict_module, "_gather_along_cp_dim", lambda tensor, **_: tensor)
+
+    result = _predict_step(model, batch, output_embeddings=True)
+
+    assert model.call_args.kwargs["packed_seq_params"] is not None
+    gather_tp.assert_called_once_with(local_embeddings, tensor_parallel_output_grad=False, group=tp_group)
+    assert result["hidden_embeddings"].shape == (2, 3, 2)
+    torch.testing.assert_close(result["hidden_embeddings"][0], full_embeddings[:3, 0])
+    torch.testing.assert_close(result["hidden_embeddings"][1, 0], full_embeddings[3, 0])
+    torch.testing.assert_close(result["hidden_embeddings"][1, 1:], torch.zeros(2, 2))
+    torch.testing.assert_close(result["pad_mask"], torch.tensor([[1, 1, 1], [1, 0, 0]]))
+    torch.testing.assert_close(result["tokens"], torch.tensor([[10, 11, 12], [20, 0, 0]]))
+    torch.testing.assert_close(result["seq_idx"], torch.tensor([2, 7]))
+
+
+def test_native_nvfp4_cli(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["predict", "--fasta", "/tmp/in.fa", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = predict_module.parse_args()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "predict",
+            "--fasta",
+            "/tmp/in.fa",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--native-nvfp4",
+            "fc1",
+            "--native-nvfp4-activation-amax",
+            "6",
+        ],
+    )
+    native = predict_module.parse_args()
+
+    assert defaults.native_nvfp4 == "off"
+    assert defaults.native_nvfp4_activation_amax is None
+    assert defaults.packed_token_budget == 250_000
+    assert defaults.no_packing_length_bucketing is False
+    assert native.native_nvfp4 == "fc1"
+    assert native.native_nvfp4_activation_amax == 6.0
+
+
+def test_native_mxfp8_cli(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["predict", "--fasta", "/tmp/in.fa", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = predict_module.parse_args()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "predict",
+            "--fasta",
+            "/tmp/in.fa",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--native-mxfp8",
+            "expansion",
+        ],
+    )
+    native = predict_module.parse_args()
+
+    assert defaults.native_mxfp8 == "off"
+    assert native.native_mxfp8 == "expansion"
+
+
+def test_global_fp8_all_layers_cli(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["predict", "--fasta", "/tmp/in.fa", "--ckpt-dir", "/tmp/ckpt"])
+    defaults = predict_module.parse_args()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "predict",
+            "--fasta",
+            "/tmp/in.fa",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--mixed-precision-recipe",
+            "bf16_with_fp8_current_scaling_mixed",
+            "--fp8-all-layers",
+        ],
+    )
+    fp8 = predict_module.parse_args()
+
+    assert defaults.fp8_all_layers is False
+    assert fp8.fp8_all_layers is True
+
+
+def test_length_bucketed_batches_split_extreme_skew_once_before_model_layers() -> None:
+    lengths = [200_000, 10, 10, 10, 10, 10, 300_000]
+
+    batches = _length_bucketed_batches(
+        lengths,
+        max_records=6,
+        max_tokens=250_000,
+        bucket_by_length=True,
+        data_parallel_rank=0,
+        data_parallel_size=1,
+    )
+
+    assert batches == [[6], [0], [1, 2, 3, 4, 5]]
+    assert sorted(index for batch in batches for index in batch) == list(range(len(lengths)))
+    assert all(sum(lengths[index] for index in batch) <= 250_000 or len(batch) == 1 for batch in batches)
+
+
+def test_length_bucketed_batches_reports_empty_record_indices() -> None:
+    with pytest.raises(ValueError, match=r"record indices \[1, 3\].*--no-sequence-packing"):
+        _length_bucketed_batches(
+            [8, 0, 4, -1],
+            max_records=4,
+            max_tokens=32,
+            bucket_by_length=True,
+            data_parallel_rank=0,
+            data_parallel_size=1,
+        )
+
+
+def _prediction_sample(index: int, tokens: list[int]) -> dict[str, torch.Tensor]:
+    length = len(tokens)
+    return {
+        "tokens": torch.tensor(tokens, dtype=torch.long),
+        "position_ids": torch.arange(length, dtype=torch.long),
+        "seq_idx": torch.tensor(index, dtype=torch.long),
+        "loss_mask": torch.ones(length, dtype=torch.long),
+    }
+
+
+def test_packing_collate_flattens_without_batch_max_padding() -> None:
+    batch = [_prediction_sample(4, [10, 11, 12]), _prediction_sample(9, [20])]
+
+    packed = _packing_collate_fn(batch, pad_token_id=0, min_length=2)
+
+    torch.testing.assert_close(packed["tokens"], torch.tensor([[10, 11, 12, 20, 0]]))
+    torch.testing.assert_close(packed["position_ids"], torch.tensor([[0, 1, 2, 0, 1]]))
+    torch.testing.assert_close(packed["loss_mask"], torch.tensor([[1, 1, 1, 1, 0]]))
+    torch.testing.assert_close(packed["seq_idx"], torch.tensor([4, 9]))
+    torch.testing.assert_close(packed["cu_seqlens"], torch.tensor([0, 3, 5], dtype=torch.int32))
+    torch.testing.assert_close(packed["packed_sequence_ids"], torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32))
+    assert packed["packed_max_seqlen"] == 3
+    assert packed["packed_pad_token_id"] == 0
+
+
+def test_unpack_packed_tensor_materializes_endpoint_padding_once() -> None:
+    flat = torch.arange(10, dtype=torch.float32).reshape(1, 5, 2)
+    sequence_ids = torch.tensor([0, 0, 0, 1, 1])
+    local_positions = torch.tensor([0, 1, 2, 0, 1])
+
+    unpacked = _unpack_packed_tensor(
+        flat,
+        sequence_ids=sequence_ids,
+        local_positions=local_positions,
+        batch_size=2,
+        max_seqlen=3,
+        pad_value=-1,
+    )
+
+    assert unpacked.shape == (2, 3, 2)
+    torch.testing.assert_close(unpacked[0], flat[0, :3])
+    torch.testing.assert_close(unpacked[1, :2], flat[0, 3:])
+    torch.testing.assert_close(unpacked[1, 2], torch.full((2,), -1.0))
+
+
+def test_predict_step_sends_one_packed_call_and_restores_output_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    batch = _packing_collate_fn(
+        [_prediction_sample(2, [10, 11, 12]), _prediction_sample(7, [20])],
+        pad_token_id=0,
+    )
+
+    class RecordingModel:
+        packed_seq_params = None
+
+        def __call__(self, *, input_ids, position_ids, attention_mask, packed_seq_params=None):
+            self.packed_seq_params = packed_seq_params
+            total_tokens = input_ids.shape[1]
+            return torch.arange(total_tokens * 3, dtype=torch.float32).reshape(1, total_tokens, 3)
+
+    model = RecordingModel()
+    monkeypatch.setattr(predict_module.parallel_state, "is_pipeline_last_stage", lambda: True)
+    monkeypatch.setattr(predict_module.parallel_state, "get_tensor_model_parallel_group", lambda: None)
+    monkeypatch.setattr(predict_module, "_gather_along_last_dim", lambda tensor, group: tensor)
+    monkeypatch.setattr(predict_module, "_gather_along_cp_dim", lambda tensor, **_: tensor)
+
+    result = predict_module._predict_step(model, batch)
+
+    assert model.packed_seq_params is not None
+    torch.testing.assert_close(model.packed_seq_params.cu_seqlens_q, batch["cu_seqlens"])
+    assert result["token_logits"].shape == (2, 3, 3)
+    torch.testing.assert_close(result["pad_mask"], torch.tensor([[1, 1, 1], [1, 0, 0]]))
+    torch.testing.assert_close(result["tokens"], torch.tensor([[10, 11, 12], [20, 0, 0]]))
+    torch.testing.assert_close(result["seq_idx"], torch.tensor([2, 7]))
+
+
+@pytest.mark.parametrize("collapse_option", ["sum", "mean"])
+def test_packed_collapsed_log_probs_stay_flat(monkeypatch: pytest.MonkeyPatch, collapse_option: str) -> None:
+    batch = _packing_collate_fn(
+        [_prediction_sample(2, [10, 11, 12]), _prediction_sample(7, [20, 21])],
+        pad_token_id=0,
+    )
+    logits = torch.randn(1, 5, 32, generator=torch.Generator().manual_seed(11))
+    # A tempting cross-boundary label must never contribute to either sequence.
+    logits[0, 2, 20] = 100.0
+
+    class RecordingModel:
+        def __call__(self, **_kwargs):
+            return logits
+
+    monkeypatch.setattr(predict_module.parallel_state, "is_pipeline_last_stage", lambda: True)
+    monkeypatch.setattr(predict_module.parallel_state, "get_tensor_model_parallel_group", lambda: None)
+    monkeypatch.setattr(predict_module, "_gather_along_last_dim", lambda tensor, group: tensor)
+    monkeypatch.setattr(predict_module, "_gather_along_cp_dim", lambda tensor, **_: tensor)
+    monkeypatch.setattr(
+        predict_module,
+        "_unpack_packed_tensor",
+        lambda *_args, **_kwargs: pytest.fail("collapsed packed scoring must not materialize rectangular output"),
+    )
+
+    result = predict_module._predict_step(
+        RecordingModel(),
+        batch,
+        output_log_prob_seqs=True,
+        log_prob_collapse_option=collapse_option,
+    )
+
+    references = []
+    for start, end in ((0, 3), (3, 5)):
+        reference = predict_module._compute_log_probs(
+            logits=logits[:, start:end],
+            tokens=batch["tokens"][:, start:end],
+            loss_mask=batch["loss_mask"][:, start:end],
+            seq_idx=batch["seq_idx"][(0 if start == 0 else 1) : (1 if start == 0 else 2)],
+            collapse_option=collapse_option,
+            context_parallel_size=1,
+        )
+        references.append(reference["log_probs_seqs"])
+
+    torch.testing.assert_close(result["log_probs_seqs"], torch.cat(references))
+    torch.testing.assert_close(result["seq_idx"], batch["seq_idx"])
+
+
 def _xfail_if_unsupported_subquadratic_ops(result: subprocess.CompletedProcess, use_subquadratic_ops: bool) -> None:
     if use_subquadratic_ops and "failed a CUDA self-test" in result.stderr:
         pytest.xfail("subquadratic_ops_torch CUDA kernels are unsupported in this environment")
@@ -120,7 +440,7 @@ def mbridge_checkpoint_1b_8k_bf16_path(mbridge_checkpoint_1b_8k_bf16) -> Path:
             2,
             "epoch",
             id="ddp=1,pp=2,wi=epoch",
-            marks=pytest.mark.skip("Pipeline parallelism test currently hangs."),
+            marks=pytest.mark.skip("Prediction intentionally rejects pipeline parallelism greater than one."),
         ),
     ],
 )
@@ -189,6 +509,9 @@ def test_predict_evo2_runs(
 
     # Assert that the command completed successfully
     assert result.returncode == 0, f"predict_evo2 command failed with code {result.returncode}"
+    combined_output = result.stdout + result.stderr
+    assert "Prediction sequence packing: enabled" in combined_output
+    assert "Packed prediction schedule:" in combined_output
 
     # Assert that the output directory was created and contains predictions
     # With DDP, each DP rank produces its own file with dp_rank in the filename
@@ -373,17 +696,94 @@ def subquadratic_predictions_7b_1m_results(
     return dict(zip([i.item() for i in preds["seq_idx"]], [p.item() for p in preds["log_probs_seqs"]]))
 
 
+def _run_rectangular_prediction_baseline(
+    mbridge_checkpoint_7b_1m_path: Path,
+    tmp_path: Path,
+    *,
+    use_subquadratic_ops: bool,
+    num_sequences: int = 5,
+) -> dict[int, float]:
+    """Generate a layout- and kernel-family-matched baseline for CP prediction.
+
+    CP currently uses rectangular batches even though packed prediction is the CLI default.
+    Comparing CP with the default packed baseline would conflate topology accuracy with the
+    different BF16 accumulation order of the segmented kernels.
+    """
+    target_sequence_lengths = [2048] * num_sequences
+    fasta_file_path = tmp_path / "test.fasta"
+    create_fasta_file(
+        fasta_file_path,
+        num_sequences,
+        sequence_lengths=target_sequence_lengths,
+        repeating_dna_pattern=ALU_SEQUENCE,
+    )
+    output_dir = tmp_path / "test_output"
+    subquadratic_option = "--use-subquadratic-ops" if use_subquadratic_ops else ""
+    command = (
+        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
+        f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_7b_1m_path} "
+        f"--micro-batch-size 3 --output-dir {output_dir} --num-nodes 1 --write-interval epoch "
+        f"--no-sequence-packing {subquadratic_option} "
+        "--output-log-prob-seqs --log-prob-collapse-option sum"
+    )
+    run = subprocess.run(
+        shlex.split(command),
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        env=copy.deepcopy(PRETEST_ENV),
+        text=True,
+    )
+    _xfail_if_unsupported_subquadratic_ops(run, use_subquadratic_ops)
+    assert run.returncode == 0, f"Rectangular baseline prediction failed: {run.stderr}"
+
+    pred_files = glob.glob(str(output_dir / "predictions__rank_*__dp_rank_*.pt"))
+    preds = batch_collator(
+        [torch.load(path, weights_only=True) for path in pred_files],
+        batch_dim=0,
+        seq_dim=1,
+        batch_dim_key_defaults={},
+        seq_dim_key_defaults={},
+    )
+    return dict(zip([i.item() for i in preds["seq_idx"]], [p.item() for p in preds["log_probs_seqs"]]))
+
+
+@pytest.fixture(scope="module")
+def rectangular_predictions_7b_1m_results(
+    mbridge_checkpoint_7b_1m_path: Path,
+    tmp_path_factory,
+) -> dict[int, float]:
+    return _run_rectangular_prediction_baseline(
+        mbridge_checkpoint_7b_1m_path,
+        tmp_path_factory.mktemp("rectangular_baseline_preds"),
+        use_subquadratic_ops=False,
+    )
+
+
+@pytest.fixture(scope="module")
+def rectangular_subquadratic_predictions_7b_1m_results(
+    mbridge_checkpoint_7b_1m_path: Path,
+    tmp_path_factory,
+) -> dict[int, float]:
+    return _run_rectangular_prediction_baseline(
+        mbridge_checkpoint_7b_1m_path,
+        tmp_path_factory.mktemp("rectangular_subquadratic_baseline_preds"),
+        use_subquadratic_ops=True,
+    )
+
+
 @pytest.fixture(scope="module")
 def tp_reference_predictions_7b_1m_results(
     mbridge_checkpoint_7b_1m_path: Path,
     tmp_path_factory,
     num_sequences: int = 5,
-) -> dict[bool, dict[int, float]]:
-    """Generate TP=1 baselines with the slow test-only sharding oracle.
+) -> dict[int, float]:
+    """Generate a BF16 TP=1 baseline with the slow test-only sharding oracle.
 
-    These are intentionally separate from the normal TE baseline. The oracle makes
-    tensor-parallel topology a mathematical-layout test instead of conflating it with
-    topology-dependent BF16/FP8 GEMM accumulation.
+    This is intentionally separate from the normal TE baseline. The oracle makes
+    BF16 tensor-parallel topology a mathematical-layout test instead of conflating it
+    with topology-dependent GEMM accumulation. FP8 uses the production BF16 numerical
+    reference because current scaling is performed independently on the actual TP shards.
     """
     target_sequence_lengths = [2048] * num_sequences
     tmp_path = tmp_path_factory.mktemp("tp_reference_baseline_preds")
@@ -395,41 +795,32 @@ def tp_reference_predictions_7b_1m_results(
         repeating_dna_pattern=ALU_SEQUENCE,
     )
     launcher = Path(__file__).with_name("tp_reference_predict.py")
-    is_fp8_supported, _, _ = check_fp8_support(torch.cuda.current_device())
-    results: dict[bool, dict[int, float]] = {}
+    output_dir = tmp_path / "bf16"
+    command = (
+        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
+        f"{launcher} --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_7b_1m_path} "
+        f"--micro-batch-size 3 --output-dir {output_dir} --num-nodes 1 --write-interval epoch "
+        "--output-log-prob-seqs --log-prob-collapse-option sum"
+    )
+    result = subprocess.run(
+        shlex.split(command),
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        env=copy.deepcopy(PRETEST_ENV),
+        text=True,
+    )
+    assert result.returncode == 0, f"TP reference prediction failed: {result.stderr}"
 
-    for fp8 in (False, True):
-        if fp8 and not is_fp8_supported:
-            continue
-        output_dir = tmp_path / ("fp8" if fp8 else "bf16")
-        fp8_option = "--mixed-precision-recipe bf16_with_fp8_current_scaling_mixed" if fp8 else ""
-        command = (
-            "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
-            f"{launcher} --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_7b_1m_path} "
-            f"--micro-batch-size 3 --output-dir {output_dir} --num-nodes 1 --write-interval epoch "
-            f"{fp8_option} --output-log-prob-seqs --log-prob-collapse-option sum"
-        )
-        result = subprocess.run(
-            shlex.split(command),
-            check=False,
-            cwd=tmp_path,
-            capture_output=True,
-            env=copy.deepcopy(PRETEST_ENV),
-            text=True,
-        )
-        assert result.returncode == 0, f"TP reference prediction failed: {result.stderr}"
-
-        pred_files = glob.glob(str(output_dir / "predictions__rank_*__dp_rank_*.pt"))
-        preds = batch_collator(
-            [torch.load(path, weights_only=True) for path in pred_files],
-            batch_dim=0,
-            seq_dim=1,
-            batch_dim_key_defaults={},
-            seq_dim_key_defaults={},
-        )
-        results[fp8] = dict(zip([i.item() for i in preds["seq_idx"]], [p.item() for p in preds["log_probs_seqs"]]))
-
-    return results
+    pred_files = glob.glob(str(output_dir / "predictions__rank_*__dp_rank_*.pt"))
+    preds = batch_collator(
+        [torch.load(path, weights_only=True) for path in pred_files],
+        batch_dim=0,
+        seq_dim=1,
+        batch_dim_key_defaults={},
+        seq_dim_key_defaults={},
+    )
+    return dict(zip([i.item() for i in preds["seq_idx"]], [p.item() for p in preds["log_probs_seqs"]]))
 
 
 @pytest.mark.parametrize(
@@ -495,7 +886,7 @@ def tp_reference_predictions_7b_1m_results(
             False,
             None,
             id="ddp=1,cp=1,pp=2,tp=1,fp8=False,wi=epoch,subq=False",
-            marks=pytest.mark.skip("Pipeline parallelism test currently hangs."),
+            marks=pytest.mark.skip("Prediction intentionally rejects pipeline parallelism greater than one."),
         ),
         pytest.param(
             1, 1, 1, 2, True, "epoch", False, None, id="ddp=1,cp=1,pp=1,tp=2,fp8=True,wi=epoch,subq=False"
@@ -534,10 +925,10 @@ def test_predict_evo2_equivalent_with_log_probs(
     For this test, we want coverage of CP, so we make sure sequence lengths are all the same and divisible by CP.
 
     CP/DDP behavior is compared with the matching production kernel-family baseline.
-    TP layout is compared with a deliberately slow, test-only full-logical-tensor
-    oracle so the assertion is independent of topology-dependent BF16/FP8 accumulation
-    order. The real TE TP implementation is exercised by a separate production-path
-    smoke test below.
+    BF16 TP layout is compared with a deliberately slow, test-only full-logical-tensor
+    oracle so the assertion is independent of topology-dependent accumulation order.
+    FP8 TP uses production TE and is compared with BF16 because current scaling is
+    intentionally local to the real TP shards and therefore topology-dependent.
     """
     if target_sequence_lengths is None:
         target_sequence_lengths = [2048, 2048, 2048, 2048, 2048]
@@ -561,15 +952,19 @@ def test_predict_evo2_equivalent_with_log_probs(
         # Fix hanging issue on A6000 GPUs with multi-gpu tests
         env["NCCL_P2P_DISABLE"] = "1"
 
-    fp8_option = "--mixed-precision-recipe bf16_with_fp8_current_scaling_mixed" if fp8 else ""
+    fp8_option = "--mixed-precision-recipe bf16_with_fp8_current_scaling_mixed --fp8-all-layers" if fp8 else ""
     subquadratic_ops_option = "--use-subquadratic-ops" if use_subquadratic_ops else ""
     context_parallel_comm_type_option = (
         f"--context-parallel-comm-type {context_parallel_comm_type}" if context_parallel_comm_type else ""
     )
     output_dir = tmp_path / "test_output"
-    # TP correctness uses the slow test-only oracle. The normal TE implementation is
-    # exercised separately below without replacing its fast BF16/FP8 reductions.
-    launcher = str(Path(__file__).with_name("tp_reference_predict.py")) if tp > 1 else "-m bionemo.evo2.run.predict"
+    # BF16 TP correctness uses the slow test-only oracle. FP8 must use the normal TE
+    # implementation so its per-shard current scaling is tested rather than emulated.
+    launcher = (
+        str(Path(__file__).with_name("tp_reference_predict.py"))
+        if tp > 1 and not fp8
+        else "-m bionemo.evo2.run.predict"
+    )
     command = (
         f"torchrun --standalone --nproc_per_node {world_size} --nnodes 1 "
         f"{launcher} --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_7b_1m_path} "
@@ -597,6 +992,12 @@ def test_predict_evo2_equivalent_with_log_probs(
 
     # Assert that the command completed successfully
     assert result.returncode == 0, f"predict_evo2 command failed with code {result.returncode}"
+    combined_output = result.stdout + result.stderr
+    if cp > 1:
+        assert "Sequence-packed prediction currently falls back to rectangular batches for CP>1" in combined_output
+        assert "Prediction sequence packing: disabled" in combined_output
+    else:
+        assert "Prediction sequence packing: enabled" in combined_output
 
     # Assert that the output directory was created
     # With DDP, each DP rank produces its own file with dp_rank in the filename
@@ -630,18 +1031,30 @@ def test_predict_evo2_equivalent_with_log_probs(
     assert len(preds["log_probs_seqs"]) == len(preds["seq_idx"]) == num_sequences
     assert len(seq_idx_map) == num_sequences
 
-    if tp > 1:
-        tp_reference_predictions = request.getfixturevalue("tp_reference_predictions_7b_1m_results")
-        expected_predictions = tp_reference_predictions[fp8]
+    if tp > 1 and fp8:
+        expected_predictions = baseline_predictions_7b_1m_results
+    elif tp > 1:
+        expected_predictions = request.getfixturevalue("tp_reference_predictions_7b_1m_results")
+    elif cp > 1 and not fp8:
+        fixture_name = (
+            "rectangular_subquadratic_predictions_7b_1m_results"
+            if use_subquadratic_ops
+            else "rectangular_predictions_7b_1m_results"
+        )
+        expected_predictions = request.getfixturevalue(fixture_name)
     elif use_subquadratic_ops:
         expected_predictions = request.getfixturevalue("subquadratic_predictions_7b_1m_results")
     else:
         expected_predictions = baseline_predictions_7b_1m_results
     for original_idx, log_probs in zip(preds["seq_idx"], preds["log_probs_seqs"]):
-        if tp > 1:
-            # The test-only full-logical-tensor GEMMs are topology invariant; retain
-            # the original non-parallel tolerance instead of relaxing it for TP.
-            rel = 1e-6
+        if tp > 1 and not fp8:
+            # The test-only full-logical-tensor GEMMs remain within 2e-6 across the
+            # extra BF16 casts introduced by TP=8 sequence-parallel sharding.
+            rel = 2e-6
+        elif tp > 1 and fp8:
+            # Current scaling is applied to each production TP shard. The measured
+            # worst case against BF16 is ~2.02%, so retain a narrow 2.5% envelope.
+            rel = 2.5e-2
         elif cp > 1 and not fp8:
             if context_parallel_comm_type == "a2a":
                 # A2A evaluates every attention head over the full sequence and
@@ -656,6 +1069,11 @@ def test_predict_evo2_equivalent_with_log_probs(
             # Pipeline-parallel prediction is currently skipped above; retain its
             # historical bound until that independent path is enabled and audited.
             rel = 2e-3
+        elif ddp > 1:
+            # Packed DDP repartitions sequences into different segmented calls. The
+            # resulting BF16 FFT accumulation differs by about 1.1e-6 relative while
+            # remaining far below a token-level accuracy threshold.
+            rel = 2e-6
         elif use_subquadratic_ops:
             # A single-rank run must reproduce its matching kernel-family baseline.
             rel = 1e-6
@@ -665,6 +1083,257 @@ def test_predict_evo2_equivalent_with_log_probs(
         else:
             rel = 1e-6
         assert log_probs.item() == pytest.approx(expected_predictions[original_idx.item()], rel=rel)
+
+
+def _run_segmented_parallel_predict_probe(
+    *,
+    checkpoint_path: Path,
+    work_dir: Path,
+    tensor_parallel_size: int,
+    fp8: bool = False,
+) -> tuple[dict[int, float], list[dict]]:
+    """Run one unequal-length packed call and collect actual kernel use per TP rank."""
+    if torch.cuda.device_count() < tensor_parallel_size:
+        pytest.skip(f"Packed prediction probe needs {tensor_parallel_size} GPUs, found {torch.cuda.device_count()}")
+    fasta_path = work_dir / "ragged.fasta"
+    create_fasta_file(
+        fasta_path,
+        3,
+        sequence_lengths=[130, 190, 250],
+        repeating_dna_pattern=ALU_SEQUENCE,
+    )
+    output_dir = work_dir / "predictions"
+    probe_dir = work_dir / "kernel-proof"
+    launcher = Path(__file__).with_name("packed_parallel_probe.py")
+    command = [
+        "torchrun",
+        "--standalone",
+        "--nproc_per_node",
+        str(tensor_parallel_size),
+        "--nnodes",
+        "1",
+        str(launcher),
+        "predict",
+        "--fasta",
+        str(fasta_path),
+        "--ckpt-dir",
+        str(checkpoint_path),
+        "--output-dir",
+        str(output_dir),
+        "--micro-batch-size",
+        "3",
+        "--packed-token-budget",
+        "1000",
+        "--write-interval",
+        "epoch",
+        "--tensor-parallel-size",
+        str(tensor_parallel_size),
+        "--num-nodes",
+        "1",
+        "--devices",
+        str(tensor_parallel_size),
+        "--output-log-prob-seqs",
+        "--log-prob-collapse-option",
+        "sum",
+    ]
+    if fp8:
+        command.extend(
+            [
+                "--mixed-precision-recipe",
+                "bf16_with_fp8_current_scaling_mixed",
+                "--fp8-all-layers",
+            ]
+        )
+    env = copy.deepcopy(PRETEST_ENV)
+    env["EVO2_PACKED_PROBE_DIR"] = str(probe_dir)
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=900, env=env)
+    assert result.returncode == 0, (
+        f"Packed parallel predict probe failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+    prediction_files = glob.glob(str(output_dir / "predictions__rank_*__dp_rank_*.pt"))
+    assert len(prediction_files) == 1
+    predictions = torch.load(prediction_files[0], weights_only=True)
+    values = {
+        int(sequence_index): float(log_probability)
+        for sequence_index, log_probability in zip(predictions["seq_idx"], predictions["log_probs_seqs"])
+    }
+    proofs = [json.loads((probe_dir / f"rank-{rank}.json").read_text()) for rank in range(tensor_parallel_size)]
+    assert {proof["rank"] for proof in proofs} == set(range(tensor_parallel_size))
+    assert all(proof["calls"] > 0 for proof in proofs)
+    assert all(proof["max_segments"] == 3 for proof in proofs)
+    assert {operator for proof in proofs for operator in proof["operator_counts"]} == {
+        "hyena",
+        "hyena_medium_conv",
+        "hyena_short_conv",
+    }
+    return values, proofs
+
+
+def _run_embedding_probe(
+    *,
+    checkpoint_path: Path,
+    work_dir: Path,
+    tensor_parallel_size: int,
+    packed: bool,
+) -> tuple[dict[str, torch.Tensor], list[dict]]:
+    """Extract layer-two embeddings and optionally prove segmented execution on every rank."""
+    if torch.cuda.device_count() < tensor_parallel_size:
+        pytest.skip(f"Embedding probe needs {tensor_parallel_size} GPUs, found {torch.cuda.device_count()}")
+    fasta_path = work_dir / "ragged.fasta"
+    create_fasta_file(
+        fasta_path,
+        3,
+        sequence_lengths=[130, 190, 250],
+        repeating_dna_pattern=ALU_SEQUENCE,
+    )
+    output_dir = work_dir / "predictions"
+    probe_dir = work_dir / "kernel-proof"
+    command = [
+        "torchrun",
+        "--standalone",
+        "--nproc_per_node",
+        str(tensor_parallel_size),
+        "--nnodes",
+        "1",
+    ]
+    if packed:
+        command.extend([str(Path(__file__).with_name("packed_parallel_probe.py")), "predict"])
+    else:
+        command.extend(["-m", "bionemo.evo2.run.predict"])
+    command.extend(
+        [
+            "--fasta",
+            str(fasta_path),
+            "--ckpt-dir",
+            str(checkpoint_path),
+            "--output-dir",
+            str(output_dir),
+            "--micro-batch-size",
+            "3",
+            "--packed-token-budget",
+            "1000",
+            "--write-interval",
+            "epoch",
+            "--tensor-parallel-size",
+            str(tensor_parallel_size),
+            "--num-nodes",
+            "1",
+            "--devices",
+            str(tensor_parallel_size),
+            "--embedding-layer",
+            "2",
+        ]
+    )
+    if not packed:
+        command.append("--no-sequence-packing")
+    env = copy.deepcopy(PRETEST_ENV)
+    env["EVO2_PACKED_PROBE_DIR"] = str(probe_dir)
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=900, env=env)
+    assert result.returncode == 0, f"Embedding probe failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+
+    combined_output = result.stdout + result.stderr
+    expected_layout = "enabled" if packed else "disabled"
+    assert f"Prediction sequence packing: {expected_layout}" in combined_output
+    if tensor_parallel_size > 1:
+        assert "Prediction sequence parallelism: enabled (policy: auto)" in combined_output
+
+    prediction_files = glob.glob(str(output_dir / "predictions__rank_*__dp_rank_*.pt"))
+    assert len(prediction_files) == 1
+    predictions = torch.load(prediction_files[0], weights_only=True)
+    proofs = []
+    if packed:
+        proofs = [json.loads((probe_dir / f"rank-{rank}.json").read_text()) for rank in range(tensor_parallel_size)]
+        assert {proof["rank"] for proof in proofs} == set(range(tensor_parallel_size))
+        assert all(proof["calls"] == 3 for proof in proofs)
+        assert all(proof["max_segments"] == 3 for proof in proofs)
+        assert {operator for proof in proofs for operator in proof["operator_counts"]} == {
+            "hyena",
+            "hyena_medium_conv",
+            "hyena_short_conv",
+        }
+    return predictions, proofs
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip 7b-1m checkpoint tests in CI due to disk space")
+def test_packed_embedding_tp2(mbridge_checkpoint_7b_1m_path, tmp_path_factory) -> None:
+    """Ragged layer output must match rectangular and TP=1 while all packed operators run."""
+    rectangular, _ = _run_embedding_probe(
+        checkpoint_path=mbridge_checkpoint_7b_1m_path,
+        work_dir=tmp_path_factory.mktemp("embedding-rectangular-tp1-7b"),
+        tensor_parallel_size=1,
+        packed=False,
+    )
+    packed_tp1, _ = _run_embedding_probe(
+        checkpoint_path=mbridge_checkpoint_7b_1m_path,
+        work_dir=tmp_path_factory.mktemp("embedding-packed-tp1-7b"),
+        tensor_parallel_size=1,
+        packed=True,
+    )
+    packed_tp2, _ = _run_embedding_probe(
+        checkpoint_path=mbridge_checkpoint_7b_1m_path,
+        work_dir=tmp_path_factory.mktemp("embedding-packed-tp2-7b"),
+        tensor_parallel_size=2,
+        packed=True,
+    )
+
+    lengths = [130, 190, 250]
+    outputs = (rectangular, packed_tp1, packed_tp2)
+    for predictions in outputs:
+        assert set(predictions) == {"hidden_embeddings", "pad_mask", "seq_idx", "tokens"}
+        assert predictions["hidden_embeddings"].shape == (3, 250, 4096)
+        assert predictions["pad_mask"].shape == predictions["tokens"].shape == (3, 250)
+        for row, sequence_index in enumerate(predictions["seq_idx"].tolist()):
+            length = lengths[sequence_index]
+            assert predictions["pad_mask"][row].sum().item() == length
+            assert torch.isfinite(predictions["hidden_embeddings"][row, :length]).all()
+    for predictions in (packed_tp1, packed_tp2):
+        for row, sequence_index in enumerate(predictions["seq_idx"].tolist()):
+            assert torch.count_nonzero(predictions["hidden_embeddings"][row, lengths[sequence_index] :]) == 0
+
+    def unpadded(predictions: dict[str, torch.Tensor], sequence_index: int) -> torch.Tensor:
+        row = (predictions["seq_idx"] == sequence_index).nonzero(as_tuple=True)[0].item()
+        return predictions["hidden_embeddings"][row, : lengths[sequence_index]].float()
+
+    def relative_error(left: torch.Tensor, right: torch.Tensor) -> float:
+        return float((left - right).norm() / right.norm().clamp_min(1e-30))
+
+    for sequence_index in range(3):
+        rectangular_embedding = unpadded(rectangular, sequence_index)
+        packed_embedding = unpadded(packed_tp1, sequence_index)
+        parallel_embedding = unpadded(packed_tp2, sequence_index)
+        assert relative_error(packed_embedding, rectangular_embedding) < 1e-4
+        assert relative_error(parallel_embedding, packed_embedding) < 5e-3
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip 7b-1m checkpoint tests in CI due to disk space")
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8-all-layers"])
+def test_segmented_packed_prediction_executes_on_every_tp_rank(
+    mbridge_checkpoint_7b_1m_path,
+    tmp_path_factory,
+    fp8: bool,
+) -> None:
+    """Production TP cannot pass by silently selecting rectangular or padding-oracle code."""
+    baseline, _ = _run_segmented_parallel_predict_probe(
+        checkpoint_path=mbridge_checkpoint_7b_1m_path,
+        work_dir=tmp_path_factory.mktemp("packed-predict-baseline-7b"),
+        tensor_parallel_size=1,
+        fp8=fp8,
+    )
+    parallel, _ = _run_segmented_parallel_predict_probe(
+        checkpoint_path=mbridge_checkpoint_7b_1m_path,
+        work_dir=tmp_path_factory.mktemp("packed-predict-tp2-7b"),
+        tensor_parallel_size=2,
+        fp8=fp8,
+    )
+
+    assert set(parallel) == set(baseline)
+    for sequence_index in baseline:
+        # Per-shard current scaling is topology-dependent; the measured ragged FP8
+        # maximum is 2.83%, while the broken SP padding path exceeded 1,100%.
+        assert parallel[sequence_index] == pytest.approx(baseline[sequence_index], rel=3.5e-2 if fp8 else 2e-2)
 
 
 @pytest.mark.parametrize(

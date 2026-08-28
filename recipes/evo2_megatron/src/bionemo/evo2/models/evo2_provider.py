@@ -273,12 +273,15 @@ def make_evo2_dynamic_inference_context_cls():
 
     Evo2 constrains each standalone decode context to the active request count and enables
     decode-only CUDA graph dimensions, so the graph path does not need an Evo2-specific
-    context subclass. Keeping the exact mcore type also preserves mcore's CUDA graph
-    argument checks without runtime compatibility hooks.
+    context subclass. Install Evo2's storage-span-aware paged KV append before returning
+    the exact mcore type, preserving mcore's CUDA graph argument checks.
 
     Returns:
         The mcore ``DynamicInferenceContext`` class.
     """
+    from bionemo.evo2.models.megatron.hyena.paged_kv_cache import install_large_tensor_safe_kv_append
+
+    install_large_tensor_safe_kv_append()
     from megatron.core.inference.contexts.dynamic_context import (
         DynamicInferenceContext,  # lazy: heavy mcore import; keep evo2_provider importable without the full inference stack
     )
@@ -439,6 +442,65 @@ def bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, *, request_
 def bind_hyena_packed_views_to_dynamic_context(model, dyn_ctx, *, request_slot: int):
     """Bind Hyena state-dict entries to a single live dynamic-context Mamba slot."""
     return bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, request_slots=[request_slot])
+
+
+def bind_hyena_packed_views_to_static_context(model, static_ctx, *, batch_size: int, device):
+    """Install persistent full-size Hyena state views on a static inference context.
+
+    Static prefill ordinarily stores a freshly allocated tail whose last dimension is
+    only ``min(prompt_length, filter_length - 1)``.  That is correct for eager decode,
+    but it prevents a CUDA graph from retaining stable state pointers and makes short
+    prompts ineligible for the fused decode kernel.  Allocate the uniform per-layer
+    state once and reuse :class:`_PackedHyenaSlotStateDict` so every prefill copies its
+    tail into a stable, right-aligned full ring.
+    """
+    batch_size = int(batch_size)
+    if batch_size < 1:
+        raise ValueError(f"Static Hyena state binding requires a positive batch size, got {batch_size}")
+
+    decoder = model.decoder if hasattr(model, "decoder") else model
+    conv_shape, ssm_shape, per_layer = decoder.hyena_state_shapes_per_request()
+    conv_states = torch.zeros(
+        (len(per_layer), batch_size, *conv_shape),
+        dtype=torch.float32,
+        device=device,
+    )
+    ssm_states = torch.zeros(
+        (len(per_layer), batch_size, *ssm_shape),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    packed = {}
+    for kind in ("fir", "inner_fir", "iir"):
+        state_dict = _PackedHyenaSlotStateDict(kind)
+        packed[kind] = state_dict
+        object.__setattr__(static_ctx, f"{kind}_filter_state_dict", state_dict)
+
+    for layer_index, shapes in enumerate(per_layer):
+        packed["fir"].register(shapes.conv_owner_id, conv_states[layer_index])
+        width, last_dim = shapes.ssm_shape
+        packed[shapes.ssm_kind].register(
+            shapes.ssm_owner_id,
+            ssm_states[layer_index, :, :width, :last_dim],
+        )
+
+    object.__setattr__(static_ctx, "_evo2_hyena_conv_states", conv_states)
+    object.__setattr__(static_ctx, "_evo2_hyena_ssm_states", ssm_states)
+    object.__setattr__(static_ctx, "_evo2_hyena_packed_state_dicts", tuple(packed.values()))
+    return list(packed.values())
+
+
+def reset_hyena_packed_views_for_new_request(static_ctx) -> None:
+    """Zero persistent static Hyena buffers and make the next forward a prefill."""
+    state_dicts = getattr(static_ctx, "_evo2_hyena_packed_state_dicts", ())
+    with torch.no_grad():
+        for tensor_name in ("_evo2_hyena_conv_states", "_evo2_hyena_ssm_states"):
+            tensor = getattr(static_ctx, tensor_name, None)
+            if tensor is not None:
+                tensor.zero_()
+        for state_dict in state_dicts:
+            state_dict.reset_for_new_request()
 
 
 def get_batch(

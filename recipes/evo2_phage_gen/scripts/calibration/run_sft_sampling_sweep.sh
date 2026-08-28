@@ -26,6 +26,16 @@ MAX_RETRIES="${MAX_RETRIES:-1}"
 CELL_TIMEOUT_SECONDS="${CELL_TIMEOUT_SECONDS:-7200}"
 SOURCE_ENV="${SOURCE_ENV:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE:-0}"
+
+if [[ "${HOPPER_FP8_INFERENCE}" != "0" && "${HOPPER_FP8_INFERENCE}" != "1" ]]; then
+  echo "HOPPER_FP8_INFERENCE must be 0 or 1" >&2
+  exit 2
+fi
+declare -a CALIBRATION_PRECISION_ARGS=()
+if [[ "${HOPPER_FP8_INFERENCE}" == "1" ]]; then
+  CALIBRATION_PRECISION_ARGS=(--hopper-fp8)
+fi
 
 if [[ "${SOURCE_ENV}" == "1" ]]; then
   # shellcheck source=/dev/null
@@ -57,6 +67,7 @@ python -m bionemo.evo2_phage_gen.sampling_calibration materialize \
   --seed "${SEED}" \
   --prompt-batch-size "${PROMPT_BATCH_SIZE}" \
   --max-seq-length "${MAX_SEQ_LENGTH}" \
+  "${CALIBRATION_PRECISION_ARGS[@]}" \
   > "${RUN_ROOT}/logs/materialize.log"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
@@ -116,7 +127,8 @@ run_worker() {
         --prompt-batch-size "${PROMPT_BATCH_SIZE}" \
         --max-seq-length "${MAX_SEQ_LENGTH}" \
         --top-k "${TOP_K}" \
-        --top-p "${TOP_P}"
+        --top-p "${TOP_P}" \
+        "${CALIBRATION_PRECISION_ARGS[@]}"
     )
     if (( ${#inference_command[@]} == 0 )); then
       echo "${cell_key}: command builder returned no arguments" >&2

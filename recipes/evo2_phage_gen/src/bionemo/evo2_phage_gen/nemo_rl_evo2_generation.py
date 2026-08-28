@@ -180,8 +180,8 @@ def generate_evo2_native_batched(
 
     from bionemo.evo2.run.infer import (
         Evo2InferenceComponents,
-        _generate_native_dynamic,
         _setup_native_dynamic_components,
+        generate,
     )
 
     if not sampling_params:
@@ -220,7 +220,7 @@ def generate_evo2_native_batched(
     temperature = float(_batched_sampling_value(sampling_params, "temperature", required=False, default=1.0))
     top_k = int(_batched_sampling_value(sampling_params, "top_k", required=False, default=0))
     top_p = float(_batched_sampling_value(sampling_params, "top_p", required=False, default=0.0))
-    native_results = _generate_native_dynamic(
+    native_results = generate(
         components,
         tokenizer.prompts,
         max_new_tokens=max_new_tokens,
@@ -235,6 +235,7 @@ def generate_evo2_native_batched(
         inference_dynamic_batching_max_tokens=mcore_generation_config.get("max_tokens"),
         inference_dynamic_batching_block_size=int(mcore_generation_config.get("block_size_tokens", 256)),
         evo2_batched_decode_size=batched_decode_size,
+        inference_backend="dynamic",
         result_callback=None,
     )
 

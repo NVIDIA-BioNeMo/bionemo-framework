@@ -23,6 +23,8 @@ dependencies = [
     # nvidia-resiliency-ext is pulled transitively by megatron-bridge.
     "emerging_optimizers",
     "subquadratic-ops-torch-cu13",
+    # Native CUDA-13 FA4 prefill, validated with the 26.07 system Torch on GB300.
+    "flash-attn-4[cu13]==4.0.0b27",
 
     # bionemo.common dependencies
     "boto3",

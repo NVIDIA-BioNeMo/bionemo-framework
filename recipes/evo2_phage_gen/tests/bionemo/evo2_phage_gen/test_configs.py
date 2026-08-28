@@ -211,6 +211,9 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
     assert mcore_generation_config["prompt_batch_size"] == 12
     assert mcore_generation_config["max_requests"] == 12
+    assert mcore_generation_config["generation_adapter_config"]["ignore_eos"] is True
+    assert mcore_generation_config["generation_adapter_config"]["strict_generation"] is True
+    assert config["policy"]["sequence_packing"]["enabled"] is False
     assert config["logger"]["wandb_enabled"] is False
     assert config["logger"]["wandb"]["name"] == "phix174-gdpo"
     assert config["cluster"] == {"gpus_per_node": 8, "num_nodes": 1}

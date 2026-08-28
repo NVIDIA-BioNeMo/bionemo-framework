@@ -23,7 +23,7 @@
         "The response compares raw and cluster-deduplicated QC yield, target evidence, copying, diversity, and uncertainty.",
         "It rejects a high-yield cell when the gain is mainly reference copying.",
         "It prefers a stable plateau and temperature 1.0 when practically equivalent.",
-        "It keeps multiple prompt strata only when they improve the frontier and fit the deployed batch shape.",
+        "It keeps multiple prompt strata only when they improve the frontier and does not require their count to divide the microbatch or GPU count because packed dynamic prefill supports mixed lengths.",
         "It records the selected settings and rationale."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",

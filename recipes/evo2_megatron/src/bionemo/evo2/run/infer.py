@@ -21,8 +21,10 @@ r"""Text generation (inference) workflow for Evo2 using Megatron Core.
 This module provides autoregressive text generation for Evo2 models through the native mcore
 dynamic-inference engine. It drives paged-KV attention with Hyena recurrent state packed into
 mcore's two Mamba state slots. ``flash_decode`` and sequence parallelism are turned off
-automatically, and each prompt is decoded through an Evo2-specific dynamic context that keeps a
-single active request as one row.
+automatically. Prompt groups use one boundary-described ragged prefill, then advance every active
+request in parallel with persistent Hyena recurrent state and paged attention state. Block-level
+CUDA graphs are the default decode path; a layer-level compatibility scope and eager debugging
+path remain available.
 
 Usage (CLI, single prompt):
     torchrun --nproc_per_node 1 -m bionemo.evo2.run.infer \
@@ -35,6 +37,7 @@ Usage (CLI, batch from JSONL file):
     torchrun --nproc_per_node 1 -m bionemo.evo2.run.infer \
         --ckpt-dir /path/to/mbridge/checkpoint \
         --prompt-file prompts.jsonl \
+        --prompt-batch-size 16 \
         --max-new-tokens 100 \
         --output-file results.jsonl
 
@@ -69,7 +72,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -97,6 +100,7 @@ from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_saf
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.inference.sampling_params import SamplingParams
+from megatron.core.transformer.enums import InferenceCudaGraphScope
 from megatron.core.transformer.module import Float16Module
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
@@ -105,12 +109,33 @@ from bionemo.evo2.models.evo2_provider import (
     ContextParallelCommType,
     bind_hyena_packed_views_to_dynamic_context,
     bind_hyena_packed_views_to_dynamic_context_batch,
+    bind_hyena_packed_views_to_static_context,
     build_evo2_mamba_inference_state_config,
     compute_evo2_paged_kv_buffer_size_gb,
     configure_runtime_context_parallel_comm_type,
     make_evo2_dynamic_inference_context_cls,
+    reset_hyena_packed_views_for_new_request,
 )
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
+from bionemo.evo2.run.low_precision import (
+    configure_global_fp8_layer_scope,
+    configure_quantized_parameter_storage,
+    inference_parameter_storage,
+    inference_precision_kind,
+    prepare_model_for_quantized_inference,
+    validate_inference_precision,
+)
+from bionemo.evo2.run.native_fp8 import (
+    prepare_model_for_native_fp8_inference,
+    validate_native_fp8_decode,
+    validate_native_fp8_policy,
+    validate_native_fp8_precision,
+)
+from bionemo.evo2.run.native_nvfp4 import (
+    prepare_model_for_native_nvfp4_inference,
+    validate_native_nvfp4_decode,
+    validate_native_nvfp4_policy,
+)
 from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 
 
@@ -120,6 +145,11 @@ logger.setLevel(logging.INFO)
 # Detailed phase evidence requires synchronized CUDA boundaries and allocator resets. Keep it
 # opt-in so ordinary inference retains only its existing low-overhead batch and total timers.
 _CUDA_PHASE_EVIDENCE_ENABLED = os.environ.get("EVO2_EXACT_PHASE_EVIDENCE") == "1"
+
+# Static generation normally needs one full-batch context plus one remainder
+# context. More exact-shape contexts retain large KV/state allocations and their
+# CUDA-graph runners, so replace the small cache instead of letting it grow.
+_MAX_STATIC_FLASH_CONTEXTS = 2
 
 
 @dataclass(frozen=True)
@@ -359,6 +389,12 @@ class Evo2NativeDynamicComponents:
     evo2_seed: int
     cuda_graphs_enabled: bool
     cuda_graph_manager_count: int
+    cuda_graph_scope: str
+    precision_kind: str
+    precision_parameter_storage: str
+    cuda_graph_runner_count: int = 0
+    cuda_graph_recorded_count: int = 0
+    cuda_graph_replay_verified: bool = False
     # MCore wrapper used only when pipeline parallelism is active. It is bound lazily to the
     # current dynamic context because that context may be rebuilt when its capacity grows.
     inference_wrapper: Optional[Any] = None
@@ -380,6 +416,9 @@ class Evo2NativeDynamicComponents:
     engine_setup_stats_pending: bool = False
     # Stable generation-call counter used by serialized timing group identifiers.
     generation_call_index: int = 0
+    # Static FlashAttention contexts are keyed by (batch, max sequence length).
+    # Reusing the exact object preserves graph-bound KV and Hyena state pointers.
+    static_contexts: dict[tuple[int, int], Any] = field(default_factory=dict)
 
 
 # =============================================================================
@@ -406,6 +445,9 @@ def _setup_native_dynamic_components(
     max_seq_length: Optional[int],
     evo2_seed: int,
     cuda_graphs_enabled: bool,
+    cuda_graph_scope: Optional[str] = None,
+    precision_kind: Optional[str] = None,
+    precision_parameter_storage: Optional[str] = None,
 ) -> Evo2NativeDynamicComponents:
     """Prepare the standalone HyenaModel to decode on an Evo2 dynamic context.
 
@@ -434,6 +476,13 @@ def _setup_native_dynamic_components(
     ctx_cls = make_evo2_dynamic_inference_context_cls()
     mamba_cfg = build_evo2_mamba_inference_state_config(raw_model)
     cuda_graph_manager_count = sum(1 for module in hyena_model.modules() if hasattr(module, "cudagraph_manager"))
+    if cuda_graph_scope is None:
+        configured_scope = getattr(hyena_model.config, "inference_cuda_graph_scope", None)
+        cuda_graph_scope = str(getattr(configured_scope, "name", configured_scope or "none"))
+    if precision_kind is None:
+        precision_kind = inference_precision_kind(hyena_model.config)
+    if precision_parameter_storage is None:
+        precision_parameter_storage = inference_parameter_storage(hyena_model.config)
     if rank == 0:
         logger.info(
             "[evo2-native] standalone evo2 prepared for native dynamic decode "
@@ -450,19 +499,27 @@ def _setup_native_dynamic_components(
         evo2_seed=evo2_seed,
         cuda_graphs_enabled=cuda_graphs_enabled,
         cuda_graph_manager_count=cuda_graph_manager_count,
+        cuda_graph_scope=str(cuda_graph_scope),
+        precision_kind=str(precision_kind),
+        precision_parameter_storage=str(precision_parameter_storage),
         max_seq_length_is_auto=max_seq_length is None,
     )
 
 
-def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int, cuda_graph_impl: str = "local") -> bool:
+def _configure_native_dynamic_cuda_graphs(
+    model_provider: Any,
+    *,
+    rank: int,
+    cuda_graph_impl: str = "local",
+    cuda_graph_scope: str = "block",
+) -> bool:
     """Enable mcore local CUDA graphs for Evo2 dynamic inference when supported.
 
     This mirrors Megatron's ``cuda_graph_impl=local`` setup, but applies it directly to the
     provider loaded from the checkpoint because this recipe does not use Megatron's global arg
-    parser. Empty ``cuda_graph_scope`` enables local graphs for every graphable
-    layer, including Transformer attention/MLP layers and Hyena layers. The
-    enclosing HyenaStack only replays its own graph for explicit
-    ``CudaGraphScope.full_iteration`` so the default path does not nest graphs.
+    parser. ``cuda_graph_scope="block"`` captures the complete decoder stack in one graph per
+    active request count, avoiding one host graph launch per layer. ``"layer"`` preserves the
+    narrower per-layer MCore graph path as a compatibility fallback.
 
     ``cuda_graph_impl="none"`` disables graph capture entirely (decode runs eager) -- useful for
     debugging and for tests that need an un-graphed reference to compare against.
@@ -472,10 +529,15 @@ def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int, cud
             logger.warning("[evo2-native-cg] model provider has no cuda_graph_impl; CUDA graphs disabled")
         return False
 
+    if cuda_graph_scope not in {"block", "layer"}:
+        raise ValueError(f"Unsupported CUDA graph scope {cuda_graph_scope!r}; expected 'block' or 'layer'")
+
     model_provider.cuda_graph_impl = cuda_graph_impl
-    # A checkpoint can carry the inference scope selected by a different graph implementation.
-    # Let MCore derive the valid default for the implementation requested by this inference run.
-    model_provider.inference_cuda_graph_scope = None
+    # A checkpoint can carry a scope selected by a different graph implementation. Store the
+    # normalized enum explicitly because the provider has already run TransformerConfig.__post_init__.
+    model_provider.inference_cuda_graph_scope = (
+        InferenceCudaGraphScope.none if cuda_graph_impl == "none" else InferenceCudaGraphScope[cuda_graph_scope]
+    )
     model_provider.cuda_graph_scope = []
     if cuda_graph_impl == "none":
         if rank == 0:
@@ -484,8 +546,21 @@ def _configure_native_dynamic_cuda_graphs(model_provider: Any, *, rank: int, cud
 
     os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
     if rank == 0:
-        logger.info("[evo2-native-cg] enabled mcore local per-layer CUDA graphs for dynamic decode")
+        logger.info("[evo2-native-cg] enabled mcore local %s CUDA graphs for dynamic decode", cuda_graph_scope)
     return True
+
+
+def _resolve_native_dynamic_cuda_graph_scope(
+    requested_scope: str,
+    *,
+    cuda_graph_impl: str,
+    fp8_enabled: bool,
+    fp4_enabled: bool,
+) -> str:
+    """Select a CUDA-graph scope compatible with Transformer Engine quantization state."""
+    if cuda_graph_impl == "local" and requested_scope == "block" and (fp8_enabled or fp4_enabled):
+        return "layer"
+    return requested_scope
 
 
 def _seed_cudagraph_safe_rng(rng_config: Any) -> None:
@@ -539,10 +614,18 @@ def setup_inference_engine(
     context_parallel_size: int = 1,
     context_parallel_comm_type: Optional[ContextParallelCommType] = None,
     mixed_precision_recipe: Optional[str] = None,
+    quantized_param_storage: Literal["recipe", "bf16"] = "recipe",
+    fp8_all_layers: bool = False,
     vortex_style_fp8: bool = False,
+    native_nvfp4: Literal["off", "fc1", "expansion", "full"] = "off",
+    native_nvfp4_activation_amax: Optional[float] = None,
+    native_nvfp4_decode: Literal["bf16", "fp8", "nvfp4"] = "bf16",
+    native_mxfp8: Literal["off", "hyena", "fc1", "expansion"] = "off",
+    native_mxfp8_decode: Literal["bf16", "fp8"] = "bf16",
     random_seed: int = 1234,
     use_subquadratic_ops: bool = False,
     cuda_graph_impl: str = "local",
+    cuda_graph_scope: str = "block",
 ) -> Evo2InferenceComponents:
     """Setup the Evo2 native dynamic-inference engine and related components.
 
@@ -568,13 +651,34 @@ def setup_inference_engine(
             P2P; A2A can be selected for tighter BF16 parity. Checkpoint metadata
             does not control this execution choice.
         mixed_precision_recipe: Override mixed precision recipe.
+        quantized_param_storage: Preserve the recipe's native quantized parameters (``"recipe"``)
+            or retain BF16 parameters while using quantized GEMMs (``"bf16"``).
+        fp8_all_layers: Remove BF16 first/last-block exclusions from the selected global TE FP8
+            recipe. This is the regular full-scope Hopper FP8 path for Evo2 7B.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
+        native_nvfp4: Inference-only native Blackwell W4A4 projection policy. ``"fc1"`` converts
+            MLP expansion projections; ``"expansion"`` also converts Hyena input projections and
+            attention QKV; ``"full"`` additionally converts FC2 and Hyena/attention output
+            projections. It is opt-in and mutually exclusive with global FP8/FP4 recipes.
+        native_nvfp4_activation_amax: Optional activation range. RMSNorm-fed expansions retain at
+            least their strict geometry-derived no-clipping bound; experimental full-policy
+            contractions otherwise use the complete representable block-scaled range.
+        native_nvfp4_decode: Keep autoregressive single-token projections in BF16 (default), use
+            low-latency FP8, or use experimental native W4A4 decode.
+        native_mxfp8: Inference-only native Blackwell block-scaled FP8 projection policy. This is
+            separate from Hopper/global Transformer Engine FP8 and vortex-style delayed scaling.
+        native_mxfp8_decode: Keep autoregressive projections in BF16 (default) or use the
+            experimental low-latency per-tensor FP8 comparator.
         random_seed: Random seed for reproducibility.
-        use_subquadratic_ops: Use accelerated fft_causal_conv1d / causal_conv1d
-            kernels, including projection/mixer B2B fusion during prefill.
-        cuda_graph_impl: ``"local"`` (default) captures mcore per-layer CUDA graphs for decode;
-            ``"none"`` disables graph capture (eager decode), mainly for debugging / reference runs.
+        use_subquadratic_ops: Use fused Hyena convolution kernels for
+            rectangular/eager prefill compatibility.
+        cuda_graph_impl: ``"local"`` (default) captures MCore CUDA graphs for decode; ``"none"``
+            disables graph capture (eager decode), mainly for debugging / reference runs.
+        cuda_graph_scope: ``"block"`` (default) captures the complete decoder in one graph per
+            request count; ``"layer"`` retains per-layer graphs as a compatibility fallback.
+            Global FP8/FP4 recipes automatically resolve ``"block"`` to ``"layer"`` because
+            Transformer Engine's quantization state is not compatible with block capture.
 
     Returns:
         Evo2InferenceComponents containing all inference components.
@@ -632,12 +736,6 @@ def setup_inference_engine(
     # static-batching, so flash_decode (which asserts static batching, attention.py) MUST be off.
     model_provider.flash_decode = False
     model_provider.use_subquadratic_ops = use_subquadratic_ops
-    cuda_graphs_enabled = _configure_native_dynamic_cuda_graphs(
-        model_provider, rank=int(os.environ.get("RANK", "0")), cuda_graph_impl=cuda_graph_impl
-    )
-    if cuda_graphs_enabled and getattr(model_provider, "recompute_granularity", None):
-        logger.info("Disabling activation recompute for inference CUDA graphs")
-        model_provider.recompute_granularity = None
     if getattr(model_provider, "fp32_residual_connection", False):
         logger.info("Disabling fp32_residual_connection for inference to keep TE activations in params_dtype")
         model_provider.fp32_residual_connection = False
@@ -645,14 +743,55 @@ def setup_inference_engine(
     if vortex_style_fp8:
         model_provider.vortex_style_fp8 = True
 
-    # Use bf16_mixed for inference to avoid FP8 issues
+    # Keep BF16 as the portable default; global FP8 is an explicit checkpoint/hardware-qualified choice.
     if mixed_precision_recipe is not None:
         mp_config = get_mixed_precision_config(mixed_precision_recipe)
     else:
         mp_config = get_mixed_precision_config("bf16_mixed")
 
+    validate_native_nvfp4_policy(native_nvfp4, activation_amax=native_nvfp4_activation_amax)
+    validate_native_nvfp4_decode(native_nvfp4_decode)
+    validate_native_fp8_policy(native_mxfp8)
+    validate_native_fp8_decode(native_mxfp8_decode)
+    configure_global_fp8_layer_scope(mp_config, all_layers=fp8_all_layers)
+    configure_quantized_parameter_storage(mp_config, quantized_param_storage)
+    validate_inference_precision(
+        mp_config,
+        vortex_style_fp8=vortex_style_fp8,
+        native_nvfp4_policy=native_nvfp4,
+    )
+    if native_mxfp8 != "off":
+        validate_native_fp8_precision(
+            mp_config,
+            vortex_style_fp8=vortex_style_fp8,
+            native_nvfp4_policy=native_nvfp4,
+        )
+    precision_kind = inference_precision_kind(mp_config)
+    precision_parameter_storage = inference_parameter_storage(mp_config)
     mp_config.finalize()
     mp_config.setup(model_provider)
+    effective_cuda_graph_scope = _resolve_native_dynamic_cuda_graph_scope(
+        cuda_graph_scope,
+        cuda_graph_impl=cuda_graph_impl,
+        fp8_enabled=getattr(model_provider, "fp8", None) is not None,
+        fp4_enabled=getattr(model_provider, "fp4", None) is not None,
+    )
+    if effective_cuda_graph_scope != cuda_graph_scope and int(os.environ.get("RANK", "0")) == 0:
+        logger.warning(
+            "[evo2-native-cg] global Transformer Engine FP8/FP4 state is layer-scoped; "
+            "using cuda_graph_scope='layer' instead of requested 'block'"
+        )
+    cuda_graph_scope = effective_cuda_graph_scope
+    cuda_graphs_enabled = _configure_native_dynamic_cuda_graphs(
+        model_provider,
+        rank=int(os.environ.get("RANK", "0")),
+        cuda_graph_impl=cuda_graph_impl,
+        cuda_graph_scope=cuda_graph_scope,
+    )
+    if cuda_graphs_enabled and getattr(model_provider, "recompute_granularity", None):
+        logger.info("Disabling activation recompute for inference CUDA graphs")
+        model_provider.recompute_granularity = None
+    logger.info("Inference precision: %s (parameter storage: %s)", precision_kind, precision_parameter_storage)
 
     # -------------------------------------------------------------------------
     # Step 3: Load tokenizer
@@ -731,23 +870,58 @@ def setup_inference_engine(
         )
     logger.info("Weights loaded successfully")
 
-    # FP8 TE GEMMs require the token (leading) dim to be a multiple of 8/16, but the dynamic engine
-    # decodes one token per request -> a [1, hidden] input fails TE's assert_dim_for_fp8_exec. When the
-    # precision recipe enables fp8 across ALL TE linears (e.g. "bf16_with_fp8_current_scaling_mixed"),
-    # wrap each one so it pads the token dimension up to the fp8 alignment and unpads the output
-    # (mcore's Fp8Padding/Fp8Unpadding). The wrapper is a no-op outside an active fp8 autocast, so bf16
-    # layers are unaffected. This must run before CUDA-graph capture (the warmup) so the captured decode
-    # graph includes the padding. The vortex-style path uses a bf16 recipe (only its dense_projection is
-    # fp8, via te_compat's own padding linear), so getattr(mp_config, "fp8") is falsy there and we do not
-    # double-wrap it.
-    if getattr(mp_config, "fp8", None):
-        from megatron.core.fp8_utils import prepare_model_for_fp8_inference
-
-        logger.info("FP8 recipe active: padding all TE linear layers for fp8 inference (token alignment)")
-        prepare_model_for_fp8_inference(raw_model)
+    # Globally quantized TE GEMMs require an aligned leading token dimension, while dynamic decode
+    # presents one token per active request and flat packed prefill can have any total length. MCore's
+    # historically FP8-named wrapper handles both active FP8 and FP4 contexts and delegates the exact
+    # alignment to Transformer Engine. Regular FP8 bypasses the wrapper when the flattened
+    # sequence-times-batch GEMM rows are already legal. Install both paths before graph capture.
+    if prepare_model_for_quantized_inference(raw_model, mp_config):
+        aligned_fast_path_modules = int(getattr(raw_model, "evo2_regular_fp8_aligned_fast_path_modules", 0))
+        logger.info(
+            "%s recipe active: alignment fallback installed; %d TE linears can bypass per-layer "
+            "padding for legal flattened row counts",
+            precision_kind,
+            aligned_fast_path_modules,
+        )
 
     # Wrap with Float16Module
     model = Float16Module(model_provider, raw_model)
+
+    # Convert only after Float16Module has applied its model-wide BF16 cast. NVFP4 global scales and
+    # GEMM alpha must remain FP32; installing packed modules before this wrapper would incorrectly
+    # downcast those buffers even though the checkpoint weights themselves are BF16.
+    native_nvfp4_report = prepare_model_for_native_nvfp4_inference(
+        raw_model,
+        policy=native_nvfp4,
+        activation_amax=native_nvfp4_activation_amax,
+        decode_mode=native_nvfp4_decode,
+    )
+    if native_nvfp4_report.converted_modules:
+        precision_kind = f"native-nvfp4-{native_nvfp4}-prefill+{native_nvfp4_decode}-decode"
+        precision_parameter_storage = f"native-nvfp4-prepacked+{native_nvfp4_decode}-decode"
+        logger.info(
+            "Selective native NVFP4: converted %d projection modules; packed weights %.3f GiB %s %.3f GiB BF16",
+            native_nvfp4_report.converted_modules,
+            native_nvfp4_report.quantized_weight_bytes / (1024**3),
+            "supplement" if native_nvfp4_decode == "bf16" else "replace",
+            native_nvfp4_report.original_weight_bytes / (1024**3),
+        )
+
+    native_mxfp8_report = prepare_model_for_native_fp8_inference(
+        raw_model,
+        policy=native_mxfp8,
+        decode_mode=native_mxfp8_decode,
+    )
+    if native_mxfp8_report.converted_modules:
+        precision_kind = f"native-mxfp8-{native_mxfp8}-prefill+{native_mxfp8_decode}-decode"
+        precision_parameter_storage = f"native-mxfp8-prepacked+{native_mxfp8_decode}-decode"
+        logger.info(
+            "Selective native MXFP8: converted %d expansion projections; packed weights %.3f GiB %s %.3f GiB BF16",
+            native_mxfp8_report.converted_modules,
+            native_mxfp8_report.quantized_weight_bytes / (1024**3),
+            "supplement" if native_mxfp8_decode == "bf16" else "replace",
+            native_mxfp8_report.original_weight_bytes / (1024**3),
+        )
 
     # -------------------------------------------------------------------------
     # Step 6: wire onto the native mcore dynamic-inference engine.
@@ -761,6 +935,9 @@ def setup_inference_engine(
         max_seq_length=max_seq_length,
         evo2_seed=random_seed,
         cuda_graphs_enabled=cuda_graphs_enabled,
+        cuda_graph_scope=cuda_graph_scope if cuda_graphs_enabled else "none",
+        precision_kind=precision_kind,
+        precision_parameter_storage=precision_parameter_storage,
     )
     return Evo2InferenceComponents(
         tokenizer=tokenizer,
@@ -784,6 +961,7 @@ def generate(
     inference_dynamic_batching_max_tokens: Optional[int] = None,
     inference_dynamic_batching_block_size: int = 256,
     evo2_batched_decode_size: int = 1,
+    inference_backend: Literal["dynamic", "static-flash"] = "dynamic",
     result_callback: Optional[Callable[[int, Any], None]] = None,
 ) -> List[Any]:
     """Generate text using the Evo2 native dynamic-inference engine.
@@ -807,7 +985,8 @@ def generate(
             When set and chunking is disabled, each prompt must fit within this value.
         inference_dynamic_batching_block_size: KV-cache block size for the dynamic context. This is
             not the prefill chunk size.
-        evo2_batched_decode_size: Number of same-length prompts to decode together in the native Evo2 path.
+        evo2_batched_decode_size: Number of variable-length prompts to prefill and decode together.
+        inference_backend: Use packed paged-KV dynamic inference or equal-length static FlashAttention.
         result_callback: Optional callback invoked with each prompt index and native result as it completes.
 
     Returns:
@@ -819,6 +998,24 @@ def generate(
         >>> results = generate(components, ["ATCGATCG"], max_new_tokens=50, top_k=1)
         >>> print(_unwrap_result(results[0]).generated_text)
     """
+    if inference_backend == "static-flash":
+        if enable_chunked_prefill:
+            raise ValueError("Static FlashAttention inference does not support chunked prefill")
+        return _generate_static_flash(
+            components,
+            prompts,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            return_log_probs=return_log_probs,
+            ignore_eos=ignore_eos,
+            strict_generation=strict_generation,
+            evo2_batched_decode_size=evo2_batched_decode_size,
+            result_callback=result_callback,
+        )
+    if inference_backend != "dynamic":
+        raise ValueError(f"Unsupported Evo2 inference backend {inference_backend!r}")
     return _generate_native_dynamic(
         components,
         prompts,
@@ -1081,17 +1278,33 @@ def _sampled_token_action(
     return (not is_eos, is_eos and not ignore_eos)
 
 
-def _suppress_stop_token_logits(logits: torch.Tensor, stop_token_ids: set[int]) -> torch.Tensor:
-    """Exclude valid stop-token IDs before top-k/top-p filtering."""
+def _stop_token_mask(logits: torch.Tensor, stop_token_ids: set[int]) -> Optional[torch.Tensor]:
+    """Build a reusable device mask for forced-length generation."""
     valid_stop_token_ids = sorted(token_id for token_id in stop_token_ids if 0 <= token_id < logits.shape[-1])
     if not valid_stop_token_ids:
-        return logits
-
-    filtered_logits = logits.clone()
-    filtered_logits[..., valid_stop_token_ids] = float("-inf")
-    if torch.isneginf(filtered_logits).all(dim=-1).any():
+        return None
+    if len(valid_stop_token_ids) == logits.shape[-1]:
         raise RuntimeError("Cannot ignore EOS because every tokenizer vocabulary entry is a stop token")
-    return filtered_logits
+
+    stop_token_mask = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
+    stop_token_mask[valid_stop_token_ids] = True
+    return stop_token_mask
+
+
+def _suppress_stop_token_logits(
+    logits: torch.Tensor,
+    stop_token_ids: set[int],
+    *,
+    stop_token_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Exclude stop-token IDs without a per-token device reduction or host-to-device index copy."""
+    if stop_token_mask is None:
+        stop_token_mask = _stop_token_mask(logits, stop_token_ids)
+    if stop_token_mask is None:
+        return logits
+    if stop_token_mask.shape != (logits.shape[-1],) or stop_token_mask.device != logits.device:
+        raise ValueError("stop-token mask must match the logits vocabulary and device")
+    return logits.masked_fill(stop_token_mask, float("-inf"))
 
 
 def _normalize_new_request_slots_for_packed_hyena(dyn_ctx: Any, request_count: int) -> torch.Tensor:
@@ -1188,18 +1401,82 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
         )
 
 
+def _validate_cuda_graph_capture(nd: Evo2NativeDynamicComponents, *, expected_request_counts: int) -> None:
+    """Require every configured graph manager to own captured runners.
+
+    The warmup performs one capture followed by one replay for every active-request
+    count. Reaching this check therefore proves replay completed without falling back
+    to eager execution; inspecting the runners additionally catches configurations
+    which claimed graphs were enabled but never constructed a graphable module. Packed
+    Hyena layers key graphs by active-request count, while paged-attention layers use a
+    fixed max-request shape and therefore intentionally reuse one runner.
+    """
+    managers = [
+        manager
+        for module in nd.hyena_model.modules()
+        if (manager := getattr(module, "cudagraph_manager", None)) is not None
+    ]
+    if not managers:
+        raise RuntimeError("CUDA graphs were enabled but the Evo2 model has no CUDA graph manager")
+    if nd.cuda_graph_scope == "block" and len(managers) != 1:
+        raise RuntimeError(f"Block-scope CUDA graphs require exactly one Evo2 graph manager; found {len(managers)}")
+
+    request_count = max(1, int(expected_request_counts))
+    expected_by_manager = {id(manager): request_count for manager in managers}
+    if nd.cuda_graph_scope == "layer":
+        decoder = getattr(nd.hyena_model, "decoder", None)
+        for layer, layer_type in zip(
+            getattr(decoder, "layers", ()),
+            getattr(decoder, "layer_type_list", ()),
+            strict=False,
+        ):
+            manager = getattr(layer, "cudagraph_manager", None)
+            if manager is not None and layer_type == "*":
+                expected_by_manager[id(manager)] = 1
+
+    manager_runners = [list(getattr(manager, "cudagraph_runners", ())) for manager in managers]
+    runners = [runner for owned_runners in manager_runners for runner in owned_runners]
+    minimum_runner_count = sum(expected_by_manager[id(manager)] for manager in managers)
+    recorded = [
+        runner
+        for runner in runners
+        if bool(getattr(runner, "fwd_graph_recorded", False)) and bool(getattr(runner, "cudagraph_created", False))
+    ]
+    incomplete_manager = any(
+        len(owned_runners) < expected_by_manager[id(manager)]
+        for manager, owned_runners in zip(managers, manager_runners, strict=True)
+    )
+    if incomplete_manager or len(recorded) != len(runners):
+        raise RuntimeError(
+            "CUDA graph warmup was not fully captured: "
+            f"scope={nd.cuda_graph_scope}, managers={len(managers)}, runners={len(runners)}, "
+            f"recorded={len(recorded)}, expected_at_least={minimum_runner_count}"
+        )
+
+    nd.cuda_graph_manager_count = len(managers)
+    nd.cuda_graph_runner_count = len(runners)
+    nd.cuda_graph_recorded_count = len(recorded)
+    nd.cuda_graph_replay_verified = True
+    if int(os.environ.get("RANK", "0")) == 0:
+        logger.info(
+            "[evo2-native-cg] verified capture+replay: scope=%s managers=%d runners=%d",
+            nd.cuda_graph_scope,
+            len(managers),
+            len(runners),
+        )
+
+
 def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
     """Drop all captured per-layer CUDA graphs so the next warmup re-captures at the new context size.
 
     Needed to "grow" the dynamic context (mcore has no in-place resize): a larger context is a new
     object with a longer ``rotary_pos_emb``, so graphs captured against the previous one must go.
     mcore's module-level ``delete_cuda_graphs()`` resets the global record, each runner's recorded
-    graph, and the shared mempool — but it does NOT clear each layer ``CudaGraphManager``'s per-instance
-    runner list or keyed lookup table, so a stale runner would still be found and replayed against the
-    new context (raising "CUDA graph argument mismatch"). Current mcore calls that lookup
-    ``custom_cudagraphs_lookup_table``; older releases used
-    ``inference_cudagraphs_lookup_table``. Clear both names for compatibility before resetting the
-    global record so the next decode captures against the current context and rotary shape.
+    graph, and the shared mempool — but it does NOT clear each ``CudaGraphManager``'s per-instance
+    runner list or custom-key lookup table, so a stale runner would still be found and replayed against
+    the new context (raising "CUDA graph argument mismatch"). We clear the current and legacy lookup
+    names defensively; with the global ``cudagraph_created`` flag also reset, the next decode creates a
+    fresh runner and captures at the current shape.
     """
     for module in nd.hyena_model.modules():
         mgr = getattr(module, "cudagraph_manager", None)
@@ -1215,6 +1492,9 @@ def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
     from megatron.core.transformer.cuda_graphs import delete_cuda_graphs
 
     delete_cuda_graphs()
+    nd.cuda_graph_runner_count = 0
+    nd.cuda_graph_recorded_count = 0
+    nd.cuda_graph_replay_verified = False
 
 
 def _get_or_build_shared_dynamic_context(
@@ -1305,10 +1585,412 @@ def _get_or_build_shared_dynamic_context(
             boundary_time_s=context_setup_stats._ended_at_s,
         )
         _warmup_native_dynamic_cuda_graphs(nd, dyn_ctx, device)
+        _validate_cuda_graph_capture(nd, expected_request_counts=max_active_requests)
         cuda_graph_capture_stats = _finish_cuda_phase(capture_started_at_s)
     nd.shared_dyn_ctx = dyn_ctx
     nd.shared_dyn_ctx_key = ctx_key
     return dyn_ctx, context_setup_stats, cuda_graph_capture_stats
+
+
+def _get_or_build_static_flash_context(
+    nd: Evo2NativeDynamicComponents,
+    *,
+    batch_size: int,
+    max_sequence_length: int,
+    device: torch.device,
+) -> tuple[Any, _CudaPhaseStats]:
+    """Return a graph-pointer-stable static context for one exact batch shape."""
+    from megatron.core.inference.contexts import StaticInferenceContext
+
+    key = (int(batch_size), int(max_sequence_length))
+    cached = nd.static_contexts.get(key)
+    if cached is not None:
+        # Bypass HyenaInferenceContext.reset(), which intentionally deletes ordinary
+        # state dictionaries. These are persistent packed dictionaries whose registered
+        # views must survive for CUDA-graph pointer stability.
+        StaticInferenceContext.reset(cached)
+        reset_hyena_packed_views_for_new_request(cached)
+        return cached, _CudaPhaseStats()
+
+    capacity_changed = any(cached_key[1] != key[1] for cached_key in nd.static_contexts)
+    if capacity_changed or len(nd.static_contexts) >= _MAX_STATIC_FLASH_CONTEXTS:
+        # Graph runners retain context-backed storage. Delete them before dropping
+        # the only explicit context references, and force a shared dynamic context
+        # to rebuild if callers switch inference backends on this model instance.
+        if nd.cuda_graphs_enabled:
+            _reset_layer_cuda_graphs(nd)
+            nd.shared_dyn_ctx = None
+            nd.shared_dyn_ctx_key = None
+        nd.static_contexts.clear()
+
+    started_at_s = _begin_cuda_phase()
+    context = StaticInferenceContext(
+        max_batch_size=int(batch_size),
+        max_sequence_length=int(max_sequence_length),
+    )
+    context.materialize_only_last_token_logits = True
+    bind_hyena_packed_views_to_static_context(
+        nd.hyena_model,
+        context,
+        batch_size=int(batch_size),
+        device=device,
+    )
+    context.evo2_static_cuda_graph_warmed = False
+    context.evo2_static_cuda_graph_replay_verified = False
+    nd.static_contexts[key] = context
+    return context, _finish_cuda_phase(started_at_s)
+
+
+def _static_hyena_state_snapshot(context: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    """Clone the small recurrent state so graph warmup cannot alter real prefill state."""
+    return (
+        context._evo2_hyena_conv_states.clone(),
+        context._evo2_hyena_ssm_states.clone(),
+    )
+
+
+def _restore_static_hyena_state(
+    context: Any,
+    snapshot: tuple[torch.Tensor, torch.Tensor],
+) -> None:
+    """Restore graph-bound recurrent buffers without changing their addresses."""
+    with torch.no_grad():
+        context._evo2_hyena_conv_states.copy_(snapshot[0])
+        context._evo2_hyena_ssm_states.copy_(snapshot[1])
+
+
+def _static_graph_counts(nd: Evo2NativeDynamicComponents) -> tuple[int, int, int]:
+    """Return manager, runner, and fully-recorded runner counts."""
+    managers = [
+        manager
+        for module in nd.hyena_model.modules()
+        if (manager := getattr(module, "cudagraph_manager", None)) is not None
+    ]
+    runners = [runner for manager in managers for runner in getattr(manager, "cudagraph_runners", ())]
+    recorded = [
+        runner
+        for runner in runners
+        if bool(getattr(runner, "fwd_graph_recorded", False)) and bool(getattr(runner, "cudagraph_created", False))
+    ]
+    return len(managers), len(runners), len(recorded)
+
+
+def _generate_static_flash(
+    components: Evo2InferenceComponents,
+    prompts: List[str],
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    return_log_probs: bool,
+    ignore_eos: bool,
+    strict_generation: bool,
+    evo2_batched_decode_size: int,
+    result_callback: Optional[Callable[[int, Any], None]],
+) -> List[_NativeDynamicResult]:
+    """Generate with static FlashAttention KV cache and fused Hyena decode.
+
+    This backend is intentionally fixed-shape: every request in a decode group must
+    have the same tokenized prompt length. It avoids dynamic scheduler bookkeeping,
+    keeps sampled tokens on GPU for forced-length generation, and reuses one static
+    context (including graph-bound KV/Hyena buffers) per batch/capacity shape.
+    """
+    if max_new_tokens < 0:
+        raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
+    if not prompts:
+        return []
+
+    nd = components.native_dynamic
+    tokenizer = components.tokenizer
+    forward_model = nd.forward_model
+    hyena_model = nd.hyena_model
+    device = next(hyena_model.parameters()).device
+    rank = int(os.environ.get("RANK", "0"))
+    eff_top_k = max(0, int(top_k))
+    eff_top_p = float(top_p) if top_p and top_p > 0 and eff_top_k == 0 else 0.0
+    sampling_rng = _sampling_rng_for_native_dynamic(nd, device)
+    stop_token_ids = _native_stop_token_ids(tokenizer)
+    tokenized_prompts = [list(tokenizer.tokenize(prompt)) for prompt in prompts]
+    if any(not prompt for prompt in tokenized_prompts):
+        raise ValueError("Static FlashAttention inference requires non-empty prompts")
+
+    needed_max_sequence_length = max(
+        _auto_max_seq_length_for(len(prompt), max_new_tokens) for prompt in tokenized_prompts
+    )
+    if nd.max_seq_length is None:
+        nd.max_seq_length = needed_max_sequence_length
+    elif nd.max_seq_length_is_auto and needed_max_sequence_length > nd.max_seq_length:
+        nd.max_seq_length = needed_max_sequence_length
+    if needed_max_sequence_length > int(nd.max_seq_length):
+        raise ValueError(
+            "Static FlashAttention generation exceeds max_seq_length: "
+            f"needs {needed_max_sequence_length}, configured {nd.max_seq_length}"
+        )
+
+    engine_setup_stats = _CudaPhaseStats()
+    if bool(getattr(nd, "engine_setup_stats_pending", False)):
+        engine_setup_stats = getattr(nd, "engine_setup_stats", _CudaPhaseStats())
+        nd.engine_setup_stats_pending = False
+    generation_call_index = int(getattr(nd, "generation_call_index", 0))
+    nd.generation_call_index = generation_call_index + 1
+    batch_size = max(1, int(evo2_batched_decode_size))
+    results: list[_NativeDynamicResult] = []
+    previous_flash_decode = bool(getattr(hyena_model.config, "flash_decode", False))
+    hyena_model.config.flash_decode = True
+
+    try:
+        for group_start in range(0, len(tokenized_prompts), batch_size):
+            prompt_group = tokenized_prompts[group_start : group_start + batch_size]
+            prompt_lengths = {len(prompt) for prompt in prompt_group}
+            if len(prompt_lengths) != 1:
+                raise ValueError(
+                    "Static FlashAttention requires equal tokenized prompt lengths within each decode batch; "
+                    f"group at index {group_start} has lengths {sorted(prompt_lengths)}"
+                )
+            prompt_length = next(iter(prompt_lengths))
+            request_count = len(prompt_group)
+            context, context_setup_stats = _get_or_build_static_flash_context(
+                nd,
+                batch_size=request_count,
+                max_sequence_length=int(nd.max_seq_length),
+                device=device,
+            )
+            prompt_tensor = torch.tensor(prompt_group, dtype=torch.long, device=device)
+            timings: dict[str, Any] = {}
+            memory: dict[str, int] = {}
+            _record_phase_stats(
+                timings,
+                memory,
+                "engine_setup",
+                engine_setup_stats if group_start == 0 else _CudaPhaseStats(),
+            )
+            _record_phase_stats(
+                timings,
+                memory,
+                "context_setup",
+                context_setup_stats,
+            )
+
+            try:
+                from megatron.core.inference.utils import InferenceMode
+
+                inference_mode_context = InferenceMode.active
+            except ImportError:  # pragma: no cover - installed MCore always provides it
+                inference_mode_context = contextlib.nullcontext
+
+            def _forward(input_ids: torch.Tensor) -> torch.Tensor:
+                with inference_mode_context():
+                    return forward_model(
+                        input_ids,
+                        None,
+                        None,
+                        inference_context=context,
+                        runtime_gather_output=True,
+                    )
+
+            prefill_started_at_s = _begin_cuda_phase()
+            with torch.inference_mode():
+                logits = _forward(prompt_tensor)
+            prefill_stats = _finish_cuda_phase(prefill_started_at_s)
+            _record_phase_stats(timings, memory, "prefill", prefill_stats)
+            context.increment_sequence_len_offset(prompt_length)
+            context.enable_decode_mode()
+
+            graph_capture_stats = _CudaPhaseStats()
+            if nd.cuda_graphs_enabled and max_new_tokens > 1 and not context.evo2_static_cuda_graph_warmed:
+                snapshot = _static_hyena_state_snapshot(context)
+                managers_before, runners_before, _recorded_before = _static_graph_counts(nd)
+                if managers_before == 0:
+                    raise RuntimeError("Static FlashAttention CUDA graphs were enabled but no graph manager exists")
+                if nd.cuda_graph_scope == "block" and managers_before != 1:
+                    raise RuntimeError(f"Static block CUDA graphs require one manager, found {managers_before}")
+                capture_started_at_s = _begin_cuda_phase()
+                dummy_tokens = torch.zeros((request_count, 1), dtype=torch.long, device=device)
+                with torch.inference_mode():
+                    _forward(dummy_tokens)  # capture
+                    _restore_static_hyena_state(context, snapshot)
+                    _forward(dummy_tokens)  # replay proof
+                    _restore_static_hyena_state(context, snapshot)
+                graph_capture_stats = _finish_cuda_phase(capture_started_at_s)
+                managers_after, runners_after, recorded_after = _static_graph_counts(nd)
+                if runners_after <= runners_before or recorded_after != runners_after:
+                    raise RuntimeError(
+                        "Static FlashAttention CUDA graph capture/replay was not verified: "
+                        f"managers={managers_after}, runners={runners_after}, recorded={recorded_after}, "
+                        f"runners_before={runners_before}"
+                    )
+                context.evo2_static_cuda_graph_warmed = True
+                context.evo2_static_cuda_graph_replay_verified = True
+            _record_phase_stats(timings, memory, "cuda_graph_capture", graph_capture_stats)
+
+            generated_ids: list[list[int]] = [[] for _ in range(request_count)]
+            generated_logprobs: list[list[float]] = [[] for _ in range(request_count)]
+            stopped = [False] * request_count
+            decode_started_at_s = _begin_cuda_phase()
+            if max_new_tokens > 0:
+                next_logits = logits[:, -1, :].float()
+                stop_token_mask = _stop_token_mask(next_logits, stop_token_ids) if ignore_eos else None
+                # Forced-length generation never needs per-step host decisions. Keep
+                # tokens/log-probs resident and perform one transfer after the loop.
+                gpu_resident_results = bool(ignore_eos)
+                token_buffer = (
+                    torch.empty((max_new_tokens, request_count), dtype=torch.long, device=device)
+                    if gpu_resident_results
+                    else None
+                )
+                logprob_buffer = (
+                    torch.empty((max_new_tokens, request_count), dtype=torch.float32, device=device)
+                    if gpu_resident_results and return_log_probs
+                    else None
+                )
+                completed_steps = 0
+
+                for token_index in range(max_new_tokens):
+                    sampling_logits = (
+                        _suppress_stop_token_logits(
+                            next_logits,
+                            stop_token_ids,
+                            stop_token_mask=stop_token_mask,
+                        )
+                        if ignore_eos
+                        else next_logits
+                    )
+                    log_probs = _sampling_log_probs_from_logits(
+                        sampling_logits,
+                        temperature=float(temperature),
+                        top_k=eff_top_k,
+                        top_p=eff_top_p,
+                        vocab_size=tokenizer.vocab_size,
+                    )
+                    sampled = _sample_from_log_probs(
+                        log_probs,
+                        top_k=eff_top_k,
+                        generator=sampling_rng,
+                        vocab_size=tokenizer.vocab_size,
+                    ).to(dtype=torch.long)
+                    completed_steps = token_index + 1
+
+                    if gpu_resident_results:
+                        token_buffer[token_index].copy_(sampled)
+                        if logprob_buffer is not None:
+                            logprob_buffer[token_index].copy_(log_probs.gather(1, sampled.view(-1, 1)).squeeze(1))
+                    else:
+                        sampled_ids = sampled.detach().cpu().tolist()
+                        selected_log_probs = (
+                            _selected_log_probs_for_sampled_tokens(log_probs, sampled)
+                            if return_log_probs
+                            else [0.0] * request_count
+                        )
+                        for request_index, token_id in enumerate(sampled_ids):
+                            if stopped[request_index]:
+                                continue
+                            append_token, stop_request = _sampled_token_action(
+                                int(token_id), stop_token_ids, ignore_eos=False
+                            )
+                            if append_token:
+                                generated_ids[request_index].append(int(token_id))
+                                if return_log_probs:
+                                    generated_logprobs[request_index].append(float(selected_log_probs[request_index]))
+                            stopped[request_index] = stop_request
+                        if all(stopped):
+                            break
+
+                    if token_index + 1 < max_new_tokens:
+                        with torch.inference_mode():
+                            logits = _forward(sampled.unsqueeze(1))
+                        context.increment_sequence_len_offset(1)
+                        next_logits = logits[:, -1, :].float()
+
+                if gpu_resident_results:
+                    host_tokens = token_buffer[:completed_steps].transpose(0, 1).detach().cpu().tolist()
+                    host_logprobs = (
+                        logprob_buffer[:completed_steps].transpose(0, 1).detach().cpu().tolist()
+                        if logprob_buffer is not None
+                        else None
+                    )
+                    for request_index in range(request_count):
+                        generated_ids[request_index] = [int(token) for token in host_tokens[request_index]]
+                        if host_logprobs is not None:
+                            generated_logprobs[request_index] = [
+                                float(value) for value in host_logprobs[request_index]
+                            ]
+
+            decode_stats = _finish_cuda_phase(decode_started_at_s)
+            _record_phase_stats(timings, memory, "decode", decode_stats)
+            timings["generation_elapsed_s"] = prefill_stats.elapsed_s + decode_stats.elapsed_s
+            manager_count, runner_count, recorded_count = _static_graph_counts(nd)
+            timings.update(
+                {
+                    "timing_scope": "static_flash_generation_group",
+                    "timing_group_id": (f"static-call-{generation_call_index:08d}-group-{group_start:08d}"),
+                    "timing_request_count": request_count,
+                    "precision_kind": nd.precision_kind,
+                    "precision_parameter_storage": nd.precision_parameter_storage,
+                    "cuda_graph_scope": nd.cuda_graph_scope,
+                    "cuda_graph_manager_count": manager_count,
+                    "cuda_graph_runner_count": runner_count,
+                    "cuda_graph_recorded_count": recorded_count,
+                    "cuda_graph_replay_verified": bool(context.evo2_static_cuda_graph_replay_verified),
+                }
+            )
+            timings["total_elapsed_s"] = sum(
+                float(timings.get(f"{phase}_elapsed_s", 0.0))
+                for phase in ("engine_setup", "context_setup", "cuda_graph_capture", "prefill", "decode")
+            )
+            memory["generation_peak_allocated_bytes"] = max(
+                int(memory.get("prefill_peak_allocated_bytes", 0)),
+                int(memory.get("decode_peak_allocated_bytes", 0)),
+            )
+            memory["generation_peak_reserved_bytes"] = max(
+                int(memory.get("prefill_peak_reserved_bytes", 0)),
+                int(memory.get("decode_peak_reserved_bytes", 0)),
+            )
+            memory["total_peak_allocated_bytes"] = max(
+                (value for key, value in memory.items() if key.endswith("_peak_allocated_bytes")),
+                default=0,
+            )
+            memory["total_peak_reserved_bytes"] = max(
+                (value for key, value in memory.items() if key.endswith("_peak_reserved_bytes")),
+                default=0,
+            )
+
+            for request_index, prompt_tokens in enumerate(prompt_group):
+                request_tokens = generated_ids[request_index]
+                stopped_on_eos = stopped[request_index]
+                if strict_generation and not stopped_on_eos and len(request_tokens) != max_new_tokens:
+                    raise RuntimeError(
+                        "Strict static FlashAttention generation ended short: "
+                        f"request {group_start + request_index} produced "
+                        f"{len(request_tokens)} / {max_new_tokens} tokens"
+                    )
+                result = _NativeDynamicResult(
+                    generated_text=tokenizer.detokenize(request_tokens) if request_tokens else "",
+                    generated_length=len(request_tokens),
+                    prompt_tokens=prompt_tokens,
+                    generated_tokens=request_tokens,
+                    generated_log_probs=(generated_logprobs[request_index] if return_log_probs else None),
+                    finish_reason="stop" if stopped_on_eos else "length",
+                    stopped_on_eos=stopped_on_eos,
+                    truncated=not stopped_on_eos and len(request_tokens) >= max_new_tokens,
+                    timings=dict(timings),
+                    memory=dict(memory),
+                )
+                results.append(result)
+                if result_callback is not None:
+                    result_callback(group_start + request_index, result)
+            if rank == 0:
+                logger.info(
+                    "[evo2-static-flash] requests=%d prompt_tokens=%d generated_tokens=%d graph_replay=%s",
+                    request_count,
+                    prompt_length * request_count,
+                    sum(len(tokens) for tokens in generated_ids),
+                    context.evo2_static_cuda_graph_replay_verified,
+                )
+    finally:
+        hyena_model.config.flash_decode = previous_flash_decode
+
+    return results
 
 
 def _generate_native_dynamic(
@@ -1372,7 +2054,13 @@ def _generate_native_dynamic(
     tokenized_prompts: List[List[int]] = [list(tokenizer.tokenize(prompt)) for prompt in prompts]
     max_n_prompt = max(len(toks) for toks in tokenized_prompts)
     batched_prefill_request_count = min(max(1, int(evo2_batched_decode_size)), len(tokenized_prompts))
-    batched_prefill_tokens = batched_prefill_request_count * max_n_prompt
+    batched_prefill_tokens = max(
+        sum(
+            len(prompt_tokens)
+            for prompt_tokens in tokenized_prompts[group_start : group_start + batched_prefill_request_count]
+        )
+        for group_start in range(0, len(tokenized_prompts), batched_prefill_request_count)
+    )
 
     block_size_tokens = int(inference_dynamic_batching_block_size)
     if block_size_tokens <= 0:
@@ -1385,7 +2073,7 @@ def _generate_native_dynamic(
         if batched_prefill_tokens > max_tokens and not enable_chunked_prefill:
             raise ValueError(
                 f"Batched prefill requires {batched_prefill_tokens} tokens "
-                f"({batched_prefill_request_count} request(s) * {max_n_prompt} prompt tokens), but the configured "
+                f"across at most {batched_prefill_request_count} request(s), but the configured "
                 f"max token budget is {max_tokens}. Increase --inference-dynamic-batching-max-tokens or pass "
                 "--enable-chunked-prefill."
             )
@@ -1446,7 +2134,7 @@ def _generate_native_dynamic(
     if batched_prefill_tokens > dyn_ctx.max_tokens and not enable_chunked_prefill:
         raise ValueError(
             f"Batched prefill requires {batched_prefill_tokens} tokens "
-            f"({batched_prefill_request_count} request(s) * {max_n_prompt} prompt tokens), but the dynamic context "
+            f"across at most {batched_prefill_request_count} request(s), but the dynamic context "
             f"max token budget is {dyn_ctx.max_tokens}. Increase --inference-dynamic-batching-max-tokens or pass "
             "--enable-chunked-prefill."
         )
@@ -1458,6 +2146,7 @@ def _generate_native_dynamic(
         generated_logprobs: List[float] = []
         stop_token_ids = _native_stop_token_ids(tokenizer)
         stopped_on_eos = False
+        stop_token_mask: Optional[torch.Tensor] = None
         timings = {
             "prefill_elapsed_s": 0.0,
             "decode_elapsed_s": 0.0,
@@ -1488,7 +2177,7 @@ def _generate_native_dynamic(
             timing_complete = True
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
-            nonlocal stopped_on_eos
+            nonlocal stop_token_mask, stopped_on_eos
             dyn_ctx.initialize_attention_state()
             input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
             try:
@@ -1503,7 +2192,17 @@ def _generate_native_dynamic(
             # selects the per-request final position -> [num_requests, vocab]. Sample in fp32 so
             # stochastic filters and logprobs do not depend on the model activation dtype.
             last_logits = _extract_generation_logits(dyn_ctx, logits)
-            sampling_logits = _suppress_stop_token_logits(last_logits, stop_token_ids) if ignore_eos else last_logits
+            if ignore_eos and stop_token_mask is None:
+                stop_token_mask = _stop_token_mask(last_logits, stop_token_ids)
+            sampling_logits = (
+                _suppress_stop_token_logits(
+                    last_logits,
+                    stop_token_ids,
+                    stop_token_mask=stop_token_mask,
+                )
+                if ignore_eos
+                else last_logits
+            )
             sampled_log_probs = _sampling_log_probs_from_logits(
                 sampling_logits,
                 temperature=float(temperature),
@@ -1652,17 +2351,17 @@ def _generate_native_dynamic(
             ]
         if enable_chunked_prefill:
             raise ValueError("Evo2 batched decode does not support chunked prefill")
-        prompt_lengths = {len(prompt_ids) for prompt_ids in prompt_token_id_batch}
-        if len(prompt_lengths) != 1:
-            raise ValueError(f"Evo2 batched decode requires same-length prompts, got lengths {sorted(prompt_lengths)}")
-
-        n_prompt = prompt_lengths.pop()
+        prompt_lengths = [len(prompt_ids) for prompt_ids in prompt_token_id_batch]
+        max_prompt_length = max(prompt_lengths)
+        total_prompt_tokens = sum(prompt_lengths)
         generated_ids: list[list[int]] = [[] for _ in range(batch_request_count)]
         generated_logprobs: list[list[float]] = [[] for _ in range(batch_request_count)]
         stop_token_ids = _native_stop_token_ids(tokenizer)
+        stop_token_mask: Optional[torch.Tensor] = None
         stopped_on_eos = [False for _ in range(batch_request_count)]
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
+            nonlocal stop_token_mask
             dyn_ctx.initialize_attention_state()
             input_ids, position_ids = dyn_ctx.current_input_and_position_ids()
             try:
@@ -1680,8 +2379,16 @@ def _generate_native_dynamic(
                     f"got {last_logits.shape[0]} rows for {batch_request_count} requests"
                 )
             active_logits = last_logits[:batch_request_count]
+            if ignore_eos and stop_token_mask is None:
+                stop_token_mask = _stop_token_mask(active_logits, stop_token_ids)
             sampling_logits = (
-                _suppress_stop_token_logits(active_logits, stop_token_ids) if ignore_eos else active_logits
+                _suppress_stop_token_logits(
+                    active_logits,
+                    stop_token_ids,
+                    stop_token_mask=stop_token_mask,
+                )
+                if ignore_eos
+                else active_logits
             )
             active_log_probs = _sampling_log_probs_from_logits(
                 sampling_logits,
@@ -1735,17 +2442,18 @@ def _generate_native_dynamic(
                         prompt_tokens=torch.tensor(prompt_token_ids, dtype=torch.int64, device=device),
                         sampling_params=SamplingParams(num_tokens_to_generate=max_new_tokens, termination_id=-1),
                     )
-                    dyn_ctx.add_request(req, prefill_chunk_length=n_prompt)
+                    dyn_ctx.add_request(req, prefill_chunk_length=len(prompt_token_ids))
 
                 slots = _normalize_new_request_slots_for_packed_hyena(dyn_ctx, batch_request_count)
                 bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
                 dyn_ctx.evo2_batched_decode_enabled = True
                 if rank == 0:
                     logger.info(
-                        "[evo2-native] batched prompt prefill: requests=%d, chunk=%d/%d tokens, remaining=0",
+                        "[evo2-native] batched prompt prefill: requests=%d, total_tokens=%d, max_length=%d, "
+                        "layout=packed",
                         batch_request_count,
-                        n_prompt,
-                        n_prompt,
+                        total_prompt_tokens,
+                        max_prompt_length,
                     )
 
                 prefill_started_at_s = _begin_cuda_phase()
@@ -1812,6 +2520,13 @@ def _generate_native_dynamic(
                 "timing_scope": "native_generation_group",
                 "timing_group_id": (f"native-call-{generation_call_index:08d}-group-{prompt_offset:08d}"),
                 "timing_request_count": len(group_results),
+                "precision_kind": nd.precision_kind,
+                "precision_parameter_storage": nd.precision_parameter_storage,
+                "cuda_graph_scope": nd.cuda_graph_scope,
+                "cuda_graph_manager_count": nd.cuda_graph_manager_count,
+                "cuda_graph_runner_count": nd.cuda_graph_runner_count,
+                "cuda_graph_recorded_count": nd.cuda_graph_recorded_count,
+                "cuda_graph_replay_verified": nd.cuda_graph_replay_verified,
             }
         )
         group_timings["total_elapsed_s"] = sum(
@@ -2116,9 +2831,52 @@ def parse_args() -> argparse.Namespace:
     # Precision arguments
     ap.add_argument("--mixed-precision-recipe", type=str, default=None, help="Override precision recipe")
     ap.add_argument(
+        "--quantized-param-storage",
+        choices=["recipe", "bf16"],
+        default="recipe",
+        help="For FP8/FP4 recipes, preserve native quantized parameter storage or retain BF16 parameters "
+        "while quantizing GEMMs. BF16 storage reduces checkpoint-load peak memory and is a measured fallback.",
+    )
+    ap.add_argument(
+        "--fp8-all-layers",
+        action="store_true",
+        help="Apply the selected global TE FP8 recipe to every compatible linear, including the first/last blocks",
+    )
+    ap.add_argument(
         "--vortex-style-fp8",
         action="store_true",
         help="Use vortex-style FP8 (applies FP8 only to projection layers)",
+    )
+    ap.add_argument(
+        "--native-nvfp4",
+        choices=["off", "fc1", "expansion", "full"],
+        default="off",
+        help="Inference-only Blackwell W4A4 policy: MLP fc1, expansion projections, or all projections",
+    )
+    ap.add_argument(
+        "--native-nvfp4-activation-amax",
+        type=float,
+        default=None,
+        help="Optional activation range: raises strict RMSNorm bounds, and calibrates full-policy contractions",
+    )
+
+    ap.add_argument(
+        "--native-nvfp4-decode",
+        choices=["bf16", "fp8", "nvfp4"],
+        default="bf16",
+        help="Use accuracy-first BF16 or experimental low-latency FP8/native W4A4 for single-token projections",
+    )
+    ap.add_argument(
+        "--native-mxfp8",
+        choices=["off", "hyena", "fc1", "expansion"],
+        default="off",
+        help="Inference-only native Blackwell MXFP8 policy: Hyena input, MLP fc1, or all expansion projections",
+    )
+    ap.add_argument(
+        "--native-mxfp8-decode",
+        choices=["bf16", "fp8"],
+        default="bf16",
+        help="Use accuracy-first BF16 or experimental low-latency per-tensor FP8 for single-token projections",
     )
 
     # Model arguments
@@ -2165,16 +2923,30 @@ def parse_args() -> argparse.Namespace:
         "--use-subquadratic-ops",
         action="store_true",
         default=False,
-        help="Use accelerated subquadratic-ops fft_causal_conv1d / causal_conv1d CUDA kernels, "
-        "including projection/mixer B2B fusion. This can speed up prompt processing but has no "
-        "effect on per-token decode throughput.",
+        help="Use fused Hyena convolution kernels for rectangular/eager prefill compatibility. "
+        "Dynamic segmented prefill and per-token decode are unaffected.",
     )
     ap.add_argument(
         "--cuda-graph-impl",
         choices=["none", "local"],
         default="local",
-        help="CUDA-graph mode for dynamic decode: 'local' (mcore per-layer graphs, default) or 'none' "
+        help="CUDA-graph implementation for dynamic decode: 'local' (MCore graphs, default) or 'none' "
         "(eager decode, no graph capture). 'none' is mainly for debugging / un-graphed reference runs.",
+    )
+    ap.add_argument(
+        "--inference-backend",
+        choices=["dynamic", "static-flash"],
+        default="dynamic",
+        help="Decode backend: packed paged-KV dynamic inference (default) or static-batch "
+        "FlashAttention. Static Flash requires equal tokenized prompt lengths within each decode batch.",
+    )
+    ap.add_argument(
+        "--cuda-graph-scope",
+        choices=["block", "layer"],
+        default="block",
+        help="MCore local CUDA-graph granularity: one complete decoder-block graph (default) or "
+        "one graph per layer (compatibility fallback). Global FP8/FP4 recipes automatically use "
+        "layer scope. Ignored with --cuda-graph-impl none.",
     )
     ap.add_argument(
         "--enable-chunked-prefill",
@@ -2262,13 +3034,22 @@ def infer(
     output_file: Optional[Path] = None,
     stream_output: bool = False,
     mixed_precision_recipe: Optional[str] = None,
+    quantized_param_storage: Literal["recipe", "bf16"] = "recipe",
+    fp8_all_layers: bool = False,
     vortex_style_fp8: bool = False,
+    native_nvfp4: Literal["off", "fc1", "expansion", "full"] = "off",
+    native_nvfp4_activation_amax: Optional[float] = None,
+    native_nvfp4_decode: Literal["bf16", "fp8", "nvfp4"] = "bf16",
+    native_mxfp8: Literal["off", "hyena", "fc1", "expansion"] = "off",
+    native_mxfp8_decode: Literal["bf16", "fp8"] = "bf16",
     max_seq_length: Optional[int] = None,
     max_seq_length_num_prompts: int = _DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS,
     max_batch_size: int = 1,
     evo2_batched_decode_size: int = 1,
     use_subquadratic_ops: bool = False,
     cuda_graph_impl: str = "local",
+    cuda_graph_scope: str = "block",
+    inference_backend: Literal["dynamic", "static-flash"] = "dynamic",
     enable_chunked_prefill: bool = False,
     inference_dynamic_batching_max_tokens: Optional[int] = None,
     inference_dynamic_batching_block_size: int = 256,
@@ -2300,20 +3081,35 @@ def infer(
         stream_output: Write and flush each result as soon as it is generated. Strict generation
             writes to ``<output_file>.partial`` and atomically promotes it after success.
         mixed_precision_recipe: Override mixed precision recipe.
+        quantized_param_storage: Preserve native quantized parameters from the selected recipe or
+            retain BF16 parameters while executing its quantized GEMMs.
+        fp8_all_layers: Remove BF16 first/last-block exclusions from the selected global TE FP8
+            recipe. This is the regular full-scope Hopper FP8 path for Evo2 7B.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
+        native_nvfp4: Inference-only native Blackwell W4A4 projection policy.
+        native_nvfp4_activation_amax: Optional activation range. Expansions retain a strict
+            no-clipping lower bound; full-policy contractions otherwise use the complete range.
+        native_nvfp4_decode: Keep autoregressive single-token projections in BF16 (default), use
+            low-latency FP8, or use experimental native W4A4 decode.
+        native_mxfp8: Inference-only native Blackwell block-scaled FP8 projection policy.
+        native_mxfp8_decode: Keep autoregressive single-token projections in BF16 (default) or use
+            experimental low-latency per-tensor FP8.
         max_seq_length: Manual sequence-length cap (supersedes auto-sizing; never grows). ``None``
             (default) auto-sizes the engine from the prompt token lengths and grows on demand.
         max_seq_length_num_prompts: When auto-sizing, size from the longest of the first N prompts
             (``<= 0`` = all). A longer later prompt grows the context on demand rather than erroring.
         max_batch_size: Prompt-file chunk size and Megatron setup micro-batch metadata. This does
             not control the number of prompt-file generations or Evo2 native decode concurrency.
-        evo2_batched_decode_size: Opt-in number of same-length Evo2 prompts to keep active for
-            native Hyena next-token decode. ``1`` preserves the original single-request path.
-        use_subquadratic_ops: Use accelerated subquadratic FFT/causal-conv1d kernels in inference,
-            including projection/mixer B2B fusion during prefill.
-        cuda_graph_impl: ``"local"`` (default) uses mcore per-layer decode CUDA graphs; ``"none"``
-            runs decode eagerly (no graph capture) -- mainly for debugging / un-graphed reference runs.
+        evo2_batched_decode_size: Number of variable-length Evo2 prompts to keep active for
+            packed prefill and native Hyena next-token decode. ``1`` preserves single-request execution.
+        use_subquadratic_ops: Use fused Hyena convolution kernels for rectangular/eager prefill compatibility.
+        cuda_graph_impl: ``"local"`` (default) uses MCore decode CUDA graphs; ``"none"`` runs
+            decode eagerly (no graph capture) -- mainly for debugging / un-graphed reference runs.
+        cuda_graph_scope: ``"block"`` (default) captures the complete decoder; ``"layer"`` keeps
+            the per-layer compatibility path. Global FP8/FP4 recipes automatically resolve block
+            scope to layer scope for Transformer Engine quantization-state compatibility.
+        inference_backend: Use packed paged-KV dynamic inference or equal-length static FlashAttention.
         enable_chunked_prefill: Split prompts across multiple prefill forwards when needed.
         inference_dynamic_batching_max_tokens: Optional dynamic-context per-step token budget.
         inference_dynamic_batching_block_size: Paged-KV block size for dynamic inference.
@@ -2357,10 +3153,18 @@ def infer(
         context_parallel_size=context_parallel_size,
         context_parallel_comm_type=context_parallel_comm_type,
         mixed_precision_recipe=mixed_precision_recipe,
+        quantized_param_storage=quantized_param_storage,
+        fp8_all_layers=fp8_all_layers,
         vortex_style_fp8=vortex_style_fp8,
+        native_nvfp4=native_nvfp4,
+        native_nvfp4_activation_amax=native_nvfp4_activation_amax,
+        native_nvfp4_decode=native_nvfp4_decode,
+        native_mxfp8=native_mxfp8,
+        native_mxfp8_decode=native_mxfp8_decode,
         random_seed=random_seed,
         use_subquadratic_ops=use_subquadratic_ops,
         cuda_graph_impl=cuda_graph_impl,
+        cuda_graph_scope=cuda_graph_scope,
     )
     engine_setup_stats = _finish_cuda_phase(engine_setup_started_at_s)
     if not engine_setup_stats.performed:
@@ -2456,6 +3260,7 @@ def infer(
                 inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
                 inference_dynamic_batching_block_size=inference_dynamic_batching_block_size,
                 evo2_batched_decode_size=evo2_batched_decode_size,
+                inference_backend=inference_backend,
                 result_callback=_stream_result if stream_file is not None else None,
             )
             t_batch_elapsed = time.perf_counter() - t_batch_start
@@ -2588,13 +3393,22 @@ def main() -> None:
         output_file=args.output_file,
         stream_output=args.stream_output,
         mixed_precision_recipe=args.mixed_precision_recipe,
+        quantized_param_storage=args.quantized_param_storage,
+        fp8_all_layers=args.fp8_all_layers,
         vortex_style_fp8=args.vortex_style_fp8,
+        native_nvfp4=args.native_nvfp4,
+        native_nvfp4_activation_amax=args.native_nvfp4_activation_amax,
+        native_nvfp4_decode=args.native_nvfp4_decode,
+        native_mxfp8=args.native_mxfp8,
+        native_mxfp8_decode=args.native_mxfp8_decode,
         max_seq_length=max_seq_length,
         max_seq_length_num_prompts=args.max_seq_length_num_prompts,
         max_batch_size=prompt_file_chunk_size,
         evo2_batched_decode_size=prompt_batch_size,
         use_subquadratic_ops=args.use_subquadratic_ops,
         cuda_graph_impl=args.cuda_graph_impl,
+        cuda_graph_scope=args.cuda_graph_scope,
+        inference_backend=args.inference_backend,
         enable_chunked_prefill=args.enable_chunked_prefill,
         inference_dynamic_batching_max_tokens=args.inference_dynamic_batching_max_tokens,
         inference_dynamic_batching_block_size=args.inference_dynamic_batching_block_size,

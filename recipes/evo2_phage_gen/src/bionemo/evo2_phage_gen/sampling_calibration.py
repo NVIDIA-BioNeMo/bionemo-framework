@@ -110,12 +110,13 @@ def build_inference_command(
     max_seq_length: int,
     top_k: int,
     top_p: float,
+    hopper_fp8: bool = False,
 ) -> list[str]:
     """Build one strict target-total-length Evo2 inference command."""
     max_new_tokens = target_length - cell.prefix_length
     if max_new_tokens <= 0:
         raise ValueError("target_length must exceed prefix length")
-    return [
+    command = [
         "torchrun",
         "--nproc_per_node",
         str(tensor_parallel_size),
@@ -144,11 +145,27 @@ def build_inference_command(
         str(max_seq_length),
         "--prompt-batch-size",
         str(prompt_batch_size),
-        "--strict-generation",
-        "--stream-output",
-        "--output-file",
-        str(output_file),
+        "--inference-backend",
+        "dynamic",
     ]
+    if hopper_fp8:
+        command.extend(
+            [
+                "--mixed-precision-recipe",
+                "bf16_with_fp8_current_scaling_mixed",
+                "--fp8-all-layers",
+            ]
+        )
+    command.extend(
+        [
+            "--ignore-eos",
+            "--strict-generation",
+            "--stream-output",
+            "--output-file",
+            str(output_file),
+        ]
+    )
+    return command
 
 
 def validate_cell_output(output_file: Path, prompt_file: Path, *, expected_records: int) -> int:
@@ -189,6 +206,7 @@ def materialize_sweep(
     seed: int,
     prompt_batch_size: int,
     max_seq_length: int,
+    hopper_fp8: bool = False,
 ) -> dict:
     """Materialize the sweep configuration and all cell prompt banks."""
     cells = build_sweep_cells(prefix_lengths, temperatures)
@@ -214,7 +232,7 @@ def materialize_sweep(
 
     cells_path = run_root / "cells.tsv"
     sweep_config = {
-        "schema_version": 1,
+        "schema_version": 2,
         "state": "planned",
         "checkpoint": str(checkpoint.resolve()),
         "reference_start": reference_start,
@@ -228,6 +246,7 @@ def materialize_sweep(
         "seed": int(seed),
         "prompt_batch_size": int(prompt_batch_size),
         "max_seq_length": int(max_seq_length),
+        "inference_precision": "hopper-regular-fp8-all-layers" if hopper_fp8 else "bf16",
         "topology": {
             "gpu_ids": [int(gpu) for gpu in gpu_ids],
             "tensor_parallel_size": int(tensor_parallel_size),
@@ -301,6 +320,7 @@ def _parse_args() -> argparse.Namespace:
     materialize.add_argument("--seed", type=int, default=7)
     materialize.add_argument("--prompt-batch-size", type=int, default=16)
     materialize.add_argument("--max-seq-length", type=int, default=10240)
+    materialize.add_argument("--hopper-fp8", action="store_true")
 
     print_command = subparsers.add_parser("print-command")
     print_command.add_argument("--infer-script", type=Path, required=True)
@@ -317,6 +337,7 @@ def _parse_args() -> argparse.Namespace:
     print_command.add_argument("--max-seq-length", type=int, required=True)
     print_command.add_argument("--top-k", type=int, required=True)
     print_command.add_argument("--top-p", type=float, required=True)
+    print_command.add_argument("--hopper-fp8", action="store_true")
 
     validate = subparsers.add_parser("validate-cell")
     validate.add_argument("--output", type=Path, required=True)
@@ -348,6 +369,7 @@ def main() -> None:
             seed=args.seed,
             prompt_batch_size=args.prompt_batch_size,
             max_seq_length=args.max_seq_length,
+            hopper_fp8=args.hopper_fp8,
         )
         print(json.dumps(sweep_config, sort_keys=True))
     elif args.command == "print-command":
@@ -365,6 +387,7 @@ def main() -> None:
             max_seq_length=args.max_seq_length,
             top_k=args.top_k,
             top_p=args.top_p,
+            hopper_fp8=args.hopper_fp8,
         )
         sys.stdout.buffer.write(b"\0".join(item.encode() for item in command) + b"\0")
     elif args.command == "validate-cell":

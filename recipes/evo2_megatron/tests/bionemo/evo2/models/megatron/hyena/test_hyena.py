@@ -25,13 +25,14 @@ import torch
 from megatron.bridge.training.config import OptimizerConfig, OptimizerConfigOverrideProviderContext, SchedulerConfig
 from megatron.core.inference.utils import InferenceMode
 from megatron.core.optimizer import _get_param_groups, get_standard_config_overrides
-from megatron.core.transformer.enums import CudaGraphScope
+from megatron.core.transformer.enums import CudaGraphScope, InferenceCudaGraphScope
 from megatron.core.transformer.mlp import MLP
+from megatron.core.utils import WrappedTensor
 
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaOptimizerConfigOverrideProvider
 from bionemo.evo2.models.megatron.hyena.hyena_block import HyenaStack
 from bionemo.evo2.models.megatron.hyena.hyena_layer import HyenaLayer
-from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel
+from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel, _static_sequence_len_offset
 
 from .tp_reference import (
     get_tp_reference_hyena_stack_spec,
@@ -51,6 +52,32 @@ class _FakePGCollection:
     dp_cp = None
     intra_dp_cp = None
     intra_expt_dp = None
+
+
+class _TupleIdentity(torch.nn.Module):
+    def forward(self, hidden_states, **kwargs):
+        return hidden_states, None
+
+
+class _RecordingMixer(_TupleIdentity):
+    def __init__(self):
+        super().__init__()
+        self.packed_seq_params = None
+
+    def forward(self, hidden_states, *, packed_seq_params=None, **kwargs):
+        self.packed_seq_params = packed_seq_params
+        return super().forward(hidden_states)
+
+
+class _BiasDropoutIdentity(torch.nn.Module):
+    def forward(self, training, fused):
+        del training, fused
+
+        def apply(output_with_bias, residual, dropout):
+            del residual, dropout
+            return output_with_bias[0]
+
+        return apply
 
 
 @contextlib.contextmanager
@@ -83,10 +110,100 @@ def test_flash_decode_requires_inference_context_when_inference_mode_is_active()
         )
 
 
+def test_static_sequence_len_offset_reuses_graph_stable_storage():
+    context = SimpleNamespace(sequence_len_offset=7)
+
+    first = _static_sequence_len_offset(context, batch_size=3, device=torch.device("cpu"))
+    first_pointer = first.data_ptr()
+    context.sequence_len_offset = 11
+    second = _static_sequence_len_offset(context, batch_size=3, device=torch.device("cpu"))
+
+    assert second.data_ptr() == first_pointer
+    assert second.dtype == torch.int32
+    assert second.tolist() == [11, 11, 11]
+
+
+def test_packed_rope_uses_full_token_count_for_sequence_parallel_input():
+    model = HyenaModel.__new__(HyenaModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(multi_latent_attention=False, flash_decode=False)
+    model.position_embedding_type = "rope"
+    model.decoder = object()
+    model.rotary_pos_emb = MagicMock()
+    model.rotary_pos_emb.get_rotary_seq_len.return_value = 5
+    frequencies = torch.empty(5, 1, 1, 4)
+    model.rotary_pos_emb.return_value = frequencies
+    position_ids = torch.tensor([[0, 1, 2, 0, 1]])
+    sequence_parallel_input = torch.empty(3, 1, 8, dtype=torch.bfloat16)
+    packed_seq_params = SimpleNamespace(qkv_format="thd")
+    fused_frequencies = torch.empty(5, 1, 2, 4, dtype=torch.bfloat16)
+
+    with patch(
+        "bionemo.evo2.models.megatron.hyena.hyena_model.precompute_packed_rope_cos_sin",
+        return_value=fused_frequencies,
+    ) as precompute:
+        _, rotary_pos_emb, _, _, _ = model._preprocess(
+            input_ids=torch.empty(0, dtype=torch.long),
+            position_ids=position_ids,
+            decoder_input=sequence_parallel_input,
+            packed_seq_params=packed_seq_params,
+        )
+
+    assert rotary_pos_emb is fused_frequencies
+    precompute.assert_called_once_with(
+        frequencies,
+        position_ids,
+        total_tokens=position_ids.numel(),
+        dtype=sequence_parallel_input.dtype,
+    )
+
+
+def test_packed_rope_uses_config_dtype_without_pipeline_decoder_input():
+    model = HyenaModel.__new__(HyenaModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        multi_latent_attention=False,
+        flash_decode=False,
+        params_dtype=torch.bfloat16,
+    )
+    model.pre_process = False
+    model.position_embedding_type = "rope"
+    model.decoder = object()
+    model.rotary_pos_emb = MagicMock()
+    model.rotary_pos_emb.get_rotary_seq_len.return_value = 5
+    frequencies = torch.empty(5, 1, 1, 4)
+    model.rotary_pos_emb.return_value = frequencies
+    position_ids = torch.tensor([[0, 1, 2, 0, 1]])
+    packed_seq_params = SimpleNamespace(qkv_format="thd")
+    fused_frequencies = torch.empty(5, 1, 2, 4, dtype=torch.bfloat16)
+
+    with patch(
+        "bionemo.evo2.models.megatron.hyena.hyena_model.precompute_packed_rope_cos_sin",
+        return_value=fused_frequencies,
+    ) as precompute:
+        _, rotary_pos_emb, _, _, _ = model._preprocess(
+            input_ids=torch.empty(0, dtype=torch.long),
+            position_ids=position_ids,
+            decoder_input=None,
+            packed_seq_params=packed_seq_params,
+        )
+
+    assert rotary_pos_emb is fused_frequencies
+    precompute.assert_called_once_with(
+        frequencies,
+        position_ids,
+        total_tokens=position_ids.numel(),
+        dtype=torch.bfloat16,
+    )
+
+
 def test_hyena_stack_does_not_create_full_iteration_manager_for_empty_scope():
     stack = HyenaStack.__new__(HyenaStack)
     torch.nn.Module.__init__(stack)
-    stack.config = SimpleNamespace(cuda_graph_scope=[])
+    stack.config = SimpleNamespace(
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.layer,
+    )
 
     with patch(
         "bionemo.evo2.models.megatron.hyena.hyena_block.CudaGraphManager",
@@ -100,8 +217,14 @@ def test_hyena_stack_does_not_create_full_iteration_manager_for_empty_scope():
 def test_hyena_stack_uses_cudagraph_manager_config_scope():
     stack = HyenaStack.__new__(HyenaStack)
     torch.nn.Module.__init__(stack)
-    stack.config = SimpleNamespace(cuda_graph_scope=[])
-    config = SimpleNamespace(cuda_graph_scope=[CudaGraphScope.full_iteration])
+    stack.config = SimpleNamespace(
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.layer,
+    )
+    config = SimpleNamespace(
+        cuda_graph_scope=[CudaGraphScope.full_iteration],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.layer,
+    )
     manager = object()
 
     with patch(
@@ -114,11 +237,174 @@ def test_hyena_stack_uses_cudagraph_manager_config_scope():
     manager_cls.assert_called_once_with(config)
 
 
+def test_hyena_stack_uses_block_inference_cudagraph_manager():
+    stack = HyenaStack.__new__(HyenaStack)
+    torch.nn.Module.__init__(stack)
+    config = SimpleNamespace(
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.block,
+    )
+    stack.config = config
+    manager = object()
+
+    with patch(
+        "bionemo.evo2.models.megatron.hyena.hyena_block.CudaGraphManager",
+        return_value=manager,
+    ) as manager_cls:
+        stack.create_mcore_cudagraph_manager(config)
+
+    assert stack.cudagraph_manager is manager
+    manager_cls.assert_called_once_with(config)
+
+
+def test_hyena_stack_non_preprocess_forward_honors_explicit_pipeline_input():
+    """A graph-bound PP activation must not be replaced by the stack's stale input tensor."""
+    stack = HyenaStack.__new__(HyenaStack)
+    torch.nn.Module.__init__(stack)
+    stack.eval()
+    stack.pre_process = False
+    stack.input_tensor = torch.zeros(2, 1, 4)
+    stack.layers = torch.nn.ModuleList()
+    stack.final_norm = None
+    stack.config = SimpleNamespace(
+        sequence_parallel=False,
+        fp8=None,
+        fp4=None,
+        recompute_granularity=None,
+    )
+    graph_input = torch.ones(2, 1, 4)
+
+    output = stack.forward(graph_input, attention_mask=None)
+
+    torch.testing.assert_close(output, graph_input)
+
+
+def test_hyena_stack_block_graph_receives_current_pipeline_input():
+    """PP decode replay must copy each newly received activation into its graph input buffer."""
+    stack = HyenaStack.__new__(HyenaStack)
+    torch.nn.Module.__init__(stack)
+    stack.eval()
+    stack.pre_process = False
+    pipeline_input = torch.ones(2, 1, 4)
+    stack.input_tensor = pipeline_input
+    stack.config = SimpleNamespace(
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.block,
+    )
+    stack.cudagraph_manager = MagicMock(return_value=("graph output",))
+    inference_context = SimpleNamespace(
+        evo2_max_batched_decode_requests=1,
+        evo2_batched_decode_enabled=True,
+        total_request_count=1,
+        paused_request_count=0,
+        padded_batch_dimensions=(1, 1),
+        is_static_batching=lambda: False,
+        is_decode_only=lambda: True,
+        using_cuda_graph_this_step=lambda: True,
+    )
+
+    output = stack(
+        hidden_states=WrappedTensor(None),
+        attention_mask=None,
+        inference_context=inference_context,
+    )
+
+    assert output == "graph output"
+    assert stack.cudagraph_manager.call_args.kwargs["cache_key"] == ((1, 1), 1, True)
+    assert stack.cudagraph_manager.call_args.args[2]["hidden_states"] is pipeline_input
+
+
+def test_hyena_stack_block_cuda_graph_cache_key_includes_evo2_request_shape():
+    stack = HyenaStack.__new__(HyenaStack)
+    torch.nn.Module.__init__(stack)
+    stack.eval()
+    stack.pre_process = True
+    stack.config = SimpleNamespace(
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.block,
+    )
+    stack.cudagraph_manager = MagicMock(return_value=("graph output",))
+    padded_batch_dimensions = object()
+    inference_context = SimpleNamespace(
+        evo2_max_batched_decode_requests=4,
+        evo2_batched_decode_enabled=True,
+        total_request_count=2,
+        paused_request_count=0,
+        padded_batch_dimensions=padded_batch_dimensions,
+        is_static_batching=lambda: False,
+        is_decode_only=lambda: True,
+        using_cuda_graph_this_step=lambda: True,
+    )
+    hidden_states = torch.zeros(1)
+
+    output = stack(hidden_states=hidden_states, attention_mask=None, inference_context=inference_context)
+
+    assert output == "graph output"
+    stack.cudagraph_manager.assert_called_once_with(
+        stack,
+        (),
+        {
+            "hidden_states": hidden_states,
+            "attention_mask": None,
+            "inference_context": inference_context,
+            "dynamic_inference_decode_only": True,
+        },
+        cache_key=(padded_batch_dimensions, 2, True),
+    )
+
+
+def test_hyena_stack_block_cuda_graph_cache_key_includes_static_cache_shape():
+    """Static graphs cannot alias contexts with different batch or sequence capacities."""
+    stack = HyenaStack.__new__(HyenaStack)
+    torch.nn.Module.__init__(stack)
+    stack.eval()
+    stack.pre_process = True
+    stack.config = SimpleNamespace(
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.block,
+    )
+    stack.cudagraph_manager = MagicMock(return_value=("graph output",))
+    inference_context = SimpleNamespace(
+        max_batch_size=3,
+        max_sequence_length=4096,
+        is_static_batching=lambda: True,
+        is_decode_only=lambda: True,
+    )
+    hidden_states = torch.zeros(1)
+
+    output = stack(hidden_states=hidden_states, attention_mask=None, inference_context=inference_context)
+
+    assert output == "graph output"
+    assert stack.cudagraph_manager.call_args.kwargs["cache_key"] == ("evo2-static", 3, 4096)
+
+
+def test_hyena_layer_does_not_create_manager_inside_block_inference_graph():
+    layer = HyenaLayer.__new__(HyenaLayer)
+    torch.nn.Module.__init__(layer)
+    layer.config = SimpleNamespace(
+        cuda_graph_impl="local",
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.block,
+    )
+
+    with patch(
+        "bionemo.evo2.models.megatron.hyena.hyena_layer.CudaGraphManager",
+        return_value=object(),
+    ):
+        layer.create_mcore_cudagraph_manager(layer.config)
+
+    assert not hasattr(layer, "cudagraph_manager")
+
+
 def test_hyena_layer_cuda_graph_cache_key_includes_evo2_request_shape():
     layer = HyenaLayer.__new__(HyenaLayer)
     torch.nn.Module.__init__(layer)
     layer.eval()
-    layer.config = SimpleNamespace(cuda_graph_impl="local", cuda_graph_scope=[])
+    layer.config = SimpleNamespace(
+        cuda_graph_impl="local",
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.layer,
+    )
     layer.cudagraph_manager = MagicMock(return_value="graph output")
     padded_batch_dimensions = object()
     inference_context = SimpleNamespace(
@@ -185,6 +471,50 @@ def test_strided_column_shards_round_trip(tp_size: int, stride: int):
     ).movedim(0, -1)
 
     assert torch.equal(restored_output, full_output)
+
+
+def test_hyena_layer_cuda_graph_cache_key_includes_static_cache_shape():
+    layer = HyenaLayer.__new__(HyenaLayer)
+    torch.nn.Module.__init__(layer)
+    layer.eval()
+    layer.config = SimpleNamespace(
+        cuda_graph_impl="local",
+        cuda_graph_scope=[],
+        inference_cuda_graph_scope=InferenceCudaGraphScope.layer,
+    )
+    layer.cudagraph_manager = MagicMock(return_value="graph output")
+    inference_context = SimpleNamespace(
+        max_batch_size=2,
+        max_sequence_length=8192,
+        is_static_batching=lambda: True,
+        is_decode_only=lambda: True,
+    )
+    hidden_states = torch.zeros(1)
+
+    output = layer(hidden_states=hidden_states, attention_mask=None, inference_context=inference_context)
+
+    assert output == "graph output"
+    assert layer.cudagraph_manager.call_args.kwargs["cache_key"] == ("evo2-static", 2, 8192)
+
+
+def test_hyena_layer_forwards_packed_sequence_metadata():
+    layer = HyenaLayer.__new__(HyenaLayer)
+    torch.nn.Module.__init__(layer)
+    layer.transformer_config = SimpleNamespace(params_dtype=torch.float32, bias_dropout_fusion=False)
+    layer.hidden_dropout = 0.0
+    layer.residual_in_fp32 = False
+    layer.norm = torch.nn.Identity()
+    layer.mixer = _RecordingMixer()
+    layer.hyena_bda = _BiasDropoutIdentity()
+    layer.pre_mlp_layernorm = torch.nn.Identity()
+    layer.mlp = _TupleIdentity()
+    layer.mlp_bda = _BiasDropoutIdentity()
+    packed_seq_params = object()
+
+    hidden_states = torch.randn(4, 1, 8)
+    layer.forward(hidden_states, attention_mask=None, packed_seq_params=packed_seq_params)
+
+    assert layer.mixer.packed_seq_params is packed_seq_params
 
 
 def test_weight_decay_conditions():

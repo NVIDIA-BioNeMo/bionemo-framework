@@ -27,6 +27,7 @@ from bionemo.evo2_phage_gen.generation import (
     finalize_ranked_rollout,
     infer_jsonl_to_fasta,
     phix174_prompts,
+    write_inference_prompt_shards,
     write_prompt_sweep_jsonl,
     write_rl_prompt_bank,
     write_sft_likelihood_fasta,
@@ -88,6 +89,19 @@ def test_write_rl_prompt_bank_supports_alternating_and_grouped_mixtures(tmp_path
     assert len({row["id"] for row in alternating_records + grouped_records}) == 8
 
 
+def test_write_rl_prompt_bank_supports_exact_nondivisible_record_count(tmp_path):
+    path = write_rl_prompt_bank(
+        tmp_path / "train.jsonl",
+        prompt_lengths=[4, 6, 8],
+        num_records=5,
+        id_prefix="train",
+    )
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [len(row["messages"][0]["content"]) - 2 for row in records] == [4, 6, 8, 4, 6]
+    assert len({row["id"] for row in records}) == 5
+
+
 def test_write_prompt_sweep_jsonl_repeats_prompts(tmp_path):
     """Prompt JSONL files should be ready for ``infer_evo2 --prompt-file``."""
     paths = write_prompt_sweep_jsonl(tmp_path, prompt_lengths=[4, 6], num_prompts=2, id_prefix="test")
@@ -98,6 +112,38 @@ def test_write_prompt_sweep_jsonl_repeats_prompts(tmp_path):
         {"id": "test_prompt4_0000", "prompt": "+~GAGT"},
         {"id": "test_prompt4_0001", "prompt": "+~GAGT"},
     ]
+
+
+def test_write_inference_prompt_shards_interleaves_lengths_with_exact_total(tmp_path):
+    inputs = write_prompt_sweep_jsonl(
+        tmp_path / "source",
+        prompt_lengths=[4, 6, 8],
+        num_prompts=4,
+        id_prefix="test",
+    )
+
+    shards = write_inference_prompt_shards(
+        inputs,
+        tmp_path / "shards",
+        num_records=10,
+        num_shards=2,
+    )
+
+    records_by_shard = [[json.loads(line) for line in path.read_text().splitlines()] for path in shards]
+    assert [len(records) for records in records_by_shard] == [5, 5]
+    assert [len(record["prompt"]) - 2 for records in records_by_shard for record in records] == [
+        4,
+        6,
+        8,
+        4,
+        6,
+        8,
+        4,
+        6,
+        8,
+        4,
+    ]
+    assert len({record["id"] for records in records_by_shard for record in records}) == 10
 
 
 def test_infer_jsonl_to_fasta_prepends_prompt_and_trims_eos(tmp_path):

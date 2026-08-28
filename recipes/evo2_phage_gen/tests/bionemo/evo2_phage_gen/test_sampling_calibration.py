@@ -110,7 +110,31 @@ def test_build_inference_command_preserves_total_target_length(tmp_path: Path) -
     assert command[command.index("--top-k") + 1] == "17"
     assert command[command.index("--top-p") + 1] == "0.85"
     assert command[command.index("--tensor-parallel-size") + 1] == "1"
+    assert command[command.index("--inference-backend") + 1] == "dynamic"
+    assert "--ignore-eos" in command
     assert "--strict-generation" in command
+
+
+def test_build_inference_command_enables_full_scope_regular_hopper_fp8(tmp_path: Path) -> None:
+    command = build_inference_command(
+        infer_script=tmp_path / "infer.py",
+        checkpoint=tmp_path / "checkpoint",
+        prompt_file=tmp_path / "prompts.jsonl",
+        output_file=tmp_path / "output.jsonl",
+        cell=SweepCell(prefix_length=24, temperature=1.0),
+        target_length=6000,
+        seed=7,
+        tensor_parallel_size=1,
+        master_port=29551,
+        prompt_batch_size=16,
+        max_seq_length=10240,
+        top_k=17,
+        top_p=0.85,
+        hopper_fp8=True,
+    )
+
+    assert command[command.index("--mixed-precision-recipe") + 1] == "bf16_with_fp8_current_scaling_mixed"
+    assert "--fp8-all-layers" in command
 
 
 def test_print_command_cli_emits_complete_nul_delimited_vector(tmp_path: Path) -> None:
@@ -204,7 +228,8 @@ def test_materialize_sweep_config_mismatch_does_not_modify_outputs(tmp_path: Pat
         "prompt_batch_size": 1,
         "max_seq_length": 16,
     }
-    materialize_sweep(**kwargs)
+    config = materialize_sweep(**kwargs)
+    assert config["inference_precision"] == "bf16"
     before = {
         path.relative_to(kwargs["run_root"]): path.read_bytes()
         for path in kwargs["run_root"].rglob("*")
@@ -213,6 +238,8 @@ def test_materialize_sweep_config_mismatch_does_not_modify_outputs(tmp_path: Pat
 
     with pytest.raises(ValueError, match="configuration differs"):
         materialize_sweep(**{**kwargs, "temperatures": [0.9]})
+    with pytest.raises(ValueError, match="configuration differs"):
+        materialize_sweep(**{**kwargs, "hopper_fp8": True})
 
     after = {
         path.relative_to(kwargs["run_root"]): path.read_bytes()

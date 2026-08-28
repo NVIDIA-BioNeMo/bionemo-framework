@@ -72,20 +72,35 @@ def write_rl_prompt_bank(
     path: Path,
     *,
     prompt_lengths: Sequence[int],
-    repeats_per_length: int,
+    repeats_per_length: int | None = None,
+    num_records: int | None = None,
     reference_start: str = PHIX174_REFERENCE_START,
     prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
     id_prefix: str = "rl-prompt",
     grouped: bool = False,
 ) -> Path:
-    """Write an equal-mixture prompt bank for NeMo-RL."""
-    if repeats_per_length <= 0:
+    """Write an interleaved, near-equal prompt mixture for NeMo-RL."""
+    if (repeats_per_length is None) == (num_records is None):
+        raise ValueError("exactly one of repeats_per_length and num_records must be provided")
+    if not prompt_lengths:
+        raise ValueError("prompt_lengths must not be empty")
+    if repeats_per_length is not None and repeats_per_length <= 0:
         raise ValueError("repeats_per_length must be positive")
+    if num_records is not None and num_records <= 0:
+        raise ValueError("num_records must be positive")
     prompts_by_length = phix174_prompts(reference_start, prompt_lengths, prompt_prefix=prompt_prefix)
-    if grouped:
-        order = [length for length in prompt_lengths for _ in range(repeats_per_length)]
+    if repeats_per_length is not None:
+        if grouped:
+            order = [length for length in prompt_lengths for _ in range(repeats_per_length)]
+        else:
+            order = [length for _ in range(repeats_per_length) for length in prompt_lengths]
+    elif grouped:
+        base_count, extra_count = divmod(num_records, len(prompt_lengths))
+        order = [
+            length for index, length in enumerate(prompt_lengths) for _ in range(base_count + (index < extra_count))
+        ]
     else:
-        order = [length for _ in range(repeats_per_length) for length in prompt_lengths]
+        order = [prompt_lengths[index % len(prompt_lengths)] for index in range(num_records)]
     counters = dict.fromkeys(prompt_lengths, 0)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
@@ -98,6 +113,53 @@ def write_rl_prompt_bank(
             }
             handle.write(json.dumps(record) + "\n")
     return path
+
+
+def write_inference_prompt_shards(
+    jsonl_paths: Sequence[Path],
+    output_dir: Path,
+    *,
+    num_records: int,
+    num_shards: int,
+) -> list[Path]:
+    """Interleave prompt strata and split an exact-size inference bank into balanced shards."""
+    if not jsonl_paths:
+        raise ValueError("at least one input JSONL path is required")
+    if num_records <= 0:
+        raise ValueError("num_records must be positive")
+    if num_shards <= 0 or num_shards > num_records:
+        raise ValueError("num_shards must be between one and num_records")
+
+    groups = [
+        [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()] for path in jsonl_paths
+    ]
+    if any(not group for group in groups):
+        raise ValueError("every input JSONL path must contain at least one prompt")
+
+    records: list[dict] = []
+    for record_index in range(max(len(group) for group in groups)):
+        for group in groups:
+            if record_index < len(group):
+                records.append(group[record_index])
+                if len(records) == num_records:
+                    break
+        if len(records) == num_records:
+            break
+    if len(records) != num_records:
+        raise ValueError(f"requested {num_records} records but the inputs contain only {len(records)}")
+    record_ids = [record.get("id") for record in records]
+    if any(record_id is None for record_id in record_ids) or len(set(record_ids)) != len(record_ids):
+        raise ValueError("input prompt IDs must be present and unique")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for shard_index in range(num_shards):
+        start = shard_index * num_records // num_shards
+        end = (shard_index + 1) * num_records // num_shards
+        output_path = output_dir / f"dp{shard_index}.jsonl"
+        output_path.write_text("".join(json.dumps(record) + "\n" for record in records[start:end]))
+        paths.append(output_path)
+    return paths
 
 
 def ensure_paper_useful_rl_prompt_files(
@@ -495,11 +557,13 @@ def main() -> None:
 
     rl_bank_parser = subparsers.add_parser(
         "write-rl-prompts",
-        help="Write an equal-mixture PhiX174 prompt bank for NeMo-RL",
+        help="Write an interleaved near-equal PhiX174 prompt bank for NeMo-RL",
     )
     rl_bank_parser.add_argument("--output", type=Path, required=True)
     rl_bank_parser.add_argument("--prompt-lengths", type=int, nargs="+", required=True)
-    rl_bank_parser.add_argument("--repeats-per-length", type=int, required=True)
+    rl_bank_size = rl_bank_parser.add_mutually_exclusive_group(required=True)
+    rl_bank_size.add_argument("--repeats-per-length", type=int)
+    rl_bank_size.add_argument("--num-records", type=int)
     rl_bank_parser.add_argument("--reference-start", type=str, default=PHIX174_REFERENCE_START)
     rl_bank_parser.add_argument("--prompt-prefix", type=str, default=DEFAULT_PROMPT_PREFIX)
     rl_bank_parser.add_argument("--id-prefix", type=str, default="rl-prompt")
@@ -512,6 +576,15 @@ def main() -> None:
     prompt_parser.add_argument("--prompt-prefix", type=str, default=DEFAULT_PROMPT_PREFIX)
     prompt_parser.add_argument("--num-prompts", type=int, default=1000)
     prompt_parser.add_argument("--id-prefix", type=str, default="phix174")
+
+    shard_parser = subparsers.add_parser(
+        "write-inference-shards",
+        help="Interleave prompt-length files into exact-size inference shards",
+    )
+    shard_parser.add_argument("--input-jsonl", type=Path, nargs="+", required=True)
+    shard_parser.add_argument("--output-dir", type=Path, required=True)
+    shard_parser.add_argument("--num-records", type=int, required=True)
+    shard_parser.add_argument("--num-shards", type=int, required=True)
 
     fasta_parser = subparsers.add_parser("jsonl-to-fasta", help="Convert infer_evo2 JSONL outputs to FASTA")
     fasta_parser.add_argument("--input-jsonl", type=Path, nargs="*", default=[])
@@ -614,6 +687,7 @@ def main() -> None:
                 args.output,
                 prompt_lengths=args.prompt_lengths,
                 repeats_per_length=args.repeats_per_length,
+                num_records=args.num_records,
                 reference_start=args.reference_start,
                 prompt_prefix=args.prompt_prefix,
                 id_prefix=args.id_prefix,
@@ -628,6 +702,14 @@ def main() -> None:
             prompt_prefix=args.prompt_prefix,
             num_prompts=args.num_prompts,
             id_prefix=args.id_prefix,
+        ):
+            print(path)
+    elif args.command == "write-inference-shards":
+        for path in write_inference_prompt_shards(
+            args.input_jsonl,
+            args.output_dir,
+            num_records=args.num_records,
+            num_shards=args.num_shards,
         ):
             print(path)
     elif args.command == "jsonl-to-fasta":

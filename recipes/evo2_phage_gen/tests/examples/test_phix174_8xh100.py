@@ -139,6 +139,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "model_variant": "7b-base",
         "base_checkpoint": "evo2/7b-8k:1.0",
         "model_size": "evo2_7b_base",
+        "inference_precision": "bf16",
         "whole_genome": True,
         "safety_screen": "current configured databases",
         "final_generation_count": 1000,
@@ -234,6 +235,13 @@ def test_dry_run(tmp_path: Path) -> None:
     reporting = log.index("command: evo2_phage_generation finalize-rollout")
     assert deduplication < likelihood < safety < target < diagnostic < clustering < reporting
     assert "/rollout/deduplication/representatives.fasta" in log
+    likelihood_command = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: torchrun " in line and "predict_evo2" in line
+    )
+    assert likelihood_command[likelihood_command.index("--micro-batch-size") + 1] == "8"
+    assert "--use-subquadratic-ops" not in likelihood_command
 
     sft_command = next(
         shlex.split(line.partition("command: ")[2])
@@ -245,6 +253,7 @@ def test_dry_run(tmp_path: Path) -> None:
     assert sft_command[sft_command.index("--most-recent-k") + 1] == "1"
     assert sft_command[sft_command.index("--checkpoint-metric-name") + 1] == "lm loss"
     assert "--strict-checkpoint-metric" in sft_command
+    assert "--use-subquadratic-ops" in sft_command
     assert sft_command[sft_command.index("--checkpoint-metric-step-tolerance") + 1] == "1"
     assert "--wandb-project" not in sft_command
 
@@ -295,6 +304,55 @@ def test_dry_run(tmp_path: Path) -> None:
     )
     assert conversion[conversion.index("--nemo2-ckpt-dir") + 1] == "<downloaded-evo2-7b-8k>"
     assert conversion[conversion.index("--model-size") + 1] == "evo2_7b_base"
+
+
+def test_hopper_fp8_inference_is_forwarded_only_to_endpoint_workflows(tmp_path: Path) -> None:
+    result_root = tmp_path / "hopper-fp8"
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--hopper-fp8-inference",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        env={
+            **os.environ,
+            "MODEL_VARIANT": "7b-base",
+            "NUM_GPUS": "8",
+            "NUM_CPUS": "96",
+            "SFT_TENSOR_PARALLEL_SIZE": "2",
+            "NEMO_RL_RAY_NUM_CPUS": "96",
+            "API_KEY": "test-api-key",
+            "NVIDIA_API_KEY": "test-nvidia-api-key",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["inference_precision"] == "hopper-regular-fp8-all-layers"
+
+    log = (result_root / "RUNLOG.md").read_text()
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    endpoint_commands = [command for command in commands if "--prompt-file" in command or "predict_evo2" in command]
+    assert endpoint_commands
+    for command in endpoint_commands:
+        assert command[command.index("--mixed-precision-recipe") + 1] == "bf16_with_fp8_current_scaling_mixed"
+        assert "--fp8-all-layers" in command
+
+    calibration = next(
+        command for command in commands if any(part.endswith("run_sft_sampling_sweep.sh") for part in command)
+    )
+    assert "HOPPER_FP8_INFERENCE=1" in calibration
+    gdpo_commands = [command for command in commands if command[:1] == ["evo2_phage_run_gdpo"]]
+    assert gdpo_commands
+    assert all("--fp8-all-layers" not in command for command in gdpo_commands)
 
 
 def test_wandb_dry_run(tmp_path: Path) -> None:
@@ -385,14 +443,63 @@ def test_single_gpu_plan(tmp_path: Path) -> None:
     assert sft[sft.index("--seq-length") + 1] == "10240"
 
     rollout = [command for command in commands if command[:1] == ["env"] and "--prompt-file" in command]
-    assert len(rollout) == 2
-    assert [command[1] for command in rollout] == ["CUDA_VISIBLE_DEVICES=0", "CUDA_VISIBLE_DEVICES=0"]
+    assert len(rollout) == 1
+    assert [command[1] for command in rollout] == ["CUDA_VISIBLE_DEVICES=0"]
     assert [Path(command[command.index("--prompt-file") + 1]).name for command in rollout] == [
         "dp0.jsonl",
-        "dp1.jsonl",
     ]
-    assert [command[command.index("--seed") + 1] for command in rollout] == ["7", "1000010"]
-    assert "split the equal prompt mixture (16 24) into 2 deterministic shards over 1 GPU(s)" in log
+    assert [command[command.index("--seed") + 1] for command in rollout] == ["7"]
+    assert all(command[command.index("--inference-backend") + 1] == "dynamic" for command in rollout)
+    assert all("--ignore-eos" in command for command in rollout)
+    assert "interleave prompt lengths (16 24) across 1 deterministic mixed-length shard(s)" in log
+
+
+def test_sampling_selection_allows_length_count_that_does_not_divide_batches(tmp_path: Path) -> None:
+    source = tmp_path / "thirteen-length-selection.yaml"
+    source.write_text(
+        """\
+temperature: 0.9
+top_k: 17
+top_p: 0.85
+max_new_tokens: 5800
+prompt_lengths: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+rl_seed: 101
+rollout_seed: 7
+seed_stride: 11
+"""
+    )
+    result_root = tmp_path / "result"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"MODEL_VARIANT", "NUM_CPUS", "NUM_GPUS", "SFT_TENSOR_PARALLEL_SIZE"}
+    }
+    env.update({"NUM_GPUS": "1", "NUM_CPUS": "72"})
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--result-root",
+            str(result_root),
+            "--sampling-selection",
+            str(source),
+        ],
+        cwd=RECIPE_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
+    assert [command[command.index("--num-records") + 1] for command in prompt_banks] == ["14", "96"]
+    assert "interleave prompt lengths (0 1 2 3 4 5 6 7 8 9 10 11 12)" in log
 
 
 def test_dry_run_supports_preferred_7b_1m_variant(tmp_path: Path) -> None:
@@ -496,12 +603,11 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
     prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
     assert len(prompt_banks) == 2
     assert all(
-        command[command.index("--prompt-lengths") + 1 : command.index("--repeats-per-length")]
-        == ["4", "8", "16", "24"]
+        command[command.index("--prompt-lengths") + 1 : command.index("--num-records")] == ["4", "8", "16", "24"]
         for command in prompt_banks
     )
-    assert prompt_banks[0][prompt_banks[0].index("--repeats-per-length") + 1] == "3"
-    assert prompt_banks[1][prompt_banks[1].index("--repeats-per-length") + 1] == "24"
+    assert prompt_banks[0][prompt_banks[0].index("--num-records") + 1] == "12"
+    assert prompt_banks[1][prompt_banks[1].index("--num-records") + 1] == "96"
 
     gdpo = next(command for command in commands if command[:1] == ["evo2_phage_run_gdpo"])
     for override in (

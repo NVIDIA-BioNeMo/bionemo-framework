@@ -74,6 +74,16 @@ policy:
         # so validation/train steps do not reuse the same sampling seed.
         seed: 42
         seed_stride: 1000003
+        # Whole-genome rollouts require the requested completion length. Suppressing EOS also
+        # keeps every 12-request DP shard on the same packed dynamic decode schedule.
+        ignore_eos: true
+        strict_generation: true
+
+  # This NeMo-RL switch controls gradient-bearing policy/log-prob packing, not rollout packing.
+  # Keep it off until Evo2's packed loss/backward path has a separate correctness and throughput A/B;
+  # the generation adapter above already uses packed dynamic prefill and batched recurrent decode.
+  sequence_packing:
+    enabled: false
 
 data:
   train:
