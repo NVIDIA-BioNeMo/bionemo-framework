@@ -19,6 +19,8 @@ Record added, omitted, or redefined terms; their evidence and consequences; cont
 
 Before the full run, execute a small full-shape preflight with positive and failure controls. Confirm every enabled reward runs, produces finite values in `[0, 1]`, is logged separately, and handles short genomes, missing genes/ORFs, empty tool output, invalid observations, and tool failure without crashing or receiving accidental positive credit. Confirm checkpoint writing and restart.
 
+Retain the first sampled EOD and its log-probability in each row's policy trajectory, mask synthetic padding, and score biological sequence only before EOD. Size generation `max_model_len` to the longest tokenized prompt plus `max_new_tokens`, rounded to the allocator block boundary. Select paged-KV offset width from each view's reachable strided storage span; keep MCore's original append for spans at or below signed `INT32_MAX` and widen pointer operands before multiplication above it.
+
 Treat a pilot log containing `batched decode group failed` with `requires same-length prompts` as
 an operational failure even if generation falls back successfully. Stable-partition native adapter
 inputs into same-token-length groups, restore results to their original indices, and rerun the

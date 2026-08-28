@@ -353,6 +353,7 @@ def test_dry_run(tmp_path: Path) -> None:
     gdpo = gdpo_commands[0]
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
     assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
+    assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
 
     conversion = next(
         shlex.split(line.partition("command: ")[2])
@@ -751,6 +752,7 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
         "policy.generation.temperature=0.9",
         "policy.generation.top_k=17",
         "policy.generation.top_p=0.85",
+        "policy.generation.mcore_generation_config.max_model_len=5888",
         "policy.generation.mcore_generation_config.generation_adapter_config.seed=101",
         "policy.generation.mcore_generation_config.generation_adapter_config.seed_stride=11",
     ):

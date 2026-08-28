@@ -225,6 +225,32 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-018-terminal-eod-trajectory",
+      "prompt": "One row in a batched Evo2 GDPO rollout samples A,C,EOD while another row keeps decoding. Define the shorter row's policy trajectory, loss mask, and biological QC input.",
+      "expected_output": "Retain the first EOD as a learned action while masking padding and excluding EOD and later physical samples from QC.",
+      "assertions": [
+        "The first EOD token and its sampled log-probability remain in the row-local policy trajectory.",
+        "Tokens and log-probabilities produced physically after that row's EOD are discarded without truncating other rows.",
+        "Synthetic flattening padding has zero action loss while the terminal EOD has action loss enabled.",
+        "Biological QC scores only the nucleotide text before EOD."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-019-paged-kv-capacity",
+      "prompt": "An Evo2 pilot passes at 48 requests but corrupts output at 96; its strided per-layer KV view spans 4,029,677,568 elements. The generation context is 10,240 tokens although the longest prompt plus generation is 5,476. Diagnose both capacity issues without shrinking the intended rollout.",
+      "expected_output": "Right-size the context and widen only oversized paged-KV pointer arithmetic, then rerun full shape.",
+      "assertions": [
+        "The response derives max_model_len from the longest tokenized prompt plus max_new_tokens, rounded to the allocator block boundary.",
+        "It selects index width from reachable strided storage span rather than request count or tensor numel.",
+        "It widens pointer operands before multiplication above signed INT32_MAX while preserving MCore's safe narrow path.",
+        "It requires valid full-shape outputs and finite log-probabilities after the change."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

@@ -220,6 +220,7 @@ SAMPLING_SEED_STRIDE=
 SAMPLING_PROMPT_LABEL=
 SAMPLING_TRAIN_RECORDS=
 SAMPLING_FINAL_PER_STRATUM=
+RL_MAX_MODEL_LEN=
 declare -a SAMPLING_PROMPT_LENGTHS=()
 declare -a SAMPLING_PROMPT_ANCHORS=()
 mkdir -p "${RESULT_ROOT}" "${STATE_DIR}" "${STAGE_DIR}"
@@ -360,8 +361,10 @@ try:
     if len({name for name, _ in anchors}) != len(anchors):
         raise ValueError("prompt anchor names must be unique")
     strata = len(prompt_lengths) * len(anchors)
-    if max_new_tokens + max(prompt_lengths) > 10240:
-        raise ValueError("max_new_tokens plus the longest prompt exceeds the 10,240-token model context")
+    if max_new_tokens + max(prompt_lengths) + 2 > 10240:
+        raise ValueError(
+            "max_new_tokens plus the longest prompt and +~ direction prefix exceeds the 10,240-token model context"
+        )
 except (OSError, ValueError, yaml.YAMLError) as error:
     print(f"Invalid sampling selection {path}: {error}", file=sys.stderr)
     raise SystemExit(2) from error
@@ -386,7 +389,7 @@ PY
 }
 
 load_sampling_selection() {
-  local fields
+  local fields longest_prompt_length=0 minimum_model_length prompt_length
   if [[ -s "${SAMPLING_SELECTION}" ]]; then
     fields="$(sampling_selection_fields "${SAMPLING_SELECTION}")" || return
   elif [[ "${DRY_RUN}" == "1" ]]; then
@@ -401,6 +404,12 @@ load_sampling_selection() {
     SAMPLING_TRAIN_RECORDS SAMPLING_FINAL_PER_STRATUM <<< "${fields}"
   read -r -a SAMPLING_PROMPT_LENGTHS <<< "${SAMPLING_PROMPT_LENGTHS_TEXT}"
   read -r -a SAMPLING_PROMPT_ANCHORS <<< "${SAMPLING_PROMPT_ANCHORS_TEXT}"
+  for prompt_length in "${SAMPLING_PROMPT_LENGTHS[@]}"; do
+    ((prompt_length > longest_prompt_length)) && longest_prompt_length="${prompt_length}"
+  done
+  # Include the two-token +~ direction prefix, then round to the cache block boundary.
+  minimum_model_length="$((SAMPLING_MAX_NEW_TOKENS + longest_prompt_length + 2))"
+  RL_MAX_MODEL_LEN="$((((minimum_model_length + 255) / 256) * 256))"
 }
 
 if [[ "${DRY_RUN}" != "1" ]]; then
@@ -915,7 +924,7 @@ stage_40() {
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else

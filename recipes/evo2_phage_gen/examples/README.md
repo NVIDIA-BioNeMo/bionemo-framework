@@ -137,6 +137,12 @@ anchor×length strata. Validation independently contains the same mixture. The 1
 rollout uses 250 prompts per stratum: two 500-record, same-length files alternate anchors and combine
 to exactly 1,000 records.
 
+The launcher sets `max_model_len` to the smallest 256-token boundary covering the longest selected
+prompt, its two-token `+~` prefix, and `max_new_tokens` (5,632 with the defaults), rather than
+allocating the unused remainder of the 10,240-token SFT context. Native RL trajectories retain the
+first sampled EOD and its log-probability, mask only synthetic padding, and exclude EOD and any
+post-EOD physical samples from biological QC.
+
 To stop after the sweep and scoring, before prompt banks or RL are created, run:
 
 ```bash
