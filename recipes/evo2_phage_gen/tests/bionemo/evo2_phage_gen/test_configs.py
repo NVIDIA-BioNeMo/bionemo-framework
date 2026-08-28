@@ -248,11 +248,20 @@ def test_phix_example_documents_every_gdpo_objective():
     config = yaml.safe_load((RECIPE_ROOT / "configs" / "gdpo_phage_megatron.yaml").read_text())
     readme = (RECIPE_ROOT / "examples" / "README.md").read_text()
     heading = "## Current PhiX174 GDPO score definitions"
+    implementation_heading = "### Objective implementation map"
 
     assert heading in readme
     score_section = readme.split(heading, maxsplit=1)[1]
+    assert implementation_heading in score_section
+    implementation_section = score_section.split(implementation_heading, maxsplit=1)[1].split("### ", maxsplit=1)[0]
+    assert "../configs/gdpo_phage_megatron.yaml" in implementation_section
+    assert "gdpo_objective_scores_from_scored" in implementation_section
     for objective in config["env"]["phage_qc"]["gdpo_objectives"]:
         assert f"`{objective['name']}`" in score_section
+        assert f"| `{objective['name']}` |" in implementation_section
+    assert implementation_section.count("../src/bionemo/evo2_phage_gen/") >= len(
+        config["env"]["phage_qc"]["gdpo_objectives"]
+    )
     for evidence in ("Sinsheimervirus", "5,339", "5,359", "5,388", "5,494", "FASTA"):
         assert evidence in score_section
 
