@@ -15,8 +15,12 @@ uv venv --python 3.12 --clear --system-site-packages
 # 2. Activate the environment
 source .venv/bin/activate
 
-# 3. Keep warp-lang<1.13.0 because subquadratic-ops-torch 0.2.0 uses wp.context removed in 1.13.
-uv pip install 'warp-lang<1.13.0'
+# 3. Pin warp-lang to a version that still exposes wp.LOG_WARNING / wp.config.log_level.
+# subquadratic-ops-torch-cu13 0.3.0 (resolved by the unpinned dependency below) sets
+# `wp.config.log_level = wp.LOG_WARNING` in implicit_filter.py; those symbols only exist in
+# warp-lang 1.14+ (absent from 1.0.x through 1.13.x). A floor of 1.14 is therefore required.
+# Keep a defensive upper cap since warp 1.17+ has not been validated against 0.3.0.
+uv pip install 'warp-lang>=1.14,<1.17'
 
 # 4. Install build requirements against the Transformer Engine already supplied by the image. An image without
 # Transformer Engine intentionally produces an empty constraints file.
