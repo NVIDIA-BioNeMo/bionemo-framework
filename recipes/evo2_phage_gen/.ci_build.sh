@@ -15,21 +15,23 @@ uv venv --python 3.12 --clear --system-site-packages
 # 2. Activate the environment
 source .venv/bin/activate
 
-# 3. Pin warp-lang<1.12.0. subquadratic-ops-torch accesses wp.LOG_WARNING,
-# which Warp removed in 1.12.
-uv pip install 'warp-lang<1.12.0'
-
-# 4. Install build requirements against the Transformer Engine already supplied by the image. An image without
-# Transformer Engine intentionally produces an empty constraints file.
-if ! pip freeze | grep -E '^transformer[-_]engine([= @]|$)' > pip-constraints.txt; then
-    : > pip-constraints.txt
-    echo "transformer-engine is not installed; continuing with an empty pip-constraints.txt" >&2
-fi
-# Also pin warp-lang to prevent upgrade during recipe install
+# 3. Create constraints file upfront so ALL installs respect warp-lang<1.12.0
+# subquadratic-ops-torch accesses wp.LOG_WARNING, which Warp removed in 1.12.
+: > pip-constraints.txt
 echo "warp-lang<1.12.0" >> pip-constraints.txt
+
+# Also pin transformer_engine if present
+if pip freeze | grep -qE '^transformer[-_]engine([= @]|$)'; then
+    pip freeze | grep -E '^transformer[-_]engine([= @]|$)' >> pip-constraints.txt
+fi
+
+# 4. Install warp-lang with constraints
+uv pip install -c pip-constraints.txt 'warp-lang<1.12.0'
+
+# 5. Install build requirements
 uv pip install -c pip-constraints.txt -c security_constraints.txt -r build_requirements.txt --no-build-isolation
 
-# 5. Install the recipe with all remaining dependencies, including test extras.
+# 6. Install the recipe with all remaining dependencies, including test extras
 uv pip install -c pip-constraints.txt -c security_constraints.txt -e '.[test]' --no-build-isolation
 
 # The resolved causal-conv1d wheel is usually usable. Some Torch nightlies can
@@ -72,14 +74,14 @@ print(re.sub(r"[^A-Za-z0-9._-]+", "_", raw))
         echo "expected exactly one cached causal-conv1d wheel, found ${#causal_conv1d_wheels[@]}" >&2
         exit 1
     fi
-    uv pip install --no-deps --reinstall-package causal-conv1d "${causal_conv1d_wheels[0]}"
+    uv pip install -c pip-constraints.txt -c security_constraints.txt --no-deps --reinstall-package causal-conv1d "${causal_conv1d_wheels[0]}"
     python -c 'import causal_conv1d'
 fi
 
-# 6. Apply the recipe's Evo2 support to the configured NeMo-RL source, then install it once.
+# 7. Apply the recipe's Evo2 support to the configured NeMo-RL source, then install it once.
 evo2_phage_setup_nemo_rl --force-reinstall
 
-# 7. CI starts from the base devcontainer image, so keep native verifier tools
+# 8. CI starts from the base devcontainer image, so keep native verifier tools
 # recipe-local instead of requiring apt/conda or a custom image. Installing into
 # .venv/bin makes them available whenever .ci_test_env.sh activates the venv.
 evo2_phage_prepare_external_assets \
