@@ -28,3 +28,6 @@ uv pip install -c pip-constraints.txt -r build_requirements.txt --no-build-isola
 
 # 6. Install the recipe with all remaining dependencies, including test extras
 uv pip install -c pip-constraints.txt -e '.[test]' --no-build-isolation
+
+# 7. Force reinstall warp-lang to ensure constraint is enforced after all deps
+uv pip install -c pip-constraints.txt --reinstall-package warp-lang 'warp-lang<1.12.0'

@@ -34,6 +34,9 @@ uv pip install -c pip-constraints.txt -c security_constraints.txt -r build_requi
 # 6. Install the recipe with all remaining dependencies, including test extras
 uv pip install -c pip-constraints.txt -c security_constraints.txt -e '.[test]' --no-build-isolation
 
+# 7. Force reinstall warp-lang to ensure constraint is enforced after all deps
+uv pip install -c pip-constraints.txt -c security_constraints.txt --reinstall-package warp-lang 'warp-lang<1.12.0'
+
 # The resolved causal-conv1d wheel is usually usable. Some Torch nightlies can
 # expose a binary-ABI mismatch at import time; compile only in that case and
 # retain the resulting wheel in BuildKit's persistent uv cache.
@@ -78,10 +81,10 @@ print(re.sub(r"[^A-Za-z0-9._-]+", "_", raw))
     python -c 'import causal_conv1d'
 fi
 
-# 7. Apply the recipe's Evo2 support to the configured NeMo-RL source, then install it once.
+# 8. Apply the recipe's Evo2 support to the configured NeMo-RL source, then install it once.
 evo2_phage_setup_nemo_rl --force-reinstall
 
-# 8. CI starts from the base devcontainer image, so keep native verifier tools
+# 9. CI starts from the base devcontainer image, so keep native verifier tools
 # recipe-local instead of requiring apt/conda or a custom image. Installing into
 # .venv/bin makes them available whenever .ci_test_env.sh activates the venv.
 evo2_phage_prepare_external_assets \
