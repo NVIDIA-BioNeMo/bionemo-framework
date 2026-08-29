@@ -5,7 +5,9 @@ torchao!=0.14.0
 torchdata
 torchmetrics
 tqdm
-transformers
+# Stay on transformers 5.x but exclude 5.16+: the 5.16.0/5.16.1 releases regressed
+# return_overflowing_tokens windowing (stride yielded only the final overflow window).
+transformers>=5.0.0,<5.16
 wandb
 zstandard
 nvdlfw_inspect @ git+https://github.com/NVIDIA/nvidia-dlfw-inspect
