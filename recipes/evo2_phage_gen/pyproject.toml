@@ -185,6 +185,9 @@ override-dependencies = [
     # Avoid optional log-pattern-mining dependency conflicts from nvidia-resiliency-ext.
     "logsage; sys_platform == 'never'",
     "drain3; sys_platform == 'never'",
+    # Pin warp-lang<1.12.0 because subquadratic-ops-torch accesses wp.LOG_WARNING,
+    # which Warp removed in 1.12.
+    "warp-lang<1.12.0",
 ]
 
 [tool.uv.sources]
