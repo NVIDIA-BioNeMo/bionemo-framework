@@ -15,7 +15,7 @@ uv venv --python 3.12 --clear --system-site-packages
 # 2. Activate the environment
 source .venv/bin/activate
 
-# 3. Keep warp-lang<1.12.0. subquadratic-ops-torch accesses wp.LOG_WARNING,
+# 3. Pin warp-lang<1.12.0. subquadratic-ops-torch accesses wp.LOG_WARNING,
 # which Warp removed in 1.12.
 uv pip install 'warp-lang<1.12.0'
 
@@ -25,6 +25,8 @@ if ! pip freeze | grep -E '^transformer[-_]engine([= @]|$)' > pip-constraints.tx
     : > pip-constraints.txt
     echo "transformer-engine is not installed; continuing with an empty pip-constraints.txt" >&2
 fi
+# Also pin warp-lang to prevent upgrade during recipe install
+echo "warp-lang<1.12.0" >> pip-constraints.txt
 uv pip install -c pip-constraints.txt -c security_constraints.txt -r build_requirements.txt --no-build-isolation
 
 # 5. Install the recipe with all remaining dependencies, including test extras.

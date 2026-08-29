@@ -16,6 +16,8 @@ uv pip install 'warp-lang<1.12.0'
 
 # 4. Install build requirements and pin transformer_engine
 pip freeze | grep transformer_engine > pip-constraints.txt
+# Also pin warp-lang to prevent upgrade during recipe install
+echo "warp-lang<1.12.0" >> pip-constraints.txt
 uv pip install -r build_requirements.txt --no-build-isolation
 
 # 5. Install the recipe with all remaining dependencies, including test extras
