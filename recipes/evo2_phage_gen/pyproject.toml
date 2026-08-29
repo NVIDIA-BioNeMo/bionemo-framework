@@ -88,6 +88,10 @@ dependencies = [
     "seaborn",
     # Extracts native tools distributed as modern .conda packages.
     "zstandard",
+
+    # Pin warp-lang<1.12.0 because subquadratic-ops-torch accesses wp.LOG_WARNING,
+    # which Warp removed in 1.12.
+    "warp-lang<1.12.0",
 ]
 
 [project.optional-dependencies]
