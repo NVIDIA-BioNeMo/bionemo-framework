@@ -10,8 +10,9 @@ uv venv --clear --system-site-packages
 # 2. Activate the environment
 source .venv/bin/activate
 
-# 3. Pin warp-lang<1.13.0 (subquadratic-ops-torch 0.2.0 uses wp.context removed in 1.13)
-uv pip install 'warp-lang<1.13.0'
+# 3. Pin warp-lang<1.12.0. subquadratic-ops-torch accesses wp.LOG_WARNING,
+# which Warp removed in 1.12.
+uv pip install 'warp-lang<1.12.0'
 
 # 4. Install build requirements and pin transformer_engine
 pip freeze | grep transformer_engine > pip-constraints.txt
