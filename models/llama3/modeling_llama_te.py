@@ -245,9 +245,12 @@ class NVLlamaModel(NVLlamaPreTrainedModel):
         )
 
         # We use TE's RotaryPositionEmbedding, but we ensure that we use the same inv_freq as the original
-        # LlamaRotaryEmbedding.
+        # LlamaRotaryEmbedding. TE registers this buffer as persistent by default; re-register it as a
+        # non-persistent buffer so it is recomputed deterministically from config instead of being
+        # round-tripped through the checkpoint. This matches how transformers 5 (meta-device) reloads of
+        # this model treat the buffer, and keeps its persistence consistent across transformers 4 and 5.
         self.rotary_emb = RotaryPositionEmbedding(config.hidden_size // config.num_attention_heads)
-        self.rotary_emb.inv_freq = LlamaRotaryEmbedding(config=config).inv_freq
+        self.rotary_emb.register_buffer("inv_freq", LlamaRotaryEmbedding(config=config).inv_freq, persistent=False)
         self._rotary_inv_freq_needs_init = self.rotary_emb.inv_freq.device.type == "meta"
 
         self._fp8_recipe: transformer_engine.common.recipe.Recipe | None = None
