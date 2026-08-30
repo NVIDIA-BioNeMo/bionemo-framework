@@ -1,0 +1,37 @@
+# Training config
+model_name: ???
+micro_batch_size: ???
+max_seq_length: 1024
+data_path: .
+num_train_steps: ???
+
+# WandB config
+wandb_init_args:
+  name: ???
+
+# FSDP config
+use_fsdp: true
+fully_shard_kwargs:
+  zero_dp_strategy: "optim_grads_params"
+  calculate_per_token_loss: false
+  init_model_with_meta_device: true
+  check_for_nan_in_grad: true
+  grad_reduce_in_fp32: false
+  preserve_fp32_weights: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  sync_grads_each_step: true
+  average_in_collective: false
+
+# Optimizer config
+adamw_kwargs:
+  lr: 4e-4
+  fused: true
+  betas: [0.9, 0.98]
+  eps: 1e-8
+  weight_decay: 0.01
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_training_steps: 500_000

@@ -1,0 +1,18 @@
+defaults:
+  - defaults
+
+# Training config
+model_name: meta-llama/Llama-2-7b-hf
+# model_name: meta-llama/Llama-2-7b-hf
+micro_batch_size: 2
+num_train_steps: 5
+
+# WandB config
+wandb_init_args:
+  name: "meta-llama_Meta-Llama-3-8B"
+  mode: "offline"
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2
+  num_training_steps: 8
