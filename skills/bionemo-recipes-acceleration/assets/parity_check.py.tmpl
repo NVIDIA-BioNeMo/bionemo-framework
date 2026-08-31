@@ -48,22 +48,56 @@ FP8_LOSS_ATOL, FP8_LOSS_RTOL = 0.1, 0.05
 FP8_LOGITS_ATOL, FP8_LOGITS_RTOL = 5.0, 0.1
 
 # The same sweep the shared harness runs ($BIONEMO_RECIPES/models/esm2/tests/common/fixtures.py::ALL_RECIPES).
-# The NVFP4 kwargs make the test deterministic -- keep them.
-ALL_RECIPES = [
-    recipe_module.DelayedScaling(),
-    recipe_module.Float8CurrentScaling(),
-    recipe_module.Float8BlockScaling(),
-    recipe_module.MXFP8BlockScaling(),
-    recipe_module.NVFP4BlockScaling(disable_rht=True, disable_stochastic_rounding=True),
+# Built lazily: a missing TE symbol or unsupported constructor kwarg makes that recipe
+# "unsupported" rather than crashing collection and blocking unrelated BF16 tests.
+# The NVFP4 kwargs make the test deterministic -- keep them when accepted.
+_RECIPE_SPECS = [
+    ("DelayedScaling", {}),
+    ("Float8CurrentScaling", {}),
+    ("Float8BlockScaling", {}),
+    ("MXFP8BlockScaling", {}),
+    ("NVFP4BlockScaling", {"disable_rht": True, "disable_stochastic_rounding": True}),
 ]
 
-RECIPE_SUPPORT_CHECKS = {
-    "DelayedScaling": fp8.check_fp8_support,
-    "Float8CurrentScaling": fp8.check_fp8_support,
-    "Float8BlockScaling": fp8.check_fp8_block_scaling_support,
-    "MXFP8BlockScaling": fp8.check_mxfp8_support,
-    "NVFP4BlockScaling": fp8.check_nvfp4_support,
+_SUPPORT_FN_NAMES = {
+    "DelayedScaling": "check_fp8_support",
+    "Float8CurrentScaling": "check_fp8_support",
+    "Float8BlockScaling": "check_fp8_block_scaling_support",
+    "MXFP8BlockScaling": "check_mxfp8_support",
+    "NVFP4BlockScaling": "check_nvfp4_support",
 }
+
+
+def _build_recipes():
+    recipes = []
+    for name, kwargs in _RECIPE_SPECS:
+        cls = getattr(recipe_module, name, None)
+        if cls is None:
+            continue
+        try:
+            recipes.append(cls(**kwargs))
+        except TypeError:
+            # Older TE build doesn't accept these kwargs; instantiate without them.
+            try:
+                recipes.append(cls())
+            except Exception:
+                pass
+    return recipes
+
+
+def _build_support_checks():
+    checks = {}
+    for name, fn_name in _SUPPORT_FN_NAMES.items():
+        fn = getattr(fp8, fn_name, None)
+        if fn is not None:
+            checks[name] = fn
+        else:
+            checks[name] = lambda _fn=fn_name: (False, f"{_fn} not present in this TE version")
+    return checks
+
+
+ALL_RECIPES = _build_recipes()
+RECIPE_SUPPORT_CHECKS = _build_support_checks()
 
 
 def _parametrize_recipes():
