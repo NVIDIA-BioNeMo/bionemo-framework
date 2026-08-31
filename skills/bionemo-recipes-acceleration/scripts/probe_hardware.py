@@ -81,7 +81,7 @@ DATA_CENTER_GPUS = ("H100", "H200", "B100", "B200", "B300")
 
 # Compute capability tuples used for BioNeMo-specific hardware caveats.
 SM_120_COMPUTE_CAPABILITY = (12, 0)  # Consumer Blackwell (RTX 50xx)
-SM_80_COMPUTE_CAPABILITY = (8, 0)    # Ampere (A100)
+SM_80_COMPUTE_CAPABILITY = (8, 0)  # Ampere (A100)
 
 _ENVIRONMENT_NOTICE = """
 NOTE: This script must run in your model's training environment — the same Python
