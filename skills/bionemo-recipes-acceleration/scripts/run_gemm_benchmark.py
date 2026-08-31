@@ -65,8 +65,9 @@ BENCHMARK_RELPATH = Path("benchmarks/gemm/benchmark_gemm.py")
 TE_REPO_URL = "https://github.com/NVIDIA/TransformerEngine.git"
 
 # Recipe names (from probe_hardware.py) that map to each benchmark skip flag.
-# --no-fp8 covers block-scaled FP8 families; --no-fp4 covers NVFP4.
-BLOCK_SCALED_FP8_RECIPES = frozenset({"Float8BlockScaling", "MXFP8BlockScaling"})
+# --no-fp8 skips all FP8 precisions; only add it when no FP8 recipe of any
+# kind is supported. --no-fp4 covers NVFP4.
+ALL_FP8_RECIPES = frozenset({"DelayedScaling", "Float8CurrentScaling", "Float8BlockScaling", "MXFP8BlockScaling"})
 
 # Model-config keys we forward, mapped to the benchmark's flag names.
 CONFIG_FLAGS = {
@@ -161,7 +162,7 @@ def skip_flags_from_hardware(hardware: dict) -> list[str]:
     """
     supported = set(hardware.get("supported_recipes", []))
     flags: list[str] = []
-    if not (BLOCK_SCALED_FP8_RECIPES & supported):
+    if not (ALL_FP8_RECIPES & supported):
         flags.append("--no-fp8")
     if "NVFP4BlockScaling" not in supported:
         flags.append("--no-fp4")

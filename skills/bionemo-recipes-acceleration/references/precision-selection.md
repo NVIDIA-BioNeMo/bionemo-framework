@@ -75,7 +75,10 @@ python benchmarks/gemm/benchmark_gemm.py \
   -o ./gemm_speedup.png
 ```
 
-On Hopper add `--no-fp8 --no-fp4` to skip the block-scaled and FP4 precisions it cannot run.
+Add `--no-fp4` on Hopper to skip NVFP4, which it cannot run. Do not add `--no-fp8` unless the
+hardware supports no FP8 recipe of any kind — Hopper supports `DelayedScaling` and
+`Float8CurrentScaling`, so `--no-fp8` would incorrectly suppress those benchmarks.
+`scripts/run_gemm_benchmark.py` derives both flags automatically from `hardware.json`.
 
 ### Manual shape mode
 
