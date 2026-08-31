@@ -188,8 +188,13 @@ Also stop when:
 
 - The attention pattern does not match any reference — causal vs bidirectional is not configurable.
 - The model definition cannot be located or is generated dynamically at runtime.
-- No forward pass can be run for the parity check (no weights, no tokenizer, no sample input) —
-  because then Phase 5 cannot prove anything.
+- No forward pass can be run for the parity check because of a reason intrinsic to the target —
+  no weights, no tokenizer, no sample input — because then Phase 5 cannot prove anything. Use
+  failure class `ARCH_` here.
+
+Do **not** use `ARCH_` when a forward pass cannot be run because a dependency failed to install.
+That is failure class `ENV_`: the architecture has not been judged, and the run may succeed in a
+clean environment. See the "Failure classes" section in `SKILL.md`.
 
 Not a hard stop, but route elsewhere: **Megatron-LM based code** —
 `$BIONEMO_RECIPES/recipes/eden_megatron/` and `$BIONEMO_RECIPES/recipes/evo2_megatron/` already
@@ -204,7 +209,8 @@ stated — not a refusal.
 
 ## The hard-stop report
 
-Fill `assets/ACCELERATION_REPORT.md.tmpl` with the hard-stop variant. It must state:
+All architectural hard-stops use failure class `ARCH_`. Fill `assets/ACCELERATION_REPORT.md.tmpl`
+with the hard-stop variant. It must state:
 
 1. What architecture was detected, with the file and class names that identified it.
 2. Which reference scored highest, and its score on each of the six axes.

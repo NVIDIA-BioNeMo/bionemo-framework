@@ -116,6 +116,20 @@ export BIONEMO_RECIPES=$PWD/bionemo-recipes
 When running inside a bionemo-recipes checkout, set `$BIONEMO_RECIPES` to the repo root. Phase 0
 resolves and verifies this variable before any other step.
 
+## Failure classes
+
+Two failure classes appear in `ACCELERATION_REPORT.md` and in `.bionemo-accel/` artifacts. Use
+the correct one; conflating them produces misleading reports and blocks retries.
+
+| Class  | Meaning | Retryable | Examples |
+| ------ | ------- | --------- | -------- |
+| `ENV_` | Declared dependencies exist but could not be installed or imported in this environment. The architecture has not been judged. The run cannot proceed until the environment is fixed, but a clean environment may succeed. | Yes | `torch` or `transformer_engine` not importable; `probe_hardware.py` exits 1 due to a missing package; `pip install` failed; wrong Python interpreter. |
+| `ARCH_` | The target architecture has no TE analogue, or the model definition cannot be located or executed for a reason intrinsic to the target (no weights, no tokenizer, no sample input). No amount of environment fixing will unblock the run. | No | Diffusion/score-based, GNN/equivariant, state-space model; causal vs bidirectional mismatch; model class defined dynamically at runtime. |
+
+**Critical distinction:** "no forward pass can be run" is `ARCH_` only when the blocker is
+intrinsic to the target (missing weights, no tokenizer, purely-generated code). If the blocker is
+an uninstallable dependency, emit `ENV_` and stop — do not treat it as an architectural judgment.
+
 ## Guardrails
 
 1. **Match before you modify.** Phase 1 decides the reference and the depth before any edit. An
@@ -151,6 +165,22 @@ Trainer / Accelerate / Lightning / Megatron); whether TE is already imported; mo
 `num_hidden_layers`, `vocab_size`); `torch.__version__`, `transformer_engine.__version__`. Write
 `.bionemo-accel/inventory.json`. Add `.bionemo-accel/` to the target's `.gitignore`.
 
+Before proceeding to Phase 1, install the target's declared dependencies so that a forward pass
+can run and `import` checks succeed:
+
+```bash
+# prefer uv when available
+if [ -f pyproject.toml ]; then
+    uv pip install -e . 2>/dev/null || pip install -e .
+elif [ -f requirements.txt ]; then
+    uv pip install -r requirements.txt 2>/dev/null || pip install -r requirements.txt
+fi
+```
+
+Install in the same environment as `probe_hardware.py` (same interpreter). If install fails,
+record the error in `.bionemo-accel/inventory.json` under `"dep_install_error"` and emit `ENV_`
+— do not proceed to architecture matching until the target's own deps are resolvable.
+
 **Phase 1 — Architecture match, or hard stop.** Read `references/architecture-matching.md`. Score
 the target on the six rubric axes against the reference menu (encoder/MLM pre-norm and post-norm,
 causal LM dense, MoE, genomics LM, encoder–decoder). **Attention pattern is the only required
@@ -166,8 +196,11 @@ write the hard-stop `ACCELERATION_REPORT.md` and exit.
 python $SKILL_DIR/scripts/probe_hardware.py -o .bionemo-accel/hardware.json
 ```
 
-where `$SKILL_DIR` is the directory containing this `SKILL.md`. Read
-`references/precision-selection.md` §Phase 2 for sm_120/sm_80 caveats and TE version guidance.
+where `$SKILL_DIR` is the directory containing this `SKILL.md`. If the script exits non-zero
+because `torch` or `transformer_engine` could not be imported or installed, write an
+`ACCELERATION_REPORT.md` with failure class `ENV_` and stop — this is a dependency provisioning
+failure, not an architectural judgment. Read `references/precision-selection.md` §Phase 2 for
+sm_120/sm_80 caveats and TE version guidance.
 
 **Phase 3 — Precision selection.** Run:
 
@@ -177,6 +210,16 @@ python $SKILL_DIR/scripts/run_gemm_benchmark.py \
     --hardware  .bionemo-accel/hardware.json \
     -o .bionemo-accel/gemm
 ```
+
+The benchmark iterates only over the recipes `probe_hardware.py` reported as supported (via
+`--no-fp8` / `--no-fp4` skip flags derived from `hardware.json`). A non-zero exit is **not** a
+reason to abandon the port:
+
+- If `summary.json` was written (at least one mode succeeded), proceed to Phase 4 using the
+  available measurements.
+- If `summary.json` is absent (all modes failed), proceed to Phase 4 using the `supported_recipes`
+  list from `hardware.json` as the basis for the precision recommendation; note "benchmark
+  unavailable" in `precision.json` and in the final report.
 
 Read `references/precision-selection.md` §Phase 3 for interpretation — GEMM speedup is an upper
 bound on end-to-end speedup; autocast vs pre-quantize gap is quantization overhead; a ≈1.0× result
@@ -201,14 +244,14 @@ change to enable FP8.
 Each phase reads its predecessor's JSON artifact. Do not skip phases or produce a downstream
 artifact without the upstream ones in place.
 
-| Source  | Artifact                              | Consumed by                 |
-| ------- | ------------------------------------- | --------------------------- |
-| Phase 0 | `.bionemo-accel/inventory.json`       | Phases 1, 3                 |
-| Phase 1 | `.bionemo-accel/match.json` (or exit) | Phases 2, 4                 |
-| Phase 2 | `.bionemo-accel/hardware.json`        | Phase 3                     |
-| Phase 3 | `.bionemo-accel/gemm/summary.json`    | Phase 6                     |
-| Phase 3 | `.bionemo-accel/precision.json`       | Phase 4 (config generation) |
-| Phase 5 | tier results                          | Phase 6                     |
+| Source  | Artifact                              | Consumed by                 | Required? |
+| ------- | ------------------------------------- | --------------------------- | --------- |
+| Phase 0 | `.bionemo-accel/inventory.json`       | Phases 1, 3                 | Yes       |
+| Phase 1 | `.bionemo-accel/match.json` (or exit) | Phases 2, 4                 | Yes       |
+| Phase 2 | `.bionemo-accel/hardware.json`        | Phase 3                     | Yes       |
+| Phase 3 | `.bionemo-accel/gemm/summary.json`    | Phase 6                     | No — absent when all benchmark modes fail; note "benchmark unavailable" in the report |
+| Phase 3 | `.bionemo-accel/precision.json`       | Phase 4 (config generation) | Yes — fall back to `supported_recipes` from `hardware.json` if summary absent |
+| Phase 5 | tier results                          | Phase 6                     | Yes       |
 
 On an interrupted run, Phases 0–2 may reuse existing artifacts if the environment has not changed.
 Phases 3–6 always re-run.
@@ -302,7 +345,7 @@ All artifacts are written into the **target repo**, never into `$BIONEMO_RECIPES
 | `.bionemo-accel/inventory.json` | 0 | Always | Model dimensions, entry points, framework, TE import status |
 | `.bionemo-accel/match.json` | 1 | On match | Architecture family, confidence score, matched reference |
 | `.bionemo-accel/hardware.json` | 2 | Always | GPU, compute capability, per-recipe TE support flags |
-| `.bionemo-accel/gemm/summary.json` | 3 | Always | GEMM speedup for autocast and pre-quantize modes, interpretation reminders |
+| `.bionemo-accel/gemm/summary.json` | 3 | When ≥1 benchmark run succeeds | GEMM speedup for successful modes, skip flags applied, interpretation reminders |
 | `.bionemo-accel/precision.json` | 3 | Always | Selected recipe and rationale |
 | `parity_check.py` | 5 | Always | Tier 1 forward-pass parity check against the original model |
 | `tests/test_modeling_ported.py` | 5 | Depth B only | BaseModelTest harness subclass for the ported model |

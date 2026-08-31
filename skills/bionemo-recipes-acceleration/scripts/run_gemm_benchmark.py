@@ -64,11 +64,9 @@ BENCHMARK_RELPATH = Path("benchmarks/gemm/benchmark_gemm.py")
 
 TE_REPO_URL = "https://github.com/NVIDIA/TransformerEngine.git"
 
-# Hopper compute major version (sm_9x); block-scaled and FP4 precisions are skipped on this arch.
-HOPPER_COMPUTE_MAJOR = 9
-
-# Hopper cannot run the block-scaled or FP4 precisions; the tutorial skips them explicitly.
-HOPPER_SKIP_FLAGS = ["--no-fp8", "--no-fp4"]
+# Recipe names (from probe_hardware.py) that map to each benchmark skip flag.
+# --no-fp8 covers block-scaled FP8 families; --no-fp4 covers NVFP4.
+BLOCK_SCALED_FP8_RECIPES = frozenset({"Float8BlockScaling", "MXFP8BlockScaling"})
 
 # Model-config keys we forward, mapped to the benchmark's flag names.
 CONFIG_FLAGS = {
@@ -152,17 +150,22 @@ def clone_transformer_engine(dest: Path, version: str | None) -> Path | None:
     return None
 
 
-def is_hopper(hardware: dict) -> bool:
-    """Return True when the probed device is Hopper (compute capability 9.x).
+def skip_flags_from_hardware(hardware: dict) -> list[str]:
+    """Derive benchmark skip flags from the probe's supported-recipe list.
 
     Args:
         hardware: Parsed ``hardware.json`` from ``probe_hardware.py``.
 
     Returns:
-        True for sm_90 devices.
+        List of ``--no-*`` flags to pass to ``benchmark_gemm.py``.
     """
-    capability = hardware.get("torch", {}).get("compute_capability_tuple")
-    return bool(capability) and capability[0] == HOPPER_COMPUTE_MAJOR
+    supported = set(hardware.get("supported_recipes", []))
+    flags: list[str] = []
+    if not (BLOCK_SCALED_FP8_RECIPES & supported):
+        flags.append("--no-fp8")
+    if "NVFP4BlockScaling" not in supported:
+        flags.append("--no-fp4")
+    return flags
 
 
 def build_command(
@@ -195,8 +198,7 @@ def build_command(
             )
         for key, flag in CONFIG_FLAGS.items():
             cmd += [flag, str(model[key])]
-        if is_hopper(hardware):
-            cmd += HOPPER_SKIP_FLAGS
+        cmd += skip_flags_from_hardware(hardware)
 
     if pre_quantize:
         cmd.append("--pre-quantize")
@@ -289,28 +291,34 @@ def main() -> int:
         )
         results[mode] = run_mode(cmd, args.output_dir / f"{mode}.log", args.verbose_kernels)
 
-    summary = {
-        "benchmark_script": str(script),
-        "mode": "manual_shapes" if args.shapes else "model_config",
-        "hopper_skip_flags_applied": (not args.shapes) and is_hopper(hardware),
-        "supported_recipes": hardware.get("supported_recipes", []),
-        "runs": results,
-        "interpretation_reminders": [
-            "GEMM speedup is an UPPER BOUND on end-to-end speedup: attention, LayerNorm/RMSNorm, "
-            "activations, and AllReduce are precision-agnostic and are not measured here.",
-            "A speedup near 1.0x usually means a silent fallback to a lower-precision kernel. "
-            "Re-run with --verbose-kernels (NVTE_LOG_LEVEL=1) and confirm dispatch before concluding.",
-            "The autocast-vs-pre_quantized gap is the dynamic quantization overhead. Report both.",
-            "NVFP4 carries costs outside the GEMM kernels (random Hadamard transforms, stochastic "
-            "rounding, 2D block scaling, amax passes). Discount its headline number.",
-            "DelayedScaling always runs in autocast mode; --pre-quantize does not apply to it.",
-        ],
-    }
-    summary_path = args.output_dir / "summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
-    print(f"\nWrote {summary_path}", file=sys.stderr)
+    skip_flags = skip_flags_from_hardware(hardware) if not args.shapes else []
+    successful_runs = {mode: res for mode, res in results.items() if res["returncode"] == 0}
 
-    return 0 if all(run["returncode"] == 0 for run in results.values()) else 1
+    if successful_runs:
+        summary = {
+            "benchmark_script": str(script),
+            "mode": "manual_shapes" if args.shapes else "model_config",
+            "skip_flags_applied": skip_flags,
+            "supported_recipes": hardware.get("supported_recipes", []),
+            "runs": successful_runs,
+            "interpretation_reminders": [
+                "GEMM speedup is an UPPER BOUND on end-to-end speedup: attention, LayerNorm/RMSNorm, "
+                "activations, and AllReduce are precision-agnostic and are not measured here.",
+                "A speedup near 1.0x usually means a silent fallback to a lower-precision kernel. "
+                "Re-run with --verbose-kernels (NVTE_LOG_LEVEL=1) and confirm dispatch before concluding.",
+                "The autocast-vs-pre_quantized gap is the dynamic quantization overhead. Report both.",
+                "NVFP4 carries costs outside the GEMM kernels (random Hadamard transforms, stochastic "
+                "rounding, 2D block scaling, amax passes). Discount its headline number.",
+                "DelayedScaling always runs in autocast mode; --pre-quantize does not apply to it.",
+            ],
+        }
+        summary_path = args.output_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"\nWrote {summary_path}", file=sys.stderr)
+    else:
+        print("\nNo benchmark runs succeeded; summary.json not written.", file=sys.stderr)
+
+    return 0 if len(successful_runs) == len(results) else 1
 
 
 if __name__ == "__main__":

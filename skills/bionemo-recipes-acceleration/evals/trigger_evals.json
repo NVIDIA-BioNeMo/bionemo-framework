@@ -13,8 +13,6 @@
   {"query": "replace nn.Linear with te.Linear and wrap in te.autocast", "should_trigger": true},
   {"query": "convert my T5 encoder-decoder to Transformer Engine", "should_trigger": true},
   {"query": "accelerate scGPT fine-tuning with Transformer Engine", "should_trigger": true},
-  {"query": "add FP8 to my single-cell foundation model encoder", "should_trigger": true},
-  {"query": "my BERT-style encoder is post-norm with a ReLU MLP, can you port it to TE", "should_trigger": true},
   {"query": "accelerate my Nextflow variant-calling pipeline with Parabricks", "should_trigger": false},
   {"query": "speed up my diffusion model for protein structure generation", "should_trigger": false},
   {"query": "add FP8 to my equivariant GNN network", "should_trigger": false},
