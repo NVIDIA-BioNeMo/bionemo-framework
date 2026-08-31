@@ -59,16 +59,19 @@ the skill stops and explains why rather than producing an unvalidated port.
 ## Examples
 
 **Transformer model — full port:**
+
 > "Add FP8 training to my ESM2 fine-tuning script in `/workspace/my_esm2/`"
 
 Output: branch `bionemo-accel/encoder-mlm` with FP8 configs, parity-checked, and `ACCELERATION_REPORT.md` at the repo root.
 
 **Causal LM — THD packing added:**
+
 > "Speed up my Llama fine-tuning loop with Transformer Engine and THD sequence packing"
 
 Output: full TE port with THD attention, `DataCollatorWithFlattening`, Tier 1 + Tier 2 validation, `ACCELERATION_REPORT.md`.
 
 **Out-of-scope — hard stop:**
+
 > "Add FP8 to my SE(3)-equivariant GNN for protein structure prediction"
 
 Output: `ACCELERATION_REPORT.md` identifying the architecture as equivariant/GNN, zero source files modified, reason for rejection named.
@@ -121,10 +124,10 @@ resolves and verifies this variable before any other step.
 Two failure classes appear in `ACCELERATION_REPORT.md` and in `.bionemo-accel/` artifacts. Use
 the correct one; conflating them produces misleading reports and blocks retries.
 
-| Class  | Meaning | Retryable | Examples |
-| ------ | ------- | --------- | -------- |
-| `ENV_` | Declared dependencies exist but could not be installed or imported in this environment. The architecture has not been judged. The run cannot proceed until the environment is fixed, but a clean environment may succeed. | Yes | `torch` or `transformer_engine` not importable; `probe_hardware.py` exits 1 due to a missing package; `pip install` failed; wrong Python interpreter. |
-| `ARCH_` | The target architecture has no TE analogue, or the model definition cannot be located or executed for a reason intrinsic to the target (no weights, no tokenizer, no sample input). No amount of environment fixing will unblock the run. | No | Diffusion/score-based, GNN/equivariant, state-space model; causal vs bidirectional mismatch; model class defined dynamically at runtime. |
+| Class   | Meaning                                                                                                                                                                                                                                   | Retryable | Examples                                                                                                                                              |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENV_`  | Declared dependencies exist but could not be installed or imported in this environment. The architecture has not been judged. The run cannot proceed until the environment is fixed, but a clean environment may succeed.                 | Yes       | `torch` or `transformer_engine` not importable; `probe_hardware.py` exits 1 due to a missing package; `pip install` failed; wrong Python interpreter. |
+| `ARCH_` | The target architecture has no TE analogue, or the model definition cannot be located or executed for a reason intrinsic to the target (no weights, no tokenizer, no sample input). No amount of environment fixing will unblock the run. | No        | Diffusion/score-based, GNN/equivariant, state-space model; causal vs bidirectional mismatch; model class defined dynamically at runtime.              |
 
 **Critical distinction:** "no forward pass can be run" is `ARCH_` only when the blocker is
 intrinsic to the target (missing weights, no tokenizer, purely-generated code). If the blocker is
@@ -244,14 +247,14 @@ change to enable FP8.
 Each phase reads its predecessor's JSON artifact. Do not skip phases or produce a downstream
 artifact without the upstream ones in place.
 
-| Source  | Artifact                              | Consumed by                 | Required? |
-| ------- | ------------------------------------- | --------------------------- | --------- |
-| Phase 0 | `.bionemo-accel/inventory.json`       | Phases 1, 3                 | Yes       |
-| Phase 1 | `.bionemo-accel/match.json` (or exit) | Phases 2, 4                 | Yes       |
-| Phase 2 | `.bionemo-accel/hardware.json`        | Phase 3                     | Yes       |
+| Source  | Artifact                              | Consumed by                 | Required?                                                                             |
+| ------- | ------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------- |
+| Phase 0 | `.bionemo-accel/inventory.json`       | Phases 1, 3                 | Yes                                                                                   |
+| Phase 1 | `.bionemo-accel/match.json` (or exit) | Phases 2, 4                 | Yes                                                                                   |
+| Phase 2 | `.bionemo-accel/hardware.json`        | Phase 3                     | Yes                                                                                   |
 | Phase 3 | `.bionemo-accel/gemm/summary.json`    | Phase 6                     | No — absent when all benchmark modes fail; note "benchmark unavailable" in the report |
-| Phase 3 | `.bionemo-accel/precision.json`       | Phase 4 (config generation) | Yes — fall back to `supported_recipes` from `hardware.json` if summary absent |
-| Phase 5 | tier results                          | Phase 6                     | Yes       |
+| Phase 3 | `.bionemo-accel/precision.json`       | Phase 4 (config generation) | Yes — fall back to `supported_recipes` from `hardware.json` if summary absent         |
+| Phase 5 | tier results                          | Phase 6                     | Yes                                                                                   |
 
 On an interrupted run, Phases 0–2 may reuse existing artifacts if the environment has not changed.
 Phases 3–6 always re-run.
@@ -287,10 +290,10 @@ Full protocol in `references/validation.md`. Summary:
 
 ## Available Scripts
 
-| Script | Purpose | Key Arguments |
-| --- | --- | --- |
-| `scripts/probe_hardware.py` | Probe GPU and TE install; detect per-recipe FP8/MXFP8/NVFP4 support; optionally install missing packages | `-o <path>` output JSON path; `--no-install` skip install prompt |
-| `scripts/run_gemm_benchmark.py` | Run TE GEMM benchmark in autocast and pre-quantize modes; write speedup plots and summary JSON | `--inventory <json>`; `--hardware <json>`; `-o <dir>`; `--shapes <MxKxN>`; `--allow-clone`; `--verbose-kernels` |
+| Script                          | Purpose                                                                                                  | Key Arguments                                                                                                   |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `scripts/probe_hardware.py`     | Probe GPU and TE install; detect per-recipe FP8/MXFP8/NVFP4 support; optionally install missing packages | `-o <path>` output JSON path; `--no-install` skip install prompt                                                |
+| `scripts/run_gemm_benchmark.py` | Run TE GEMM benchmark in autocast and pre-quantize modes; write speedup plots and summary JSON           | `--inventory <json>`; `--hardware <json>`; `-o <dir>`; `--shapes <MxKxN>`; `--allow-clone`; `--verbose-kernels` |
 
 Invoke scripts from the pipeline phases using bash or `run_script()`:
 
@@ -299,11 +302,17 @@ Invoke scripts from the pipeline phases using bash or `run_script()`:
 run_script("scripts/probe_hardware.py", args=["-o", ".bionemo-accel/hardware.json"])
 
 # Phase 3 — GEMM benchmark
-run_script("scripts/run_gemm_benchmark.py", args=[
-    "--inventory", ".bionemo-accel/inventory.json",
-    "--hardware",  ".bionemo-accel/hardware.json",
-    "-o",          ".bionemo-accel/gemm",
-])
+run_script(
+    "scripts/run_gemm_benchmark.py",
+    args=[
+        "--inventory",
+        ".bionemo-accel/inventory.json",
+        "--hardware",
+        ".bionemo-accel/hardware.json",
+        "-o",
+        ".bionemo-accel/gemm",
+    ],
+)
 ```
 
 ## Templates
@@ -321,48 +330,48 @@ corresponding output file.
 
 **Required**
 
-| Input | Source | Description |
-| --- | --- | --- |
-| Target codebase path | User prompt or current working directory | Repo or folder containing the model to accelerate |
-| `$BIONEMO_RECIPES` | Environment variable | Path to a bionemo-recipes checkout (read-only reference) |
+| Input                | Source                                   | Description                                              |
+| -------------------- | ---------------------------------------- | -------------------------------------------------------- |
+| Target codebase path | User prompt or current working directory | Repo or folder containing the model to accelerate        |
+| `$BIONEMO_RECIPES`   | Environment variable                     | Path to a bionemo-recipes checkout (read-only reference) |
 
 **Optional (passed to scripts)**
 
-| Input | Flag | Default | Description |
-| --- | --- | --- | --- |
-| Skip install prompt | `--no-install` (probe_hardware) | off | Exit 1 immediately if torch or TE missing |
-| Manual GEMM shapes | `--shapes MxKxN` (run_gemm_benchmark) | derived from inventory | Override model-config-based shapes |
-| TE source tree | `--te-source <path>` or `$TE_SOURCE_DIR` (run_gemm_benchmark) | auto-detected | Explicit path to a Transformer Engine checkout |
-| Auto-clone TE | `--allow-clone` (run_gemm_benchmark) | off | Shallow-clone TE source if benchmark script not found locally |
-| Kernel dispatch log | `--verbose-kernels` (run_gemm_benchmark) | off | Set `NVTE_LOG_LEVEL=1` to confirm kernel dispatch |
+| Input               | Flag                                                          | Default                | Description                                                   |
+| ------------------- | ------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------- |
+| Skip install prompt | `--no-install` (probe_hardware)                               | off                    | Exit 1 immediately if torch or TE missing                     |
+| Manual GEMM shapes  | `--shapes MxKxN` (run_gemm_benchmark)                         | derived from inventory | Override model-config-based shapes                            |
+| TE source tree      | `--te-source <path>` or `$TE_SOURCE_DIR` (run_gemm_benchmark) | auto-detected          | Explicit path to a Transformer Engine checkout                |
+| Auto-clone TE       | `--allow-clone` (run_gemm_benchmark)                          | off                    | Shallow-clone TE source if benchmark script not found locally |
+| Kernel dispatch log | `--verbose-kernels` (run_gemm_benchmark)                      | off                    | Set `NVTE_LOG_LEVEL=1` to confirm kernel dispatch             |
 
 ## Output Format
 
 All artifacts are written into the **target repo**, never into `$BIONEMO_RECIPES`.
 
-| Artifact | Phase | Written | Description |
-| --- | --- | --- | --- |
-| `.bionemo-accel/inventory.json` | 0 | Always | Model dimensions, entry points, framework, TE import status |
-| `.bionemo-accel/match.json` | 1 | On match | Architecture family, confidence score, matched reference |
-| `.bionemo-accel/hardware.json` | 2 | Always | GPU, compute capability, per-recipe TE support flags |
-| `.bionemo-accel/gemm/summary.json` | 3 | When ≥1 benchmark run succeeds | GEMM speedup for successful modes, skip flags applied, interpretation reminders |
-| `.bionemo-accel/precision.json` | 3 | Always | Selected recipe and rationale |
-| `parity_check.py` | 5 | Always | Tier 1 forward-pass parity check against the original model |
-| `tests/test_modeling_ported.py` | 5 | Depth B only | BaseModelTest harness subclass for the ported model |
-| `tests/conftest.py` | 5 | Depth B only | pytest plugin registration (`pytest_plugins = ["tests.common.fixtures"]`) |
-| `ACCELERATION_REPORT.md` | 6 | Always | Final report: measured speedups, one-line FP8 enable config, limitations |
-| `ACCELERATION_REPORT.md` (hard stop) | 1 | On out-of-scope architecture | Rejection reason (no TE analogue, attention-pattern mismatch, or no runnable forward pass); no other files written or modified |
+| Artifact                             | Phase | Written                        | Description                                                                                                                    |
+| ------------------------------------ | ----- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `.bionemo-accel/inventory.json`      | 0     | Always                         | Model dimensions, entry points, framework, TE import status                                                                    |
+| `.bionemo-accel/match.json`          | 1     | On match                       | Architecture family, confidence score, matched reference                                                                       |
+| `.bionemo-accel/hardware.json`       | 2     | Always                         | GPU, compute capability, per-recipe TE support flags                                                                           |
+| `.bionemo-accel/gemm/summary.json`   | 3     | When ≥1 benchmark run succeeds | GEMM speedup for successful modes, skip flags applied, interpretation reminders                                                |
+| `.bionemo-accel/precision.json`      | 3     | Always                         | Selected recipe and rationale                                                                                                  |
+| `parity_check.py`                    | 5     | Always                         | Tier 1 forward-pass parity check against the original model                                                                    |
+| `tests/test_modeling_ported.py`      | 5     | Depth B only                   | BaseModelTest harness subclass for the ported model                                                                            |
+| `tests/conftest.py`                  | 5     | Depth B only                   | pytest plugin registration (`pytest_plugins = ["tests.common.fixtures"]`)                                                      |
+| `ACCELERATION_REPORT.md`             | 6     | Always                         | Final report: measured speedups, one-line FP8 enable config, limitations                                                       |
+| `ACCELERATION_REPORT.md` (hard stop) | 1     | On out-of-scope architecture   | Rejection reason (no TE analogue, attention-pattern mismatch, or no runnable forward pass); no other files written or modified |
 
 **Branch:** `bionemo-accel/<family>` is created in the target repo on a successful port (e.g. `bionemo-accel/encoder-mlm`, `bionemo-accel/causal-lm-dense`).
 
 ## Troubleshooting
 
-| Error / Symptom | Cause | Solution |
-| --- | --- | --- |
-| Hard stop at Phase 1 | Architecture has no TE analogue (diffusion, GNN/equivariant, state-space), attention pattern mismatches, or no forward pass can be run | Read `references/architecture-matching.md`. An advisory-axis mismatch alone is never a stop — it selects the reference and depth instead |
-| `Could not find benchmarks/gemm/benchmark_gemm.py` | TE pip wheel does not include source; no NGC container or local checkout found | Pass `--te-source <path>`, set `TE_SOURCE_DIR`, or add `--allow-clone` |
-| GEMM speedup near 1.0× | Silent kernel fallback to a lower-precision kernel | Re-run with `--verbose-kernels`; confirm expected dispatch in `NVTE_LOG_LEVEL=1` output before concluding there is no benefit |
-| `torch not importable` after install | Script ran in the wrong Python environment | Verify `which python` inside your training venv/conda env; re-run `probe_hardware.py` in that environment |
-| `transformer_engine.pytorch.autocast` missing | TE version predates the API BioNeMo recipes use | Upgrade to `transformer-engine[pytorch]>=2.0` or use `nvcr.io/nvidia/pytorch:26.04-py3` |
-| Parity check fails after port | Weight conversion bug or `te.autocast` scope too narrow | Compare QKV packing against `$BIONEMO_RECIPES/models/esm2/convert.py`; verify `te.autocast` wraps the full forward pass |
-| `quantized_model_init` + megatron-fsdp fails | BIONEMO-3012 (upstream xfail) | Do not combine `quantized_model_init` with `megatron-fsdp` until resolved; note in report |
+| Error / Symptom                                    | Cause                                                                                                                                  | Solution                                                                                                                                 |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Hard stop at Phase 1                               | Architecture has no TE analogue (diffusion, GNN/equivariant, state-space), attention pattern mismatches, or no forward pass can be run | Read `references/architecture-matching.md`. An advisory-axis mismatch alone is never a stop — it selects the reference and depth instead |
+| `Could not find benchmarks/gemm/benchmark_gemm.py` | TE pip wheel does not include source; no NGC container or local checkout found                                                         | Pass `--te-source <path>`, set `TE_SOURCE_DIR`, or add `--allow-clone`                                                                   |
+| GEMM speedup near 1.0×                             | Silent kernel fallback to a lower-precision kernel                                                                                     | Re-run with `--verbose-kernels`; confirm expected dispatch in `NVTE_LOG_LEVEL=1` output before concluding there is no benefit            |
+| `torch not importable` after install               | Script ran in the wrong Python environment                                                                                             | Verify `which python` inside your training venv/conda env; re-run `probe_hardware.py` in that environment                                |
+| `transformer_engine.pytorch.autocast` missing      | TE version predates the API BioNeMo recipes use                                                                                        | Upgrade to `transformer-engine[pytorch]>=2.0` or use `nvcr.io/nvidia/pytorch:26.04-py3`                                                  |
+| Parity check fails after port                      | Weight conversion bug or `te.autocast` scope too narrow                                                                                | Compare QKV packing against `$BIONEMO_RECIPES/models/esm2/convert.py`; verify `te.autocast` wraps the full forward pass                  |
+| `quantized_model_init` + megatron-fsdp fails       | BIONEMO-3012 (upstream xfail)                                                                                                          | Do not combine `quantized_model_init` with `megatron-fsdp` until resolved; note in report                                                |

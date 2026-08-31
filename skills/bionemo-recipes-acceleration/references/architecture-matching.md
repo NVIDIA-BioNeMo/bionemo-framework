@@ -44,8 +44,8 @@ From the `TEBertLayer` docstring:
 
 > Geneformer/HF BERT (POST-norm): Input -> Attention -> Dropout -> Residual Add -> LayerNorm -> MLP
 > -> Dropout -> Residual Add -> LayerNorm -> Output. Typical TransformerLayer (PRE-norm): Input ->
-> [LayerNorm Attn inside MultiheadAttention] -> Dropout -> Residual Add -> [LayerNorm MLP inside
-> LayerNormMLP] -> Dropout -> Residual Add -> Output.
+> [LayerNorm Attn inside MultiheadAttention] -> Dropout -> Residual Add -> \[LayerNorm MLP inside
+> LayerNormMLP\] -> Dropout -> Residual Add -> Output.
 
 So the block is assembled from `te.MultiheadAttention(input_layernorm=False)`, `te.LayerNorm`, and
 two `te.Linear`. Geneformer is also an all-ReLU encoder — it *requires* `hidden_act="relu"` — which
@@ -155,8 +155,7 @@ What a mismatch on each advisory axis actually costs:
   post-norm selects the reference: pre-norm → `te.TransformerLayer` (ESM-2); post-norm →
   hand-assembled `TEBertLayer` (geneformer). Neither is a stop.
 - **MLP form.** This axis is about *structure* — plain up/down vs gated vs MoE. **Activation choice
-  is not a mismatch.** `te.TransformerLayer` accepts `gelu, geglu, qgelu, qgeglu, relu, reglu,
-  srelu, sreglu, silu, swiglu`; `$BIONEMO_RECIPES/models/esm2/modeling_esm_te.py` passes
+  is not a mismatch.** `te.TransformerLayer` accepts `gelu, geglu, qgelu, qgeglu, relu, reglu, srelu, sreglu, silu, swiglu`; `$BIONEMO_RECIPES/models/esm2/modeling_esm_te.py` passes
   `config.encoder_activation` through unmodified, `$BIONEMO_RECIPES/models/codonfm/modeling_codonfm_te.py`
   whitelists `gelu`/`relu`/`silu`, and `$BIONEMO_RECIPES/models/geneformer/` is ReLU throughout. A
   ReLU encoder is an encoder.
