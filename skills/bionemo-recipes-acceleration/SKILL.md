@@ -235,7 +235,10 @@ only) at the depth warranted by the code.
 
 **Phase 5 — Validate.** Read `references/validation.md`. Generate `parity_check.py` from
 `assets/parity_check.py.tmpl` (Tier 1, always); generate `tests/test_modeling_ported.py` and
-`tests/conftest.py` from the corresponding templates (Tier 2, when Depth B produced a converter);
+`tests/conftest.py` from the corresponding templates (Tier 2, when Depth B produced a converter
+**or when THD packing was applied at any depth** — `test_golden_values_thd` is the packing
+correctness proof and must run even for Depth A ports; use the no-HF-counterpart path from
+`references/validation.md` §"When the target has no HF counterpart" if no converter exists);
 reproduce CI (Tier 3, when containerised). Fix the port if any tier fails.
 
 **Phase 6 — Report.** Generate `ACCELERATION_REPORT.md` from `assets/ACCELERATION_REPORT.md.tmpl`
@@ -277,8 +280,10 @@ Phases 3–6 always re-run.
 Full protocol in `references/validation.md`. Summary:
 
 - **Tier 1 — always** — forward logits + loss parity, backward, FP8 recipe sweep, BSHD-vs-THD.
-- **Tier 2 — when converter generated** — `BaseModelTest` harness (~30 inherited tests: golden
-  values, conversion round trips, init, FP8 recipe sweep).
+- **Tier 2 — when converter generated or THD packing applied** — `BaseModelTest` harness (~30
+  inherited tests: golden values, `test_golden_values_thd` packing proof, conversion round trips,
+  init, FP8 recipe sweep). Depth A + packing ports use the no-HF-counterpart path (identity
+  converters, skip conversion tests, checked-in baseline).
 - **Tier 3 — when containerised** — CI reproduction in `nvcr.io/nvidia/pytorch:26.04-py3`. State
   what was skipped and why.
 
