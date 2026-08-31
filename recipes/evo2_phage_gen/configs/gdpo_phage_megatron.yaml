@@ -62,8 +62,7 @@ policy:
     max_new_tokens: 5450
     temperature: 1.0
     top_p: 1.0
-    # Leave a fifth candidate slot so EOD can compete alongside A/C/G/T.
-    top_k: 5
+    top_k: 4
     mcore_generation_config:
       max_requests: 12
       prompt_batch_size: 12
@@ -120,6 +119,7 @@ env:
     weight_protein_hit_count: 1.0
     weight_tropism: 1.0
     weight_synteny: 0.25
+    weight_gene_a_origin: 0.25
     weight_average_protein_identity: 0.25
     weight_required_genes: 0.1
     weight_mmseqs_cluster_diversity: 1.0
@@ -153,6 +153,9 @@ env:
         requires_safety_eligibility: true
       - name: "synteny"
         columns: ["reward_external_synteny"]
+        requires_safety_eligibility: true
+      - name: "gene_a_origin"
+        columns: ["reward_gene_a_origin"]
         requires_safety_eligibility: true
       - name: "average_protein_identity"
         columns: ["reward_external_average_protein_identity"]

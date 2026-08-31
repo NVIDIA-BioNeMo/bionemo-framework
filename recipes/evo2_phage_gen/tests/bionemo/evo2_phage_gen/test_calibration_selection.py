@@ -38,6 +38,7 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
             "reward_external_tropism": [1.0, 0.0],
             "reward_external_required_genes": [0.5, 0.5],
             "reward_external_synteny": [0.7, 0.1],
+            "reward_gene_a_origin": [0.6, 0.2],
             "reward_external_average_protein_identity": [1.0, 1.0],
             "reward_binary_full_qc_pass": [1.0, 0.0],
             "reward_binary_full_qc_cluster_deduplicated_pass": [1.0, 0.0],
@@ -46,6 +47,7 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
             "tropism_measurement_available": [1.0, 1.0],
             "required_genes_measurement_available": [1.0, 1.0],
             "synteny_measurement_available": [1.0, 1.0],
+            "smooth_reference_measurement_available": [1.0, 1.0],
             "average_protein_identity_measurement_available": [1.0, 1.0],
             "mmseqs_cluster_num_clusters": [1, 1],
             "mmseqs_cluster_valid_for_clustering": [1.0, 1.0],
@@ -60,6 +62,8 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
     assert summary["within_setting_clusterable_count"] == 2
     assert summary["within_setting_99pct_distinct_rate"] == 0.5
     assert summary["target_signal_mean"] == pytest.approx(7 / 12)
+    assert summary["all_external_measurements_available_rate"] == 1.0
+    assert summary["gene_a_origin_reward_mean"] == pytest.approx(0.4)
 
 
 def test_summarize_setting_marks_header_only_scores_ineligible(tmp_path):

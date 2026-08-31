@@ -52,10 +52,12 @@ from bionemo.evo2_phage_gen.reward import (
     _add_full_synteny_rewards,
     _add_mmseqs_hit_rewards,
     _add_required_gene_rewards,
+    _add_smooth_reference_rewards,
     _aggregate_reward,
     _bounded_range_score,
     _external_qc_env,
     _lower_bound_ratio_score,
+    _smooth_reference_search_command,
     _spike_identity_score,
     _synteny_distance_score,
     _upper_bound_ratio_score,
@@ -819,7 +821,14 @@ def test_score_nucleotide_metrics_penalizes_low_complexity_sequence_ends():
 def test_reward_components_are_registered_and_clipped_to_unit_interval():
     """The aggregate RL score should be easy to reweight and stay in [0, 1]."""
     component_names = {component.name for component in REWARD_COMPONENTS}
-    assert {"valid_nt_chars", "genome_length", "gc_content", "protein_hit_count", "tropism"}.issubset(component_names)
+    assert {
+        "valid_nt_chars",
+        "genome_length",
+        "gc_content",
+        "protein_hit_count",
+        "tropism",
+        "gene_a_origin",
+    }.issubset(component_names)
     assert "mmseqs_cluster_diversity" in component_names
     assert "dustmask_end" in component_names
     removed_components = {
@@ -1281,6 +1290,96 @@ def test_external_qc_env_prepends_run_specific_tool_directory(tmp_path):
     env = _external_qc_env(ExternalQCRewardConfig(tool_bin_dir=tool_bin_dir))
 
     assert env["PATH"].split(os.pathsep)[0] == str(tool_bin_dir.resolve())
+
+
+def test_smooth_reference_search_is_permissive_but_significance_bounded(tmp_path):
+    """RL evidence search must retain partial hits without admitting E >= 1 noise."""
+    command = _smooth_reference_search_command(
+        reference_fasta=tmp_path / "reference.faa",
+        candidate_fasta=tmp_path / "candidate.faa",
+        output_tsv=tmp_path / "hits.tsv",
+        temporary_dir=tmp_path / "mmseqs-tmp",
+        threads=8,
+    )
+
+    assert command[:2] == ["mmseqs", "easy-search"]
+    assert command[command.index("--min-seq-id") + 1] == "0"
+    assert command[command.index("-c") + 1] == "0"
+    assert command[command.index("-e") + 1] == "1"
+    assert command[command.index("--format-output") + 1] == "query,target,evalue,pident,alnlen,qlen,tlen"
+    assert command[command.index("--threads") + 1] == "8"
+
+
+def test_smooth_reference_rewards_replace_only_shaped_scores_and_preserve_hard_passes(tmp_path, monkeypatch):
+    """The permissive search must not weaken the existing LoVis/tropism pass gates."""
+    motif = "CAACTTGATATTAATAACACTATAGACCAC"
+    reference_gff = tmp_path / "reference.gff"
+    reference_gff.write_text(
+        "##gff-version 3\n"
+        "ref\ttest\tCDS\t1\t9\t.\t+\t0\tID=A\n"
+        "ref\ttest\tCDS\t10\t18\t.\t+\t0\tID=G\n"
+        "##FASTA\n"
+        ">ref\n"
+        "ATGAAATAAATGCCCTAA\n"
+    )
+    a_orf = "G" * 6 + motif + "G" * 30
+    input_fasta = tmp_path / "input.fasta"
+    input_fasta.write_text(f">umi1\n{a_orf}\n")
+    (tmp_path / "orfs.fasta").write_text(
+        f">umi1_ORF.1 [0-{len(a_orf)}](+) type:complete length:{len(a_orf)}\n{a_orf}\n"
+        ">umi1_ORF.2 [3-105](+) type:complete length:102\n"
+        f"{'ATG' * 34}\n"
+    )
+    (tmp_path / "proteins.fasta").write_text(
+        ">umi1_ORF.1 [0-66](+) type:complete length:66\nMMMMMMMMMMMMMMMMMMMMMM\n"
+        ">umi1_ORF.2 [3-105](+) type:complete length:102\nMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\n"
+    )
+
+    def fake_run(command, **kwargs):
+        Path(command[4]).write_text("A\tumi1_ORF.1\t1e-20\t90\t95\t100\t100\nG\tumi1_ORF.2\t1e-20\t95\t99\t100\t100\n")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    scored = pd.DataFrame(
+        {
+            "arc_qc_id": ["umi1"],
+            "reward_external_synteny": [0.0],
+            "reward_external_synteny_pass": [1.0],
+            "reward_external_tropism": [0.0],
+            "reward_external_tropism_pass": [1.0],
+            "reward_gene_a_origin": [0.0],
+        }
+    )
+    external = ExternalQCRewardConfig(
+        enable_smooth_reference_rewards=True,
+        enable_synteny=True,
+        enable_tropism=True,
+        enable_gene_a_origin=True,
+        gene_a_reference_locus="A",
+        tropism_reference_locus="G",
+        gene_a_origin_motif=motif,
+        gene_a_origin_offset_nt=6,
+        gene_a_origin_offset_tolerance_nt=6,
+    )
+
+    observed = _add_smooth_reference_rewards(
+        scored,
+        run_dir=tmp_path,
+        input_fasta=input_fasta,
+        config={
+            "smooth_reference_genome_gff_file": str(reference_gff),
+            "orfipy_proteins_file_save_location": "proteins.fasta",
+            "orfipy_orfs_file_save_location": "orfs.fasta",
+        },
+        external_qc=external,
+    )
+
+    assert observed.loc[0, "reward_external_synteny"] == 1.0
+    assert observed.loc[0, "reward_external_tropism"] == 1.0
+    assert observed.loc[0, "reward_gene_a_origin"] == 1.0
+    assert observed.loc[0, "reward_external_synteny_pass"] == 1.0
+    assert observed.loc[0, "reward_external_tropism_pass"] == 1.0
+    assert observed.loc[0, "smooth_reference_measurement_available"] == 1.0
 
 
 def test_successful_tropism_search_without_hits_is_a_measured_zero(tmp_path):

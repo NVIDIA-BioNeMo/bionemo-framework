@@ -108,7 +108,7 @@
       "expected_output": "Coverage-aware, duplicate-safe protein evidence with aligned online and hard-QC semantics.",
       "assertions": [
         "The scorer retains alignment, query, and target lengths and reports reciprocal coverage rather than treating identity alone as gene presence.",
-        "Partial hits may receive bounded dense credit, but intact-gene hard gates require the configured reciprocal-coverage threshold on both query and target.",
+        "Partial called-ORF hits may receive bounded dense credit only above a shuffled-sequence null, with smooth significance, identity, and bidirectional-coverage progress; intact-gene hard gates remain independent and require their configured query and target coverage.",
         "Distinct-family counts and family-level AAI use one best coverage-qualified hit per target family so duplicate ORFs and fragments cannot inflate evidence, and thresholds are calibrated for exact targets versus profile consensuses.",
         "Missing alignment-length evidence fails closed rather than falling back to raw hit counts.",
         "Focused tests include full-length, truncated, duplicate-family, missing-evidence, and overlapping or embedded-gene cases and compare online scoring with final QC."

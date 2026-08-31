@@ -41,12 +41,22 @@ CELL_RE = re.compile(
     r"prefix(?P<prefix>\d+)_temp(?P<temperature>\d+(?:\.\d+)?)$"
 )
 EXTERNAL_OBJECTIVES = {
-    "protein_hit_count": "protein_database_hit_count",
-    "tropism": "tropism",
-    "required_genes": "required_genes",
-    "synteny": "synteny",
-    "average_protein_identity": "average_protein_identity",
+    "protein_hit_count": ("reward_external_protein_hit_count", "protein_database_hit_count_measurement_available"),
+    "tropism": ("reward_external_tropism", "smooth_reference_measurement_available"),
+    "required_genes": ("reward_external_required_genes", "required_genes_measurement_available"),
+    "synteny": ("reward_external_synteny", "smooth_reference_measurement_available"),
+    "gene_a_origin": ("reward_gene_a_origin", "smooth_reference_measurement_available"),
+    "average_protein_identity": (
+        "reward_external_average_protein_identity",
+        "average_protein_identity_measurement_available",
+    ),
 }
+EXTERNAL_SUPPORT_COLUMNS = tuple(
+    dict.fromkeys(
+        [support_column for _reward_column, support_column in EXTERNAL_OBJECTIVES.values()]
+        + ["tropism_measurement_available", "synteny_measurement_available"]
+    )
+)
 SAFETY_OBJECTIVES = ("amr", "toxin", "lysogeny")
 EXPLICIT_SAFETY_INAPPLICABILITY = {
     "toxin": ("NOT_RUN", frozenset({"TOXIN_NO_PROTEIN_QUERIES"})),
@@ -63,6 +73,7 @@ REWARD_COLUMNS = (
     "reward_external_tropism",
     "reward_external_required_genes",
     "reward_external_synteny",
+    "reward_gene_a_origin",
     "reward_external_average_protein_identity",
     "reward_mmseqs_cluster_diversity",
     "reward_safety_amr",
@@ -76,6 +87,9 @@ BIOLOGY_COLUMNS = (
     "required_genes_total",
     "num_syntenic_genes",
     "total_num_genes",
+    "gene_a_origin_motif_score",
+    "gene_a_origin_position_score",
+    "gene_a_origin_strong_site_count",
     "average_protein_percent_identity",
     "average_protein_identity_gene_count",
     "mmseqs_cluster_is_singleton",
@@ -173,14 +187,11 @@ def summarize_cell(cell: str, scored: pd.DataFrame) -> dict[str, float | int | s
         "records": len(scored),
         "metric_environment_ok": external_environment_ok and safety_evidence_interpretable,
     }
-    for objective, support_prefix in EXTERNAL_OBJECTIVES.items():
-        reward_column = f"reward_external_{objective}"
-        support_column = f"{support_prefix}_measurement_available"
+    for objective, (reward_column, support_column) in EXTERNAL_OBJECTIVES.items():
         row[f"{objective}_reward_mean"] = float(_numeric_column(scored, reward_column).mean())
         row[f"{objective}_support_rate"] = float(_numeric_column(scored, support_column).mean())
-    external_support_columns = [f"{prefix}_measurement_available" for prefix in EXTERNAL_OBJECTIVES.values()]
     external_support = pd.concat(
-        [_numeric_column(scored, column) for column in external_support_columns], axis=1
+        [_numeric_column(scored, column) for column in EXTERNAL_SUPPORT_COLUMNS], axis=1
     ).fillna(0.0)
     row["all_external_measurements_available_rate"] = float(external_support.min(axis=1).mean())
     for column in REWARD_COLUMNS:
@@ -243,6 +254,8 @@ def score_cell(
         required_genes_evidence_target=float(arc.get("required_genes_evidence_target", 10.0)),
         protein_match_min_reciprocal_coverage=float(arc.get("protein_match_min_reciprocal_coverage", 0.75)),
         tropism_match_min_reciprocal_coverage=float(arc.get("tropism_match_min_reciprocal_coverage", 0.95)),
+        enable_smooth_reference_rewards=True,
+        enable_gene_a_origin=True,
         lovis4u_parallel_jobs=max(1, threads),
         lovis4u_chunk_size=max(1, threads),
         lovis4u_collect_pdfs=False,
@@ -270,6 +283,7 @@ def score_cell(
             tropism=1,
             required_genes=1,
             synteny=1,
+            gene_a_origin=1,
             average_protein_identity=1,
             mmseqs_cluster_diversity=1,
         ),

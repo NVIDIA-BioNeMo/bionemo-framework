@@ -118,6 +118,7 @@ def test_summarize_cell_separates_measured_zero_from_missing_support():
             "reward_external_tropism": [0.0, 0.0],
             "reward_external_required_genes": [0.2, 0.0],
             "reward_external_synteny": [0.1, 0.0],
+            "reward_gene_a_origin": [0.3, 0.0],
             "reward_external_average_protein_identity": [0.8, 0.0],
             "reward_binary_full_qc_pass": [0.0, 0.0],
             "reward_binary_full_qc_cluster_deduplicated_pass": [0.0, 0.0],
@@ -126,6 +127,7 @@ def test_summarize_cell_separates_measured_zero_from_missing_support():
             "tropism_measurement_available": [1.0, 1.0],
             "required_genes_measurement_available": [1.0, 0.0],
             "synteny_measurement_available": [1.0, 0.0],
+            "smooth_reference_measurement_available": [1.0, 0.0],
             "average_protein_identity_measurement_available": [1.0, 0.0],
             "reward_safety_amr": [1.0, 1.0],
             "reward_safety_toxin": [1.0, 0.0],
@@ -148,7 +150,11 @@ def test_summarize_cell_separates_measured_zero_from_missing_support():
     summary = summarize_cell("prefix4_temp1.0", scored)
 
     assert summary["tropism_reward_mean"] == 0.0
-    assert summary["tropism_support_rate"] == 1.0
+    assert summary["tropism_support_rate"] == 0.5
+    assert summary["synteny_support_rate"] == 0.5
+    assert summary["gene_a_origin_reward_mean"] == 0.15
+    assert summary["gene_a_origin_support_rate"] == 0.5
+    assert summary["reward_gene_a_origin_mean"] == 0.15
     assert summary["required_genes_support_rate"] == 0.5
     assert summary["all_external_measurements_available_rate"] == 0.5
     assert summary["reward_safety_amr_mean"] == 1.0
@@ -166,6 +172,7 @@ def test_summarize_cell_accepts_explicit_safety_inapplicability():
             "tropism_measurement_available": [1.0],
             "required_genes_measurement_available": [1.0],
             "synteny_measurement_available": [1.0],
+            "smooth_reference_measurement_available": [1.0],
             "average_protein_identity_measurement_available": [1.0],
             "safety_amr_measurement_available": [1.0],
             "safety_amr_execution_status": ["COMPLETED_AND_PARSED"],

@@ -27,6 +27,7 @@ import pandas as pd
 from bionemo.evo2_phage_gen.calibration_scoring import (
     CELL_RE,
     EXTERNAL_OBJECTIVES,
+    EXTERNAL_SUPPORT_COLUMNS,
     safety_objective_interpretability,
 )
 
@@ -52,8 +53,7 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
     cell = path.name.removesuffix(".scores.csv")
     match = CELL_RE.fullmatch(cell)
     cell_seed = bootstrap_seed + int(hashlib.sha256(cell.encode()).hexdigest()[:8], 16)
-    support_columns = [f"{prefix}_measurement_available" for prefix in EXTERNAL_OBJECTIVES.values()]
-    support = pd.concat([_numeric(scored, column) for column in support_columns], axis=1).min(axis=1)
+    support = pd.concat([_numeric(scored, column) for column in EXTERNAL_SUPPORT_COLUMNS], axis=1).min(axis=1)
     safety_environment_ok = bool(len(scored) and safety_objective_interpretability(scored).all().all())
     target_signal = pd.concat(
         [
@@ -97,8 +97,8 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
         row[f"{name}_mean"] = float(array.mean()) if len(array) else 0.0
         row[f"{name}_ci_low"] = low
         row[f"{name}_ci_high"] = high
-    for objective in EXTERNAL_OBJECTIVES:
-        row[f"{objective}_reward_mean"] = float(_numeric(scored, f"reward_external_{objective}").mean())
+    for objective, (reward_column, _support_column) in EXTERNAL_OBJECTIVES.items():
+        row[f"{objective}_reward_mean"] = float(_numeric(scored, reward_column).mean())
     return row
 
 

@@ -121,6 +121,15 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
     assert sequence_safety["phrogs_threads"] == 16
     assert external_qc["lovis4u_mmseqs_threads"] == 8
     assert external_qc["lovis4u_metrics_only"] is True
+    assert external_qc["enable_smooth_reference_rewards"] is True
+    assert external_qc["synteny_identity_full_credit"] == 0.90
+    assert external_qc["synteny_reciprocal_coverage_full_credit"] == 0.95
+    assert external_qc["synteny_raw_integrity_min"] == 0.001
+    assert external_qc["tropism_identity_full_credit"] == 0.95
+    assert external_qc["tropism_reciprocal_coverage_full_credit"] == 0.99
+    assert external_qc["enable_gene_a_origin"] is True
+    assert external_qc["gene_a_reference_locus"] == "NC_001422.1_ORF.23"
+    assert config["env"]["phage_qc"]["weight_gene_a_origin"] == 0.25
     assert generation_config["temperature"] > 0.0
     assert generation_config["top_k"] is None
     assert generation_config["top_p"] == 1.0
@@ -155,7 +164,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["loss_fn"]["reference_policy_kl_penalty"] == 0.001
     assert config["loss_fn"]["token_level_loss"] is False
     assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
-    assert config["policy"]["generation"]["top_k"] == 5
+    assert config["policy"]["generation"]["top_k"] == 4
     assert config["policy"]["generation"]["mcore_generation_config"]["generation_adapter_config"]["seed"] == 42
     assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6
     assert config["policy"]["megatron_cfg"]["optimizer"]["min_lr"] == 1.0e-7
@@ -175,6 +184,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "tropism",
         "required_genes",
         "synteny",
+        "gene_a_origin",
         "average_protein_identity",
         "mmseqs_cluster_diversity",
         "safety_amr",

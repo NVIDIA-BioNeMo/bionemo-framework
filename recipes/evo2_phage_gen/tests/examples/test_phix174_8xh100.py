@@ -353,7 +353,7 @@ def test_dry_run(tmp_path: Path) -> None:
     gdpo = gdpo_commands[0]
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
     assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
-    assert "policy.generation.top_k=5" in gdpo
+    assert "policy.generation.top_k=4" in gdpo
     assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
 
     conversion = next(
