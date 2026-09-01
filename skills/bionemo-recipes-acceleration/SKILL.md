@@ -53,7 +53,8 @@ the skill stops and explains why rather than producing an unvalidated port.
 
 - Genomics pipeline (Nextflow, Snakemake, WDL) → use `genomics-workflow-acceleration`
 - Diffusion, score-based, equivariant (SE3/E3), GNN, SSM/Mamba models → hard stop with report
-- Megatron-LM training → direct user to `$BIONEMO_RECIPES/recipes/evo2_megatron/`
+- Megatron-LM training → direct user to `$BIONEMO_RECIPES/recipes/evo2_megatron/` (sequence/genomics
+  models) or `$BIONEMO_RECIPES/recipes/eden_megatron/` (protein/chemistry models)
 - Inference serving / vLLM → `$BIONEMO_RECIPES/recipes/vllm_inference/`
 
 ## Examples
@@ -235,7 +236,7 @@ only) at the depth warranted by the code.
 
 **Phase 5 — Validate.** Read `references/validation.md`. Generate `parity_check.py` from
 `assets/parity_check.py.tmpl` (Tier 1, always); generate `tests/test_modeling_ported.py` and
-`tests/conftest.py` from the corresponding templates (Tier 2, when Depth B produced a converter
+`tests/test_modeling_ported.py` and `conftest.py` (root) from the corresponding templates (Tier 2, when Depth B produced a converter
 **or when THD packing was applied at any depth** — `test_golden_values_thd` is the packing
 correctness proof and must run even for Depth A ports; use the no-HF-counterpart path from
 `references/validation.md` §"When the target has no HF counterpart" if no converter exists);
@@ -328,7 +329,7 @@ corresponding output file.
 
 - `assets/parity_check.py.tmpl` → `<target>/parity_check.py` (Tier 1 validation, Phase 5)
 - `assets/test_modeling_ported.py.tmpl` → `<target>/tests/test_modeling_ported.py` (Tier 2, Phase 5)
-- `assets/conftest.py.tmpl` → `<target>/tests/conftest.py` (Tier 2, Phase 5)
+- `assets/conftest.py.tmpl` → `<target>/conftest.py` (Tier 2, Phase 5 — root level so `pytest_plugins` is valid)
 - `assets/ACCELERATION_REPORT.md.tmpl` → `<target>/ACCELERATION_REPORT.md` (Phase 6)
 
 ## Inputs
@@ -354,18 +355,18 @@ corresponding output file.
 
 All artifacts are written into the **target repo**, never into `$BIONEMO_RECIPES`.
 
-| Artifact                             | Phase | Written                        | Description                                                                                                                    |
-| ------------------------------------ | ----- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `.bionemo-accel/inventory.json`      | 0     | Always                         | Model dimensions, entry points, framework, TE import status                                                                    |
-| `.bionemo-accel/match.json`          | 1     | On match                       | Architecture family, confidence score, matched reference                                                                       |
-| `.bionemo-accel/hardware.json`       | 2     | Always                         | GPU, compute capability, per-recipe TE support flags                                                                           |
-| `.bionemo-accel/gemm/summary.json`   | 3     | When ≥1 benchmark run succeeds | GEMM speedup for successful modes, skip flags applied, interpretation reminders                                                |
-| `.bionemo-accel/precision.json`      | 3     | Always                         | Selected recipe and rationale                                                                                                  |
-| `parity_check.py`                    | 5     | Always                         | Tier 1 forward-pass parity check against the original model                                                                    |
-| `tests/test_modeling_ported.py`      | 5     | Depth B only                   | BaseModelTest harness subclass for the ported model                                                                            |
-| `tests/conftest.py`                  | 5     | Depth B only                   | pytest plugin registration (`pytest_plugins = ["tests.common.fixtures"]`)                                                      |
-| `ACCELERATION_REPORT.md`             | 6     | Always                         | Final report: measured speedups, one-line FP8 enable config, limitations                                                       |
-| `ACCELERATION_REPORT.md` (hard stop) | 1     | On out-of-scope architecture   | Rejection reason (no TE analogue, attention-pattern mismatch, or no runnable forward pass); no other files written or modified |
+| Artifact                             | Phase | Written                        | Description                                                                                                                        |
+| ------------------------------------ | ----- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `.bionemo-accel/inventory.json`      | 0     | Always                         | Model dimensions, entry points, framework, TE import status                                                                        |
+| `.bionemo-accel/match.json`          | 1     | On match                       | Architecture family, confidence score, matched reference                                                                           |
+| `.bionemo-accel/hardware.json`       | 2     | Always                         | GPU, compute capability, per-recipe TE support flags                                                                               |
+| `.bionemo-accel/gemm/summary.json`   | 3     | When ≥1 benchmark run succeeds | GEMM speedup for successful modes, skip flags applied, interpretation reminders                                                    |
+| `.bionemo-accel/precision.json`      | 3     | Always                         | Selected recipe and rationale                                                                                                      |
+| `parity_check.py`                    | 5     | Always                         | Tier 1 forward-pass parity check against the original model                                                                        |
+| `tests/test_modeling_ported.py`      | 5     | Depth B only                   | BaseModelTest harness subclass for the ported model                                                                                |
+| `conftest.py`                        | 5     | Depth B only                   | pytest plugin registration (`pytest_plugins = ["tests.common.fixtures"]`) — written to repo root so pytest permits the declaration |
+| `ACCELERATION_REPORT.md`             | 6     | Always                         | Final report: measured speedups, one-line FP8 enable config, limitations                                                           |
+| `ACCELERATION_REPORT.md` (hard stop) | 1     | On out-of-scope architecture   | Rejection reason (no TE analogue, attention-pattern mismatch, or no runnable forward pass); no other files written or modified     |
 
 **Branch:** `bionemo-accel/<family>` is created in the target repo on a successful port (e.g. `bionemo-accel/encoder-mlm`, `bionemo-accel/causal-lm-dense`).
 

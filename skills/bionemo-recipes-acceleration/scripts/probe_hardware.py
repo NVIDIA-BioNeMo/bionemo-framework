@@ -265,7 +265,7 @@ def probe_transformer_engine(compute_capability: tuple[int, int] | None) -> dict
         import transformer_engine
         import transformer_engine.pytorch
         from transformer_engine.pytorch import fp8
-    except ImportError as e:
+    except (ImportError, OSError, RuntimeError) as e:
         return {"available": False, "error": f"transformer_engine not importable: {e}"}
 
     result: dict = {

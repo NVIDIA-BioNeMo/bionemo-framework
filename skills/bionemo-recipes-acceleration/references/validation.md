@@ -63,15 +63,16 @@ Contents: `__init__.py` (exports `BaseModelTest`, `TestTolerances`, `HAS_DATA_CE
 
 ### Wire the conftest
 
-`<target>/tests/conftest.py` must contain:
+`<target>/conftest.py` (the **repo root**, not `tests/`) must contain:
 
 ```python
 pytest_plugins = ["tests.common.fixtures"]
 ```
 
 Without it the `fp8_recipe`, `input_format`, and `te_attn_backend` fixtures do not load and
-collection fails. Use `assets/conftest.py.tmpl`; it also appends the model root to `sys.path`, since
-the reference recipes import modules by flat name.
+collection fails. pytest >= 7 raises a collection error when `pytest_plugins` is declared in a
+non-root conftest — always write it to the root. Use `assets/conftest.py.tmpl`; it also appends
+the model root to `sys.path`, since the reference recipes import modules by flat name.
 
 ### Implement the hooks
 
