@@ -25,6 +25,7 @@ import pandas as pd
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
+from scipy.optimize import linear_sum_assignment
 
 
 ORFIPY_INTERVAL_RE = re.compile(r"\[(\d+)-(\d+)\]")
@@ -141,29 +142,27 @@ def _maximum_weight_reference_assignment(
     reference_order: tuple[str, ...],
     candidate_order: tuple[str, ...],
 ) -> tuple[float, tuple[tuple[str, str], ...]]:
-    """Return a deterministic maximum-weight one-to-one reference assignment."""
-    if len(reference_order) > 20:
-        raise ValueError("Bitmask reference assignment supports at most 20 loci")
-    states: dict[int, tuple[float, tuple[tuple[str, str], ...]]] = {0: (0.0, ())}
-    for candidate in candidate_order:
-        updated = dict(states)
-        for mask, (score, pairs) in states.items():
-            for index, reference in enumerate(reference_order):
-                bit = 1 << index
-                weight = float(edge_weights.get((reference, candidate), 0.0))
-                if mask & bit or weight <= 0.0:
-                    continue
-                new_mask = mask | bit
-                proposal = (score + weight, (*pairs, (reference, candidate)))
-                incumbent = updated.get(new_mask)
-                if (
-                    incumbent is None
-                    or proposal[0] > incumbent[0] + 1e-12
-                    or (math.isclose(proposal[0], incumbent[0], abs_tol=1e-12) and proposal[1] < incumbent[1])
-                ):
-                    updated[new_mask] = proposal
-        states = updated
-    return max(states.values(), key=lambda item: (item[0], tuple(reversed(item[1]))))
+    """Return an exact maximum-weight one-to-one assignment at genome scale."""
+    if len(set(reference_order)) != len(reference_order) or len(set(candidate_order)) != len(candidate_order):
+        raise ValueError("Reference and candidate orders must contain unique locus identifiers")
+    if not reference_order or not candidate_order:
+        return 0.0, ()
+    matrix = [
+        [float(edge_weights.get((reference, candidate), 0.0)) for candidate in candidate_order]
+        for reference in reference_order
+    ]
+    row_indices, column_indices = linear_sum_assignment(matrix, maximize=True)
+    assignment = tuple(
+        sorted(
+            (
+                (reference_order[row], candidate_order[column])
+                for row, column in zip(row_indices, column_indices, strict=True)
+                if matrix[row][column] > 0.0
+            ),
+            key=lambda pair: (reference_order.index(pair[0]), candidate_order.index(pair[1])),
+        )
+    )
+    return sum(float(edge_weights[pair]) for pair in assignment), assignment
 
 
 def _linear_ordered_integrity(
@@ -241,7 +240,7 @@ def score_smooth_reference_architecture(
         content_integrity_sum=content_sum,
         ordered_integrity_sum=ordered_sum,
         duplicate_integrity_sum=duplicate_sum,
-        assignment=tuple(sorted(assignment)),
+        assignment=assignment,
     )
 
 

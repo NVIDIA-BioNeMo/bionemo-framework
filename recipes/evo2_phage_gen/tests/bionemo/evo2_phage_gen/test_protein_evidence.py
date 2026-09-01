@@ -321,6 +321,27 @@ def test_smooth_architecture_is_rotation_invariant_and_one_to_one():
     assert ambiguous.content_integrity_sum == 1.0
 
 
+def test_smooth_architecture_scales_beyond_twenty_reference_loci():
+    """Genome-scale architecture matching must not retain the bitmask implementation's locus cap."""
+    reference_order = tuple(f"reference_{index}" for index in range(34))
+    candidate_order = tuple(f"candidate_{index}" for index in range(34))
+    edges = {
+        (reference, candidate): 1.0 for reference, candidate in zip(reference_order, candidate_order, strict=True)
+    }
+
+    result = protein_evidence.score_smooth_reference_architecture(
+        edges,
+        reference_order=reference_order,
+        candidate_order=candidate_order,
+        order_weight=0.75,
+        duplicate_penalty_weight=0.75,
+    )
+
+    assert result.reward == 1.0
+    assert result.content_integrity_sum == 34.0
+    assert result.assignment == tuple(zip(reference_order, candidate_order, strict=True))
+
+
 def test_gene_a_origin_requires_the_functional_site_inside_the_assigned_a_orf():
     """An exact site outside its A-ORF context must not earn origin credit."""
     motif = "CAACTTGATATTAATAACACTATAGACCAC"
