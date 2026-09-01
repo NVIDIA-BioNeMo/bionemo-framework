@@ -590,7 +590,7 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--use-subquadratic-ops",
         action="store_true",
-        help="Use subquadratic_ops for improved performance.",
+        help="Use accelerated subquadratic FFT/causal-conv1d kernels, including projection/mixer B2B fusion.",
     )  # DONE
     parser.add_argument(
         "--most-recent-k",

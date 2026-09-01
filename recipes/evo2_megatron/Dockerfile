@@ -28,10 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN uv venv --system-site-packages --seed $VIRTUAL_ENV
 
-# Pin warp-lang to a version that still exposes wp.LOG_WARNING / wp.config.log_level (see .ci_build.sh).
-# subquadratic-ops-torch-cu13 0.3.0 sets `wp.config.log_level = wp.LOG_WARNING` in
-# implicit_filter.py; those symbols only exist in warp-lang 1.14+ (absent through 1.13.x).
-RUN uv pip install 'warp-lang>=1.14,<1.17'
+# Let subquadratic-ops select its compatible warp-lang dependency.
+# Pin warp-lang here in the future if subquadratic-ops has a verified compatibility issue.
 
 # 4. Pin transformer_engine to the version pre-installed in the base image.
 # Without this constraint uv may try to upgrade or rebuild TE, which breaks the build.

@@ -204,7 +204,7 @@ class MixerModuleWrapper(torch.nn.Module):
     def forward(self, x, _use_cp=True):
         """Forward pass for the MixerModuleWrapper."""
         if self.use_subquadratic_ops and self.operator_type != "hyena":
-            logging.info(f"Using subquadratic_ops: {self.use_subquadratic_ops}")
+            logging.info("Using subquadratic_ops implementation")
             z = self.mixer.b2b_kernel(x, _use_cp=_use_cp)
         else:
             logging.info("Using PyTorch implementation")

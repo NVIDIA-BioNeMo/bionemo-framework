@@ -24,10 +24,12 @@ import logging
 import os
 import tempfile
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import huggingface_hub.errors
+import numpy as np
 import torch
 import torch.distributed as dist
 from huggingface_hub import hf_hub_download
@@ -139,7 +141,21 @@ def load_savanna_state_dict(path: Path) -> dict[str, torch.Tensor]:
     Returns:
         Flat state dict with keys like 'sequential.{i}.xxx'.
     """
-    raw = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
+    # Savanna checkpoints include NumPy uint32 RNG state. Older checkpoints
+    # record NumPy 1's ``numpy.core`` path, while NumPy 2 exposes the same
+    # reconstruction function from ``numpy._core``. Allow only the container
+    # globals required to decode that metadata and retain weights-only loading.
+    numpy_reconstruct = np.empty(0).__reduce__()[0]
+    numpy_safe_globals = [
+        BytesIO,
+        np.ndarray,
+        np.dtype,
+        type(np.dtype(np.uint32)),
+        numpy_reconstruct,
+        (numpy_reconstruct, "numpy.core.multiarray._reconstruct"),
+    ]
+    with torch.serialization.safe_globals(numpy_safe_globals):
+        raw = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
     if "module" in raw:
         raw = raw["module"]
 

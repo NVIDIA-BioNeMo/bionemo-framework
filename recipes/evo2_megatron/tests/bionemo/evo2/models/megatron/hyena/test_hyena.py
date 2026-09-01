@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -25,11 +26,18 @@ from megatron.bridge.training.config import OptimizerConfig, OptimizerConfigOver
 from megatron.core.inference.utils import InferenceMode
 from megatron.core.optimizer import _get_param_groups, get_standard_config_overrides
 from megatron.core.transformer.enums import CudaGraphScope
+from megatron.core.transformer.mlp import MLP
 
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaOptimizerConfigOverrideProvider
 from bionemo.evo2.models.megatron.hyena.hyena_block import HyenaStack
 from bionemo.evo2.models.megatron.hyena.hyena_layer import HyenaLayer
 from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel
+
+from .tp_reference import (
+    get_tp_reference_hyena_stack_spec,
+    merge_strided_column_shards,
+    select_strided_column_shard,
+)
 
 
 class _FakePGCollection:
@@ -133,6 +141,50 @@ def test_hyena_layer_cuda_graph_cache_key_includes_evo2_request_shape():
         {"attention_mask": None, "inference_context": inference_context},
         cache_key=(padded_batch_dimensions, 2, True),
     )
+
+
+def test_tp_reference_stack_uses_test_only_fp32_linears():
+    spec = get_tp_reference_hyena_stack_spec()
+
+    hyena_submodules = spec.submodules.hyena_layer.submodules
+    attention_submodules = spec.submodules.attention_layer.submodules
+    attention_mlp = attention_submodules.mlp
+    assert isinstance(attention_mlp, partial)
+    assert attention_mlp.func == MLP.as_mlp_submodule
+    attention_mlp_submodules = attention_mlp.keywords["submodules"]
+    row_linear_modules = (
+        hyena_submodules.mixer.submodules.dense,
+        hyena_submodules.mlp.submodules.linear_fc2,
+        attention_submodules.self_attention.submodules.linear_proj,
+        attention_mlp_submodules.linear_fc2,
+    )
+    column_linear_modules = (
+        hyena_submodules.mixer.submodules.dense_projection,
+        hyena_submodules.mlp.submodules.linear_fc1,
+        attention_submodules.self_attention.submodules.linear_qkv,
+        attention_mlp_submodules.linear_fc1,
+    )
+
+    assert {module.__name__ for module in row_linear_modules} == {"TpReferenceRowParallelLinear"}
+    assert {module.__name__ for module in column_linear_modules} == {"TpReferenceLayerNormColumnParallelLinear"}
+
+
+@pytest.mark.parametrize(("tp_size", "stride"), [(1, 1), (2, 1), (2, 2), (4, 2)])
+def test_strided_column_shards_round_trip(tp_size: int, stride: int):
+    """Logical GLU ordering survives TP shard selection and reconstruction."""
+    width = tp_size * stride * 3
+    full_output = torch.arange(2 * 3 * width).reshape(2, 3, width)
+
+    output_shards = [
+        select_strided_column_shard(full_output, tp_rank=tp_rank, tp_size=tp_size, stride=stride)
+        for tp_rank in range(tp_size)
+    ]
+    restored_output = merge_strided_column_shards(
+        [shard.movedim(-1, 0) for shard in output_shards],
+        stride=stride,
+    ).movedim(0, -1)
+
+    assert torch.equal(restored_output, full_output)
 
 
 def test_weight_decay_conditions():

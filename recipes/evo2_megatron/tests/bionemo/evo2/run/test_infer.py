@@ -115,11 +115,128 @@ def test_configure_native_dynamic_cuda_graphs_normalizes_checkpoint_state(
     assert provider.cuda_graph_scope == []
 
 
+def test_graph_reset_clears_current_mcore_runner_cache(monkeypatch):
+    stale_runner = object()
+    manager = SimpleNamespace(
+        cudagraph_runners=[stale_runner],
+        custom_cudagraphs_lookup_table={(1,): stale_runner},
+    )
+    nd = SimpleNamespace(
+        hyena_model=SimpleNamespace(
+            modules=lambda: [SimpleNamespace(cudagraph_manager=manager)],
+        )
+    )
+    delete_calls = []
+    monkeypatch.setattr(
+        "megatron.core.transformer.cuda_graphs.delete_cuda_graphs",
+        lambda: delete_calls.append(True),
+    )
+
+    infer_module._reset_layer_cuda_graphs(nd)
+
+    assert manager.cudagraph_runners == []
+    assert manager.custom_cudagraphs_lookup_table == {}
+    assert delete_calls == [True]
+
+
 def test_batched_binding_rejects_permuted_contiguous_request_slots():
     from bionemo.evo2.models.evo2_provider import bind_hyena_packed_views_to_dynamic_context_batch
 
     with pytest.raises(ValueError, match="contiguous request slots"):
         bind_hyena_packed_views_to_dynamic_context_batch(None, None, request_slots=[2, 0, 1])
+
+
+def test_packed_hyena_uses_local_pp_layer_map():
+    from bionemo.evo2.models.evo2_provider import bind_hyena_packed_views_to_dynamic_context_batch
+
+    layer_shapes = [
+        SimpleNamespace(conv_owner_id=101, ssm_owner_id=201, ssm_shape=(2, 3), ssm_kind="inner_fir"),
+        SimpleNamespace(conv_owner_id=102, ssm_owner_id=202, ssm_shape=(3, 2), ssm_kind="iir"),
+    ]
+    layers = [
+        SimpleNamespace(
+            layer_number=17 + local_idx,
+            mixer=SimpleNamespace(hyena_state_shapes_per_request=lambda: None),
+        )
+        for local_idx in range(2)
+    ]
+    decoder = SimpleNamespace(
+        layers=layers,
+        hyena_state_shapes_per_request=lambda: ((4, 5), (3, 3), layer_shapes),
+    )
+    model = SimpleNamespace(decoder=decoder)
+    dyn_ctx = SimpleNamespace(
+        mamba_conv_states=torch.zeros(2, 1, 4, 5),
+        mamba_ssm_states=torch.zeros(2, 1, 3, 3),
+        layer_map={0: 0, 1: 1},
+    )
+
+    packed_states = bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, request_slots=[0])
+    packed_by_kind = {state._kind: state for state in packed_states}
+    packed_by_kind["fir"][101] = torch.full((1, 4, 5), 1.0)
+    packed_by_kind["fir"][102] = torch.full((1, 4, 5), 2.0)
+    packed_by_kind["inner_fir"][201] = torch.full((1, 2, 3), 3.0)
+    packed_by_kind["iir"][202] = torch.full((1, 3, 2), 4.0)
+
+    assert packed_by_kind["fir"][101].data_ptr() == dyn_ctx.mamba_conv_states[0, 0].data_ptr()
+    assert packed_by_kind["fir"][102].data_ptr() == dyn_ctx.mamba_conv_states[1, 0].data_ptr()
+    assert packed_by_kind["inner_fir"][201].data_ptr() == dyn_ctx.mamba_ssm_states[0, 0, :2, :3].data_ptr()
+    assert packed_by_kind["iir"][202].data_ptr() == dyn_ctx.mamba_ssm_states[1, 0, :3, :2].data_ptr()
+    assert torch.all(dyn_ctx.mamba_conv_states[0] == 1.0)
+    assert torch.all(dyn_ctx.mamba_conv_states[1] == 2.0)
+    assert torch.all(dyn_ctx.mamba_ssm_states[0, :, :2, :3] == 3.0)
+    assert torch.all(dyn_ctx.mamba_ssm_states[1, :, :3, :2] == 4.0)
+
+
+def test_native_pp_forward_broadcasts_last_stage_logits(monkeypatch):
+    class _FakePPGroup:
+        @staticmethod
+        def size():
+            return 2
+
+    pp_group = _FakePPGroup()
+    dyn_ctx = SimpleNamespace(
+        pipeline_parallel_group=pp_group,
+        config=SimpleNamespace(materialize_only_last_token_logits=True),
+        num_last_token_logits=2,
+    )
+    wrapper_inputs = []
+
+    class _FakeInferenceWrapper:
+        inference_context = dyn_ctx
+
+        @staticmethod
+        def run_one_forward_step(inference_input):
+            wrapper_inputs.append(inference_input)
+            return None
+
+    class _UnexpectedDirectForward:
+        def __call__(self, *_args, **_kwargs):
+            pytest.fail("pipeline-parallel inference must use MCore's inference wrapper")
+
+    expected_logits = torch.ones((1, 2, 4), dtype=torch.bfloat16)
+    broadcast_args = []
+
+    def _broadcast(size, dtype, tensor=None, pp_group=None):
+        broadcast_args.append((size, dtype, tensor, pp_group))
+        return expected_logits
+
+    from megatron.core.inference import communication_utils
+
+    monkeypatch.setattr(communication_utils, "broadcast_from_last_pipeline_stage", _broadcast)
+    nd = SimpleNamespace(
+        forward_model=_UnexpectedDirectForward(),
+        hyena_model=SimpleNamespace(vocab_size=4, config=SimpleNamespace(params_dtype=torch.bfloat16)),
+        inference_wrapper=_FakeInferenceWrapper(),
+    )
+    input_ids = torch.tensor([[1, 2], [3, 4]], dtype=torch.long)
+    position_ids = torch.tensor([[0, 1], [0, 1]], dtype=torch.long)
+
+    logits = infer_module._forward_native_dynamic_logits(nd, dyn_ctx, input_ids, position_ids)
+
+    assert logits is expected_logits
+    assert wrapper_inputs == [{"tokens": input_ids, "position_ids": position_ids, "attention_mask": None}]
+    assert broadcast_args == [([1, 2, 4], torch.bfloat16, None, pp_group)]
 
 
 @pytest.mark.parametrize(
@@ -213,6 +330,16 @@ def test_exact_generation_cli_flags_default_false_and_enable_when_passed(monkeyp
     assert defaults.strict_generation is False
     assert enabled.ignore_eos is True
     assert enabled.strict_generation is True
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [([], None), (["--context-parallel-comm-type", "p2p"], "p2p"), (["--context-parallel-comm-type", "a2a"], "a2a")],
+)
+def test_infer_context_parallel_comm_type_cli(monkeypatch, extra_args, expected):
+    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt", *extra_args])
+
+    assert parse_args().context_parallel_comm_type == expected
 
 
 def test_max_batch_size_help_describes_prompt_file_chunking(monkeypatch, capsys):

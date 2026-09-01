@@ -84,12 +84,14 @@ add flags such as:
 
 With best-K enabled, the save interval must be a multiple of the validation interval. The callback assigns the closest already-recorded metric when each checkpoint is saved, writes all scalar validation results to `validation_metrics.json`, and records the chosen assignments in `checkpoint_metrics.json`; its `best_checkpoint` field points to the selected relative checkpoint directory. By default, missing matches warn and use recent-K retention; `--strict-checkpoint-metric` stops instead and reports the raw validation keys. TensorBoard adds a ` validation` suffix to those raw keys. Checkpoints that predate newly enabled tracking are left in place as historical unscored checkpoints.
 
-> **Tip:** The `--use-subquadratic-ops` flag enables fused subquadratic-ops
-> CUDA kernels (`b2b_causal_conv1d` for proj+mixer fusion in prefill,
-> `fft_causal_conv1d` / `causal_conv1d` inside `engine.parallel_fir`). It
-> applies to training, batch prediction (`predict_evo2`), and the prefill
-> phase of autoregressive inference (`infer_evo2`); per-token decode is
-> already in optimal recurrent form and is unaffected.
+> **Tip:** The `--use-subquadratic-ops` flag enables the accelerated
+> `fft_causal_conv1d` / `causal_conv1d` kernels. It applies to training,
+> batch prediction (`predict_evo2`), and the prefill phase of autoregressive
+> inference (`infer_evo2`); per-token decode is already in recurrent form and
+> is unaffected. Short and medium Hyena operators use the fused projection+mixer
+> B2B kernel on this accelerated BF16 production path. Fusion changes BF16
+> accumulation order slightly; it does not switch execution to the slow FP32
+> tensor-parallel test oracle.
 
 ### Autoregressive generation (`infer_evo2`)
 
@@ -113,10 +115,14 @@ Options:
 - `--temperature` — sampling temperature (default: 1.0).
 - `--top-k` / `--top-p` — top-k or nucleus sampling (0 = disabled).
 - `--tensor-parallel-size` — tensor parallelism for large models (default: 1).
+- `--context-parallel-size` — context parallelism for long prompts (default: 1).
+- `--context-parallel-comm-type` — runtime attention transport for context
+  parallelism: `p2p` (the default ring-style path) or `a2a` (tighter BF16 parity,
+  with a possible performance cost). This runtime choice overrides checkpoint
+  metadata.
 - `--max-seq-length` — maximum sequence length (default: 8192).
-- `--use-subquadratic-ops` — use fused subquadratic-ops kernels for prefill
-  (b2b causal conv, FFT/causal conv1d in `parallel_fir`). Recommended when
-  processing many prompts in one process.
+- `--use-subquadratic-ops` — use accelerated FFT/causal-conv1d kernels, including
+  projection/mixer B2B fusion, for prefill.
 
 ### Batch sequence scoring (`predict_evo2`)
 
@@ -142,9 +148,13 @@ Options:
 - `--log-prob-collapse-option` — aggregation: `sum`, `mean`, or `per_token`.
 - `--embedding-layer` — extract embeddings from a specific layer instead of logits
   (supports negative indexing, e.g., `-1` for last layer).
+- `--context-parallel-comm-type` — runtime attention transport for context
+  parallelism: `p2p` (the default ring-style path) or `a2a` (tighter BF16 parity,
+  with a possible performance cost). This runtime choice overrides checkpoint
+  metadata.
 - `--mask-phylogenetic-tags` — mask phylogenetic tags in loss computation.
-- `--use-subquadratic-ops` — enable fused Hyena convolution kernels for faster
-  scoring (recommended for larger datasets; has a one-time compilation cost).
+- `--use-subquadratic-ops` — enable accelerated Hyena FFT/causal-conv1d kernels,
+  including projection/mixer B2B fusion, for faster scoring.
 
 ### Data preprocessing (`preprocess_evo2`)
 

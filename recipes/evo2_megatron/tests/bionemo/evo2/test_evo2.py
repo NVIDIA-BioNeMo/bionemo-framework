@@ -1005,7 +1005,7 @@ def test_batch_generate_mbridge_subquadratic_ops(tmp_path: Path):
 
 
 def _run_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path: Path):
-    """Second-half match accuracy through the dynamic engine with the fused subquadratic-ops kernels.
+    """Second-half match accuracy through the dynamic engine with subquadratic FFT/causal kernels.
 
     Mirrors :func:`test_batch_generate_mbridge` (1b-bf16, greedy) but enables ``use_subquadratic_ops``
     so the b2b causal-conv1d prefill and fft/causal-conv1d FIR kernels are exercised end-to-end on the
@@ -1056,7 +1056,8 @@ def _run_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path:
         prompts = [split[0] for split in seq_splits]
         targets = [split[1] for split in seq_splits]
 
-        # use_subquadratic_ops=True routes prefill/FIR through the fused subquadratic kernels.
+        # use_subquadratic_ops=True routes prefill/FIR through the accelerated
+        # FFT/causal kernels, including the projection/mixer B2B fusion.
         components = setup_inference_engine(
             ckpt_dir=mbridge_ckpt_path,
             max_seq_length=8192,

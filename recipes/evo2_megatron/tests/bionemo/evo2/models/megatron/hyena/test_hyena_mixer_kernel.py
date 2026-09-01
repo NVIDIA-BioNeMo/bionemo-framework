@@ -94,7 +94,8 @@ class MixerModuleWrapper(torch.nn.Module):
         # Create necessary submodules - use the mixer submodules like in the regular mixer fixture
         submodules = hyena_stack_spec_no_te.submodules.hyena_layer.submodules.mixer.submodules
 
-        # Set the b2b parameter in the config
+        # Select the subquadratic operator implementations, including the fused
+        # projection/mixer B2B path for short and medium operators.
         hyena_test_config.use_subquadratic_ops = use_subquadratic_ops
         self.use_subquadratic_ops = use_subquadratic_ops
         self.operator_type = operator_type

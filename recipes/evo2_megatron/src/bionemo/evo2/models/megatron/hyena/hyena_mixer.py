@@ -302,6 +302,7 @@ class HyenaMixer(MegatronModule):
             init_method=transformer_config.init_method,
             bias=False,  # bias not currently supported (self.hyena_config.conv_proj_bias),
             use_fast_causal_conv=self.fast_conv_proj,
+            pg_collection=self.pg_collection,
         )
 
         if self.operator_type == "hyena_short_conv":
@@ -316,6 +317,7 @@ class HyenaMixer(MegatronModule):
                 short_conv_class=ParallelCausalDepthwiseConv1dWithState,
                 use_fast_causal_conv=self.fast_conv_mixer,
                 use_conv_bias=self.transformer_config.use_short_conv_bias,
+                pg_collection=self.pg_collection,
             )
 
             if self.use_subquadratic_ops:
@@ -326,6 +328,7 @@ class HyenaMixer(MegatronModule):
                     self.mixer,
                     operator_type=self.operator_type,
                     flip_mixer_weight=False,
+                    pg_collection=self.pg_collection,
                 )
 
         if self.operator_type in [
@@ -347,6 +350,7 @@ class HyenaMixer(MegatronModule):
                 self.transformer_config.init_method,
                 operator_type,
                 max_sequence_length,
+                pg_collection=self.pg_collection,
             )
 
             if self.use_subquadratic_ops and self.operator_type == "hyena_medium_conv":
@@ -357,6 +361,7 @@ class HyenaMixer(MegatronModule):
                     self.mixer,
                     operator_type=self.operator_type,
                     flip_mixer_weight=True,
+                    pg_collection=self.pg_collection,
                 )
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -382,6 +387,7 @@ class HyenaMixer(MegatronModule):
             skip_bias_add=dense_skip_bias_add,
             is_expert=False,
             tp_comm_buffer_name="fc2",
+            tp_group=self.tp_group,
         )
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
@@ -571,9 +577,9 @@ class HyenaMixer(MegatronModule):
             groups=tail_in.shape[1],
         )[..., -(mixer_kernel_size - 1) :].to(features.dtype)
 
-        x1, x2, v = rearrange(intermediate, "b (g dg p) l -> b (g dg) p l", p=3, g=self.num_groups_per_tp_rank).unbind(
-            dim=2
-        )
+        _x1, x2, v = rearrange(
+            intermediate, "b (g dg p) l -> b (g dg) p l", p=3, g=self.num_groups_per_tp_rank
+        ).unbind(dim=2)
         mixer_input_tail = (x2 * v).to(torch.float32).contiguous()  # [B, D, K_mixer-1]
 
         if self.operator_type == "hyena_short_conv":

@@ -16,19 +16,26 @@
 """Tests for model provider instantiation, naming, and checkpoint converters."""
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import sentinel
+from zipfile import ZipFile
 
+import numpy as np
 import pytest
 import torch
 
+import bionemo.evo2.models.evo2_provider as evo2_provider
 from bionemo.evo2.models.evo2_provider import (
     HYENA_MODEL_OPTIONS,
     MODEL_OPTIONS,
     Hyena1bModelProvider,
+    HyenaTestModelProvider,
     _patch_megatron_dataset_helper_compile,
+    build_evo2_mamba_inference_state_config,
     infer_model_type,
 )
 from bionemo.evo2.utils.checkpoint.mbridge_to_vortex import _split_fc1, mbridge_to_vortex_state_dict
-from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import savanna_to_mbridge_state_dict
+from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import load_savanna_state_dict, savanna_to_mbridge_state_dict
 
 
 def test_evo2_prefix_for_arc_models():
@@ -52,6 +59,33 @@ def test_old_keys_removed():
 def test_model_options_equals_hyena():
     """Verify MODEL_OPTIONS equals HYENA_MODEL_OPTIONS (Eden removed)."""
     assert set(MODEL_OPTIONS.keys()) == set(HYENA_MODEL_OPTIONS.keys())
+
+
+def test_hyena_provider_leaves_te_context_parallel_transport_unset():
+    """Checkpoint model definitions do not persist a runtime transport optimization."""
+    per_layer = ["a2a", "p2p"]
+    assert HyenaTestModelProvider().cp_comm_type is None
+    assert HyenaTestModelProvider(cp_comm_type=None).cp_comm_type is None
+    assert HyenaTestModelProvider(cp_comm_type="p2p").cp_comm_type == "p2p"
+    assert HyenaTestModelProvider(cp_comm_type=per_layer).cp_comm_type is per_layer
+
+
+@pytest.mark.parametrize(("requested", "expected"), [(None, "p2p"), ("p2p", "p2p"), ("a2a", "a2a")])
+def test_configure_runtime_context_parallel_comm_type(requested: str | None, expected: str):
+    """Runtime selection defaults to P2P and overrides stale checkpoint metadata."""
+    provider = SimpleNamespace(cp_comm_type="a2a")
+
+    resolved = evo2_provider.configure_runtime_context_parallel_comm_type(provider, requested)
+
+    assert resolved == expected
+    assert provider.cp_comm_type == expected
+
+
+def test_configure_runtime_context_parallel_comm_type_rejects_unknown_transport():
+    provider = SimpleNamespace(cp_comm_type=None)
+
+    with pytest.raises(ValueError, match="context-parallel communication type"):
+        evo2_provider.configure_runtime_context_parallel_comm_type(provider, "all_gather")
 
 
 def test_infer_model_type_hyena():
@@ -104,6 +138,85 @@ def test_megatron_dataset_helper_compile_guard(
     dataset_utils.compile_helpers()
     assert bridge_initialize.compile_helpers is dataset_utils.compile_helpers
     assert len(calls) == expected_original_calls
+
+
+def test_get_batch_passes_the_context_parallel_group(monkeypatch: pytest.MonkeyPatch):
+    """Keep TP/PP ranks out of MCore's context-parallel batch partitioning."""
+    batch = {
+        "tokens": sentinel.tokens,
+        "labels": sentinel.labels,
+        "loss_mask": sentinel.loss_mask,
+        "attention_mask": None,
+        "position_ids": sentinel.position_ids,
+        "cu_seqlens": None,
+    }
+    pg_collection = SimpleNamespace(pp=sentinel.pp_group, cp=sentinel.cp_group)
+
+    monkeypatch.setattr(evo2_provider, "is_pp_first_stage", lambda group: True)
+    monkeypatch.setattr(evo2_provider, "is_pp_last_stage", lambda group: True)
+    monkeypatch.setattr(evo2_provider, "get_batch_from_iterator", lambda *args, **kwargs: batch)
+
+    def partition_on_cp_group(actual_batch, *, is_hybrid_cp, cp_group):
+        assert actual_batch is batch
+        assert is_hybrid_cp is False
+        assert cp_group is sentinel.cp_group
+        return actual_batch
+
+    monkeypatch.setattr(evo2_provider, "get_batch_on_this_cp_rank", partition_on_cp_group)
+
+    cfg = SimpleNamespace(dataset=SimpleNamespace(skip_getting_attention_mask_from_dataset=True))
+    result = evo2_provider.get_batch(iter(()), cfg, pg_collection=pg_collection)
+
+    assert result[:3] == (sentinel.tokens, sentinel.labels, sentinel.loss_mask)
+
+
+def test_hyena_only_stage_gets_kv_sentinel():
+    """MCore dynamic inference gets its required KV slot without shifting real layers."""
+    from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols
+
+    layer_types = [Symbols.MAMBA] * 4
+    model = SimpleNamespace(
+        decoder=SimpleNamespace(
+            layer_type_list=layer_types,
+            mamba_state_shapes_per_request=lambda: ((2, 3), (4, 5)),
+        )
+    )
+
+    state_config = build_evo2_mamba_inference_state_config(model)
+
+    assert state_config.layer_type_list == [*layer_types, Symbols.ATTENTION]
+    assert layer_types == [Symbols.MAMBA] * 4
+
+
+def test_load_legacy_savanna_numpy_metadata(tmp_path: Path):
+    """Legacy Savanna metadata can be loaded without disabling weights-only safety."""
+    source_path = tmp_path / "current_numpy.pt"
+    checkpoint_path = tmp_path / "legacy_savanna.pt"
+    expected = torch.arange(4)
+    torch.save(
+        {
+            "module": {"module.sequential.0.weight": expected},
+            "rng_state": np.array([1234], dtype=np.uint32),
+        },
+        source_path,
+    )
+
+    # NumPy 2 writes ``numpy._core``; the pinned Savanna checkpoint was written
+    # by NumPy 1 and therefore records the legacy ``numpy.core`` module path.
+    replaced_module_path = False
+    with ZipFile(source_path) as source, ZipFile(checkpoint_path, "w") as legacy:
+        for member in source.infolist():
+            payload = source.read(member.filename)
+            if member.filename.endswith("data.pkl"):
+                updated = payload.replace(b"numpy._core.multiarray", b"numpy.core.multiarray")
+                replaced_module_path = updated != payload
+                payload = updated
+            legacy.writestr(member, payload)
+    assert replaced_module_path
+
+    state_dict = load_savanna_state_dict(checkpoint_path)
+
+    assert torch.equal(state_dict["sequential.0.weight"], expected)
 
 
 def _make_mock_savanna_sd(pattern: str) -> dict[str, torch.Tensor]:

@@ -243,5 +243,6 @@ requires-dist = [
 ]
 
 [tool.uv.extra-build-dependencies]
-warp-lang = ["wheel_stub"]
+# Let transitive packages select and build warp-lang. Reintroduce recipe-level
+# handling only if a verified Warp compatibility or build issue requires it.
 nvidia-resiliency-ext = ["poetry_dynamic_versioning"]

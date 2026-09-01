@@ -22,6 +22,8 @@
 #     python ci/scripts/check_copied_files.py --fix
 # --- END COPIED FILE NOTICE ---
 
+from functools import partial
+
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
@@ -132,8 +134,8 @@ def get_hyena_stack_spec(
                     ),
                     self_attn_bda=get_bias_dropout_add,
                     pre_mlp_layernorm=pre_layernorm,
-                    mlp=ModuleSpec(
-                        module=MLP,
+                    mlp=partial(
+                        MLP.as_mlp_submodule,
                         submodules=MLPSubmodules(linear_fc1=col_linear, linear_fc2=row_linear),
                     ),
                     mlp_bda=get_bias_dropout_add,

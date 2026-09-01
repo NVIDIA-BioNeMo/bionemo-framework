@@ -91,7 +91,7 @@ from megatron.bridge.utils.common_utils import (
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.core import dist_checkpointing, parallel_state, tensor_parallel
 from megatron.core.num_microbatches_calculator import init_num_microbatches_calculator
-from megatron.core.tensor_parallel.mappings import _gather_along_last_dim
+from megatron.core.tensor_parallel.mappings import _gather_along_last_dim, gather_from_sequence_parallel_region
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_batch_on_this_cp_rank
 from torch import Tensor
@@ -107,6 +107,11 @@ except ImportError:
 from bionemo.common.inference.collation import batch_collator
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.data.fasta_dataset import SimpleFastaDataset
+from bionemo.evo2.models.evo2_provider import (
+    CONTEXT_PARALLEL_COMM_TYPES,
+    ContextParallelCommType,
+    configure_runtime_context_parallel_comm_type,
+)
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 
 
@@ -560,6 +565,15 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("--context-parallel-size", type=int, default=1, help="Context parallelism degree")
     ap.add_argument(
+        "--context-parallel-comm-type",
+        choices=CONTEXT_PARALLEL_COMM_TYPES,
+        default=None,
+        help=(
+            "Runtime TE context-parallel attention transport. P2P is the default; A2A offers tighter "
+            "numerical parity. Any value serialized in the checkpoint is ignored."
+        ),
+    )
+    ap.add_argument(
         "--no-sequence-parallel",
         action="store_true",
         help="Disable sequence parallelism when using TP > 1",
@@ -776,8 +790,18 @@ def _predict_step(
     # For logits (post_process=True): gather along vocabulary dimension (last dim is sharded)
     # For embeddings (post_process=False): hidden states are not sharded across TP, skip gathering
     if output_embeddings:
-        # Hidden states are not sharded across TP ranks, just use the output directly
-        forward_out_tp_gathered = output_tensor
+        # Sequence parallelism leaves hidden states sharded along their first (sequence)
+        # dimension. Restore the full residual stream before any CP gather or transpose.
+        unwrapped_model = getattr(model, "module", model)
+        sequence_parallel = getattr(getattr(unwrapped_model, "config", None), "sequence_parallel", False)
+        if sequence_parallel and parallel_state.get_tensor_model_parallel_world_size() > 1:
+            forward_out_tp_gathered = gather_from_sequence_parallel_region(
+                output_tensor,
+                tensor_parallel_output_grad=False,
+                group=parallel_state.get_tensor_model_parallel_group(),
+            )
+        else:
+            forward_out_tp_gathered = output_tensor
     else:
         # Logits have the vocab dimension sharded across TP ranks
         forward_out_tp_gathered = _gather_along_last_dim(
@@ -785,7 +809,10 @@ def _predict_step(
         )
 
     # Gather across context parallel ranks (sequence dimension)
-    forward_out_gathered = _gather_along_cp_dim(forward_out_tp_gathered)
+    forward_out_gathered = _gather_along_cp_dim(
+        forward_out_tp_gathered,
+        seq_dim=0 if output_embeddings else 1,
+    )
     loss_mask_gathered = _gather_along_cp_dim(batch["loss_mask"])
     tokens_gathered = _gather_along_cp_dim(batch["tokens"])
 
@@ -997,6 +1024,7 @@ def predict(
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
+    context_parallel_comm_type: Optional[ContextParallelCommType] = None,
     no_sequence_parallel: bool = False,
     # Precision settings
     mixed_precision_recipe: Optional[str] = None,
@@ -1031,6 +1059,9 @@ def predict(
         tensor_parallel_size: Tensor parallelism degree (splits model across GPUs).
         pipeline_model_parallel_size: Pipeline parallelism degree (must be 1).
         context_parallel_size: Context parallelism degree (splits sequence across GPUs).
+        context_parallel_comm_type: Runtime TE attention transport. ``None`` selects
+            P2P; A2A can be selected for tighter BF16 parity. Checkpoint metadata
+            does not control this execution choice.
         no_sequence_parallel: Disable sequence parallelism when using TP > 1.
         mixed_precision_recipe: Override mixed precision recipe (default: use checkpoint).
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
@@ -1083,6 +1114,7 @@ def predict(
     model_provider.tensor_model_parallel_size = tensor_parallel_size
     model_provider.pipeline_model_parallel_size = pipeline_model_parallel_size
     model_provider.context_parallel_size = context_parallel_size
+    configure_runtime_context_parallel_comm_type(model_provider, context_parallel_comm_type)
     model_provider.sequence_parallel = tensor_parallel_size > 1 and not no_sequence_parallel
 
     # Configure vortex-style FP8 (applies FP8 only to projection layers)
@@ -1318,7 +1350,11 @@ def predict(
             # Apply context parallel slicing (seq_idx must NOT be sliced)
             if context_parallel_size > 1:
                 seq_idx = batch_gpu.pop("seq_idx", None)
-                batch_gpu = get_batch_on_this_cp_rank(batch_gpu, is_hybrid_cp=False)
+                batch_gpu = get_batch_on_this_cp_rank(
+                    batch_gpu,
+                    is_hybrid_cp=False,
+                    cp_group=parallel_state.get_context_parallel_group(),
+                )
                 if seq_idx is not None:
                     batch_gpu["seq_idx"] = seq_idx
 
@@ -1403,6 +1439,7 @@ def main() -> None:
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,
         context_parallel_size=args.context_parallel_size,
+        context_parallel_comm_type=args.context_parallel_comm_type,
         no_sequence_parallel=args.no_sequence_parallel,
         # Precision settings
         mixed_precision_recipe=args.mixed_precision_recipe,

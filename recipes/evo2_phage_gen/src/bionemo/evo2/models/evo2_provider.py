@@ -89,6 +89,30 @@ _patch_megatron_dataset_helper_compile()
 register_allowed_target_prefix("bionemo.evo2.")
 
 
+ContextParallelCommType = Literal["p2p", "a2a"]
+CONTEXT_PARALLEL_COMM_TYPES: tuple[ContextParallelCommType, ...] = ("p2p", "a2a")
+
+
+def configure_runtime_context_parallel_comm_type(
+    model_provider: TransformerConfig,
+    requested: Optional[str],
+) -> ContextParallelCommType:
+    """Apply the runtime CP transport, ignoring any value serialized in a checkpoint.
+
+    The transport changes how TE schedules the same context-parallel attention
+    calculation. It is an execution choice rather than a model definition, so
+    prediction and inference resolve it after checkpoint instantiation. P2P is
+    the backward-compatible, faster default; A2A is an explicit tighter-parity
+    option.
+    """
+    resolved = "p2p" if requested is None else requested
+    if resolved not in CONTEXT_PARALLEL_COMM_TYPES:
+        choices = ", ".join(CONTEXT_PARALLEL_COMM_TYPES)
+        raise ValueError(f"Unsupported context-parallel communication type {resolved!r}; expected one of: {choices}")
+    model_provider.cp_comm_type = resolved
+    return resolved
+
+
 def get_vocab_size(*args, **kwargs):
     raise NotImplementedError("FIXME get_vocab_size is not implemented Find it in megatron bridge")
 
@@ -229,12 +253,20 @@ def build_evo2_mamba_inference_state_config(model, *, conv_dtype=None, ssm_dtype
     from megatron.core.inference.config import (
         MambaInferenceStateConfig,  # lazy: heavy mcore import — keep evo2_provider importable without the full inference stack
     )
+    from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols
 
     decoder = model.decoder if hasattr(model, "decoder") else model
     conv_states_shape, ssm_states_shape = decoder.mamba_state_shapes_per_request()
-    layer_type_list = decoder.layer_type_list  # mcore symbols, set in HyenaStack.__init__
+    layer_type_list = list(decoder.layer_type_list)  # mcore symbols, set in HyenaStack.__init__
+    if not any(layer_type in (Symbols.ATTENTION, Symbols.DS_ATTENTION) for layer_type in layer_type_list):
+        # DynamicInferenceContext now requires at least one attention slot because its
+        # pipeline-synchronized request scheduler is backed by the paged KV allocator.
+        # Some deep PP layouts produce valid Hyena-only stages. Append a bookkeeping
+        # slot after all real local layers so their layer_map indices and Mamba state
+        # slots remain unchanged; no model layer ever reads or writes this KV entry.
+        layer_type_list.append(Symbols.ATTENTION)
     return MambaInferenceStateConfig(
-        layer_type_list=list(layer_type_list),
+        layer_type_list=layer_type_list,
         conv_states_shape=tuple(conv_states_shape),
         ssm_states_shape=tuple(ssm_states_shape),
         conv_states_dtype=conv_dtype or torch.float32,
@@ -375,7 +407,7 @@ def bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, *, request_
 
     conv_states = dyn_ctx.mamba_conv_states  # (num_mamba_layers, max_requests, *conv_shape)
     ssm_states = dyn_ctx.mamba_ssm_states  # (num_mamba_layers, max_requests, *ssm_shape)
-    layer_map = dyn_ctx.layer_map  # global-0based -> per-type-local index
+    layer_map = dyn_ctx.layer_map  # pipeline-stage-local layer index -> per-type-local index
 
     # One packed dict per state-dict bucket the Hyena ops use, installed on the live context.
     packed: dict = {}
@@ -389,16 +421,16 @@ def bind_hyena_packed_views_to_dynamic_context_batch(model, dyn_ctx, *, request_
     # the context's layer_map so the conv/ssm sub-slice lands in the exact slot
     # ``mamba_states_cache(layer_number)`` would return.
     hyena_layers = [
-        layer
-        for layer in decoder.layers
+        (local_layer_idx, layer)
+        for local_layer_idx, layer in enumerate(decoder.layers)
         if hasattr(layer, "mixer") and hasattr(layer.mixer, "hyena_state_shapes_per_request")
     ]
     assert len(hyena_layers) == len(per_layer), (
         f"Hyena-layer/per-layer-shape count mismatch ({len(hyena_layers)} vs {len(per_layer)}); "
         "hyena_state_shapes_per_request() and the layer walk disagree."
     )
-    for layer, shapes in zip(hyena_layers, per_layer):
-        mamba_layer_idx = layer_map[layer.layer_number - 1]
+    for (local_layer_idx, _layer), shapes in zip(hyena_layers, per_layer):
+        mamba_layer_idx = layer_map[local_layer_idx]
         # conv slots: whole per-(layer,request) rows, shaped [B, *conv_shape] for the op.
         conv_view = conv_states[mamba_layer_idx, start_slot:end_slot]  # [B, *conv_shape] — STABLE alias
         packed["fir"].register(shapes.conv_owner_id, conv_view)
@@ -453,7 +485,7 @@ def get_batch(
     )
 
     # slice batch along sequence dimension for context parallelism
-    batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=False)
+    batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=False, cp_group=pg_collection.cp)
     attention_mask = batch.get("attention_mask")
     if need_attention_mask and attention_mask is None:
         raise ValueError("Attention mask is required but not found in the batch")

@@ -107,10 +107,13 @@ from megatron.core.transformer.module import Float16Module
 
 from bionemo.evo2.data.dataset_tokenizer import DEFAULT_HF_TOKENIZER_MODEL_PATH
 from bionemo.evo2.models.evo2_provider import (
+    CONTEXT_PARALLEL_COMM_TYPES,
+    ContextParallelCommType,
     bind_hyena_packed_views_to_dynamic_context,
     bind_hyena_packed_views_to_dynamic_context_batch,
     build_evo2_mamba_inference_state_config,
     compute_evo2_paged_kv_buffer_size_gb,
+    configure_runtime_context_parallel_comm_type,
     make_evo2_dynamic_inference_context_cls,
 )
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
@@ -362,6 +365,9 @@ class Evo2NativeDynamicComponents:
     evo2_seed: int
     cuda_graphs_enabled: bool
     cuda_graph_manager_count: int
+    # MCore wrapper used only when pipeline parallelism is active. It is bound lazily to the
+    # current dynamic context because that context may be rebuilt when its capacity grows.
+    inference_wrapper: Optional[Any] = None
     # Persistent dynamic context, built lazily on the first generate() call and reused across all
     # subsequent calls so the per-layer CUDA graphs (captured once during warmup) stay valid. Keyed
     # by the context-affecting generate() options so it is rebuilt only if those change.
@@ -537,6 +543,7 @@ def setup_inference_engine(
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
+    context_parallel_comm_type: Optional[ContextParallelCommType] = None,
     mixed_precision_recipe: Optional[str] = None,
     vortex_style_fp8: bool = False,
     random_seed: int = 1234,
@@ -563,13 +570,15 @@ def setup_inference_engine(
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
+        context_parallel_comm_type: Runtime TE attention transport. ``None`` selects
+            P2P; A2A can be selected for tighter BF16 parity. Checkpoint metadata
+            does not control this execution choice.
         mixed_precision_recipe: Override mixed precision recipe.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
         random_seed: Random seed for reproducibility.
-        use_subquadratic_ops: Use fused subquadratic-ops kernels (b2b causal
-            conv1d in prefill, fft_causal_conv1d / causal_conv1d in
-            parallel_fir).
+        use_subquadratic_ops: Use accelerated fft_causal_conv1d / causal_conv1d
+            kernels, including projection/mixer B2B fusion during prefill.
         cuda_graph_impl: ``"local"`` (default) captures mcore per-layer CUDA graphs for decode;
             ``"none"`` disables graph capture (eager decode), mainly for debugging / reference runs.
 
@@ -620,6 +629,7 @@ def setup_inference_engine(
     model_provider.tensor_model_parallel_size = tensor_parallel_size
     model_provider.pipeline_model_parallel_size = pipeline_model_parallel_size
     model_provider.context_parallel_size = context_parallel_size
+    configure_runtime_context_parallel_comm_type(model_provider, context_parallel_comm_type)
     # Disable sequence parallelism for inference - Megatron's inference engine
     # does not support it for non-MoE models.
     model_provider.sequence_parallel = False
@@ -972,6 +982,55 @@ def _extract_generation_logits(dyn_ctx, logits: torch.Tensor) -> torch.Tensor:
     return dyn_ctx.last_token_logits(logits).float()
 
 
+def _forward_native_dynamic_logits(
+    nd: Evo2NativeDynamicComponents,
+    dyn_ctx: Any,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Run one native-dynamic forward and make PP logits available on every stage."""
+    pp_group = getattr(dyn_ctx, "pipeline_parallel_group", None)
+    if pp_group is None or pp_group.size() == 1:
+        return nd.forward_model(
+            input_ids,
+            position_ids,
+            None,
+            inference_context=dyn_ctx,
+            runtime_gather_output=True,
+        )
+
+    inference_wrapper = getattr(nd, "inference_wrapper", None)
+    if inference_wrapper is None or inference_wrapper.inference_context is not dyn_ctx:
+        from megatron.core.inference.model_inference_wrappers.gpt.gpt_inference_wrapper import (
+            GPTInferenceWrapper,
+        )
+
+        # HyenaModel follows the same inference forward/set_input_tensor contract as GPTModel.
+        # MCore's wrapper owns the PP receive, set_input_tensor, forward, and send sequence.
+        inference_wrapper = GPTInferenceWrapper(nd.forward_model, dyn_ctx)
+        nd.inference_wrapper = inference_wrapper
+
+    logits = inference_wrapper.run_one_forward_step(
+        {"tokens": input_ids, "position_ids": position_ids, "attention_mask": None}
+    )
+
+    from megatron.core.inference.communication_utils import broadcast_from_last_pipeline_stage
+
+    config = getattr(dyn_ctx, "config", None)
+    materialize_only_last = getattr(
+        dyn_ctx,
+        "materialize_only_last_token_logits",
+        getattr(config, "materialize_only_last_token_logits", False),
+    )
+    logits_seq_len = dyn_ctx.num_last_token_logits if materialize_only_last else input_ids.shape[1]
+    return broadcast_from_last_pipeline_stage(
+        [1, int(logits_seq_len), int(nd.hyena_model.vocab_size)],
+        dtype=nd.hyena_model.config.params_dtype,
+        tensor=logits,
+        pp_group=pp_group,
+    )
+
+
 def _native_stop_token_ids(tokenizer: Any) -> set[int]:
     """Best-effort set of tokenizer EOD/EOS ids for fixed-shape native decode."""
     stop_token_ids: set[int] = set()
@@ -1085,7 +1144,6 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
     """
     from megatron.core.inference.inference_request import DynamicInferenceRequest
 
-    forward_model = nd.forward_model
     hyena_model = nd.hyena_model
     rank = int(os.environ.get("RANK", "0"))
 
@@ -1121,13 +1179,7 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
                     except ImportError:
                         inference_mode_context = contextlib.nullcontext()
                     with inference_mode_context:
-                        forward_model(
-                            input_ids,
-                            position_ids,
-                            None,
-                            inference_context=dyn_ctx,
-                            runtime_gather_output=True,
-                        )
+                        _forward_native_dynamic_logits(nd, dyn_ctx, input_ids, position_ids)
                     dyn_ctx.update_requests(
                         torch.ones(warmup_request_count, dtype=torch.bool, device=device),
                         torch.zeros(warmup_request_count, dtype=torch.int64, device=device),
@@ -1149,11 +1201,11 @@ def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
     object with a longer ``rotary_pos_emb``, so graphs captured against the previous one must go.
     mcore's module-level ``delete_cuda_graphs()`` resets the global record, each runner's recorded
     graph, and the shared mempool — but it does NOT clear each layer ``CudaGraphManager``'s per-instance
-    ``cudagraph_runners`` / ``inference_cudagraphs_lookup_table``, so a stale runner would still be
-    found and replayed against the new context (raising "CUDA graph argument mismatch"). We clear those
-    per-manager structures first; with the global ``cudagraph_created`` flag also reset, the next decode
-    creates a fresh runner and captures at the current shape. Done defensively so a future mcore that
-    renames these internals degrades to a clear capture-time error rather than silent misbehavior.
+    runner list or keyed lookup table, so a stale runner would still be found and replayed against the
+    new context (raising "CUDA graph argument mismatch"). Current mcore calls that lookup
+    ``custom_cudagraphs_lookup_table``; older releases used
+    ``inference_cudagraphs_lookup_table``. Clear both names for compatibility before resetting the
+    global record so the next decode captures against the current context and rotary shape.
     """
     for module in nd.hyena_model.modules():
         mgr = getattr(module, "cudagraph_manager", None)
@@ -1161,9 +1213,10 @@ def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
             continue
         if hasattr(mgr, "cudagraph_runners"):
             mgr.cudagraph_runners = []
-        lookup_table = getattr(mgr, "inference_cudagraphs_lookup_table", None)
-        if lookup_table is not None:
-            lookup_table.clear()
+        for lookup_name in ("custom_cudagraphs_lookup_table", "inference_cudagraphs_lookup_table"):
+            lookup_table = getattr(mgr, lookup_name, None)
+            if lookup_table is not None:
+                lookup_table.clear()
 
     from megatron.core.transformer.cuda_graphs import delete_cuda_graphs
 
@@ -1305,7 +1358,6 @@ def _generate_native_dynamic(
     from megatron.core.inference.inference_request import DynamicInferenceRequest
 
     nd = components.native_dynamic
-    forward_model = nd.forward_model
     hyena_model = nd.hyena_model
     tokenizer = components.tokenizer
     device = next(hyena_model.parameters()).device
@@ -1452,13 +1504,7 @@ def _generate_native_dynamic(
             except ImportError:
                 inference_mode_context = contextlib.nullcontext()
             with inference_mode_context:
-                logits = forward_model(
-                    input_ids,
-                    position_ids,
-                    None,
-                    inference_context=dyn_ctx,
-                    runtime_gather_output=True,
-                )
+                logits = _forward_native_dynamic_logits(nd, dyn_ctx, input_ids, position_ids)
             # HyenaModel returns [B, S, vocab]; last_token_logits expects [1, S, H] and
             # selects the per-request final position -> [num_requests, vocab]. Sample in fp32 so
             # stochastic filters and logprobs do not depend on the model activation dtype.
@@ -1632,13 +1678,7 @@ def _generate_native_dynamic(
             except ImportError:
                 inference_mode_context = contextlib.nullcontext()
             with inference_mode_context:
-                logits = forward_model(
-                    input_ids,
-                    position_ids,
-                    None,
-                    inference_context=dyn_ctx,
-                    runtime_gather_output=True,
-                )
+                logits = _forward_native_dynamic_logits(nd, dyn_ctx, input_ids, position_ids)
             last_logits = _extract_generation_logits(dyn_ctx, logits)
             if last_logits.shape[0] < batch_request_count:
                 raise RuntimeError(
@@ -2052,6 +2092,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallelism")
     ap.add_argument("--pipeline-model-parallel-size", type=int, default=1, help="Pipeline parallelism")
     ap.add_argument("--context-parallel-size", type=int, default=1, help="Context parallelism")
+    ap.add_argument(
+        "--context-parallel-comm-type",
+        choices=CONTEXT_PARALLEL_COMM_TYPES,
+        default=None,
+        help=(
+            "Runtime TE context-parallel attention transport. P2P is the default; A2A offers tighter "
+            "numerical parity. Any value serialized in the checkpoint is ignored."
+        ),
+    )
 
     # Output arguments
     ap.add_argument(
@@ -2122,9 +2171,9 @@ def parse_args() -> argparse.Namespace:
         "--use-subquadratic-ops",
         action="store_true",
         default=False,
-        help="Use fused subquadratic-ops CUDA kernels (b2b causal conv1d in prefill, "
-        "fft_causal_conv1d / causal_conv1d in parallel_fir). Speeds up prompt processing "
-        "but has no effect on per-token decode throughput.",
+        help="Use accelerated subquadratic-ops fft_causal_conv1d / causal_conv1d CUDA kernels, "
+        "including projection/mixer B2B fusion. This can speed up prompt processing but has no "
+        "effect on per-token decode throughput.",
     )
     ap.add_argument(
         "--cuda-graph-impl",
@@ -2215,6 +2264,7 @@ def infer(
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     context_parallel_size: int = 1,
+    context_parallel_comm_type: Optional[ContextParallelCommType] = None,
     output_file: Optional[Path] = None,
     stream_output: bool = False,
     mixed_precision_recipe: Optional[str] = None,
@@ -2249,6 +2299,9 @@ def infer(
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
         context_parallel_size: Context parallelism degree.
+        context_parallel_comm_type: Runtime TE attention transport. ``None`` selects
+            P2P; A2A can be selected for tighter BF16 parity. Checkpoint metadata
+            does not control this execution choice.
         output_file: Optional path to save results as JSONL.
         stream_output: Write and flush each result as soon as it is generated. Strict generation
             writes to ``<output_file>.partial`` and atomically promotes it after success.
@@ -2263,7 +2316,8 @@ def infer(
             not control the number of prompt-file generations or Evo2 native decode concurrency.
         evo2_batched_decode_size: Opt-in number of same-length Evo2 prompts to keep active for
             native Hyena next-token decode. ``1`` preserves the original single-request path.
-        use_subquadratic_ops: Use fused subquadratic-ops kernels in the inference path.
+        use_subquadratic_ops: Use accelerated subquadratic FFT/causal-conv1d kernels in inference,
+            including projection/mixer B2B fusion during prefill.
         cuda_graph_impl: ``"local"`` (default) uses mcore per-layer decode CUDA graphs; ``"none"``
             runs decode eagerly (no graph capture) -- mainly for debugging / un-graphed reference runs.
         enable_chunked_prefill: Split prompts across multiple prefill forwards when needed.
@@ -2307,6 +2361,7 @@ def infer(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         context_parallel_size=context_parallel_size,
+        context_parallel_comm_type=context_parallel_comm_type,
         mixed_precision_recipe=mixed_precision_recipe,
         vortex_style_fp8=vortex_style_fp8,
         random_seed=random_seed,
@@ -2535,6 +2590,7 @@ def main() -> None:
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,
         context_parallel_size=args.context_parallel_size,
+        context_parallel_comm_type=args.context_parallel_comm_type,
         output_file=args.output_file,
         stream_output=args.stream_output,
         mixed_precision_recipe=args.mixed_precision_recipe,

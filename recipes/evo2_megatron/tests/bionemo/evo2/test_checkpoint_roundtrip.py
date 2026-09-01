@@ -21,6 +21,7 @@ vortex checkpoint.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 import torch
@@ -29,6 +30,7 @@ from huggingface_hub import hf_hub_download
 from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS
 from bionemo.evo2.utils.checkpoint.mbridge_to_vortex import mbridge_to_vortex_state_dict
 from bionemo.evo2.utils.checkpoint.savanna_to_mbridge import load_savanna_state_dict, savanna_to_mbridge_state_dict
+from bionemo.evo2.utils.checkpoint.vortex_to_mbridge import load_vortex_state_dict
 
 
 SAVANNA_1B_REPO = "arcinstitute/savanna_evo2_1b_base"
@@ -85,7 +87,7 @@ def roundtrip_vortex_sd(savanna_checkpoint_path):
 @pytest.fixture(scope="module")
 def vortex_reference_sd(vortex_reference_path):
     """Load the reference vortex state dict from HuggingFace."""
-    return torch.load(vortex_reference_path, map_location="cpu", weights_only=True)
+    return load_vortex_state_dict(Path(vortex_reference_path))
 
 
 @pytest.mark.slow

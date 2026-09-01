@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
+import bionemo.evo2.models.megatron.hyena.hyena_mixer as hyena_mixer_module
 from bionemo.evo2.models.evo2_provider import HyenaNVTestModelProvider, HyenaTestModelProvider
 from bionemo.evo2.models.megatron.hyena.hyena_config import HyenaConfig
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spec_no_te
@@ -130,6 +134,57 @@ def test_pad_padded_dynamic_context_tokens_restores_dummy_width() -> None:
     torch.testing.assert_close(padded[..., 2:], torch.zeros((1, 3, 2)))
 
 
+def test_mixer_propagates_explicit_process_groups_to_all_parallel_components(
+    monkeypatch: pytest.MonkeyPatch,
+    hyena_config: HyenaConfig,
+) -> None:
+    """Custom process-group collections control both sides of Hyena tensor parallelism."""
+    tp_group = MagicMock()
+    tp_group.size.return_value = 1
+    build_kwargs = []
+
+    def record_build_module(_spec, *_args, **kwargs):
+        build_kwargs.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(hyena_mixer_module, "build_module", record_build_module)
+    projection_conv = MagicMock()
+    short_operator = MagicMock()
+    monkeypatch.setattr(hyena_mixer_module, "ParallelCausalDepthwiseConv1dWithState", projection_conv)
+    monkeypatch.setattr(hyena_mixer_module, "ParallelShortHyenaOperator", short_operator)
+
+    config = HyenaTestModelProvider()
+    config.finalize()
+    pg_collection = SimpleNamespace(tp=tp_group)
+    HyenaMixer(
+        transformer_config=config,
+        hyena_config=hyena_config,
+        max_sequence_length=512,
+        submodules=SimpleNamespace(dense_projection=object(), dense=object()),
+        operator_type="hyena_short_conv",
+        pg_collection=pg_collection,
+    )
+
+    assert [kwargs.get("tp_group") for kwargs in build_kwargs] == [tp_group, tp_group]
+    assert projection_conv.call_args.kwargs["pg_collection"] is pg_collection
+    assert short_operator.call_args.kwargs["pg_collection"] is pg_collection
+
+
+@skip_if_no_gpu
+def test_mixer_enables_b2b_fusion_with_subquadratic_ops(hyena_config: HyenaConfig) -> None:
+    """The accelerated subquadratic path includes its key projection/mixer fusion."""
+    test_config = HyenaTestModelProvider()
+    test_config.use_subquadratic_ops = True
+    test_config.finalize()
+
+    with distributed_model_parallel_state():
+        hyena_mixer = _create_hyena_mixer(test_config, hyena_config, "hyena_short_conv")
+
+    assert hyena_mixer.use_subquadratic_ops is True
+    assert hasattr(hyena_mixer, "b2b_kernel")
+
+
 @skip_if_no_gpu
 def test_mixer_initialization(test_config: HyenaTestModelProvider, hyena_config: HyenaConfig, operator_type: str):
     """Test proper initialization of HyenaMixer with different configurations."""
@@ -181,7 +236,7 @@ def test_mixer_forward_pass(test_config: HyenaTestModelProvider, hyena_config: H
             )
 
             # Forward pass
-            y, bias = hyena_mixer(input_features, _hyena_use_cp=False)
+            y, _bias = hyena_mixer(input_features, _hyena_use_cp=False)
 
             # Verify output shape
             expected_shape = (seq_len, batch_size, hyena_mixer.hidden_size)
