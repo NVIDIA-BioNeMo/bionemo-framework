@@ -1,21 +1,24 @@
 name: "BioNeMo Interpretability Recipes CI"
 
-# CI for the SAE interpretability recipes under interpretability/sparse_autoencoders/recipes/*.
+# CI for the SAE interpretability code under interpretability/sparse_autoencoders/* — both the
+# recipes (recipes/*) and the shared `sae` library.
 # Generic matrix, modeled on the repo-wide unit-tests-recipes.yml but scoped to the interp subtree:
-#   * `changed-dirs` (cheap ubuntu) discovers which interp recipes to test and emits a matrix.
-#   * `unit-tests` runs each selected recipe on the L4: its own `.ci_build.sh` + `pytest tests/`.
+#   * `changed-dirs` (cheap ubuntu) discovers which interp units to test and emits a matrix.
+#   * `unit-tests` runs each selected unit on the L4: its own `.ci_build.sh` + `pytest tests/`.
 #
-# Eligible recipes = any interp recipe with its own `.ci_build.sh`. Today that's `evo2`; codonfm/esm2
-# have no `.ci_build.sh`/tests yet, so they are skipped until they add them. This also makes the lane
-# a green no-op before the evo2 SAE recipe lands (#1622) — the presence guard is "has a .ci_build.sh".
+# Eligible units = any interp recipe OR the `sae` lib itself, each with its own `.ci_build.sh`.
+# Today that's `sae` (its own lib tests) plus `evo2` once #1622 lands; codonfm/esm2 have no
+# `.ci_build.sh`/tests yet, so they are skipped until they add them. The presence guard is
+# "has a .ci_build.sh".
 #
 # What runs when:
 #   * change under a recipe's own dir            -> that recipe.
-#   * change to the shared `sae` lib, or to this workflow file, or the nightly schedule
-#                                                -> ALL eligible recipes (they all depend on sae).
+#   * change under the shared `sae` lib          -> the `sae` lib's own tests AND every recipe
+#                                                   (all recipes depend on sae).
+#   * change to this workflow file, or nightly   -> ALL eligible units.
 #   * change to an unrelated recipe / elsewhere  -> nothing (empty matrix, green no-op).
-# Each recipe's `.ci_build.sh` owns its own build (evo2 -> mbridge bionemo.evo2; esm2 -> HF; etc.),
-# so a codonfm/esm2 change never triggers the Evo2 megatron build, and vice-versa.
+# Each unit's `.ci_build.sh` owns its own build (evo2 -> mbridge bionemo.evo2; esm2 -> HF; sae -> a
+# plain editable install), so a codonfm/esm2 change never triggers the Evo2 megatron build, etc.
 
 on:
   push:
@@ -59,14 +62,16 @@ jobs:
           SAE="interpretability/sparse_autoencoders/sae"
           WF=".github/workflows/unit-tests-interpretability-recipes.yaml"
 
-          # Eligible recipes = those with their own .ci_build.sh (others are green no-ops until
-          # they add one; empty before #1622 lands -> whole lane is a no-op).
+          # Eligible units = interp recipes AND the shared `sae` lib, each gated on having its own
+          # .ci_build.sh (units without one are green no-ops until they add it). Including "$SAE"
+          # makes the lib a first-class matrix entry (build + `pytest tests/`), so sae/tests is
+          # tested directly instead of only triggering the recipes that depend on it.
           # Use `if` (not `[ -f ] && echo`): the short-circuit leaves exit 1 when the last dir
           # lacks a .ci_build.sh, which `set -e` would turn into a job failure instead of an
           # empty (green no-op) matrix.
-          ALL=$(for d in "$RROOT"/*/; do if [ -f "${d}.ci_build.sh" ]; then echo "${d%/}"; fi; done \
+          ALL=$(for d in "$RROOT"/*/ "$SAE"/; do if [ -f "${d}.ci_build.sh" ]; then echo "${d%/}"; fi; done \
                 | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          echo "Eligible recipes (have .ci_build.sh): $ALL"
+          echo "Eligible units (have .ci_build.sh): $ALL"
 
           MERGE_BASE=$(git merge-base HEAD origin/main)
           CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
