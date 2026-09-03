@@ -16,7 +16,7 @@ keywords = ["machine learning", "biology", "proteins", "interpretability", "esm2
 # Depends on the generic SAE package
 dependencies = [
     "sae",
-    "torch>=2.0",
+    "torch>=2.13.0",
     "numpy>=1.20",
     "tqdm>=4.60",
     "fair-esm>=2.0",
