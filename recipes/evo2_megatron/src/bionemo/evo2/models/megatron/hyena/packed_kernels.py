@@ -832,7 +832,11 @@ def fused_hyena_decode_from_projection(
     if operator_kind < 2 and mixer_taps > 128:
         raise ValueError("fused decode supports FIR mixers up to 128 taps")
     output = torch.empty((batch, channels), dtype=projection.dtype, device=projection.device)
-    block_channels = {0: 64, 1: 32, 2: 32}[operator_kind]
+    # Measured on GB300 with graph-captured launches at C=4096: the short FIR gains from
+    # four warps, while the wide medium ring and the modal state tiles reduce fastest
+    # within one warp (four warps cost 2x on medium at batch 32).
+    block_channels = {0: 64, 1: 16, 2: 16}[operator_kind]
+    num_warps = 4 if operator_kind == 0 else 1
     projection_ring_block = triton.next_power_of_2(projection_weight.shape[1] - 1)
     mixer_ring_block = triton.next_power_of_2(mixer_taps - 1) if operator_kind < 2 else 1
     grid = (batch, triton.cdiv(channels, block_channels))
@@ -860,7 +864,7 @@ def fused_hyena_decode_from_projection(
         block_channels=block_channels,
         projection_ring_block=projection_ring_block,
         mixer_ring_block=mixer_ring_block,
-        num_warps=4,
+        num_warps=num_warps,
     )
     return output
 
