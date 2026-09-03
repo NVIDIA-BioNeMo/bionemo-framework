@@ -72,6 +72,43 @@ def test_hyena_provider_leaves_te_context_parallel_transport_unset():
     assert HyenaTestModelProvider(cp_comm_type=per_layer).cp_comm_type is per_layer
 
 
+@pytest.mark.parametrize(
+    ("device_capability", "expected_backend", "expected_fa4"),
+    [
+        ((8, 9), evo2_provider.AttnBackend.fused, False),
+        ((9, 0), evo2_provider.AttnBackend.flash, True),
+    ],
+)
+def test_fa4_backend_respects_supported_device_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    device_capability: tuple[int, int],
+    expected_backend,
+    expected_fa4: bool,
+):
+    """FA4 remains enabled on Hopper but falls back before model creation on L4."""
+    from megatron.core.transformer import attention as mcore_attention
+
+    provider = SimpleNamespace(attention_backend=evo2_provider.AttnBackend.flash)
+    monkeypatch.setattr(mcore_attention, "HAVE_FA4", True)
+
+    evo2_provider._configure_fa4_for_device(provider, device_capability=device_capability)
+
+    assert provider.attention_backend is expected_backend
+    assert mcore_attention.HAVE_FA4 is expected_fa4
+
+
+def test_fa4_backend_falls_back_without_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    from megatron.core.transformer import attention as mcore_attention
+
+    provider = SimpleNamespace(attention_backend=evo2_provider.AttnBackend.flash)
+    monkeypatch.setattr(mcore_attention, "HAVE_FA4", True)
+    monkeypatch.setattr(evo2_provider.torch.cuda, "is_available", lambda: False)
+
+    assert evo2_provider._configure_fa4_for_device(provider) is False
+    assert provider.attention_backend is evo2_provider.AttnBackend.fused
+    assert mcore_attention.HAVE_FA4 is False
+
+
 @pytest.mark.parametrize(("requested", "expected"), [(None, "p2p"), ("p2p", "p2p"), ("a2a", "a2a")])
 def test_configure_runtime_context_parallel_comm_type(requested: str | None, expected: str):
     """Runtime selection defaults to P2P and overrides stale checkpoint metadata."""

@@ -70,6 +70,7 @@ import math
 import os
 import sys
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
@@ -133,7 +134,8 @@ logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Detailed phase evidence requires synchronized CUDA boundaries and allocator resets. Keep it
-# opt-in so ordinary inference retains only its existing low-overhead batch and total timers.
+# opt-in; ordinary inference still records low-overhead wall time for each phase, but does not
+# synchronize solely for measurement or report phase-local allocator peaks.
 _CUDA_PHASE_EVIDENCE_ENABLED = os.environ.get("EVO2_EXACT_PHASE_EVIDENCE") == "1"
 
 # Static generation normally needs one full-batch context plus one remainder
@@ -144,7 +146,7 @@ _MAX_STATIC_FLASH_CONTEXTS = 2
 
 @dataclass(frozen=True)
 class _CudaPhaseStats:
-    """Synchronized elapsed time and allocator peaks for one CUDA phase."""
+    """Wall time for one CUDA phase, plus allocator peaks when exact evidence is enabled."""
 
     elapsed_s: float = 0.0
     peak_allocated_bytes: int = 0
@@ -158,7 +160,7 @@ def _begin_cuda_phase(
     already_synchronized: bool = False,
     boundary_time_s: Optional[float] = None,
 ) -> float:
-    """Start a CUDA phase, optionally reusing the preceding phase's synchronized boundary."""
+    """Start a CUDA phase, optionally reusing the preceding exact-measurement boundary."""
     if not _CUDA_PHASE_EVIDENCE_ENABLED:
         return time.perf_counter()
     if not already_synchronized:
@@ -168,9 +170,14 @@ def _begin_cuda_phase(
 
 
 def _finish_cuda_phase(started_at_s: float) -> _CudaPhaseStats:
-    """Finish a CUDA phase at one synchronized boundary and capture allocator peaks."""
+    """Finish a CUDA phase, synchronizing and reading allocator peaks only when requested."""
     if not _CUDA_PHASE_EVIDENCE_ENABLED:
-        return _CudaPhaseStats()
+        ended_at_s = time.perf_counter()
+        return _CudaPhaseStats(
+            elapsed_s=ended_at_s - started_at_s,
+            performed=False,
+            _ended_at_s=ended_at_s,
+        )
     torch.cuda.synchronize()
     ended_at_s = time.perf_counter()
     return _CudaPhaseStats(
@@ -372,9 +379,9 @@ class Evo2NativeDynamicComponents:
     mamba_state_config: Any
     forward_model: torch.nn.Module
     hyena_model: torch.nn.Module
-    # Engine sequence-length budget. ``None`` means "auto": resolved from the prompts (longest prompt
-    # + max_new_tokens + headroom) the first time generation runs, then frozen for the engine lifetime
-    # (the CUDA-graphed context cannot grow). A concrete value is a manual cap that supersedes auto.
+    # Engine sequence-length budget. ``None`` means "auto": resolve from the prompts (longest prompt
+    # + max_new_tokens + headroom) on first use and rebuild/re-capture if a later call must grow it.
+    # A concrete value is a manual cap that supersedes auto-sizing.
     max_seq_length: Optional[int]
     evo2_seed: int
     cuda_graphs_enabled: bool
@@ -397,9 +404,8 @@ class Evo2NativeDynamicComponents:
     # once per prompt-file chunk, and reseeding each chunk would replay identical samples for
     # repeated prompts.
     sampling_rng: Optional[torch.Generator] = None
-    # True when ``max_seq_length`` was auto-sized from prompts (vs a manual cap). In auto mode a prompt
-    # that needs more than the frozen budget is a hard error (the context cannot grow); in manual mode
-    # the request just stops early on overflow, as before.
+    # True when ``max_seq_length`` was auto-sized from prompts (vs a manual cap). Auto mode grows the
+    # context when needed; manual mode retains the configured cap.
     max_seq_length_is_auto: bool = False
     # Engine setup is measured by infer(), then emitted exactly once on the first generated group.
     engine_setup_stats: _CudaPhaseStats = field(default_factory=_CudaPhaseStats)
@@ -465,8 +471,8 @@ def _setup_native_dynamic_components(
 
     ctx_cls = make_evo2_dynamic_inference_context_cls()
     mamba_cfg = build_evo2_mamba_inference_state_config(raw_model)
-    # Parameters are final here, so the packed modal pole tables built now serve every
-    # prefill and decode step for the rest of the process, including graphed decode.
+    # Allocate modal pole-table storage before graph capture. Later in-place optimizer/refit
+    # updates refresh its values during prefill without changing graph-captured addresses.
     warmed_modal_layers = warm_packed_hyena_caches(hyena_model)
     cuda_graph_manager_count = sum(1 for module in hyena_model.modules() if hasattr(module, "cudagraph_manager"))
     if cuda_graph_scope is None:
@@ -1235,6 +1241,21 @@ def _sampled_token_action(
     return preserve_eos_token, True
 
 
+def _physical_request_counts(prompt_count: int, batch_size: int) -> tuple[int, ...]:
+    """Return the distinct physical decode shapes used by fixed-row prompt groups."""
+    if prompt_count < 0:
+        raise ValueError(f"prompt_count must be non-negative, got {prompt_count}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if prompt_count == 0:
+        return ()
+    _, remainder = divmod(prompt_count, batch_size)
+    counts = {min(prompt_count, batch_size)}
+    if remainder:
+        counts.add(remainder)
+    return tuple(sorted(counts))
+
+
 def _stop_token_mask(logits: torch.Tensor, stop_token_ids: set[int]) -> Optional[torch.Tensor]:
     """Build a reusable device mask for forced-length generation."""
     valid_stop_token_ids = sorted(token_id for token_id in stop_token_ids if 0 <= token_id < logits.shape[-1])
@@ -1287,8 +1308,14 @@ def _normalize_new_request_slots_for_packed_hyena(dyn_ctx: Any, request_count: i
     return request_slots
 
 
-def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx: Any, device: torch.device) -> None:
-    """Capture the per-layer decode CUDA graph(s) up front on a throwaway request.
+def _warmup_native_dynamic_cuda_graphs(
+    nd: Evo2NativeDynamicComponents,
+    dyn_ctx: Any,
+    device: torch.device,
+    *,
+    request_counts: Collection[int],
+) -> None:
+    """Capture requested physical decode shapes up front on throwaway requests.
 
     mcore captures each per-layer decode CUDA graph lazily on the first decode step that matches the
     graph's batch dimensions, and that capture runs warmup iterations of the layer forward. For Evo2
@@ -1303,8 +1330,11 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
     those views and seeding the recurrent state, which selects the decode code path) and then decoded
     a couple of steps to trigger and replay capture. The context is reset afterwards, discarding the
     throwaway state; the captured graph (held on the model's layers) is then reused by every real
-    prompt. Only the public context primitives the real decode loop already uses are exercised here,
-    so this does not depend on mcore's internal cuda-graph-warmup helpers.
+    prompt. EOD stopping is logical rather than physical: every row in a prompt group remains active
+    until that group completes. Consequently only the full and optional remainder group shapes used
+    by the current call need runners; warming every size from one to the configured capacity wastes
+    capture time and graph memory. Only the public context primitives the real decode loop already
+    uses are exercised here, so this does not depend on mcore's internal graph-warmup helpers.
     """
     from megatron.core.inference.inference_request import DynamicInferenceRequest
 
@@ -1313,12 +1343,11 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
 
     # A short throwaway prompt is enough: the decode CUDA graph shape is independent of prompt length.
     n_warmup_prompt_tokens = max(1, min(8, int(dyn_ctx.max_tokens)))
+    normalized_request_counts = tuple(sorted({int(count) for count in request_counts}))
+    if not normalized_request_counts or normalized_request_counts[0] < 1:
+        raise ValueError("CUDA graph warmup request counts must contain only positive values")
     with torch.inference_mode():
-        max_warmup_request_count = max(
-            1,
-            int(getattr(dyn_ctx, "evo2_max_batched_decode_requests", 1)),
-        )
-        for warmup_request_count in range(1, max_warmup_request_count + 1):
+        for warmup_request_count in normalized_request_counts:
             try:
                 for request_id in range(warmup_request_count):
                     req = DynamicInferenceRequest(
@@ -1353,16 +1382,20 @@ def _warmup_native_dynamic_cuda_graphs(nd: Evo2NativeDynamicComponents, dyn_ctx:
                 dyn_ctx.reset()
     if rank == 0:
         logger.info(
-            "[evo2-native-cg] warmed decode CUDA graph(s) for request counts 1-%d",
-            max_warmup_request_count,
+            "[evo2-native-cg] warmed decode CUDA graph(s) for physical request count(s): %s",
+            ",".join(str(count) for count in normalized_request_counts),
         )
 
 
-def _validate_cuda_graph_capture(nd: Evo2NativeDynamicComponents, *, expected_request_counts: int) -> None:
+def _validate_cuda_graph_capture(
+    nd: Evo2NativeDynamicComponents,
+    *,
+    expected_request_counts: Collection[int],
+) -> None:
     """Require every configured graph manager to own captured runners.
 
-    The warmup performs one capture followed by one replay for every active-request
-    count. Reaching this check therefore proves replay completed without falling back
+    The warmup performs one capture followed by one replay for every requested physical
+    request count. Reaching this check therefore proves replay completed without falling back
     to eager execution; inspecting the runners additionally catches configurations
     which claimed graphs were enabled but never constructed a graphable module. Packed
     Hyena layers key graphs by active-request count, while paged-attention layers use a
@@ -1378,8 +1411,11 @@ def _validate_cuda_graph_capture(nd: Evo2NativeDynamicComponents, *, expected_re
     if nd.cuda_graph_scope == "block" and len(managers) != 1:
         raise RuntimeError(f"Block-scope CUDA graphs require exactly one Evo2 graph manager; found {len(managers)}")
 
-    request_count = max(1, int(expected_request_counts))
-    expected_by_manager = {id(manager): request_count for manager in managers}
+    request_counts = frozenset(int(count) for count in expected_request_counts)
+    if not request_counts or min(request_counts) < 1:
+        raise ValueError("Expected CUDA graph request counts must contain only positive values")
+    expected_shape_count = len(request_counts)
+    expected_by_manager = {id(manager): expected_shape_count for manager in managers}
     if nd.cuda_graph_scope == "layer":
         decoder = getattr(nd.hyena_model, "decoder", None)
         for layer, layer_type in zip(
@@ -1461,6 +1497,7 @@ def _get_or_build_shared_dynamic_context(
     max_tokens: Optional[int],
     enable_chunked_prefill: bool,
     max_active_requests: int,
+    cuda_graph_request_counts: Optional[Collection[int]] = None,
     device: torch.device,
 ) -> tuple[Any, _CudaPhaseStats, _CudaPhaseStats]:
     """Return the engine's persistent dynamic context, building (and graph-warming) it on first use.
@@ -1484,6 +1521,11 @@ def _get_or_build_shared_dynamic_context(
         bool(enable_chunked_prefill),
     )
     cached = nd.shared_dyn_ctx
+    requested_graph_counts = frozenset(int(count) for count in (cuda_graph_request_counts or (max_active_requests,)))
+    if not requested_graph_counts or min(requested_graph_counts) < 1:
+        raise ValueError("CUDA graph request counts must contain only positive values")
+    if max(requested_graph_counts) > int(max_active_requests):
+        raise ValueError("CUDA graph request counts cannot exceed max_active_requests")
     if (
         cached is not None
         and nd.shared_dyn_ctx_key == ctx_key
@@ -1493,7 +1535,22 @@ def _get_or_build_shared_dynamic_context(
         # Reuse the persistent context (it is big enough); reset() returns it to a clean state without
         # freeing the CUDA-graph-referenced buffers (it is explicitly designed for reuse-after-capture).
         cached.reset()
-        return cached, _CudaPhaseStats(), _CudaPhaseStats()
+        capture_stats = _CudaPhaseStats()
+        warmed_graph_counts = frozenset(getattr(cached, "evo2_warmed_cuda_graph_request_counts", ()))
+        missing_graph_counts = requested_graph_counts - warmed_graph_counts
+        if nd.cuda_graphs_enabled and missing_graph_counts:
+            capture_started_at_s = _begin_cuda_phase()
+            _warmup_native_dynamic_cuda_graphs(
+                nd,
+                cached,
+                device,
+                request_counts=missing_graph_counts,
+            )
+            warmed_graph_counts |= missing_graph_counts
+            _validate_cuda_graph_capture(nd, expected_request_counts=warmed_graph_counts)
+            cached.evo2_warmed_cuda_graph_request_counts = warmed_graph_counts
+            capture_stats = _finish_cuda_phase(capture_started_at_s)
+        return cached, _CudaPhaseStats(), capture_stats
 
     # First build, config change, or grow. Drop any graphs captured against the previous context
     # object so a stale graph can never be replayed against the new (larger) one.
@@ -1537,6 +1594,7 @@ def _get_or_build_shared_dynamic_context(
     )
     dyn_ctx.materialize_only_last_token_logits = True
     dyn_ctx.evo2_max_batched_decode_requests = int(max_active_requests)
+    dyn_ctx.evo2_warmed_cuda_graph_request_counts = frozenset()
     dyn_ctx.initialize_all_tensors()
     context_setup_stats = _finish_cuda_phase(context_setup_started_at_s)
     cuda_graph_capture_stats = _CudaPhaseStats()
@@ -1545,8 +1603,14 @@ def _get_or_build_shared_dynamic_context(
             already_synchronized=True,
             boundary_time_s=context_setup_stats._ended_at_s,
         )
-        _warmup_native_dynamic_cuda_graphs(nd, dyn_ctx, device)
-        _validate_cuda_graph_capture(nd, expected_request_counts=max_active_requests)
+        _warmup_native_dynamic_cuda_graphs(
+            nd,
+            dyn_ctx,
+            device,
+            request_counts=requested_graph_counts,
+        )
+        _validate_cuda_graph_capture(nd, expected_request_counts=requested_graph_counts)
+        dyn_ctx.evo2_warmed_cuda_graph_request_counts = requested_graph_counts
         cuda_graph_capture_stats = _finish_cuda_phase(capture_started_at_s)
     nd.shared_dyn_ctx = dyn_ctx
     nd.shared_dyn_ctx_key = ctx_key
@@ -2018,7 +2082,9 @@ def _generate_native_dynamic(
     # so the shared context's max-token budget can be validated against the longest prompt.
     tokenized_prompts: List[List[int]] = [list(tokenizer.tokenize(prompt)) for prompt in prompts]
     max_n_prompt = max(len(toks) for toks in tokenized_prompts)
-    batched_prefill_request_count = min(max(1, int(evo2_batched_decode_size)), len(tokenized_prompts))
+    batched_decode_size = max(1, int(evo2_batched_decode_size))
+    batched_prefill_request_count = min(batched_decode_size, len(tokenized_prompts))
+    cuda_graph_request_counts = _physical_request_counts(len(tokenized_prompts), batched_decode_size)
     batched_prefill_tokens = max(
         sum(
             len(prompt_tokens)
@@ -2087,7 +2153,8 @@ def _generate_native_dynamic(
         block_size_tokens=block_size_tokens,
         max_tokens=max_tokens,
         enable_chunked_prefill=enable_chunked_prefill,
-        max_active_requests=max(1, int(evo2_batched_decode_size)),
+        max_active_requests=batched_decode_size,
+        cuda_graph_request_counts=cuda_graph_request_counts,
         device=device,
     )
     engine_setup_stats = _CudaPhaseStats()
@@ -2391,6 +2458,9 @@ def _generate_native_dynamic(
                     if stop_request:
                         stopped_on_eos[request_idx] = True
 
+            # EOD completion is logical: keep every physical row active until the group finishes
+            # and ignore later samples for stopped rows above. This preserves one fixed graph shape
+            # and each request's recorded action/log-probability trajectory without compaction.
             keep_group_active = (not count_generated) or any(
                 not stopped_on_eos[request_idx] and len(request_generated_ids) < max_new_tokens
                 for request_idx, request_generated_ids in enumerate(generated_ids)
@@ -2460,13 +2530,17 @@ def _generate_native_dynamic(
             )
         ]
 
-    batched_decode_size = max(1, int(evo2_batched_decode_size))
     if batched_decode_size > 1 and rank == 0:
         logger.info("[evo2-native] opt-in batched decode active: size=%d", batched_decode_size)
 
     def _append_results(group_results: list[_NativeDynamicResult], *, prompt_offset: int) -> None:
         group_timings = dict(group_results[0].timings or {})
         group_memory = dict(group_results[0].memory or {})
+        generation_completion_tokens = sum(len(result.generated_tokens or ()) for result in group_results)
+        prefill_completion_tokens = sum(bool(result.generated_tokens) for result in group_results)
+        decode_completion_tokens = generation_completion_tokens - prefill_completion_tokens
+        generation_elapsed_s = float(group_timings.get("generation_elapsed_s", 0.0))
+        decode_elapsed_s = float(group_timings.get("decode_elapsed_s", 0.0))
         setup_phase_stats = {
             "engine_setup": engine_setup_stats if prompt_offset == 0 else _CudaPhaseStats(),
             "context_setup": context_setup_stats if prompt_offset == 0 else _CudaPhaseStats(),
@@ -2494,6 +2568,15 @@ def _generate_native_dynamic(
                 "cuda_graph_runner_count": nd.cuda_graph_runner_count,
                 "cuda_graph_recorded_count": nd.cuda_graph_recorded_count,
                 "cuda_graph_replay_verified": nd.cuda_graph_replay_verified,
+                "phase_timing_exact": _CUDA_PHASE_EVIDENCE_ENABLED,
+                "generation_completion_tokens": generation_completion_tokens,
+                "decode_completion_tokens": decode_completion_tokens,
+                "generation_completion_tokens_per_s": (
+                    generation_completion_tokens / generation_elapsed_s if generation_elapsed_s > 0 else 0.0
+                ),
+                "decode_completion_tokens_per_s": (
+                    decode_completion_tokens / decode_elapsed_s if decode_elapsed_s > 0 else 0.0
+                ),
             }
         )
         group_timings["total_elapsed_s"] = sum(
@@ -3131,6 +3214,9 @@ def infer(
     all_records: List[Dict[str, Any]] = []
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_model_generation_elapsed_s = 0.0
+    total_decode_elapsed_s = 0.0
+    total_decode_completion_tokens = 0
     t_generate_start = time.perf_counter()
     # Every process runs the same unsharded prompt list. Use one global writer for the shared
     # output path: data-parallel rank zero is true once per model-parallel coordinate and can
@@ -3198,6 +3284,10 @@ def infer(
             t_batch_elapsed = time.perf_counter() - t_batch_start
 
             batch_completion_tokens = 0
+            batch_model_generation_elapsed_s = 0.0
+            batch_decode_elapsed_s = 0.0
+            batch_decode_completion_tokens = 0
+            seen_timing_groups: set[tuple[str, str]] = set()
             for prompt_idx, (entry, result) in enumerate(zip(batch, results)):
                 record = streamed_records.get(prompt_idx)
                 if record is None:
@@ -3212,12 +3302,40 @@ def infer(
                 batch_completion_tokens += record["usage"]["completion_tokens"]
                 total_prompt_tokens += record["usage"]["prompt_tokens"]
                 total_completion_tokens += record["usage"]["completion_tokens"]
+                result_timings = record.get("timings", {})
+                timing_group_id = result_timings.get("timing_group_id")
+                if timing_group_id is not None:
+                    timing_group_key = (
+                        str(result_timings.get("timing_scope", "native_generation_group")),
+                        str(timing_group_id),
+                    )
+                    if timing_group_key not in seen_timing_groups:
+                        seen_timing_groups.add(timing_group_key)
+                        batch_model_generation_elapsed_s += float(result_timings.get("generation_elapsed_s", 0.0))
+                        batch_decode_elapsed_s += float(result_timings.get("decode_elapsed_s", 0.0))
+                        batch_decode_completion_tokens += int(result_timings.get("decode_completion_tokens", 0))
 
             batch_tok_per_sec = batch_completion_tokens / t_batch_elapsed if t_batch_elapsed > 0 else 0
             logger.info(
-                f"[PERF] Batch {batch_idx}: {batch_completion_tokens} tokens in "
+                f"[PERF] Batch {batch_idx} end-to-end: {batch_completion_tokens} tokens in "
                 f"{t_batch_elapsed:.2f}s ({batch_tok_per_sec:.1f} completion tok/s)"
             )
+            if batch_model_generation_elapsed_s > 0:
+                batch_generation_tok_per_sec = batch_completion_tokens / batch_model_generation_elapsed_s
+                logger.info(
+                    f"[PERF] Batch {batch_idx} model generation (excludes engine/context/graph setup): "
+                    f"{batch_completion_tokens} tokens in {batch_model_generation_elapsed_s:.2f}s "
+                    f"({batch_generation_tok_per_sec:.1f} completion tok/s)"
+                )
+            if batch_decode_elapsed_s > 0:
+                batch_decode_tok_per_sec = batch_decode_completion_tokens / batch_decode_elapsed_s
+                logger.info(
+                    f"[PERF] Batch {batch_idx} steady decode: {batch_decode_completion_tokens} tokens in "
+                    f"{batch_decode_elapsed_s:.2f}s ({batch_decode_tok_per_sec:.1f} completion tok/s)"
+                )
+            total_model_generation_elapsed_s += batch_model_generation_elapsed_s
+            total_decode_elapsed_s += batch_decode_elapsed_s
+            total_decode_completion_tokens += batch_decode_completion_tokens
     finally:
         if stream_file is not None:
             stream_file.close()
@@ -3247,10 +3365,22 @@ def infer(
         f"{mem_after_generate_gb - mem_after_setup_gb:.3f} GB)"
     )
     logger.info(
-        f"[PERF] Total: {total_prompt_tokens} prompt tokens + {total_completion_tokens} "
+        f"[PERF] Total end-to-end: {total_prompt_tokens} prompt tokens + {total_completion_tokens} "
         f"completion tokens in {t_generate_elapsed:.2f}s "
         f"({total_tok_per_sec:.1f} completion tok/s)"
     )
+    if total_model_generation_elapsed_s > 0:
+        logger.info(
+            f"[PERF] Total model generation (excludes engine/context/graph setup): {total_completion_tokens} "
+            f"completion tokens in {total_model_generation_elapsed_s:.2f}s "
+            f"({total_completion_tokens / total_model_generation_elapsed_s:.1f} completion tok/s)"
+        )
+    if total_decode_elapsed_s > 0:
+        logger.info(
+            f"[PERF] Total steady decode: {total_decode_completion_tokens} completion tokens in "
+            f"{total_decode_elapsed_s:.2f}s "
+            f"({total_decode_completion_tokens / total_decode_elapsed_s:.1f} completion tok/s)"
+        )
 
     if is_rank_zero:
         for record in all_records:

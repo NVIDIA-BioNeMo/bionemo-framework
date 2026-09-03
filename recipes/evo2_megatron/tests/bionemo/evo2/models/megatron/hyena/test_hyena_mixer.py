@@ -206,12 +206,16 @@ def test_packed_cuda_metadata_accepts_missing_max_seqlen_q() -> None:
 
 @skip_if_no_gpu
 def test_modal_poles_are_cached_until_filter_parameters_change(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Packed modal recurrence setup should run once per unchanged layer."""
+    """Refit must update graph-captured modal tables without replacing their storage."""
     calls = []
 
     def build_poles(gamma, poles_parameter):
         calls.append((gamma, poles_parameter))
-        return object()
+        value = float(len(calls))
+        return hyena_mixer_module.ModalPoles(
+            decay=torch.full(gamma.shape, value, dtype=torch.float32, device=gamma.device),
+            log_decay=torch.full(gamma.shape, -value, dtype=torch.float32, device=gamma.device),
+        )
 
     monkeypatch.setattr(hyena_mixer_module, "modal_poles", build_poles, raising=False)
     with distributed_model_parallel_state():
@@ -221,9 +225,11 @@ def test_modal_poles_are_cached_until_filter_parameters_change(monkeypatch: pyte
         assert mixer._packed_modal_poles() is first
         with torch.no_grad():
             mixer.mixer.filter.p.add_(1)
-        rebuilt = mixer._packed_modal_poles()
+        refreshed = mixer._packed_modal_poles()
 
-    assert rebuilt is not first
+    assert refreshed is first
+    assert refreshed.decay.unique().item() == 2.0
+    assert refreshed.log_decay.unique().item() == -2.0
     assert len(calls) == 2
 
 

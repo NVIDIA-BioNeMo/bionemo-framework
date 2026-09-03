@@ -451,6 +451,71 @@ def test_evo2_adapter_emits_replicated_batched_data_from_every_model_parallel_ra
         adapter.generate_worker(worker, data=data, greedy=False)
 
 
+def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch):
+    adapter = Evo2MegatronGenerationAdapter({"seed": 17})
+    context = SimpleNamespace(reset_count=0)
+    context.reset = lambda: setattr(context, "reset_count", context.reset_count + 1)
+    model = SimpleNamespace()
+    native_dynamic = SimpleNamespace(
+        forward_model=model,
+        shared_dyn_ctx=context,
+        evo2_seed=0,
+        sampling_rng=None,
+    )
+    worker = SimpleNamespace(
+        cfg={
+            "megatron_cfg": {"tensor_model_parallel_size": 1},
+            "generation": {
+                "mcore_generation_config": {
+                    "max_model_len": 64,
+                    "cuda_graph_impl": "local",
+                    "prompt_batch_size": 2,
+                }
+            },
+        },
+        model=model,
+        megatron_tokenizer=_Tokenizer(),
+        _evo2_native_dynamic_components=native_dynamic,
+    )
+    prompt_tokens = torch.tensor([[11], [21]])
+    prompt_lengths = torch.tensor([1, 1])
+    sampling_params = [SimpleNamespace(num_tokens_to_generate=1)] * 2
+
+    def _fake_generate(_components, prompts, **_kwargs):
+        return [
+            SimpleNamespace(
+                prompt_tokens=[token_id],
+                generated_tokens=[65],
+                generated_log_probs=[-0.1],
+                finish_reason="length",
+                stopped_on_eos=False,
+                truncated=True,
+                timings={},
+                memory={},
+            )
+            for token_id, _prompt in zip((11, 21), prompts, strict=True)
+        ]
+
+    monkeypatch.setattr("bionemo.evo2.run.infer.generate", _fake_generate)
+    monkeypatch.setattr(
+        "bionemo.evo2.run.infer._setup_native_dynamic_components",
+        lambda **_kwargs: pytest.fail("the second rollout rebuilt the native engine"),
+    )
+
+    for _ in range(2):
+        results = evo2_generation.generate_evo2_native_batched(
+            worker,
+            prompt_tokens,
+            prompt_lengths,
+            sampling_params,
+        )
+        assert [result.generated_tokens for result in results] == [[65], [65]]
+        adapter.finish_worker(worker)
+
+    assert worker._evo2_native_dynamic_components is native_dynamic
+    assert context.reset_count == 2
+
+
 def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id(monkeypatch):
     adapter = Evo2MegatronGenerationAdapter({"seed": 17})
     prompt_tokens = torch.tensor([[11, 12], [21, 22], [31, 32], [41, 42]])
@@ -460,6 +525,7 @@ def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id
         "timing_scope": "native_generation_group",
         "timing_group_id": "native-call-00000000-group-00000000",
         "timing_request_count": 2,
+        "phase_timing_exact": True,
         "engine_setup_elapsed_s": 1.0,
         "context_setup_elapsed_s": 2.0,
         "cuda_graph_capture_elapsed_s": 3.0,
@@ -472,6 +538,7 @@ def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id
         "timing_scope": "native_generation_group",
         "timing_group_id": "native-call-00000000-group-00000002",
         "timing_request_count": 2,
+        "phase_timing_exact": True,
         "engine_setup_elapsed_s": 0.0,
         "context_setup_elapsed_s": 0.0,
         "cuda_graph_capture_elapsed_s": 0.0,
@@ -554,6 +621,11 @@ def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id
     assert timing["timing/train/generation/evo2_decode_elapsed_s"] == 12.0
     assert timing["timing/train/generation/evo2_generation_elapsed_s"] == 22.0
     assert timing["timing/train/generation/evo2_total_elapsed_s"] == 28.0
+    assert timing["timing/train/generation/evo2_phase_timing_exact"] == 1.0
+    assert timing["timing/train/generation/evo2_generation_completion_tokens"] == 8.0
+    assert timing["timing/train/generation/evo2_decode_completion_tokens"] == 4.0
+    assert timing["timing/train/generation/evo2_generation_completion_tokens_per_s"] == pytest.approx(8 / 22)
+    assert timing["timing/train/generation/evo2_decode_completion_tokens_per_s"] == pytest.approx(4 / 12)
     expected_memory_metrics = {
         "engine_setup_peak_allocated_bytes": 100,
         "engine_setup_peak_reserved_bytes": 110,

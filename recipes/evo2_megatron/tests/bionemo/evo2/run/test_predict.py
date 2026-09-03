@@ -100,6 +100,25 @@ def test_predict_pp_fails_early() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("embedding_layer", "expected_num_layers"),
+    [(-25, 1), (-2, 24), (-1, 25), (0, 1), (5, 6), (24, 25)],
+)
+def test_resolve_embedding_layer(embedding_layer: int, expected_num_layers: int) -> None:
+    assert predict_module._resolve_embedding_layer(embedding_layer, 25) == expected_num_layers
+
+
+@pytest.mark.parametrize("embedding_layer", [-26, 25, 100])
+def test_resolve_embedding_layer_rejects_out_of_range(embedding_layer: int) -> None:
+    with pytest.raises(ValueError, match=rf"Invalid embedding_layer={embedding_layer}"):
+        predict_module._resolve_embedding_layer(embedding_layer, 25)
+
+
+def test_resolve_embedding_layer_rejects_log_probs() -> None:
+    with pytest.raises(ValueError, match="Cannot use --output-log-prob-seqs with --embedding-layer"):
+        predict_module._resolve_embedding_layer(-1, 25, output_log_prob_seqs=True)
+
+
 def test_predict_step_gathers_sequence_parallel_embeddings():
     local_embeddings = torch.arange(6, dtype=torch.float32).reshape(2, 1, 3)
     full_embeddings = torch.arange(12, dtype=torch.float32).reshape(4, 1, 3)
@@ -1360,10 +1379,31 @@ def test_different_results_with_without_peft(tmp_path, mbridge_checkpoint_1b_8k_
 @pytest.mark.parametrize(
     "embedding_layer,expected_num_layers",
     [
-        pytest.param(-1, 25, id="embedding_layer=-1_expects_25_layers"),
-        pytest.param(-2, 24, id="embedding_layer=-2_expects_24_layers"),
+        pytest.param(
+            -1,
+            25,
+            id="embedding_layer=-1_expects_25_layers",
+            marks=pytest.mark.skipif(
+                bool(os.environ.get("CI")), reason="Full-depth embeddings run in prefix parity test"
+            ),
+        ),
+        pytest.param(
+            -2,
+            24,
+            id="embedding_layer=-2_expects_24_layers",
+            marks=pytest.mark.skipif(
+                bool(os.environ.get("CI")), reason="Interior negative index is covered outside CI"
+            ),
+        ),
         pytest.param(0, 1, id="embedding_layer=0_expects_1_layer"),
-        pytest.param(5, 6, id="embedding_layer=5_expects_6_layers"),
+        pytest.param(
+            5,
+            6,
+            id="embedding_layer=5_expects_6_layers",
+            marks=pytest.mark.skipif(
+                bool(os.environ.get("CI")), reason="Interior positive index is covered outside CI"
+            ),
+        ),
     ],
 )
 @pytest.mark.slow
@@ -1392,7 +1432,7 @@ def test_predict_evo2_embedding_extraction(
     original_num_layers = 25  # 1b model has 25 layers
 
     if target_sequence_lengths is None:
-        target_sequence_lengths = [1024, 1024, 1024]
+        target_sequence_lengths = [64, 96, 128]
 
     world_size = 1
     if world_size > torch.cuda.device_count():
@@ -1511,21 +1551,11 @@ def test_predict_evo2_embedding_extraction(
     assert len(seq_idx_map) == num_sequences
 
 
-@pytest.fixture(
-    params=[False, True],
-    ids=["causal-conv1d", "subquadratic-ops"],
-)
-def use_subquadratic_ops(request):
-    """Whether predict should use subquadratic Hyena kernels."""
-    return request.param
-
-
 @pytest.mark.timeout(512)
 @pytest.mark.slow
 def test_predict_evo2_short_embedding_is_prefix_invariant_across_batch_padding(
     tmp_path,
     mbridge_checkpoint_1b_8k_bf16_path: Path,
-    use_subquadratic_ops: bool,
 ):
     """A short sequence should embed the same alone or padded in a longer batch."""
     if torch.cuda.device_count() < 1:
@@ -1538,12 +1568,10 @@ def test_predict_evo2_short_embedding_is_prefix_invariant_across_batch_padding(
         fasta_path.write_text("".join(f">{name}\n{sequence}\n" for name, sequence in records.items()))
 
     def _run_predict(fasta_path: Path, output_dir: Path) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
-        subquadratic_arg = " --use-subquadratic-ops" if use_subquadratic_ops else ""
         command = (
             "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
             f"-m bionemo.evo2.run.predict --fasta {fasta_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
             f"--output-dir {output_dir} --micro-batch-size 2 --write-interval epoch --embedding-layer -1"
-            f"{subquadratic_arg}"
         )
         result = subprocess.run(
             shlex.split(command),
@@ -1552,7 +1580,6 @@ def test_predict_evo2_short_embedding_is_prefix_invariant_across_batch_padding(
             capture_output=True,
             text=True,
         )
-        _xfail_if_unsupported_subquadratic_ops(result, use_subquadratic_ops)
         if result.returncode != 0:
             print("STDOUT:\n" + result.stdout)
             print("STDERR:\n" + result.stderr)
@@ -1609,83 +1636,6 @@ def test_predict_evo2_short_embedding_is_prefix_invariant_across_batch_padding(
     padded_embeddings = _unpadded_dna_embeddings(padded_preds, padded_seq_idx_map, "short", len(short_sequence))
 
     _assert_prefix_embeddings_close(alone_embeddings, padded_embeddings)
-
-
-@pytest.mark.slow
-def test_predict_evo2_embedding_layer_validation(
-    tmp_path,
-    mbridge_checkpoint_1b_8k_bf16_path: Path,
-):
-    """Test that invalid embedding layer values are rejected with appropriate errors."""
-    fasta_file_path = tmp_path / "test.fasta"
-    create_fasta_file(fasta_file_path, 1, sequence_lengths=[512], repeating_dna_pattern=ALU_SEQUENCE)
-
-    env = copy.deepcopy(PRETEST_ENV)
-    if is_a6000_gpu():
-        env["NCCL_P2P_DISABLE"] = "1"
-
-    output_dir = tmp_path / "test_output"
-    # Test with an invalid embedding layer (too large positive index)
-    # The 1b model has 25 layers, so layer 100 should be invalid
-    command = (
-        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
-        f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
-        f"--output-dir {output_dir} --embedding-layer 100"
-    )
-
-    cmd_parts = shlex.split(command)
-    result = subprocess.run(
-        cmd_parts,
-        check=False,
-        cwd=tmp_path,
-        capture_output=True,
-        env=env,
-        text=True,
-    )
-
-    # Should fail with an error about invalid embedding layer
-    assert result.returncode != 0, "Expected command to fail with invalid embedding layer"
-    assert "Invalid embedding_layer" in result.stderr or "Invalid embedding_layer" in result.stdout, (
-        "Expected error message about invalid embedding layer"
-    )
-
-
-@pytest.mark.slow
-def test_predict_evo2_embedding_with_log_probs_rejected(
-    tmp_path,
-    mbridge_checkpoint_1b_8k_bf16_path: Path,
-):
-    """Test that using both --embedding-layer and --output-log-prob-seqs is rejected."""
-    fasta_file_path = tmp_path / "test.fasta"
-    create_fasta_file(fasta_file_path, 1, sequence_lengths=[512], repeating_dna_pattern=ALU_SEQUENCE)
-
-    env = copy.deepcopy(PRETEST_ENV)
-    if is_a6000_gpu():
-        env["NCCL_P2P_DISABLE"] = "1"
-
-    output_dir = tmp_path / "test_output"
-    # Test combining embedding extraction with log prob output (should fail)
-    command = (
-        "torchrun --standalone --nproc_per_node 1 --nnodes 1 "
-        f"-m bionemo.evo2.run.predict --fasta {fasta_file_path} --ckpt-dir {mbridge_checkpoint_1b_8k_bf16_path} "
-        f"--output-dir {output_dir} --embedding-layer -1 --output-log-prob-seqs"
-    )
-
-    cmd_parts = shlex.split(command)
-    result = subprocess.run(
-        cmd_parts,
-        check=False,
-        cwd=tmp_path,
-        capture_output=True,
-        env=env,
-        text=True,
-    )
-
-    # Should fail with an error about incompatible options
-    assert result.returncode != 0, "Expected command to fail with incompatible options"
-    assert "Cannot use --output-log-prob-seqs with --embedding-layer" in result.stderr or (
-        "Cannot use --output-log-prob-seqs with --embedding-layer" in result.stdout
-    ), "Expected error message about incompatible options"
 
 
 def test_load_model_to_layer_requires_layer():

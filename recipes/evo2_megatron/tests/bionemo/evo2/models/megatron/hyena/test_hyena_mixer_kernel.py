@@ -285,9 +285,11 @@ def test_subquadratic_ops_kernel(
             dtype=mixer.mixer.transformer_config.params_dtype,
             device=torch.cuda.current_device(),
         )
+        reference_input = input_features.detach().clone().requires_grad_(True)
+        kernel_input = input_features.detach().clone().requires_grad_(True)
 
         # PyTorch Mixer
-        output_features = mixer(input_features)
+        output_features = mixer(reference_input)
         assert output_features.shape == (
             batch_size,
             mixer.mixer.hidden_size,
@@ -298,6 +300,7 @@ def test_subquadratic_ops_kernel(
 
         loss = output_features.float().mean()
         loss.backward()
+        assert reference_input.grad is not None
 
         # Store the gradients for later comparison.
         grads = []
@@ -308,7 +311,7 @@ def test_subquadratic_ops_kernel(
         mixer.zero_grad()
 
         # CUDA kernel in Mixer
-        output_features_kernel = mixer_kernel(input_features)
+        output_features_kernel = mixer_kernel(kernel_input)
         assert output_features_kernel.shape == (
             batch_size,
             mixer_kernel.mixer.hidden_size,
@@ -319,6 +322,7 @@ def test_subquadratic_ops_kernel(
 
         loss_kernel = output_features_kernel.float().mean()
         loss_kernel.backward()
+        assert kernel_input.grad is not None
 
         # Store the gradients for later comparison.
         grads_kernel = []
@@ -332,18 +336,15 @@ def test_subquadratic_ops_kernel(
         torch.testing.assert_close(output_features, output_features_kernel, rtol=0.02, atol=2e-4)
         torch.testing.assert_close(loss, loss_kernel, msg=f"Loss mismatch for {operator_type}")
 
-        # Compare gradients
+        # Parameter and activation gradients are the training-path contract for these kernels.
         assert len(grads) == len(grads_kernel), f"Gradient count mismatch for {operator_type}"
-
-        gradient_mismatch = False
         for (n, g), (n_kernel, g_kernel) in zip(grads, grads_kernel):
-            try:
-                torch.testing.assert_close(g, g_kernel, msg=f"Gradient mismatch for {operator_type} - {n}")
-            except AssertionError as e:
-                gradient_mismatch = True
-                print(f"Gradient mismatch for {operator_type} - {n}: {e}")
-
-        if gradient_mismatch:
-            print(f"There were gradient mismatches for {operator_type}!")
-        else:
-            print(f"All gradients matched successfully for {operator_type}!")
+            assert n == n_kernel
+            torch.testing.assert_close(
+                g,
+                g_kernel,
+                rtol=0.02,
+                atol=2e-4,
+                msg=f"Gradient mismatch for {operator_type} - {n}",
+            )
+        torch.testing.assert_close(reference_input.grad, kernel_input.grad, rtol=0.02, atol=2e-4)

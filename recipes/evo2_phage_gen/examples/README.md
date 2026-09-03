@@ -157,6 +157,10 @@ for its 96-sequence step and requires exact-length, EOS-suppressed completions. 
 likelihood uses packed prediction for ragged batches while preserving FASTA record mappings. NeMo-RL's
 separate `policy.sequence_packing` option remains disabled until its gradient-bearing loss/backward
 path is independently qualified; it does not control rollout packing.
+Each shard keeps its decode rows logically active, captures only the physical full/remainder batch
+shapes it actually runs, and retains the warmed engine across rollout and validation cycles. Report
+cold end-to-end, setup-free generation, and steady-decode throughput separately; set
+`EVO2_EXACT_PHASE_EVIDENCE=1` only for synchronized phase and allocator diagnostics.
 [Black et al., “Quantifying evolutionary novelty and design efficiency in generative genome
 design”](https://www.biorxiv.org/content/10.64898/2026.06.12.731871v1.full) found that Evo 2
 likelihood predicted experimental viability within a previously filtered PhiX174 dataset, but the

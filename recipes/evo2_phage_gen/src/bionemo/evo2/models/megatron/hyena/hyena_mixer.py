@@ -834,7 +834,9 @@ class HyenaMixer(MegatronModule):
         """Return this layer's modal decay tables, computed once and reused by every packed kernel.
 
         The tables depend only on the ``p`` and ``gamma`` parameters, so they are cached on
-        the module and rebuilt only when either parameter's storage or version changes.
+        the module and refreshed only when either parameter's storage or version changes.
+        Refresh preserves the tables' tensor storage when possible: decode CUDA graphs capture
+        those addresses, while RL refits update the source parameters in place between rollouts.
         They keep the parameters' ``[num_groups, 16]`` shape for this tensor-parallel
         partition; the kernels expand groups to channels with ``group_dim``. Unlike
         ``get_logp`` there is no context-parallel rank slicing, because the packed paths
@@ -846,7 +848,21 @@ class HyenaMixer(MegatronModule):
         cached = getattr(self, "_packed_modal_poles_cache", None)
         if cached is not None and cached[0] == cache_key:
             return cached[1]
-        poles = modal_poles(gamma.detach(), p.detach())
+        refreshed = modal_poles(gamma.detach(), p.detach())
+        poles = refreshed
+        if cached is not None:
+            cached_poles = cached[1]
+            if all(
+                old.shape == new.shape and old.dtype == new.dtype and old.device == new.device
+                for old, new in zip(
+                    (cached_poles.decay, cached_poles.log_decay),
+                    (refreshed.decay, refreshed.log_decay),
+                    strict=True,
+                )
+            ):
+                cached_poles.decay.copy_(refreshed.decay)
+                cached_poles.log_decay.copy_(refreshed.log_decay)
+                poles = cached_poles
         self._packed_modal_poles_cache = (cache_key, poles)
         return poles
 

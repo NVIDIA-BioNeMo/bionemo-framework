@@ -341,6 +341,24 @@ def initialize_inference_distributed(
         )
 
 
+def _resolve_embedding_layer(
+    embedding_layer: int,
+    original_num_layers: int,
+    *,
+    output_log_prob_seqs: bool = False,
+) -> int:
+    """Resolve a Python-style layer index and validate embedding output options."""
+    target_num_layers = original_num_layers + embedding_layer + 1 if embedding_layer < 0 else embedding_layer + 1
+    if target_num_layers <= 0 or target_num_layers > original_num_layers:
+        raise ValueError(
+            f"Invalid embedding_layer={embedding_layer} for model with {original_num_layers} layers. "
+            f"Valid range: -{original_num_layers} to {original_num_layers - 1}."
+        )
+    if output_log_prob_seqs:
+        raise ValueError("Cannot use --output-log-prob-seqs with --embedding-layer. Embeddings are not logits.")
+    return target_num_layers
+
+
 def load_model_to_layer(
     checkpoint_dir,
     layer: Optional[int] = None,
@@ -398,9 +416,7 @@ def load_model_to_layer(
             mp.enable_cuda_graph = False  # graph capture conflicts with residual-stream hooks
     else:
         original_num_layers = mp.num_layers
-        target = original_num_layers + layer + 1 if layer < 0 else layer + 1
-        if target <= 0 or target > original_num_layers:
-            raise ValueError(f"layer={layer} invalid for {original_num_layers}-layer model")
+        target = _resolve_embedding_layer(layer, original_num_layers)
         mp.num_layers = target
         mp.post_process = False
         if getattr(mp, "hybrid_override_pattern", None) and len(mp.hybrid_override_pattern) > target:
@@ -1499,20 +1515,11 @@ def predict(
     output_embeddings = embedding_layer is not None
 
     if output_embeddings:
-        # Validate and resolve the embedding layer index
-        # Support Python-style negative indexing
-        if embedding_layer < 0:
-            # Convert negative index to positive (e.g., -1 -> last layer)
-            target_num_layers = original_num_layers + embedding_layer + 1
-        else:
-            # Positive index: layer N means we need N+1 layers (0-indexed)
-            target_num_layers = embedding_layer + 1
-
-        if target_num_layers <= 0 or target_num_layers > original_num_layers:
-            raise ValueError(
-                f"Invalid embedding_layer={embedding_layer} for model with {original_num_layers} layers. "
-                f"Valid range: -{original_num_layers} to {original_num_layers - 1}."
-            )
+        target_num_layers = _resolve_embedding_layer(
+            embedding_layer,
+            original_num_layers,
+            output_log_prob_seqs=output_log_prob_seqs,
+        )
 
         # Set the model to use fewer layers and skip post-processing (output heads).
         model_provider.num_layers = target_num_layers
@@ -1536,10 +1543,6 @@ def predict(
             f"Embedding extraction mode: extracting from layer {embedding_layer} "
             f"(using {target_num_layers} of {original_num_layers} layers, post_process=False)"
         )
-
-        # Cannot use log prob output with embedding mode
-        if output_log_prob_seqs:
-            raise ValueError("Cannot use --output-log-prob-seqs with --embedding-layer. Embeddings are not logits.")
 
     # -------------------------------------------------------------------------
     # Step 4: Initialize distributed environment

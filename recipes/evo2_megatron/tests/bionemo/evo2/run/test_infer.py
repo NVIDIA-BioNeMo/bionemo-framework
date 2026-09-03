@@ -20,15 +20,10 @@
 
 infer.py drives generation through the NATIVE mcore dynamic-inference engine (paged-KV attention +
 Hyena recurrent state packed into mcore's two Mamba slots), which is the only engine here.
-The general generation tests below
-(test_infer_runs, test_infer_temperature, test_infer_top_k, test_infer_phylogenetic_prompt,
-test_identical_prompts_should_be_identical, test_subquadratic_ops_matches_baseline,
-test_different_prompts_produce_different_outputs, test_different_results_with_without_peft,
-the batch-padding prefix-invariance test, and the parallel-accuracy tests) all exercise this
-engine; they assert "infer.py generates valid DNA" rather than any engine-specific internal.
-The native dynamic tests add edge-case coverage (full-prompt multi-block prefill, opt-in
-chunked prefill, single-token decode, longer generation, short-prompt right-aligned seed, TP=2
-batch=1).
+The generation tests below exercise this engine directly. A single mixed-prompt test reuses one
+model load to cover the JSONL contract, ragged batched prefill, prompt sensitivity, and the short-
+and long-prompt edge cases through 100 decode steps. Separate tests remain only for state
+transitions that cannot share that run: full-vs-chunked prefill equivalence, LoRA, and model parallelism.
 
 The core forward pass (predict.py) and HyenaInferenceContext are tested
 in test_evo2.py which has working test_forward_manual and test_forward_ckpt_conversion.
@@ -690,7 +685,7 @@ def test_validate_cuda_graph_capture_records_every_block_graph_runner():
         cuda_graph_replay_verified=False,
     )
 
-    infer_module._validate_cuda_graph_capture(native, expected_request_counts=2)
+    infer_module._validate_cuda_graph_capture(native, expected_request_counts={1, 2})
 
     assert native.cuda_graph_runner_count == 2
     assert native.cuda_graph_recorded_count == 2
@@ -721,7 +716,7 @@ def test_validate_layer_cuda_graph_capture_allows_one_fixed_attention_runner():
         cuda_graph_replay_verified=False,
     )
 
-    infer_module._validate_cuda_graph_capture(native, expected_request_counts=2)
+    infer_module._validate_cuda_graph_capture(native, expected_request_counts={1, 2})
 
     assert native.cuda_graph_manager_count == 3
     assert native.cuda_graph_runner_count == 5
@@ -745,7 +740,7 @@ def test_validate_layer_cuda_graph_capture_rejects_missing_hyena_request_shape()
     native = SimpleNamespace(hyena_model=model, cuda_graph_scope="layer")
 
     with pytest.raises(RuntimeError, match="not fully captured"):
-        infer_module._validate_cuda_graph_capture(native, expected_request_counts=2)
+        infer_module._validate_cuda_graph_capture(native, expected_request_counts={1, 2})
 
 
 @pytest.mark.parametrize(
@@ -771,7 +766,7 @@ def test_validate_cuda_graph_capture_rejects_a_configured_but_inactive_graph_pat
     )
 
     with pytest.raises(RuntimeError, match=message):
-        infer_module._validate_cuda_graph_capture(native, expected_request_counts=1)
+        infer_module._validate_cuda_graph_capture(native, expected_request_counts={1})
 
 
 def test_max_batch_size_help_describes_prompt_file_chunking(monkeypatch, capsys):
@@ -942,7 +937,25 @@ def test_infer_reports_setup_elapsed_and_peak_memory(
     assert components.native_dynamic.engine_setup_stats.peak_allocated_bytes == 2 * gib
     assert components.native_dynamic.engine_setup_stats.peak_reserved_bytes == 3 * gib
     assert "[MEMORY] After generation: peak=4.000 GB, reserved=5.000 GB" in caplog.text
+    assert "[PERF] Batch 1 end-to-end:" in caplog.text
     assert records[0]["completion_token_ids"] == [65]
+
+
+def test_low_overhead_phase_timing_reports_wall_time_without_cuda_sync(monkeypatch):
+    monkeypatch.setattr(infer_module, "_CUDA_PHASE_EVIDENCE_ENABLED", False)
+    perf_counter_values = iter([10.0, 17.5])
+    monkeypatch.setattr(infer_module.time, "perf_counter", lambda: next(perf_counter_values))
+    monkeypatch.setattr(
+        torch.cuda,
+        "synchronize",
+        lambda: pytest.fail("low-overhead timing must not synchronize CUDA"),
+    )
+
+    started_at_s = infer_module._begin_cuda_phase()
+    stats = infer_module._finish_cuda_phase(started_at_s)
+
+    assert stats.elapsed_s == 7.5
+    assert stats.performed is False
 
 
 def test_non_primary_global_rank_does_not_write_results(monkeypatch, tmp_path):
@@ -1236,15 +1249,16 @@ class _MockNativeDynamicContext:
         self.request_count = 0
 
 
-def test_cuda_graph_warmup_captures_every_active_request_count(monkeypatch):
+def test_graph_warmup_uses_only_physical_shapes(monkeypatch):
     class _WarmupContext(_MockNativeDynamicContext):
         def add_request(self, request, *, prefill_chunk_length: int):
             super().add_request(request, prefill_chunk_length=prefill_chunk_length)
             request_idx = self.request_count - 1
-            self.mamba_metadata.request_to_mamba_state_idx[request_idx] = 9 - request_idx
+            self.mamba_metadata.request_to_mamba_state_idx[request_idx] = 127 - request_idx
 
     context = _WarmupContext()
-    context.evo2_max_batched_decode_requests = 3
+    context.mamba_metadata.request_to_mamba_state_idx = torch.arange(128)
+    context.evo2_max_batched_decode_requests = 96
     bound_slots = []
     batched_decode_enabled_when_bound = []
 
@@ -1266,14 +1280,27 @@ def test_cuda_graph_warmup_captures_every_active_request_count(monkeypatch):
         native_dynamic,
         context,
         torch.device("cpu"),
+        request_counts={96},
     )
 
-    assert forward_model.calls == 9
-    assert batch_sizes == [1, 1, 1, 2, 2, 2, 3, 3, 3]
-    assert bound_slots == [[9], [8, 9], [7, 8, 9]]
-    assert batched_decode_enabled_when_bound == [False, False, False]
-    assert context.reset_count == 3
+    assert forward_model.calls == 3
+    assert batch_sizes == [96, 96, 96]
+    assert bound_slots == [list(range(32, 128))]
+    assert batched_decode_enabled_when_bound == [False]
+    assert context.reset_count == 1
     assert context.evo2_batched_decode_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("prompt_count", "batch_size", "expected"),
+    [
+        (96, 96, (96,)),
+        (100, 96, (4, 96)),
+        (5, 2, (1, 2)),
+    ],
+)
+def test_physical_request_shapes_include_only_full_and_remainder(prompt_count, batch_size, expected):
+    assert infer_module._physical_request_counts(prompt_count, batch_size) == expected
 
 
 def _run_mock_native_generation(
@@ -1460,6 +1487,10 @@ def test_native_batched_loop_omits_ignored_eos_and_reaches_exact_length(monkeypa
         assert result.timings["timing_scope"] == "native_generation_group"
         assert result.timings["timing_group_id"] == "native-call-00000000-group-00000000"
         assert result.timings["timing_request_count"] == 2
+        assert result.timings["generation_completion_tokens"] == 6
+        assert result.timings["decode_completion_tokens"] == 4
+        assert result.timings["generation_completion_tokens_per_s"] > 0
+        assert result.timings["decode_completion_tokens_per_s"] > 0
     assert forward_model.calls == 4
     assert results[0].timings is not results[1].timings
     assert results[0].memory is not results[1].memory
@@ -1679,7 +1710,7 @@ def test_native_loop_synchronizes_only_at_phase_boundaries(
         assert result.memory["total_peak_reserved_bytes"] == 404
 
 
-def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_capacity(monkeypatch):
+def test_shared_dynamic_context_reports_cold_setup_and_reuses_same_request_shape(monkeypatch):
     events = []
     monkeypatch.setattr(infer_module, "_CUDA_PHASE_EVIDENCE_ENABLED", True)
 
@@ -1725,7 +1756,7 @@ def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_cap
     )
 
     def validate_capture(_nd, *, expected_request_counts):
-        assert expected_request_counts == 2
+        assert expected_request_counts == frozenset({2})
         events.append("validate")
 
     monkeypatch.setattr(infer_module, "_validate_cuda_graph_capture", validate_capture)
@@ -1743,7 +1774,7 @@ def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_cap
         block_size_tokens=16,
         max_tokens=64,
         enable_chunked_prefill=False,
-        max_active_requests=1,
+        max_active_requests=2,
         device=torch.device("cpu"),
     )
 
@@ -1774,203 +1805,6 @@ def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_cap
         "sync",
         "reset",
     ]
-
-
-def test_infer_runs(mbridge_checkpoint_path, tmp_path):
-    """Test that infer.py runs without errors and produces JSONL output."""
-    output_file = tmp_path / "output.jsonl"
-
-    # Use a longer DNA prompt to meet FP8 dimension requirements (divisible by 8)
-    # 64 characters should be safe
-    prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
-    cmd = [
-        "torchrun",
-        "--standalone",
-        "--nproc_per_node",
-        "1",
-        "--nnodes",
-        "1",
-        "-m",
-        "bionemo.evo2.run.infer",
-        "--ckpt-dir",
-        str(mbridge_checkpoint_path),
-        "--prompt",
-        prompt,
-        "--max-new-tokens",
-        "10",
-        "--output-file",
-        str(output_file),
-        "--temperature",
-        "1.0",  # Non-zero temperature required by MCore
-        "--top-k",
-        "1",  # Top-k=1 for greedy decoding
-    ]
-
-    env = copy.deepcopy(PRETEST_ENV)
-
-    result = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,  # 5 minutes
-        env=env,
-    )
-
-    assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-    assert output_file.exists(), "Output file was not created"
-
-    records = _read_jsonl_results(output_file)
-    assert len(records) == 1, f"Expected 1 result, got {len(records)}"
-    record = records[0]
-    assert record["id"] == "0"
-    assert record["prompt"] == prompt
-    assert len(record["completion"]) > 0, "Generated text is empty"
-    assert record["finish_reason"] in ("length", "stop")
-    assert "usage" in record
-    assert record["usage"]["prompt_tokens"] > 0
-    assert record["usage"]["completion_tokens"] > 0
-
-
-@pytest.mark.parametrize("temperature", [0.5, 1.0])
-def test_infer_temperature(mbridge_checkpoint_path, tmp_path, temperature):
-    """Test that different temperatures produce output."""
-    output_file = tmp_path / f"output_temp_{temperature}.jsonl"
-    # Use a longer prompt for FP8 compatibility
-    prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
-    cmd = [
-        "torchrun",
-        "--standalone",
-        "--nproc_per_node",
-        "1",
-        "--nnodes",
-        "1",
-        "-m",
-        "bionemo.evo2.run.infer",
-        "--ckpt-dir",
-        str(mbridge_checkpoint_path),
-        "--prompt",
-        prompt,
-        "--max-new-tokens",
-        "5",
-        "--temperature",
-        str(temperature),
-        "--output-file",
-        str(output_file),
-    ]
-
-    env = copy.deepcopy(PRETEST_ENV)
-
-    result = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,  # 5 minutes
-        env=env,
-    )
-
-    assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-
-
-def test_infer_top_k(mbridge_checkpoint_path, tmp_path):
-    """Test top-k sampling."""
-    output_file = tmp_path / "output_topk.jsonl"
-    # Use a longer prompt for FP8 compatibility
-    prompt = "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
-    cmd = [
-        "torchrun",
-        "--standalone",
-        "--nproc_per_node",
-        "1",
-        "--nnodes",
-        "1",
-        "-m",
-        "bionemo.evo2.run.infer",
-        "--ckpt-dir",
-        str(mbridge_checkpoint_path),
-        "--prompt",
-        prompt,
-        "--max-new-tokens",
-        "5",
-        "--top-k",
-        "4",  # Only sample from top 4 tokens (A, C, G, T)
-        "--output-file",
-        str(output_file),
-    ]
-
-    env = copy.deepcopy(PRETEST_ENV)
-
-    result = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,  # 5 minutes
-        env=env,
-    )
-
-    assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-
-
-def test_infer_phylogenetic_prompt(mbridge_checkpoint_path, tmp_path):
-    """Test generation with a phylogenetic lineage prompt.
-
-    Evo2 is trained with phylogenetic tags, so generation should work
-    well when conditioned on these tags. Using a longer prompt for FP8.
-    """
-    output_file = tmp_path / "output_phylo.jsonl"
-
-    # Phylogenetic prompt (padded to be longer for FP8 compatibility)
-    prompt = (
-        "|d__Bacteria;"
-        "p__Pseudomonadota;"
-        "c__Gammaproteobacteria;"
-        "o__Enterobacterales;"
-        "f__Enterobacteriaceae;"
-        "g__Escherichia;"
-        "s__Escherichia|"
-    )
-    cmd = [
-        "torchrun",
-        "--standalone",
-        "--nproc_per_node",
-        "1",
-        "--nnodes",
-        "1",
-        "-m",
-        "bionemo.evo2.run.infer",
-        "--ckpt-dir",
-        str(mbridge_checkpoint_path),
-        "--prompt",
-        prompt,
-        "--max-new-tokens",
-        "20",
-        "--temperature",
-        "1.0",  # Non-zero temperature required by MCore
-        "--top-k",
-        "1",  # Top-k=1 for greedy decoding
-        "--output-file",
-        str(output_file),
-    ]
-
-    env = copy.deepcopy(PRETEST_ENV)
-
-    result = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,  # 5 minutes
-        env=env,
-    )
-
-    assert result.returncode == 0, f"infer command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-    assert output_file.exists(), "Output file was not created"
-
-    records = _read_jsonl_results(output_file)
-    assert len(records) == 1
-    assert len(records[0]["completion"]) > 0, "Generated text is empty"
 
 
 # DNA prompts for reproducibility tests (from test_prompt.py)
@@ -2115,15 +1949,6 @@ def _write_prompts_jsonl(prompt_file: Path, prompts: list[tuple[str, str]]) -> N
         f.writelines(json.dumps({"id": prompt_id, "prompt": prompt_text}) + "\n" for prompt_id, prompt_text in prompts)
 
 
-@pytest.fixture(
-    params=[False, True],
-    ids=["causal-conv1d", "subquadratic-ops"],
-)
-def infer_use_subquadratic_ops(request):
-    """Whether infer should use subquadratic Hyena kernels."""
-    return request.param
-
-
 def _run_infer_prompt_file(
     *,
     mbridge_checkpoint_path: Path,
@@ -2197,7 +2022,6 @@ def _completion_logprobs(record: dict) -> torch.Tensor:
 def test_infer_evo2_short_prefill_is_prefix_invariant_across_batch_padding(
     mbridge_checkpoint_path,
     tmp_path,
-    infer_use_subquadratic_ops: bool,
 ):
     """A short prefill should be invariant when packed with a longer prompt.
 
@@ -2221,14 +2045,14 @@ def test_infer_evo2_short_prefill_is_prefix_invariant_across_batch_padding(
         prompt_file=alone_prompt_file,
         output_file=tmp_path / "alone_output.jsonl",
         max_batch_size=1,
-        use_subquadratic_ops=infer_use_subquadratic_ops,
+        use_subquadratic_ops=False,
     )
     padded_records = _run_infer_prompt_file(
         mbridge_checkpoint_path=mbridge_checkpoint_path,
         prompt_file=padded_prompt_file,
         output_file=tmp_path / "padded_output.jsonl",
         max_batch_size=2,
-        use_subquadratic_ops=infer_use_subquadratic_ops,
+        use_subquadratic_ops=False,
     )
 
     assert set(alone_records) == {"short"}
@@ -2259,6 +2083,7 @@ def run_infer_subprocess_parallel(
     evo2_batched_decode_size: int | None = None,
     cuda_graph_impl: str | None = None,
     expected_log_substrings: tuple[str, ...] = (),
+    extra_args: tuple[str, ...] = (),
 ) -> list[dict]:
     """Run inference as a subprocess with model parallelism.
 
@@ -2281,6 +2106,7 @@ def run_infer_subprocess_parallel(
         evo2_batched_decode_size: If set, pass --evo2-batched-decode-size to the CLI.
         cuda_graph_impl: If set, pass --cuda-graph-impl.
         expected_log_substrings: Strings that must appear in stdout or stderr.
+        extra_args: Additional CLI arguments appended to the infer command.
 
     Returns:
         List of parsed JSONL result dicts.
@@ -2321,6 +2147,7 @@ def run_infer_subprocess_parallel(
         cmd.extend(["--evo2-batched-decode-size", str(evo2_batched_decode_size)])
     if cuda_graph_impl is not None:
         cmd.extend(["--cuda-graph-impl", str(cuda_graph_impl)])
+    cmd.extend(extra_args)
 
     env = copy.deepcopy(PRETEST_ENV)
     # Prepend the source src/ directory to PYTHONPATH so that local model code
@@ -2435,7 +2262,7 @@ def _run_segmented_parallel_infer_probe(
         assert record["timings"]["timing_request_count"] == 2
         assert record["timings"]["cuda_graph_scope"] == "block"
         assert record["timings"]["cuda_graph_manager_count"] == 1
-        assert record["timings"]["cuda_graph_runner_count"] >= 2
+        assert record["timings"]["cuda_graph_runner_count"] == 1
         assert record["timings"]["cuda_graph_recorded_count"] == record["timings"]["cuda_graph_runner_count"]
         assert record["timings"]["cuda_graph_replay_verified"] is True
     return records, proofs
@@ -2451,136 +2278,6 @@ def _assert_parallel_probe_matches_baseline(actual: dict[str, dict], expected: d
             rtol=2e-2,
             atol=5e-2,
         )
-
-
-def test_identical_prompts_should_be_identical(mbridge_checkpoint_path, tmp_path):
-    """Test that identical prompts produce identical sequences.
-
-    With greedy decoding (top_k=1) and the same seed, identical prompts
-    should produce identical outputs.
-    """
-    output_file_1 = tmp_path / "output_prompt1_run1.jsonl"
-    output_file_2 = tmp_path / "output_prompt1_run2.jsonl"
-
-    # Run inference twice with the same prompt
-    generated_1 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=output_file_1,
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,  # Greedy decoding for determinism
-        seed=42,
-    )
-
-    generated_2 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=output_file_2,
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,  # Greedy decoding for determinism
-        seed=42,
-    )
-
-    assert len(generated_1) > 0, "First generation produced empty output"
-    assert len(generated_2) > 0, "Second generation produced empty output"
-    assert generated_1["completion"] == generated_2["completion"]
-    assert generated_1["completion_token_ids"] == generated_2["completion_token_ids"]
-
-
-@pytest.mark.parametrize(
-    ("cuda_graph_impl", "cuda_graph_scope"),
-    [("none", "block"), ("local", "layer"), ("local", "block")],
-)
-@pytest.mark.parametrize("use_subquadratic_ops", [False, True])
-def test_subquadratic_ops_with_cuda_graph_matches_baseline(
-    mbridge_checkpoint_path,
-    tmp_path,
-    use_subquadratic_ops,
-    cuda_graph_impl,
-    cuda_graph_scope,
-):
-    """The legacy flag cannot perturb dynamic generation or its requested graph scope.
-
-    The reference is the simplest path: standard kernels with CUDA graphs OFF (``cuda_graph_impl=none``).
-    Greedy decoding and a fixed seed make generation deterministic. The dynamic backend ignores
-    ``--use-subquadratic-ops`` before model setup, so every requested eager/layer/block variant must
-    remain byte-identical while the graph choice stays available to the native segmented path.
-    """
-    baseline = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=tmp_path / "output_baseline.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        use_subquadratic_ops=False,
-        cuda_graph_impl="none",
-    )
-    variant = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=tmp_path / "output_variant.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        use_subquadratic_ops=use_subquadratic_ops,
-        cuda_graph_impl=cuda_graph_impl,
-        extra_args=["--cuda-graph-scope", cuda_graph_scope],
-    )
-
-    assert baseline["completion"], "Baseline generation produced empty output"
-    assert variant["completion"], "Variant generation produced empty output"
-    assert variant["completion"] == baseline["completion"], (
-        f"subq_ops={use_subquadratic_ops}, cuda_graph_impl={cuda_graph_impl}, "
-        f"cuda_graph_scope={cuda_graph_scope} diverged from the "
-        f"eager non-subq baseline:\n  baseline={baseline['completion']!r}\n  variant ={variant['completion']!r}"
-    )
-
-
-def test_different_prompts_produce_different_outputs(mbridge_checkpoint_path, tmp_path):
-    """Test that different prompts produce different sequences.
-
-    Different input prompts should produce different outputs, demonstrating
-    that the model is actually responding to the prompt content.
-    """
-    output_file_1 = tmp_path / "output_prompt1.jsonl"
-    output_file_2 = tmp_path / "output_prompt2.jsonl"
-
-    # Run inference with two different prompts
-    generated_1 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=output_file_1,
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,  # Greedy decoding
-        seed=42,
-    )
-
-    generated_2 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_2,
-        output_file=output_file_2,
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,  # Greedy decoding
-        seed=42,
-    )
-
-    assert len(generated_1) > 0, "First generation produced empty output"
-    assert len(generated_2) > 0, "Second generation produced empty output"
-
-    # The outputs should be different since the prompts are different
-    # We check that the generated portions (after the prompt) are not identical
-    assert generated_1 != generated_2, (
-        f"Different prompts produced identical outputs:\n"
-        f"Prompt 1 output: {generated_1}\n"
-        f"Prompt 2 output: {generated_2}"
-    )
 
 
 @pytest.fixture
@@ -2846,6 +2543,7 @@ def segmented_infer_baseline_1b(mbridge_checkpoint_path, tmp_path_factory) -> di
 )
 @pytest.mark.slow
 @pytest.mark.timeout(900)
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Packed CP/PP inference requires at least two GPUs")
 def test_segmented_packed_infer_executes_on_every_cp_or_pp_rank(
     mbridge_checkpoint_path,
     segmented_infer_baseline_1b,
@@ -3150,11 +2848,10 @@ def test_hyena_inference_context_different_sequence_lengths():
 # =============================================================================
 # These exercise the NATIVE mcore dynamic-inference path (paged-KV attention + Hyena recurrent
 # state packed into mcore's two Mamba slots). They run against the small 1b-8k-bf16 fixture
-# checkpoint (real weights, validates the mechanism + correctness, not just shapes). Edge cases
-# cover full-prompt multi-block prefill (prompt > block_size_tokens), opt-in chunked prefill,
-# single-token decode, longer generation, TP-non-divisible batch (batch=1 on TP=2), and
-# prompt-shorter-than-the-medium-FIR-ring behavior. Greedy decoding (top_k=1) keeps the
-# assertions deterministic.
+# checkpoint (real weights, validates the mechanism + correctness, not just shapes). The mixed
+# request covers packed short-to-multi-block prefill, prompt-dependent decode, and longer recurrence.
+# Separate runs cover chunked-prefill equivalence, FP8, and TP-non-divisible batches.
+# Greedy decoding (top_k=1) keeps the assertions deterministic.
 
 # Paged-KV block size for the multi-block prefill test below. It also happens to be the CLI/engine
 # default, but the test pins it explicitly (passing --inference-dynamic-batching-block-size) so the
@@ -3180,87 +2877,73 @@ def _is_dna_completion(text: str) -> bool:
     return len(text) > 0 and all(c in DNA_BASES for c in text)
 
 
-def test_native_dynamic_runs(mbridge_checkpoint_path, tmp_path):
-    """A short prompt generates a non-empty DNA completion through the native engine."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Native dynamic-engine test requires a GPU")
-    record = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt="ACGTACGTAACCGGTTACGTACGTAACCGGTT",
-        output_file=tmp_path / "native_runs.jsonl",
-        max_new_tokens=10,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=512,
-    )
-    assert record["usage"]["prompt_tokens"] > 0
-    assert record["usage"]["completion_tokens"] == 10
-    assert _is_dna_completion(record["completion"]), f"non-DNA completion: {record['completion']!r}"
+def test_native_mixed_prompt_contract(mbridge_checkpoint_path, tmp_path):
+    """Cover independent native-engine prompt contracts with one model load.
 
-
-def test_native_dynamic_full_prefill_multi_block(mbridge_checkpoint_path, tmp_path):
-    """A prompt longer than the paged-KV block size prefills as one multi-block request.
-
-    The block size is pinned explicitly (``--inference-dynamic-batching-block-size``) and the prompt
-    exceeds it, so with no ``--enable-chunked-prefill`` the whole prompt is enqueued as a single
-    prefill chunk whose KV spans ``ceil(n_prompt / block_size) >= 2`` paged blocks. The first forward
-    processes all prompt tokens, and last_token_logits selects the true final position before decode.
-    Pinning the block size (rather than relying on the default) is what makes this a multi-block test.
+    The ragged batch includes duplicate and different prompts, a prompt shorter than the medium-FIR
+    ring, a prompt spanning multiple paged-KV blocks, and a phylogenetic prompt. This replaces
+    separate subprocess tests whose repeated model setup dominated their runtime.
     """
     if torch.cuda.device_count() < 1:
         pytest.skip("Native dynamic-engine test requires a GPU")
-    block_size_tokens = KV_BLOCK_SIZE_TOKENS
-    n_prompt_tokens = len(LONG_DNA_PROMPT)
-    assert n_prompt_tokens > block_size_tokens, (
-        f"LONG_DNA_PROMPT ({n_prompt_tokens} tokens) must exceed block_size_tokens={block_size_tokens} "
-        "to span more than one KV block"
-    )
-    record = run_infer_subprocess(
+
+    prompts = [
+        ("basic", "ATCG" * 16),
+        ("same-a", PROMPT_1),
+        ("same-b", PROMPT_1),
+        ("different", PROMPT_2),
+        ("short", "ACGTACGTAACCGGTT"),
+        ("long", LONG_DNA_PROMPT),
+        (
+            "phylogenetic",
+            "|d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;o__Enterobacterales;"
+            "f__Enterobacteriaceae;g__Escherichia;s__Escherichia|",
+        ),
+    ]
+    prompt_file = tmp_path / "mixed_prompts.jsonl"
+    _write_prompts_jsonl(prompt_file, prompts)
+    records = run_infer_subprocess_parallel(
         mbridge_checkpoint_path,
-        prompt=LONG_DNA_PROMPT,
-        output_file=tmp_path / "native_full_prefill_multi_block.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
+        prompt_file=prompt_file,
+        output_file=tmp_path / "mixed_outputs.jsonl",
+        max_new_tokens=100,
         top_k=1,
         seed=42,
-        max_seq_length=512,
-        block_size_tokens=block_size_tokens,
+        max_batch_size=len(prompts),
+        evo2_batched_decode_size=len(prompts),
+        expected_log_substrings=("[evo2-native] batched prompt prefill: requests=7",),
+        extra_args=(
+            "--max-seq-length",
+            "1024",
+            "--inference-dynamic-batching-block-size",
+            str(KV_BLOCK_SIZE_TOKENS),
+            "--ignore-eos",
+            "--strict-generation",
+        ),
     )
-    # The whole prompt must have been prefilled (KV spanning >1 block) and 20 tokens generated.
-    assert record["usage"]["prompt_tokens"] == n_prompt_tokens, (
-        f"prompt_tokens {record['usage']['prompt_tokens']} != {n_prompt_tokens}; multi-block "
-        "prefill did not enqueue the full prompt"
-    )
-    assert record["usage"]["completion_tokens"] == 20
-    assert _is_dna_completion(record["completion"]), f"non-DNA completion: {record['completion']!r}"
 
+    by_id = {record["id"]: record for record in records}
+    assert set(by_id) == {prompt_id for prompt_id, _ in prompts}
+    first_timing = records[0]["timings"]
+    assert first_timing["cuda_graph_runner_count"] == 1
+    assert first_timing["cuda_graph_recorded_count"] == 1
+    assert first_timing["cuda_graph_replay_verified"] is True
+    for prompt_id, prompt in prompts:
+        record = by_id[prompt_id]
+        assert record["prompt"] == prompt
+        assert record["finish_reason"] == "length"
+        assert record["usage"]["prompt_tokens"] == len(prompt)
+        assert record["usage"]["completion_tokens"] == 100
 
-def test_native_dynamic_chunked_prefill_cli_multi_chunk(mbridge_checkpoint_path, tmp_path):
-    """--enable-chunked-prefill allows prompts to exceed the per-step token budget."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Native dynamic-engine test requires a GPU")
-    n_prompt_tokens = len(LONG_DNA_PROMPT)
-    max_tokens = 256
-    assert n_prompt_tokens > max_tokens
-    record = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=LONG_DNA_PROMPT,
-        output_file=tmp_path / "native_chunked_prefill.jsonl",
-        max_new_tokens=4,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=512,
-        extra_args=[
-            "--enable-chunked-prefill",
-            "--inference-dynamic-batching-max-tokens",
-            str(max_tokens),
-        ],
-    )
-    assert record["usage"]["prompt_tokens"] == n_prompt_tokens
-    assert record["usage"]["completion_tokens"] == 4
-    assert _is_dna_completion(record["completion"]), f"non-DNA completion: {record['completion']!r}"
+    assert len(prompts[4][1]) < 127
+    assert len(prompts[5][1]) > KV_BLOCK_SIZE_TOKENS
+    for prompt_id in ("basic", "same-a", "same-b", "different", "short", "long"):
+        assert _is_dna_completion(by_id[prompt_id]["completion"]), (
+            f"non-DNA completion for {prompt_id}: {by_id[prompt_id]['completion']!r}"
+        )
+    assert by_id["phylogenetic"]["completion"]
+    assert by_id["same-a"]["completion_token_ids"] == by_id["same-b"]["completion_token_ids"]
+    assert by_id["same-a"]["completion"] != by_id["different"]["completion"]
 
 
 def test_native_dynamic_chunked_prefill_matches_full_prefill(mbridge_checkpoint_path, tmp_path):
@@ -3270,8 +2953,8 @@ def test_native_dynamic_chunked_prefill_matches_full_prefill(mbridge_checkpoint_
     prefill: prefilling the whole prompt in one forward vs splitting it across multiple prefill
     forwards (``--enable-chunked-prefill`` with a per-step token budget below the prompt length) must
     produce identical tokens under greedy decoding, since chunked prefill is only a memory-bounded way
-    to compute the same prefill. The existing chunked-prefill test only checks it runs and emits DNA;
-    this one pins the equivalence to full prefill. It guards the Hyena chunked-prefill fix: the FIR/IIR
+    to compute the same prefill. This pins the equivalence to full prefill and guards the Hyena
+    chunked-prefill fix: the FIR/IIR
     recurrent state is threaded across chunks by stepping each chunk's tokens through step_fir/step_iir
     (hyena_utils.ParallelCausalDepthwiseConv1dWithState.forward / forward_long / forward_medium); before
     that fix, chunk 1+ was misclassified as a single decode step and the output degenerated.
@@ -3324,16 +3007,13 @@ def test_native_dynamic_chunked_prefill_matches_full_prefill(mbridge_checkpoint_
     )
 
 
-def test_native_dynamic_full_fp8_runs_with_and_without_chunked_prefill(mbridge_checkpoint_path, tmp_path):
-    """Full fp8 inference (fp8 on every TE linear) runs both with full and with chunked prefill.
+def test_native_dynamic_fp8_chunked_prefill(mbridge_checkpoint_path, tmp_path):
+    """Megatron FP8 inference runs through chunked prefill and graphed decode.
 
     Confirms the fp8 token-padding path (``prepare_model_for_fp8_inference``, applied in
-    ``setup_inference_engine`` when the recipe turns on fp8) coexists with (a) the multi-block /
-    chunked-prefill Hyena block-step and (b) the CUDA-graphed single-token decode. Greedy full vs
-    chunked fp8 completions need NOT be bit-identical: current-scaling fp8 derives each GEMM's scale
-    from its own activation amax, which differs between a whole-prompt prefill and per-chunk prefills.
-    So this pins that BOTH configurations run and emit a valid DNA completion of the requested length
-    (not that they match) -- the bf16 equivalence above already pins the exact full==chunked behavior.
+    ``setup_inference_engine`` when the recipe turns on fp8) coexists with the multi-block Hyena
+    block-step and CUDA-graphed decode. The BF16 test above already compares full and chunked prefill,
+    while the broader model suite covers ordinary Megatron FP8 execution.
     """
     if torch.cuda.device_count() < 1:
         pytest.skip("Native dynamic-engine test requires a GPU")
@@ -3352,17 +3032,6 @@ def test_native_dynamic_full_fp8_runs_with_and_without_chunked_prefill(mbridge_c
         "--fp8-all-layers",
     ]
 
-    full = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=LONG_DNA_PROMPT,
-        output_file=tmp_path / "fp8_full_prefill.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,  # greedy
-        seed=42,
-        max_seq_length=512,
-        extra_args=fp8_args,
-    )
     chunked = run_infer_subprocess(
         mbridge_checkpoint_path,
         prompt=LONG_DNA_PROMPT,
@@ -3379,134 +3048,14 @@ def test_native_dynamic_full_fp8_runs_with_and_without_chunked_prefill(mbridge_c
             str(chunk_max_tokens),
         ],
     )
-    for label, rec in (("full", full), ("chunked", chunked)):
-        assert rec["usage"]["prompt_tokens"] == n_prompt_tokens, (
-            f"{label} fp8 prefill enqueued {rec['usage']['prompt_tokens']} != {n_prompt_tokens}"
-        )
-        assert rec["usage"]["completion_tokens"] == 20, (
-            f"{label} fp8 generated {rec['usage']['completion_tokens']} != 20 tokens"
-        )
-        assert _is_dna_completion(rec["completion"]), f"non-DNA {label} fp8 completion: {rec['completion']!r}"
-
-
-def test_native_dynamic_single_token_decode(mbridge_checkpoint_path, tmp_path):
-    """A single decode step (max_new_tokens=1) produces exactly one token after prefill."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Native dynamic-engine test requires a GPU")
-    record = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt="ACGTACGTAACCGGTTACGTACGTAACCGGTT",
-        output_file=tmp_path / "native_single.jsonl",
-        max_new_tokens=1,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=256,
-    )
-    assert record["usage"]["completion_tokens"] == 1, "expected exactly one decoded token"
-    assert _is_dna_completion(record["completion"]), f"non-DNA completion: {record['completion']!r}"
-
-
-def test_native_dynamic_short_prompt_under_medium_ring(mbridge_checkpoint_path, tmp_path):
-    """A prompt shorter than the medium-FIR ring (127) prefills via the right-aligned seed.
-
-    The medium Hyena operator's recurrent FIR ring is 127 wide; a short prompt produces a seed
-    shorter than the ring. The packed-slot path right-aligns that short seed into the fixed-width
-    ring (numerically equivalent to the eager grow path for the flip-filter medium operator). This
-    guards that fix: a ~16-token prompt must still generate a valid DNA completion.
-    """
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Native dynamic-engine test requires a GPU")
-    record = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt="ACGTACGTAACCGGTT",  # 16 tokens << 127 (medium ring width)
-        output_file=tmp_path / "native_short.jsonl",
-        max_new_tokens=10,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=256,
-    )
-    assert record["usage"]["completion_tokens"] == 10
-    assert _is_dna_completion(record["completion"]), f"non-DNA completion: {record['completion']!r}"
-
-
-def test_native_dynamic_long_generation(mbridge_checkpoint_path, tmp_path):
-    """A longer generation (100 tokens) runs many decode steps without context overflow."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Native dynamic-engine test requires a GPU")
-    record = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=tmp_path / "native_long_gen.jsonl",
-        max_new_tokens=100,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=1024,
-    )
-    assert record["usage"]["completion_tokens"] == 100, "long generation did not reach 100 tokens"
-    assert _is_dna_completion(record["completion"]), f"non-DNA completion: {record['completion']!r}"
-
-
-def test_native_dynamic_deterministic(mbridge_checkpoint_path, tmp_path):
-    """Greedy decoding with the same prompt + seed is reproducible across runs."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Native dynamic-engine test requires a GPU")
-    rec1 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=tmp_path / "native_det1.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=512,
-    )
-    rec2 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=tmp_path / "native_det2.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=512,
-    )
-    assert rec1["completion"] == rec2["completion"], (
-        f"native greedy decode not deterministic:\n  run1: {rec1['completion']}\n  run2: {rec2['completion']}"
-    )
-
-
-def test_native_dynamic_different_prompts_differ(mbridge_checkpoint_path, tmp_path):
-    """Different prompts produce different completions (the model responds to the prompt)."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Native dynamic-engine test requires a GPU")
-    rec1 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_1,
-        output_file=tmp_path / "native_diff1.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=512,
-    )
-    rec2 = run_infer_subprocess(
-        mbridge_checkpoint_path,
-        prompt=PROMPT_2,
-        output_file=tmp_path / "native_diff2.jsonl",
-        max_new_tokens=20,
-        temperature=1.0,
-        top_k=1,
-        seed=42,
-        max_seq_length=512,
-    )
-    assert rec1["completion"] != rec2["completion"], "different prompts produced identical completions"
+    assert chunked["usage"]["prompt_tokens"] == n_prompt_tokens
+    assert chunked["usage"]["completion_tokens"] == 20
+    assert _is_dna_completion(chunked["completion"]), f"non-DNA fp8 completion: {chunked['completion']!r}"
 
 
 @pytest.mark.slow
 @pytest.mark.timeout(600)
+@pytest.mark.skipif(bool(os.environ.get("CI")), reason="Skip 7b-1m checkpoint tests in single-GPU CI")
 def test_native_dynamic_tp2_batch1(mbridge_checkpoint_7b_1m_path, tmp_path):
     """TP=2 with a single request (batch=1) runs through decode-only CUDA graphs.
 

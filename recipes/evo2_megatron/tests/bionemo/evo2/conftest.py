@@ -83,8 +83,14 @@ def cleanup_after_test():
     os.environ.clear()
     os.environ.update(saved_environ)
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        gc.collect()
+        # Most tests in this suite never allocate on CUDA. A full cyclic-GC scan after
+        # every one of them costs roughly 0.4-1.0 seconds as the imported MCore graph
+        # grows, while releasing no GPU memory. Preserve the OOM isolation for tests
+        # that leave CUDA allocations or allocator reservations behind.
+        if torch.cuda.memory_allocated():
+            gc.collect()
+        if torch.cuda.memory_reserved():
+            torch.cuda.empty_cache()
 
 
 def pytest_addoption(parser: pytest.Parser):

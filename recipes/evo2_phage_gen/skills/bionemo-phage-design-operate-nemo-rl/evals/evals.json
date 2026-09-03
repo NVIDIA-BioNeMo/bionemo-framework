@@ -61,7 +61,7 @@
       "prompt": "A full RL smoke works, but one enabled whole-genome scorer dominates wall time. Start the 500-step run with the conservative setting.",
       "expected_output": "Benchmark and optimize the scorer without silently weakening the objective.",
       "assertions": [
-        "The response measures realistic full-genome throughput and identifies compute, memory, I/O, or contention bottlenecks.",
+        "The response measures realistic full-genome throughput, distinguishes cold setup/capture from steady decode over consecutive rollout/refit cycles, and identifies compute, memory, I/O, or contention bottlenecks.",
         "It tests batching, parallelism, caching by scientific input and tool version, or placement only when semantics remain unchanged.",
         "An optimized path must agree with the accepted path on positive, negative, and edge controls.",
         "The scorer is not dropped, replaced, or evaluated on fragments merely to improve speed.",

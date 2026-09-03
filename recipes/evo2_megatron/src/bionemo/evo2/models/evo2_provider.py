@@ -85,6 +85,38 @@ register_allowed_target_prefix("bionemo.evo2.")
 
 ContextParallelCommType = Literal["p2p", "a2a"]
 CONTEXT_PARALLEL_COMM_TYPES: tuple[ContextParallelCommType, ...] = ("p2p", "a2a")
+_FA4_SUPPORTED_COMPUTE_CAPABILITY_MAJORS = frozenset({9, 10, 11, 12})
+
+
+def _configure_fa4_for_device(
+    model_provider: TransformerConfig,
+    *,
+    device_capability: Optional[tuple[int, int]] = None,
+) -> bool:
+    """Use FA4 only where its forward, backward, and paged-KV paths are supported.
+
+    MCore currently treats an importable ``flash_attn.cute`` as sufficient to use FA4.
+    The pinned FA4 release can run a subset of forward operations on SM8x, but training
+    backward and dynamic inference with a paged KV cache require SM9x or newer. On older
+    GPUs, use TE fused attention for ordinary forwards and let MCore dynamic inference
+    fall back to the installed FA2 implementation.
+
+    Returns:
+        Whether MCore may use FA4 on the selected device.
+    """
+    from megatron.core.transformer import attention as mcore_attention
+
+    if not getattr(mcore_attention, "HAVE_FA4", False):
+        return False
+    if device_capability is None and torch.cuda.is_available():
+        device_capability = torch.cuda.get_device_capability()
+    if device_capability is not None and device_capability[0] in _FA4_SUPPORTED_COMPUTE_CAPABILITY_MAJORS:
+        return True
+
+    mcore_attention.HAVE_FA4 = False
+    if model_provider.attention_backend in (AttnBackend.flash, AttnBackend.auto):
+        model_provider.attention_backend = AttnBackend.fused
+    return False
 
 
 def configure_runtime_context_parallel_comm_type(
@@ -809,6 +841,7 @@ class HyenaModelProvider(TransformerConfig, ModelProviderMixin[MCoreHyenaModel])
         Returns:
             MCoreHyenaModel: Configured Hyena model instance
         """
+        _configure_fa4_for_device(self)
         self.bias_activation_fusion = False if self.remove_activation_post_first_layer else self.bias_activation_fusion
 
         assert getattr(self, "virtual_pipeline_model_parallel_size", None) is None and vp_stage is None, (

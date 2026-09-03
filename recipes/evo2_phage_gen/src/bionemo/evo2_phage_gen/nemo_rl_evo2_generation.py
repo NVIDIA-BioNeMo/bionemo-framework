@@ -470,6 +470,8 @@ class Evo2MegatronGenerationAdapter:
                     "generation_elapsed_s": 0.0,
                     "total_elapsed_s": 0.0,
                 }
+                phase_timing_exact = True
+                observed_timing_group = False
                 memory_peak_maxima = {
                     f"{phase_name}_peak_{memory_kind}_bytes": 0
                     for phase_name in (
@@ -503,6 +505,10 @@ class Evo2MegatronGenerationAdapter:
                         continue
                     seen_evidence_groups.add(evidence_group_key)
                     if result_timings is not None:
+                        observed_timing_group = True
+                        phase_timing_exact = phase_timing_exact and bool(
+                            result_timings.get("phase_timing_exact", False)
+                        )
                         for phase_name in phase_totals:
                             phase_totals[phase_name] += float(result_timings.get(phase_name, 0.0))
                     if result_memory is not None:
@@ -524,6 +530,31 @@ class Evo2MegatronGenerationAdapter:
                         "timing/train/generation/evo2_decode_elapsed_s": phase_totals["decode_elapsed_s"],
                         "timing/train/generation/evo2_generation_elapsed_s": phase_totals["generation_elapsed_s"],
                         "timing/train/generation/evo2_total_elapsed_s": phase_totals["total_elapsed_s"],
+                        "timing/train/generation/evo2_phase_timing_exact": float(
+                            observed_timing_group and phase_timing_exact
+                        ),
+                    }
+                )
+                generation_completion_tokens = sum(len(item.generated_tokens) for item in result)
+                decode_completion_tokens = sum(max(0, len(item.generated_tokens) - 1) for item in result)
+                generation_elapsed_s = phase_totals["generation_elapsed_s"]
+                decode_elapsed_s = phase_totals["decode_elapsed_s"]
+                native_elapsed_s = timing["timing/train/generation/evo2_native_elapsed_s"]
+                timing.update(
+                    {
+                        "timing/train/generation/evo2_generation_completion_tokens": float(
+                            generation_completion_tokens
+                        ),
+                        "timing/train/generation/evo2_decode_completion_tokens": float(decode_completion_tokens),
+                        "timing/train/generation/evo2_end_to_end_completion_tokens_per_s": (
+                            generation_completion_tokens / native_elapsed_s if native_elapsed_s > 0 else 0.0
+                        ),
+                        "timing/train/generation/evo2_generation_completion_tokens_per_s": (
+                            generation_completion_tokens / generation_elapsed_s if generation_elapsed_s > 0 else 0.0
+                        ),
+                        "timing/train/generation/evo2_decode_completion_tokens_per_s": (
+                            decode_completion_tokens / decode_elapsed_s if decode_elapsed_s > 0 else 0.0
+                        ),
                     }
                 )
                 timing.update(
@@ -538,7 +569,14 @@ class Evo2MegatronGenerationAdapter:
         return worker._parse_result_to_batched_data_dict(data, result)
 
     def finish_worker(self, worker: Any) -> None:
-        """Release native Evo2 generation state before logprob/training phases."""
-        if hasattr(worker, "_evo2_native_dynamic_components"):
-            delattr(worker, "_evo2_native_dynamic_components")
-        torch.cuda.empty_cache()
+        """Reset requests while retaining the graph-warmed engine across RL cycles.
+
+        NeMo-RL calls this hook after every rollout and validation generation. Colocated optimizer
+        updates and refits preserve parameter storage, so captured graphs remain valid; derived
+        modal tables refresh in place before the next decode. Releasing this cache here would rebuild
+        the context and recapture the same physical request shapes every cycle.
+        """
+        native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
+        shared_dyn_ctx = getattr(native_dynamic, "shared_dyn_ctx", None)
+        if shared_dyn_ctx is not None:
+            shared_dyn_ctx.reset()

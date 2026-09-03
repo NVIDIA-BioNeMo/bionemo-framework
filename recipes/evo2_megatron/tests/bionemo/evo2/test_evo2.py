@@ -290,6 +290,10 @@ def _check_matchrate(*, ckpt_name, matchrate, assert_matchrate=True):
             True,
             True,
             id="1b-8k-bf16-subquadratic-ops-flash",
+            marks=pytest.mark.skipif(
+                bool(os.environ.get("CI")),
+                reason="L4 falls back from FA4, duplicating the retained subquadratic full-model forward",
+            ),
         ),
         pytest.param(
             "evo2/1b-8k:1.0",
@@ -996,6 +1000,10 @@ def _run_subq_mbridge_test_subprocess(tmp_path: Path) -> None:
 
 @pytest.mark.timeout(900)
 @pytest.mark.slow
+@pytest.mark.skipif(
+    bool(os.environ.get("CI")),
+    reason="Focused mixer tests cover subquadratic forward/backward parity in CI",
+)
 def test_batch_generate_mbridge_subquadratic_ops(tmp_path: Path):
     """Run subquadratic MBridge generation coverage in an isolated pytest subprocess."""
     if os.environ.get(_RUN_SUBQ_MBRIDGE_INPROCESS_ENV) != "1":
