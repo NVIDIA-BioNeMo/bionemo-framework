@@ -1,0 +1,152 @@
+# @package _global_
+defaults:
+  - /base
+  - _self_
+
+############################################################
+# lepton job info
+############################################################
+node_group: yo-bom-lepton-001
+mount_from: node-nfs:fs1
+num_nodes: 1
+device_type: gpu
+num_devices: 1
+gpu_type: h100-sxm
+resource_shape: gpu.h100-sxm
+
+job_name: "esm2-sae-650m-smoke"
+
+############################################################
+# Telemetry
+############################################################
+# Disabled by default because this is an example smoke run. Set both
+# log_to_wandb=true and train_wandb_enabled=true to collect W&B metrics.
+log_to_wandb: false
+log_to_kratos: false
+kratos_subject: "interpretability_sae_examples_v0.0.1"
+wandb_dir: /workspace/bionemo-framework/interpretability/sparse_autoencoders/recipes/esm2/wandb
+
+############################################################
+# recipe identifiers
+############################################################
+recipe_subdir: interpretability/sparse_autoencoders/recipes/esm2
+model_type: esm2_sae
+variant: smoke
+framework: sae
+precision: bf16
+te_enabled: true
+fp8_enabled: false
+extras: []
+
+total_gpus: ${multiply:${num_devices},${num_nodes}}
+
+wandb_init_args:
+  project: "interpretability_sae_examples__${sanitize:${branch}}"
+  group: "${model_type}__${variant}__${total_gpus}gpus__${sanitize:${gpu_type}}"
+  job_type: "${recipe_subdir}"
+  name: null
+  entity: clara-discovery
+  mode: online
+
+############################################################
+# ESM2 SAE producer-consumer smoke settings
+############################################################
+run_name: lepton_esm2_650m_sae_smoke
+num_proteins: 100
+layer: 24
+model_name: nvidia/esm2_t33_650M_UR50D
+source: uniref50
+max_length: 512
+extract_batch_size: 8
+extract_dtype: bf16
+
+dp_size: 1
+train_n_epochs: 1
+max_steps: 20
+train_batch_size: 256
+expansion_factor: 4
+top_k: 16
+auxk: 32
+learning_rate: 3e-4
+log_interval: 10
+checkpoint_steps: 999999
+init_pre_bias: false
+train_wandb_enabled: false
+queue_size: 4
+shuffle_buffer_size: 8192
+
+data_dir: /data/interpretability/sae/esm2_smoke/data
+output_base: /data/interpretability/sae/esm2_smoke/outputs
+
+products:
+  - config: esm2_650m_smoke
+
+############################################################
+# Checkout Script
+############################################################
+checkout_script: |
+  set -euo pipefail
+  cd /workspace
+  git clone https://github.com/NVIDIA/bionemo-framework.git
+  cd bionemo-framework
+  if [ -n "${commit_sha}" ]; then
+    echo "Checking out commit: ${commit_sha}"
+    git checkout "${commit_sha}"
+  elif [ "${branch}" != "main" ]; then
+    echo "Checking out branch: ${branch}"
+    git checkout "${branch}"
+  fi
+  cd interpretability/sparse_autoencoders
+  python -m pip install --upgrade pip
+  python -m pip install -e ./sae
+  python -m pip install -e ./recipes/esm2
+
+############################################################
+# run script
+############################################################
+run_script: |
+  cd /workspace/bionemo-framework/interpretability/sparse_autoencoders/recipes/esm2
+
+  WANDB_FLAG="--no-wandb"
+  if [ "${train_wandb_enabled}" = "true" ]; then
+    WANDB_FLAG="--wandb"
+  fi
+
+  INIT_PRE_BIAS_FLAG="--no-init-pre-bias"
+  if [ "${init_pre_bias}" = "true" ]; then
+    INIT_PRE_BIAS_FLAG="--init-pre-bias"
+  fi
+
+  python scripts/train_streaming.py \
+    --source ${source} \
+    --data-dir ${data_dir} \
+    --num-proteins ${num_proteins} \
+    --filter-length \
+    --model-name ${model_name} \
+    --layer ${layer} \
+    --extract-batch-size ${extract_batch_size} \
+    --max-length ${max_length} \
+    --dtype ${extract_dtype} \
+    --model-type topk \
+    --expansion-factor ${expansion_factor} \
+    --top-k ${top_k} \
+    --auxk ${auxk} \
+    --auxk-coef 0.03125 \
+    $INIT_PRE_BIAS_FLAG \
+    --n-epochs ${train_n_epochs} \
+    --max-steps ${max_steps} \
+    --batch-size ${train_batch_size} \
+    --lr ${learning_rate} \
+    --log-interval ${log_interval} \
+    --queue-size ${queue_size} \
+    --shuffle-buffer-size ${shuffle_buffer_size} \
+    $WANDB_FLAG \
+    --wandb-project ${wandb_init_args.project} \
+    --wandb-run-name ${run_name} \
+    --wandb-group ${wandb_init_args.group} \
+    --wandb-job-type ${wandb_init_args.job_type} \
+    --dp-size ${dp_size} \
+    --seed 42 \
+    --output-dir ${output_base}/${run_name} \
+    --checkpoint-dir ${output_base}/${run_name}/checkpoints \
+    --checkpoint-steps ${checkpoint_steps}

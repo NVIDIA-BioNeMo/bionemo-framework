@@ -110,6 +110,7 @@ fi
 # Extract values from config (with sensible defaults)
 RECIPE_SUBDIR="$(printf '%s' "$ALL_CONFIG_JSON_UPDATED" | jq -r '.recipe_subdir // "esm2_native_te"')"
 KRATOS_SUBJECT="$(printf '%s' "$ALL_CONFIG_JSON_UPDATED" | jq -r '.kratos_subject // "convergence_tests_v0.0.1"')"
+WANDB_DIR="$(printf '%s' "$ALL_CONFIG_JSON_UPDATED" | jq -r --arg recipe "$RECIPE_SUBDIR" '.wandb_dir // ("/workspace/bionemo-framework/recipes/" + $recipe + "/wandb")')"
 
 
 
@@ -178,9 +179,6 @@ DRIVER_VERSION="$("$NVIDIA_SMI_BIN" -q 2>/dev/null | awk -F': ' '/Driver Version
 CUDA_VERSION="$("$NVIDIA_SMI_BIN" -q 2>/dev/null | awk -F': ' '/CUDA Version/ {print $2; exit}')"
 NVIDIA_DRIVER_INFO="$(jq -n --arg dv "$DRIVER_VERSION" --arg cv "$CUDA_VERSION" 'def nn($x): if ($x|length)>0 then $x else null end; {driver_version: nn($dv), cuda_version: nn($cv)}' 2>/dev/null || echo '{}')"
 set -e
-
-# Look for W&B files
-WANDB_DIR="/workspace/bionemo-framework/recipes/$RECIPE_SUBDIR/wandb"
 
 WANDB_FOUND=0
 WANDB_SUMMARY=""
