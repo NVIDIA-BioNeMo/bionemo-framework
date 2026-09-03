@@ -1007,7 +1007,9 @@ def test_predict_evo2_equivalent_with_log_probs(
             # FP8 + TP can have 1 to 2% log-prob drift vs baseline; use 2% relative tolerance.
             rel = 2e-2
         else:
-            rel = 1e-6
+            # Independent packed BF16 CUDA processes vary by up to about 1.5e-6
+            # relative while preserving the same per-token predictions.
+            rel = 2e-6
         assert log_probs.item() == pytest.approx(expected_predictions[original_idx.item()], rel=rel)
 
 

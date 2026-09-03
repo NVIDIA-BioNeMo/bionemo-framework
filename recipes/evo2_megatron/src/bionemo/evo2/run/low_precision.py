@@ -101,25 +101,6 @@ def configure_quantized_parameter_storage(mixed_precision_config: Any, storage: 
             setattr(mixed_precision_config, field_name, False)
 
 
-def disable_sequence_parallel_for_global_quantization(model_provider: Any, mixed_precision_config: Any) -> bool:
-    """Disable SP when the generic FP8/FP4 padding wrapper would own TP collectives.
-
-    MCore's inference padding shim externally gathers and reduce-scatters sequence-parallel
-    tensors. That changes Evo2 packed-prediction numerics even for aligned rows and corrupts
-    unaligned ragged batches. Retain tensor parallelism but let each rank keep the full sequence;
-
-    Returns:
-        ``True`` when sequence parallelism was disabled.
-    """
-    global_quantization = _enabled(getattr(mixed_precision_config, "fp8", None)) or _enabled(
-        getattr(mixed_precision_config, "fp4", None)
-    )
-    if not global_quantization or not getattr(model_provider, "sequence_parallel", False):
-        return False
-    model_provider.sequence_parallel = False
-    return True
-
-
 def configure_prediction_sequence_parallel(
     model_provider: Any,
     mixed_precision_config: Any,

@@ -28,7 +28,6 @@ from bionemo.evo2.run import low_precision as low_precision_module
 from bionemo.evo2.run.low_precision import (
     configure_global_fp8_layer_scope,
     configure_quantized_parameter_storage,
-    disable_sequence_parallel_for_global_quantization,
     inference_parameter_storage,
     inference_precision_kind,
     prepare_model_for_quantized_inference,
@@ -267,27 +266,6 @@ def test_recipe_parameter_storage_preserves_quantized_parameters():
 def test_bf16_parameter_storage_rejects_a_non_quantized_compute_recipe():
     with pytest.raises(ValueError, match="requires an FP8 or FP4"):
         configure_quantized_parameter_storage(SimpleNamespace(fp8=None, fp4=None), "bf16")
-
-
-@pytest.mark.parametrize(
-    "config",
-    [
-        SimpleNamespace(fp8="hybrid", fp4=None),
-        SimpleNamespace(fp8=None, fp4="e2m1"),
-    ],
-)
-def test_global_quantization_disables_sequence_parallel_for_prediction(config):
-    provider = SimpleNamespace(sequence_parallel=True)
-
-    assert disable_sequence_parallel_for_global_quantization(provider, config) is True
-    assert provider.sequence_parallel is False
-
-
-def test_bf16_prediction_preserves_sequence_parallel():
-    provider = SimpleNamespace(sequence_parallel=True)
-
-    assert disable_sequence_parallel_for_global_quantization(provider, SimpleNamespace(fp8=None, fp4=None)) is False
-    assert provider.sequence_parallel is True
 
 
 @pytest.mark.parametrize(

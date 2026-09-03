@@ -757,6 +757,10 @@ class HyenaMixer(MegatronModule):
         every existing short, medium, and long Hyena forward/backward path run
         independently. Geometric buckets keep padding below 2x even for highly skewed
         packs, and prevent one very long segment from inflating every short transform.
+
+        This is a correctness and compatibility fallback, not an expected training
+        throughput optimization: every Hyena layer splits, pads, and reassembles its
+        segments on each forward until boundary-aware packed backward kernels exist.
         """
         if features.shape[0] != 1:
             raise ValueError(
@@ -933,7 +937,8 @@ class HyenaMixer(MegatronModule):
             x: Input tensor of shape [L, B, D] (seq_len, batch_size, hidden_dim)
             layer_past: Past layer state for inference (default: None)
             inference_context: Parameters for inference (default: None)
-            packed_seq_params: THD cumulative sequence boundaries (default: None)
+            packed_seq_params: THD boundaries for stateless packed training or prediction/scoring. Stateful
+                generation instead uses ``inference_context`` for both prefill and autoregressive decode.
             _hyena_use_cp: Whether to use context parallelism (default: True)
 
         Returns:
@@ -952,10 +957,13 @@ class HyenaMixer(MegatronModule):
         else:
             _proj_use_cp = False
 
+        # ``PackedSeqParams`` belongs to stateless packed training/scoring forwards. Native generation
+        # instead lets ``inference_context`` own request boundaries during ragged prefill, then reuses
+        # that context for autoregressive decode without passing packed parameters.
         if packed_seq_params is not None and inference_context is not None:
             raise ValueError(
                 "PackedSeqParams cannot share Hyena's stateful inference context; use native dynamic request "
-                "batching for generation or an ordinary no-state packed forward for scoring"
+                "batching for generation or an ordinary stateless packed forward for training/scoring"
             )
         if packed_seq_params is not None and _proj_use_cp:
             raise NotImplementedError("Packed Hyena with context parallel size greater than one is not yet supported")
