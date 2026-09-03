@@ -27,6 +27,7 @@ from bionemo.evo2.models.megatron.hyena.packed_kernels import (
     fused_hyena_decode_from_projection,
     local_positions_from_cu_seqlens,
     modal_chunk_metadata_from_cu_seqlens,
+    modal_poles,
     segmented_causal_conv1d,
     segmented_fir_from_projection,
     segmented_modal_from_projection,
@@ -295,8 +296,7 @@ def test_fused_hyena_decode_matches_existing_recurrence_and_state_updates(
         mixer_weight,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        modal_poles(gamma, poles_parameter),
         projection_group_width=3,
         mixer_group_width=mixer_group_width,
         operator=operator,
@@ -320,12 +320,6 @@ def test_fused_hyena_decode_keeps_batch_state_independent() -> None:
     projection_weight = torch.randn(channels, 3, device=device, dtype=torch.bfloat16).contiguous()
     mixer_weight = torch.randn(channels // group_width, taps, device=device, dtype=torch.bfloat16).contiguous()
     diagonal = torch.randn(channels, device=device, dtype=torch.bfloat16)
-    modal_parameter = torch.randn(
-        channels // group_width,
-        16,
-        device=device,
-        dtype=torch.float32,
-    ).contiguous()
 
     original_projection_state = projection_state.clone()
     original_mixer_state = mixer_state.clone()
@@ -336,9 +330,8 @@ def test_fused_hyena_decode_keeps_batch_state_independent() -> None:
         original_mixer_state,
         mixer_weight,
         diagonal,
-        modal_parameter,
-        modal_parameter,
-        modal_parameter,
+        None,
+        None,
         projection_group_width=3,
         mixer_group_width=group_width,
         operator="medium",
@@ -356,9 +349,8 @@ def test_fused_hyena_decode_keeps_batch_state_independent() -> None:
         perturbed_mixer_state,
         mixer_weight,
         diagonal,
-        modal_parameter,
-        modal_parameter,
-        modal_parameter,
+        None,
+        None,
         projection_group_width=3,
         mixer_group_width=group_width,
         operator="medium",
@@ -396,8 +388,7 @@ def test_fused_modal_decode_is_batch_invariant() -> None:
         projection_weight,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        modal_poles(gamma, poles_parameter),
         projection_group_width=3,
         mixer_group_width=1,
         operator="modal",
@@ -434,9 +425,8 @@ def test_fused_medium_decode_is_batch_invariant() -> None:
         mixer_state,
         mixer_weight,
         diagonal,
-        mixer_weight,
-        mixer_weight,
-        mixer_weight,
+        None,
+        None,
         projection_group_width=3,
         mixer_group_width=group_width,
         operator="medium",
@@ -547,6 +537,7 @@ def test_segmented_modal_matches_independent_sequences_and_blocks_leakage() -> N
     residues = torch.randn(channels // group_width, 16, device=device, dtype=torch.float32).contiguous()
     gamma = torch.empty_like(residues).uniform_(-4.5, -2.5)
     poles_parameter = torch.empty_like(residues).uniform_(-1.5, -0.5)
+    poles = modal_poles(gamma, poles_parameter)
     cu_seqlens = _cu_seqlens(lengths, device)
 
     final_state = torch.empty(len(lengths), channels, 16, device=device, dtype=torch.float32)
@@ -554,8 +545,7 @@ def test_segmented_modal_matches_independent_sequences_and_blocks_leakage() -> N
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        poles,
         cu_seqlens,
         group_width=group_width,
         final_state_out=final_state,
@@ -573,8 +563,7 @@ def test_segmented_modal_matches_independent_sequences_and_blocks_leakage() -> N
         perturbed,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        poles,
         cu_seqlens,
         group_width=group_width,
     )
@@ -598,6 +587,7 @@ def test_chunked_segmented_modal_matches_recurrence_and_blocks_leakage() -> None
     residues = torch.randn(channels // group_width, 16, device=device, dtype=torch.float32).contiguous()
     gamma = torch.empty_like(residues).uniform_(-4.5, -2.5)
     poles_parameter = torch.empty_like(residues).uniform_(-1.5, -0.5)
+    poles = modal_poles(gamma, poles_parameter)
     cu_seqlens = _cu_seqlens(lengths, device)
     final_state = torch.empty(len(lengths), channels, 16, device=device, dtype=torch.float32)
 
@@ -605,8 +595,7 @@ def test_chunked_segmented_modal_matches_recurrence_and_blocks_leakage() -> None
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        poles,
         cu_seqlens,
         group_width=group_width,
         final_state_out=final_state,
@@ -625,8 +614,7 @@ def test_chunked_segmented_modal_matches_recurrence_and_blocks_leakage() -> None
         perturbed,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        poles,
         cu_seqlens,
         group_width=group_width,
         chunk_size=4,
@@ -661,6 +649,7 @@ def test_chunked_segmented_modal_matches_direct_scan_across_many_chunks() -> Non
     residues = torch.randn(channels // group_width, 16, device=device, dtype=torch.float32).contiguous()
     gamma = torch.empty_like(residues).uniform_(-4.5, -2.5)
     poles_parameter = torch.empty_like(residues).uniform_(-1.5, -0.5)
+    poles = modal_poles(gamma, poles_parameter)
     cu_seqlens = _cu_seqlens(lengths, device)
     direct_state = torch.empty(len(lengths), channels, 16, device=device, dtype=torch.float32)
     chunked_state = torch.empty_like(direct_state)
@@ -669,8 +658,7 @@ def test_chunked_segmented_modal_matches_direct_scan_across_many_chunks() -> Non
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        poles,
         cu_seqlens,
         group_width=group_width,
         final_state_out=direct_state,
@@ -679,8 +667,7 @@ def test_chunked_segmented_modal_matches_direct_scan_across_many_chunks() -> Non
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        poles,
         cu_seqlens,
         group_width=group_width,
         final_state_out=chunked_state,

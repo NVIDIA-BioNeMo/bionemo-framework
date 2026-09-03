@@ -116,6 +116,7 @@ from bionemo.evo2.models.evo2_provider import (
     make_evo2_dynamic_inference_context_cls,
     reset_hyena_packed_views_for_new_request,
 )
+from bionemo.evo2.models.megatron.hyena.hyena_mixer import warm_packed_hyena_caches
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.run.low_precision import (
     configure_global_fp8_layer_scope,
@@ -464,6 +465,9 @@ def _setup_native_dynamic_components(
 
     ctx_cls = make_evo2_dynamic_inference_context_cls()
     mamba_cfg = build_evo2_mamba_inference_state_config(raw_model)
+    # Parameters are final here, so the packed modal pole tables built now serve every
+    # prefill and decode step for the rest of the process, including graphed decode.
+    warmed_modal_layers = warm_packed_hyena_caches(hyena_model)
     cuda_graph_manager_count = sum(1 for module in hyena_model.modules() if hasattr(module, "cudagraph_manager"))
     if cuda_graph_scope is None:
         configured_scope = getattr(hyena_model.config, "inference_cuda_graph_scope", None)
@@ -475,9 +479,10 @@ def _setup_native_dynamic_components(
     if rank == 0:
         logger.info(
             "[evo2-native] standalone evo2 prepared for native dynamic decode "
-            "(SP off, cuda_graphs=%s, graph_managers=%d).",
+            "(SP off, cuda_graphs=%s, graph_managers=%d, modal_pole_caches=%d).",
             cuda_graphs_enabled,
             cuda_graph_manager_count,
+            warmed_modal_layers,
         )
     return Evo2NativeDynamicComponents(
         ctx_cls=ctx_cls,
