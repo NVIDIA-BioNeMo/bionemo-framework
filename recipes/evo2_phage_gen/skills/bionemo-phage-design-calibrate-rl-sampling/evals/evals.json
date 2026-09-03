@@ -9,7 +9,7 @@
         "The response reconstructs the SFT conditioning, orientation, wrappers, BOS/EOS, padding, masking, tokenization, and continuation boundary.",
         "It uses only cues present during SFT and does not copy the paper format when the selected checkpoint differs.",
         "It sweeps a reasonable temperature and prefix range with paired seeds and enough samples to compare uncertainty.",
-        "It materializes the selected prompt mixture and sampling settings in the eventual commands.",
+        "It materializes the selected prompt mixture and sampling settings in the eventual commands and treats simultaneous nonzero top-k/top-p as temperature, then top-k, then top-p.",
         "Calibration samples remain separate from RL validation and final rollout."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",

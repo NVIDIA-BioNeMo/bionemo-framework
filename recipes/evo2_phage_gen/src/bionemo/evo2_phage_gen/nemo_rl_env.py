@@ -26,7 +26,7 @@ from typing import Any
 import pandas as pd
 
 from bionemo.evo2_phage_gen.design_scope import HostDomain, HostEvidence
-from bionemo.evo2_phage_gen.qc import NucleotideQCConfig
+from bionemo.evo2_phage_gen.qc import NucleotideQCConfig, trim_at_first_eos
 from bionemo.evo2_phage_gen.reward import (
     REWARD_COMPONENTS,
     SAFETY_REVIEW_CREDIT,
@@ -433,8 +433,9 @@ def _prompt_nucleotides(message_log: list[dict[str, Any]]) -> str:
 
 
 def extract_scored_sequence(message_log: list[dict[str, Any]]) -> str:
-    """Build the sequence scored by QC: nucleotide prompt prefix plus raw assistant text."""
-    return _prompt_nucleotides(message_log) + extract_assistant_sequence(message_log)
+    """Build pure generated DNA for QC while leaving terminal actions in the RL trajectory."""
+    completion = trim_at_first_eos(extract_assistant_sequence(message_log))
+    return _prompt_nucleotides(message_log) + completion
 
 
 def score_message_logs(

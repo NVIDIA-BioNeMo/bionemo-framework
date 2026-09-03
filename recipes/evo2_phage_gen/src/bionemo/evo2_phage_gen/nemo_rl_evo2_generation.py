@@ -173,6 +173,7 @@ def generate_evo2_native_batched(
     *,
     evo2_seed: int | None = None,
     ignore_eos: bool = False,
+    preserve_eos_token: bool = False,
     strict_generation: bool = False,
 ) -> list[Evo2GenerationResult]:
     """Generate Evo2 completions with the standalone batched dynamic-decode lifecycle."""
@@ -229,6 +230,7 @@ def generate_evo2_native_batched(
         top_p=top_p,
         return_log_probs=True,
         ignore_eos=ignore_eos,
+        preserve_eos_token=preserve_eos_token,
         strict_generation=strict_generation,
         enable_chunked_prefill=bool(mcore_generation_config.get("enable_chunked_prefill", False))
         and batched_decode_size <= 1,
@@ -435,6 +437,7 @@ class Evo2MegatronGenerationAdapter:
                 sampling_params,
                 evo2_seed=seed,
                 ignore_eos=bool(self.config.get("ignore_eos", False)),
+                preserve_eos_token=bool(self.config.get("preserve_eos_token", False)),
                 strict_generation=bool(self.config.get("strict_generation", False)),
             )
             expected_results = int(prompt_tokens_tensor.size(0))

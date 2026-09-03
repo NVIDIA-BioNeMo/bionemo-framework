@@ -135,8 +135,14 @@ Options:
   length and fail on overflow, fallback, or incomplete evidence. With an output
   file, `--stream-output` uses a `.partial` file and promotes it atomically only
   after the strict run succeeds.
+- `--preserve-eos-token` — include a sampled terminal EOS/EOD token and, with
+  `--return-log-probs`, its log-probability in the returned trajectory. This is
+  opt-in; downstream DNA consumers should trim the terminal marker before
+  biological scoring.
 - `--temperature` — sampling temperature (default: 1.0).
-- `--top-k` / `--top-p` — top-k or nucleus sampling (0 = disabled).
+- `--top-k` / `--top-p` — top-k and nucleus sampling (0 = disabled). When both
+  are enabled, filtering runs in the documented order: temperature, top-k,
+  then top-p; returned token log-probabilities use the final filtered distribution.
 - `--tensor-parallel-size` — tensor parallelism for large models (default: 1).
 - `--context-parallel-size` — context parallelism for long prompts (default: 1).
 - `--context-parallel-comm-type` — runtime attention transport for context

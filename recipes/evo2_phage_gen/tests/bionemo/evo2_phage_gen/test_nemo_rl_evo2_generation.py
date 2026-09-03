@@ -574,8 +574,10 @@ def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id
         assert timing[f"memory/train/generation/evo2_{metric_name}"] == expected_value
 
 
-def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):
-    adapter = Evo2MegatronGenerationAdapter({"ignore_eos": True, "strict_generation": True})
+def test_evo2_adapter_forwards_generation_controls(monkeypatch):
+    adapter = Evo2MegatronGenerationAdapter(
+        {"ignore_eos": True, "preserve_eos_token": True, "strict_generation": True}
+    )
     prompt_tokens = torch.tensor([[11, 0], [21, 22]])
     prompt_lengths = torch.tensor([1, 2])
     sampling_params = [SimpleNamespace(num_tokens_to_generate=2)] * 2
@@ -611,8 +613,10 @@ def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):
         return [
             SimpleNamespace(
                 prompt_tokens=prompt_tokens[idx, : prompt_lengths[idx]].tolist(),
-                generated_tokens=[65, 67],
+                generated_tokens=[65, 0],
                 generated_log_probs=[-0.1, -0.2],
+                finish_reason="stop",
+                stopped_on_eos=True,
                 memory={
                     "generation_peak_allocated_bytes": 123,
                     "generation_peak_reserved_bytes": 456,
@@ -627,10 +631,14 @@ def test_evo2_adapter_forwards_exact_generation_controls(monkeypatch):
 
     assert len(results) == 2
     assert forwarded["ignore_eos"] is True
+    assert forwarded["preserve_eos_token"] is True
     assert forwarded["strict_generation"] is True
     assert forwarded["inference_backend"] == "dynamic"
     assert forwarded["evo2_batched_decode_size"] == 2
     assert forwarded["prompt_token_ids"] == [[11], [21, 22]]
+    assert results[0].generated_tokens == [65, 0]
+    assert results[0].generated_log_probs == [-0.1, -0.2]
+    assert results[0].stopped_on_eos is True
     assert results[0].memory == {
         "generation_peak_allocated_bytes": 123,
         "generation_peak_reserved_bytes": 456,

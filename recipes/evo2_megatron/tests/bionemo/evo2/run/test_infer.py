@@ -434,26 +434,40 @@ def test_simple_generation_activates_mcore_inference_mode():
 
 def test_sampled_eos_is_omitted_without_stopping_when_ignore_eos_is_enabled():
     assert _sampled_token_action(0, {0}, ignore_eos=True) == (False, False)
+    assert _sampled_token_action(0, {0}, ignore_eos=True, preserve_eos_token=True) == (False, False)
 
 
 def test_sampled_eos_stops_and_is_omitted_by_default():
     assert _sampled_token_action(0, {0}, ignore_eos=False) == (False, True)
 
 
-def test_exact_generation_cli_flags_default_false_and_enable_when_passed(monkeypatch):
+def test_sampled_eos_stops_and_is_preserved_when_requested():
+    assert _sampled_token_action(0, {0}, ignore_eos=False, preserve_eos_token=True) == (True, True)
+
+
+def test_generation_control_cli_flags_default_false_and_enable_when_passed(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
     defaults = parse_args()
 
     monkeypatch.setattr(
         sys,
         "argv",
-        ["infer", "--ckpt-dir", "/tmp/ckpt", "--ignore-eos", "--strict-generation"],
+        [
+            "infer",
+            "--ckpt-dir",
+            "/tmp/ckpt",
+            "--ignore-eos",
+            "--preserve-eos-token",
+            "--strict-generation",
+        ],
     )
     enabled = parse_args()
 
     assert defaults.ignore_eos is False
+    assert defaults.preserve_eos_token is False
     assert defaults.strict_generation is False
     assert enabled.ignore_eos is True
+    assert enabled.preserve_eos_token is True
     assert enabled.strict_generation is True
 
 
@@ -531,12 +545,17 @@ def test_generate_dispatches_explicit_static_flash_backend(monkeypatch):
         SimpleNamespace(),
         ["ACGT"],
         max_new_tokens=2,
-        top_k=1,
+        top_k=3,
+        top_p=0.7,
+        preserve_eos_token=True,
         inference_backend="static-flash",
     )
 
     assert result is expected
     assert calls[0][1]["evo2_batched_decode_size"] == 1
+    assert calls[0][1]["top_k"] == 3
+    assert calls[0][1]["top_p"] == 0.7
+    assert calls[0][1]["preserve_eos_token"] is True
 
 
 def test_reset_cuda_graphs_clears_current_and_legacy_manager_caches(monkeypatch):
@@ -1092,6 +1111,29 @@ def test_sampling_log_probs_use_temperature_scaled_top_k_support():
     assert torch.isneginf(log_probs[0, 3])
 
 
+def test_sampling_log_probs_compose_temperature_top_k_then_top_p():
+    """Both filters compose, and log-probs use the final renormalized support."""
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]], dtype=torch.float32)
+
+    log_probs = _sampling_log_probs_from_logits(logits, temperature=2.0, top_k=3, top_p=0.7)
+    expected = torch.log_softmax(torch.tensor([[2.0, 1.5]], dtype=torch.float32), dim=-1)
+
+    torch.testing.assert_close(log_probs[0, :2], expected[0])
+    assert torch.isneginf(log_probs[0, 2:]).all()
+
+
+def test_sampling_top_p_one_skips_noop_vocab_sort(monkeypatch):
+    """A full-mass nucleus must not add a vocabulary sort to every decode step."""
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]], dtype=torch.float32)
+
+    monkeypatch.setattr(torch, "sort", lambda *_args, **_kwargs: pytest.fail("top-p=1.0 sorted logits"))
+
+    actual = _sampling_log_probs_from_logits(logits, temperature=1.0, top_k=2, top_p=1.0)
+    expected = torch.log_softmax(torch.tensor([[4.0, 3.0]], dtype=torch.float32), dim=-1)
+    torch.testing.assert_close(actual[0, :2], expected[0])
+    assert torch.isneginf(actual[0, 2:]).all()
+
+
 def test_sample_from_log_probs_uses_prefiltered_distribution():
     """Native decode should sample from the log-probs it already computed."""
     logits = torch.tensor([[1.0, 5.0, 4.0]], dtype=torch.float32)
@@ -1240,8 +1282,12 @@ def _run_mock_native_generation(
     sampled_steps: list[list[int]],
     prompts: list[str] | None = None,
     max_new_tokens: int = 3,
+    temperature: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 0.0,
     return_log_probs: bool = True,
     ignore_eos: bool = False,
+    preserve_eos_token: bool = False,
     strict_generation: bool = True,
     evo2_batched_decode_size: int = 1,
     stop_after_updates: int | None = None,
@@ -1251,6 +1297,7 @@ def _run_mock_native_generation(
     peak_allocated_values: list[int] | None = None,
     peak_reserved_values: list[int] | None = None,
     expected_suppressed_token_ids: set[int] | None = None,
+    generation_logits: torch.Tensor | None = None,
     context_max_tokens: int = 128,
 ):
     from megatron.core.inference.utils import InferenceMode
@@ -1306,7 +1353,11 @@ def _run_mock_native_generation(
     monkeypatch.setattr(
         infer_module,
         "_extract_generation_logits",
-        lambda *_args, **_kwargs: torch.zeros((context.request_count, _MockLoopTokenizer.vocab_size)),
+        lambda *_args, **_kwargs: (
+            generation_logits.repeat(context.request_count, 1)
+            if generation_logits is not None
+            else torch.zeros((context.request_count, _MockLoopTokenizer.vocab_size))
+        ),
     )
     monkeypatch.setattr(infer_module, "_sample_from_log_probs", _sample_step)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("sync") if events is not None else None)
@@ -1331,11 +1382,12 @@ def _run_mock_native_generation(
         components,
         prompts=prompts or ["P"],
         max_new_tokens=max_new_tokens,
-        temperature=1.0,
-        top_k=0,
-        top_p=0.0,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
         return_log_probs=return_log_probs,
         ignore_eos=ignore_eos,
+        preserve_eos_token=preserve_eos_token,
         strict_generation=strict_generation,
         enable_chunked_prefill=False,
         inference_dynamic_batching_max_tokens=None,
@@ -1431,6 +1483,38 @@ def test_native_batched_prefill_accepts_ragged_prompt_lengths(monkeypatch):
     assert forward_model.calls == 1
 
 
+def test_native_sampler_composes_top_k_top_p_and_returns_filtered_logprob(monkeypatch):
+    results, _context, _forward_model = _run_mock_native_generation(
+        monkeypatch,
+        sampled_steps=[[1]],
+        max_new_tokens=1,
+        temperature=2.0,
+        top_k=3,
+        top_p=0.7,
+        generation_logits=torch.tensor([[4.0, 3.0, 2.0, 1.0]]),
+    )
+
+    expected = torch.log_softmax(torch.tensor([2.0, 1.5]), dim=-1)[1].item()
+    assert results[0].generated_tokens == [1]
+    assert results[0].generated_log_probs == pytest.approx([expected])
+
+
+def test_native_batched_loop_preserves_terminal_eos_action_and_logprob(monkeypatch):
+    results, _context, _forward_model = _run_mock_native_generation(
+        monkeypatch,
+        prompts=["P", "QQ"],
+        sampled_steps=[[0, 1], [2, 2], [3, 3]],
+        preserve_eos_token=True,
+        evo2_batched_decode_size=2,
+    )
+
+    assert [result.generated_tokens for result in results] == [[0], [1, 2, 3]]
+    assert results[0].generated_log_probs == pytest.approx([-math.log(4)])
+    assert results[0].finish_reason == "stop"
+    assert results[0].stopped_on_eos is True
+    assert results[1].generated_log_probs == pytest.approx([-math.log(4)] * 3)
+
+
 def test_native_batched_prefill_enforces_total_token_budget(monkeypatch):
     with pytest.raises(ValueError, match=r"Batched prefill requires 2 tokens.*max token budget is 1"):
         _run_mock_native_generation(
@@ -1478,9 +1562,11 @@ def test_native_strict_loop_accepts_short_output_stopped_by_eos(monkeypatch):
     results, _context, _forward_model = _run_mock_native_generation(
         monkeypatch,
         sampled_steps=[[1], [0]],
+        preserve_eos_token=True,
     )
 
-    assert results[0].generated_tokens == [1]
+    assert results[0].generated_tokens == [1, 0]
+    assert results[0].generated_log_probs == pytest.approx([-math.log(4), -math.log(4)])
     assert results[0].finish_reason == "stop"
     assert results[0].stopped_on_eos is True
     assert results[0].truncated is False

@@ -909,6 +909,7 @@ def generate(
     top_p: float = 0.0,
     return_log_probs: bool = False,
     ignore_eos: bool = False,
+    preserve_eos_token: bool = False,
     strict_generation: bool = False,
     enable_chunked_prefill: bool = False,
     inference_dynamic_batching_max_tokens: Optional[int] = None,
@@ -928,9 +929,12 @@ def generate(
         max_new_tokens: Maximum number of tokens to generate.
         temperature: Sampling temperature (higher = more random).
         top_k: Top-k sampling parameter (0 = disabled, 1 = greedy).
-        top_p: Nucleus sampling parameter (0 = disabled).
+        top_p: Nucleus sampling parameter (0 = disabled), applied after top-k when both are enabled.
         return_log_probs: Whether to return log probabilities.
         ignore_eos: Omit sampled EOS tokens and continue to max_new_tokens.
+        preserve_eos_token: Include a sampled terminal EOS/EOD token and, when requested, its
+            log-probability in the result before stopping. Has no effect when ``ignore_eos``
+            suppresses stop tokens.
         strict_generation: Fail instead of returning short or fallback generation results.
         enable_chunked_prefill: Split prompts across multiple prefill forwards when they exceed
             ``inference_dynamic_batching_max_tokens``. Disabled by default.
@@ -963,6 +967,7 @@ def generate(
             top_p=top_p,
             return_log_probs=return_log_probs,
             ignore_eos=ignore_eos,
+            preserve_eos_token=preserve_eos_token,
             strict_generation=strict_generation,
             evo2_batched_decode_size=evo2_batched_decode_size,
             result_callback=result_callback,
@@ -978,6 +983,7 @@ def generate(
         top_p=top_p,
         return_log_probs=return_log_probs,
         ignore_eos=ignore_eos,
+        preserve_eos_token=preserve_eos_token,
         strict_generation=strict_generation,
         enable_chunked_prefill=enable_chunked_prefill,
         inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
@@ -1036,7 +1042,6 @@ def _sampling_log_probs_from_logits(
     """
     assert isinstance(top_p, float)
     assert isinstance(top_k, int)
-    assert not (top_k > 0 and top_p > 0.0), "Cannot have top-p and top-k both greater than zero"
     assert top_p <= 1.0, "top-p should be in (0,1]"
 
     def _modify_for_top_k(logits, k):
@@ -1067,7 +1072,7 @@ def _sampling_log_probs_from_logits(
         if vocab_size:
             assert top_k < vocab_size, "top-k is larger than vocab size."
         _modify_for_top_k(last_token_logits, top_k)
-    elif top_p > 0.0:
+    if 0.0 < top_p < 1.0:
         _modify_for_top_p(last_token_logits, top_p)
 
     return torch.log_softmax(last_token_logits, dim=-1)
@@ -1225,10 +1230,15 @@ def _sampled_token_action(
     stop_token_ids: set[int],
     *,
     ignore_eos: bool,
+    preserve_eos_token: bool = False,
 ) -> tuple[bool, bool]:
     """Return whether to append a sampled token and stop its request."""
     is_eos = token_id in stop_token_ids
-    return (not is_eos, is_eos and not ignore_eos)
+    if not is_eos:
+        return True, False
+    if ignore_eos:
+        return False, False
+    return preserve_eos_token, True
 
 
 def _stop_token_mask(logits: torch.Tensor, stop_token_ids: set[int]) -> Optional[torch.Tensor]:
@@ -1642,6 +1652,7 @@ def _generate_static_flash(
     top_p: float,
     return_log_probs: bool,
     ignore_eos: bool,
+    preserve_eos_token: bool,
     strict_generation: bool,
     evo2_batched_decode_size: int,
     result_callback: Optional[Callable[[int, Any], None]],
@@ -1665,7 +1676,7 @@ def _generate_static_flash(
     device = next(hyena_model.parameters()).device
     rank = int(os.environ.get("RANK", "0"))
     eff_top_k = max(0, int(top_k))
-    eff_top_p = float(top_p) if top_p and top_p > 0 and eff_top_k == 0 else 0.0
+    eff_top_p = float(top_p) if top_p and top_p > 0 else 0.0
     sampling_rng = _sampling_rng_for_native_dynamic(nd, device)
     stop_token_ids = _native_stop_token_ids(tokenizer)
     tokenized_prompts = [list(tokenizer.tokenize(prompt)) for prompt in prompts]
@@ -1843,7 +1854,10 @@ def _generate_static_flash(
                             if stopped[request_index]:
                                 continue
                             append_token, stop_request = _sampled_token_action(
-                                int(token_id), stop_token_ids, ignore_eos=False
+                                int(token_id),
+                                stop_token_ids,
+                                ignore_eos=False,
+                                preserve_eos_token=preserve_eos_token,
                             )
                             if append_token:
                                 generated_ids[request_index].append(int(token_id))
@@ -1960,6 +1974,7 @@ def _generate_native_dynamic(
     top_p: float,
     return_log_probs: bool,
     ignore_eos: bool,
+    preserve_eos_token: bool,
     strict_generation: bool,
     enable_chunked_prefill: bool,
     inference_dynamic_batching_max_tokens: Optional[int],
@@ -1996,10 +2011,9 @@ def _generate_native_dynamic(
     device = next(hyena_model.parameters()).device
     rank = int(os.environ.get("RANK", "0"))
 
-    # Greedy unless temperature/top-k/top-p say otherwise. The stock sampler asserts NOT
-    # (top_k>0 AND top_p>0); honor top-k first for compatibility with SamplingParams.
+    # Match the documented sampling pipeline: temperature, then top-k, then top-p.
     eff_top_k = max(0, int(top_k))
-    eff_top_p = float(top_p) if (top_p and top_p > 0 and eff_top_k == 0) else 0.0
+    eff_top_p = float(top_p) if top_p and top_p > 0 else 0.0
     sampling_rng = _sampling_rng_for_native_dynamic(nd, device)
 
     results: List[_NativeDynamicResult] = []
@@ -2183,6 +2197,7 @@ def _generate_native_dynamic(
                     next_tok_id,
                     stop_token_ids,
                     ignore_eos=ignore_eos,
+                    preserve_eos_token=preserve_eos_token,
                 )
                 if append_token:
                     generated_ids.append(next_tok_id)
@@ -2373,6 +2388,7 @@ def _generate_native_dynamic(
                         next_tok_id,
                         stop_token_ids,
                         ignore_eos=ignore_eos,
+                        preserve_eos_token=preserve_eos_token,
                     )
                     if append_token:
                         generated_ids[request_idx].append(next_tok_id)
@@ -2733,7 +2749,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max-new-tokens", type=int, default=100, help="Maximum tokens to generate")
     ap.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     ap.add_argument("--top-k", type=int, default=0, help="Top-k sampling (0 = disabled)")
-    ap.add_argument("--top-p", type=float, default=0.0, help="Top-p nucleus sampling (0 = disabled)")
+    ap.add_argument("--top-p", type=float, default=0.0, help="Top-p nucleus sampling after top-k (0 = disabled)")
     ap.add_argument("--seed", type=int, default=None, help="Random seed")
     ap.add_argument(
         "--return-log-probs",
@@ -2746,6 +2762,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Omit sampled EOS tokens and generate exactly --max-new-tokens tokens",
+    )
+    ap.add_argument(
+        "--preserve-eos-token",
+        action="store_true",
+        default=False,
+        help="Include a sampled terminal EOS/EOD token (and its log-probability when requested)",
     )
     ap.add_argument(
         "--strict-generation",
@@ -2952,6 +2974,7 @@ def infer(
     seed: Optional[int] = None,
     return_log_probs: bool = False,
     ignore_eos: bool = False,
+    preserve_eos_token: bool = False,
     strict_generation: bool = False,
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2987,10 +3010,12 @@ def infer(
         max_new_tokens: Maximum number of tokens to generate.
         temperature: Sampling temperature (higher = more random).
         top_k: Top-k sampling parameter (0 = disabled).
-        top_p: Nucleus sampling parameter (0 = disabled).
+        top_p: Nucleus sampling parameter (0 = disabled), applied after top-k when both are enabled.
         seed: Random seed for reproducibility.
         return_log_probs: Whether to return per-token log probabilities.
         ignore_eos: Omit sampled EOS tokens and continue to max_new_tokens.
+        preserve_eos_token: Include a sampled terminal EOS/EOD token and, when requested, its
+            log-probability in each result. Has no effect when ``ignore_eos`` suppresses stop tokens.
         strict_generation: Fail instead of returning short or fallback generation results.
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
@@ -3167,6 +3192,7 @@ def infer(
                 top_p=top_p,
                 return_log_probs=return_log_probs,
                 ignore_eos=ignore_eos,
+                preserve_eos_token=preserve_eos_token,
                 strict_generation=strict_generation,
                 enable_chunked_prefill=enable_chunked_prefill,
                 inference_dynamic_batching_max_tokens=inference_dynamic_batching_max_tokens,
@@ -3297,6 +3323,7 @@ def main() -> None:
         seed=args.seed,
         return_log_probs=args.return_log_probs,
         ignore_eos=args.ignore_eos,
+        preserve_eos_token=args.preserve_eos_token,
         strict_generation=args.strict_generation,
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,

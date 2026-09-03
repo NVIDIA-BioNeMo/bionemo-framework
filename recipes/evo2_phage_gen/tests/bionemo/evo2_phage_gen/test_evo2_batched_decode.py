@@ -181,6 +181,21 @@ def test_batched_decode_stop_actions_are_row_local():
     ]
 
 
+def test_batched_decode_can_preserve_terminal_stop_actions():
+    """Opt-in preservation should retain each terminal action while stopping its row."""
+    stop_token_ids = _native_stop_token_ids(_DummyTokenizer())
+
+    assert [
+        _sampled_token_action(token_id, stop_token_ids, ignore_eos=False, preserve_eos_token=True)
+        for token_id in (1, 0, 2, 99)
+    ] == [
+        (True, False),
+        (True, True),
+        (True, False),
+        (True, True),
+    ]
+
+
 def test_batched_decode_ignore_eos_omits_stop_token_without_stopping():
     """Ignoring EOS should omit the stop token while keeping the request active."""
     stop_token_ids = _native_stop_token_ids(_DummyTokenizer())
