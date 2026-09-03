@@ -28,7 +28,7 @@
         "It disables pre-QC clustering, clusters only the safety-PASS hard-QC set, preserves complete candidate-to-result and cluster mapping, and reports raw, representative, PASS, FAIL, INDETERMINATE, hard-QC, and clustered counts.",
         "It reports total and mean per-nucleotide selected-SFT log probability for every design, checks residual score-length correlation, and uses likelihood ordering only when that diagnostic supports it.",
         "It defaults medium/long generation to packed dynamic inference for uniform or mixed prompts, including exact-length data-parallel GDPO rollouts, distinguishes that path from unqualified gradient-bearing policy sequence packing, reserves static-Flash for a benchmark-qualified equal-length win, selects packed scoring for ragged records or benchmark-qualified rectangular scoring for uniform records/CP, and preserves record mappings.",
-        "It treats low precision as checkpoint- and hardware-qualified: Hopper regular FP8 with the explicit all-layer scope override and multiple-of-eight strict decode groups, Vortex delayed scaling, and Blackwell MXFP8/NVFP4 are distinguished, and unqualified full-FP4 or low-precision decode is not used.",
+        "It treats low precision as checkpoint- and hardware-qualified: Hopper regular FP8 with the explicit all-layer scope override and multiple-of-eight strict decode groups is distinguished from Vortex delayed scaling.",
         "Computational screening is not described as proof of bootability, host range, safety, or efficacy."
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",

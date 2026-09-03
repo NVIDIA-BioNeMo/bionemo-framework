@@ -20,7 +20,6 @@
 
 import copy
 import glob
-import importlib.util
 import json
 import os
 import re
@@ -52,29 +51,6 @@ from ..utils import check_fp8_support, is_a6000_gpu
 
 # Do this at collection time before we run any tests.
 PRETEST_ENV = copy.deepcopy(os.environ)
-
-
-def _load_profile_predict_aggregate():
-    profile_path = Path(__file__).parents[4] / "benchmarks" / "profile_predict.py"
-    spec = importlib.util.spec_from_file_location("_evo2_profile_predict", profile_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module._aggregate_layout
-
-
-@pytest.mark.parametrize(
-    ("layouts", "expected"),
-    [
-        (["packed", "packed"], "length-aware-packed"),
-        (["rectangular"], "rectangular"),
-        (["packed", "rectangular"], "mixed"),
-    ],
-)
-def test_profile_predict_aggregate_layout_is_accurate(layouts: list[str], expected: str) -> None:
-    measurements = [{"layout": layout} for layout in layouts]
-
-    assert _load_profile_predict_aggregate()(measurements) == expected
 
 
 @pytest.mark.parametrize(
@@ -185,56 +161,6 @@ def test_packed_embedding_step_gathers_and_unpacks(monkeypatch: pytest.MonkeyPat
     torch.testing.assert_close(result["pad_mask"], torch.tensor([[1, 1, 1], [1, 0, 0]]))
     torch.testing.assert_close(result["tokens"], torch.tensor([[10, 11, 12], [20, 0, 0]]))
     torch.testing.assert_close(result["seq_idx"], torch.tensor([2, 7]))
-
-
-def test_native_nvfp4_cli(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["predict", "--fasta", "/tmp/in.fa", "--ckpt-dir", "/tmp/ckpt"])
-    defaults = predict_module.parse_args()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "predict",
-            "--fasta",
-            "/tmp/in.fa",
-            "--ckpt-dir",
-            "/tmp/ckpt",
-            "--native-nvfp4",
-            "fc1",
-            "--native-nvfp4-activation-amax",
-            "6",
-        ],
-    )
-    native = predict_module.parse_args()
-
-    assert defaults.native_nvfp4 == "off"
-    assert defaults.native_nvfp4_activation_amax is None
-    assert defaults.packed_token_budget == 250_000
-    assert defaults.no_packing_length_bucketing is False
-    assert native.native_nvfp4 == "fc1"
-    assert native.native_nvfp4_activation_amax == 6.0
-
-
-def test_native_mxfp8_cli(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["predict", "--fasta", "/tmp/in.fa", "--ckpt-dir", "/tmp/ckpt"])
-    defaults = predict_module.parse_args()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "predict",
-            "--fasta",
-            "/tmp/in.fa",
-            "--ckpt-dir",
-            "/tmp/ckpt",
-            "--native-mxfp8",
-            "expansion",
-        ],
-    )
-    native = predict_module.parse_args()
-
-    assert defaults.native_mxfp8 == "off"
-    assert native.native_mxfp8 == "expansion"
 
 
 def test_global_fp8_all_layers_cli(monkeypatch):

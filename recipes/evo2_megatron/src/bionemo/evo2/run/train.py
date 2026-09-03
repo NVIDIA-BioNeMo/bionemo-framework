@@ -465,7 +465,6 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Enable targeted `nsys` profiling on the training loop for a defined step range. To actually get profiling"
         " output you must run the whole program with `nsys`. For example: "
         " `nsys profile -s none -o output_report_name -t cuda,nvtx --force-overwrite true "
-        "--inherit-environment=false --discard-environment=true "
         "--capture-range=cudaProfilerApi --capture-range-end=stop  [regular python command here]`",
     )  # DONE
     # start, end, rank
@@ -591,7 +590,7 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--use-subquadratic-ops",
         action="store_true",
-        help="Use the training-tuned fused Hyena convolution kernels, including projection/mixer B2B fusion.",
+        help="Use accelerated subquadratic FFT/causal-conv1d kernels, including projection/mixer B2B fusion.",
     )  # DONE
     parser.add_argument(
         "--most-recent-k",
@@ -1082,7 +1081,6 @@ def train(args: argparse.Namespace) -> None:
         """Enable Nsys profiling.
         Example:
             nsys profile -s none -t nvtx,cuda -o <path/to/output_file> --force-overwrite true \
-                --inherit-environment=false --discard-environment=true \
               --capture-range=cudaProfilerApi --capture-range-end=stop
         """
         cfg.profiling.use_nsys_profiler = True

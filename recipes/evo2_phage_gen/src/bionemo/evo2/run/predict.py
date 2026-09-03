@@ -135,15 +135,6 @@ from bionemo.evo2.run.low_precision import (
     prepare_model_for_quantized_inference,
     validate_inference_precision,
 )
-from bionemo.evo2.run.native_fp8 import (
-    prepare_model_for_native_fp8_inference,
-    validate_native_fp8_policy,
-    validate_native_fp8_precision,
-)
-from bionemo.evo2.run.native_nvfp4 import (
-    prepare_model_for_native_nvfp4_inference,
-    validate_native_nvfp4_policy,
-)
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -641,24 +632,6 @@ def parse_args() -> argparse.Namespace:
         "--vortex-style-fp8",
         action="store_true",
         help="Use vortex-style FP8 (applies FP8 only to projection layers)",
-    )
-    ap.add_argument(
-        "--native-nvfp4",
-        choices=["off", "fc1", "expansion", "full"],
-        default="off",
-        help="Inference-only Blackwell W4A4 policy: MLP fc1, expansion projections, or all projections",
-    )
-    ap.add_argument(
-        "--native-nvfp4-activation-amax",
-        type=float,
-        default=None,
-        help="Optional activation range: raises strict RMSNorm bounds, and calibrates full-policy contractions",
-    )
-    ap.add_argument(
-        "--native-mxfp8",
-        choices=["off", "hyena", "fc1", "expansion"],
-        default="off",
-        help="Inference-only native Blackwell MXFP8 policy: Hyena input, MLP fc1, or all expansion projections",
     )
     ap.add_argument(
         "--use-subquadratic-ops",
@@ -1349,9 +1322,6 @@ def predict(
     quantized_param_storage: Literal["recipe", "bf16"] = "recipe",
     fp8_all_layers: bool = False,
     vortex_style_fp8: bool = False,
-    native_nvfp4: Literal["off", "fc1", "expansion", "full"] = "off",
-    native_nvfp4_activation_amax: Optional[float] = None,
-    native_mxfp8: Literal["off", "hyena", "fc1", "expansion"] = "off",
     use_subquadratic_ops: bool = False,
     # Batch/sequence settings
     micro_batch_size: int = 1,
@@ -1400,11 +1370,6 @@ def predict(
             recipe. This is the regular full-scope Hopper FP8 path for Evo2 7B.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
-        native_nvfp4: Inference-only native Blackwell W4A4 projection policy.
-        native_nvfp4_activation_amax: Optional activation range. Expansions retain a strict
-            no-clipping lower bound; full-policy contractions otherwise use the complete range.
-        native_mxfp8: Inference-only native Blackwell block-scaled FP8 projection policy. This is
-            distinct from Hopper/global Transformer Engine FP8 and vortex-style delayed scaling.
         use_subquadratic_ops: Use fused Hyena convolution kernels for rectangular prediction.
         micro_batch_size: Batch size per forward pass.
         min_length: Minimum sequence length (pad shorter sequences to this).
@@ -1484,21 +1449,14 @@ def predict(
     else:
         mp_config = get_mixed_precision_config("bf16_mixed")
 
-    validate_native_nvfp4_policy(native_nvfp4, activation_amax=native_nvfp4_activation_amax)
-    validate_native_fp8_policy(native_mxfp8)
     configure_global_fp8_layer_scope(mp_config, all_layers=fp8_all_layers)
     configure_quantized_parameter_storage(mp_config, quantized_param_storage)
-    validate_inference_precision(
-        mp_config,
-        vortex_style_fp8=vortex_style_fp8,
-        native_nvfp4_policy=native_nvfp4,
-    )
+    validate_inference_precision(mp_config, vortex_style_fp8=vortex_style_fp8)
     sequence_parallel_enabled = configure_prediction_sequence_parallel(
         model_provider,
         mp_config,
         policy=sequence_parallel_policy,
         legacy_disabled=no_sequence_parallel,
-        selective_native_low_precision=native_nvfp4 != "off" or native_mxfp8 != "off",
     )
     effective_sequence_parallel_policy = "off" if no_sequence_parallel else sequence_parallel_policy
     logger.info(
@@ -1514,12 +1472,6 @@ def predict(
         logger.warning(
             "Forced sequence parallelism delegates global FP8/FP4 padding to installed MCore; "
             "verify correctness and throughput before production use"
-        )
-    if native_mxfp8 != "off":
-        validate_native_fp8_precision(
-            mp_config,
-            vortex_style_fp8=vortex_style_fp8,
-            native_nvfp4_policy=native_nvfp4,
         )
     precision_kind = inference_precision_kind(mp_config)
     precision_parameter_storage = inference_parameter_storage(mp_config)
@@ -1679,54 +1631,6 @@ def predict(
             dist_ckpt_strictness="ignore_all",
         )
     logger.info("Weights loaded successfully")
-
-    native_nvfp4_reports = [
-        prepare_model_for_native_nvfp4_inference(
-            model_module,
-            policy=native_nvfp4,
-            activation_amax=native_nvfp4_activation_amax,
-            decode_mode="nvfp4",
-        )
-        for model_module in model
-    ]
-    native_nvfp4_count = sum(report.converted_modules for report in native_nvfp4_reports)
-    if native_nvfp4_count:
-        packed_bytes = sum(report.quantized_weight_bytes for report in native_nvfp4_reports)
-        original_bytes = sum(report.original_weight_bytes for report in native_nvfp4_reports)
-        for model_module in model:
-            inner_model = getattr(model_module, "module", model_module)
-            inner_model.config.evo2_native_nvfp4_policy = native_nvfp4
-            inner_model.config.evo2_native_nvfp4_parameter_storage = "native-nvfp4-prepacked"
-        logger.info(
-            "Selective native NVFP4: converted %d projection modules; packed weights %.3f GiB replace %.3f GiB BF16",
-            native_nvfp4_count,
-            packed_bytes / (1024**3),
-            original_bytes / (1024**3),
-        )
-
-    native_mxfp8_reports = [
-        prepare_model_for_native_fp8_inference(
-            model_module,
-            policy=native_mxfp8,
-            decode_mode="none",
-        )
-        for model_module in model
-    ]
-    native_mxfp8_count = sum(report.converted_modules for report in native_mxfp8_reports)
-    if native_mxfp8_count:
-        packed_bytes = sum(report.quantized_weight_bytes for report in native_mxfp8_reports)
-        original_bytes = sum(report.original_weight_bytes for report in native_mxfp8_reports)
-        for model_module in model:
-            inner_model = getattr(model_module, "module", model_module)
-            inner_model.config.evo2_native_mxfp8_policy = native_mxfp8
-            inner_model.config.evo2_native_mxfp8_parameter_storage = "native-mxfp8-prepacked"
-        logger.info(
-            "Selective native MXFP8: converted %d expansion projections; packed weights %.3f GiB "
-            "replace %.3f GiB BF16",
-            native_mxfp8_count,
-            packed_bytes / (1024**3),
-            original_bytes / (1024**3),
-        )
 
     # Packed prediction flattens ragged requests, so its aggregate token count is not necessarily a
     # legal quantized GEMM dimension. Apply MCore's recipe-aware fallback after loading weights and
@@ -1944,9 +1848,6 @@ def main() -> None:
         quantized_param_storage=args.quantized_param_storage,
         fp8_all_layers=args.fp8_all_layers,
         vortex_style_fp8=args.vortex_style_fp8,
-        native_nvfp4=args.native_nvfp4,
-        native_nvfp4_activation_amax=args.native_nvfp4_activation_amax,
-        native_mxfp8=args.native_mxfp8,
         use_subquadratic_ops=args.use_subquadratic_ops,
         # Batch/sequence settings
         micro_batch_size=args.micro_batch_size,

@@ -156,15 +156,11 @@ Options:
   the invocation. Use `static-flash` only when an A/B at the target length
   shows it wins for an equal-tokenized-length batch; short workloads can cross
   over in its favor.
-- `--native-nvfp4` / `--native-mxfp8` — selective native Blackwell prefill;
-  decode remains BF16 by default. Low-precision decode and `full` NVFP4 remain
-  experimental until checkpoint-specific accuracy qualification.
 - `--mixed-precision-recipe bf16_with_fp8_current_scaling_mixed` — regular
   Transformer Engine FP8. Add `--fp8-all-layers` for every compatible 7B TE
   linear; batches with a flattened row count divisible by eight avoid the
   alignment fallback. Packed prediction's default sequence-parallel policy
   retains TP but disables SP for global FP8/FP4 on current MCore.
-  MXFP8/NVFP4 are Blackwell-only.
 - `--use-subquadratic-ops` — compatibility path for fused unpacked prefill
   kernels. It forces eager decode because those extension kernels are not safe
   to capture in the native CUDA graph.
@@ -210,51 +206,15 @@ Options:
 - `--use-subquadratic-ops` — enable legacy fused convolution kernels on the
   rectangular compatibility path. It is unnecessary for the default segmented
   packed path.
-- `--native-nvfp4` / `--native-mxfp8` — selective native Blackwell prefill-only
-  scoring. Regular/global TE FP8 remains available through
-  `--mixed-precision-recipe`.
 - `--fp8-all-layers` — remove the selected global TE FP8 recipe's first/last
   BF16 block exclusions. For Hopper 7B prediction, use it with
   `--mixed-precision-recipe bf16_with_fp8_current_scaling_mixed`; it does not
-  select Vortex-style FP8 or Blackwell MXFP8.
+  select Vortex-style FP8.
 - `--sequence-parallel-policy {auto,on,off}` — `auto` keeps SP for BF16 TP and
   disables it for global FP8/FP4 because current MCore's padding shim
   double-reduces row outputs. Use `on` only to requalify a future pad-aware
   single-reduction MCore path with aligned/ragged TP parity and performance A/B
   tests. `--no-sequence-parallel` remains a backward-compatible alias for off.
-
-### Performance profiling
-
-`profile_predict.py` and `profile_infer.py` measure warmed endpoint throughput;
-`profile_native_low_precision.py` compares supported hardware formats. A secure
-Nsight template is:
-
-```bash
-nsys profile --sample=none --trace=cuda,nvtx \
-  --capture-range=cudaProfilerApi --capture-range-end=stop \
-  --inherit-environment=false --discard-environment=true \
-  --env-var PATH=/workspace/.venv/bin:/usr/local/cuda/bin:/usr/bin,TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas,CPATH=/usr/local/cuda/include \
-  --output=/tmp/evo2-profile \
-  /workspace/.venv/bin/python benchmarks/profile_predict.py \
-  --benchmark-profile-range [predict arguments]
-```
-
-Use the direct virtual-environment interpreter and list only required paths in
-`--env-var`; forwarding the ambient environment can embed credentials.
-
-Single-GB300 Evo2 7B results:
-
-| Workload                                      | Comparison                     | Result                                                              |
-| --------------------------------------------- | ------------------------------ | ------------------------------------------------------------------- |
-| Ragged BF16 prediction, short / medium / long | packed vs rectangular          | 1.32x / 1.14x / 3.50x; 99.825% top-1 agreement                      |
-| Uniform BF16 prediction                       | packed vs rectangular          | packed 1.43x at 64x10; rectangular 1.12x at 8x1024                  |
-| 32 prompts x 64-token greedy decode           | MCore vs vLLM                  | 5,769 vs 2,915 completion token/s; identical tokens                 |
-| Skewed 250k-token prediction                  | BF16 vs NVFP4 expansion        | 62.2k vs 77.4k token/s; 47.8 vs 41.3 GiB                            |
-| Capacity                                      | NVFP4 prediction / BF16 decode | 1M-token packed call; exact 250k-token generation with graph replay |
-
-vLLM 0.20 built against the container's existing Torch 2.13 and CUDA 13.3
-without replacing either. Nsight verified native E4M3 and SM100 MXF4 kernels;
-H100/H200 end-to-end FP8 qualification remains hardware-specific.
 
 ### Data preprocessing (`preprocess_evo2`)
 
@@ -702,13 +662,13 @@ have currently demonstrated small training runs at 2M context on only 512 H100 G
 
 ## Available models in NGC (Currently NeMo format so first convert to mbridge)
 
-> **Note:** Hopper provides native E4M3/E5M2 FP8 Tensor Cores, but not native MXFP8 or NVFP4. If you would like to use one of the checkpoints that requires FP8 and Hopper (e.g., that does not work
+> **Note:** If you would like to use one of the checkpoints that requires FP8 and Hopper (e.g., that does not work
 > on Blackwell), you need to supply both `--mixed-precision-recipe bf16-mixed` to disable the default Megatron FP8
 > recipes, as well as `--vortex-style-fp8` which enables the custom FP8 recipe that supports these models. For the
 > robust NVIDIA fine-tuned variants of these models, you can run with regular FP8 across all compatible TE linears.
 > The `evo2_7b` model size does not have these sensitivity issues, so on Hopper it can be executed with global
 > Megatron FP8 (current or delayed scaling) or BF16. To remove MBridge current scaling's default BF16 first/last
-> blocks, add `--fp8-all-layers`. MXFP8/NVFP4 flags are Blackwell-only.
+> blocks, add `--fp8-all-layers`.
 
 | HF Model                                                                                        | BioNeMo Resource Name                                                                                                 | Blackwell FP8 | Blackwell BF16 | Hopper FP8 | Hopper BF16 | Ampere | Notes                                                                                                                                                                                                                                                                    |
 | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------- | -------------- | ---------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

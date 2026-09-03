@@ -59,24 +59,6 @@ def test_inference_precision_kind_reports_the_active_compute_format(config, expe
     assert inference_precision_kind(config) == expected_kind
 
 
-def test_inference_precision_kind_reports_selective_native_nvfp4():
-    config = SimpleNamespace(
-        evo2_native_nvfp4_policy="expansion",
-        evo2_native_nvfp4_parameter_storage="native-nvfp4-prepacked",
-    )
-    assert inference_precision_kind(config) == "bf16+native-nvfp4-expansion"
-    assert inference_parameter_storage(config) == "native-nvfp4-prepacked"
-
-
-def test_inference_precision_kind_reports_selective_native_mxfp8():
-    config = SimpleNamespace(
-        evo2_native_mxfp8_policy="expansion",
-        evo2_native_mxfp8_parameter_storage="native-mxfp8-prepacked",
-    )
-    assert inference_precision_kind(config) == "bf16+native-mxfp8-expansion"
-    assert inference_parameter_storage(config) == "native-mxfp8-prepacked"
-
-
 @pytest.mark.parametrize(
     "config",
     [
@@ -273,7 +255,7 @@ def test_bf16_parameter_storage_disables_native_quantized_parameter_allocation(c
     assert inference_parameter_storage(config) == "bf16"
 
 
-def test_recipe_parameter_storage_preserves_native_mxfp8_parameters():
+def test_recipe_parameter_storage_preserves_quantized_parameters():
     config = SimpleNamespace(fp8="e4m3", fp4=None, fp8_param=True, fp4_param=False)
 
     configure_quantized_parameter_storage(config, "recipe")
@@ -357,16 +339,4 @@ def test_prediction_sequence_parallel_rejects_conflicting_legacy_disable():
             SimpleNamespace(fp8=None, fp4=None),
             policy="on",
             legacy_disabled=True,
-        )
-
-
-def test_selective_native_low_precision_rejects_forced_sequence_parallel():
-    provider = SimpleNamespace(tensor_model_parallel_size=2, sequence_parallel=None)
-
-    with pytest.raises(ValueError, match="selective native low precision"):
-        low_precision_module.configure_prediction_sequence_parallel(
-            provider,
-            SimpleNamespace(fp8=None, fp4=None),
-            policy="on",
-            selective_native_low_precision=True,
         )

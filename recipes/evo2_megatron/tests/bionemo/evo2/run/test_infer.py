@@ -496,58 +496,6 @@ def test_inference_backend_cli_defaults_dynamic_and_accepts_static_flash(monkeyp
     assert static_flash.inference_backend == "static-flash"
 
 
-def test_native_nvfp4_cli(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
-    defaults = parse_args()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "infer",
-            "--ckpt-dir",
-            "/tmp/ckpt",
-            "--native-nvfp4",
-            "full",
-            "--native-nvfp4-activation-amax",
-            "7.5",
-            "--native-nvfp4-decode",
-            "fp8",
-        ],
-    )
-    native = parse_args()
-
-    assert defaults.native_nvfp4 == "off"
-    assert defaults.native_nvfp4_activation_amax is None
-    assert defaults.native_nvfp4_decode == "bf16"
-    assert native.native_nvfp4 == "full"
-    assert native.native_nvfp4_activation_amax == 7.5
-    assert native.native_nvfp4_decode == "fp8"
-
-
-def test_native_mxfp8_cli(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
-    defaults = parse_args()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "infer",
-            "--ckpt-dir",
-            "/tmp/ckpt",
-            "--native-mxfp8",
-            "hyena",
-            "--native-mxfp8-decode",
-            "fp8",
-        ],
-    )
-    native = parse_args()
-
-    assert defaults.native_mxfp8 == "off"
-    assert defaults.native_mxfp8_decode == "bf16"
-    assert native.native_mxfp8 == "hyena"
-    assert native.native_mxfp8_decode == "fp8"
-
-
 def test_global_fp8_all_layers_cli(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["infer", "--ckpt-dir", "/tmp/ckpt"])
     defaults = parse_args()

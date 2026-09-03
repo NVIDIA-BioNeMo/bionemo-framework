@@ -171,9 +171,8 @@ need to divide a microbatch or the GPU count. Use tmux or a scheduler for the lo
 
 BF16 remains the portable default. After H100/H200 qualification, pass
 `--hopper-fp8-inference` to use regular FP8 across compatible 7B linears for calibration, rollout,
-and likelihood scoring without changing GDPO training precision. Vortex-style FP8 is separate;
-native MXFP8 and NVFP4 are Blackwell-only. Decode batches divisible by eight avoid regular FP8's
-alignment fallback.
+and likelihood scoring without changing GDPO training precision. Vortex-style FP8 is separate.
+Decode batches divisible by eight avoid regular FP8's alignment fallback.
 
 ## Current PhiX174 GDPO score definitions
 

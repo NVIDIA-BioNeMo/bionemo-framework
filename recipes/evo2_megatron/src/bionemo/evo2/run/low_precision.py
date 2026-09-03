@@ -29,12 +29,6 @@ def _enabled(value: Any) -> bool:
 
 def inference_precision_kind(mixed_precision_config: Any) -> str:
     """Return a compact label for the configured inference compute format."""
-    native_mxfp8_policy = str(getattr(mixed_precision_config, "evo2_native_mxfp8_policy", "off"))
-    if native_mxfp8_policy != "off":
-        return f"bf16+native-mxfp8-{native_mxfp8_policy}"
-    native_nvfp4_policy = str(getattr(mixed_precision_config, "evo2_native_nvfp4_policy", "off"))
-    if native_nvfp4_policy != "off":
-        return f"bf16+native-nvfp4-{native_nvfp4_policy}"
     if _enabled(getattr(mixed_precision_config, "fp4", None)):
         return "nvfp4"
     if _enabled(getattr(mixed_precision_config, "fp8", None)):
@@ -71,12 +65,6 @@ def configure_global_fp8_layer_scope(mixed_precision_config: Any, *, all_layers:
 
 def inference_parameter_storage(mixed_precision_config: Any) -> str:
     """Return whether TE linear weights are stored natively quantized or in BF16."""
-    native_storage = getattr(mixed_precision_config, "evo2_native_mxfp8_parameter_storage", None)
-    if native_storage is not None:
-        return str(native_storage)
-    native_storage = getattr(mixed_precision_config, "evo2_native_nvfp4_parameter_storage", None)
-    if native_storage is not None:
-        return str(native_storage)
     if _enabled(getattr(mixed_precision_config, "fp8_param", None)) or _enabled(
         getattr(mixed_precision_config, "fp4_param", None)
     ):
@@ -119,7 +107,6 @@ def disable_sequence_parallel_for_global_quantization(model_provider: Any, mixed
     MCore's inference padding shim externally gathers and reduce-scatters sequence-parallel
     tensors. That changes Evo2 packed-prediction numerics even for aligned rows and corrupts
     unaligned ragged batches. Retain tensor parallelism but let each rank keep the full sequence;
-    native selective low-precision policies already enforce the same correctness fallback.
 
     Returns:
         ``True`` when sequence parallelism was disabled.
@@ -139,7 +126,6 @@ def configure_prediction_sequence_parallel(
     *,
     policy: Literal["auto", "on", "off"] = "auto",
     legacy_disabled: bool = False,
-    selective_native_low_precision: bool = False,
 ) -> bool:
     """Resolve prediction sequence parallelism and update the model provider."""
     if policy not in {"auto", "on", "off"}:
@@ -150,19 +136,16 @@ def configure_prediction_sequence_parallel(
         policy = "off"
 
     tp_size = int(getattr(model_provider, "tensor_model_parallel_size", 1) or 1)
-    if policy == "on" and selective_native_low_precision and tp_size > 1:
-        raise ValueError("Sequence parallelism is unsupported with selective native low precision")
-
     global_quantization = _enabled(getattr(mixed_precision_config, "fp8", None)) or _enabled(
         getattr(mixed_precision_config, "fp4", None)
     )
     # AUTO disables SP for global FP8/FP4 because MCore's current padding shim adds
     # external collectives and double-reduces row outputs; SP-off is correct and faster
     # on the representative 7B TP2 packed workload. Revisit when MCore supplies pad-aware
-    # SP with one row reduction: A/B auto/off vs on with profile_predict.py on H100 TP2,
-    # using aligned and unaligned ragged batches, and require log-probability parity.
+    # SP with one row reduction: A/B auto/off vs on on H100 TP2 using aligned and
+    # unaligned ragged batches, and require log-probability parity and lower wall time.
     enabled = tp_size > 1 and policy != "off"
-    if policy == "auto" and (global_quantization or selective_native_low_precision):
+    if policy == "auto" and global_quantization:
         enabled = False
 
     model_provider.sequence_parallel = enabled
@@ -173,18 +156,12 @@ def validate_inference_precision(
     mixed_precision_config: Any,
     *,
     vortex_style_fp8: bool,
-    native_nvfp4_policy: str = "off",
 ) -> None:
     """Reject precision combinations whose nested quantization contexts are undefined."""
     fp8_enabled = _enabled(getattr(mixed_precision_config, "fp8", None))
     fp4_enabled = _enabled(getattr(mixed_precision_config, "fp4", None))
     if fp8_enabled and fp4_enabled:
         raise ValueError("Global FP8 and FP4 inference recipes are mutually exclusive")
-    if native_nvfp4_policy != "off" and (vortex_style_fp8 or fp8_enabled or fp4_enabled):
-        raise ValueError(
-            "Selective native NVFP4 inference requires the bf16_mixed recipe and is mutually exclusive with "
-            "vortex-style FP8 or a global FP8/FP4 recipe"
-        )
     if vortex_style_fp8 and (fp8_enabled or fp4_enabled):
         raise ValueError(
             "--vortex-style-fp8 and a global FP8/FP4 mixed-precision recipe are mutually exclusive; "

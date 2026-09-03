@@ -125,17 +125,6 @@ from bionemo.evo2.run.low_precision import (
     prepare_model_for_quantized_inference,
     validate_inference_precision,
 )
-from bionemo.evo2.run.native_fp8 import (
-    prepare_model_for_native_fp8_inference,
-    validate_native_fp8_decode,
-    validate_native_fp8_policy,
-    validate_native_fp8_precision,
-)
-from bionemo.evo2.run.native_nvfp4 import (
-    prepare_model_for_native_nvfp4_inference,
-    validate_native_nvfp4_decode,
-    validate_native_nvfp4_policy,
-)
 from bionemo.evo2.run.predict import initialize_inference_distributed, resolve_checkpoint_path
 
 
@@ -617,11 +606,6 @@ def setup_inference_engine(
     quantized_param_storage: Literal["recipe", "bf16"] = "recipe",
     fp8_all_layers: bool = False,
     vortex_style_fp8: bool = False,
-    native_nvfp4: Literal["off", "fc1", "expansion", "full"] = "off",
-    native_nvfp4_activation_amax: Optional[float] = None,
-    native_nvfp4_decode: Literal["bf16", "fp8", "nvfp4"] = "bf16",
-    native_mxfp8: Literal["off", "hyena", "fc1", "expansion"] = "off",
-    native_mxfp8_decode: Literal["bf16", "fp8"] = "bf16",
     random_seed: int = 1234,
     use_subquadratic_ops: bool = False,
     cuda_graph_impl: str = "local",
@@ -657,19 +641,6 @@ def setup_inference_engine(
             recipe. This is the regular full-scope Hopper FP8 path for Evo2 7B.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
-        native_nvfp4: Inference-only native Blackwell W4A4 projection policy. ``"fc1"`` converts
-            MLP expansion projections; ``"expansion"`` also converts Hyena input projections and
-            attention QKV; ``"full"`` additionally converts FC2 and Hyena/attention output
-            projections. It is opt-in and mutually exclusive with global FP8/FP4 recipes.
-        native_nvfp4_activation_amax: Optional activation range. RMSNorm-fed expansions retain at
-            least their strict geometry-derived no-clipping bound; experimental full-policy
-            contractions otherwise use the complete representable block-scaled range.
-        native_nvfp4_decode: Keep autoregressive single-token projections in BF16 (default), use
-            low-latency FP8, or use experimental native W4A4 decode.
-        native_mxfp8: Inference-only native Blackwell block-scaled FP8 projection policy. This is
-            separate from Hopper/global Transformer Engine FP8 and vortex-style delayed scaling.
-        native_mxfp8_decode: Keep autoregressive projections in BF16 (default) or use the
-            experimental low-latency per-tensor FP8 comparator.
         random_seed: Random seed for reproducibility.
         use_subquadratic_ops: Use fused Hyena convolution kernels for
             rectangular/eager prefill compatibility.
@@ -749,23 +720,9 @@ def setup_inference_engine(
     else:
         mp_config = get_mixed_precision_config("bf16_mixed")
 
-    validate_native_nvfp4_policy(native_nvfp4, activation_amax=native_nvfp4_activation_amax)
-    validate_native_nvfp4_decode(native_nvfp4_decode)
-    validate_native_fp8_policy(native_mxfp8)
-    validate_native_fp8_decode(native_mxfp8_decode)
     configure_global_fp8_layer_scope(mp_config, all_layers=fp8_all_layers)
     configure_quantized_parameter_storage(mp_config, quantized_param_storage)
-    validate_inference_precision(
-        mp_config,
-        vortex_style_fp8=vortex_style_fp8,
-        native_nvfp4_policy=native_nvfp4,
-    )
-    if native_mxfp8 != "off":
-        validate_native_fp8_precision(
-            mp_config,
-            vortex_style_fp8=vortex_style_fp8,
-            native_nvfp4_policy=native_nvfp4,
-        )
+    validate_inference_precision(mp_config, vortex_style_fp8=vortex_style_fp8)
     precision_kind = inference_precision_kind(mp_config)
     precision_parameter_storage = inference_parameter_storage(mp_config)
     mp_config.finalize()
@@ -886,42 +843,6 @@ def setup_inference_engine(
 
     # Wrap with Float16Module
     model = Float16Module(model_provider, raw_model)
-
-    # Convert only after Float16Module has applied its model-wide BF16 cast. NVFP4 global scales and
-    # GEMM alpha must remain FP32; installing packed modules before this wrapper would incorrectly
-    # downcast those buffers even though the checkpoint weights themselves are BF16.
-    native_nvfp4_report = prepare_model_for_native_nvfp4_inference(
-        raw_model,
-        policy=native_nvfp4,
-        activation_amax=native_nvfp4_activation_amax,
-        decode_mode=native_nvfp4_decode,
-    )
-    if native_nvfp4_report.converted_modules:
-        precision_kind = f"native-nvfp4-{native_nvfp4}-prefill+{native_nvfp4_decode}-decode"
-        precision_parameter_storage = f"native-nvfp4-prepacked+{native_nvfp4_decode}-decode"
-        logger.info(
-            "Selective native NVFP4: converted %d projection modules; packed weights %.3f GiB %s %.3f GiB BF16",
-            native_nvfp4_report.converted_modules,
-            native_nvfp4_report.quantized_weight_bytes / (1024**3),
-            "supplement" if native_nvfp4_decode == "bf16" else "replace",
-            native_nvfp4_report.original_weight_bytes / (1024**3),
-        )
-
-    native_mxfp8_report = prepare_model_for_native_fp8_inference(
-        raw_model,
-        policy=native_mxfp8,
-        decode_mode=native_mxfp8_decode,
-    )
-    if native_mxfp8_report.converted_modules:
-        precision_kind = f"native-mxfp8-{native_mxfp8}-prefill+{native_mxfp8_decode}-decode"
-        precision_parameter_storage = f"native-mxfp8-prepacked+{native_mxfp8_decode}-decode"
-        logger.info(
-            "Selective native MXFP8: converted %d expansion projections; packed weights %.3f GiB %s %.3f GiB BF16",
-            native_mxfp8_report.converted_modules,
-            native_mxfp8_report.quantized_weight_bytes / (1024**3),
-            "supplement" if native_mxfp8_decode == "bf16" else "replace",
-            native_mxfp8_report.original_weight_bytes / (1024**3),
-        )
 
     # -------------------------------------------------------------------------
     # Step 6: wire onto the native mcore dynamic-inference engine.
@@ -2847,37 +2768,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use vortex-style FP8 (applies FP8 only to projection layers)",
     )
-    ap.add_argument(
-        "--native-nvfp4",
-        choices=["off", "fc1", "expansion", "full"],
-        default="off",
-        help="Inference-only Blackwell W4A4 policy: MLP fc1, expansion projections, or all projections",
-    )
-    ap.add_argument(
-        "--native-nvfp4-activation-amax",
-        type=float,
-        default=None,
-        help="Optional activation range: raises strict RMSNorm bounds, and calibrates full-policy contractions",
-    )
-
-    ap.add_argument(
-        "--native-nvfp4-decode",
-        choices=["bf16", "fp8", "nvfp4"],
-        default="bf16",
-        help="Use accuracy-first BF16 or experimental low-latency FP8/native W4A4 for single-token projections",
-    )
-    ap.add_argument(
-        "--native-mxfp8",
-        choices=["off", "hyena", "fc1", "expansion"],
-        default="off",
-        help="Inference-only native Blackwell MXFP8 policy: Hyena input, MLP fc1, or all expansion projections",
-    )
-    ap.add_argument(
-        "--native-mxfp8-decode",
-        choices=["bf16", "fp8"],
-        default="bf16",
-        help="Use accuracy-first BF16 or experimental low-latency per-tensor FP8 for single-token projections",
-    )
 
     # Model arguments
     ap.add_argument(
@@ -3037,11 +2927,6 @@ def infer(
     quantized_param_storage: Literal["recipe", "bf16"] = "recipe",
     fp8_all_layers: bool = False,
     vortex_style_fp8: bool = False,
-    native_nvfp4: Literal["off", "fc1", "expansion", "full"] = "off",
-    native_nvfp4_activation_amax: Optional[float] = None,
-    native_nvfp4_decode: Literal["bf16", "fp8", "nvfp4"] = "bf16",
-    native_mxfp8: Literal["off", "hyena", "fc1", "expansion"] = "off",
-    native_mxfp8_decode: Literal["bf16", "fp8"] = "bf16",
     max_seq_length: Optional[int] = None,
     max_seq_length_num_prompts: int = _DEFAULT_AUTO_MAX_SEQ_LENGTH_NUM_PROMPTS,
     max_batch_size: int = 1,
@@ -3087,14 +2972,6 @@ def infer(
             recipe. This is the regular full-scope Hopper FP8 path for Evo2 7B.
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
-        native_nvfp4: Inference-only native Blackwell W4A4 projection policy.
-        native_nvfp4_activation_amax: Optional activation range. Expansions retain a strict
-            no-clipping lower bound; full-policy contractions otherwise use the complete range.
-        native_nvfp4_decode: Keep autoregressive single-token projections in BF16 (default), use
-            low-latency FP8, or use experimental native W4A4 decode.
-        native_mxfp8: Inference-only native Blackwell block-scaled FP8 projection policy.
-        native_mxfp8_decode: Keep autoregressive single-token projections in BF16 (default) or use
-            experimental low-latency per-tensor FP8.
         max_seq_length: Manual sequence-length cap (supersedes auto-sizing; never grows). ``None``
             (default) auto-sizes the engine from the prompt token lengths and grows on demand.
         max_seq_length_num_prompts: When auto-sizing, size from the longest of the first N prompts
@@ -3156,11 +3033,6 @@ def infer(
         quantized_param_storage=quantized_param_storage,
         fp8_all_layers=fp8_all_layers,
         vortex_style_fp8=vortex_style_fp8,
-        native_nvfp4=native_nvfp4,
-        native_nvfp4_activation_amax=native_nvfp4_activation_amax,
-        native_nvfp4_decode=native_nvfp4_decode,
-        native_mxfp8=native_mxfp8,
-        native_mxfp8_decode=native_mxfp8_decode,
         random_seed=random_seed,
         use_subquadratic_ops=use_subquadratic_ops,
         cuda_graph_impl=cuda_graph_impl,
@@ -3396,11 +3268,6 @@ def main() -> None:
         quantized_param_storage=args.quantized_param_storage,
         fp8_all_layers=args.fp8_all_layers,
         vortex_style_fp8=args.vortex_style_fp8,
-        native_nvfp4=args.native_nvfp4,
-        native_nvfp4_activation_amax=args.native_nvfp4_activation_amax,
-        native_nvfp4_decode=args.native_nvfp4_decode,
-        native_mxfp8=args.native_mxfp8,
-        native_mxfp8_decode=args.native_mxfp8_decode,
         max_seq_length=max_seq_length,
         max_seq_length_num_prompts=args.max_seq_length_num_prompts,
         max_batch_size=prompt_file_chunk_size,
