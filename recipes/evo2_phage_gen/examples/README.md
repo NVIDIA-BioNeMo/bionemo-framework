@@ -143,6 +143,9 @@ allocating the unused remainder of the 10,240-token SFT context. Native RL traje
 first sampled EOD and its log-probability, mask only synthetic padding, and exclude EOD and any
 post-EOD physical samples from biological QC.
 
+`RL_PROMPT_BATCH_SIZE` controls the packed mixed-length decode group size (default 12); set a larger
+value only on a qualified device profile that has enough memory for the corresponding cache.
+
 To stop after the sweep and scoring, before prompt banks or RL are created, run:
 
 ```bash

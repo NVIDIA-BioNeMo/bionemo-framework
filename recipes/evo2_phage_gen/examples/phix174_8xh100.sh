@@ -58,11 +58,16 @@ PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755
 PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
 PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
 CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
+RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-12}"
 SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
 SAFETY_THREADS="${SAFETY_THREADS:-32}"
 SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
 PHIX174_HOST_EVIDENCE_JSON='{"source":"NCBI Datasets v2alpha genome dataset report","source_version":"NCBI Datasets v2alpha API","replication_host_domains":["BACTERIA"],"confirmed":true,"metadata":{"accession":"NC_001422.1","intended_design_context":"PhiX/Microviridae bacterial phage"}}'
+if [[ ! "${RL_PROMPT_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'RL_PROMPT_BATCH_SIZE must be a positive integer; got %q\n' "${RL_PROMPT_BATCH_SIZE}" >&2
+  exit 2
+fi
 
 usage() {
   printf '%s\n' \
@@ -924,7 +929,8 @@ stage_40() {
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    note "RL native packed mixed-length decode group size: ${RL_PROMPT_BATCH_SIZE}; generation context ceiling: ${RL_MAX_MODEL_LEN}"
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else

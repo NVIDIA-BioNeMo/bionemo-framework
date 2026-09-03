@@ -353,8 +353,12 @@ def test_dry_run(tmp_path: Path) -> None:
     gdpo = gdpo_commands[0]
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
     assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
-    assert "policy.generation.top_k=4" in gdpo
+    assert "policy.generation.top_k=5" in gdpo
+    assert "policy.generation.top_p=0.999" in gdpo
     assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
+    assert "policy.generation.mcore_generation_config.max_requests=12" in gdpo
+    assert "policy.generation.mcore_generation_config.prompt_batch_size=12" in gdpo
+    assert "RL native packed mixed-length decode group size: 12" in log
 
     conversion = next(
         shlex.split(line.partition("command: ")[2])
@@ -509,7 +513,9 @@ def test_single_gpu_plan(tmp_path: Path) -> None:
     ]
     assert [command[command.index("--seed") + 1] for command in rollout] == ["7"]
     assert all(command[command.index("--inference-backend") + 1] == "dynamic" for command in rollout)
-    assert all("--ignore-eos" in command for command in rollout)
+    assert all("--ignore-eos" not in command for command in rollout)
+    assert all("--preserve-eos-token" in command for command in rollout)
+    assert all("--stop-token-suppress-before" not in command for command in rollout)
     assert "interleave prompt lengths (16 24) across 1 deterministic mixed-length shard(s)" in log
 
 
@@ -521,7 +527,16 @@ temperature: 0.9
 top_k: 17
 top_p: 0.85
 max_new_tokens: 5800
+stop_token_length_schedule:
+  control_prefix_tokens: 2
+  suppress_eod_before: 5306
+  partial_top_p: 0.999
+  top_p_full_from: 5359
+  max_biological_length: 5474
 prompt_lengths: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+prompt_anchors:
+  - name: origin
+    start_1_based: 1
 rl_seed: 101
 rollout_seed: 7
 seed_stride: 11
@@ -1176,6 +1191,7 @@ def test_topology_env(tmp_path: Path) -> None:
             **os.environ,
             "NUM_GPUS": "4",
             "NUM_CPUS": "48",
+            "RL_PROMPT_BATCH_SIZE": "96",
             "SFT_TENSOR_PARALLEL_SIZE": "1",
             "NEMO_RL_RAY_NUM_CPUS": "",
         },
@@ -1204,3 +1220,6 @@ def test_topology_env(tmp_path: Path) -> None:
     assert rollout == [f"CUDA_VISIBLE_DEVICES={rank}" for rank in range(4)]
     assert "cluster.gpus_per_node=4" in log
     assert "RL Ray CPU slots: 48" in log
+    assert "policy.generation.mcore_generation_config.max_requests=96" in log
+    assert "policy.generation.mcore_generation_config.prompt_batch_size=96" in log
+    assert "RL native packed mixed-length decode group size: 96" in log
