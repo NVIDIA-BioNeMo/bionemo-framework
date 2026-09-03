@@ -50,9 +50,11 @@ from bionemo.evo2.models.megatron.hyena.packed_kernels import (
     PACKED_CAUSAL_CONV_AVAILABLE,
     TRITON_AVAILABLE,
     ModalChunkMetadata,
+    ModalPoles,
     fused_hyena_decode_from_projection,
     local_positions_from_cu_seqlens,
     modal_chunk_metadata_from_cu_seqlens,
+    modal_poles,
     segmented_causal_conv1d,
     segmented_fir_from_projection,
     segmented_modal_from_projection,
@@ -201,6 +203,22 @@ def _dynamic_packed_cuda_metadata(
     metadata = (cu_seqlens, local_positions, sequence_ids, modal_chunks)
     setattr(inference_context, "_evo2_hyena_cuda_metadata_cache", (cache_key, metadata))
     return metadata
+
+
+def warm_packed_hyena_caches(model: torch.nn.Module) -> int:
+    """Build every long-Hyena layer's packed modal pole tables once, ahead of any decode.
+
+    Inference entry points call this after the model is finalized so the tables exist
+    for the whole process lifetime and are never first created inside a CUDA graph
+    capture. Returns the number of layers warmed.
+    """
+    warmed = 0
+    with torch.no_grad():
+        for module in model.modules():
+            if isinstance(module, HyenaMixer) and module.operator_type == "hyena":
+                module._packed_modal_poles()
+                warmed += 1
+    return warmed
 
 
 def _dynamic_context_real_token_count(inference_context, padded_token_count: int) -> int:
@@ -703,8 +721,7 @@ class HyenaMixer(MegatronModule):
             diagonal = self.mixer.conv_bias.contiguous() if self.mixer.use_conv_bias else None
             diagonal_group_width = self.mixer.group_dim
             operator = "short"
-            modal_parameter = mixer_weight
-            residues = gamma = poles_parameter = modal_parameter
+            residues = poles = None
         elif self.operator_type == "hyena_medium_conv":
             mixer_state = getattr(inference_context, "inner_fir_filter_state_dict", {}).get(id(self.mixer))
             mixer_weight = self.mixer.filter(self.mixer.hyena_medium_conv_len)
@@ -715,8 +732,7 @@ class HyenaMixer(MegatronModule):
             diagonal = self.mixer.conv_bias.contiguous()
             diagonal_group_width = 1
             operator = "medium"
-            modal_parameter = mixer_weight
-            residues = gamma = poles_parameter = modal_parameter
+            residues = poles = None
         else:
             if self.hyena_config.hyena_filter_order != 16:
                 return None
@@ -727,8 +743,7 @@ class HyenaMixer(MegatronModule):
             diagonal_group_width = 1
             operator = "modal"
             residues = self.mixer.filter.R.contiguous()
-            gamma = self.mixer.filter.gamma.contiguous()
-            poles_parameter = self.mixer.filter.p.contiguous()
+            poles = self._packed_modal_poles()
 
         if mixer_state is None or mixer_state.shape[0] != features.shape[0]:
             return None
@@ -740,8 +755,7 @@ class HyenaMixer(MegatronModule):
             mixer_weight,
             diagonal,
             residues,
-            gamma,
-            poles_parameter,
+            poles,
             projection_group_width=projection_group_width,
             mixer_group_width=mixer_group_width,
             operator=operator,
@@ -787,6 +801,26 @@ class HyenaMixer(MegatronModule):
 
         assert all(segment is not None for segment in output_segments)
         return torch.cat(output_segments, dim=-1)
+
+    def _packed_modal_poles(self) -> ModalPoles:
+        """Return this layer's modal decay tables, computed once and reused by every packed kernel.
+
+        The tables depend only on the ``p`` and ``gamma`` parameters, so they are cached on
+        the module and rebuilt only when either parameter's storage or version changes.
+        They keep the parameters' ``[num_groups, 16]`` shape for this tensor-parallel
+        partition; the kernels expand groups to channels with ``group_dim``. Unlike
+        ``get_logp`` there is no context-parallel rank slicing, because the packed paths
+        only run with the full channel set on every rank.
+        """
+        p = self.mixer.filter.p
+        gamma = self.mixer.filter.gamma
+        cache_key = (p.data_ptr(), p._version, gamma.data_ptr(), gamma._version)
+        cached = getattr(self, "_packed_modal_poles_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        poles = modal_poles(gamma.detach(), p.detach())
+        self._packed_modal_poles_cache = (cache_key, poles)
+        return poles
 
     def _supports_flat_segmented_prefill(self, projection: torch.Tensor) -> bool:
         """Whether the inference-only flat segmented kernels support this model instance."""
@@ -885,8 +919,7 @@ class HyenaMixer(MegatronModule):
                 projection_fir,
                 self.mixer.conv_bias.contiguous(),
                 self.mixer.filter.R.contiguous(),
-                self.mixer.filter.gamma.contiguous(),
-                self.mixer.filter.p.contiguous(),
+                self._packed_modal_poles(),
                 cu_seqlens,
                 group_width=self.mixer.group_dim,
                 final_state_out=final_state,
