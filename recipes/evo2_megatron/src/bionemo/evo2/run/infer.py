@@ -116,6 +116,7 @@ from bionemo.evo2.models.evo2_provider import (
     make_evo2_dynamic_inference_context_cls,
     reset_hyena_packed_views_for_new_request,
 )
+from bionemo.evo2.models.megatron.hyena.hyena_mixer import warm_packed_hyena_caches
 from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
 from bionemo.evo2.run.low_precision import (
     configure_global_fp8_layer_scope,
@@ -464,6 +465,9 @@ def _setup_native_dynamic_components(
 
     ctx_cls = make_evo2_dynamic_inference_context_cls()
     mamba_cfg = build_evo2_mamba_inference_state_config(raw_model)
+    # Parameters are final here, so the packed modal pole tables built now serve every
+    # prefill and decode step for the rest of the process, including graphed decode.
+    warmed_modal_layers = warm_packed_hyena_caches(hyena_model)
     cuda_graph_manager_count = sum(1 for module in hyena_model.modules() if hasattr(module, "cudagraph_manager"))
     if cuda_graph_scope is None:
         configured_scope = getattr(hyena_model.config, "inference_cuda_graph_scope", None)
@@ -475,9 +479,10 @@ def _setup_native_dynamic_components(
     if rank == 0:
         logger.info(
             "[evo2-native] standalone evo2 prepared for native dynamic decode "
-            "(SP off, cuda_graphs=%s, graph_managers=%d).",
+            "(SP off, cuda_graphs=%s, graph_managers=%d, modal_pole_caches=%d).",
             cuda_graphs_enabled,
             cuda_graph_manager_count,
+            warmed_modal_layers,
         )
     return Evo2NativeDynamicComponents(
         ctx_cls=ctx_cls,
@@ -593,6 +598,24 @@ def _force_exit_after_cuda_graph_inference() -> None:
 # =============================================================================
 
 
+def _resolve_inference_subquadratic_ops(
+    use_subquadratic_ops: bool,
+    inference_backend: Literal["dynamic", "static-flash"],
+) -> bool:
+    """Ignore the legacy kernels when native segmented dynamic inference owns both phases."""
+    if inference_backend not in {"dynamic", "static-flash"}:
+        raise ValueError(f"Unsupported inference backend {inference_backend!r}")
+    if use_subquadratic_ops and inference_backend == "dynamic":
+        if int(os.environ.get("RANK", "0")) == 0:
+            logger.warning(
+                "--use-subquadratic-ops is ignored by the dynamic inference backend: "
+                "segmented packed prefill and fused recurrent decode already replace those kernels. "
+                "Keeping CUDA graphs enabled."
+            )
+        return False
+    return bool(use_subquadratic_ops)
+
+
 def setup_inference_engine(
     ckpt_dir: Path,
     *,
@@ -610,6 +633,7 @@ def setup_inference_engine(
     use_subquadratic_ops: bool = False,
     cuda_graph_impl: str = "local",
     cuda_graph_scope: str = "block",
+    inference_backend: Literal["dynamic", "static-flash"] = "dynamic",
 ) -> Evo2InferenceComponents:
     """Setup the Evo2 native dynamic-inference engine and related components.
 
@@ -642,14 +666,17 @@ def setup_inference_engine(
         vortex_style_fp8: Use vortex-style FP8 (applies FP8 only to projection layers).
             Needed for FP8-sensitive checkpoints from original evo2 training (1b, 40b).
         random_seed: Random seed for reproducibility.
-        use_subquadratic_ops: Use fused Hyena convolution kernels for
-            rectangular/eager prefill compatibility.
+        use_subquadratic_ops: Use fused Hyena convolution kernels for static-Flash
+            rectangular/eager prefill compatibility. Ignored by the dynamic backend.
         cuda_graph_impl: ``"local"`` (default) captures MCore CUDA graphs for decode; ``"none"``
             disables graph capture (eager decode), mainly for debugging / reference runs.
         cuda_graph_scope: ``"block"`` (default) captures the complete decoder in one graph per
             request count; ``"layer"`` retains per-layer graphs as a compatibility fallback.
             Global FP8/FP4 recipes automatically resolve ``"block"`` to ``"layer"`` because
             Transformer Engine's quantization state is not compatible with block capture.
+        inference_backend: Backend that will consume the configured model. The default dynamic
+            backend ignores ``use_subquadratic_ops`` because its packed prefill and decode use
+            separate native kernels.
 
     Returns:
         Evo2InferenceComponents containing all inference components.
@@ -658,12 +685,11 @@ def setup_inference_engine(
         >>> components = setup_inference_engine(Path("/path/to/checkpoint"), max_batch_size=4)
         >>> results = generate(components, prompts=["ATCG", "GCTA"], max_new_tokens=100)
     """
-    # subquadratic_ops_torch ships prebuilt CUDA kernels that cannot be captured into a CUDA graph
-    # (launching one during capture crashes the process with SIGSEGV in cuLaunchKernel), and Evo2 is
-    # all-Hyena so every graph-captured decode layer would hit one. They are therefore mutually
-    # exclusive. Honor the explicit use_subquadratic_ops opt-in by forcing eager decode. Note the
-    # default (cuda_graph_impl="local", use_subquadratic_ops=False) is the fast path: CUDA-graphed
-    # decode is ~1.4-3.7x faster than subquadratic-ops here, which only helps at very long prefill.
+    use_subquadratic_ops = _resolve_inference_subquadratic_ops(use_subquadratic_ops, inference_backend)
+
+    # The remaining use is static-Flash rectangular prefill. Keep its decode eager because an
+    # unsupported fused-decode shape can fall back to a prebuilt subquadratic kernel, which cannot
+    # be captured safely. Dynamic inference resolved the flag to False above and retains graphs.
     if use_subquadratic_ops and cuda_graph_impl != "none":
         logger.warning(
             "use_subquadratic_ops=True is incompatible with CUDA-graphed decode "
@@ -1462,8 +1488,12 @@ def _get_or_build_shared_dynamic_context(
     # First build, config change, or grow. Drop any graphs captured against the previous context
     # object so a stale graph can never be replayed against the new (larger) one.
     context_setup_started_at_s = _begin_cuda_phase()
-    if cached is not None and nd.cuda_graphs_enabled:
+    if nd.cuda_graphs_enabled and (cached is not None or nd.static_contexts):
         _reset_layer_cuda_graphs(nd)
+        # Static contexts remember whether their graph was warmed. Once the shared
+        # graph managers are reset, retaining one would make a later static call skip
+        # capture and execute a real decode while MCore records against live state.
+        nd.static_contexts.clear()
 
     hyena_model = nd.hyena_model
     # max_requests is kept at least tp-divisible and can be enlarged by the opt-in Evo2 batched
@@ -2813,8 +2843,8 @@ def parse_args() -> argparse.Namespace:
         "--use-subquadratic-ops",
         action="store_true",
         default=False,
-        help="Use fused Hyena convolution kernels for rectangular/eager prefill compatibility. "
-        "Dynamic segmented prefill and per-token decode are unaffected.",
+        help="Use legacy fused Hyena kernels for static-Flash rectangular/eager prefill. "
+        "Ignored by the dynamic backend, whose segmented prefill and fused decode keep CUDA graphs enabled.",
     )
     ap.add_argument(
         "--cuda-graph-impl",
@@ -2980,7 +3010,8 @@ def infer(
             not control the number of prompt-file generations or Evo2 native decode concurrency.
         evo2_batched_decode_size: Number of variable-length Evo2 prompts to keep active for
             packed prefill and native Hyena next-token decode. ``1`` preserves single-request execution.
-        use_subquadratic_ops: Use fused Hyena convolution kernels for rectangular/eager prefill compatibility.
+        use_subquadratic_ops: Use fused Hyena convolution kernels for static-Flash rectangular/eager
+            prefill compatibility. The dynamic backend ignores this flag and keeps CUDA graphs enabled.
         cuda_graph_impl: ``"local"`` (default) uses MCore decode CUDA graphs; ``"none"`` runs
             decode eagerly (no graph capture) -- mainly for debugging / un-graphed reference runs.
         cuda_graph_scope: ``"block"`` (default) captures the complete decoder; ``"layer"`` keeps
@@ -3016,6 +3047,8 @@ def infer(
 
     random_seed = seed or 1234
 
+    use_subquadratic_ops = _resolve_inference_subquadratic_ops(use_subquadratic_ops, inference_backend)
+
     _prune_caches()
     if not _CUDA_PHASE_EVIDENCE_ENABLED:
         torch.cuda.reset_peak_memory_stats()
@@ -3037,6 +3070,7 @@ def infer(
         use_subquadratic_ops=use_subquadratic_ops,
         cuda_graph_impl=cuda_graph_impl,
         cuda_graph_scope=cuda_graph_scope,
+        inference_backend=inference_backend,
     )
     engine_setup_stats = _finish_cuda_phase(engine_setup_started_at_s)
     if not engine_setup_stats.performed:

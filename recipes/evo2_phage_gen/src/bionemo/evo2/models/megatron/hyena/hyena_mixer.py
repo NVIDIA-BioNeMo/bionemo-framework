@@ -50,9 +50,11 @@ from bionemo.evo2.models.megatron.hyena.packed_kernels import (
     PACKED_CAUSAL_CONV_AVAILABLE,
     TRITON_AVAILABLE,
     ModalChunkMetadata,
+    ModalPoles,
     fused_hyena_decode_from_projection,
     local_positions_from_cu_seqlens,
     modal_chunk_metadata_from_cu_seqlens,
+    modal_poles,
     segmented_causal_conv1d,
     segmented_fir_from_projection,
     segmented_modal_from_projection,
@@ -64,6 +66,12 @@ from bionemo.evo2.models.megatron.hyena.packed_kernels import (
 logger = logging.getLogger(__name__)
 
 _PACKED_MODAL_CHUNK_SIZE = 512
+
+
+def _packed_metadata_cache_key(tensor: torch.Tensor, total_tokens: int) -> tuple[int, int, int | None, int]:
+    """Identify immutable packed metadata without reading inference-tensor versions."""
+    version = None if torch.is_inference(tensor) else tensor._version
+    return id(tensor), tensor.data_ptr(), version, total_tokens
 
 
 def _packed_sequence_boundaries(packed_seq_params: PackedSeqParams, total_tokens: int) -> tuple[int, ...]:
@@ -85,7 +93,10 @@ def _packed_sequence_boundaries(packed_seq_params: PackedSeqParams, total_tokens
     if cu_seqlens.ndim != 1:
         raise ValueError(f"Packed Hyena requires one-dimensional cu_seqlens_q, got shape {tuple(cu_seqlens.shape)}")
 
-    cache_key = (cu_seqlens.data_ptr(), cu_seqlens._version, total_tokens)
+    # Inference tensors deliberately have no version counter. PackedSeqParams treats
+    # cu_seqlens as immutable, so object/storage identity is sufficient for those tensors;
+    # ordinary tensors retain version-based invalidation for in-place changes.
+    cache_key = _packed_metadata_cache_key(cu_seqlens, total_tokens)
     cached = getattr(packed_seq_params, "_evo2_hyena_boundary_cache", None)
     if cached is not None and cached[0] == cache_key:
         return cached[1]
@@ -129,7 +140,7 @@ def _packed_cuda_metadata(
     ):
         raise ValueError("Fast packed Hyena requires contiguous CUDA int32 cu_seqlens_q")
 
-    cache_key = (cu_seqlens.data_ptr(), cu_seqlens._version, total_tokens)
+    cache_key = _packed_metadata_cache_key(cu_seqlens, total_tokens)
     cached = getattr(packed_seq_params, "_evo2_hyena_cuda_metadata_cache", None)
     if cached is not None and cached[0] == cache_key:
         return cached[1]
@@ -145,8 +156,13 @@ def _packed_cuda_metadata(
         sequence_ids = sequence_ids[0]
     else:
         sequence_ids = sequence_ids_from_cu_seqlens(cu_seqlens, total_tokens)
-    max_sequence_length = packed_seq_params.max_seqlen_q
-    if torch.is_tensor(max_sequence_length):
+    max_sequence_length = getattr(packed_seq_params, "max_seqlen_q", None)
+    if max_sequence_length is None:
+        # MCore leaves this optional. The total packed width is a conservative upper
+        # bound that preserves correctness; callers that provide the maximum avoid
+        # building modal chunk metadata for a pack of many individually short rows.
+        max_sequence_length = total_tokens
+    elif torch.is_tensor(max_sequence_length):
         max_sequence_length = int(max_sequence_length.item())
     else:
         max_sequence_length = int(max_sequence_length)
@@ -201,6 +217,22 @@ def _dynamic_packed_cuda_metadata(
     metadata = (cu_seqlens, local_positions, sequence_ids, modal_chunks)
     setattr(inference_context, "_evo2_hyena_cuda_metadata_cache", (cache_key, metadata))
     return metadata
+
+
+def warm_packed_hyena_caches(model: torch.nn.Module) -> int:
+    """Build every long-Hyena layer's packed modal pole tables once, ahead of any decode.
+
+    Inference entry points call this after the model is finalized so the tables exist
+    for the whole process lifetime and are never first created inside a CUDA graph
+    capture. Returns the number of layers warmed.
+    """
+    warmed = 0
+    with torch.no_grad():
+        for module in model.modules():
+            if isinstance(module, HyenaMixer) and module.operator_type == "hyena":
+                module._packed_modal_poles()
+                warmed += 1
+    return warmed
 
 
 def _dynamic_context_real_token_count(inference_context, padded_token_count: int) -> int:
@@ -693,6 +725,10 @@ class HyenaMixer(MegatronModule):
         if projection_state is None or projection_state.shape[0] != features.shape[0]:
             return None
         projection_weight, projection_group_width = _packed_fir_weight(self.hyena_proj_conv)
+        if projection_state.ndim == 3 and projection_state.shape[-1] < projection_weight.shape[-1] - 1:
+            # The ordinary eager state path grows a short prefill history one decode
+            # token at a time. Fusion requires the complete fixed-width ring.
+            return None
 
         if self.operator_type == "hyena_short_conv":
             # The fused implementation currently models Evo2's standard gated short operator.
@@ -703,8 +739,7 @@ class HyenaMixer(MegatronModule):
             diagonal = self.mixer.conv_bias.contiguous() if self.mixer.use_conv_bias else None
             diagonal_group_width = self.mixer.group_dim
             operator = "short"
-            modal_parameter = mixer_weight
-            residues = gamma = poles_parameter = modal_parameter
+            residues = poles = None
         elif self.operator_type == "hyena_medium_conv":
             mixer_state = getattr(inference_context, "inner_fir_filter_state_dict", {}).get(id(self.mixer))
             mixer_weight = self.mixer.filter(self.mixer.hyena_medium_conv_len)
@@ -715,8 +750,7 @@ class HyenaMixer(MegatronModule):
             diagonal = self.mixer.conv_bias.contiguous()
             diagonal_group_width = 1
             operator = "medium"
-            modal_parameter = mixer_weight
-            residues = gamma = poles_parameter = modal_parameter
+            residues = poles = None
         else:
             if self.hyena_config.hyena_filter_order != 16:
                 return None
@@ -727,10 +761,15 @@ class HyenaMixer(MegatronModule):
             diagonal_group_width = 1
             operator = "modal"
             residues = self.mixer.filter.R.contiguous()
-            gamma = self.mixer.filter.gamma.contiguous()
-            poles_parameter = self.mixer.filter.p.contiguous()
+            poles = self._packed_modal_poles()
 
         if mixer_state is None or mixer_state.shape[0] != features.shape[0]:
+            return None
+        if (
+            operator in {"short", "medium"}
+            and mixer_state.ndim == 3
+            and mixer_state.shape[-1] < mixer_weight.shape[-1] - 1
+        ):
             return None
         output = fused_hyena_decode_from_projection(
             features[..., 0].contiguous(),
@@ -740,8 +779,7 @@ class HyenaMixer(MegatronModule):
             mixer_weight,
             diagonal,
             residues,
-            gamma,
-            poles_parameter,
+            poles,
             projection_group_width=projection_group_width,
             mixer_group_width=mixer_group_width,
             operator=operator,
@@ -791,6 +829,26 @@ class HyenaMixer(MegatronModule):
 
         assert all(segment is not None for segment in output_segments)
         return torch.cat(output_segments, dim=-1)
+
+    def _packed_modal_poles(self) -> ModalPoles:
+        """Return this layer's modal decay tables, computed once and reused by every packed kernel.
+
+        The tables depend only on the ``p`` and ``gamma`` parameters, so they are cached on
+        the module and rebuilt only when either parameter's storage or version changes.
+        They keep the parameters' ``[num_groups, 16]`` shape for this tensor-parallel
+        partition; the kernels expand groups to channels with ``group_dim``. Unlike
+        ``get_logp`` there is no context-parallel rank slicing, because the packed paths
+        only run with the full channel set on every rank.
+        """
+        p = self.mixer.filter.p
+        gamma = self.mixer.filter.gamma
+        cache_key = (p.data_ptr(), p._version, gamma.data_ptr(), gamma._version)
+        cached = getattr(self, "_packed_modal_poles_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        poles = modal_poles(gamma.detach(), p.detach())
+        self._packed_modal_poles_cache = (cache_key, poles)
+        return poles
 
     def _supports_flat_segmented_prefill(self, projection: torch.Tensor) -> bool:
         """Whether the inference-only flat segmented kernels support this model instance."""
@@ -889,8 +947,7 @@ class HyenaMixer(MegatronModule):
                 projection_fir,
                 self.mixer.conv_bias.contiguous(),
                 self.mixer.filter.R.contiguous(),
-                self.mixer.filter.gamma.contiguous(),
-                self.mixer.filter.p.contiguous(),
+                self._packed_modal_poles(),
                 cu_seqlens,
                 group_width=self.mixer.group_dim,
                 final_state_out=final_state,

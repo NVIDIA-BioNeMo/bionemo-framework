@@ -77,10 +77,10 @@ torchrun --nproc-per-node 2 --no-python \
 
 > **Tip:** `--use-subquadratic-ops` remains the training switch for
 > `b2b_causal_conv1d` and the fused `fft_causal_conv1d` / `causal_conv1d`
-> Hyena kernels. For `predict_evo2` and `infer_evo2`, it remains available for
-> rectangular/eager compatibility prefill; the default packed/dynamic prefill
-> uses its own segmented kernels, and per-token decode is recurrent and
-> unaffected.
+> Hyena kernels. For `predict_evo2`, it remains available on the rectangular
+> compatibility path. `infer_evo2` uses it only with the static-Flash backend;
+> dynamic inference ignores it because segmented prefill and fused recurrent
+> decode already own those phases.
 
 ### Checkpoint retention
 
@@ -161,9 +161,10 @@ Options:
   linear; batches with a flattened row count divisible by eight avoid the
   alignment fallback. Packed prediction's default sequence-parallel policy
   retains TP but disables SP for global FP8/FP4 on current MCore.
-- `--use-subquadratic-ops` — compatibility path for fused unpacked prefill
-  kernels. It forces eager decode because those extension kernels are not safe
-  to capture in the native CUDA graph.
+- `--use-subquadratic-ops` — compatibility path for fused static-Flash
+  rectangular prefill. It is ignored by the default dynamic backend, which
+  retains its faster CUDA-graphed decode. With static-Flash it forces eager
+  decode because a fallback extension kernel is unsafe to capture.
 
 ### Batch sequence scoring (`predict_evo2`)
 

@@ -561,6 +561,99 @@ def test_reset_cuda_graphs_clears_current_and_legacy_manager_caches(monkeypatch)
     assert deleted == [True]
 
 
+def test_dynamic_context_rebuild_invalidates_warmed_static_contexts(monkeypatch):
+    """A dynamic graph reset must not leave a static context marked as graph-warmed."""
+
+    class _BuildContext:
+        def __init__(self, *, model_config, inference_config):
+            del model_config
+            self.max_sequence_length = inference_config.max_sequence_length
+            self.max_requests = inference_config.max_requests
+
+        def initialize_all_tensors(self):
+            pass
+
+    stale_static = SimpleNamespace(
+        evo2_static_cuda_graph_warmed=True,
+        evo2_static_cuda_graph_replay_verified=True,
+    )
+    old_dynamic = SimpleNamespace(max_sequence_length=64, max_requests=1)
+    nd = SimpleNamespace(
+        shared_dyn_ctx=old_dynamic,
+        shared_dyn_ctx_key=(16, 64, False),
+        static_contexts={(1, 64): stale_static},
+        cuda_graphs_enabled=True,
+        hyena_model=SimpleNamespace(config=SimpleNamespace(tensor_model_parallel_size=1)),
+        mamba_state_config=object(),
+        max_seq_length=128,
+        ctx_cls=_BuildContext,
+    )
+    reset_graphs = []
+    monkeypatch.setattr(infer_module, "_reset_layer_cuda_graphs", lambda _nd: reset_graphs.append(True))
+    monkeypatch.setattr(infer_module, "compute_evo2_paged_kv_buffer_size_gb", lambda *_args, **_kwargs: 0.01)
+    monkeypatch.setattr(infer_module, "_begin_cuda_phase", lambda **_kwargs: 0.0)
+    monkeypatch.setattr(infer_module, "_finish_cuda_phase", lambda *_args, **_kwargs: infer_module._CudaPhaseStats())
+    monkeypatch.setattr(infer_module, "_warmup_native_dynamic_cuda_graphs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(infer_module, "_validate_cuda_graph_capture", lambda *_args, **_kwargs: None)
+
+    rebuilt, _, _ = infer_module._get_or_build_shared_dynamic_context(
+        nd,
+        block_size_tokens=16,
+        max_tokens=64,
+        enable_chunked_prefill=False,
+        max_active_requests=1,
+        device=torch.device("cpu"),
+    )
+
+    assert rebuilt is not old_dynamic
+    assert reset_graphs == [True]
+    assert nd.static_contexts == {}
+
+
+def test_dynamic_infer_ignores_subquadratic_ops_without_disabling_cuda_graphs(monkeypatch, caplog):
+    """The dynamic backend must keep its segmented/graph path when the legacy flag is passed."""
+    setup_kwargs = {}
+    components = SimpleNamespace(
+        tokenizer=SimpleNamespace(tokenize=lambda text: [ord(char) for char in text]),
+        native_dynamic=SimpleNamespace(cuda_graphs_enabled=True),
+    )
+    result = _NativeDynamicResult(
+        generated_text="A",
+        generated_length=1,
+        prompt_tokens=[65],
+        generated_tokens=[65],
+    )
+
+    def setup(**kwargs):
+        setup_kwargs.update(kwargs)
+        return components
+
+    monkeypatch.setattr(infer_module, "get_world_size_safe", lambda: 1)
+    monkeypatch.setattr(infer_module, "get_rank_safe", lambda: 0)
+    monkeypatch.setattr(infer_module, "_prune_caches", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 0)
+    monkeypatch.setattr(infer_module, "setup_inference_engine", setup)
+    monkeypatch.setattr(infer_module, "generate", lambda *_args, **_kwargs: [result])
+    monkeypatch.setattr(infer_module, "_teardown_distributed_for_inference", lambda: None)
+    caplog.set_level("WARNING", logger=infer_module.logger.name)
+
+    infer_module.infer(
+        prompts=[{"id": "seq", "prompt": "A"}],
+        ckpt_dir=Path("/tmp/ckpt"),
+        max_new_tokens=1,
+        max_seq_length=16,
+        use_subquadratic_ops=True,
+        cuda_graph_impl="local",
+        inference_backend="dynamic",
+    )
+
+    assert setup_kwargs["use_subquadratic_ops"] is False
+    assert setup_kwargs["cuda_graph_impl"] == "local"
+    assert "ignored by the dynamic inference backend" in caplog.text
+
+
 def test_validate_cuda_graph_capture_records_every_block_graph_runner():
     """A configured graph path must expose captured runners before serving user prompts."""
     runners = [
@@ -1522,6 +1615,7 @@ def test_shared_dynamic_context_reports_cold_setup_and_reuses_larger_request_cap
     nd = SimpleNamespace(
         shared_dyn_ctx=None,
         shared_dyn_ctx_key=None,
+        static_contexts={},
         cuda_graphs_enabled=True,
         hyena_model=SimpleNamespace(config=SimpleNamespace(tensor_model_parallel_size=1)),
         mamba_state_config=object(),
@@ -2321,18 +2415,12 @@ def test_subquadratic_ops_with_cuda_graph_matches_baseline(
     cuda_graph_impl,
     cuda_graph_scope,
 ):
-    """Every (subq-ops x CUDA-graph scope) combination matches the eager baseline.
+    """The legacy flag cannot perturb dynamic generation or its requested graph scope.
 
     The reference is the simplest path: standard kernels with CUDA graphs OFF (``cuda_graph_impl=none``).
-    Greedy decoding (top_k=1) + a fixed seed make generation deterministic, so each of the four
-    combinations of {standard, subq-ops} x {eager, layer graph, block graph} must produce byte-identical output.
-
-    subquadratic-ops kernels cannot be captured into a CUDA graph (they SIGSEGV during capture), so
-    ``setup_inference_engine`` makes them mutually exclusive: requesting both forces eager decode
-    (``cuda_graph_impl='none'``) with a warning. Hence the ``[True, 'local']`` case runs subq-ops
-    eagerly rather than crashing, and must still match the baseline. The subq path uses guarded
-    kernels: if this GPU cannot run them, ``run_infer_subprocess`` xfails (via the CUDA self-test
-    guard) instead of producing invalid output.
+    Greedy decoding and a fixed seed make generation deterministic. The dynamic backend ignores
+    ``--use-subquadratic-ops`` before model setup, so every requested eager/layer/block variant must
+    remain byte-identical while the graph choice stays available to the native segmented path.
     """
     baseline = run_infer_subprocess(
         mbridge_checkpoint_path,

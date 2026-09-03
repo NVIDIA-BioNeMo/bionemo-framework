@@ -2,7 +2,7 @@
 
 Use prompts and seeds independent of calibration and RL validation. Generate the requested number of completed candidates, accounting for failed or duplicate attempts without silently shrinking the denominator.
 
-Use packed dynamic inference for medium/long generation with either uniform or mixed prompt lengths; use static-Flash only when a target-length benchmark shows it wins for an equal-length batch. Require `--ignore-eos --strict-generation` for exact target lengths. Use packed prediction for ragged likelihood batches and preserve record mappings. For uniform medium/long scoring, benchmark `--no-sequence-packing`; the rectangular path also enables CP, while TP supports both layouts.
+Use packed dynamic inference for medium/long generation with either uniform or mixed prompt lengths; use static-Flash only when a target-length benchmark shows it wins for an equal-length batch. Require `--ignore-eos --strict-generation` for exact target lengths. Dynamic generation ignores `--use-subquadratic-ops` and keeps CUDA-graphed decode; reserve that legacy switch for static-Flash generation or rectangular prediction/training. Use packed prediction for ragged likelihood batches and preserve record mappings. For uniform medium/long scoring, benchmark `--no-sequence-packing`; the rectangular path also enables CP, while TP supports both layouts.
 
 The recipe's GDPO adapter uses this packed dynamic path directly on every data-parallel rollout shard and suppresses EOS for exact-length whole genomes. Its `policy.sequence_packing` setting is intentionally separate and disabled: that setting changes gradient-bearing policy and loss execution and must not be enabled solely from inference benchmarks.
 

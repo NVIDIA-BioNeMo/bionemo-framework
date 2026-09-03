@@ -126,7 +126,7 @@ def test_static_sequence_len_offset_reuses_graph_stable_storage():
 def test_packed_rope_uses_full_token_count_for_sequence_parallel_input():
     model = HyenaModel.__new__(HyenaModel)
     torch.nn.Module.__init__(model)
-    model.config = SimpleNamespace(multi_latent_attention=False, flash_decode=False)
+    model.config = SimpleNamespace(multi_latent_attention=False, flash_decode=False, apply_rope_fusion=True)
     model.position_embedding_type = "rope"
     model.decoder = object()
     model.rotary_pos_emb = MagicMock()
@@ -158,12 +158,42 @@ def test_packed_rope_uses_full_token_count_for_sequence_parallel_input():
     )
 
 
+def test_packed_rope_keeps_frequencies_for_unfused_path():
+    """Unfused THD RoPE must receive frequencies, not the fused cos/sin table."""
+    model = HyenaModel.__new__(HyenaModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(multi_latent_attention=False, flash_decode=False, apply_rope_fusion=False)
+    model.position_embedding_type = "rope"
+    model.decoder = object()
+    model.rotary_pos_emb = MagicMock()
+    model.rotary_pos_emb.get_rotary_seq_len.return_value = 5
+    frequencies = torch.empty(5, 1, 1, 4)
+    model.rotary_pos_emb.return_value = frequencies
+    position_ids = torch.tensor([[0, 1, 2, 0, 1]])
+    decoder_input = torch.empty(5, 1, 8, dtype=torch.bfloat16)
+    packed_seq_params = SimpleNamespace(qkv_format="thd")
+
+    with patch(
+        "bionemo.evo2.models.megatron.hyena.hyena_model.precompute_packed_rope_cos_sin",
+    ) as precompute:
+        _, rotary_pos_emb, _, _, _ = model._preprocess(
+            input_ids=torch.empty(0, dtype=torch.long),
+            position_ids=position_ids,
+            decoder_input=decoder_input,
+            packed_seq_params=packed_seq_params,
+        )
+
+    assert rotary_pos_emb is frequencies
+    precompute.assert_not_called()
+
+
 def test_packed_rope_uses_config_dtype_without_pipeline_decoder_input():
     model = HyenaModel.__new__(HyenaModel)
     torch.nn.Module.__init__(model)
     model.config = SimpleNamespace(
         multi_latent_attention=False,
         flash_decode=False,
+        apply_rope_fusion=True,
         params_dtype=torch.bfloat16,
     )
     model.pre_process = False

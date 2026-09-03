@@ -27,6 +27,7 @@ from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import hyena_stack_spe
 from bionemo.evo2.models.megatron.hyena.hyena_mixer import (
     HyenaMixer,
     _packed_cuda_metadata,
+    _packed_sequence_boundaries,
     _pad_padded_dynamic_context_tokens,
     _slice_padded_dynamic_context_tokens,
 )
@@ -153,12 +154,47 @@ def _independent_mixer_forward(mixer: HyenaMixer, packed_input: torch.Tensor, le
 
 @skip_if_no_gpu
 def test_packed_cuda_metadata_reconstructs_missing_sequence_ids() -> None:
-    """PackedSeqParams variants without seq_idx must use the boundary-derived fallback."""
+    """Inference tensors and missing seq_idx must use cached boundary-derived metadata."""
+    with torch.inference_mode():
+        cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32, device="cuda")
+        packed_seq_params = SimpleNamespace(
+            cu_seqlens_q_padded=None,
+            cu_seqlens_q=cu_seqlens,
+            max_seqlen_q=3,
+        )
+
+        _, local_positions, sequence_ids, modal_chunks = _packed_cuda_metadata(packed_seq_params, total_tokens=5)
+        _, cached_positions, cached_ids, _ = _packed_cuda_metadata(packed_seq_params, total_tokens=5)
+
+    assert local_positions.tolist() == [0, 1, 0, 1, 2]
+    assert sequence_ids.tolist() == [0, 0, 1, 1, 1]
+    assert cached_positions.data_ptr() == local_positions.data_ptr()
+    assert cached_ids.data_ptr() == sequence_ids.data_ptr()
+    assert modal_chunks is None
+
+
+def test_packed_boundaries_support_inference_tensors() -> None:
+    """The autograd-free packed fallback must not read an unavailable version counter."""
+    with torch.inference_mode():
+        cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+        packed_seq_params = SimpleNamespace(
+            qkv_format="thd",
+            cu_seqlens_q_padded=None,
+            cu_seqlens_q=cu_seqlens,
+        )
+
+        assert _packed_sequence_boundaries(packed_seq_params, total_tokens=5) == (0, 2, 5)
+        assert _packed_sequence_boundaries(packed_seq_params, total_tokens=5) == (0, 2, 5)
+
+
+@skip_if_no_gpu
+def test_packed_cuda_metadata_accepts_missing_max_seqlen_q() -> None:
+    """MCore's optional max_seqlen_q must not prevent packed eval."""
     cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32, device="cuda")
     packed_seq_params = SimpleNamespace(
         cu_seqlens_q_padded=None,
         cu_seqlens_q=cu_seqlens,
-        max_seqlen_q=3,
+        max_seqlen_q=None,
     )
 
     _, local_positions, sequence_ids, modal_chunks = _packed_cuda_metadata(packed_seq_params, total_tokens=5)
@@ -166,6 +202,29 @@ def test_packed_cuda_metadata_reconstructs_missing_sequence_ids() -> None:
     assert local_positions.tolist() == [0, 1, 0, 1, 2]
     assert sequence_ids.tolist() == [0, 0, 1, 1, 1]
     assert modal_chunks is None
+
+
+@skip_if_no_gpu
+def test_modal_poles_are_cached_until_filter_parameters_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Packed modal recurrence setup should run once per unchanged layer."""
+    calls = []
+
+    def build_poles(gamma, poles_parameter):
+        calls.append((gamma, poles_parameter))
+        return object()
+
+    monkeypatch.setattr(hyena_mixer_module, "modal_poles", build_poles, raising=False)
+    with distributed_model_parallel_state():
+        mixer = _create_small_packing_mixer("hyena", torch.bfloat16).eval()
+
+        first = mixer._packed_modal_poles()
+        assert mixer._packed_modal_poles() is first
+        with torch.no_grad():
+            mixer.mixer.filter.p.add_(1)
+        rebuilt = mixer._packed_modal_poles()
+
+    assert rebuilt is not first
+    assert len(calls) == 2
 
 
 class _FakeDynamicContext:
@@ -780,3 +839,38 @@ def test_static_single_token_decode_selects_fused_kernel(
             mixer(next_input, inference_context=context, _hyena_use_cp=False)
 
         assert calls == [kernel_operator]
+
+
+@skip_if_no_gpu
+def test_static_decode_falls_back_while_medium_fir_history_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial eager FIR seed must grow through the existing step path before fusion."""
+    device = torch.device("cuda", torch.cuda.current_device())
+
+    with distributed_model_parallel_state():
+        torch.manual_seed(9014)
+        mixer = _create_small_packing_mixer("hyena_medium_conv", torch.bfloat16).eval()
+        prefill_input = torch.randn(3, 1, mixer.input_size, device=device, dtype=torch.bfloat16)
+        next_input = torch.randn(1, 1, mixer.input_size, device=device, dtype=torch.bfloat16)
+        context = _FakeStaticDecodeContext()
+
+        with torch.no_grad():
+            mixer(prefill_input, inference_context=context, _hyena_use_cp=False)
+        assert context.inner_fir_filter_state_dict[id(mixer.mixer)].shape[-1] == 3
+
+        fused_calls = []
+        original = hyena_mixer_module.fused_hyena_decode_from_projection
+
+        def record_call(*args, **kwargs):
+            fused_calls.append(kwargs["operator"])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(hyena_mixer_module, "fused_hyena_decode_from_projection", record_call)
+        with torch.no_grad():
+            decode_output, _ = mixer(next_input, inference_context=context, _hyena_use_cp=False)
+            reference_output, _ = mixer(torch.cat((prefill_input, next_input)), _hyena_use_cp=False)
+
+        assert fused_calls == []
+        assert context.inner_fir_filter_state_dict[id(mixer.mixer)].shape[-1] == 4
+        torch.testing.assert_close(decode_output, reference_output[-1:], rtol=3e-2, atol=3e-2)

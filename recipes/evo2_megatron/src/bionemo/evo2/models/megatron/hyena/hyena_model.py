@@ -319,7 +319,11 @@ class HyenaModel(LanguageModule):
                     rotary_seq_len,
                     packed_seq=packed_seq_params is not None and packed_seq_params.qkv_format == "thd",
                 )
-                if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
+                if (
+                    packed_seq_params is not None
+                    and packed_seq_params.qkv_format == "thd"
+                    and self.config.apply_rope_fusion
+                ):
                     # Materialize local-position frequencies once per packed call. Attention
                     # layers then use the flat fused pointwise kernel without reconstructing
                     # positions (or reshuffling tokens) from cu_seqlens on every layer.

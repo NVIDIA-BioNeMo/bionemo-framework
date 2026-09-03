@@ -1005,14 +1005,14 @@ def test_batch_generate_mbridge_subquadratic_ops(tmp_path: Path):
 
 
 def _run_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path: Path):
-    """Second-half match accuracy through the dynamic engine with subquadratic FFT/causal kernels.
+    """Second-half match accuracy through static-Flash with subquadratic prefill kernels.
 
     Mirrors :func:`test_batch_generate_mbridge` (1b-bf16, greedy) but enables ``use_subquadratic_ops``
     so the b2b causal-conv1d prefill and fft/causal-conv1d FIR kernels are exercised end-to-end on the
-    native dynamic decode path. Because subquadratic-ops kernels cannot be captured into a CUDA graph,
-    ``setup_inference_engine`` forces ``cuda_graph_impl='none'`` (eager decode) when they are enabled.
-    This gives accuracy coverage for the subquadratic-ops path through the dynamic engine, not just the
-    default conv path. It xfails on hardware where the
+    rectangular static-Flash path. Because a decode fallback could reach a subquadratic kernel,
+    ``setup_inference_engine`` forces ``cuda_graph_impl='none'`` for this opt-in combination.
+    Dynamic inference deliberately ignores the flag and is covered by its segmented kernels instead.
+    This test xfails on hardware where the
     prebuilt subquadratic kernels fail their CUDA self-test (unsupported PTX/toolchain), matching the
     other subquadratic tests in this recipe.
     """
@@ -1065,6 +1065,7 @@ def _run_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path:
             tensor_parallel_size=1,
             random_seed=42,
             use_subquadratic_ops=True,
+            inference_backend="static-flash",
         )
         results = generate(
             components,
@@ -1072,6 +1073,7 @@ def _run_batch_generate_mbridge_subquadratic_ops(sequences: list[str], tmp_path:
             max_new_tokens=num_tokens_to_generate,
             temperature=1.0,
             top_k=1,  # Greedy for determinism
+            inference_backend="static-flash",
         )
 
         match_percents = [

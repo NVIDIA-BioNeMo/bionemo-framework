@@ -52,6 +52,40 @@ def _requires_64bit_indexing(*element_counts: int) -> bool:
     return max(element_counts, default=0) > _MAX_SIGNED_INT32
 
 
+@dataclass(frozen=True)
+class ModalPoles:
+    """Precomputed fp32 ``[groups, order]`` modal poles shared by every packed modal kernel."""
+
+    decay: torch.Tensor
+    log_decay: torch.Tensor
+
+
+def modal_poles(gamma: torch.Tensor, poles_parameter: torch.Tensor) -> ModalPoles:
+    """Reduce Evo2's modal ``(gamma, p)`` parameters to per-mode decay and its log.
+
+    ``log_decay`` is the quantity ``ImplicitModalFilter.get_logp`` feeds the unpacked
+    recurrence; ``decay`` is its exponential. The token recurrences read ``decay``
+    directly, while the chunk carry needs ``exp(log_decay * chunk_length)`` because
+    recovering the log from a decay near one would lose precision for slow modes.
+    Callers compute this once per layer and reuse it across prefill and decode.
+    """
+    if gamma.shape != poles_parameter.shape or gamma.ndim != 2:
+        raise ValueError("gamma and poles_parameter must share a [groups, order] shape")
+    log_decay = -torch.exp(poles_parameter.to(torch.float32)) * torch.exp(gamma.to(torch.float32))
+    return ModalPoles(decay=torch.exp(log_decay).contiguous(), log_decay=log_decay.contiguous())
+
+
+def _validate_modal_poles(poles: ModalPoles, expected_shape: tuple[int, int], device: torch.device) -> None:
+    for tensor in (poles.decay, poles.log_decay):
+        if (
+            tensor.shape != expected_shape
+            or tensor.dtype != torch.float32
+            or tensor.device != device
+            or not tensor.is_contiguous()
+        ):
+            raise ValueError("modal poles must be contiguous fp32 [groups,16] on the input device; use modal_poles")
+
+
 try:
     import triton
     import triton.language as tl
@@ -64,6 +98,10 @@ PACKED_CAUSAL_CONV_AVAILABLE = causal_conv1d_fn is not None or TRITON_AVAILABLE
 
 
 if TRITON_AVAILABLE:
+    # The ``.to(tl.bfloat16).to(tl.float32)`` round trips below are unnecessary: all
+    # accumulation is fp32, and the subquadratic-ops kernels never round intermediates
+    # yet remain compatible with the PyTorch path. They mimic PyTorch's BF16
+    # intermediate materialization and can be removed.
 
     @triton.jit
     def _segmented_causal_conv1d_kernel(
@@ -202,8 +240,7 @@ if TRITON_AVAILABLE:
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        decays,
         cu_seqlens,
         selected_sequence_ids,
         output,
@@ -230,9 +267,7 @@ if TRITON_AVAILABLE:
         parameter_offset = filter_index[:, None] * order + mode[None, :]
         parameter_mask = valid_channel[:, None]
         residue = tl.load(residues + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        gamma_value = tl.load(gamma + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        pole_parameter = tl.load(poles_parameter + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        decay = tl.exp(-tl.exp(pole_parameter) * tl.exp(gamma_value))
+        decay = tl.load(decays + parameter_offset, mask=parameter_mask, other=0.0)
         state = tl.zeros((block_channels, order), dtype=tl.float32)
         sequence_start = tl.load(cu_seqlens + sequence)
         sequence_end = tl.load(cu_seqlens + sequence + 1)
@@ -265,8 +300,7 @@ if TRITON_AVAILABLE:
         mixer_weight,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        decays,
         output,
         projection_state_stride_batch,
         projection_state_stride_channel,
@@ -284,16 +318,24 @@ if TRITON_AVAILABLE:
         has_diagonal: tl.constexpr,
         diagonal_group_width: tl.constexpr,
         block_channels: tl.constexpr,
-        parallel_medium: tl.constexpr,
-        medium_state_block: tl.constexpr,
+        projection_ring_block: tl.constexpr,
+        mixer_ring_block: tl.constexpr,
     ):
-        """Fuse the shared projection FIR with one single-token Hyena recurrence."""
+        """Fuse the shared projection FIR with one single-token Hyena recurrence.
+
+        Every ring buffer is read into registers once, then shifted by storing those
+        registers one tap lower after a CTA barrier. Reloading the neighbouring tap in
+        place would race: lanes in other warps (including replicated lanes when a tile
+        is smaller than the CTA) may already have overwritten it.
+        """
         batch = tl.program_id(0)
         channel = tl.program_id(1) * block_channels + tl.arange(0, block_channels)
         valid_channel = channel < channels
         x1 = tl.zeros((block_channels,), dtype=tl.float32)
         x2 = tl.zeros((block_channels,), dtype=tl.float32)
         value = tl.zeros((block_channels,), dtype=tl.float32)
+        projection_ring_index = tl.arange(0, projection_ring_block)
+        projection_ring_valid = projection_ring_index[None, :] < projection_taps - 1
 
         for feature in tl.static_range(0, 3):
             projected_channel = 3 * channel + feature
@@ -309,30 +351,19 @@ if TRITON_AVAILABLE:
                 other=0.0,
             ).to(tl.float32)
             state_base = batch * projection_state_stride_batch + projected_channel * projection_state_stride_channel
-            for state_index in tl.static_range(0, projection_taps - 1):
-                state_value = tl.load(
-                    projection_state + state_base + state_index * projection_state_stride_tap,
-                    mask=valid_channel,
-                    other=0.0,
-                ).to(tl.float32)
-                tap = tl.load(
-                    projection_weight + projection_group * projection_taps + state_index,
-                    mask=valid_channel,
-                    other=0.0,
-                ).to(tl.float32)
-                accumulator += state_value * tap
+            ring_mask = valid_channel[:, None] & projection_ring_valid
+            ring_offset = state_base[:, None] + projection_ring_index[None, :] * projection_state_stride_tap
+            ring = tl.load(projection_state + ring_offset, mask=ring_mask, other=0.0).to(tl.float32)
+            ring_tap = tl.load(
+                projection_weight + projection_group[:, None] * projection_taps + projection_ring_index[None, :],
+                mask=ring_mask,
+                other=0.0,
+            ).to(tl.float32)
+            accumulator += tl.sum(ring * ring_tap, axis=1)
 
-            for state_index in tl.static_range(0, projection_taps - 2):
-                next_state = tl.load(
-                    projection_state + state_base + (state_index + 1) * projection_state_stride_tap,
-                    mask=valid_channel,
-                    other=0.0,
-                )
-                tl.store(
-                    projection_state + state_base + state_index * projection_state_stride_tap,
-                    next_state,
-                    mask=valid_channel,
-                )
+            tl.debug_barrier()
+            shift_mask = ring_mask & (projection_ring_index[None, :] >= 1)
+            tl.store(projection_state + ring_offset - projection_state_stride_tap, ring, mask=shift_mask)
             tl.store(
                 projection_state + state_base + (projection_taps - 2) * projection_state_stride_tap,
                 current,
@@ -357,71 +388,33 @@ if TRITON_AVAILABLE:
 
         if operator_kind < 2:
             mixer_group = channel // mixer_group_width
+            state_index = tl.arange(0, mixer_ring_block)
+            ring_valid = state_index[None, :] < mixer_taps - 1
+            state_mask = valid_channel[:, None] & ring_valid
+            state_offset = mixer_state_base[:, None] + state_index[None, :] * mixer_state_stride_tap
+            state_value = tl.load(mixer_state + state_offset, mask=state_mask, other=0.0).to(tl.float32)
             if operator_kind == 0:
                 current_tap_index = mixer_taps - 1
+                tap_index = state_index
             else:
                 current_tap_index = 0
+                tap_index = mixer_taps - 1 - state_index
             mixed = recurrent_input * tl.load(
                 mixer_weight + mixer_group * mixer_taps + current_tap_index,
                 mask=valid_channel,
                 other=0.0,
             ).to(tl.float32)
-            if operator_kind == 1 and parallel_medium:
-                state_index = tl.arange(0, medium_state_block)
-                state_mask = valid_channel[:, None] & (state_index[None, :] < mixer_taps - 1)
-                state_offset = mixer_state_base[:, None] + state_index[None, :] * mixer_state_stride_tap
-                state_value = tl.load(mixer_state + state_offset, mask=state_mask, other=0.0).to(tl.float32)
-                tap_index = mixer_taps - 1 - state_index
-                tap = tl.load(
-                    mixer_weight + mixer_group[:, None] * mixer_taps + tap_index[None, :],
-                    mask=state_mask,
-                    other=0.0,
-                ).to(tl.float32)
-                mixed += tl.sum(state_value * tap, axis=1)
-                mixed += diagonal_value * recurrent_input
-                # All old state values must be consumed before the in-place ring shift.
-                tl.debug_barrier()
-                shift_mask = valid_channel[:, None] & (state_index[None, :] < mixer_taps - 2)
-                next_state = tl.load(
-                    mixer_state + state_offset + mixer_state_stride_tap,
-                    mask=shift_mask,
-                    other=0.0,
-                )
-                tl.store(
-                    mixer_state + state_offset,
-                    next_state,
-                    mask=shift_mask,
-                )
-            else:
-                for state_index in tl.range(0, mixer_taps - 1):
-                    state_value = tl.load(
-                        mixer_state + mixer_state_base + state_index * mixer_state_stride_tap,
-                        mask=valid_channel,
-                        other=0.0,
-                    ).to(tl.float32)
-                    if operator_kind == 0:
-                        tap_index = state_index
-                    else:
-                        tap_index = mixer_taps - 1 - state_index
-                    tap = tl.load(
-                        mixer_weight + mixer_group * mixer_taps + tap_index,
-                        mask=valid_channel,
-                        other=0.0,
-                    ).to(tl.float32)
-                    mixed += state_value * tap
-                mixed += diagonal_value * recurrent_input
+            tap = tl.load(
+                mixer_weight + mixer_group[:, None] * mixer_taps + tap_index[None, :],
+                mask=state_mask,
+                other=0.0,
+            ).to(tl.float32)
+            mixed += tl.sum(state_value * tap, axis=1)
+            mixed += diagonal_value * recurrent_input
 
-                for state_index in tl.range(0, mixer_taps - 2):
-                    next_state = tl.load(
-                        mixer_state + mixer_state_base + (state_index + 1) * mixer_state_stride_tap,
-                        mask=valid_channel,
-                        other=0.0,
-                    )
-                    tl.store(
-                        mixer_state + mixer_state_base + state_index * mixer_state_stride_tap,
-                        next_state,
-                        mask=valid_channel,
-                    )
+            tl.debug_barrier()
+            shift_mask = state_mask & (state_index[None, :] >= 1)
+            tl.store(mixer_state + state_offset - mixer_state_stride_tap, state_value, mask=shift_mask)
             tl.store(
                 mixer_state + mixer_state_base + (mixer_taps - 2) * mixer_state_stride_tap,
                 recurrent_input,
@@ -433,16 +426,11 @@ if TRITON_AVAILABLE:
             parameter_offset = mixer_group[:, None] * modal_order + mode[None, :]
             parameter_mask = valid_channel[:, None]
             residue = tl.load(residues + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-            gamma_value = tl.load(gamma + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-            pole_parameter = tl.load(
-                poles_parameter + parameter_offset,
-                mask=parameter_mask,
-                other=0.0,
-            ).to(tl.float32)
-            decay = tl.exp(-tl.exp(pole_parameter) * tl.exp(gamma_value))
+            decay = tl.load(decays + parameter_offset, mask=parameter_mask, other=0.0)
             state_offset = mixer_state_base[:, None] + mode[None, :] * mixer_state_stride_tap
             state = tl.load(mixer_state + state_offset, mask=parameter_mask, other=0.0).to(tl.float32)
             state = recurrent_input[:, None] + decay * state
+            tl.debug_barrier()
             tl.store(mixer_state + state_offset, state, mask=parameter_mask)
             mixed = tl.sum(residue * state, axis=1) + diagonal_value * recurrent_input
 
@@ -458,8 +446,7 @@ if TRITON_AVAILABLE:
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        decays,
         chunk_starts,
         chunk_lengths,
         chunk_sequence_ids,
@@ -481,9 +468,7 @@ if TRITON_AVAILABLE:
         mode = tl.arange(0, order)
         parameter_offset = filter_index[:, None] * order + mode[None, :]
         parameter_mask = valid_channel[:, None]
-        gamma_value = tl.load(gamma + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        pole_parameter = tl.load(poles_parameter + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        decay = tl.exp(-tl.exp(pole_parameter) * tl.exp(gamma_value))
+        decay = tl.load(decays + parameter_offset, mask=parameter_mask, other=0.0)
         sequence_id = tl.load(chunk_sequence_ids + chunk)
         previous_sequence_id = tl.load(chunk_sequence_ids + chunk - 1, mask=chunk > 0, other=-1)
         is_first_chunk = sequence_id != previous_sequence_id
@@ -521,8 +506,7 @@ if TRITON_AVAILABLE:
 
     @triton.jit
     def _segmented_modal_chunk_propagate_kernel(
-        gamma,
-        poles_parameter,
+        log_decays,
         chunk_lengths,
         sequence_chunk_offsets,
         chunked_sequence_ids,
@@ -543,9 +527,7 @@ if TRITON_AVAILABLE:
         mode = tl.arange(0, order)
         parameter_offset = filter_index[:, None] * order + mode[None, :]
         parameter_mask = valid_channel[:, None]
-        gamma_value = tl.load(gamma + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        pole_parameter = tl.load(poles_parameter + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        decay_exponent = -tl.exp(pole_parameter) * tl.exp(gamma_value)
+        decay_exponent = tl.load(log_decays + parameter_offset, mask=parameter_mask, other=0.0)
         state = tl.zeros((block_channels, order), dtype=tl.float32)
         first_chunk = tl.load(sequence_chunk_offsets + sequence)
         last_chunk = tl.load(sequence_chunk_offsets + sequence + 1)
@@ -573,8 +555,7 @@ if TRITON_AVAILABLE:
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        decays,
         chunk_starts,
         chunk_lengths,
         continuation_chunk_ids,
@@ -598,9 +579,7 @@ if TRITON_AVAILABLE:
         parameter_offset = filter_index[:, None] * order + mode[None, :]
         parameter_mask = valid_channel[:, None]
         residue = tl.load(residues + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        gamma_value = tl.load(gamma + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        pole_parameter = tl.load(poles_parameter + parameter_offset, mask=parameter_mask, other=0.0).to(tl.float32)
-        decay = tl.exp(-tl.exp(pole_parameter) * tl.exp(gamma_value))
+        decay = tl.load(decays + parameter_offset, mask=parameter_mask, other=0.0)
         state_offset = (chunk * channels + channel[:, None]) * order + mode[None, :]
         state = tl.load(chunk_states + state_offset, mask=parameter_mask, other=0.0).to(tl.float32)
         chunk_start = tl.load(chunk_starts + chunk)
@@ -752,9 +731,8 @@ def fused_hyena_decode_from_projection(
     mixer_state: torch.Tensor,
     mixer_weight: torch.Tensor,
     diagonal: torch.Tensor | None,
-    residues: torch.Tensor,
-    gamma: torch.Tensor,
-    poles_parameter: torch.Tensor,
+    residues: torch.Tensor | None,
+    poles: ModalPoles | None,
     *,
     projection_group_width: int,
     mixer_group_width: int,
@@ -765,7 +743,9 @@ def fused_hyena_decode_from_projection(
 
     ``projection`` is the interleaved ``[x1, x2, v]`` dense projection for one decode
     position per request. Both recurrent state views are updated in place, preserving
-    their aliases into MCore's dynamic-context state slots.
+    their aliases into MCore's dynamic-context state slots. ``residues`` and the
+    precomputed ``modal_poles`` output are only read by the modal operator and may be
+    ``None`` otherwise.
     """
     if not TRITON_AVAILABLE:
         raise RuntimeError("Triton is required for fused Hyena decode")
@@ -834,17 +814,31 @@ def fused_hyena_decode_from_projection(
         if mixer_state.shape[2] != 16:
             raise ValueError("modal mixer_state must have order 16")
         expected_parameter_shape = (channels // mixer_group_width, 16)
-        if any(
-            parameter.shape != expected_parameter_shape or not parameter.is_cuda or not parameter.is_contiguous()
-            for parameter in (residues, gamma, poles_parameter)
+        if (
+            residues is None
+            or residues.shape != expected_parameter_shape
+            or not residues.is_cuda
+            or not residues.is_contiguous()
         ):
-            raise ValueError("modal parameters must be contiguous CUDA [groups,16]")
+            raise ValueError("modal residues must be contiguous CUDA [groups,16]")
+        if poles is None:
+            raise ValueError("modal decode requires precomputed modal_poles")
+        _validate_modal_poles(poles, expected_parameter_shape, projection.device)
         mixer_taps = 1
+    # Triton still needs pointer arguments for the FIR operators, but the constexpr branch never loads them.
+    residues_argument = residues if residues is not None else projection
+    decays_argument = poles.decay if poles is not None else projection
 
+    if operator_kind < 2 and mixer_taps > 128:
+        raise ValueError("fused decode supports FIR mixers up to 128 taps")
     output = torch.empty((batch, channels), dtype=projection.dtype, device=projection.device)
-    parallel_medium = operator_kind == 1 and mixer_taps <= 128
-    block_channels = 16 if parallel_medium else (8 if operator_kind == 2 else 64)
-    medium_state_block = triton.next_power_of_2(mixer_taps - 1) if parallel_medium else 1
+    # Measured on GB300 with graph-captured launches at C=4096: the short FIR gains from
+    # four warps, while the wide medium ring and the modal state tiles reduce fastest
+    # within one warp (four warps cost 2x on medium at batch 32).
+    block_channels = {0: 64, 1: 16, 2: 16}[operator_kind]
+    num_warps = 4 if operator_kind == 0 else 1
+    projection_ring_block = triton.next_power_of_2(projection_weight.shape[1] - 1)
+    mixer_ring_block = triton.next_power_of_2(mixer_taps - 1) if operator_kind < 2 else 1
     grid = (batch, triton.cdiv(channels, block_channels))
     _fused_hyena_decode_from_projection_kernel[grid](
         projection,
@@ -853,9 +847,8 @@ def fused_hyena_decode_from_projection(
         mixer_state,
         mixer_weight,
         diagonal,
-        residues,
-        gamma,
-        poles_parameter,
+        residues_argument,
+        decays_argument,
         output,
         *projection_state.stride(),
         *mixer_state.stride(),
@@ -869,12 +862,9 @@ def fused_hyena_decode_from_projection(
         has_diagonal=has_diagonal,
         diagonal_group_width=diagonal_group_width,
         block_channels=block_channels,
-        parallel_medium=parallel_medium,
-        medium_state_block=medium_state_block,
-        # Multi-warp 2-D state tiles corrupt sparse lanes on production-sized
-        # Blackwell grids in the 26.07 stack. Keep vectorized medium/modal tiles
-        # on one warp; the serial short-FIR tile retains four.
-        num_warps=1 if operator_kind == 2 or parallel_medium else 4,
+        projection_ring_block=projection_ring_block,
+        mixer_ring_block=mixer_ring_block,
+        num_warps=num_warps,
     )
     return output
 
@@ -1046,8 +1036,7 @@ def segmented_modal_from_projection(
     projection: torch.Tensor,
     diagonal: torch.Tensor,
     residues: torch.Tensor,
-    gamma: torch.Tensor,
-    poles_parameter: torch.Tensor,
+    poles: ModalPoles,
     cu_seqlens: torch.Tensor,
     *,
     group_width: int,
@@ -1057,10 +1046,11 @@ def segmented_modal_from_projection(
 ) -> torch.Tensor:
     """Apply Evo2's 16-mode recurrence independently within every packed segment.
 
-    Supplying ``chunk_metadata`` (or the convenience ``chunk_size`` argument)
-    parallelizes long sequences without padding, sorting, or moving token rows.
-    The compact FP32 chunk summaries are overwritten in-place with each chunk's
-    initial carry before continuation chunks are evaluated.
+    ``poles`` is the precomputed ``modal_poles`` output shared by every launch
+    below. Supplying ``chunk_metadata`` (or the convenience ``chunk_size``
+    argument) parallelizes long sequences without padding, sorting, or moving token
+    rows. The compact FP32 chunk summaries are overwritten in-place with each
+    chunk's initial carry before continuation chunks are evaluated.
     """
     if not TRITON_AVAILABLE:
         raise RuntimeError("Triton is required for packed Hyena inference kernels")
@@ -1072,10 +1062,9 @@ def segmented_modal_from_projection(
     channels = projected_channels // 3
     if diagonal.shape != (channels,):
         raise ValueError("diagonal must have one value per output channel")
-    if residues.shape != gamma.shape or residues.shape != poles_parameter.shape:
-        raise ValueError("modal parameter shapes must match")
     if residues.ndim != 2 or residues.shape[1] != 16:
         raise ValueError("packed modal inference currently requires exactly 16 modes")
+    _validate_modal_poles(poles, tuple(residues.shape), projection.device)
     if residues.shape[0] * group_width != channels:
         raise ValueError("modal groups and group_width must partition the projection channels")
     if (
@@ -1142,8 +1131,7 @@ def segmented_modal_from_projection(
                 projection,
                 diagonal,
                 residues,
-                gamma,
-                poles_parameter,
+                poles.decay,
                 cu_seqlens,
                 chunk_metadata.unchunked_sequence_ids,
                 output,
@@ -1172,8 +1160,7 @@ def segmented_modal_from_projection(
                 projection,
                 diagonal,
                 residues,
-                gamma,
-                poles_parameter,
+                poles.decay,
                 chunk_metadata.chunk_starts,
                 chunk_metadata.chunk_lengths,
                 chunk_metadata.chunk_sequence_ids,
@@ -1189,8 +1176,7 @@ def segmented_modal_from_projection(
         if chunked_sequence_count:
             sequence_grid = (chunked_sequence_count, triton.cdiv(channels, block_channels))
             _segmented_modal_chunk_propagate_kernel[sequence_grid](
-                gamma,
-                poles_parameter,
+                poles.log_decay,
                 chunk_metadata.chunk_lengths,
                 chunk_metadata.sequence_chunk_offsets,
                 chunk_metadata.chunked_sequence_ids,
@@ -1211,8 +1197,7 @@ def segmented_modal_from_projection(
                 projection,
                 diagonal,
                 residues,
-                gamma,
-                poles_parameter,
+                poles.decay,
                 chunk_metadata.chunk_starts,
                 chunk_metadata.chunk_lengths,
                 chunk_metadata.continuation_chunk_ids,
@@ -1232,8 +1217,7 @@ def segmented_modal_from_projection(
         projection,
         diagonal,
         residues,
-        gamma,
-        poles_parameter,
+        poles.decay,
         cu_seqlens,
         cu_seqlens,
         output,
