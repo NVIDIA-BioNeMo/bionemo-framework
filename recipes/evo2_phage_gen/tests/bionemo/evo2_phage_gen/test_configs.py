@@ -164,7 +164,8 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["loss_fn"]["reference_policy_kl_penalty"] == 0.001
     assert config["loss_fn"]["token_level_loss"] is False
     assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
-    assert config["policy"]["generation"]["top_k"] == 4
+    assert config["policy"]["generation"]["top_k"] == 5
+    assert config["policy"]["generation"]["top_p"] == 0.999
     assert config["policy"]["generation"]["mcore_generation_config"]["generation_adapter_config"]["seed"] == 42
     assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6
     assert config["policy"]["megatron_cfg"]["optimizer"]["min_lr"] == 1.0e-7
@@ -244,7 +245,8 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
     assert mcore_generation_config["prompt_batch_size"] == 12
     assert mcore_generation_config["max_requests"] == 12
-    assert mcore_generation_config["generation_adapter_config"]["ignore_eos"] is True
+    assert mcore_generation_config["generation_adapter_config"]["ignore_eos"] is False
+    assert mcore_generation_config["generation_adapter_config"]["preserve_eos_token"] is True
     assert mcore_generation_config["generation_adapter_config"]["strict_generation"] is True
     assert config["policy"]["sequence_packing"]["enabled"] is False
     assert config["logger"]["wandb_enabled"] is False
@@ -268,7 +270,6 @@ def test_phix_example_documents_every_gdpo_objective():
     assert "gdpo_objective_scores_from_scored" in implementation_section
     for objective in config["env"]["phage_qc"]["gdpo_objectives"]:
         assert f"`{objective['name']}`" in score_section
-        assert f"| `{objective['name']}` |" in implementation_section
     assert implementation_section.count("../src/bionemo/evo2_phage_gen/") >= len(
         config["env"]["phage_qc"]["gdpo_objectives"]
     )

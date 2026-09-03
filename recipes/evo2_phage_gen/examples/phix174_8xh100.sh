@@ -1023,7 +1023,7 @@ stage_50() {
         --tensor-parallel-size 1 \
         --max-seq-length 10240 --prompt-batch-size 16 --inference-backend dynamic \
         ${INFERENCE_PRECISION_ARGS[@]+"${INFERENCE_PRECISION_ARGS[@]}"} \
-        --ignore-eos --strict-generation --stream-output \
+        --preserve-eos-token --strict-generation --stream-output \
         --output-file "${outputs[rank]}")
       printf -v printable '%q ' "${command[@]}"; note "command: ${printable}"
       if [[ "${DRY_RUN}" != "1" ]]; then

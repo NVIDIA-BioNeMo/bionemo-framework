@@ -61,8 +61,8 @@ policy:
   generation:
     max_new_tokens: 5450
     temperature: 1.0
-    top_p: 1.0
-    top_k: 4
+    top_p: 0.999
+    top_k: 5
     mcore_generation_config:
       max_requests: 12
       prompt_batch_size: 12
@@ -76,9 +76,9 @@ policy:
         # so validation/train steps do not reuse the same sampling seed.
         seed: 42
         seed_stride: 1000003
-        # Whole-genome rollouts require the requested completion length. Suppressing EOS also
-        # keeps every 12-request DP shard on the same packed dynamic decode schedule.
-        ignore_eos: true
+        # Let the policy learn when to terminate and retain the sampled EOD action and log-probability.
+        ignore_eos: false
+        preserve_eos_token: true
         strict_generation: true
 
   # This NeMo-RL switch controls gradient-bearing policy/log-prob packing, not rollout packing.

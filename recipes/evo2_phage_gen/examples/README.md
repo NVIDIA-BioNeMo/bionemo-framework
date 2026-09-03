@@ -120,8 +120,9 @@ stages are not uploaded retroactively.
 
 [`default-sampling-selection.yaml`](default-sampling-selection.yaml) contains the current PhiX
 defaults and is the schema for a custom selection. Passing `--sampling-selection` is an explicit
-override, not a choice derived from the fresh calibration evidence. Its decoder ceiling reaches
-approximately
+override, not a choice derived from the fresh calibration evidence. The defaults use temperature
+1, top-k 5, and top-p 0.999; sampled EOD is retained so the length reward can teach termination.
+The decoder ceiling reaches approximately
 5,466–5,474 nt across the prompt mixture, within the length reward's upper declining slope and below
 its 5,494-nt zero edge. The 5,359–5,391-nt full-credit band sits inside the broader
 5,306–5,493-nt hard acceptance interval. For the circular PhiX reference, the deployed

@@ -515,7 +515,6 @@ def test_single_gpu_plan(tmp_path: Path) -> None:
     assert all(command[command.index("--inference-backend") + 1] == "dynamic" for command in rollout)
     assert all("--ignore-eos" not in command for command in rollout)
     assert all("--preserve-eos-token" in command for command in rollout)
-    assert all("--stop-token-suppress-before" not in command for command in rollout)
     assert "interleave prompt lengths (16 24) across 1 deterministic mixed-length shard(s)" in log
 
 
@@ -527,12 +526,6 @@ temperature: 0.9
 top_k: 17
 top_p: 0.85
 max_new_tokens: 5800
-stop_token_length_schedule:
-  control_prefix_tokens: 2
-  suppress_eod_before: 5306
-  partial_top_p: 0.999
-  top_p_full_from: 5359
-  max_biological_length: 5474
 prompt_lengths: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 prompt_anchors:
   - name: origin
