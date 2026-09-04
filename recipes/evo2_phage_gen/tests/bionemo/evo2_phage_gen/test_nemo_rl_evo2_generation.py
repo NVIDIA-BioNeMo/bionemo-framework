@@ -603,6 +603,34 @@ def test_graph_adapter_preserves_captured_model_storage():
     assert not adapter.requires_persistent_model_storage(worker)
 
 
+@pytest.mark.parametrize(
+    ("precision_kind", "vortex_style_fp8", "expected"),
+    [
+        ("bf16", False, False),
+        ("fp8", False, True),
+        ("fp8-all-layers", False, True),
+        ("mxfp8", False, True),
+        ("nvfp4", False, True),
+        ("bf16", True, True),
+    ],
+)
+def test_graph_adapter_recaptures_quantized_graphs_after_refit(precision_kind, vortex_style_fp8, expected):
+    adapter = Evo2MegatronGenerationAdapter({"seed": 17})
+    native_dynamic = SimpleNamespace(
+        cuda_graphs_enabled=True,
+        shared_dyn_ctx=object(),
+        cuda_graph_replay_verified=True,
+        static_contexts={},
+        precision_kind=precision_kind,
+        hyena_model=SimpleNamespace(config=SimpleNamespace(vortex_style_fp8=vortex_style_fp8)),
+        cuda_graph_force_recapture=False,
+    )
+    worker = SimpleNamespace(_evo2_native_dynamic_components=native_dynamic)
+
+    assert adapter.model_refit_complete(worker) is expected
+    assert native_dynamic.cuda_graph_force_recapture is expected
+
+
 @pytest.mark.parametrize(("storage_required", "expected_move_params"), [(False, True), (True, False)])
 def test_refit_offload_respects_graph_storage(monkeypatch, storage_required, expected_move_params):
     calls = []

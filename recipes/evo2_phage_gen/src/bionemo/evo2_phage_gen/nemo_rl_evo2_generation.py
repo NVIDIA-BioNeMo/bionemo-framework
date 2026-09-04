@@ -315,6 +315,25 @@ class Evo2MegatronGenerationAdapter:
         )
         return dynamic_graph_ready or static_graph_ready
 
+    def model_refit_complete(self, worker: Any) -> bool:
+        """Require fresh quantized CUDA graphs after colocated policy weights change."""
+        native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
+        if native_dynamic is None or not getattr(native_dynamic, "cuda_graphs_enabled", False):
+            return False
+        if not self.requires_persistent_model_storage(worker):
+            return False
+
+        precision_kind = str(getattr(native_dynamic, "precision_kind", "")).lower()
+        model_config = getattr(getattr(native_dynamic, "hyena_model", None), "config", None)
+        quantized = precision_kind in {"fp8", "fp8-all-layers", "mxfp8", "nvfp4"} or bool(
+            getattr(model_config, "vortex_style_fp8", False)
+        )
+        if not quantized:
+            return False
+
+        native_dynamic.cuda_graph_force_recapture = True
+        return True
+
     def _distributed_rank(self, worker: Any) -> int:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             return int(torch.distributed.get_rank())

@@ -220,9 +220,9 @@ def test_persistent_graph_manager_binding_survives_training_toggle(monkeypatch):
     assert nd.cuda_graph_manager_count == 1
 
 
-@pytest.mark.parametrize("change_source", ["parameter", "buffer", "peer"])
-def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, change_source):
-    """Validation-first graphs must not survive a colocated model-tensor reallocation."""
+@pytest.mark.parametrize("change_source", ["parameter", "buffer", "peer", "quantized-refit"])
+def test_dynamic_graph_recaptures_after_model_state_change(monkeypatch, change_source):
+    """Validation-first graphs must not survive changed captured model state."""
 
     class _Context:
         max_sequence_length = 64
@@ -289,6 +289,8 @@ def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, change_sourc
 
     if change_source == "peer":
         peer_storage_changed["value"] = True
+    elif change_source == "quantized-refit":
+        nd.cuda_graph_force_recapture = True
     else:
         rebound = model.weight if change_source == "parameter" else model.scale
         rebound.data = rebound.detach().clone()
@@ -312,6 +314,7 @@ def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, change_sourc
     assert not static_context.evo2_static_cuda_graph_warmed
     assert not static_context.evo2_static_cuda_graph_replay_verified
     assert nd.cuda_graph_model_storage_signature == infer_module._model_storage_signature(model)
+    assert not nd.cuda_graph_force_recapture
 
 
 @pytest.mark.parametrize("remote_group", ["model", "context"])

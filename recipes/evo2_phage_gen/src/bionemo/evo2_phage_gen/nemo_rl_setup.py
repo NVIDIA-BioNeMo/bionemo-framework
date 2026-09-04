@@ -158,6 +158,8 @@ def assert_nemo_rl_runtime() -> None:
     generation_mixin = getattr(generation_worker, "MegatronGenerationMixin", None)
     if not callable(getattr(generation_mixin, "_generation_adapter_requires_persistent_model_storage", None)):
         raise RuntimeError("NeMo-RL cannot preserve CUDA-graph model storage across colocated refits")
+    if not callable(getattr(generation_mixin, "_generation_adapter_model_refit_complete", None)):
+        raise RuntimeError("NeMo-RL cannot refresh quantized CUDA graphs after colocated refits")
     parameters = inspect.signature(cluster.init_ray).parameters
     if not {"include_dashboard", "num_cpus"}.issubset(parameters):
         raise RuntimeError("NeMo-RL is missing local Ray resource controls")

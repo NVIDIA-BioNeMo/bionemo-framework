@@ -419,7 +419,7 @@ index 0a0721dd9..00eebb24a 100644
 +
 +
  class MegatronGenerationMixin:
-@@ -73,13 +84,55 @@ class MegatronGenerationMixin:
+@@ -73,13 +84,62 @@ class MegatronGenerationMixin:
          self._inference_loop = None
          self._inference_thread = None
 
@@ -465,6 +465,13 @@ index 0a0721dd9..00eebb24a 100644
 +        if callable(requirement):
 +            return bool(requirement(self))
 +        return bool(requirement)
++
++    def _generation_adapter_model_refit_complete(self) -> None:
++        """Notify the adapter after colocated policy weights have changed."""
++        adapter = self._load_generation_adapter()
++        callback = getattr(adapter, "model_refit_complete", None)
++        if callable(callback):
++            callback(self)
 +
      def _initialize_inference_engine(self, mcore_generation_config: dict) -> None:
          """Initialize the persistent inference engine and client."""
@@ -755,7 +762,7 @@ index f1a5d705c..0b86a145b 100644
              print(f"FLOPS tracker not supported for model {config['model_name']}: {e}")
 
 diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
-index e517e0298..84ef1f1b0 100644
+index e517e0298..e40a11294 100644
 --- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
 +++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
 @@ -1167,6 +1167,13 @@ class MegatronPolicyWorkerImpl(
@@ -772,22 +779,20 @@ index e517e0298..84ef1f1b0 100644
          self.refit_param_info_mcore = self._calculate_refit_param_info()
 
          # Collect tensor metadata for refit / hf side info
-@@ -1536,9 +1543,14 @@ class MegatronPolicyWorkerImpl(
-     def offload_after_refit(self):
+@@ -1537,10 +1544,12 @@ class MegatronPolicyWorkerImpl(
          """Offload as much as possible on the CPU."""
          no_grad = torch.no_grad()
          no_grad.__enter__()
 -        self.model = self.move_model(self.model, "cpu")
-+        preserve_model_storage = (
-+            self._generation_adapter_requires_persistent_model_storage()
-+        )
-+        self.model = self.move_model(
-+            self.model, "cpu", move_params=not preserve_model_storage
-+        )
++        preserve_model_storage = self._generation_adapter_requires_persistent_model_storage()
++        self.model = self.move_model(self.model, "cpu", move_params=not preserve_model_storage)
          self.model.eval()
          torch.randn(1).cuda()  # wake up torch allocator
          self.offload_before_refit()  # rerun the old offload function
++        self._generation_adapter_model_refit_complete()
 
+         allocated = torch.cuda.memory_allocated() / (1024**3)  # Convert to GB
+         reserved = torch.cuda.memory_reserved() / (1024**3)  # Convert to GB
 diff --git a/nemo_rl/distributed/virtual_cluster.py b/nemo_rl/distributed/virtual_cluster.py
 index 7d50355..ea55326 100644
 --- a/nemo_rl/distributed/virtual_cluster.py

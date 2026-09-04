@@ -396,6 +396,10 @@ class Evo2NativeDynamicComponents:
     cuda_graph_runner_count: int = 0
     cuda_graph_recorded_count: int = 0
     cuda_graph_replay_verified: bool = False
+    # Transformer Engine quantized graphs may capture derived weight state that changes after a
+    # colocated refit even when registered tensor addresses remain stable. The generation adapter
+    # sets this after a quantized refit; the next rollout clears it only after successful recapture.
+    cuda_graph_force_recapture: bool = False
     # Registered model-tensor storage captured by the current graph runners. Optimizer updates may
     # change values in place, but an offload/reload can rebind the tensors to new allocations; in
     # that case every runner must be discarded before another replay.
@@ -1675,6 +1679,7 @@ def _model_storage_signature(model: torch.nn.Module) -> tuple[tuple[Any, ...], .
 def _record_cuda_graph_model_storage(nd: Evo2NativeDynamicComponents) -> None:
     """Record the model allocations used by the runners just captured and replay-verified."""
     nd.cuda_graph_model_storage_signature = _model_storage_signature(nd.hyena_model)
+    nd.cuda_graph_force_recapture = False
 
 
 def _graph_parallel_any(local_value: bool) -> bool:
@@ -1707,13 +1712,14 @@ def _graph_parallel_any(local_value: bool) -> bool:
 
 
 def _invalidate_cuda_graphs_for_rebound_model_storage(nd: Evo2NativeDynamicComponents) -> bool:
-    """Invalidate graph runners when model offload/reload changed a captured address."""
+    """Invalidate graph runners when captured model storage or quantized state changed."""
     if not nd.cuda_graphs_enabled:
         return False
     _restore_native_dynamic_cuda_graph_managers(nd)
     captured = getattr(nd, "cuda_graph_model_storage_signature", None)
     local_storage_changed = captured is not None and captured != _model_storage_signature(nd.hyena_model)
-    if not _graph_parallel_any(local_storage_changed):
+    local_recapture_required = local_storage_changed or bool(getattr(nd, "cuda_graph_force_recapture", False))
+    if not _graph_parallel_any(local_recapture_required):
         return False
 
     _reset_layer_cuda_graphs(nd)
@@ -1723,7 +1729,7 @@ def _invalidate_cuda_graphs_for_rebound_model_storage(nd: Evo2NativeDynamicCompo
         context.evo2_static_cuda_graph_warmed = False
         context.evo2_static_cuda_graph_replay_verified = False
     if int(os.environ.get("RANK", "0")) == 0:
-        logger.info("[evo2-native-cg] model storage changed; recapturing CUDA graphs before replay")
+        logger.info("[evo2-native-cg] captured model state changed; recapturing CUDA graphs before replay")
     return True
 
 

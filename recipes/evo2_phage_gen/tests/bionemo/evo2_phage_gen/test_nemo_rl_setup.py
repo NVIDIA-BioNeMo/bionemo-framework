@@ -31,6 +31,14 @@ class _GenerationWorkerMixin:
     def _generation_adapter_requires_persistent_model_storage(self):
         return False
 
+    def _generation_adapter_model_refit_complete(self):
+        return None
+
+
+class _StorageOnlyGenerationWorkerMixin:
+    def _generation_adapter_requires_persistent_model_storage(self):
+        return False
+
 
 def _cached_source() -> Path | None:
     _, revision = nemo_rl_setup._configured_source()
@@ -127,6 +135,7 @@ assert torch.equal(ordinary_mask, replay_mask)
     worker = (build / "nemo_rl" / "models" / "policy" / "workers" / "megatron_policy_worker.py").read_text()
     assert "self._generation_adapter_requires_persistent_model_storage()" in worker
     assert 'self.model, "cpu", move_params=not preserve_model_storage' in worker
+    assert "self._generation_adapter_model_refit_complete()" in worker
 
 
 def test_environment_metrics_receive_one_task_namespace(tmp_path: Path) -> None:
@@ -245,8 +254,19 @@ def test_runtime_requires_sampled_action_support(monkeypatch: pytest.MonkeyPatch
         nemo_rl_setup.assert_nemo_rl_runtime()
 
 
-def test_runtime_requires_graph_storage_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stale install must not reuse graphs after colocated parameter rebinding."""
+@pytest.mark.parametrize(
+    ("generation_mixin", "expected_error"),
+    [
+        (SimpleNamespace, "preserve CUDA-graph model storage"),
+        (_StorageOnlyGenerationWorkerMixin, "refresh quantized CUDA graphs"),
+    ],
+)
+def test_runtime_requires_graph_storage_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    generation_mixin,
+    expected_error,
+) -> None:
+    """A stale install must expose both graph-storage lifecycle hooks."""
 
     def init_ray(log_dir=None, *, include_dashboard=True, num_cpus=None):
         return None
@@ -261,11 +281,11 @@ def test_runtime_requires_graph_storage_lifecycle(monkeypatch: pytest.MonkeyPatc
                 apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
             )
         if name.endswith(".megatron_worker"):
-            return SimpleNamespace(MegatronGenerationMixin=SimpleNamespace)
+            return SimpleNamespace(MegatronGenerationMixin=generation_mixin)
         return SimpleNamespace(init_ray=init_ray)
 
     monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
     monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
 
-    with pytest.raises(RuntimeError, match="preserve CUDA-graph model storage"):
+    with pytest.raises(RuntimeError, match=expected_error):
         nemo_rl_setup.assert_nemo_rl_runtime()
