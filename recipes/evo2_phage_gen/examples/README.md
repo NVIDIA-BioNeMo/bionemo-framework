@@ -228,7 +228,8 @@ reference rotations together and requires identical reward, filter, and measurem
 outcomes. Arc hard QC removes ORFipy calls beginning wholly inside its appended pseudocircular tail,
 while retaining cross-origin ORFs, so tail length cannot create rotation-dependent duplicate genes.
 Raw endpoint-local DUST fractions can differ by linear origin, but the tested PhiX rotations have
-the same reward and pass outcome; the exact control enforces the deployed outcome contract.
+the same intrinsic reward and pass outcome; the exact control excludes per-row cluster-deduplicated
+representative flags because those are set-relative rather than properties of a rotation.
 
 The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and `NUM_CPUS` to
 `nproc`. SFT tensor parallelism defaults to 1 on a single GPU and 2 otherwise; override

@@ -321,6 +321,23 @@ def test_dry_run(tmp_path: Path) -> None:
         assert command[: len(expected_arc_prefix)] == expected_arc_prefix
         assert "--overwrite" in command
 
+    rotation_control = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_generation write-reference-rotations " in line
+    )
+    control_anchors = [
+        rotation_control[index + 1]
+        for index, value in enumerate(rotation_control)
+        if value == "--prompt-anchor"
+    ]
+    assert control_anchors == [
+        "coordinate_origin:1",
+        "before_g:2387",
+        "after_h:3918",
+        "a_cluster_start:3973",
+    ]
+
     rl_control = next(
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()

@@ -596,6 +596,9 @@ def _comparable_control_metrics(row: dict[str, Any]) -> dict[str, object]:
     """Return reward, filter, and measurement outcomes that must be origin-invariant."""
     metrics: dict[str, object] = {}
     for name, value in row.items():
+        if name.endswith("_cluster_deduplicated_pass"):
+            # This is a set-relative representative choice, not an intrinsic genome outcome.
+            continue
         if not (
             name == "reward"
             or name.startswith(("reward_", "valid_"))

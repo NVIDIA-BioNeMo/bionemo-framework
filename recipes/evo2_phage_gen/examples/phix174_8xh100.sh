@@ -895,6 +895,8 @@ stage_40() {
   local -a control_anchor_args=(--prompt-anchor coordinate_origin:1)
   load_sampling_selection
   for anchor in "${SAMPLING_PROMPT_ANCHORS[@]}"; do
+    # Keep one control per circular coordinate; the explicit baseline already covers coordinate 1.
+    [[ "${anchor##*:}" == "1" ]] && continue
     control_anchor_args+=(--prompt-anchor "${anchor}")
   done
   if [[ -f "${STAGE_DIR}/40-rl.done" ]]; then

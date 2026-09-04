@@ -125,9 +125,9 @@
         "For the circular genome, the response evaluates alternate rotations and uses overlap-aware CDS occupancy plus annotated regulatory, origin, promoter, and terminator features when screening anchors.",
         "It treats absence of an annotation as incomplete evidence rather than proof that an interval lacks an unannotated regulatory element.",
         "For the fixed-end linear dsDNA genome, it first reconstructs the biological termini and chosen packaged or deposited form rather than using an artifact deposit join, then calibrates both strand-equivalent terminal orientations without allowing arbitrary internal rotation.",
-        "For each target, same-length generation batches mix eligible circular anchors or both fixed-end strand orientations, and each RL global batch contains the intended orientation-by-length mixture even if a decode microbatch cannot mix lengths.",
+        "For each target, packed dynamic generation carries the full ordered orientation-by-length mixture in one call; a backend that genuinely requires fixed shapes may use balanced same-length calls while preserving the intended global mixture.",
         "The fixed validation bank independently represents the same strata, with starts, lengths, seeds, and topology recorded.",
-        "It checks circular-origin invariance for rewards and filters declared rotation-invariant, records any intentional origin-dependent exceptions, and does not use origin-dependent whole-sequence likelihood to globally rank mixed-origin designs."
+        "It checks intrinsic circular-origin invariance for rewards and filters declared rotation-invariant, treats per-row cluster-deduplicated representative flags as set-relative while validating representative count and set-level yield, records intentional origin-dependent exceptions, and does not use origin-dependent whole-sequence likelihood to globally rank mixed-origin designs."
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": null

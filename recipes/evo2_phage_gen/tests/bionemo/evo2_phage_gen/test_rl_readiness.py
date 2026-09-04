@@ -241,6 +241,13 @@ def test_environment_control_requires_identical_metrics_across_circular_rotation
         assert len(message_log_batch) == 2
         scores = pd.concat([_control_scores(sequence), _control_scores(rotated)], ignore_index=True)
         scores["mmseqs_cluster_size"] = 2
+        for column in (
+            "reward_binary_historical_core_cluster_deduplicated_pass",
+            "reward_binary_core_cluster_deduplicated_pass",
+            "reward_binary_historical_full_qc_cluster_deduplicated_pass",
+            "reward_binary_full_qc_cluster_deduplicated_pass",
+        ):
+            scores[column] = [1.0, 0.0]
         return scores
 
     monkeypatch.setattr(nemo_rl_env, "score_message_logs", score)
