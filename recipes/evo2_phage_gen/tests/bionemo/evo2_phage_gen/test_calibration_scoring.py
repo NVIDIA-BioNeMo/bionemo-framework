@@ -107,7 +107,7 @@ def test_score_cell_uses_the_phix_capsid_length_envelope(tmp_path, monkeypatch):
         config.genome_length_reward_lower_full,
         config.genome_length_reward_upper_full,
         config.genome_length_reward_upper_zero,
-    ) == (5305, 5359, 5391, 5494)
+    ) == (5305, 5359, 5391, 5445)
 
 
 def test_summarize_cell_separates_measured_zero_from_missing_support():

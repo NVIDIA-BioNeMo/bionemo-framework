@@ -115,6 +115,19 @@
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-009-independent-measurement",
+      "prompt": "A generated genome is one nucleotide below the final length gate but otherwise tool-safe. Arc currently removes it before ORF calling and fills its protein and synteny measurements with zero. Fix the online behavior without weakening final acceptance.",
+      "expected_output": "Independent biological measurements plus a separate failed length gate.",
+      "assertions": [
+        "A tool-safe short genome still receives ORF, protein, and architecture measurements rather than fabricated zeroes.",
+        "The graded length reward and binary final length acceptance remain separate.",
+        "Final acceptance still rejects the genome outside the configured hard length interval.",
+        "Empty, malformed, or tool-failed genomes remain isolated and receive explicit zero credit where measurement is impossible."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
     }
   ]
 }

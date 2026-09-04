@@ -273,6 +273,9 @@ def test_rl_prompt_and_control_evals_cover_the_new_contract() -> None:
     assert "bionemo-phage-design-implement-rl-objectives-007-biological-controls" in {
         case["id"] for case in implement["evals"]
     }
+    assert "bionemo-phage-design-implement-rl-objectives-009-independent-measurement" in {
+        case["id"] for case in implement["evals"]
+    }
     assert "bionemo-phage-design-calibrate-rl-sampling-008-circular-editable-regions" in {
         case["id"] for case in calibrate["evals"]
     }

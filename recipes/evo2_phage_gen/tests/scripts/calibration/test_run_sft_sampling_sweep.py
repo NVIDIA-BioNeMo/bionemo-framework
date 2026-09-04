@@ -47,7 +47,7 @@ def test_sampling_sweep_dry_run_materializes_marker_only_parallel_plan(tmp_path:
 
     sweep_config = json.loads((run_root / "sweep_config.json").read_text())
     assert sweep_config["topology"] == {"gpu_ids": [0, 1], "tensor_parallel_size": 1, "replicas": 2}
-    assert sweep_config["target_length"] == 5470
+    assert sweep_config["target_length"] == 5444
     assert sweep_config["max_seq_length"] == 10240
     assert sweep_config["top_k"] == 5
     assert sweep_config["top_p"] == 0.999

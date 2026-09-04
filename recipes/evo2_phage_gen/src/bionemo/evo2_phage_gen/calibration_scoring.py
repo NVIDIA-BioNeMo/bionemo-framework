@@ -268,7 +268,7 @@ def score_cell(
             genome_length_reward_lower_zero=5305,
             genome_length_reward_lower_full=5359,
             genome_length_reward_upper_full=5391,
-            genome_length_reward_upper_zero=5494,
+            genome_length_reward_upper_zero=5445,
             dustmask_filter=True,
             dustmasker_bin=str((tool_bin_dir / "dustmasker").resolve()),
         ),

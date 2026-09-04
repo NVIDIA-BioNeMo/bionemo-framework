@@ -186,7 +186,7 @@ policy:
     port_range_low: 11001
     port_range_high: 15000
     backend: megatron
-    max_new_tokens: 5450
+    max_new_tokens: 5420
     temperature: 0.8
     top_p: 1.0
     top_k: null
@@ -244,7 +244,7 @@ env:
     genome_length_reward_lower_zero: 5305
     genome_length_reward_lower_full: 5359
     genome_length_reward_upper_full: 5391
-    genome_length_reward_upper_zero: 5494
+    genome_length_reward_upper_zero: 5445
     gc_content_min: 30.0
     gc_content_max: 65.0
     homopolymer_max: 10

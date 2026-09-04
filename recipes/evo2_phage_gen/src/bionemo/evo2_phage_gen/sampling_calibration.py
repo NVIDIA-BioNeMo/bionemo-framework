@@ -353,7 +353,7 @@ def _parse_args() -> argparse.Namespace:
     materialize.add_argument("--marker", default="+~")
     materialize.add_argument("--gpu-ids", type=int, nargs="+", required=True)
     materialize.add_argument("--tensor-parallel-size", type=int, required=True)
-    materialize.add_argument("--target-length", type=int, default=5470)
+    materialize.add_argument("--target-length", type=int, default=5444)
     materialize.add_argument("--top-k", type=int, required=True)
     materialize.add_argument("--top-p", type=float, required=True)
     materialize.add_argument("--seed", type=int, default=7)

@@ -71,7 +71,6 @@ DEFAULT_GDPO_OBJECTIVES: tuple[GDPOObjective, ...] = (
             "reward_gc_content",
             "reward_nt_homopolymer",
             "reward_dustmask_end",
-            "reward_nucleotide_pass",
         ),
     ),
     GDPOObjective(

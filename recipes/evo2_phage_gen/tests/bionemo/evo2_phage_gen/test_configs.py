@@ -97,11 +97,18 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
         "genome_length_reward_lower_zero": 5305,
         "genome_length_reward_lower_full": 5359,
         "genome_length_reward_upper_full": 5391,
-        "genome_length_reward_upper_zero": 5494,
+        "genome_length_reward_upper_zero": 5445,
     }
-    assert generation_config["max_new_tokens"] + 16 == 5466
+    assert generation_config["max_new_tokens"] + 16 == 5436
+    assert generation_config["max_new_tokens"] + 24 == 5444
+    assert (
+        config["env"]["phage_qc"]["genome_length_reward_lower_full"]
+        - config["env"]["phage_qc"]["genome_length_reward_lower_zero"]
+        == config["env"]["phage_qc"]["genome_length_reward_upper_zero"]
+        - config["env"]["phage_qc"]["genome_length_reward_upper_full"]
+    )
     assert config["env"]["phage_qc"]["genome_length_reward_upper_full"] < generation_config["max_new_tokens"] + 16
-    assert generation_config["max_new_tokens"] + 16 < config["env"]["phage_qc"]["genome_length_reward_upper_zero"]
+    assert generation_config["max_new_tokens"] + 24 < config["env"]["phage_qc"]["genome_length_reward_upper_zero"]
     assert config["policy"]["max_total_sequence_length"] >= generation_config["max_new_tokens"] + 16
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 0.0
     assert config["env"]["phage_qc"]["dustmask_filter"] is True
@@ -180,7 +187,6 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "gc_content",
         "nt_homopolymer",
         "dustmask_end",
-        "nucleotide_pass",
         "protein_hit_count",
         "tropism",
         "required_genes",
@@ -240,8 +246,8 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["policy"]["train_micro_batch_size"] == 1
     assert config["policy"]["generation_batch_size"] == 96
     assert config["policy"]["logprob_batch_size"] == 1
-    assert config["policy"]["generation"]["max_new_tokens"] + 16 == 5466
-    assert config["policy"]["generation"]["max_new_tokens"] + 24 == 5474
+    assert config["policy"]["generation"]["max_new_tokens"] + 16 == 5436
+    assert config["policy"]["generation"]["max_new_tokens"] + 24 == 5444
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
     assert mcore_generation_config["prompt_batch_size"] == 12
     assert mcore_generation_config["max_requests"] == 12
@@ -274,7 +280,7 @@ def test_phix_example_documents_every_gdpo_objective():
     assert implementation_section.count("../src/bionemo/evo2_phage_gen/") >= len(
         config["env"]["phage_qc"]["gdpo_objectives"]
     )
-    for evidence in ("Sinsheimervirus", "5,339", "5,359", "5,388", "5,494", "FASTA"):
+    for evidence in ("Sinsheimervirus", "5,339", "5,359", "5,388", "5,445", "FASTA"):
         assert evidence in score_section
 
 

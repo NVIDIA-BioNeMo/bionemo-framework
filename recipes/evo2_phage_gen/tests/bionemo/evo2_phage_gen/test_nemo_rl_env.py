@@ -228,7 +228,7 @@ def test_environment_requires_enabled_sequence_safety(tmp_path: Path):
         env_cls({"sequence_safety": disabled})
 
 
-def test_environment_maps_asymmetric_genome_length_reward_bounds(tmp_path: Path):
+def test_environment_maps_genome_length_reward_bounds(tmp_path: Path):
     """The resolved RL environment must not fall back to the broad hard-QC interval."""
     if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
         pytest.skip("NeMo-RL is unavailable")
@@ -240,7 +240,7 @@ def test_environment_maps_asymmetric_genome_length_reward_bounds(tmp_path: Path)
             "genome_length_reward_lower_zero": 5305,
             "genome_length_reward_lower_full": 5359,
             "genome_length_reward_upper_full": 5391,
-            "genome_length_reward_upper_zero": 5494,
+            "genome_length_reward_upper_zero": 5445,
         }
     )
 
@@ -249,7 +249,7 @@ def test_environment_maps_asymmetric_genome_length_reward_bounds(tmp_path: Path)
         env.config.genome_length_reward_lower_full,
         env.config.genome_length_reward_upper_full,
         env.config.genome_length_reward_upper_zero,
-    ) == (5305.0, 5359.0, 5391.0, 5494.0)
+    ) == (5305.0, 5359.0, 5391.0, 5445.0)
 
 
 def test_gdpo_objective_scores_reduce_named_columns_positionally():
@@ -287,6 +287,7 @@ def test_default_gdpo_objectives_expose_three_independent_safety_signals():
     ]
     assert all(objective.requires_safety_eligibility is False for objective in safety_objectives)
     assert all(objective.requires_safety_eligibility is True for objective in objectives[:-3])
+    assert all("reward_nucleotide_pass" not in objective.columns for objective in objectives)
 
 
 @pytest.mark.parametrize("invalid", ["false", 0, 1, None])

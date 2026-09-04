@@ -186,10 +186,10 @@ def test_dry_run(tmp_path: Path) -> None:
         "wandb_rl_run_name": "result-7b-base-gdpo",
     }
     log = (result_root / "RUNLOG.md").read_text()
-    assert "TARGET_LENGTH=5470" in log
+    assert "TARGET_LENGTH=5444" in log
     assert (
         "sampling selection: temperature=1.0, prompt lengths=16 24, "
-        "anchors=after_f:2285 after_h:3918, max new tokens=5450"
+        "anchors=origin:1 before_g:2387 after_h:3918 a_cluster_start:3973, max new tokens=5420"
     ) in log
     for command in (
         "evo2_phage_prepare_external_assets",
@@ -499,6 +499,15 @@ def test_single_gpu_plan(tmp_path: Path) -> None:
 
     log = (result_root / "RUNLOG.md").read_text()
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
+    assert len(prompt_banks) == 2
+    assert all(command.count("--prompt-anchor") == 4 for command in prompt_banks)
+    calibration = next(
+        command
+        for command in commands
+        if command[:1] == ["env"] and "scripts/calibration/run_sft_sampling_sweep.sh" in command
+    )
+    assert "PROMPT_ANCHORS=origin:1 before_g:2387 after_h:3918 a_cluster_start:3973" in calibration
     sft = next(command for command in commands if command[:1] == ["torchrun"] and "--max-steps" in command)
     assert sft[sft.index("--nproc-per-node") + 1] == "1"
     assert sft[sft.index("--tensor-model-parallel-size") + 1] == "1"

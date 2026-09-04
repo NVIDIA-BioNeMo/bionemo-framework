@@ -821,7 +821,7 @@ stage_30() {
   if [[ -f "${STAGE_DIR}/30-calibration-generation.done" ]]; then
     note 'substage 30-calibration-generation already complete'
   else
-    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='16 24' PROMPT_ANCHORS='origin:1 after_f:2285 after_h:3918' REFERENCE_FASTA="${PHIX_REFERENCE_FASTA}" TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=5470 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
+    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='16 24' PROMPT_ANCHORS='origin:1 before_g:2387 after_h:3918 a_cluster_start:3973' REFERENCE_FASTA="${PHIX_REFERENCE_FASTA}" TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=5444 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-generation.done"
   fi
   if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then

@@ -197,7 +197,7 @@ def test_materialize_cli_defaults_to_the_phix_capsid_zero_edge(tmp_path: Path, m
         ],
     )
 
-    assert _parse_args().target_length == 5470
+    assert _parse_args().target_length == 5444
 
 
 def test_print_command_cli_emits_complete_nul_delimited_vector(tmp_path: Path) -> None:

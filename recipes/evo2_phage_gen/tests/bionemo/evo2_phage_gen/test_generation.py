@@ -135,21 +135,34 @@ def test_write_rl_prompt_bank_balances_anchor_and_length_in_each_update(tmp_path
     output = write_rl_prompt_bank(
         tmp_path / "train.jsonl",
         prompt_lengths=[2, 4],
-        repeats_per_length=2,
-        prompt_anchors=[PromptAnchor("left", 1), PromptAnchor("right", 9)],
+        num_records=96,
+        prompt_anchors=[
+            PromptAnchor("origin", 1),
+            PromptAnchor("before_g", 5),
+            PromptAnchor("after_h", 9),
+            PromptAnchor("a_cluster_start", 13),
+        ],
         reference_sequence="AAAACCCCGGGGTTTT",
         id_prefix="train",
     )
 
     records = [json.loads(line) for line in output.read_text().splitlines()]
-    for update in (records[:4], records[4:]):
-        assert [row["messages"][0]["content"] for row in update] == [
-            "+~AA",
-            "+~GG",
-            "+~AAAA",
-            "+~GGGG",
-        ]
-        assert {row["id"].split("-p", 1)[0] for row in update} == {"train-left", "train-right"}
+    strata = [row["id"].rsplit("-", 1)[0].removeprefix("train-") for row in records]
+    assert len(records) == 96
+    assert {stratum: strata.count(stratum) for stratum in set(strata)} == {
+        f"{anchor}-p{length}": 12
+        for length in (2, 4)
+        for anchor in ("origin", "before_g", "after_h", "a_cluster_start")
+    }
+    for start in range(0, len(records), 16):
+        update = strata[start : start + 16]
+        assert {stratum: update.count(stratum) for stratum in set(update)} == {
+            stratum: 2 for stratum in set(strata)
+        }
+        expanded = [stratum for stratum in update for _ in range(6)]
+        assert {stratum: expanded.count(stratum) for stratum in set(expanded)} == {
+            stratum: 12 for stratum in set(strata)
+        }
 
 
 def test_rl_repeat_and_dp_chunk_shape_mixes_anchors_locally_and_lengths_globally(tmp_path):

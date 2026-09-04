@@ -1234,6 +1234,9 @@ def _write_external_qc_config(
     config["evo_gen_seqs_fasta_file_save_location"] = str(input_fasta)
     config["overwrite_sequence_ids"] = True
     config["online_measurement_mode"] = True
+    # Length remains an independent online reward and final acceptance gate. Do not
+    # suppress otherwise usable protein and architecture evidence for an outlier.
+    config["genome_length_filter"] = False
     for key in ARC_PATH_KEYS:
         if config.get(key):
             config[key] = str(_repo_path(config[key]))

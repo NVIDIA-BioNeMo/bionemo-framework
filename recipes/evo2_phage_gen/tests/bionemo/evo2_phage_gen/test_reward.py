@@ -315,8 +315,8 @@ def test_score_nucleotide_metrics_rewards_passing_sequence():
         assert scored.loc[0, f"reward_safety_{safety_class}"] == 0.0
 
 
-def test_score_nucleotide_metrics_uses_configured_asymmetric_genome_length_reward():
-    lengths = [5305, 5332, 5359, 5386, 5391, 5442, 5494, 5800]
+def test_score_nucleotide_metrics_uses_configured_symmetric_genome_length_reward():
+    lengths = [5305, 5332, 5359, 5386, 5391, 5418, 5445, 5800]
     scored = score_nucleotide_metrics(
         pd.DataFrame(
             {
@@ -330,11 +330,11 @@ def test_score_nucleotide_metrics_uses_configured_asymmetric_genome_length_rewar
             genome_length_reward_lower_zero=5305,
             genome_length_reward_lower_full=5359,
             genome_length_reward_upper_full=5391,
-            genome_length_reward_upper_zero=5494,
+            genome_length_reward_upper_zero=5445,
         ),
     )
 
-    assert scored["reward_genome_length"].tolist() == pytest.approx([0.0, 0.5, 1.0, 1.0, 1.0, 52 / 103, 0.0, 0.0])
+    assert scored["reward_genome_length"].tolist() == pytest.approx([0.0, 0.5, 1.0, 1.0, 1.0, 0.5, 0.0, 0.0])
     assert scored.loc[scored["genome_length"] == 5800, "reward_nucleotide_pass"].item() == 0.0
 
 
@@ -346,7 +346,7 @@ def test_score_nucleotide_metrics_uses_configured_asymmetric_genome_length_rewar
             "genome_length_reward_lower_zero": 5359,
             "genome_length_reward_lower_full": 5305,
             "genome_length_reward_upper_full": 5391,
-            "genome_length_reward_upper_zero": 5494,
+            "genome_length_reward_upper_zero": 5445,
         },
     ],
 )
@@ -1184,6 +1184,8 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
         "genetic_architecture_visualization_script": "",
         "protein_annotation_file": "",
         "reference_genome_gff_file_save_location": str(reference_gff),
+        "genome_length_filter": True,
+        "genome_length_range": [5306, 5493],
     }
     base_config_path = tmp_path / "arc_config.yaml"
     base_config_path.write_text(yaml.safe_dump(base_config))
@@ -1229,6 +1231,8 @@ def test_external_qc_config_enables_paper_ready_validation_filters(tmp_path):
     assert "*" not in str(Seq(cds).translate())[:-1]
     assert "reference\tcaller\tCDS\t567\t843\t.\t+\t0\tID=E" in reference_gff.read_text()
     assert run_config["online_measurement_mode"] is True
+    assert run_config["genome_length_filter"] is False
+    assert run_config["genome_length_range"] == [5306, 5493]
     assert run_config["protein_match_min_reciprocal_coverage"] == 0.9
     assert run_config["tropism_match_min_reciprocal_coverage"] == 0.95
 

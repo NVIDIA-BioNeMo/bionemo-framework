@@ -18,8 +18,8 @@ checkpointing:
 
 grpo:
   max_num_epochs: 500
-  # Each 12-request DP decode batch sees both anchors at one length; the full
-  # 96-rollout update covers both lengths and both anchors.
+  # Each 12-request DP decode batch sees two prompt records; the full 96-rollout
+  # update covers all eight anchor-by-length strata with 12 generations each.
   num_prompts_per_step: 16
   num_generations_per_prompt: 6
   max_num_steps: 500
@@ -59,7 +59,7 @@ policy:
     scheduler:
       lr_warmup_init: 1.0e-7
   generation:
-    max_new_tokens: 5450
+    max_new_tokens: 5420
     temperature: 1.0
     top_p: 0.999
     top_k: 5
@@ -141,9 +141,6 @@ env:
         requires_safety_eligibility: true
       - name: "dustmask_end"
         columns: ["reward_dustmask_end"]
-        requires_safety_eligibility: true
-      - name: "nucleotide_pass"
-        columns: ["reward_nucleotide_pass"]
         requires_safety_eligibility: true
       - name: "protein_hit_count"
         columns: ["reward_external_protein_hit_count"]

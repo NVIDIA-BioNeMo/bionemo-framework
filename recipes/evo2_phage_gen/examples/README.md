@@ -123,20 +123,22 @@ defaults and is the schema for a custom selection. Passing `--sampling-selection
 override, not a choice derived from the fresh calibration evidence. The defaults use temperature
 1, top-k 5, and top-p 0.999; sampled EOD is retained so the length reward can teach termination.
 The decoder ceiling reaches approximately
-5,466–5,474 nt across the prompt mixture, within the length reward's upper declining slope and below
-its 5,494-nt zero edge. The 5,359–5,391-nt full-credit band sits inside the broader
+5,436–5,444 nt across the prompt mixture, within the length reward's upper declining slope and below
+its 5,445-nt zero edge. The 5,359–5,391-nt full-credit band sits inside the broader
 5,306–5,493-nt hard acceptance interval. For the circular PhiX reference, the deployed
-16- and 24-nt prompts start at 1-based positions 2,285 (`after_f`) and 3,918 (`after_h`). These
-intervals avoid annotated CDS/features and have lower overlapping-CDS occupancy than the old
-coordinate origin, but an unannotated regulatory element may still exist. The calibration also
-includes origin position 1 as a comparison control. This rotation strategy does not apply to a
-linear genome, whose biological endpoints must be preserved.
+16- and 24-nt prompts mix four 1-based anchors: coordinate 1 (`origin`), 2,387 (`before_g`),
+3,918 (`after_h`), and 3,973 (`a_cluster_start`). `before_g` and `a_cluster_start` begin eight
+bases before the curated G and A starts, respectively, so they preserve each start codon and the
+first 8 or 16 coding bases while leaving the rest of G, A, A*, and B generative. `after_h` supplies
+an unseeded route into the A/A*/B cluster; `origin` retains the canonical context while fixing a
+short origin-spanning segment shared by those three ORFs. This rotation strategy does not apply to
+a linear genome, whose biological endpoints must be preserved.
 
 Each 96-rollout GDPO update uses 16 prompt records × 6 generations. With DP8, each 12-request decode
-batch contains both anchors at one prompt length, while the global update contains all four
-anchor×length strata. Validation independently contains the same mixture. The 1,000-design final
-rollout uses 250 prompts per stratum: two 500-record, same-length files alternate anchors and combine
-to exactly 1,000 records.
+batch contains two prompt records, while the global update contains all eight anchor×length strata:
+two prompt records and 12 generated sequences per stratum. Validation independently contains the
+same mixture. The 1,000-design final rollout uses 125 prompts per stratum: two 500-record,
+same-length files alternate four anchors and combine to exactly 1,000 records.
 
 The launcher sets `max_model_len` to the smallest 256-token boundary covering the longest selected
 prompt, its two-token `+~` prefix, and `max_new_tokens` (5,632 with the defaults), rather than
@@ -241,16 +243,16 @@ Decode batches divisible by eight avoid regular FP8's alignment fallback.
 
 ## Current PhiX174 GDPO score definitions
 
-This is the human-readable contract for the 16 objectives in
+This is the human-readable contract for the 15 objectives in
 `configs/gdpo_phage_megatron.yaml`. It is also the worked example for the run-specific
 `artifacts/RL_SCORE_DEFINITIONS.md` that an agent writes when designing or changing objectives;
 the E2E shell script does not generate that artifact. These thresholds reproduce the current
 PhiX174 computational profile, not universal phage-design optima or evidence of bootability.
 
-GDPO receives each row below as a separate `[0, 1]` objective. The scalar `weight_*` settings are
-diagnostic and do not reweight objectives after GDPO normalization. The first 13 objectives are
-forced to zero unless the sequence has an exact sequence-safety `PASS`; the three safety
-objectives remain unmasked so failures still provide learning signal. Missing, invalid, non-finite,
+GDPO receives each objective row below as a separate `[0, 1]` objective. The scalar `weight_*`
+settings are diagnostic and do not reweight objectives after GDPO normalization. The first 12
+objectives are forced to zero unless the sequence has an exact sequence-safety `PASS`; the three
+safety objectives remain unmasked so failures still provide learning signal. Missing, invalid, non-finite,
 or unavailable measurements map to zero when scoring returns a row. Configured Arc, DUST, or
 diversity-command failures can instead fail the scoring batch rather than fabricate a biological
 score. Final checkpoint selection uses the stricter safety-qualified, full-QC,
@@ -271,7 +273,6 @@ the exact-safety mask. The implementations for the individual terms are:
 | `gc_content`               | [`calculate_gc_content`](../src/bionemo/evo2_phage_gen/qc.py) and [`_interval_score`](../src/bionemo/evo2_phage_gen/reward.py)                                                                                                                                    |
 | `nt_homopolymer`           | [`calculate_nt_homopolymer_len`](../src/bionemo/evo2_phage_gen/qc.py) and [`_upper_bound_ratio_score`](../src/bionemo/evo2_phage_gen/reward.py)                                                                                                                   |
 | `dustmask_end`             | [`calculate_dustmasker_metrics`](../src/bionemo/evo2_phage_gen/qc.py) and [`score_nucleotide_metrics`](../src/bionemo/evo2_phage_gen/reward.py)                                                                                                                   |
-| `nucleotide_pass`          | [`score_nucleotide_metrics`](../src/bionemo/evo2_phage_gen/reward.py)                                                                                                                                                                                             |
 | `protein_hit_count`        | [`_add_mmseqs_hit_rewards`](../src/bionemo/evo2_phage_gen/reward.py) and [`protein_alignment_integrity`](../src/bionemo/evo2_phage_gen/protein_evidence.py)                                                                                                       |
 | `tropism`                  | [`smooth_protein_match_integrity`](../src/bionemo/evo2_phage_gen/protein_evidence.py), [`summarize_smooth_reference_evidence`](../src/bionemo/evo2_phage_gen/protein_evidence.py), and [`_add_smooth_reference_rewards`](../src/bionemo/evo2_phage_gen/reward.py) |
 | `required_genes`           | [`summarize_required_gene_evidence`](../src/bionemo/evo2_phage_gen/protein_evidence.py) and [`_add_required_gene_rewards`](../src/bionemo/evo2_phage_gen/reward.py)                                                                                               |
@@ -287,6 +288,11 @@ the exact-safety mask. The implementations for the individual terms are:
 
 - **RL objectives** are the rows below. Their `[0, 1]` values shape training; full credit is a target,
   not an automatic final acceptance boundary.
+- **Online measurement** disables Arc's length prefilter so a tool-safe length outlier still receives
+  independent ORF, protein, and architecture measurements. Length remains its own graded reward and
+  final acceptance gate.
+- **Nucleotide-pass telemetry** records the binary conjunction used by checkpoint and final-QC
+  diagnostics; it is not a separate GDPO objective duplicating the graded component terms.
 - **Checkpoint selection** uses
   `binary_safety_qualified_full_qc_cluster_deduplicated_rate`. It requires exact safety `PASS`, full
   credit on the binary-core rewards—including the 5,359–5,391-nt length band—then the independent
@@ -315,11 +321,11 @@ in the online reward path.
 | Objective (reward column)                    | Zero credit                                                                                                            | Full credit                                                                                                                                | Partial credit and rationale                                                                                                                                                                                                                                                                                                            |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `valid_nt_chars` (`reward_valid_nt_chars`)   | Any emitted character outside A/C/G/T.                                                                                 | No non-ACGT character is present.                                                                                                          | Binary. The raw helper regards an empty string as having no invalid character, but empty output fails length and aggregate nucleotide gates and cannot receive the safety-qualified GDPO objective. This prevents malformed sequence text from satisfying downstream biological tools.                                                  |
-| `genome_length` (`reward_genome_length`)     | Length at or below 5,305 nt, or at or above 5,494 nt.                                                                  | 5,359–5,391 nt inclusive.                                                                                                                  | Ramp linearly from 0 to 1 over 5,305–5,359 nt and from 1 to 0 over 5,391–5,494 nt. Exact FASTA lengths for 155 same-capsid Sinsheimervirus genomes span 5,339–5,388 nt (p5 5,359; median/reference 5,386); INPHARED's rounded kilobase field is not used. PhiX has no terminal repeat, so deposited and packaged lengths are identical. |
+| `genome_length` (`reward_genome_length`)     | Length at or below 5,305 nt, or at or above 5,445 nt.                                                                  | 5,359–5,391 nt inclusive.                                                                                                                  | Ramp linearly from 0 to 1 over 5,305–5,359 nt and from 1 to 0 over 5,391–5,445 nt: equal 54-nt slopes on both sides. Exact FASTA lengths for 155 same-capsid Sinsheimervirus genomes span 5,339–5,388 nt (p5 5,359; median/reference 5,386); INPHARED's rounded kilobase field is not used. PhiX has no terminal repeat, so deposited and packaged lengths are identical. |
 | `gc_content` (`reward_gc_content`)           | Mathematically at or below −5% or at or above 100%; only the 100% endpoint is physically attainable.                   | 30–65% inclusive.                                                                                                                          | Below 30%: `max(0, 1 - (30-GC)/35)`; above 65%: `max(0, 1 - (GC-65)/35)`. Thus 0% GC still scores 1/7, while 100% scores 0. The broad band rejects extreme composition while leaving room around the PhiX reference.                                                                                                                    |
 | `nt_homopolymer` (`reward_nt_homopolymer`)   | No finite positive run length reaches exactly zero; an ineligible row is subsequently zeroed by the exact-safety mask. | Maximum nucleotide run *H* ≤ 10 bases.                                                                                                     | For *H* > 10, score `10/H`, decreasing asymptotically toward zero. Long homopolymers are discouraged because they are low-complexity and can complicate synthesis and sequencing.                                                                                                                                                       |
-| `dustmask_end` (`reward_dustmask_end`)       | No valid masked fraction reaches zero; an ineligible row is subsequently zeroed by the exact-safety mask.              | Maximum DUST-masked fraction *F* over either terminal 200-nt window ≤ 0.9.                                                                 | For 0.9 < *F* ≤ 1, score `0.9/F` (0.9–1.0). A failed external DUST command fails the scoring batch. The online nucleotide-pass objective supplies the binary cutoff; the final Arc target profile does not repeat this gate. DUST uses the approach described by [Morgulis et al.](https://doi.org/10.1089/cmb.2006.13.1028).           |
-| `nucleotide_pass` (`reward_nucleotide_pass`) | Any component gate fails.                                                                                              | All characters are A/C/G/T, length is 5,306–5,493 nt, GC is 30–65%, maximum homopolymer is ≤10, and both terminal DUST fractions are ≤0.9. | Binary online conjunction. Its non-DUST thresholds are also applied by final Arc QC; the DUST distinction is described above.                                                                                                                                                                                                           |
+| `dustmask_end` (`reward_dustmask_end`)       | No valid masked fraction reaches zero; an ineligible row is subsequently zeroed by the exact-safety mask.              | Maximum DUST-masked fraction *F* over either terminal 200-nt window ≤ 0.9.                                                                 | For 0.9 < *F* ≤ 1, score `0.9/F` (0.9–1.0). A failed external DUST command fails the scoring batch. The nucleotide-pass diagnostic supplies the binary cutoff; the final Arc target profile does not repeat this gate. DUST uses the approach described by [Morgulis et al.](https://doi.org/10.1089/cmb.2006.13.1028).                 |
+| Nucleotide-pass diagnostic (`reward_nucleotide_pass`) | Any component gate fails.                                                                                       | All characters are A/C/G/T, length is 5,306–5,493 nt, GC is 30–65%, maximum homopolymer is ≤10, and both terminal DUST fractions are ≤0.9. | Binary acceptance and checkpoint diagnostic, not a separate GDPO shaping objective. Failure does not suppress independent ORF, protein, or architecture measurements; its non-DUST thresholds are also applied by final Arc QC.                                                                                                            |
 
 ### Protein evidence, architecture, and diversity
 
