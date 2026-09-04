@@ -91,6 +91,7 @@ from bionemo.evo2.models.evo2_provider import (
     Hyena40bModelProvider,
     HyenaModelProvider,
     HyenaOptimizerConfigOverrideProvider,
+    _configure_fa4_for_device,
 )
 from bionemo.evo2.models.megatron.hyena.hyena_layer_specs import get_hyena_stack_spec
 from bionemo.evo2.models.megatron.hyena.hyena_model import HyenaModel as MCoreHyenaModel
@@ -237,6 +238,7 @@ class HyenaForSequenceClassificationProvider(HyenaModelProvider):
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> HyenaForSequenceClassification:
         """Construct the classification model with the configured backbone."""
+        _configure_fa4_for_device(self)
         self.bias_activation_fusion = False if self.remove_activation_post_first_layer else self.bias_activation_fusion
 
         assert getattr(self, "virtual_pipeline_model_parallel_size", None) is None and vp_stage is None, (
