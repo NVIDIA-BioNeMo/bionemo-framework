@@ -355,6 +355,29 @@ def test_evo2_native_generation_reseeds_cached_sampling_rng_for_each_adapter_cal
     assert native_dynamic.sampling_rng is None
 
 
+@pytest.mark.parametrize(("precision", "prepared"), [("fp8", True), ("fp4", True), ("bf16", False)])
+def test_quantized_rollout_prepares_rows_outside_inference_mode(monkeypatch, precision, prepared):
+    calls = []
+
+    def prepare(model, config):
+        calls.append((model, config, torch.is_inference_mode_enabled()))
+        return True
+
+    monkeypatch.setattr("bionemo.evo2.run.low_precision.prepare_model_for_quantized_inference", prepare)
+    config = SimpleNamespace(
+        fp8="e4m3" if precision == "fp8" else None,
+        fp4="nvfp4" if precision == "fp4" else None,
+    )
+    model = SimpleNamespace(config=config)
+
+    with torch.inference_mode():
+        evo2_generation._prepare_evo2_quantized_inference(model)
+
+    assert bool(calls) is prepared
+    if prepared:
+        assert calls == [(model, config, False)]
+
+
 @pytest.mark.parametrize(
     ("configured_size", "tensor_parallel_size", "expected_size"),
     [(48, 1, 48), (48, 2, 48), (48, 5, 50), (96, 7, 98), (96, 8, 96)],
@@ -642,6 +665,7 @@ def test_refit_offload_respects_graph_storage(monkeypatch, storage_required, exp
             calls.append(("move", moved_model, device, kwargs)) or moved_model
         ),
         offload_before_refit=lambda: calls.append(("offload-before-refit",)),
+        _generation_adapter_model_refit_complete=lambda: calls.append(("refit-complete",)),
     )
     monkeypatch.setattr(torch.cuda.nvtx, "range_push", lambda _name: None)
     monkeypatch.setattr(torch.cuda.nvtx, "range_pop", lambda: None)
@@ -651,8 +675,10 @@ def test_refit_offload_respects_graph_storage(monkeypatch, storage_required, exp
 
     MegatronPolicyWorkerImpl.offload_after_refit(worker)
 
-    assert calls[0] == ("move", model, "cpu", {"move_params": expected_move_params})
-    assert calls[1:] == [("eval",), ("offload-before-refit",)]
+    move_call = calls[0]
+    assert move_call[:3] == ("move", model, "cpu")
+    assert move_call[3]["move_params"] is expected_move_params
+    assert calls[1:] == [("eval",), ("offload-before-refit",), ("refit-complete",)]
 
 
 def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id(monkeypatch):
@@ -841,6 +867,7 @@ def test_evo2_adapter_forwards_generation_controls(monkeypatch):
     results = adapter.generate_worker(worker, data=SimpleNamespace(size=2))
 
     assert len(results) == 2
+    assert worker._evo2_native_dynamic_components.use_torch_inference_mode is False
     assert forwarded["ignore_eos"] is True
     assert forwarded["preserve_eos_token"] is True
     assert forwarded["strict_generation"] is True
@@ -892,6 +919,7 @@ def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, f
         setup_kwargs.update(kwargs)
         return native_dynamic
 
+    monkeypatch.setattr(evo2_generation, "_prepare_evo2_quantized_inference", lambda _model: None)
     monkeypatch.setattr("bionemo.evo2.run.infer._setup_native_dynamic_components", fake_setup)
     monkeypatch.setattr(
         "bionemo.evo2.run.infer.generate",

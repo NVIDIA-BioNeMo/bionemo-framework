@@ -586,6 +586,15 @@ def test_native_stop_token_ids_resolves_eos_text_token():
     assert _native_stop_token_ids(_FakeTokenizer()) == {0}
 
 
+@pytest.mark.parametrize(("use_inference_mode", "expected_inference_mode"), [(True, True), (False, False)])
+def test_native_torch_context_selects_tensor_kind(use_inference_mode, expected_inference_mode):
+    nd = SimpleNamespace(use_torch_inference_mode=use_inference_mode)
+
+    with infer_module._native_torch_context(nd):
+        assert torch.is_inference_mode_enabled() is expected_inference_mode
+        assert torch.is_grad_enabled() is False
+
+
 def test_simple_generation_activates_mcore_inference_mode():
     from megatron.core.inference.utils import InferenceMode
 

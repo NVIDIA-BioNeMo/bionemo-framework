@@ -433,6 +433,9 @@ class Evo2NativeDynamicComponents:
     # Static FlashAttention contexts are keyed by (batch, max sequence length).
     # Reusing the exact object preserves graph-bound KV and Hyena state pointers.
     static_contexts: dict[tuple[int, int], Any] = field(default_factory=dict)
+    # Standalone inference can use inference_mode. A colocated training model must use
+    # no_grad so Transformer Engine does not retain inference tensors across the next update.
+    use_torch_inference_mode: bool = True
 
 
 # =============================================================================
@@ -548,6 +551,13 @@ def _restore_native_dynamic_cuda_graph_managers(nd: Evo2NativeDynamicComponents)
     if bindings:
         nd.cuda_graph_manager_count = len(bindings)
     return len(bindings)
+
+
+def _native_torch_context(nd: Evo2NativeDynamicComponents):
+    """Return the non-grad context appropriate for this engine's lifetime."""
+    if getattr(nd, "use_torch_inference_mode", True):
+        return torch.inference_mode()
+    return torch.no_grad()
 
 
 def _setup_native_dynamic_components(
@@ -1538,7 +1548,7 @@ def _warmup_native_dynamic_cuda_graphs(
     normalized_request_counts = tuple(sorted({int(count) for count in request_counts}))
     if not normalized_request_counts or normalized_request_counts[0] < 1:
         raise ValueError("CUDA graph warmup request counts must contain only positive values")
-    with torch.inference_mode():
+    with _native_torch_context(nd):
         for warmup_request_count in normalized_request_counts:
             try:
                 for request_id in range(warmup_request_count):
@@ -2559,7 +2569,7 @@ def _generate_native_dynamic(
             return bool(active_after_sample[0].item())
 
         try:
-            with torch.inference_mode():
+            with _native_torch_context(nd):
                 req = DynamicInferenceRequest(
                     request_id=0,
                     prompt_tokens=torch.tensor(prompt_token_ids, dtype=torch.int64, device=device),
@@ -2774,7 +2784,7 @@ def _generate_native_dynamic(
             return keep_group_active
 
         try:
-            with torch.inference_mode():
+            with _native_torch_context(nd):
                 for request_idx, prompt_token_ids in enumerate(prompt_token_id_batch):
                     req = DynamicInferenceRequest(
                         request_id=request_idx,

@@ -77,6 +77,20 @@ def _unwrap_evo2_model(model: Any) -> Any:
     return current
 
 
+def _prepare_evo2_quantized_inference(model: Any) -> None:
+    """Prepare a shared FP8/FP4 training model for arbitrary rollout row counts."""
+    config = getattr(model, "config", None)
+    if not (getattr(config, "fp8", None) or getattr(config, "fp4", None)):
+        return
+
+    from bionemo.evo2.run.low_precision import prepare_model_for_quantized_inference
+
+    # The wrappers persist for the next policy update, so construct their Transformer
+    # Engine helper tensors outside an enclosing inference_mode context.
+    with torch.inference_mode(False):
+        prepare_model_for_quantized_inference(model, config)
+
+
 def should_use_evo2_native_batched_generation(cfg: dict[str, Any], model: Any, batch_size: int) -> bool:
     """Return whether NeMo-RL should bypass MCore's generic coordinator for Evo2."""
     generation = cfg.get("generation", {}) or {}
@@ -203,6 +217,7 @@ def generate_evo2_native_batched(
     native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
     if native_dynamic is None:
         raw_model = _unwrap_evo2_model(unwrap_model(worker.model))
+        _prepare_evo2_quantized_inference(raw_model)
         cuda_graph_impl = str(mcore_generation_config.get("cuda_graph_impl", "local"))
         requested_cuda_graph_scope = str(mcore_generation_config.get("inference_cuda_graph_scope", "block"))
         model_config = getattr(raw_model, "config", None)
@@ -226,6 +241,8 @@ def generate_evo2_native_batched(
             cuda_graph_scope=effective_cuda_graph_scope,
         )
         worker._evo2_native_dynamic_components = native_dynamic
+    # This model is reused immediately for an autograd-enabled policy update.
+    native_dynamic.use_torch_inference_mode = False
     _reseed_evo2_native_dynamic(native_dynamic, initial_seed)
 
     components = Evo2InferenceComponents(
