@@ -1,0 +1,11 @@
+poetry-core>=2.4,<3
+poetry_dynamic_versioning>=1.10,<2  # build dep of nvidia-resiliency-ext (transitively pulled by megatron-bridge); needed in the venv because we install with --no-build-isolation
+grpcio-tools>=1.82.0rc2,<2  # build dep of nvidia-resiliency-ext: its setup.py shells out to `python -m grpc_tools.protoc` to compile *.proto files; --no-build-isolation means we have to provide it in the venv up-front
+wheel_stub>=0.5,<0.6
+ninja>=1.13,<2  # should speed up causal-conv1d build
+# ARM64 Biotite fallback validated 2026-08-21. Enable these with the commented
+# pyproject.toml Biotite/Biotraj pins when the aarch64 resolver hits that known
+# source-build path; they are unnecessary for the normal x86_64 wheel install.
+# hatchling>=1.32,<2
+# hatch-vcs>=0.5,<1
+# hatch-cython>=0.6,<1

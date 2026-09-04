@@ -1,0 +1,32 @@
+# Default configuration for Geneformer training
+# L0 Sanity test
+# @package _global_
+
+defaults:
+  - defaults
+  - model: 106m
+  - _self_
+
+model:
+  micro_batch_size: 8
+  use_te_layers: true
+
+# Training configuration
+training:
+  use_mfsdp: true
+  use_fp8: false
+  num_train_steps: 100 # this setting defines the number of training steps
+  num_workers: 4 # this setting defines the number of workers for the dataloader
+  mlm_probability: 0.15 # this setting defines the probability of masking tokens in the input
+  checkpoint_dir: "checkpoints/l0-106m"
+  save_every_n_steps: 50
+  resume_from_checkpoint: true
+
+wandb_init_args: # These arguments are for managing the weights and biases experiment.
+  name: "geneformer-l0-106m" # this setting defines the name of the experiment
+  project: "bionemo-recipes-l0-106m" # this setting defines the project name
+  mode: "offline"
+
+# Data configuration
+data:
+  path: "genecorpus_500_samples.parquet" # A sanity dataset saved to the repo that holds 500 samples.

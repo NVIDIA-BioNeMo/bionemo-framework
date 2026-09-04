@@ -1,0 +1,10 @@
+torch
+torchvision
+transformer_engine
+megatron-fsdp
+hydra-core
+einops
+wandb
+tqdm
+datasets
+pytest

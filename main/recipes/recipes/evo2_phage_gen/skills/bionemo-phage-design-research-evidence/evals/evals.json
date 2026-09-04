@@ -1,0 +1,44 @@
+{
+  "skill_name": "bionemo-phage-design-research-evidence",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-research-evidence-001-new-objective-evidence",
+      "prompt": "Research evidence for RL and final-QC objectives for a newly selected jumbo bacteriophage. We want viable, diverse whole-genome designs with a target-specific change, but do not know which essentiality, synteny, completeness, or model thresholds transfer.",
+      "expected_output": "A concise, source-grounded assessment of the evidence that is actually needed for this target.",
+      "assertions": [
+        "The response prioritizes primary biological evidence and distinguishes measured results, author claims, and inference.",
+        "It covers complete-genome viability and the productive-infection lifecycle rather than reducing the problem to one host or similarity score.",
+        "It does not transfer a threshold or essential-gene claim without discussing target relevance and uncertainty.",
+        "It identifies unresolved decisions and experimental validation without demanding unrelated process artifacts."
+      ],
+      "expected_skill": "bionemo-phage-design-research-evidence",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-research-evidence-002-no-specialist-skill",
+      "prompt": "Find current public evidence needed to calibrate a bacterial-phage host prediction score. No specialist literature or database skill appears to be installed in this harness.",
+      "expected_output": "A practical evidence search using the best available primary sources and public databases.",
+      "assertions": [
+        "The response uses available web, literature, or biological database access rather than treating the missing specialist skill as a blocker.",
+        "It looks for relevant labeled host interactions, target-domain coverage, negative examples, and known confounders.",
+        "It states source versions or access dates where they affect interpretation and reports evidence limits.",
+        "It does not present a predictive score as proof of productive infection."
+      ],
+      "expected_skill": "bionemo-phage-design-research-evidence",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-research-evidence-003-use-documents-as-needed",
+      "prompt": "Briefly answer two questions: what does supervised fine-tuning mean in ordinary machine-learning usage, and how did the Evo 2 phage study construct its target-conditioned training examples? Use source material only where it helps.",
+      "expected_output": "A concise answer that uses common knowledge for the general concept and the relevant public study for its specific method.",
+      "assertions": [
+        "The general explanation of supervised fine-tuning does not pretend that reading a paper is necessary for common knowledge.",
+        "The study-specific answer consults and cites the relevant paper or supplement rather than guessing from general practice.",
+        "The response distinguishes the historical study method from the current recipe and does not inspect unrelated documents.",
+        "It answers the question directly without creating an unrelated project workflow."
+      ],
+      "expected_skill": "bionemo-phage-design-research-evidence",
+      "expected_script": null
+    }
+  ]
+}

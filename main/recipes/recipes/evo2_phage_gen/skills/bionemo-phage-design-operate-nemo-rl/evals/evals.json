@@ -1,0 +1,216 @@
+{
+  "skill_name": "bionemo-phage-design-operate-nemo-rl",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-001-restart-baseline",
+      "prompt": "An RL job failed after producing a promising checkpoint. Relaunch from those weights and use that checkpoint as the new KL reference so we can continue without redoing work.",
+      "expected_output": "A restart decision that preserves the intended SFT KL anchor.",
+      "assertions": [
+        "The response does not move the KL reference merely because a run failed.",
+        "A full-state resume requires compatible optimizer, scheduler, RNG, SFT KL reference, prompts, objectives, validation, and training semantics.",
+        "Weights-only recovery is treated as a new attempt anchored to the selected non-RL SFT checkpoint.",
+        "Prior RL initialization is used only for an intentional stage change with a scientific rationale.",
+        "It confirms the old job is terminal before relaunch and retains useful checkpoints and logs."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-002-component-exploitation",
+      "prompt": "Aggregate RL reward is stable, but one objective rises while its measured support shrinks and most other objective contributions go flat. Continue unattended if the aggregate looks safe.",
+      "expected_output": "Pause and diagnose component activity rather than trusting the aggregate.",
+      "assertions": [
+        "The response compares each component with its support, denominator, missingness, and hard-QC grounding.",
+        "It detects rising reward with shrinking evidence and inactive components as possible exploitation or skipped computation.",
+        "It checks whether response length or early termination changes gradient contribution.",
+        "It pauses at a usable checkpoint and inspects representative sequences or outputs before changing semantics.",
+        "Any objective change receives fresh validation rather than being treated as the same run."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-003-sampling-change",
+      "prompt": "A paused RL checkpoint used one prefix bank. Fresh calibration from the selected SFT checkpoint recommends a materially different prefix distribution and validation stratification. Resume the paused run.",
+      "expected_output": "A new SFT-anchored attempt for a materially changed training and validation distribution.",
+      "assertions": [
+        "The response records the deployed prompt serialization, mixture, validation cohort, and seeds.",
+        "It does not continue the old optimizer state as though the prompt and validation distributions were unchanged.",
+        "The policy and KL reference start from the selected non-RL SFT checkpoint.",
+        "The paused checkpoint and its results remain useful prior evidence rather than being discarded."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-004-flat-zero-and-plateau",
+      "prompt": "An enabled reward stays at zero while another gate has no hits. Overall validation is flat within noise, with one abrupt bad spike. Stop or continue?",
+      "expected_output": "First prove the zeros are real measurements, then make a noise-aware stopping decision.",
+      "assertions": [
+        "Positive controls prove every enabled reward executes and has the expected direction; they need not all score 1.",
+        "The response distinguishes measured zero from missing, skipped, invalid, or failed measurements.",
+        "Short genomes, no ORFs, missing genes, empty or no-hit tool output, and tool failure have explicit non-crashing behavior.",
+        "A sparse component is diagnosed rather than dropped or allowed to zero unrelated rewards.",
+        "One recovered spike does not force stopping; the decision uses sustained comparable validation and retains the best checkpoint."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-005-scorer-bottleneck",
+      "prompt": "A full RL smoke works, but one enabled whole-genome scorer dominates wall time. Start the 500-step run with the conservative setting.",
+      "expected_output": "Benchmark and optimize the scorer without silently weakening the objective.",
+      "assertions": [
+        "The response measures realistic full-genome throughput, distinguishes cold setup/capture from steady decode across at least two rollout/offload-refit cycles, verifies captured registered model addresses remain stable or trigger TP/PP/CP-wide recapture within the affected DP replica, requires fresh quantized graphs after every refit, and identifies compute, memory, I/O, or contention bottlenecks.",
+        "It tests batching, parallelism, caching by scientific input and tool version, or placement only when semantics remain unchanged.",
+        "An optimized path must agree with the accepted path on positive, negative, and edge controls.",
+        "The scorer is not dropped, replaced, or evaluated on fragments merely to improve speed.",
+        "The full run uses durable execution and monitoring and preserves the intended effective batch."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-006-result-root-prompts",
+      "prompt": "I resumed the PhiX174 example after calibration. Stage 30 wrote results/phix174/rl/train.jsonl, but RL readiness says the template data/phix174_rl_train_prefix16_24.jsonl is missing. Should I copy the generated file there?",
+      "expected_output": "Resume with the run-specific prompt-bank handoff rather than mutating shared template data.",
+      "assertions": [
+        "The response identifies a mismatch between the template config path and the generated result-root prompt bank.",
+        "Readiness and training use the same result-root train.jsonl path, while validation uses the matching result-root validation.jsonl.",
+        "It does not copy a run-specific prompt bank into the shared recipe data path.",
+        "It reruns the same top-level command with the same result root so missing prompt banks are recreated and completed calibration is reused.",
+        "Before readiness, the rerun creates or reuses the optimizer-free, runtime-sanitized SFT checkpoint prepared for RL and uses its direct iter_* path instead of the raw full-state SFT checkpoint."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-007-schema-one-checkpoint",
+      "prompt": "The PhiX174 GDPO pilot fails strict checkpoint loading with `Missing key in checkpoint state_dict: decoder.final_norm._extra_state/shard_0_1`. The prepared RL checkpoint has a schema-1 preparation manifest. Resume the run without repeating SFT or calibration.",
+      "expected_output": "Regenerate the derived model-only checkpoint with its serialized model object state and resume from stage 40.",
+      "assertions": [
+        "The response identifies that the schema-1 reducer omitted or changed DCP byte/object model state such as Transformer Engine _extra_state; it does not blame an SFT/NeMo-RL version change.",
+        "It reruns the same top-level command and relies on preparation to atomically replace the matching schema-1 derived checkpoint with schema version 2.",
+        "The replacement retains non-optimizer object shards and records model_object_state_preserved true while leaving the full-state source SFT checkpoint unchanged.",
+        "It does not weaken strict checkpoint loading, strip more runtime state in NeMo-RL workers, or repeat completed SFT and calibration."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-008-stable-metric-namespace",
+      "prompt": "PhiX174 GDPO validation finishes, then checkpointing says `Metric phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate not found in val metrics`. TensorBoard contains `validation/rl-validation/binary_safety_qualified_full_qc_cluster_deduplicated_rate`, and the validation bank lives at `RESULT_ROOT/rl/validation.jsonl`. Rename the checkpoint metric so I can resume.",
+      "expected_output": "Keep the strict phage endpoint and restore the recipe-owned stable task namespace rather than coupling checkpoint selection to a result path.",
+      "assertions": [
+        "The response identifies `rl-validation` as a task name derived from the result-root JSONL path by the generic OpenAI-format dataset.",
+        "Both training and validation use the recipe's stable phage OpenAI-format dataset so their task name is `phage_qc` regardless of prompt-bank location.",
+        "The checkpoint metric remains `val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate`.",
+        "It does not rename the checkpoint metric to an `rl-validation` path or replace the strict endpoint with mean reward.",
+        "The failed pilot can rerun from the same top-level result root without repeating completed SFT or calibration."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-009-megatron-checkpoint-dispatch",
+      "prompt": "A Megatron GDPO pilot finishes validation, then checkpoint saving raises `model_save_format must be None or omitted if using DTensorPolicyWorker (_v2=False)`. The config intentionally uses Megatron and `model_save_format: safetensors`. Should I remove the save format or enable DTensor?",
+      "expected_output": "Keep the Megatron worker and save the native Megatron-Bridge checkpoint consumed by resume and rollout.",
+      "assertions": [
+        "The response sets checkpointing.model_save_format to null and checkpointing.save_consolidated to false.",
+        "It keeps policy.megatron_cfg.enabled true and policy.dtensor_cfg.enabled false, and omits _v2.",
+        "It explains that the Megatron worker writes native Megatron-Bridge torch_dist checkpoints under step_N/policy/weights/iter_0000000 for direct resume and rollout use.",
+        "It does not request safetensors, a consolidated HF export, or a DTensor policy worker.",
+        "It reruns the failed pilot from the same top-level result root after updating the recipe checkout.",
+        "It does not require a NeMo-RL force reinstall for an editable recipe config change."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-010-pilot-substage-resume",
+      "prompt": "A one-step PhiX GDPO pilot completed successfully, but the next objective monitor failed with `no usable validation events`. The run predates separate pilot markers, and TensorBoard has task-scoped validation tags. Avoid repeating the 18-minute pilot and continue safely.",
+      "expected_output": "Record the confirmed pilot separately, repair and run its telemetry check, then enter the full RL run.",
+      "assertions": [
+        "The response treats the successful pilot, pilot objective-health check, and full RL run as three distinct states.",
+        "It permits creating stages/40-pilot.done only because the run log explicitly records successful pilot completion.",
+        "It does not create stages/40-pilot-check.done until the objective monitor parses and accepts the pilot telemetry, and it does not create stages/40-rl.done.",
+        "The monitor discovers the newest complete task-scoped validation namespace using mean_reward and num_sequences instead of requiring validation/mean_reward.",
+        "It resumes stage 40 from the same result root, skips the pilot, performs the repaired check, and then launches the full run."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-011-train-validation-monitoring",
+      "prompt": "Mean reward alternates between two bands during RL. The training and validation banks differ by prompt starts and generation seeds, not by biological labels. Validation is infrequent, and the monitoring helper requests metric names the runtime never emits. Diagnose progress.",
+      "expected_output": "A prompt-aware monitor that uses both on-policy training evidence and a fixed validation comparison without guessing metric names.",
+      "assertions": [
+        "The response treats training-rollout rewards, component scores, and QC as valid scientific observations rather than discarding them as optimizer-only diagnostics.",
+        "It uses the fixed validation bank for longitudinal comparability and does not describe this seed or prompt split as a biological-label holdout.",
+        "It examines prompt position, length, composition, and cohort counts in both streams before attributing the alternating bands to policy learning.",
+        "It reports terminal hard-QC yield, component means and support, measurement availability or failure, safety states, diversity, and copying so mean reward cannot hide inactive terms.",
+        "It reconciles the approved objective artifact, configured objective set, and emitted component telemetry; discrepancies trigger diagnosis and a decision record rather than an automatic stop or user wait.",
+        "It discovers and records the task-scoped metric keys actually emitted by the installed runtime instead of asserting names owned by another layer.",
+        "Checkpoint decisions use sustained fixed-bank movement corroborated by training-rollout behavior and preserve both the best scientific and latest resumable checkpoints."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-012-autonomous-objective-evolution",
+      "prompt": "Three days into an autonomous whole-genome RL run, one agreed objective stops producing usable measurements and the user is offline. Diagnosis may take time. Literature review and the partial trajectory also support adding a new graded shaping objective that could improve progress toward the same endpoint.",
+      "expected_output": "A forward-moving, versioned objective decision that treats removal as a last resort and evidence-backed addition as important work.",
+      "assertions": [
+        "The response continues autonomously rather than pausing the late-stage run solely to await user approval.",
+        "It first diagnoses or repairs the failed agreed objective and treats dropping it as a last resort, while allowing a documented temporary omission when that is the strongest scientifically defensible path.",
+        "It treats adding the literature- or partial-run-supported shaping objective as important, implements calibrated partial credit and controls, and verifies that it advances the same desired endpoint.",
+        "It versions the active objective set and does not compare aggregate rewards across different component sets as if they were the same metric.",
+        "It records the evidence, consequences, controls, restoration criteria, and exact change point without blocking useful work.",
+        "The next natural status update gives the user a concise FYI summary of key autonomous decisions since the previous check-in."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-013-noisy-recovery",
+      "prompt": "A GDPO run validates every 10 optimizer steps. Fixed-bank quality falls sharply and remains below its prior band for 50 steps, then recovers over the next 30 steps; on-policy training-rollout quality shows the same recovery. All objectives continue to produce valid measurements, including the three safety terms. Decide whether to stop.",
+      "expected_output": "Continue the RL run and record the recovered excursion rather than applying an SFT-style patience rule.",
+      "assertions": [
+        "The response treats a sharp but recovered drop as compatible with noisy RL rather than proof of irreversible damage.",
+        "It reads fixed-bank validation and on-policy training-rollout trends together and checks prompt composition and component support.",
+        "It does not stop because safety scores were temporarily low when their measurements remained valid.",
+        "It records a durable continue decision while preserving the best scientific and latest resumable checkpoints."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-014-sustained-decline",
+      "prompt": "A GDPO run validates every 10 optimizer steps. Across the last 10 comparable fixed-bank validations, roughly 100 optimizer steps, quality and several supported components have remained materially below their earlier rolling bands; training-rollout windows corroborate the decline. Prompt composition, objective definitions, and measurement availability are stable, with no rebound. The 500-step maximum is still far away.",
+      "expected_output": "Stop pushing the declining trajectory, preserve checkpoints, diagnose its onset, and autonomously choose a scientifically compatible restart or new attempt.",
+      "assertions": [
+        "The response treats max_num_steps as a ceiling and does not continue merely to reach 500 steps.",
+        "It requires the approximately 100-step sustained, corroborated pattern rather than reacting to one point or a short excursion.",
+        "It uses rolling fixed-bank and training-rollout evidence with component support, uncertainty, prompt composition, and objective-set stability.",
+        "It preserves the best scientific and latest resumable checkpoints and investigates the decline onset before choosing restart semantics.",
+        "It continues autonomously with a compatible restart or versioned new attempt rather than waiting solely for user acknowledgment."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-015-measurement-failure",
+      "prompt": "RL candidate safety scores are low, which is an intended learning target. Separately, the toxin scorer stops emitting measurements for half the rows and the lysogeny scorer reports unexplained NOT_RUN results, while their configured objectives still appear in the aggregate. Decide how the agent should react.",
+      "expected_output": "Treat low measured safety scores as learning evidence, but promptly diagnose the invalid scorer execution before using more uninterpretable updates.",
+      "assertions": [
+        "The response does not pause merely because valid safety scores are low or decreasing.",
+        "It distinguishes valid zero, FAIL, INDETERMINATE, or explicit inapplicability from missing, unexplained NOT_RUN, and execution failure.",
+        "It promptly enters a diagnosis decision because enabled objectives are not producing interpretable measurements.",
+        "It preserves a usable checkpoint, repairs or versions the strongest scientifically defensible portfolio, and proceeds autonomously rather than waiting by default.",
+        "It records component support, failure reasons, objective-set version, and the exact change point."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
+    }
+  ]
+}

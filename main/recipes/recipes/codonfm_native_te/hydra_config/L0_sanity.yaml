@@ -1,0 +1,32 @@
+defaults:
+  - defaults
+  - _self_
+
+# Training config
+model_preset: encodon_200k
+num_train_steps: 250
+
+use_sequence_packing: false
+dataset:
+  data_path: train.parquet
+  micro_batch_size: 2
+  num_workers: 1
+  max_seq_length: 512
+
+# WandB config
+wandb_init_args:
+  name: "codonfm_native_te_sanity"
+  mode: "offline"
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 100
+
+checkpoint:
+  ckpt_dir: null
+  resume_from_checkpoint: true
+  save_every_n_steps: 50
+  save_final_model: false
+
+logger:
+  frequency: 1

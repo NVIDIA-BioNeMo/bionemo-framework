@@ -1,0 +1,168 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<cls>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "<pad>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "<eos>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 3,
+      "content": "<unk>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 32,
+      "content": "<mask>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Split",
+    "pattern": {
+      "String": ""
+    },
+    "behavior": "Isolated",
+    "invert": false
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "SpecialToken": {
+          "id": "<cls>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "<eos>",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "SpecialToken": {
+          "id": "<cls>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "<eos>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 1
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "<eos>",
+          "type_id": 1
+        }
+      }
+    ],
+    "special_tokens": {
+      "<cls>": {
+        "id": "<cls>",
+        "ids": [0],
+        "tokens": ["<cls>"]
+      },
+      "<eos>": {
+        "id": "<eos>",
+        "ids": [2],
+        "tokens": ["<eos>"]
+      }
+    }
+  },
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<cls>": 0,
+      "<pad>": 1,
+      "<eos>": 2,
+      "<unk>": 3,
+      "L": 4,
+      "A": 5,
+      "G": 6,
+      "V": 7,
+      "S": 8,
+      "E": 9,
+      "R": 10,
+      "T": 11,
+      "I": 12,
+      "D": 13,
+      "P": 14,
+      "K": 15,
+      "Q": 16,
+      "N": 17,
+      "F": 18,
+      "Y": 19,
+      "M": 20,
+      "H": 21,
+      "W": 22,
+      "C": 23,
+      "X": 24,
+      "B": 25,
+      "U": 26,
+      "Z": 27,
+      "O": 28,
+      ".": 29,
+      "-": 30,
+      "<null_1>": 31,
+      "<mask>": 32
+    },
+    "unk_token": "<unk>"
+  }
+}

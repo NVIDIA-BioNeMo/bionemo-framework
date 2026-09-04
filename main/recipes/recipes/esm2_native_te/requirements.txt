@@ -1,0 +1,13 @@
+datasets
+hydra-core
+megatron-fsdp
+pytest
+torch
+torchao!=0.14.0
+torchdata
+torchmetrics
+tqdm
+transformer_engine[pytorch]
+transformers>=5.0.0
+wandb
+nvdlfw_inspect @ git+https://github.com/NVIDIA/nvidia-dlfw-inspect

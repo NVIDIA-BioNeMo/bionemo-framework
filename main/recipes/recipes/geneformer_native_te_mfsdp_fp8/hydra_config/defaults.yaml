@@ -1,0 +1,53 @@
+# Default configuration for Geneformer training
+model:
+  attention_probs_dropout_prob: 0.02
+  hidden_act: ???
+  hidden_dropout_prob: 0.02
+  hidden_size: ???
+  initializer_range: ???
+  intermediate_size: ???
+  layer_norm_eps: 1.0e-12
+  max_position_embeddings: 2048
+  micro_batch_size: ???
+  model_type: bert
+  num_attention_heads: ???
+  num_hidden_layers: ???
+  pad_token_id: ???
+  seq_length: 2048
+  use_te_layers: ???
+  vocab_size: 25426
+
+# Training configuration
+training:
+  use_mfsdp: true
+  use_fp8: false
+  optimizer_kwargs:
+    lr: 1e-4
+    fused: true
+  num_train_steps: 1000 # this setting defines the number of training steps
+  num_workers: 4 # this setting defines the number of workers for the dataloader
+  mlm_probability: 0.15 # this setting defines the probability of masking tokens in the input
+  fully_shard_kwargs:
+    zero_dp_strategy: "optim_grads_params"
+    calculate_per_token_loss: false
+    init_model_with_meta_device: true
+    overlap_grad_reduce: true
+    overlap_param_gather: true
+    sync_model_each_microbatch: true
+    average_in_collective: false
+  fp8_recipe_kwargs:
+    fp8_format: "hybrid"
+    amax_history_len: 16 # this setting defines the number of steps to store the amax values for the fp8 training. Why was mine so low?
+    amax_compute_algo: "max"
+  checkpoint_dir: ???
+  save_every_n_steps: 50
+  resume_from_checkpoint: true
+
+wandb_init_args: # These arguments are for managing the weights and biases experiment.
+  name: "geneformer-???" # this setting defines the name of the experiment
+  project: "bionemo-recipes-???" # this setting defines the project name
+  mode: "offline"
+
+# Data configuration
+data:
+  path: "genecorpus_500_samples.parquet" # A sanity dataset saved to the repo that holds 500 samples.

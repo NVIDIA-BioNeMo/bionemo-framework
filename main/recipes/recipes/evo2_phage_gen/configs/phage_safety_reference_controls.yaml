@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+
+schema_version: 1
+panel_id: phage-sequence-safety-controls-v2
+controls:
+  - control_id: ctxphi_hazard
+    accession: NC_015209.1
+    sequence_interval: null
+    display_name: Vibrio phage CTXphi
+    role: positive_hazard
+    topology: linear
+    sequence_length: 10638
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_015209.1
+    evidence_urls:
+      - https://pubmed.ncbi.nlm.nih.gov/8658163/
+      - https://doi.org/10.1038/nature00782
+    expected_aggregate_state: FAIL
+    expected_classes:
+      amr:
+        state: PASS
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: FAIL
+        required_finding_accessions:
+          ctxA: P01555
+          ctxB: P01556
+        minimum_primary_findings: 2
+        allow_additional_findings: true
+      lysogeny:
+        state: FAIL
+        required_finding_accessions: {}
+        minimum_primary_findings: 1
+        allow_additional_findings: true
+  - control_id: shiga_toxin_933w_hazard
+    accession: NC_000924.1
+    sequence_interval: null
+    display_name: Escherichia phage 933W (Shiga toxin 2-converting phage)
+    role: positive_hazard
+    topology: linear
+    sequence_length: 61670
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_000924.1
+    evidence_urls:
+      - https://pubmed.ncbi.nlm.nih.gov/10074068/
+    expected_aggregate_state: FAIL
+    expected_classes:
+      amr:
+        state: PASS
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: FAIL
+        required_finding_accessions:
+          stxA2: P09385
+          stxB2: P09386
+        minimum_primary_findings: 2
+        allow_additional_findings: true
+      lysogeny:
+        state: FAIL
+        required_finding_accessions: {}
+        minimum_primary_findings: 1
+        allow_additional_findings: true
+  - control_id: wopip1_latrotoxin_domain_hazard
+    accession: AM999887.1
+    sequence_interval: {start: 246045, end: 312651}
+    display_name: Wolbachia phage WO WOPip1 prophage interval
+    role: positive_review
+    topology: linear
+    sequence_length: 66607
+    source_url: https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=AM999887.1&db=nuccore&report=fasta&from=246045&to=312651
+    evidence_urls:
+      - https://doi.org/10.1038/ncomms13155
+      - https://www.ncbi.nlm.nih.gov/Structure/cdd/pfam15658
+    expected_aggregate_state: INDETERMINATE
+    expected_classes:
+      amr:
+        state: PASS
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: INDETERMINATE
+        required_finding_accessions:
+          latrotoxin_C_domain_bearing_WP0292: PF15658.11
+        minimum_primary_findings: 1
+        allow_additional_findings: true
+      lysogeny:
+        state: INDETERMINATE
+        required_finding_accessions: {}
+        minimum_primary_findings: 1
+        allow_additional_findings: true
+  - control_id: t7_negative
+    accession: NC_001604.1
+    sequence_interval: null
+    display_name: Enterobacteria phage T7
+    role: negative
+    topology: linear
+    sequence_length: 39937
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_001604.1
+    evidence_urls: []
+    expected_aggregate_state: PASS
+    expected_classes: &negative_expectations
+      amr:
+        state: PASS
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      toxin:
+        state: PASS
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+      lysogeny:
+        state: PASS
+        required_finding_accessions: {}
+        minimum_primary_findings: 0
+        allow_additional_findings: false
+  - control_id: phix174_negative
+    accession: NC_001422.1
+    sequence_interval: null
+    display_name: Escherichia phage phiX174
+    role: negative
+    topology: circular
+    sequence_length: 5386
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_001422.1
+    evidence_urls: []
+    expected_aggregate_state: PASS
+    expected_classes: *negative_expectations
+  - control_id: muddy_negative
+    accession: NC_022054.2
+    sequence_interval: null
+    display_name: Mycobacterium phage Muddy
+    role: negative
+    topology: linear
+    sequence_length: 48229
+    source_url: https://www.ncbi.nlm.nih.gov/nuccore/NC_022054.2
+    evidence_urls:
+      - https://phagesdb.org/phages/Muddy/
+      - https://pubmed.ncbi.nlm.nih.gov/31068712/
+    expected_aggregate_state: PASS
+    expected_classes: *negative_expectations

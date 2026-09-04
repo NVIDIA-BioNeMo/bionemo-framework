@@ -1,0 +1,3 @@
+poetry-core
+wheel_stub
+ninja  # should speed up causal-conv1d build

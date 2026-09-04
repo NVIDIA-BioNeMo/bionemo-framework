@@ -1,0 +1,34 @@
+{
+  "added_tokens_decoder": {
+    "0": {
+      "content": "<pad>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "1": {
+      "content": "<mask>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  },
+  "clean_up_tokenization_spaces": true,
+  "cls_token": "<pad>",
+  "do_basic_tokenize": false,
+  "do_lower_case": false,
+  "extra_special_tokens": {},
+  "mask_token": "<mask>",
+  "model_max_length": 2048,
+  "never_split": null,
+  "pad_token": "<pad>",
+  "sep_token": "<pad>",
+  "strip_accents": null,
+  "tokenize_chinese_chars": true,
+  "tokenizer_class": "BertTokenizer",
+  "unk_token": "<pad>"
+}

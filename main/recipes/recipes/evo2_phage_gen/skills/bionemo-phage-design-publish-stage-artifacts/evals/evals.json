@@ -1,0 +1,45 @@
+{
+  "skill_name": "bionemo-phage-design-publish-stage-artifacts",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-publish-stage-artifacts-001-selective-publication",
+      "prompt": "Back up the selected phage checkpoint, results, and useful logs to a collaborator bucket. The result tree contains redundant checkpoints, caches, downloads, and a launcher log with a signed URL.",
+      "expected_output": "A selective publication of useful scientific artifacts without secrets or bulk clutter.",
+      "assertions": [
+        "The response includes the selected checkpoint, settings, scientific summaries, useful results, and enough evidence to understand the selection.",
+        "It excludes redundant checkpoints, caches, downloads, temporary files, credentials, and signed URLs.",
+        "It confirms the intended audience, access level, and relevant license constraints.",
+        "It uses an available transfer method, verifies expected files are present and readable, and records the result in RUNLOG.md.",
+        "An upload failure remains actionable but does not invalidate a completed scientific stage."
+      ],
+      "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-publish-stage-artifacts-002-not-requested",
+      "prompt": "This local phage-design run can reach GCS and an NFS mount, but I did not ask to publish or back up anything.",
+      "expected_output": "No publication action is taken.",
+      "assertions": [
+        "The response does not upload, install transfer tools, or request credentials.",
+        "It does not make optional publication a prerequisite for scientific work.",
+        "It states concisely that publication is disabled unless the user requests it."
+      ],
+      "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-publish-stage-artifacts-003-s3-rl-input",
+      "prompt": "Sync the selected SFT checkpoint that initializes this phage RL run to an AWS S3 collaboration prefix. The original checkpoint is about 85 GB because it contains resumable training state, but stage 40 prepared a reduced checkpoint for RL.",
+      "expected_output": "An S3 publication plan that distributes the smaller checkpoint actually consumed by RL.",
+      "assertions": [
+        "The aws s3 sync source is RESULT_ROOT/rl/sft-checkpoint rather than the raw full-state SFT checkpoint tree.",
+        "The synchronized payload includes preparation-manifest.json and the manifest-recorded direct iter_* checkpoint.",
+        "Before syncing, preparation-manifest.json has schema_version 2 and model_object_state_preserved true; a schema-1 preparation is regenerated rather than published.",
+        "The raw SFT optimizer and training state is excluded unless exact SFT-training resume backup was explicitly requested.",
+        "It verifies the expected remote objects and records the destination, contents, exclusions, and transfer result in RUNLOG.md."
+      ],
+      "expected_skill": "bionemo-phage-design-publish-stage-artifacts",
+      "expected_script": null
+    }
+  ]
+}

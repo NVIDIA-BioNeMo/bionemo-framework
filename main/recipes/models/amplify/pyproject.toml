@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0,<82"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "amplify"
+version = "0.1.0"
+description = "AMPLIFY model with TE layers"
+requires-python = ">=3.8"
+dependencies = [
+    "accelerate",
+    "datasets",
+    "hydra-core",
+    "jinja2",
+    "nvidia_resiliency_ext",
+    "omegaconf",
+    "pytest",
+    "setuptools<82",
+    "torch==2.6.0a0+ecf3bae40a.nv25.01",
+    "transformer_engine[pytorch]",
+    "transformers<5.0",                  # TODO(BIO-143): update AMPLIFY to support Transformers v5
+    "xformers",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.pytest.ini_options]
+addopts = ["--color=yes", "--strict-markers", "--tb=short", "-v"]
+markers = ["fp8: marks tests as requiring FP8 support"]

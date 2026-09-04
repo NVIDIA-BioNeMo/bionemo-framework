@@ -1,0 +1,13 @@
+lm-eval  # For testing
+torch
+torchao!=0.14.0
+transformer_engine[pytorch]
+transformers
+pytest
+
+# CuteDSL fused GroupedMLP (ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8) on Blackwell.
+# nvidia-cutlass-dsl 4.5.x changes nvvm.AtomicRMWOp to require a `res` arg; cudnn-frontend
+# 1.23 calls the old API → TypeError: atomicrmw() missing 'res'. Pin the known-good pair.
+nvidia-cudnn-frontend>=1.23.0,<1.24
+nvidia-cutlass-dsl[cu13]==4.4.1
+apache-tvm-ffi  # required by cutlass DSL JIT compile path

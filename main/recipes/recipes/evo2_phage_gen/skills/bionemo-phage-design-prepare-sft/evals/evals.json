@@ -1,0 +1,50 @@
+{
+  "skill_name": "bionemo-phage-design-prepare-sft",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-prepare-sft-001-cluster-held-out-full-genomes",
+      "prompt": "Prepare 15,000 related bacterial-phage genomes for Evo 2 SFT. The target is about 50 kb, many records are near duplicates, and validation loss must reveal overfitting rather than memorized neighbors.",
+      "expected_output": "A full-genome, cluster-held-out dataset with target-aware context and explicit split files.",
+      "assertions": [
+        "The response groups exact biological equivalents, including circular rotations and reverse complements when topology supports equivalence, without losing source accessions.",
+        "It clusters unprefixed full genomes before assigning whole clusters to train, validation, and test.",
+        "It independently checks validation and test against train at the chosen identity and coverage boundary and requires zero leakage matches.",
+        "It keeps target-derived prompting examples in training when required by the RL design.",
+        "It sizes context from tokenized full-genome lengths plus conditioning and end-of-sequence overhead.",
+        "It keeps conditioning prefixes as input context while loss-masking their label targets and verifies that the following biological nucleotide remains supervised across causal sample alignments.",
+        "It writes explicit split inputs, cluster assignments, conditioning, serialization, exclusions, and leakage results."
+      ],
+      "expected_skill": "bionemo-phage-design-prepare-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-prepare-sft-002-training-budget",
+      "prompt": "Genome collection yielded 33,000 usable genomes rather than the roughly 10,000 expected. Prepare SFT without copying the publication's 12,000-step setting or stopping too early.",
+      "expected_output": "An evidence-based training ceiling and validation plan derived from the usable corpus.",
+      "assertions": [
+        "The response estimates the budget from distinct usable genomes, loss-bearing tokens, effective batch, and intended exposures.",
+        "It treats 12,000 steps as historical context rather than a fixed target or ceiling.",
+        "It schedules enough comparable validation and checkpoints to detect underfitting, improvement, and overfitting.",
+        "It leaves hardware-specific topology to execution measurement and preserves full-genome samples.",
+        "It selects the eventual checkpoint from held-out validation rather than training loss or the final step."
+      ],
+      "expected_skill": "bionemo-phage-design-prepare-sft",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-prepare-sft-003-safety-scan-failure",
+      "prompt": "A one-batch safety-scan test passed, but the full batched run failed during finalization and left only temporary per-record directories. Some records are short or have no predicted genes. Finish the preparation safely.",
+      "expected_output": "A diagnosis and rerun plan that preserves scientific counts and exercises the real edge cases.",
+      "assertions": [
+        "The response does not tally temporary directories as completed scientific results.",
+        "It diagnoses the failure and reruns or resumes only through behavior the scanner actually supports.",
+        "The next preflight spans multiple batches and a partial final batch when possible.",
+        "Positive controls prove every required detector runs, while short, no-gene, empty, no-hit, and tool-failure cases complete with explicit PASS, FAIL, or INDETERMINATE behavior rather than crashing.",
+        "The final report reconciles the full input denominator and keeps unique-sequence and source-record counts distinct.",
+        "It does not present computational sequence screening as a clinical conclusion."
+      ],
+      "expected_skill": "bionemo-phage-design-prepare-sft",
+      "expected_script": null
+    }
+  ]
+}

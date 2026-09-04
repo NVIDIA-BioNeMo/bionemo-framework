@@ -1,0 +1,92 @@
+# Training config
+use_te: true # Whether to use TransformerEngine layers through NVEsmForMaskedLM (if false, use HF's EsmForMaskedLM)
+config_name_or_path: ??? # E.g., nvidia/esm2_t6_8M_UR50D, facebook/esm2_t6_8M_UR50D, or a local path (e.g ./model_configs/nvidia/esm2_t6_8M_UR50D)
+config_kwargs: {}
+num_train_steps: ???
+
+use_meta_device: true
+
+# Whether to wrap the model in torch.compile. Note, this is currently not supported with mfsdp (BIONEMO-2977).
+# We leave this off by default since we don't see much of a performance improvement with TE layers.
+use_torch_compile: false
+
+cp_size: 1
+
+use_sequence_packing: false
+dataset:
+  tokenizer_name: ${config_name_or_path}
+  micro_batch_size: ???
+  num_workers: 1
+  max_seq_length: 1024
+  mlm_probability: 0.15
+  use_stateful_dataloader: false # Until https://github.com/pytorch/pytorch/pull/163102 is resolved with torchdata.
+  load_dataset_kwargs:
+    path: "nvidia/esm2_uniref_pretraining_data"
+    split: "train"
+    streaming: True
+
+# WandB config
+wandb_init_args:
+  name: ???
+
+# mFSDP config
+fully_shard_kwargs:
+  zero_dp_strategy: "optim_grads_params"
+  calculate_per_token_loss: false
+  init_model_with_meta_device: ${use_meta_device}
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  sync_model_each_microbatch: true
+  average_in_collective: false
+
+# TransformerEngine FP8 config. See
+# https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html for more information on
+# supported formats.
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+
+fp4_config:
+  enabled: false
+  fp4_recipe: transformer_engine.common.recipe.NVFP4BlockScaling
+  fp4_format: "E2M1"
+  fp4_recipe_kwargs: {}
+
+# Optimizer config
+adamw_kwargs:
+  lr: 4e-4
+  fused: true
+  betas: [0.9, 0.98]
+  eps: 1e-8
+  weight_decay: 0.01
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_training_steps: 500_000
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 1_000
+  max_checkpoints: 5 # Keep only the latest 5 checkpoints
+  async_save: true # Whether to save the checkpoint asynchronously, currently only supported with FSDP2.
+
+logger:
+  frequency: 100
+
+
+quant_stats_config:
+  enabled: false
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: ./log_quant_stats
+  log_to_wandb: false
+
+# Note: The layers are going to come in 1 indexed and we convert them to be 0 indexed at runtime.
+fp8_layers: null
+fp4_layers: null
+use_fp32_master_weights: null

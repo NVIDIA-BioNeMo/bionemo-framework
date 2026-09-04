@@ -1,0 +1,96 @@
+defaults:
+  - defaults
+  - _self_
+
+model:
+  vit:
+    img_size: 224
+    patch_size: 16
+    in_chans: 3
+    num_classes: ${dataset.num_classes}
+    global_pool: "map"
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: true
+    qk_norm: true
+    scale_attn_norm: true
+    scale_mlp_norm: true
+    proj_bias: true
+    init_values: null
+    class_token: true
+    pos_embed: true
+    no_embed_class: false
+    reg_tokens: 8
+    pre_norm: true
+    final_norm: true
+    fc_norm: true
+    pool_include_prefix: false
+    drop_rate: 0.05
+    pos_drop_rate: 0.05
+    patch_drop_rate: 0.05
+    proj_drop_rate: 0.05
+    attn_drop_rate: 0.05
+    drop_path_rate: 0.05
+    weight_init: null
+    init_variance_rescale: true
+  transformer_engine: false
+  channels_last: false
+
+distributed:
+  dp_outer: 1
+  dp_shard: 1
+  cp: 1
+
+fsdp:
+  init_model_with_meta_device: true
+  zero_dp_strategy: 3
+  fsdp_unit_modules:
+    - vit.Block
+    - vit.PatchEmbed
+    - vit.AttentionPoolLatent
+    - torch.nn.LayerNorm
+    - torch.nn.Linear
+  outer_dp_sharding_strategy: 1
+
+training:
+  steps: 500
+  val_interval: 25
+  log_interval: 5
+  checkpoint:
+    path: "./checkpoints/vit"
+    resume_from_metric: "-"   # + = Highest Metric (Score), - = Lowest Metric (Loss)
+
+inference:
+  checkpoint:
+    path: null
+    # Load a DCP->Torch converted checkpoint for inference without Megatron-FSDP.
+    # Otherwise, set this to "torch_dcp" if using Megatron-FSDP for inference.
+    # If the checkpoint was not trained with Megatron-FSDP, then set megatron_fsdp to false.
+    format: "torch"
+    megatron_fsdp: true
+
+dataset:
+  num_classes: 3
+  num_workers: 4
+  train:
+    batch_size: 8
+    shuffle: true
+  val:
+    batch_size: 16
+    shuffle: true
+
+random:
+  seed: 42
+
+profiling:
+  torch_memory_profile: false
+  torch_memory_profile_kwargs:
+    max_entries: 250000
+  wandb: false
+  wandb_kwargs:
+    # To use WandB, export WANDB_API_KEY=<your_api_key>!
+    name: "bionemo-vit"
+    project: "bionemo-recipes"
+    dir: null

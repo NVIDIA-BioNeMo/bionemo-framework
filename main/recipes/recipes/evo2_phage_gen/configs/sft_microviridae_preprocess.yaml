@@ -1,0 +1,20 @@
+- datapaths:
+    - data/external/zenodo/microviridae_sft_training_data_processed.fna
+  output_dir: data/sft/preprocessed
+  output_prefix: microviridae_sft_processed
+  train_split: 0.98
+  valid_split: 0.01
+  test_split: 0.01
+  overwrite: false
+  embed_reverse_complement: false
+  random_reverse_complement: 0.0
+  force_uppercase: false
+  indexed_dataset_dtype: uint8
+  append_eod: true
+  hf_tokenizer_model_path: tokenizers/nucleotide_fast_tokenizer_512
+  workers: 1
+  preproc_concurrency: 1000
+  chunksize: 1
+  drop_empty_sequences: true
+  nnn_filter: false
+  seed: 1234

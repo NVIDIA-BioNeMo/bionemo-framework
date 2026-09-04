@@ -1,0 +1,66 @@
+{
+  "skill_name": "bionemo-phage-design-generate-and-screen",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-generate-and-screen-001-order-target",
+      "prompt": "I want to order 100 bacterial-phage designs from the selected RL checkpoint. Decide how many sequences to generate, apply approved QC, and rank final candidates if defensible.",
+      "expected_output": "A pilot-informed rollout plan that reports uncertainty and does not promise an unsupported yield.",
+      "assertions": [
+        "The response uses a compatible pilot or uncertainty-aware estimate before sizing the larger rollout.",
+        "It accounts for generation failures, biological duplicates, QC failures, and clustering rather than treating every sample as orderable.",
+        "It generates complete genomes unless the user approved a narrower scope.",
+        "It reports raw and clustered denominators and whether yield or diversity is saturating.",
+        "It ranks only when the objective plan defines a defensible rule and retains limitations and wet-lab non-claims."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-002-nested-qc",
+      "prompt": "Generate a 1,000-design proof-of-concept rollout. Filters 1 through 6, 8, and 9 are mandatory; another requirement may pass through route A or route B. Produce a reproducible final report.",
+      "expected_output": "A complete-genome rollout with explicit all/any QC, deduplication, clustering, and a concise waterfall.",
+      "assertions": [
+        "The response records the checkpoint, prompt mixture, sampling settings, target length, seeds or prompt IDs, and tool/data versions that affect interpretation.",
+        "It scores all 1,000 raw designs when SFT likelihood is requested, removes exact/circular/reverse-complement biological duplicates before expensive QC, runs every required component on representatives, then applies the approved all/any logic.",
+        "Positive controls confirm each enabled filter executed; missing required evidence or tool failure becomes INDETERMINATE rather than PASS.",
+        "When pre-safety QC excludes representatives, the response preserves those exclusions in the representative denominator and requires exact manifest coverage for the sequences actually submitted to safety.",
+        "Short genomes, no ORFs, missing genes, and empty or header-only tool output do not crash or silently skip QC.",
+        "It disables pre-QC clustering, clusters only the safety-PASS hard-QC set, preserves complete candidate-to-result and cluster mapping, and reports raw, representative, PASS, FAIL, INDETERMINATE, hard-QC, and clustered counts.",
+        "It reports total and mean per-nucleotide selected-SFT log probability for every design, checks residual score-length correlation, and uses likelihood ordering only when that diagnostic supports it.",
+        "It defaults medium/long generation to packed dynamic inference for uniform or mixed prompts, including exact-length data-parallel GDPO rollouts, captures only physical full/remainder request shapes, preserves request IDs and request-to-Mamba-state mappings across staggered KV-page rollovers, and qualifies multi-page packed parity with prediction-forward selected-action checks using reconstructed target-preserving top-k/top-p support and page-boundary phase diagnostics; it reuses graphs only while registered model storage is stable, makes every TP/PP/CP rank in a DP replica recapture after any participant detects an address rebind, recaptures quantized graphs after each refit even with stable addresses, qualifies at least two rollout/offload-refit cycles, distinguishes cold end-to-end from steady-decode throughput and from unqualified gradient-bearing policy sequence packing, notes that dynamic generation ignores the legacy subquadratic flag, reserves static-Flash for a benchmark-qualified equal-length win, selects packed scoring for ragged records or benchmark-qualified rectangular scoring for uniform records/CP, and preserves record mappings.",
+        "It treats low precision as checkpoint- and hardware-qualified: Hopper regular FP8 with the explicit all-layer scope override and multiple-of-eight strict decode groups is distinguished from Vortex delayed scaling.",
+        "Computational screening is not described as proof of bootability, host range, safety, or efficacy."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-003-reference-control-panel",
+      "prompt": "The safety tools and databases are prepared. Show how to establish that the deployed filters still detect known hazards without rejecting well-characterized lytic controls.",
+      "expected_output": "A representative positive and negative control panel run through the exact deployed scientific path.",
+      "assertions": [
+        "The response includes controls for the relevant harmful cargo, lysogeny, and other enabled safety classes plus suitable lytic or therapeutic negatives.",
+        "It runs controls through the same parsing, tools, databases, thresholds, and aggregation used for candidates.",
+        "Expected findings and states are checked per component rather than only through an aggregate result.",
+        "Malformed, missing, or unsupported required evidence becomes INDETERMINATE and blocks PASS.",
+        "Unexpected control behavior is diagnosed before candidate screening proceeds."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-004-amrfinder-mixed-evidence",
+      "prompt": "An AMRFinderPlus combined scan reports two protein AMR hits and one AMR row whose Protein id is literal NA but whose contig, coordinates, strand, and method are present. Decide how final QC should handle the evidence.",
+      "expected_output": "A conservative interpretation that retains both protein and coordinate-backed nucleotide findings.",
+      "assertions": [
+        "The response does not discard the Protein id=NA row when valid contig, coordinate, strand, method, and AMR evidence are present.",
+        "It validates that coordinates map to the intended candidate and distinguishes nucleotide from protein evidence.",
+        "The independent protein hits remain reportable and are not collapsed into the nucleotide row.",
+        "Malformed or unmappable required evidence becomes INDETERMINATE rather than a false PASS.",
+        "Any hard AMR exclusion in the approved profile remains enforced."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    }
+  ]
+}

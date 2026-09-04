@@ -1,0 +1,7 @@
+{
+  "cls_token": "<pad>",
+  "mask_token": "<mask>",
+  "pad_token": "<pad>",
+  "sep_token": "<pad>",
+  "unk_token": "<pad>"
+}

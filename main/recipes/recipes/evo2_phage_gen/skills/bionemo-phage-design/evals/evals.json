@@ -1,0 +1,80 @@
+{
+  "skill_name": "bionemo-phage-design",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-001-interactive-intake",
+      "prompt": "Help me start an adapted Evo 2 phage-design project. I have not chosen the exact target, objective, SFT run, or execution settings, but I can answer questions.",
+      "expected_output": "A concise interactive intake that resolves the biologically material choices before execution.",
+      "assertions": [
+        "The response identifies target, host, intended use, outcome, whole-genome scope, evidence needs, and success criteria.",
+        "It makes a provisional therapeutic assumption visible when intended use is unspecified.",
+        "It asks only questions whose answers materially change the experiment and can inspect available evidence or prior results first.",
+        "It defaults to complete genomes and does not infer an RBP-only or locus-only task.",
+        "For a new 7B project it selects evo2/7b-1m:1.0 with model size evo2_7b, while treating a checkpoint-family change in an existing run as a new attempt.",
+        "It creates a compact project summary and RUNLOG.md rather than a large process framework."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-002-unattended-replication",
+      "prompt": "Plan a PhiX174 paper replication locally on eight H100s. Prevent cluster leakage and keep it progressing after approval while I am offline.",
+      "expected_output": "A science-first end-to-end plan with durable execution and evidence-based checkpoint selection.",
+      "assertions": [
+        "The response collects and validates full genomes, uses cluster-held-out splits, and keeps the target prompting neighborhood in training when required.",
+        "It sizes context and SFT duration from the actual corpus and selects checkpoints from validation rather than copying a paper step.",
+        "It calibrates sampling from the selected SFT serialization and keeps calibration, RL validation, and final rollout separate.",
+        "Before RL, it prepares and records a model-only, optimizer-free, runtime-sanitized SFT checkpoint while retaining the original full-state SFT checkpoint for SFT resume.",
+        "It uses a worker and monitoring facility that survives the chat process and can be reattached by job identifier.",
+        "It respects stage dependencies while overlapping independent evidence, preparation, or objective work when resources and write scopes permit.",
+        "It treats the example launcher as a reference implementation that may be run, adapted, wrapped, or replaced, using the README, stage subskills, and dependency DAG without prescribing one orchestration.",
+        "It runs every enabled reward and QC component with positive and failure controls and records useful progress in RUNLOG.md.",
+        "It generates and screens the requested full genomes and reports the final denominator and limitations."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-003-whole-genome-host-range",
+      "prompt": "Plan therapeutic phage designs for productive infection of a new resistant bacterial strain. A receptor-binding module looks important, but I did not authorize a regional edit or fixed backbone.",
+      "expected_output": "A whole-genome lifecycle plan that treats host prediction as one signal.",
+      "assertions": [
+        "The response defaults output and mutable scope to complete genomes and asks before any material scope reduction.",
+        "It covers adsorption and entry, defense and counter-defense, replication, morphogenesis and packaging, lysis and progeny, viable-reference support, and intended-use safety.",
+        "It defines the desired host direction, including target gain and any original-host retention or off-target avoidance.",
+        "It does not treat similarity as an edit mask or a host-model score as proof of productive infection.",
+        "It keeps computational objectives, final hard QC, and experimental validation distinct."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-004-science-first-reproducibility",
+      "prompt": "How would you make a small, single-user computational phage-generation pilot scientifically reproducible, and decide whether it is ready to scale?",
+      "expected_output": "An electronic-lab-notebook reproducibility plan centered on the scientific experiment rather than software supply-chain ceremony.",
+      "assertions": [
+        "The response records the biological question, input dataset and target, model checkpoint, key settings, random seeds, tool and data versions that affect interpretation, commands, outputs, and observed results.",
+        "It uses a concise RUNLOG.md and summary so another computational scientist can understand and repeat the pilot.",
+        "It includes positive and failure controls, denominators, and known limitations.",
+        "Most detail goes to experimental design, controls, outcomes, and limitations; the response does not make file or tree hashes, immutable source snapshots, clean-checkout rituals, or Git-state audits prerequisites for this single-user pilot."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-005-novel-reward-portfolio",
+      "prompt": "Plan an adapted whole-genome phage product with a biological endpoint that the recipe's existing rewards only partially describe. Two tested reward implementations are relevant but neither captures the complete goal. Decide how to construct the RL portfolio.",
+      "expected_output": "A portfolio that reuses sound tested machinery while inventing the target-specific scores needed to express the requested product.",
+      "assertions": [
+        "The response identifies translating the desired final product into complementary measurable RL scores as a core agentic task.",
+        "It prefers modifying tested reward implementations when their measurements and failure semantics genuinely fit the new goal instead of rewriting them needlessly.",
+        "Because this is beyond a faithful experiment rerun, it expects to invent novel terminal or intermediate reward functions for important aspects not captured by the existing portfolio.",
+        "New scores are creatively grounded in relevant literature, biological reasoning, viable references, domain tools, and prior or partial-run evidence rather than forced from an ill-fitting proxy.",
+        "Each new or modified score has a documented endpoint relationship, zero and target anchors, calibrated partial credit, controls, telemetry, missing or failure behavior, and final-QC role.",
+        "It preserves component-level interpretability and versions the objective set as evidence changes."
+      ],
+      "expected_skill": "bionemo-phage-design",
+      "expected_script": null
+    }
+  ]
+}

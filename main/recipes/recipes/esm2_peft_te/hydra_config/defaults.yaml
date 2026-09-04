@@ -1,0 +1,55 @@
+# Training config
+model_tag: ??? # E.g., nvidia/esm2_t6_8M_UR50D, facebook/esm2_t6_8M_UR50D, or a local path (e.g ./example_8m_checkpoint)
+num_train_steps: ???
+validation_interval: 50
+
+# Whether to wrap the model in torch.compile. Note, this is currently not supported with mfsdp (BIONEMO-2977).
+# We leave this off by default since we don't see much of a performance improvement with TE layers.
+use_torch_compile: false
+
+use_sequence_packing: false
+
+dataset:
+  tokenizer_name: ${model_tag}
+  micro_batch_size: ???
+  val_micro_batch_size: 64
+  num_workers: 1
+  max_seq_length: 1024
+  stride: 16
+  seed: 42
+  ss3_classification: true
+  load_dataset_kwargs:
+    path: "nvidia/esm2_uniref_pretraining_data"
+    split: "train"
+    streaming: True
+
+# WandB config
+wandb_init_args:
+  name: ???
+  project: null
+
+# Optimizer config
+adamw_kwargs:
+  lr: 4e-4
+  fused: true
+  betas: [0.9, 0.98]
+  eps: 1e-8
+  weight_decay: 0.01
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_training_steps: 500_000
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+
+logger:
+  frequency: 100
+
+lora:
+  r: 8
+  alpha: 16
+  target_modules: ???

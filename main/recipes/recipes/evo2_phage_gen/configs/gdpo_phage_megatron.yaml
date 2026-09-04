@@ -1,0 +1,213 @@
+# Evo2 phage GDPO rollout config.
+#
+# GDPO uses the same NeMo-RL GRPO trainer frontend, but the phage environment
+# returns a positional [B, K] reward tensor instead of the scalar aggregate.
+
+defaults: "grpo_phage_megatron.yaml"
+
+run_id: "phix174_gdpo"
+
+checkpointing:
+  checkpoint_dir: "data/checkpoints/${run_id}"
+  pretrained_checkpoint:
+    # Start GDPO from the converted base Evo2 Microviridae checkpoint, not from a prior RL run.
+    path: "data/checkpoints/evo2_7b_microviridae_mbridge"
+    format: "megatron_bridge"
+  metric_name: "val:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate"
+  higher_is_better: true
+
+grpo:
+  max_num_epochs: 500
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 48
+  max_num_steps: 500
+  val_period: 10
+  val_batch_size: 96
+  max_val_samples: 96
+  val_at_start: false
+  val_at_end: true
+  seq_logprob_error_threshold: 1.5
+  # Keep both the legacy scalar path and the explicit GDPO estimator off
+  # leave-one-out normalization so the resolved config is unambiguous.
+  use_leave_one_out_baseline: false
+  # Use the GDPO multi-reward estimator rather than scalar GRPO. This keeps
+  # objective-wise advantage normalization active for the positional rewards.
+  adv_estimator:
+    name: "gdpo"
+    normalize_rewards: true
+    use_leave_one_out_baseline: false
+    minus_baseline: true
+
+loss_fn:
+  # Conservative rollout setting: keep policy drift tighter than the smoke/base GRPO config.
+  reference_policy_kl_penalty: 0.001
+  # Give each genome equal policy-loss weight when generation lengths differ.
+  token_level_loss: false
+
+policy:
+  train_global_batch_size: 96
+  train_micro_batch_size: 1
+  generation_batch_size: 96
+  logprob_batch_size: 1
+  megatron_cfg:
+    tensor_model_parallel_size: 1
+    optimizer:
+      lr: 1.0e-6
+      min_lr: 1.0e-7
+    scheduler:
+      lr_warmup_init: 1.0e-7
+  generation:
+    max_new_tokens: 5976
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 4
+    mcore_generation_config:
+      max_requests: 12
+      prompt_batch_size: 12
+      cuda_graph_impl: "local"
+      inference_cuda_graph_scope: "block"
+      use_cuda_graphs_for_non_decode_steps: true
+      enable_chunked_prefill: false
+      generation_adapter: "bionemo.evo2_phage_gen.nemo_rl_evo2_generation:Evo2MegatronGenerationAdapter"
+      generation_adapter_config:
+        # Base seed for reproducibility. The adapter advances by seed_stride every generation call,
+        # so validation/train steps do not reuse the same sampling seed.
+        seed: 42
+        seed_stride: 1000003
+        # Whole-genome rollouts require the requested completion length. Suppressing EOS also
+        # keeps every 12-request DP shard on the same packed dynamic decode schedule.
+        ignore_eos: true
+        strict_generation: true
+
+  # This NeMo-RL switch controls gradient-bearing policy/log-prob packing, not rollout packing.
+  # Keep it off until Evo2's packed loss/backward path has a separate correctness and throughput A/B;
+  # the generation adapter above already uses packed dynamic prefill and batched recurrent decode.
+  sequence_packing:
+    enabled: false
+
+data:
+  train:
+    data_path: "data/phix174_rl_train_prefix16_24.jsonl"
+  shuffle: false
+  validation:
+    dataset_name: "bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset"
+    data_path: "data/phix174_rl_validation_prefix16_24.jsonl"
+    env_name: "phage_qc"
+    prompt_file: null
+    system_prompt_file: null
+
+env:
+  phage_qc:
+    dustmask_filter: true
+    dustmasker_bin: "dustmasker"
+    dustmask_use_external: true
+    dustmask_window: 64
+    dustmask_level: 20.0
+    dustmask_end_window: 200
+    dustmask_max_end_fraction: 0.9
+    reward_output_mode: "gdpo"
+    # These weights do not post-weight GDPO objectives after normalization. They
+    # keep scalar diagnostics and binary pass metrics aligned with the RL500 gates.
+    weight_valid_nt_chars: 1.0
+    weight_genome_length: 1.0
+    weight_gc_content: 1.0
+    weight_nt_homopolymer: 1.0
+    weight_dustmask_end: 1.0
+    weight_nucleotide_pass: 1.0
+    weight_protein_hit_count: 1.0
+    weight_tropism: 1.0
+    weight_synteny: 0.25
+    weight_average_protein_identity: 0.25
+    weight_required_genes: 0.1
+    weight_mmseqs_cluster_diversity: 1.0
+    gdpo_objectives:
+      - name: "valid_nt_chars"
+        columns: ["reward_valid_nt_chars"]
+        requires_safety_eligibility: true
+      - name: "genome_length"
+        columns: ["reward_genome_length"]
+        requires_safety_eligibility: true
+      - name: "gc_content"
+        columns: ["reward_gc_content"]
+        requires_safety_eligibility: true
+      - name: "nt_homopolymer"
+        columns: ["reward_nt_homopolymer"]
+        requires_safety_eligibility: true
+      - name: "dustmask_end"
+        columns: ["reward_dustmask_end"]
+        requires_safety_eligibility: true
+      - name: "nucleotide_pass"
+        columns: ["reward_nucleotide_pass"]
+        requires_safety_eligibility: true
+      - name: "protein_hit_count"
+        columns: ["reward_external_protein_hit_count"]
+        requires_safety_eligibility: true
+      - name: "tropism"
+        columns: ["reward_external_tropism"]
+        requires_safety_eligibility: true
+      - name: "required_genes"
+        columns: ["reward_external_required_genes"]
+        requires_safety_eligibility: true
+      - name: "synteny"
+        columns: ["reward_external_synteny"]
+        requires_safety_eligibility: true
+      - name: "average_protein_identity"
+        columns: ["reward_external_average_protein_identity"]
+        requires_safety_eligibility: true
+      - name: "mmseqs_cluster_diversity"
+        columns: ["reward_mmseqs_cluster_diversity"]
+        requires_safety_eligibility: true
+      - name: "safety_amr"
+        columns: ["reward_safety_amr"]
+        requires_safety_eligibility: false
+      - name: "safety_toxin"
+        columns: ["reward_safety_toxin"]
+        requires_safety_eligibility: false
+      - name: "safety_lysogeny"
+        columns: ["reward_safety_lysogeny"]
+        requires_safety_eligibility: false
+    external_qc:
+      enabled: true
+      tool_bin_dir: "data/external/bin"
+      work_dir: "data/checkpoints/${run_id}_external_qc"
+      fail_on_error: true
+      timeout_seconds: 1800
+      enable_protein_hit_count: true
+      enable_tropism: true
+      enable_synteny: true
+      synteny_mode: "full"
+      enable_average_protein_identity: true
+      enable_required_genes: true
+      required_genes_evidence_target: 9.0
+      # Per external-QC reward run; set lower if several environment actors score concurrently.
+      lovis4u_parallel_jobs: 32
+      lovis4u_mmseqs_threads: 8
+      lovis4u_collect_pdfs: false
+    sequence_safety:
+      batch_size: 128
+      orf_workers: 32
+      threads: 32
+      phrogs_threads: 64
+    mmseqs_cluster_diversity:
+      enabled: true
+      mmseqs_bin: "data/external/bin/mmseqs"
+      work_dir: "data/checkpoints/${run_id}_mmseqs_cluster_diversity"
+      keep_artifacts: false
+      min_seq_id: 0.99
+      coverage: 0.0
+      cov_mode: 0
+      seq_id_mode: 0
+      cluster_mode: 0
+      threads: 64
+      verbosity: 0
+
+logger:
+  log_dir: "data/checkpoints/${run_id}_logs"
+  wandb_enabled: false
+  wandb:
+    project: "evo2_phage_design_rl_gdpo"
+    name: "phix174-gdpo"
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 1

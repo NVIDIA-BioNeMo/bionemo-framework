@@ -1,0 +1,106 @@
+{
+  "skill_name": "bionemo-phage-design-adapt-execution",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-adapt-execution-001-local-preflight",
+      "prompt": "Adapt an Evo 2 phage SFT and RL workflow to the GPU node this agent is running on. Data, checkpoints, temporary files, logs, and results may use different mounts. Do not change the biological workload.",
+      "expected_output": "A measured local execution plan with a full-shape smoke test and sensible storage choices.",
+      "assertions": [
+        "The response inspects current commands, environment, storage, CPUs, accelerators, memory, occupancy, and existing jobs before sizing work.",
+        "It checks that selected paths are writable and have enough space without assuming all artifacts share one mount.",
+        "It uses a bounded full-context smoke to choose topology and effective batch.",
+        "It responds to measured memory pressure without truncating genomes, dropping loss-bearing tokens, weakening QC, or reducing the requested output count.",
+        "It records resolved settings, commands, paths, and results in RUNLOG.md without dumping credentials or the entire environment."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-002-sandbox-gpu-visibility",
+      "prompt": "The operator says this node has eight working GPUs and prior jobs used them, but nvidia-smi, /dev/nvidia inspection, and CUDA visibility all fail through the agent sandbox. Decide how to proceed.",
+      "expected_output": "A host-visible verification step rather than a false conclusion that the node has no GPUs.",
+      "assertions": [
+        "The response recognizes that the sandbox or container can hide host devices and drivers.",
+        "With permission, it repeats the probe in a host-visible context or gives the operator a concise host-side check.",
+        "It does not install drivers, switch to CPU, or shrink the intended workload based only on sandbox-visible failure.",
+        "If host visibility cannot be checked, it reports the uncertainty and leaves hardware sizing unresolved."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-003-durable-remote-run",
+      "prompt": "Prepare a long-running phage training job on the remote, scheduler, or cloud facility actually available here. It must keep running if this chat session ends and be recoverable in a later session.",
+      "expected_output": "An environment-appropriate durable launch and monitoring handoff.",
+      "assertions": [
+        "The response discovers the available facility and its current command interface instead of assuming a particular backend.",
+        "The worker, status, and logs survive the chat or agent process; shell backgrounding inside the current session is not presented as durable.",
+        "It retains a stable job identifier and provides launch, status, log, cancel, and resume information using the chosen environment.",
+        "It observes startup and later meaningful progress and does not call submission completion.",
+        "It chooses monitoring intervals from expected progress and decision timing rather than continuously polling a stable job.",
+        "For segmented training, it persists the stage operator's scientific continuation decision and does not relaunch unconditionally through the configured ceiling.",
+        "A later session can reattach and determine terminal success or failure without launching a duplicate."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-004-tool-contention",
+      "prompt": "One whole-genome filter became faster with more threads in isolation but slower when many containers ran concurrently. Other required filters have not been measured. Choose concurrency for SFT filtering, RL scoring, and final screening.",
+      "expected_output": "A tool-specific benchmark and resource plan based on realistic full-genome workloads.",
+      "assertions": [
+        "The response does not generalize one filter's threading result to every tool or stage.",
+        "It benchmarks realistic records and measures throughput, memory, I/O, and contention for each important path.",
+        "It checks that optimized and reference paths agree on controls and record mapping.",
+        "It selects concurrency from the shared bottleneck and leaves enough resources for monitoring and checkpointing.",
+        "Missing or failed required filters remain visible and cannot become PASS."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-005-workstation-container",
+      "prompt": "A workstation has working NVIDIA GPUs and Docker with the NVIDIA container runtime, but the BioNeMo recipe is checked out on the host and its dependencies are not installed there. Establish a supported environment without modifying the host Python installation.",
+      "expected_output": "A GPU-enabled NVIDIA PyTorch container workflow using the mounted checkout and recipe build scripts.",
+      "assertions": [
+        "The response uses a GPU-enabled container because the recipe build scripts are tested against the NVIDIA PyTorch container environment.",
+        "It identifies the recipe Dockerfile or repository .devcontainer as an appropriate starting point.",
+        "It exposes the workstation GPUs and bind-mounts the checkout plus the selected data, cache, and result locations.",
+        "It runs ./.ci_build.sh inside the mounted checkout and sources .ci_test_env.sh before recipe commands.",
+        "It keeps the mounted source and installed editable code aligned and records the resolved image and mount layout."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-006-non-x86-assets",
+      "prompt": "An ARM64 GPU workstation can run an NVIDIA PyTorch container. Determine whether the current Evo 2 phage external-asset setup can run unchanged.",
+      "expected_output": "An architecture-aware ARM setup using the maintained native downloads and the documented Python packaging fallback.",
+      "assertions": [
+        "The response uses the installer's architecture-selected aarch64 downloads for MMseqs2-GPU, DIAMOND, HMMER, and AMRFinderPlus rather than reusing x86_64 tool caches.",
+        "It enables the dated biotite 0.41.2 and pinned biotraj 1.2.2 source-build fallback documented beside pyproject.toml when the ARM Python resolver encounters the known wheel and sdist metadata gap.",
+        "It includes the documented Hatchling, hatch-vcs, and hatch-cython build helpers needed by that no-build-isolation fallback.",
+        "It validates native architecture and executable versions before scientific stages use the tools.",
+        "It records the image, architecture, dependency fallback if used, and resolved tool paths in RUNLOG.md."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-007-coherent-memory-node",
+      "prompt": "Adapt training to an ARM64 coherent-memory NVIDIA node. The model fits before checkpointing, but HBM fills after saves even though CUDA process allocation is modest. The non-root runtime also tries to compile a dataset helper into the root-owned environment, and nested tools oversubscribe CPUs.",
+      "expected_output": "An architecture-correct image and memory-placement plan validated across repeated checkpoint and restart boundaries.",
+      "assertions": [
+        "The response inspects CPU, HBM, and NUMA topology and recognizes that clean checkpoint page cache on a memory-only HBM node may not appear in CUDA process allocation.",
+        "It keeps device-required memory nodes visible, deliberately places CPU, offload, and cache allocations on CPU-attached memory with supported controls, and verifies actual residency.",
+        "The full-shape smoke crosses a first save, following step, second save, and exact restart; a pre-save fit is not accepted as sufficient.",
+        "Architecture-specific compiled helpers are built while the image is writable and import-tested as the actual non-root runtime user.",
+        "Large generated artifacts stay outside the image build context and are mounted at runtime.",
+        "Concurrency accounts for outer workers, nested subprocesses, and explicit tool thread limits so defaults cannot consume all visible CPUs.",
+        "If checkpoint headroom remains poor, supported optimizer offload and nonpersistent checkpoint workers are benchmarked before reducing scientific context or effective batch."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    }
+  ]
+}

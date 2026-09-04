@@ -1,0 +1,10 @@
+accelerate==1.13.0
+datasets
+deepspeed
+hydra-core
+torchao!=0.14.0
+torchmetrics
+transformer_engine[pytorch]
+transformers
+wandb
+pytest

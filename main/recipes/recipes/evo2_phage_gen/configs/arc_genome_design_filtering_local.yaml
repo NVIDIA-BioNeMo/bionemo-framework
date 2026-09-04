@@ -1,0 +1,211 @@
+################################################
+### PHAGE GENOME DESIGN FILTERING REPLICATION ###
+################################################
+#
+# Local BioNeMo-friendly config for Arc's
+# data/external/arc_evo2/phage_gen/pipelines/genome_design_filtering_pipeline.py.
+#
+# This template is intentionally conservative: nucleotide filtering is enabled
+# and external-tool stages are disabled until the PHROGs, MMseqs, CheckV,
+# Prodigal, Orfipy, and LoVis4u dependencies are installed and the database
+# paths below are populated.
+
+######################################
+### 1. INITIAL CLEANUP PARAMETERS ####
+######################################
+
+results_save_dir: "recipes/evo2_phage_gen/data/checkpoints/arc_filtering/prompt_sweep"
+current_config_file: "recipes/evo2_phage_gen/configs/arc_genome_design_filtering_local.yaml"
+evo_gen_seqs_fasta_file_save_location: "recipes/evo2_phage_gen/data/checkpoints/generation/evo2_microviridae_prompt_sweep.fasta"
+
+keep_only_up_to_first_eos: true
+overwrite_sequence_ids: true
+remove_prompt: false
+prompt_to_remove: "|r__Riboviria;k__"
+prepend_prompt: false
+prompt: ""
+
+initialized_seqs_csv_file_save_location: "qc1_initial_seqs.csv"
+initialized_seqs_fasta_file_save_location: "qc1_initial_seqs.fasta"
+
+################################
+### 2. NUCLEOTIDE FILTERING ####
+################################
+
+nucleotide_filtering: true
+nucleotide_character_filter: true
+genome_length_filter: true
+genome_length_range: [4000, 6000]
+gc_content_filter: true
+gc_content_range: [30, 65]
+nucleotide_homopolymer_filter: true
+nucleotide_homopolymer_length_range: [0, 10]
+dinucleotide_frequency_filter: false
+dinucleotide_frequency_range: [0, 20]
+tud_filter: false
+tetranucleotide: "GATC"
+tud_range: [0, 0.1]
+
+nucleotide_filter_counts_file_save_location: "qc2_nt_filter_counts.csv"
+nucleotide_filter_seqs_csv_file_save_location: "qc2_nt_filter_seqs.csv"
+nucleotide_filter_seqs_fasta_file_save_location: "qc2_nt_filter_seqs.fasta"
+
+#########################################
+### 3. PRODIGAL-BASED ORF FILTERING ####
+#########################################
+
+# Set to true after patching Arc's run_prodigal path or making Prodigal
+# discoverable through PATH in that script.
+orf_filtering: false
+use_nucleotide_filtered_df: true
+prodigal_based_filters: true
+prodigal_orfs_file_save_location: "qc3_prodigal_orfs.fasta"
+prodigal_proteins_file_save_location: "qc3_prodigal_proteins.fasta"
+orf_count_filter: true
+orf_count_range: [0, 1000000]
+orf_lengths_filter: true
+orf_lengths_range: [0, 1000000]
+coding_density_filter: true
+coding_density_range: [0, 1000000]
+aminoacid_homopolymer_length_filter: true
+aminoacid_homopolymer_length_range: [0, 1000000]
+
+orf_filter_counts_file_save_location: "qc3_orf_filter_counts.csv"
+orf_filter_seqs_csv_file_save_location: "qc3_orf_filter_seqs.csv"
+orf_filter_seqs_fasta_file_save_location: "qc3_orf_filter_seqs.fasta"
+
+############################
+### 4. HOMOLOGY FILTERING ##
+############################
+
+# Enable only after external databases below exist.
+homology_filtering: false
+use_orf_filtered_df: false
+use_nucleotide_filtered_df_instead: true
+
+orfipy_threads: 16
+orfipy_strand: "f"
+orfipy_start_codons: "ATG"
+orfipy_stop_codons: "TAA,TGA,TAG"
+orfipy_min_max_orf_lengths: [90, 1800]
+orfipy_orfs_file_save_location: "qc4_orfipy_orfs.fasta"
+orfipy_tmp_proteins_file_save_location: "qc4_orfipy_proteins_tmp.fasta"
+orfipy_proteins_file_save_location: "qc4_orfipy_proteins.fasta"
+homology_filter_seqs_circular_fasta_file_save_location: "qc4_homology_filter_seqs_pseudocircularized.fasta"
+
+protein_database_hit_count_filter: true
+mmseqs_threads: 16
+mmseqs_db_protein_database: "recipes/evo2_phage_gen/data/external/phrogs/phrogs_consensus_db_pad"
+mmseqs_protein_database_results_dir_save_location: "qc4_mmseqs_results_protein_database"
+mmseqs_protein_database_sensitivity: 4.0
+protein_database_hit_count: 7
+
+training_data_sequence_identity_filter: false
+training_data_genomes_fasta: "recipes/evo2_phage_gen/data/external/zenodo/microviridae_sft_training_data_raw.fna"
+mmseqs_training_data_results_dir_save_location: "qc4_mmseqs_results_training_data"
+mmseqs_training_data_sensitivity: 7.5
+training_data_sequence_identity_range: [0, 98.9]
+training_data_sequence_identity_metrics_file_save_location: "qc4_training_data_sequence_identity_metrics.csv"
+
+checkv_filter: false
+checkv_threads: 16
+checkv_quality_range: ["Low-quality", "Medium-quality", "High-quality", "Complete"]
+checkv_results_dir_save_location: "qc4_checkv_results"
+
+reference_genome_sequence_identity_filter: false
+reference_genome_fasta: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
+reference_genome_sequence_identity_range: [60, 100]
+
+genetic_architecture_filter: false
+genetic_architecture_reference_genome: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
+genetic_architecture_score_range: [0, 10]
+
+tropism_protein_sequence_identity_filter: true
+reference_tropism_protein: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta"
+mmseqs_db_tropism_protein: "recipes/evo2_phage_gen/data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein"
+mmseqs_tropism_protein_results_dir_save_location: "qc4_mmseqs_results_tropism_protein"
+mmseqs_tropism_protein_sensitivity: 4.0
+tropism_protein_sequence_identity_range: [60, 100]
+
+homology_filter_counts_file_save_location: "qc4_homology_filter_counts.csv"
+homology_filter_seqs_csv_file_save_location: "qc4_homology_filter_seqs.csv"
+homology_filter_seqs_fasta_file_save_location: "qc4_homology_filter_seqs.fasta"
+
+######################################
+### 5. DIVERSIFICATION FILTERING ####
+######################################
+
+diversification_filtering: false
+use_homology_filtered_df: true
+use_orf_filtered_df_instead: false
+use_nucleotide_filtered_df_instead_2: false
+
+mmseqs_clustering_filter: false
+mmseqs_clustering_min_sequence_identity: 0.99
+mmseqs_clustering_results_dir_save_location: "qc5_mmseqs_results_clustering"
+
+mmseqs_reference_genome_sequence_identity_remove_filter: false
+mmseqs_reference_genome_sequence_identity_keep_range: [0, 98.9]
+mmseqs_reference_genome_sensitivity: 7.5
+mmseqs_reference_genome_results_dir_save_location: "qc5_mmseqs_results_reference_genome"
+reference_genome_sequence_identity_metrics_file_save_location: "qc5_reference_genome_sequence_identity_metrics.csv"
+
+genetic_architecture_remove_filter: false
+genetic_architecture_score_mode: "genome"
+genetic_architecture_score_range_to_remove: [0.9, 1.1]
+
+diversification_filter_counts_file_save_location: "qc5_diversification_filter_counts.csv"
+diversification_filter_seqs_csv_file_save_location: "qc5_diversification_filter_seqs.csv"
+diversification_filter_seqs_fasta_file_save_location: "qc5_diversification_filter_seqs.fasta"
+
+########################################
+### 6. VISUALIZATION AND SYNTENY QC ####
+########################################
+
+genetic_architecture_visualization_and_synteny_filtering: false
+genetic_architecture_visualization_script: "recipes/evo2_phage_gen/data/arc_pipeline_patched/genetic_architecture_visualization.py"
+protein_annotation_file: "recipes/evo2_phage_gen/data/external/phrogs/phrog_annot_v4.tsv"
+lovis4u_conda_env: "genome_visualization"
+# Per Arc pipeline run. Arc's visualization helper also receives this as n_parallel_jobs.
+lovis4u_parallel_jobs: 12
+lovis4u_chunk_size: 12
+# RL scoring needs LoVis4u's MMseqs metadata, AAI, and required-gene metrics, but not copied PDFs.
+lovis4u_collect_pdfs: false
+
+use_reference_genome: false
+reference_genome_gff_file_save_location: "recipes/evo2_phage_gen/data/external/arc_evo2/phage_gen/data/NC_001422.1_pseudocircular.gff"
+allow_gff_product_order_synteny_fallback: false
+
+average_protein_sequence_identity_filter: true
+average_protein_sequence_identity_range: [0, 95]
+average_protein_sequence_identity_metrics_file_save_location: "qc6_average_protein_sequence_identity_metrics.csv"
+
+required_genes_filter: true
+required_genes_list:
+  - "terminase"
+  - "endolysin"
+  - "major spike protein"
+  - "DNA replication initiation"
+  - "DNA condensation"
+  - "major head protein"
+  - "head morphogenesis"
+  - "nan" # Arc annotates NC_001422.1_ORF.15 as product=nan, function=unknown function.
+  - "pilot protein for DNA ejection"
+required_genes_metrics_file_save_location: "qc6_required_genes_metrics.csv"
+required_genes_evidence_target: 9.0
+
+syntenic_gene_count_filter: true
+# Strict Arc-template/paper-ready automated synteny gate.
+syntenic_gene_count_range: [10, 12]
+total_gene_count_range: [10, 12]
+syntenic_total_gene_count_remove:
+  - [11, 11]
+
+gff_dir_save_location: "qc6_gff_files"
+gbk_dir_save_location: "qc6_gbk_files"
+genetic_architecture_visualization_dir_save_location: "qc6_genetic_architecture_visualization_metadata"
+genetic_architecture_visualization_pdf_dir_save_location: "qc6_genetic_architecture_visualization_pdfs"
+synteny_filter_counts_file_save_location: "qc6_synteny_filter_counts.csv"
+synteny_metrics_file_save_location: "qc6_synteny_filter_metrics.csv"
+synteny_filter_seqs_csv_file_save_location: "qc6_synteny_filter_seqs.csv"
+synteny_filter_seqs_fasta_file_save_location: "qc6_synteny_filter_seqs.fasta"

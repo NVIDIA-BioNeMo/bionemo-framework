@@ -1,0 +1,66 @@
+# @package _global_
+
+# Convergence test configuration with tiny Llama model (~1M params)
+# Tests that the model can overfit on a small dataset
+# Works with both DDP and FSDP2, single GPU or multi-GPU
+
+defaults:
+  - defaults
+  - _self_
+
+# Use tiny Llama config for fast convergence testing
+config_name_or_path: ./model_configs/meta-llama/Llama-3.2-1B
+config_kwargs: # Arguments to pass to the AutoConfig.from_pretrained method
+  trust_remote_code: true
+  vocab_size: 256 # Overrides to the default config that comes from meta-llama/Llama-3.2-1B
+  tie_word_embeddings: false
+  eos_token_id: 0
+  pad_token_id: 1
+  bos_token_id: 2
+  attn_input_format: "bshd"
+
+num_train_steps: 270_000
+
+dataset:
+  tokenizer_name_or_path: ./tokenizers/nucleotide_fast_tokenizer
+  micro_batch_size: 1 # Conservative for single GPU
+  text_column: "text"
+  load_dataset_kwargs:
+    path: "arcinstitute/opengenome2"
+    data_dir: "json/pretraining_or_both_phases"
+    split: "train"
+    streaming: true # Use streaming to avoid loading entire dataset into memory
+
+adamw_kwargs:
+  lr: 5e-4
+  fused: true
+  betas: [0.9, 0.98]
+  eps: 1e-8
+  weight_decay: 0.01
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_decay_steps: 500_000
+
+checkpoint:
+  ckpt_dir: null # No checkpoints
+  save_final_model: false # Don't save final model
+  resume_from_checkpoint: false # Start fresh for convergence test
+  save_every_n_steps: null # No intermediate checkpoints
+
+logger:
+  frequency: 100
+
+# WandB configuration
+wandb:
+  project: "llama3-genomic-convergence"
+  name: "tiny-llama-convergence-test"
+  mode: "online"
+  tags:
+    - convergence-test
+    - tiny-model
+    - 1M-params
+    - 8192-context
+
+use_meta_device: false
+use_torch_compile: false

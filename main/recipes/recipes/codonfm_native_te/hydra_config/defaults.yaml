@@ -1,0 +1,67 @@
+# CodonFM Training Config
+
+model_preset: ???  # e.g. encodon_200k, encodon_80m, encodon_600m, encodon_1b
+num_train_steps: ???
+grad_acc_steps: 1  # Gradient accumulation steps. Effective batch = micro_batch_size * num_gpus * grad_acc_steps
+
+use_meta_device: true
+use_sequence_packing: false
+
+dataset:
+  data_path: ???
+  micro_batch_size: ???
+  num_workers: 1
+  max_seq_length: 512
+  mlm_probability: 0.15
+
+# WandB config
+wandb_init_args:
+  name: ???
+
+# TransformerEngine FP8 config
+fp8_config:
+  enabled: false
+  fp8_recipe: transformer_engine.common.recipe.DelayedScaling
+  fp8_format: "HYBRID"
+  fp8_recipe_kwargs: {}
+
+fp4_config:
+  enabled: false
+  fp4_recipe: transformer_engine.common.recipe.NVFP4BlockScaling
+  fp4_format: "E2M1"
+  fp4_recipe_kwargs: {}
+
+# Optimizer config
+adamw_kwargs:
+  lr: 4e-4
+  fused: true
+  betas: [0.9, 0.98]
+  eps: 1e-8
+  weight_decay: 0.01
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 2_000
+  num_training_steps: 500_000
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: ???
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 1_000
+  max_checkpoints: 5
+
+logger:
+  frequency: 100
+
+quant_stats_config:
+  enabled: false
+  quant_stats_file: ./fp8_debugging_stats.yaml
+  quant_log_dir: ./log_quant_stats
+  log_to_wandb: false
+
+# Note: The layers are going to come in 1 indexed and we convert them to be 0 indexed at runtime.
+fp8_layers: null
+fp4_layers: null
+use_fp32_master_weights: null

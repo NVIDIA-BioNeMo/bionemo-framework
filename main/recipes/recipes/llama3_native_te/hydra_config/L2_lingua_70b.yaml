@@ -1,0 +1,73 @@
+# Lingua 70B BF16 with Context Parallelism (CP=2).
+# Uses train_fsdp2_cp.py, not train_fsdp2.py.
+
+defaults:
+  - defaults
+  - _self_
+
+config_name_or_path: ./model_configs/meta-llama/Llama-3.1-70B
+
+config_kwargs:
+  attn_input_format: bshd
+  self_attn_mask_type: causal
+
+# CP=2 halves per-GPU sequence length, cutting attention activation memory ~4x.
+cp_size: 2
+
+# BSHD format required for CP (no sequence packing).
+use_sequence_packing: false
+
+# Meta device init is critical for 70B to avoid OOM during model construction.
+use_meta_device: true
+
+# FP32 master weights via TE FusedAdam
+use_fp32_master_weights: true
+
+wandb:
+  name: lingua-70b-bf16-cp2
+  project: lingua-70b
+  id: lingua-70b-bf16-cp2
+
+num_train_steps: 60_000
+
+dataset:
+  tokenizer_name_or_path: ./tokenizers/Meta-Llama-3-8B
+  micro_batch_size: 1
+  num_workers: 4
+  max_seq_length: 8192
+  stride: 512
+  buffer_size: 10_000
+  use_stateful_dataloader: false
+  mask_degenerate_bases: false
+  uppercase_labels: false
+  load_dataset_kwargs:
+    path: parquet
+    data_files: "/workspace/data/dclm-baseline/global-shard_01_of_10/**/*.parquet"
+    split: "train"
+    streaming: true
+
+# With CP=2, dp_size = 32/2 = 16. GBS = 1 * 16 * 16 = 256
+grad_acc_steps: 16
+
+adamw_kwargs:
+  lr: 3e-4
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.01
+
+lr_scheduler_kwargs:
+  num_warmup_steps: 5_000
+  num_decay_steps: 55_000
+  min_lr_ratio: 0.000001
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: null
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 1000
+  async_save: true
+
+profiler:
+  enabled: false

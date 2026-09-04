@@ -1,0 +1,105 @@
+{
+  "skill_name": "bionemo-phage-design-implement-rl-objectives",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-001-denominator-gaming",
+      "prompt": "Implement two phage rewards: lower similarity to a reference, and high identity among required matching elements. No aligned elements currently appear as 0% identity. Average both with viability.",
+      "expected_output": "Bounded rewards whose missing-denominator behavior cannot be exploited.",
+      "assertions": [
+        "Every reward is in [0, 1], with a scientifically meaningful random or unacceptable baseline at 0 and supported target at 1.",
+        "No aligned elements or no matching required elements are treated as missing evidence rather than favorable low identity.",
+        "Missing, empty, invalid, too-short, no-hit, and tool-failure paths return explicit zero credit with a reason when evidence is required and do not crash.",
+        "Positive, baseline, desired, boundary, and missing-denominator tests demonstrate the intended ordering.",
+        "The combined score cannot hide a skipped or fixed-zero component."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-002-joint-score-behavior",
+      "prompt": "Six individually reasonable phage rewards will be combined. Determine whether the collection could steer training toward an unintended design family and define the implementation tests.",
+      "expected_output": "A portfolio-level behavior check in addition to component tests.",
+      "assertions": [
+        "The response checks duplicated evidence, incompatible directions, scale dominance, sparse support, and combinations that reward the wrong biological endpoint.",
+        "It evaluates reference, random or baseline, desired, and counterexample genomes at component and aggregate levels.",
+        "It keeps component values and denominators visible rather than validating only the weighted sum.",
+        "Tests cover gaming cases and confirm online rewards agree with final QC where promised.",
+        "A tiny deterministic RL smoke computes the real rewards, writes a checkpoint, and resumes."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-003-sequential-starvation",
+      "prompt": "The final QC pipeline applies protein hits, tropism, required genes, and synteny sequentially. Reuse it unchanged for online rewards.",
+      "expected_output": "Independent online measurements while retaining sequential hard filtering for final QC.",
+      "assertions": [
+        "The response identifies that later rewards would otherwise receive too few measured examples.",
+        "Each online component runs independently on the intended denominator and logs whether it was measured, missing, or failed.",
+        "Positive controls prove every enabled component executes even when an earlier final-QC gate would fail.",
+        "Sequential all-or-nothing behavior remains appropriate for final hard QC but not for hiding online observations.",
+        "The aggregate cannot appear healthy while later components are inactive."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-004-therapeutic-support",
+      "prompt": "Implement objectives for an adapted therapeutic whole-genome phage project. Several design-relevant safety checks are sparse on baseline generations, so omit them online and keep only the host classifier.",
+      "expected_output": "The approved safety components remain measurable and final exclusions remain hard.",
+      "assertions": [
+        "The response does not silently drop an applicable approved component merely because early support is sparse.",
+        "It diagnoses runtime, denominator, proposal distribution, and proxy behavior and may use calibrated shaping without changing the biological endpoint.",
+        "Required hard exclusions remain independent of online partial credit.",
+        "The host classifier remains one calibrated signal and is not treated as proof of viability or therapeutic safety.",
+        "If the host classifier is learned or stacked, it uses deployment-matched out-of-fold predictions and tests the RL-selected high-score tail, policy-candidate shift, and model or seed disagreement.",
+        "Focused controls and an installed-runtime smoke verify each implemented component."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-005-refresh-score-definition-artifact",
+      "prompt": "Implement approved changes to two reward functions and add a third reward. The code and tests pass, and the objective YAML names the components. Finish the scientific handoff without adding a new stage to the fully scripted run.",
+      "expected_output": "The implemented score behavior and its human-readable run artifact agree exactly.",
+      "assertions": [
+        "The response creates or refreshes artifacts/RL_SCORE_DEFINITIONS.md in the selected result root before declaring the reward work complete.",
+        "Every implemented objective has its measured quantity, units, direction, exact formula, resolved configuration, zero-credit and full-credit regions, and both-side partial-credit behavior when applicable.",
+        "Categorical and missing or failed states are described explicitly rather than forced into invented numeric ranges.",
+        "The report includes concise biological rationale, evidence citations, controls, telemetry, and final hard-QC relationship for each objective.",
+        "The report is checked against the implemented reward columns, formulas, configuration, and focused boundary tests; it is an agent-authored run artifact rather than a required pipeline stage."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-006-mixed-batch-controls",
+      "prompt": "Harden a whole-genome reward portfolio. Empty generations currently get vacuous composition credit, one invalid row can disrupt valid rows in the same scorer batch, and mixed safety states sometimes coerce a numeric column to strings. A refactor also changed scorer concurrency.",
+      "expected_output": "A total, row-isolated, type-stable reward implementation whose optimized path preserves scientific behavior.",
+      "assertions": [
+        "Empty and invalid genomes receive explicit zeroes across every applicable objective and cannot enter paths that assume genes or reference-length evidence.",
+        "Invalid rows are isolated and zeroed while valid rows in the same batch continue to score, with results invariant to batch composition and row order.",
+        "Numeric reward and safety columns are initialized with stable numeric dtypes before mixed PASS, FAIL, INDETERMINATE, missing, and measured updates.",
+        "Successful no-hit is distinguished from scorer or tool failure, and failure cannot become PASS or vacuous positive credit.",
+        "The exact enabled portfolio is exercised on a reference, equivalent circular representations where relevant, empty and targeted negative controls, and mixed-validity batches.",
+        "Reference and optimized paths agree on formulas, controls, record mapping, and outputs; concurrency changes are measured rather than silently serialized."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-007-biological-controls",
+      "prompt": "Implement a newly invented whole-genome reward. Unit tests cover its arithmetic, and the reference genome scores highly, but no biologically meaningful negative or counterexample has been exercised.",
+      "expected_output": "A controlled reward implementation whose direction and separation are demonstrated on relevant high- and low-scoring biological cases.",
+      "assertions": [
+        "The response adds more than an arithmetic unit test: it identifies known or evidence-supported expected high- and low-scoring genomes or targeted counterfactuals.",
+        "Control provenance, biological rationale, expected ordering, measured score, support, and failure state are recorded.",
+        "Where circular equivalence should hold, rotations and reverse complements preserve the expected result.",
+        "Boundary, empty, invalid, missing-evidence, no-hit, and tool-failure cases cannot receive accidental positive credit.",
+        "The exact installed scoring path and combined portfolio run the controls so a skipped component cannot hide behind aggregate reward."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    }
+  ]
+}

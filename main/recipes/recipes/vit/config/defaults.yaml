@@ -1,0 +1,88 @@
+model:
+  vit:
+    img_size: 224
+    patch_size: 16
+    in_chans: 3
+    num_classes: ${dataset.num_classes}
+    global_pool: "token"
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: true
+    qk_norm: false
+    scale_attn_norm: false
+    scale_mlp_norm: false
+    proj_bias: true
+    init_values: null
+    class_token: true
+    pos_embed: true
+    no_embed_class: false
+    reg_tokens: 0
+    pre_norm: false
+    final_norm: true
+    fc_norm: null
+    pool_include_prefix: false
+    drop_rate: 0.0
+    pos_drop_rate: 0.0
+    patch_drop_rate: 0.0
+    proj_drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    weight_init: "timm"
+    init_variance_rescale: false
+  transformer_engine: false
+  channels_last: false
+
+optimizer:
+  lr: 1e-4
+  betas: [0.9, 0.98]
+  eps: 1e-8
+  weight_decay: 0.01
+
+distributed:
+  dp_outer: 1
+  dp_shard: 1
+  cp: 1
+
+fsdp:
+  init_model_with_meta_device: true
+  zero_dp_strategy: "optim_grads_params"
+  fsdp_unit_modules:
+    - vit.Block
+    - vit.PatchEmbed
+    - vit.AttentionPoolLatent
+    - torch.nn.LayerNorm
+    - torch.nn.Linear
+  outer_dp_sharding_strategy: "optim"
+
+training:
+  steps: 10
+  val_interval: 5
+  log_interval: 1
+  checkpoint:
+    path: null
+    resume_from_metric: null
+
+inference:
+  checkpoint:
+    path: null
+    format: null
+    megatron_fsdp: null
+
+dataset:
+  num_classes: 3
+  num_workers: 0
+  train:
+    batch_size: 1
+    shuffle: false
+  val:
+    batch_size: 1
+    shuffle: false
+
+random:
+  seed: 42
+
+profiling:
+  torch_memory_profile: false
+  wandb: false

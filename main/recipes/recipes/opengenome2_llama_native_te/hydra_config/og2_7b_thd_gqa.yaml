@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Apache2
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OpenGenome2 7B Llama3 - THD format with Grouped Query Attention
+#
+# Architecture: 7B params, GQA (8 KV heads), THD sequence packing
+# Init: Spike-No-More embeddings (std=1.0), Megatron-style scaled proj/fc2
+# Precision: BF16 compute, FP32 master weights
+# Data: Metagenome sequences, windowed tokenization (stride=200)
+# GBS = micro_batch_size * grad_acc_steps * num_gpus = 2 * 4 * num_gpus
+#
+# Usage:
+#   torchrun --nproc_per_node=8 train_fsdp2.py --config-name og2_7b_thd_gqa ...
+
+defaults:
+  - defaults
+  - _self_
+
+# 7B model with GQA
+config_name_or_path: ./model_configs/meta-llama/Llama-3.1-8B
+config_kwargs:
+  vocab_size: 256
+  num_hidden_layers: 32
+  hidden_size: 4096
+  intermediate_size: 14336
+  num_attention_heads: 32
+  num_key_value_heads: 8  # GQA: 8 KV heads
+  max_position_embeddings: 8192
+  initializer_range: 0.02
+  attn_input_format: thd
+  rope_theta: 500000
+  rope_scaling:
+    rope_type: "llama3"
+    factor: 1.0
+    low_freq_factor: 1.0
+    high_freq_factor: 4.0
+    original_max_position_embeddings: 8192
+
+# OG2-specific init (defaults.yaml already sets these, but explicit for clarity)
+spike_no_more_embedding_init: true
+use_megatron_scaled_init: true
+skip_embedding_weight_decay: true
+use_weight_decay_grouping: true
+use_fp32_master_weights: true
+use_meta_device: false
+
+# Sequence packing
+use_sequence_packing: true
+
+# Dataset
+dataset:
+  tokenizer_name_or_path: ./tokenizers/nucleotide_fast_tokenizer
+  micro_batch_size: 2
+  num_workers: 1
+  max_seq_length: 8192
+  stride: 200
+  buffer_size: 50_000
+  mask_degenerate_bases: true
+  uppercase_labels: false
+  load_dataset_kwargs:
+    path: "json"
+    data_files: "/data/opengenome2/json/pretraining_or_both_phases/metagenomes/data_metagenomics_train_*.jsonl.gz"
+    split: "train"
+    streaming: True
+
+# Training config
+num_train_steps: 182314
+grad_acc_steps: 4
+
+# Optimizer (matching Megatron reference run)
+adamw_kwargs:
+  lr: 3e-05
+  fused: true
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.1
+
+# Learning rate scheduler
+lr_scheduler_kwargs:
+  num_warmup_steps: 2500
+  num_decay_steps: 179814  # total_steps - warmup
+  min_lr_ratio: 0.02  # min_lr / lr = 6e-07 / 3e-05
+
+# Checkpoint config
+checkpoint:
+  ckpt_dir: null
+  save_final_model: true
+  resume_from_checkpoint: true
+  save_every_n_steps: 5_000
+  async_save: true
+
+# Validation
+validation:
+  enabled: true
+  eval_interval: 500
+  num_batches: 40
+  data_path: /data/opengenome2/json/pretraining_or_both_phases/metagenomes/data_metagenomics_valid_chunk1.jsonl.gz
+  micro_batch_size: 8
+  max_seq_length: null
+  stride: null
+
+logger:
+  frequency: 1
+
+wandb:
+  name: og2_7b_thd_gqa
+  project: opengenome2-7b
+
+profiler:
+  enabled: false

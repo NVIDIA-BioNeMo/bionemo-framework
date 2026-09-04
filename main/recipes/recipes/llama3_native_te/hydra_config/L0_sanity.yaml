@@ -1,0 +1,48 @@
+defaults:
+  - defaults
+  - _self_
+
+# Use tiny Llama config for fast convergence testing
+config_name_or_path: ./model_configs/meta-llama/Llama-3.2-1B
+config_kwargs: # Arguments to pass to the AutoConfig.from_pretrained method
+  num_hidden_layers: 2
+  hidden_size: 384
+  intermediate_size: 1536
+  num_attention_heads: 6
+  num_key_value_heads: 6
+  attn_input_format: "bshd"
+
+num_train_steps: 250
+
+# We want this on in CI/CD to validate that the script runs successfully with torch.compile.
+use_torch_compile: true # Disable for faster startup during testing
+
+# We want this in CI/CD to validate that the script runs successfully with meta-device, even if convergence is affected.
+use_meta_device: true
+
+dataset:
+  tokenizer_name_or_path: nvidia/Llama-3.1-8B-Instruct-FP8
+  micro_batch_size: 1 # Small batch size for limited GPU memory
+  max_seq_length: 256
+  text_column: "text"
+  load_dataset_kwargs:
+    path: "parquet"
+    split: "train"
+    data_files: "dlcm_sanity_dataset.parquet" # Use local test file in recipe directory
+    streaming: True
+
+# WandB config
+wandb:
+  name: "llama3_8B_genomic_sanity"
+  mode: "offline"
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 10 # Shorter warmup for quick testing
+
+checkpoint:
+  ckpt_dir: null
+  save_final_model: false
+
+logger:
+  frequency: 1

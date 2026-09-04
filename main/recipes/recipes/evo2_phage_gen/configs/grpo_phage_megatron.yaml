@@ -1,0 +1,327 @@
+# Self-contained Evo2 phage GRPO configuration for the recipe's NeMo-RL runtime.
+# GDPO inherits this file and overrides the production case-study settings.
+#
+# The Megatron backend is required because Evo2 does not provide vLLM layers.
+# Keep complete-genome sequence lengths, positive/failure controls, and the
+# selected non-RL SFT checkpoint as the KL anchor when adapting this config.
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 2
+  max_rollout_turns: 1
+  max_num_epochs: 1
+  max_num_steps: 10
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  overlong_filtering: false
+  advantage_clip_low: null
+  advantage_clip_high: null
+  max_val_samples: 256
+  val_batch_size: 256
+  seed: 42
+  use_dynamic_sampling: false
+  dynamic_sampling_max_gen_batches: 10
+  batch_multiplier: 1
+  reward_shaping:
+    enabled: false
+    overlong_buffer_length: 128
+    overlong_buffer_penalty: 1
+    max_response_length: ${policy.max_total_sequence_length}
+    stop_properly_penalty_coef: null
+  adv_estimator:
+    name: grpo
+    normalize_rewards: ${grpo.normalize_rewards}
+    use_leave_one_out_baseline: ${grpo.use_leave_one_out_baseline}
+    minus_baseline: true
+  reward_scaling:
+    enabled: false
+    source_min: 0.0
+    source_max: 1.0
+    target_min: 0.0
+    target_max: 1.0
+  seq_logprob_error_threshold: null
+  invalid_tool_call_advantage: null
+  malformed_thinking_advantage: null
+  async_grpo:
+    enabled: false
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: false
+    recompute_kv_cache_after_weight_updates: false
+loss_fn:
+  reference_policy_kl_penalty: 0.01
+  reference_policy_kl_type: k3
+  kl_input_clamp_value: 20.0
+  kl_output_clamp_value: 10.0
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.2
+  ratio_clip_c: null
+  use_on_policy_kl_approximation: false
+  use_importance_sampling_correction: false
+  truncated_importance_sampling_type: null
+  truncated_importance_sampling_ratio: null
+  truncated_importance_sampling_ratio_min: null
+  sequence_level_importance_ratios: false
+  token_level_loss: true
+  force_on_policy_ratio: false
+  use_kl_in_reward: false
+  use_cispo: false
+  disable_ppo_ratio: false
+  positive_example_nll_weight: 0.0
+checkpointing:
+  enabled: true
+  checkpoint_dir: data/checkpoints/phage_grpo
+  metric_name: train:phage_qc/binary_safety_qualified_full_qc_cluster_deduplicated_rate
+  higher_is_better: true
+  keep_top_k: 3
+  save_period: 10
+  checkpoint_must_save_by: null
+  # MegatronPolicyWorker writes native Megatron-Bridge torch_dist checkpoints.
+  # Named formats are for the Automodel/DTensor checkpoint path.
+  model_save_format: null
+  save_consolidated: false
+  save_optimizer: true
+  pretrained_checkpoint:
+    path: data/checkpoints/evo2_7b_microviridae_mbridge
+    format: megatron_bridge
+policy:
+  model_name: bionemo/evo2_7b
+  tokenizer:
+    name: tokenizers/nucleotide_fast_tokenizer_512
+    chat_template_kwargs: null
+  train_global_batch_size: 4
+  train_micro_batch_size: 1
+  generation_batch_size: 1
+  logprob_batch_size: 1
+  offload_optimizer_for_logprob: false
+  max_total_sequence_length: 10240
+  precision: bfloat16
+  dtensor_cfg:
+    # This recipe uses the Megatron worker and its native distributed checkpoints.
+    enabled: false
+  megatron_cfg:
+    enabled: true
+    force_reconvert_from_hf: false
+    empty_unused_memory_level: 1
+    activation_checkpointing: true
+    recompute_granularity: full
+    recompute_modules: null
+    tensor_model_parallel_size: 2
+    expert_tensor_parallel_size: 1
+    expert_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    num_layers_in_first_pipeline_stage: null
+    num_layers_in_last_pipeline_stage: null
+    context_parallel_size: 1
+    pipeline_dtype: ${policy.precision}
+    sequence_parallel: false
+    freeze_moe_router: true
+    moe_router_dtype: fp64
+    moe_router_load_balancing_type: none
+    moe_router_bias_update_rate: 0.0
+    moe_permute_fusion: true
+    apply_rope_fusion: true
+    bias_activation_fusion: true
+    defer_fp32_logits: false
+    moe_per_layer_logging: false
+    moe_enable_deepep: false
+    moe_token_dispatcher_type: alltoall
+    moe_shared_expert_overlap: false
+    mtp_num_layers: 0
+    mtp_loss_scaling_factor: 0.0
+    mtp_use_repeated_layer: false
+    mtp_detach_heads: false
+    gradient_accumulation_fusion: false
+    use_fused_weighted_squared_relu: false
+    peft:
+      enabled: false
+    optimizer:
+      optimizer: adam
+      lr: 5.0e-06
+      min_lr: 5.0e-07
+      weight_decay: 0.01
+      bf16: true
+      fp16: false
+      params_dtype: float32
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1e-8
+      sgd_momentum: 0.9
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      clip_grad: ${policy.max_grad_norm}
+      optimizer_cpu_offload: false
+      optimizer_offload_fraction: 0.0
+    scheduler:
+      start_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      weight_decay_incr_style: constant
+      lr_decay_style: constant
+      lr_decay_iters: 1000
+      lr_warmup_iters: 13
+      lr_warmup_init: 5.0e-07
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      use_custom_fsdp: false
+      data_parallel_sharding_strategy: optim_grads_params
+    fp8_cfg:
+      enabled: false
+    env_vars: null
+    target_allowlist_prefixes:
+    - bionemo.evo2.
+    - bionemo.common.
+  draft:
+    enabled: false
+  dynamic_batching:
+    enabled: false
+  sequence_packing:
+    enabled: false
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  max_grad_norm: 1.0
+  generation:
+    port_range_low: 11001
+    port_range_high: 15000
+    backend: megatron
+    max_new_tokens: 5996
+    temperature: 0.8
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    mcore_generation_config:
+      async_engine: false
+      max_model_len: ${policy.max_total_sequence_length}
+      cuda_graph_impl: local
+      inference_cuda_graph_scope: block
+      buffer_size_gb: 10
+      num_cuda_graphs: 4
+      block_size_tokens: 256
+      use_cuda_graphs_for_non_decode_steps: true
+      enable_chunked_prefill: true
+      enable_prefix_caching: false
+      max_tokens: 16384
+      kv_cache_management_mode: persist
+      materialize_only_last_token_logits: true
+      num_speculative_tokens: 0
+      refit_backend: nvshmem
+      parsers: []
+      expose_http_server: false
+      max_requests: 2
+      prompt_batch_size: 1
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+data:
+  max_input_seq_length: 512
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: bionemo.evo2_phage_gen.nemo_rl_processors.PhageOpenAIFormatDataset
+    split_validation_size: 0.05
+    seed: ${grpo.seed}
+    data_path: data/phage_prompts.jsonl
+    env_name: phage_qc
+    prompt_file: null
+    system_prompt_file: null
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: phage_prompt_data_processor
+    env_name: phage_qc
+env:
+  phage_qc:
+    genome_length_min: 4000
+    genome_length_max: 6000
+    gc_content_min: 30.0
+    gc_content_max: 65.0
+    homopolymer_max: 10
+    dustmask_filter: true
+    dustmasker_bin: dustmasker
+    dustmask_use_external: true
+    dustmask_window: 64
+    dustmask_level: 20.0
+    dustmask_end_window: 200
+    dustmask_max_end_fraction: 0.9
+    weight_valid_nt_chars: 1.0
+    weight_genome_length: 1.0
+    weight_gc_content: 1.0
+    weight_nt_homopolymer: 1.0
+    weight_dustmask_end: 1.0
+    weight_nucleotide_pass: 0.0
+    weight_protein_hit_count: 1.0
+    weight_tropism: 1.0
+    weight_synteny: 0.25
+    weight_average_protein_identity: 0.25
+    weight_required_genes: 0.1
+    sequence_safety:
+      enabled: true
+      host_domain: BACTERIA
+      host_evidence:
+        source: NCBI Datasets v2alpha genome dataset report
+        source_version: NCBI Datasets v2alpha API
+        replication_host_domains:
+        - BACTERIA
+        confirmed: true
+        metadata:
+          accession: NC_001422.1
+          intended_design_context: PhiX/Microviridae bacterial phage
+      asset_manifest_path: data/external/safety/asset_manifest.yaml
+      diamond_bin: data/external/bin/diamond
+      mmseqs_bin: data/external/bin/mmseqs
+      policy_path: configs/phage_safety_policy.yaml
+      work_dir: data/checkpoints/phage_sequence_safety_reward
+      strict_lysis: false
+      circular: true
+      threads: 16
+      batch_size: 128
+      orf_workers: 16
+      phrogs_threads: 16
+      timeout_seconds: 300.0
+    external_qc:
+      enabled: true
+      config_path: configs/arc_genome_design_filtering_local.yaml
+      pipeline_script: data/arc_pipeline_patched/genome_design_filtering_pipeline.py
+      work_dir: data/checkpoints/phage_grpo_external_qc
+      keep_artifacts: false
+      fail_on_error: true
+      timeout_seconds: 1800
+      enable_protein_hit_count: true
+      enable_tropism: true
+      enable_synteny: true
+      synteny_mode: full
+      enable_average_protein_identity: true
+      enable_required_genes: true
+      required_genes_evidence_target: 9.0
+      lovis4u_parallel_jobs: 12
+      lovis4u_mmseqs_threads: 8
+      lovis4u_metrics_only: true
+      lovis4u_collect_pdfs: false
+logger:
+  log_dir: data/checkpoints/phage_grpo_logs
+  num_val_samples_to_print: 0
+  wandb_enabled: false
+  tensorboard_enabled: true
+  mlflow_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  wandb:
+    project: grpo-dev
+    name: sj_megatron_1B
+  tensorboard: {}
+  gpu_monitoring:
+    collection_interval: 10
+    flush_interval: 10
+cluster:
+  gpus_per_node: 2
+  num_nodes: 1
+  master_port_range_low: 25000
+  master_port_range_high: 28000
+  segment_size: null

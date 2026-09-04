@@ -1,0 +1,57 @@
+defaults:
+  - defaults
+  - _self_
+
+# Training config
+model_tag: nvidia/esm2_t48_15B_UR50D # E.g., nvidia/esm2_t6_8M_UR50D or facebook/esm2_t6_8M_UR50D
+use_pretrained: true
+num_train_steps: 1000
+
+validation_interval: 20
+
+use_torch_compile: true
+
+use_sequence_packing: true
+
+dataset:
+  tokenizer_name: ${model_tag}
+  micro_batch_size: 8
+  val_micro_batch_size: 128
+  num_workers: 1
+  max_seq_length: 1024
+  stride: 16
+  ss3_classification: true
+  load_dataset_kwargs:
+    path: "parquet"
+    split: null
+    data_files:
+      train: "data/porter6_train_dataset_55k.parquet"
+      validation: "data/porter6_val_dataset_2024_692.parquet"
+
+# WandB config
+wandb_init_args:
+  name: "esm2_t48_15B_UR50D_lora"
+  project: "esm2_lora"
+  mode: "online"
+
+# Learning rate scheduler config
+lr_scheduler_kwargs:
+  num_warmup_steps: 50
+  num_training_steps: 1_000
+
+checkpoint:
+  ckpt_dir: "checkpoints/nvidia_esm2_t48_15B_UR50D"
+  save_final_model: true
+
+logger:
+  frequency: 1
+
+lora:
+  r: 8
+  alpha: 16
+  target_modules:
+  - "layernorm_qkv"
+  # For 'facebook/esm2*' use:
+  # - "query"
+  # - "key"
+  # - "value"

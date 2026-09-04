@@ -1,0 +1,12 @@
+# Historical PhiX174 case-study settings. Supplying this file explicitly bypasses
+# the fresh-calibration compatibility check; see examples/README.md.
+temperature: 1.0
+top_k: 4
+top_p: 1.0
+max_new_tokens: 5976
+prompt_lengths:
+  - 16
+  - 24
+rl_seed: 42
+rollout_seed: 7
+seed_stride: 1000003

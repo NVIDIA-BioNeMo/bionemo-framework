@@ -1,0 +1,4 @@
+interface:
+  display_name: "Publish Phage Stage Artifacts"
+  short_description: "Upload and verify selected stage artifacts"
+  default_prompt: "Use $bionemo-phage-design-publish-stage-artifacts to publish and verify the chosen phage-design stage artifacts."

@@ -1,0 +1,15 @@
+defaults:
+  - defaults
+  - _self_
+
+model_tag: nvidia/esm2_t48_15B_UR50D
+
+stop_after_n_steps: 500
+trainer:
+  run_name: "esm2_t48_15B_UR50D_perf"
+  per_device_train_batch_size: 12
+  per_device_eval_batch_size: 12
+  report_to: "wandb"
+  learning_rate: 1.6e-4
+  weight_decay: 0.1
+  warmup_steps: 20_000

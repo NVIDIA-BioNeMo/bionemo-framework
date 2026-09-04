@@ -1,0 +1,120 @@
+{
+  "skill_name": "bionemo-phage-design-calibrate-rl-sampling",
+  "evals": [
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-001-format",
+      "prompt": "The paper used one prompt format and short PhiX prefixes, but our selected SFT preprocessing may differ. Build the RL sampling sweep.",
+      "expected_output": "A fresh sweep based on the selected SFT checkpoint's actual serialization.",
+      "assertions": [
+        "The response reconstructs the SFT conditioning, orientation, wrappers, BOS/EOS, padding, masking, tokenization, and continuation boundary.",
+        "It uses only cues present during SFT and does not copy the paper format when the selected checkpoint differs.",
+        "It sweeps a reasonable temperature and prefix range with paired seeds and enough samples to compare uncertainty.",
+        "It materializes the selected prompt mixture and sampling settings in the eventual commands and treats simultaneous nonzero top-k/top-p as temperature, then top-k, then top-p.",
+        "Calibration samples remain separate from RL validation and final rollout."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-002-selection",
+      "prompt": "One sampling cell has the highest hard-QC rate but nearly copies the reference; another is slightly lower in QC with target retention, changed synteny, and many clusters. Temperature 1.0 is competitive. Pick settings.",
+      "expected_output": "A robust quality-diversity selection rather than the noisiest maximum.",
+      "assertions": [
+        "The response compares raw and cluster-deduplicated QC yield, target evidence, copying, diversity, and uncertainty.",
+        "It rejects a high-yield cell when the gain is mainly reference copying.",
+        "It prefers a stable plateau and temperature 1.0 when practically equivalent.",
+        "It keeps multiple prompt strata only when they improve the frontier and does not require their count to divide the microbatch or GPU count because packed dynamic prefill supports mixed lengths.",
+        "It records the selected settings and rationale."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-003-topology-and-restart",
+      "prompt": "Eight GPUs are available. TP2 works, pure data parallelism might fit and be faster. The new sweep also changes the prefix distribution after a paused RL checkpoint.",
+      "expected_output": "A full-shape topology comparison and a new SFT-anchored RL attempt for materially changed sampling.",
+      "assertions": [
+        "The response benchmarks plausible layouts with the same checkpoint, prompts, seeds, completion length, and effective batch.",
+        "It compares valid candidate throughput and scientific parity rather than device utilization alone.",
+        "It does not silently alter full-genome length or sampling semantics to make a layout fit.",
+        "Because the prompt distribution changed materially, it does not treat the paused RL state as an unchanged resume.",
+        "It does not overwrite the paused run's canonical sampling-selection file or reuse its result root for the changed distribution.",
+        "The new attempt starts from the selected SFT baseline while retaining the paused checkpoint as prior evidence."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-004-metric-preflight",
+      "prompt": "Generation works, but required-gene and synteny scores were previously fixed at zero and one tool exists only in a run-specific environment. Score the sweep.",
+      "expected_output": "A metric preflight that proves every enabled component works before selecting sampling settings.",
+      "assertions": [
+        "The response resolves the actual scoring runtime and tool availability before trusting zeros.",
+        "A positive control proves each enabled component executes and has the expected direction.",
+        "Random or baseline, empty, no-hit, too-short, missing-gene, invalid, and tool-failure cases have explicit behavior.",
+        "It distinguishes a measured biological zero from a missing or skipped measurement.",
+        "It does not select a sweep cell while required scores remain unexplained or fixed at zero."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-005-resume-selection",
+      "prompt": "The realized PhiX174 script completed calibration generation and scoring, then stopped because the new evidence does not support its historical default. I approved autonomous evidence-based continuation and am offline. Resume it.",
+      "expected_output": "An evidence-based canonical sampling selection and a marker-aware rerun, not a silent historical-default override.",
+      "assertions": [
+        "The response inspects calibration/scoring/selection-evidence.csv and the underlying score and novelty evidence before choosing settings.",
+        "It writes the reviewed choice to calibration/sampling-selection.yaml with the complete script-supported schema and records its rationale.",
+        "It follows the current example README's selection handoff and restart markers when that launcher is compatible, while retaining completed calibration evidence if execution must be adapted.",
+        "It does not pass examples/default-sampling-selection.yaml merely to bypass the failed hard check.",
+        "It distinguishes a user-requested --sampling-selection override from the agent's evidence-based autonomous path."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": "examples/phix174_8xh100.sh"
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-006-intentional-review-stop",
+      "prompt": "Run the PhiX example through fresh sampling calibration, but stop before RL so I can inspect the evidence and let the agent choose custom settings. The eventual GPU environment may differ from the example host.",
+      "expected_output": "Follow the current PhiX review workflow, choose from evidence, and adapt execution without changing scientific semantics.",
+      "assertions": [
+        "The response reads evo2_phage_gen/examples/README.md as the source of truth for the current review and resume procedure.",
+        "It inspects calibration/scoring/selection-evidence.csv and the neighboring score and novelty evidence before choosing settings.",
+        "It creates an intentional review boundary before RL prompt materialization or RL launch and records the selected settings durably.",
+        "It uses examples/default-sampling-selection.yaml only as the complete schema or as an explicitly chosen historical override.",
+        "It may adapt topology, batch, workers, scheduler integration, or launch commands to measured hardware while preserving whole-genome context, effective batch, sampling semantics, and validation independence."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": "examples/phix174_8xh100.sh"
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-007-prompt-cohort-bias",
+      "prompt": "A whole-genome RL run uses long prompts centered on a region the model should be free to redesign. Fixed-order prompt cohorts produce a repeating reward sawtooth every few steps. Redesign the train and validation prompt banks without changing the endpoint.",
+      "expected_output": "Short, distributed, shuffled prompt banks whose rollout batches do not confound prompt composition with learning.",
+      "assertions": [
+        "The response distributes starts around the circular genome rather than centering prompts on key regions intended to change.",
+        "It selects prompts short enough not to lock complete key or essential features while preserving the checkpoint's actual conditioning format.",
+        "Training starts are shuffled or interleaved and each global rollout batch represents the intended position and length mixture instead of cycling through fixed cohorts.",
+        "The fixed validation bank is independent but comparably distributed, with seeds and starts recorded.",
+        "It stratifies existing metrics by prompt position, length, and composition before interpreting the sawtooth as policy improvement or regression.",
+        "Every configured external measurement must be available for selectable calibration cells; successful no-hit and scorer failure remain distinct."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-008-circular-editable-regions",
+      "prompt": "Build circular RL prompt banks for a long phage. An evenly spaced candidate grid uses prompts equal to 0.5% of the genome, but several intervals partially overlap genes and modules that RL is supposed to redesign. Longer prompts are operationally convenient. Choose the prompt strategy.",
+      "expected_output": "Short, percentage-aware prompts placed in neutral circular intervals so redesign targets remain generated rather than fixed.",
+      "assertions": [
+        "The response treats every prompt base as fixed sequence and checks circular interval overlap, including origin-wrapping prompts.",
+        "It excludes any overlap with intended-to-change bases, not only prompts containing a complete target gene or centered on one.",
+        "It reports prompt bases and genome fraction and recognizes that even a sub-percent prompt may fix substantial sequence on a smaller genome.",
+        "It starts from the shortest prompt compatible with the selected SFT serialization and does not scale prompt length linearly with genome size.",
+        "A longer prompt is retained only with a model- and design-specific rationale supported by calibration evidence.",
+        "If neutral anchors cannot support the bank, it revisits the prompt strategy rather than locking target elements; selected training starts remain shuffled or interleaved and validation stays fixed and independent."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": null
+    }
+  ]
+}
