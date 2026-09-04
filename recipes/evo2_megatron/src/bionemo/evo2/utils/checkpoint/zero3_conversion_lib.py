@@ -273,7 +273,7 @@ def parse_model_states(files: Set[str]):
             raise ValueError(f"{file} is not a model state checkpoint")
         buffer_names = state_dict[BUFFER_NAMES]
         if debug:
-            print_pid("Found buffers:", buffer_names)
+            print_pid(f"Found buffers: {buffer_names}")
 
         # recover just the buffers while restoring them to fp32 if they were saved in fp16
         buffers = {k: v.float() for k, v in state_dict["module"].items() if k in buffer_names}
