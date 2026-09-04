@@ -243,7 +243,7 @@ def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, change_sourc
     monkeypatch.setattr(
         infer_module,
         "_warmup_native_dynamic_cuda_graphs",
-        lambda *_args, **_kwargs: (events.append(("graph-capture", context.evo2_warmed_cuda_graph_request_counts))),
+        lambda *_args, **_kwargs: events.append(("graph-capture", context.evo2_warmed_cuda_graph_request_counts)),
     )
     monkeypatch.setattr(
         infer_module,
@@ -2223,6 +2223,11 @@ def _infer_script_path() -> Path:
     return _recipe_root() / "src" / "bionemo" / "evo2" / "run" / "infer.py"
 
 
+def _predict_script_path() -> Path:
+    """Return the source prediction entry point used for teacher-forced replay."""
+    return _recipe_root() / "src" / "bionemo" / "evo2" / "run" / "predict.py"
+
+
 def _write_prompts_jsonl(prompt_file: Path, prompts: list[tuple[str, str]]) -> None:
     """Write a list of (id, prompt) pairs into a JSONL file."""
     with open(prompt_file, "w") as f:
@@ -2457,6 +2462,87 @@ def run_infer_subprocess_parallel(
     assert output_file.exists(), "Output file was not created"
 
     return _read_jsonl_results(output_file)
+
+
+def _run_prediction_forward_replay(
+    *,
+    mbridge_checkpoint_path: Path,
+    sequences: dict[str, str],
+    work_dir: Path,
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Run one rectangular prediction forward and return raw logits keyed by FASTA ID."""
+    fasta_path = work_dir / "replay.fasta"
+    fasta_path.write_text("".join(f">{sequence_id}\n{sequence}\n" for sequence_id, sequence in sequences.items()))
+    output_dir = work_dir / "replay-output"
+    command = [
+        "torchrun",
+        "--standalone",
+        "--nproc_per_node",
+        "1",
+        "--nnodes",
+        "1",
+        str(_predict_script_path()),
+        "--fasta",
+        str(fasta_path),
+        "--ckpt-dir",
+        str(mbridge_checkpoint_path),
+        "--output-dir",
+        str(output_dir),
+        "--micro-batch-size",
+        str(len(sequences)),
+        "--write-interval",
+        "epoch",
+        "--no-sequence-packing",
+    ]
+    env = copy.deepcopy(PRETEST_ENV)
+    env["PYTHONPATH"] = str(_recipe_root() / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=900, env=env)
+    assert result.returncode == 0, (
+        f"teacher-forced predict command failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+    prediction_files = sorted(output_dir.glob("predictions__rank_*__dp_rank_*.pt"))
+    assert len(prediction_files) == 1, f"Expected one replay prediction file, found {prediction_files}"
+    predictions = torch.load(prediction_files[0], map_location="cpu", weights_only=True)
+    index_by_id = json.loads((output_dir / "seq_idx_map.json").read_text())
+    id_by_index = {int(index): sequence_id for sequence_id, index in index_by_id.items()}
+
+    replay_by_id = {}
+    for row, original_index in enumerate(predictions["seq_idx"].tolist()):
+        pad_mask = predictions["pad_mask"][row].bool()
+        valid_length = int(pad_mask.sum().item())
+        assert pad_mask[:valid_length].all() and not pad_mask[valid_length:].any()
+        replay_by_id[id_by_index[int(original_index)]] = {
+            "tokens": predictions["tokens"][row, :valid_length],
+            "token_logits": predictions["token_logits"][row, :valid_length],
+            "pad_mask": pad_mask,
+        }
+    assert set(replay_by_id) == set(sequences)
+    return replay_by_id
+
+
+def _target_preserving_selected_action_log_probs(
+    logits: torch.Tensor,
+    target_token_ids: torch.Tensor,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    stop_token_ids: set[int],
+) -> torch.Tensor:
+    """Reconstruct generation support, union sampled actions, and score those actions."""
+    logits = _suppress_stop_token_logits(logits.float(), stop_token_ids)
+    ordinary_log_probs = _sampling_log_probs_from_logits(
+        logits,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+    )
+    support = ordinary_log_probs.isfinite()
+    support.scatter_(1, target_token_ids.long().unsqueeze(1), True)
+    scaled_logits = logits / temperature if temperature != 1.0 else logits
+    replay_log_probs = torch.log_softmax(scaled_logits.masked_fill(~support, float("-inf")), dim=-1)
+    return replay_log_probs.gather(1, target_token_ids.long().unsqueeze(1)).squeeze(1)
 
 
 def _run_segmented_parallel_infer_probe(
@@ -3169,8 +3255,10 @@ def test_native_staggered_kv_rollover_matches_serial(mbridge_checkpoint_path, tm
     Both requests then cross a second page during the continuation. Before Evo2 reserved pages in
     place, mcore's pause/resume bookkeeping permuted the two rows at the first staggered rollover,
     cross-wiring output ownership and positional Hyena state. Greedy packed output is compared with
-    serial output; combined top-k/top-p sampling is compared with the same packed batch using a
-    single-page reference layout so RNG consumption remains identical.
+    serial output. Combined top-k/top-p sampling retains a same-batch single-page trajectory
+    reference, then every selected action is scored using a prediction forward plus reconstructed
+    target-preserving support. That portable check catches row ownership defects that
+    trajectory-only comparisons can miss; it is not an exact NeMo-RL worker replay.
     """
     if torch.cuda.device_count() < 1:
         pytest.skip("Native dynamic-engine test requires a GPU")
@@ -3256,6 +3344,64 @@ def test_native_staggered_kv_rollover_matches_serial(mbridge_checkpoint_path, tm
     top_p_reference_by_id = {record["id"]: record for record in top_p_reference}
     top_p_rollover_by_id = {record["id"]: record for record in top_p_rollover}
     _assert_parallel_probe_matches_baseline(top_p_rollover_by_id, top_p_reference_by_id)
+    assert all(_is_dna_completion(record["completion"]) for record in top_p_rollover)
+    replay_by_id = _run_prediction_forward_replay(
+        mbridge_checkpoint_path=mbridge_checkpoint_path,
+        sequences={record["id"]: record["prompt"] + record["completion"] for record in top_p_rollover},
+        work_dir=tmp_path,
+    )
+
+    diagnostics = {}
+    for request_id, record in top_p_rollover_by_id.items():
+        prompt_ids = record["prompt_token_ids"]
+        completion_ids = record["completion_token_ids"]
+        full_ids = torch.tensor(prompt_ids + completion_ids, dtype=torch.long)
+        replay = replay_by_id[request_id]
+        torch.testing.assert_close(replay["tokens"], full_ids, rtol=0, atol=0)
+        assert replay["pad_mask"][: full_ids.numel()].all()
+        assert not replay["pad_mask"][full_ids.numel() :].any()
+
+        action_positions = torch.arange(len(completion_ids), dtype=torch.long) + len(prompt_ids) - 1
+        assert int(action_positions[0]) == len(prompt_ids) - 1
+        assert int(action_positions[-1]) == full_ids.numel() - 2
+        assert replay["token_logits"].shape[0] == full_ids.numel()
+        selected_replay = _target_preserving_selected_action_log_probs(
+            replay["token_logits"].index_select(0, action_positions),
+            torch.tensor(completion_ids, dtype=torch.long),
+            temperature=1.0,
+            top_k=5,
+            top_p=0.999,
+            stop_token_ids={0},
+        )
+        generated = torch.tensor(record["logprobs"]["completion_logprobs"], dtype=torch.float32)
+        delta = (selected_replay - generated).abs()
+        absolute_positions = torch.arange(len(completion_ids), dtype=torch.long) + len(prompt_ids)
+        residues = absolute_positions.remainder(KV_BLOCK_SIZE_TOKENS)
+        residue_means = {
+            residue: float(delta[residues == residue].mean().item())
+            for residue in (1, 249, 9, 2, 10)
+            if (residues == residue).any()
+        }
+        diagnostics[request_id] = {
+            "median_abs_delta": float(delta.median().item()),
+            "mean_abs_delta": float(delta.mean().item()),
+            "max_abs_delta": float(delta.max().item()),
+            "deltas_over_4": int((delta > 4.0).sum().item()),
+            # NeMo-RL's sequence guard averages the per-token multiplicative error. Retain the
+            # exp(mean(abs(delta))) form too so neither aggregation can hide a boundary-local spike.
+            "mean_token_mult_prob_error": float(delta.exp().mean().item()),
+            "exp_mean_abs_delta": float(delta.mean().exp().item()),
+            "residue_mean_abs_delta": residue_means,
+        }
+        watched_phase_limit = max(0.1, 3.0 * diagnostics[request_id]["mean_abs_delta"])
+        assert torch.isfinite(selected_replay).all(), diagnostics
+        assert diagnostics[request_id]["deltas_over_4"] == 0, diagnostics
+        assert diagnostics[request_id]["max_abs_delta"] <= 1.5, diagnostics
+        assert diagnostics[request_id]["mean_token_mult_prob_error"] <= 1.5, diagnostics
+        assert diagnostics[request_id]["exp_mean_abs_delta"] <= 1.5, diagnostics
+        assert all(mean <= watched_phase_limit for mean in residue_means.values()), diagnostics
+
+    print("ROLLOVER_SELECTED_ACTION_REPLAY " + json.dumps(diagnostics, sort_keys=True))
 
 
 def test_native_mixed_prompt_contract(mbridge_checkpoint_path, tmp_path):

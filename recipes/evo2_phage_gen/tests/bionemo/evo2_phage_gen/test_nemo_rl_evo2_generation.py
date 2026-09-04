@@ -828,7 +828,15 @@ def test_evo2_adapter_forwards_generation_controls(monkeypatch):
     }
 
 
-def test_adapter_forwards_graph_scope(monkeypatch):
+@pytest.mark.parametrize(
+    ("fp8", "fp4", "expected_scope"),
+    [
+        (None, None, "block"),
+        ("hybrid", None, "layer"),
+        (None, "nvfp4", "layer"),
+    ],
+)
+def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, fp4, expected_scope):
     prompt_tokens = torch.tensor([[11, 12], [21, 22]])
     prompt_lengths = torch.tensor([2, 2])
     sampling_params = [SimpleNamespace(num_tokens_to_generate=2, top_k=5, top_p=0.999)] * 2
@@ -845,7 +853,10 @@ def test_adapter_forwards_graph_scope(monkeypatch):
                 }
             }
         },
-        model=SimpleNamespace(decoder=SimpleNamespace(hyena_state_shapes_per_request=lambda: None)),
+        model=SimpleNamespace(
+            config=SimpleNamespace(fp8=fp8, fp4=fp4),
+            decoder=SimpleNamespace(hyena_state_shapes_per_request=lambda: None),
+        ),
         megatron_tokenizer=_Tokenizer(),
     )
 
@@ -872,7 +883,7 @@ def test_adapter_forwards_graph_scope(monkeypatch):
     evo2_generation.generate_evo2_native_batched(worker, prompt_tokens, prompt_lengths, sampling_params)
 
     assert setup_kwargs["cuda_graphs_enabled"] is True
-    assert setup_kwargs["cuda_graph_scope"] == "block"
+    assert setup_kwargs["cuda_graph_scope"] == expected_scope
 
 
 def test_megatron_generation_shards_adapter_input_across_dp_and_gathers_in_order():

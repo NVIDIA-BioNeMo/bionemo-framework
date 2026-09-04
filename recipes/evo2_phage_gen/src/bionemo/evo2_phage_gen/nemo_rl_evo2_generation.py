@@ -181,6 +181,7 @@ def generate_evo2_native_batched(
 
     from bionemo.evo2.run.infer import (
         Evo2InferenceComponents,
+        _resolve_native_dynamic_cuda_graph_scope,
         _setup_native_dynamic_components,
         generate,
     )
@@ -202,13 +203,27 @@ def generate_evo2_native_batched(
     native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
     if native_dynamic is None:
         raw_model = _unwrap_evo2_model(unwrap_model(worker.model))
+        cuda_graph_impl = str(mcore_generation_config.get("cuda_graph_impl", "local"))
+        requested_cuda_graph_scope = str(mcore_generation_config.get("inference_cuda_graph_scope", "block"))
+        model_config = getattr(raw_model, "config", None)
+        effective_cuda_graph_scope = _resolve_native_dynamic_cuda_graph_scope(
+            requested_cuda_graph_scope,
+            cuda_graph_impl=cuda_graph_impl,
+            fp8_enabled=bool(getattr(model_config, "fp8", None)),
+            fp4_enabled=bool(getattr(model_config, "fp4", None)),
+        )
+        if effective_cuda_graph_scope != requested_cuda_graph_scope:
+            logger.warning(
+                "Evo2 global FP8/FP4 rollout uses layer-scope CUDA graphs instead of requested %s scope",
+                requested_cuda_graph_scope,
+            )
         native_dynamic = _setup_native_dynamic_components(
             model=raw_model,
             raw_model=raw_model,
             max_seq_length=int(mcore_generation_config["max_model_len"]),
             evo2_seed=initial_seed,
-            cuda_graphs_enabled=mcore_generation_config.get("cuda_graph_impl") != "none",
-            cuda_graph_scope=mcore_generation_config.get("inference_cuda_graph_scope", "block"),
+            cuda_graphs_enabled=cuda_graph_impl != "none",
+            cuda_graph_scope=effective_cuda_graph_scope,
         )
         worker._evo2_native_dynamic_components = native_dynamic
     _reseed_evo2_native_dynamic(native_dynamic, initial_seed)
