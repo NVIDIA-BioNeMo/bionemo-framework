@@ -24,6 +24,7 @@
 
 
 import math
+import os
 import sys
 from dataclasses import dataclass
 from functools import partial
@@ -122,6 +123,12 @@ def _configure_fa4_for_device(
     mcore_attention.HAVE_FA4 = False
     if model_provider.attention_backend in (AttnBackend.flash, AttnBackend.auto):
         model_provider.attention_backend = AttnBackend.fused
+    if model_provider.attention_backend is AttnBackend.fused:
+        # The container startup environment may select FlashAttention globally. Once this
+        # device-compatibility guard resolves the explicit provider backend to TE fused attention,
+        # leave MCore to set a consistent trio instead of inheriting contradictory selectors.
+        for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+            os.environ.pop(variable, None)
     return False
 
 

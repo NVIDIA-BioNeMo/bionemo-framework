@@ -15,6 +15,7 @@
 
 """Tests for model provider instantiation, naming, and checkpoint converters."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import sentinel
@@ -107,6 +108,21 @@ def test_fa4_backend_falls_back_without_cuda(monkeypatch: pytest.MonkeyPatch) ->
     assert evo2_provider._configure_fa4_for_device(provider) is False
     assert provider.attention_backend is evo2_provider.AttnBackend.fused
     assert mcore_attention.HAVE_FA4 is False
+
+
+def test_fa4_fallback_clears_conflicting_te_backend_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An inherited Flash selector cannot contradict the provider's fused fallback."""
+    from megatron.core.transformer import attention as mcore_attention
+
+    provider = SimpleNamespace(attention_backend=evo2_provider.AttnBackend.flash)
+    monkeypatch.setattr(mcore_attention, "HAVE_FA4", True)
+    for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.setenv(variable, "1")
+
+    assert evo2_provider._configure_fa4_for_device(provider, device_capability=(8, 9)) is False
+
+    assert provider.attention_backend is evo2_provider.AttnBackend.fused
+    assert all(variable not in os.environ for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"))
 
 
 @pytest.mark.parametrize(("requested", "expected"), [(None, "p2p"), ("p2p", "p2p"), ("a2a", "a2a")])
