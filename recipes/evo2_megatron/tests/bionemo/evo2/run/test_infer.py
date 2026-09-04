@@ -199,8 +199,8 @@ def test_graph_storage_signature_tracks_rebinding():
     assert infer_module._model_storage_signature(model) != rebound_parameter
 
 
-@pytest.mark.parametrize("tensor_kind", ["parameter", "buffer"])
-def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, tensor_kind):
+@pytest.mark.parametrize("change_source", ["parameter", "buffer", "peer"])
+def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, change_source):
     """Validation-first graphs must not survive a colocated model-tensor reallocation."""
 
     class _Context:
@@ -233,6 +233,12 @@ def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, tensor_kind)
         max_seq_length=64,
     )
     events = []
+    peer_storage_changed = {"value": False}
+    monkeypatch.setattr(
+        infer_module,
+        "_graph_parallel_any",
+        lambda local_value: bool(local_value or peer_storage_changed["value"]),
+    )
     monkeypatch.setattr(infer_module, "_reset_layer_cuda_graphs", lambda _nd: events.append("graph-reset"))
     monkeypatch.setattr(
         infer_module,
@@ -260,8 +266,11 @@ def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, tensor_kind)
     assert reused is context
     assert events == ["context-reset"]
 
-    rebound = model.weight if tensor_kind == "parameter" else model.scale
-    rebound.data = rebound.detach().clone()
+    if change_source == "peer":
+        peer_storage_changed["value"] = True
+    else:
+        rebound = model.weight if change_source == "parameter" else model.scale
+        rebound.data = rebound.detach().clone()
     recaptured, _, _ = infer_module._get_or_build_shared_dynamic_context(
         nd,
         block_size_tokens=16,
@@ -282,6 +291,54 @@ def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, tensor_kind)
     assert not static_context.evo2_static_cuda_graph_warmed
     assert not static_context.evo2_static_cuda_graph_replay_verified
     assert nd.cuda_graph_model_storage_signature == infer_module._model_storage_signature(model)
+
+
+@pytest.mark.parametrize("remote_group", ["model", "context"])
+def test_graph_storage_change_consensus_spans_graph_parallel_groups(monkeypatch, remote_group):
+    from megatron.core import parallel_state
+
+    model_group = object()
+    context_group = object()
+    calls = []
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda _group: "gloo")
+    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_pipeline_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_context_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(parallel_state, "get_model_parallel_group", lambda: model_group)
+    monkeypatch.setattr(parallel_state, "get_context_parallel_group", lambda: context_group)
+
+    def _all_reduce(value, *, op, group):
+        assert op == torch.distributed.ReduceOp.MAX
+        calls.append(group)
+        if (remote_group == "model" and group is model_group) or (
+            remote_group == "context" and group is context_group
+        ):
+            value.fill_(1)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", _all_reduce)
+
+    assert infer_module._graph_parallel_any(False)
+    assert calls == [model_group, context_group]
+
+
+def test_graph_storage_change_consensus_skips_single_rank_collectives(monkeypatch):
+    from megatron.core import parallel_state
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(parallel_state, "get_pipeline_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(parallel_state, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_reduce",
+        lambda *_args, **_kwargs: pytest.fail("single-rank inference must not issue a consensus collective"),
+    )
+
+    assert not infer_module._graph_parallel_any(False)
+    assert infer_module._graph_parallel_any(True)
 
 
 def test_static_flash_context_cache_invalidates_on_sequence_capacity_growth(monkeypatch):

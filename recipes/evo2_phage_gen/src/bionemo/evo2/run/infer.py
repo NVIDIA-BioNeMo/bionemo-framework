@@ -1583,12 +1583,42 @@ def _record_cuda_graph_model_storage(nd: Evo2NativeDynamicComponents) -> None:
     nd.cuda_graph_model_storage_signature = _model_storage_signature(nd.hyena_model)
 
 
+def _graph_parallel_any(local_value: bool) -> bool:
+    """OR a flag across this DP replica's TP, PP, and CP graph participants."""
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return bool(local_value)
+
+    from megatron.core import parallel_state
+
+    groups = []
+    if (
+        int(parallel_state.get_tensor_model_parallel_world_size())
+        * int(parallel_state.get_pipeline_model_parallel_world_size())
+        > 1
+    ):
+        # MCore's model-parallel group is TP x PP with DP and CP held fixed.
+        groups.append(parallel_state.get_model_parallel_group())
+    if int(parallel_state.get_context_parallel_world_size()) > 1:
+        # Folding over CP after TP x PP propagates the OR over the full graph replica.
+        groups.append(parallel_state.get_context_parallel_group())
+
+    reduced_value = bool(local_value)
+    for group in groups:
+        backend = str(torch.distributed.get_backend(group)).lower()
+        device = torch.device("cuda", torch.cuda.current_device()) if backend.endswith("nccl") else torch.device("cpu")
+        value_tensor = torch.tensor([int(reduced_value)], dtype=torch.int32, device=device)
+        torch.distributed.all_reduce(value_tensor, op=torch.distributed.ReduceOp.MAX, group=group)
+        reduced_value = bool(value_tensor.item())
+    return reduced_value
+
+
 def _invalidate_cuda_graphs_for_rebound_model_storage(nd: Evo2NativeDynamicComponents) -> bool:
     """Invalidate graph runners when model offload/reload changed a captured address."""
     if not nd.cuda_graphs_enabled:
         return False
     captured = getattr(nd, "cuda_graph_model_storage_signature", None)
-    if captured is None or captured == _model_storage_signature(nd.hyena_model):
+    local_storage_changed = captured is not None and captured != _model_storage_signature(nd.hyena_model)
+    if not _graph_parallel_any(local_storage_changed):
         return False
 
     _reset_layer_cuda_graphs(nd)

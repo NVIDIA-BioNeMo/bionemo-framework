@@ -159,8 +159,9 @@ separate `policy.sequence_packing` option remains disabled until its gradient-be
 path is independently qualified; it does not control rollout packing.
 Each shard keeps its decode rows logically active and captures only the physical full/remainder
 batch shapes it actually runs. Graph reuse requires stable registered model storage; an unexpected
-parameter or buffer address change forces recapture. Qualify at least two rollout/offload-refit
-cycles. Report cold end-to-end, setup-free generation, and steady-decode throughput separately; set
+parameter or buffer address change on any TP/PP/CP rank forces replica-wide recapture without
+crossing DP replicas. Qualify at least two rollout/offload-refit cycles. Report cold end-to-end,
+setup-free generation, and steady-decode throughput separately; set
 `EVO2_EXACT_PHASE_EVIDENCE=1` only for synchronized phase and allocator diagnostics.
 [Black et al., “Quantifying evolutionary novelty and design efficiency in generative genome
 design”](https://www.biorxiv.org/content/10.64898/2026.06.12.731871v1.full) found that Evo 2
