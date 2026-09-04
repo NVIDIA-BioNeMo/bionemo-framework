@@ -123,6 +123,29 @@ def mock_b2b_causal_conv1d(x, weight_proj, weight_mixer, skip_bias):
     return x
 
 
+def test_subquadratic_causal_conv_repairs_cudnn_module_cache(monkeypatch):
+    """The 0.3 NHW wrapper must survive import-order replacement of its cached callable."""
+    import bionemo.evo2.models.megatron.hyena.hyena_utils as hyena_utils
+
+    subq_module = getattr(hyena_utils, "_subq_causal_conv1d_module", None)
+    if subq_module is None or not hasattr(subq_module, "_NHW_OP"):
+        pytest.skip("installed subquadratic-ops does not use the 0.3 NHW callable cache")
+
+    expected = object()
+    repaired_op = MagicMock(return_value=expected)
+    broken_module = types.SimpleNamespace(causal_conv1d=repaired_op)
+    monkeypatch.setattr(subq_module, "_NHW_OP", broken_module)
+
+    def package_call(*args, **kwargs):
+        return subq_module._NHW_OP(*args, **kwargs)
+
+    monkeypatch.setattr(hyena_utils, "_subq_causal_conv1d", package_call)
+
+    assert hyena_utils.causal_conv1d("input", "weight") is expected
+    assert subq_module._NHW_OP is repaired_op
+    repaired_op.assert_called_once_with("input", "weight")
+
+
 @patch("bionemo.evo2.models.megatron.hyena.hyena_utils.causal_conv1d_fn")
 @patch("bionemo.evo2.models.megatron.hyena.hyena_utils.causal_conv1d")
 def test_parallel_causal_depthwise_conv1d_uses_subquadratic_fast_conv(
