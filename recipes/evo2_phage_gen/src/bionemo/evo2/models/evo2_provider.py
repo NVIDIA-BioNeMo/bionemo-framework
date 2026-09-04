@@ -102,33 +102,38 @@ def _configure_fa4_for_device(
 ) -> bool:
     """Use FA4 only where its forward, backward, and paged-KV paths are supported.
 
-    MCore currently treats an importable ``flash_attn.cute`` as sufficient to use FA4.
-    The pinned FA4 release can run a subset of forward operations on SM8x, but training
-    backward and dynamic inference with a paged KV cache require SM9x or newer. On older
-    GPUs, use TE fused attention for ordinary forwards and let MCore dynamic inference
-    fall back to the installed FA2 implementation.
+    MCore and TE currently treat an importable ``flash_attn.cute`` as sufficient to use
+    FA4. The pinned FA4 release can run a subset of forward operations on SM8x, but this
+    recipe's packed forward, training backward, and paged-KV paths require SM9x or newer.
+    On older GPUs, preserve the provider-selected TE backend (the default ``flash``
+    selects the installed FA2 implementation) and make both TE and MCore use FA2.
 
     Returns:
         Whether MCore may use FA4 on the selected device.
     """
     from megatron.core.transformer import attention as mcore_attention
 
-    if not getattr(mcore_attention, "HAVE_FA4", False):
-        return False
+    # ``attention_backend`` is the user-facing selector. MCore derives these TE
+    # variables when the model is built, so discard inherited values before it does so.
+    for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        os.environ.pop(variable, None)
+
     if device_capability is None and torch.cuda.is_available():
         device_capability = torch.cuda.get_device_capability()
-    if device_capability is not None and device_capability[0] in _FA4_SUPPORTED_COMPUTE_CAPABILITY_MAJORS:
-        return True
+    fa4_supported = device_capability is not None and device_capability[0] in _FA4_SUPPORTED_COMPUTE_CAPABILITY_MAJORS
+    if fa4_supported:
+        return bool(getattr(mcore_attention, "HAVE_FA4", False))
 
     mcore_attention.HAVE_FA4 = False
-    if model_provider.attention_backend in (AttnBackend.flash, AttnBackend.auto):
-        model_provider.attention_backend = AttnBackend.fused
-    if model_provider.attention_backend is AttnBackend.fused:
-        # The container startup environment may select FlashAttention globally. Once this
-        # device-compatibility guard resolves the explicit provider backend to TE fused attention,
-        # leave MCore to set a consistent trio instead of inheriting contradictory selectors.
-        for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
-            os.environ.pop(variable, None)
+    if device_capability is not None and device_capability[0] >= 8:
+        from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
+
+        # TE has one flash selector for FA2/FA3/FA4 and currently considers an
+        # installed FA4 eligible on every SM8x GPU. Hide only FA4 so ``flash`` can
+        # select FA2 on SM80/SM86/SM89. Upstream FA4 support for these older
+        # architectures is under development; remove this guard once that support
+        # lands and the pinned TE release recognizes it.
+        FlashAttentionUtils.v4_is_installed = False
     return False
 
 

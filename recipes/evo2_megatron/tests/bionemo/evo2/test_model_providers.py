@@ -74,28 +74,35 @@ def test_hyena_provider_leaves_te_context_parallel_transport_unset():
 
 
 @pytest.mark.parametrize(
-    ("device_capability", "expected_backend", "expected_fa4"),
+    ("device_capability", "configured_backend", "expected_fa4"),
     [
+        ((8, 0), evo2_provider.AttnBackend.flash, False),
+        ((8, 6), evo2_provider.AttnBackend.flash, False),
+        ((8, 9), evo2_provider.AttnBackend.flash, False),
         ((8, 9), evo2_provider.AttnBackend.fused, False),
+        ((8, 9), evo2_provider.AttnBackend.auto, False),
         ((9, 0), evo2_provider.AttnBackend.flash, True),
     ],
 )
 def test_fa4_backend_respects_supported_device_capabilities(
     monkeypatch: pytest.MonkeyPatch,
     device_capability: tuple[int, int],
-    expected_backend,
+    configured_backend,
     expected_fa4: bool,
 ):
-    """FA4 remains enabled on Hopper but falls back before model creation on L4."""
+    """FA4 remains enabled on Hopper while SM8x keeps flash dispatch through FA2."""
     from megatron.core.transformer import attention as mcore_attention
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
-    provider = SimpleNamespace(attention_backend=evo2_provider.AttnBackend.flash)
+    provider = SimpleNamespace(attention_backend=configured_backend)
     monkeypatch.setattr(mcore_attention, "HAVE_FA4", True)
+    monkeypatch.setattr(FlashAttentionUtils, "v4_is_installed", True)
 
     evo2_provider._configure_fa4_for_device(provider, device_capability=device_capability)
 
-    assert provider.attention_backend is expected_backend
+    assert provider.attention_backend is configured_backend
     assert mcore_attention.HAVE_FA4 is expected_fa4
+    assert FlashAttentionUtils.v4_is_installed is expected_fa4
 
 
 def test_fa4_backend_falls_back_without_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,23 +113,47 @@ def test_fa4_backend_falls_back_without_cuda(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(evo2_provider.torch.cuda, "is_available", lambda: False)
 
     assert evo2_provider._configure_fa4_for_device(provider) is False
-    assert provider.attention_backend is evo2_provider.AttnBackend.fused
+    assert provider.attention_backend is evo2_provider.AttnBackend.flash
     assert mcore_attention.HAVE_FA4 is False
 
 
-def test_fa4_fallback_clears_conflicting_te_backend_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An inherited Flash selector cannot contradict the provider's fused fallback."""
+def test_sm89_disables_te_fa4_independently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCore disabling FA4 must not leave TE free to select it on SM89."""
     from megatron.core.transformer import attention as mcore_attention
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
+
+    provider = SimpleNamespace(attention_backend=evo2_provider.AttnBackend.flash)
+    monkeypatch.setattr(mcore_attention, "HAVE_FA4", False)
+    monkeypatch.setattr(FlashAttentionUtils, "v4_is_installed", True)
+
+    assert evo2_provider._configure_fa4_for_device(provider, device_capability=(8, 9)) is False
+    assert provider.attention_backend is evo2_provider.AttnBackend.flash
+    assert FlashAttentionUtils.v4_is_installed is False
+
+
+def test_fa4_selection_clears_derived_te_backend_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inherited TE selectors cannot override the provider-selected backend."""
+    from megatron.core.models.common.language_module.language_module import LanguageModule
+    from megatron.core.transformer import attention as mcore_attention
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
     provider = SimpleNamespace(attention_backend=evo2_provider.AttnBackend.flash)
     monkeypatch.setattr(mcore_attention, "HAVE_FA4", True)
+    monkeypatch.setattr(FlashAttentionUtils, "v4_is_installed", True)
     for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
         monkeypatch.setenv(variable, "1")
 
     assert evo2_provider._configure_fa4_for_device(provider, device_capability=(8, 9)) is False
 
-    assert provider.attention_backend is evo2_provider.AttnBackend.fused
+    assert provider.attention_backend is evo2_provider.AttnBackend.flash
+    assert FlashAttentionUtils.v4_is_installed is False
     assert all(variable not in os.environ for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"))
+
+    LanguageModule._set_attention_backend(SimpleNamespace(config=provider))
+
+    assert os.environ["NVTE_FLASH_ATTN"] == "1"
+    assert os.environ["NVTE_FUSED_ATTN"] == "0"
+    assert os.environ["NVTE_UNFUSED_ATTN"] == "0"
 
 
 @pytest.mark.parametrize(("requested", "expected"), [(None, "p2p"), ("p2p", "p2p"), ("a2a", "a2a")])
