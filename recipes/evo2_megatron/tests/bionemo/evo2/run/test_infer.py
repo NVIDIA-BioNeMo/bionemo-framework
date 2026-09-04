@@ -1396,26 +1396,60 @@ class _MockLoopForwardModel(torch.nn.Module):
         return torch.zeros(1)
 
 
+class _MockKVBlockAllocator:
+    paused_count = 0
+
+    def __init__(self):
+        self.next_block_id = 1024
+
+    @staticmethod
+    def get_active_avail() -> int:
+        return 1024
+
+    def allocate_memory_blocks(self, count: int) -> torch.Tensor:
+        block_ids = torch.arange(self.next_block_id, self.next_block_id + count, dtype=torch.int32)
+        self.next_block_id += count
+        return block_ids
+
+
 class _MockNativeDynamicContext:
     def __init__(self, *, stop_after_updates: int | None = None, events: list[str] | None = None):
         self.max_tokens = 128
         self.max_sequence_length = 128
+        self.block_size_tokens = 16
+        self.num_speculative_tokens = 0
         self.mamba_metadata = SimpleNamespace(request_to_mamba_state_idx=torch.arange(32))
+        self.kv_block_allocator = _MockKVBlockAllocator()
+        self.request_ids = torch.full((32,), -1, dtype=torch.int32)
+        self.request_last_kv_block_offset = torch.full((32,), -1, dtype=torch.int32)
+        self.request_last_kv_block_id = torch.full((32,), -1, dtype=torch.int32)
+        self.request_kv_block_counts = torch.zeros(32, dtype=torch.int32)
+        self.request_to_kv_block_ids = torch.full((32, 16), -1, dtype=torch.int32)
         self.evo2_batched_decode_enabled = False
         self.paused_request_count = 0
         self.chunked_prefill_request_id = -1
         self.stop_after_updates = stop_after_updates
         self.events = events
         self.request_count = 0
+        self.total_request_count = 0
         self.update_count = 0
         self.reset_count = 0
         self.active = False
         self.prefill_chunk_lengths = []
 
-    def add_request(self, _request, *, prefill_chunk_length: int):
+    def add_request(self, request, *, prefill_chunk_length: int):
         assert prefill_chunk_length > 0
+        row = self.request_count
+        block_count = math.ceil(prefill_chunk_length / self.block_size_tokens)
+        block_ids = torch.arange(row * 16, row * 16 + block_count, dtype=torch.int32)
+        self.request_ids[row] = request.request_id
+        self.request_to_kv_block_ids[row, :block_count] = block_ids
+        self.request_kv_block_counts[row] = block_count
+        self.request_last_kv_block_id[row] = block_ids[-1]
+        self.request_last_kv_block_offset[row] = (prefill_chunk_length - 1) % self.block_size_tokens
         self.prefill_chunk_lengths.append(prefill_chunk_length)
         self.request_count += 1
+        self.total_request_count += 1
         self.active = True
 
     @staticmethod
@@ -1431,6 +1465,8 @@ class _MockNativeDynamicContext:
             self.events.append("update")
         self.update_count += 1
         self.active = bool(active_after_sample.any().item())
+        if self.active:
+            self.request_last_kv_block_offset[: self.request_count].add_(1).remainder_(self.block_size_tokens)
         if self.stop_after_updates is not None and self.update_count >= self.stop_after_updates:
             self.active = False
 
@@ -1441,6 +1477,12 @@ class _MockNativeDynamicContext:
         self.reset_count += 1
         self.active = False
         self.request_count = 0
+        self.total_request_count = 0
+        self.request_ids.fill_(-1)
+        self.request_last_kv_block_offset.fill_(-1)
+        self.request_last_kv_block_id.fill_(-1)
+        self.request_kv_block_counts.zero_()
+        self.request_to_kv_block_ids.fill_(-1)
 
 
 def test_graph_warmup_uses_only_physical_shapes(monkeypatch):
@@ -1495,6 +1537,50 @@ def test_graph_warmup_uses_only_physical_shapes(monkeypatch):
 )
 def test_physical_request_shapes_include_only_full_and_remainder(prompt_count, batch_size, expected):
     assert infer_module._physical_request_counts(prompt_count, batch_size) == expected
+
+
+def test_packed_decode_rollover_reserves_pages_in_place():
+    """Staggered KV-page rollover must not hand request ordering to mcore's pause scheduler."""
+
+    class _Allocator:
+        paused_count = 0
+
+        @staticmethod
+        def get_active_avail() -> int:
+            return 4
+
+        @staticmethod
+        def allocate_memory_blocks(count: int) -> torch.Tensor:
+            assert count == 2
+            return torch.tensor([90, 91], dtype=torch.int32)
+
+    block_table = torch.full((3, 4), -1, dtype=torch.int32)
+    block_table[0, 0] = 10
+    block_table[1, :2] = torch.tensor([20, 21])
+    block_table[2, :3] = torch.tensor([30, 31, 32])
+    context = SimpleNamespace(
+        paused_request_count=0,
+        total_request_count=3,
+        num_speculative_tokens=0,
+        block_size_tokens=8,
+        kv_block_allocator=_Allocator(),
+        request_ids=torch.tensor([100, 101, 102], dtype=torch.int32),
+        request_last_kv_block_offset=torch.tensor([3, 7, 7], dtype=torch.int32),
+        request_last_kv_block_id=torch.tensor([10, 21, 32], dtype=torch.int32),
+        request_kv_block_counts=torch.tensor([1, 2, 3], dtype=torch.int32),
+        request_to_kv_block_ids=block_table,
+    )
+    original_request_ids = context.request_ids.clone()
+
+    reserved = infer_module._reserve_packed_decode_rollover_blocks(context, request_count=3)
+
+    assert reserved == 2
+    assert torch.equal(context.request_ids, original_request_ids)
+    assert context.request_last_kv_block_offset.tolist() == [3, -1, -1]
+    assert context.request_last_kv_block_id.tolist() == [10, 90, 91]
+    assert context.request_kv_block_counts.tolist() == [1, 3, 4]
+    assert context.request_to_kv_block_ids[1].tolist() == [20, 21, 90, -1]
+    assert context.request_to_kv_block_ids[2].tolist() == [30, 31, 32, 91]
 
 
 def _run_mock_native_generation(
@@ -2269,6 +2355,7 @@ def run_infer_subprocess_parallel(
     max_new_tokens: int = 500,
     temperature: float = 1.0,
     top_k: int = 1,
+    top_p: float = 0.0,
     seed: int = 42,
     tensor_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2292,6 +2379,7 @@ def run_infer_subprocess_parallel(
         max_new_tokens: Maximum number of tokens to generate.
         temperature: Sampling temperature.
         top_k: Top-k sampling parameter (1 for greedy).
+        top_p: Top-p sampling parameter, applied after top-k.
         seed: Random seed for reproducibility.
         tensor_parallel_size: Tensor parallelism degree.
         pipeline_model_parallel_size: Pipeline parallelism degree.
@@ -2326,6 +2414,8 @@ def run_infer_subprocess_parallel(
         str(temperature),
         "--top-k",
         str(top_k),
+        "--top-p",
+        str(top_p),
         "--seed",
         str(seed),
         "--tensor-parallel-size",
@@ -3069,6 +3159,103 @@ DNA_BASES = set("ACGTacgtNn")
 def _is_dna_completion(text: str) -> bool:
     """True when every character of ``text`` is a DNA base (Evo2's byte vocab)."""
     return len(text) > 0 and all(c in DNA_BASES for c in text)
+
+
+@pytest.mark.timeout(900)
+def test_native_staggered_kv_rollover_matches_serial(mbridge_checkpoint_path, tmp_path):
+    """Heterogeneous packed decode stays request-exact across repeated 256-token rollovers.
+
+    The second row begins exactly at a page boundary and rolls over one step before the first.
+    Both requests then cross a second page during the continuation. Before Evo2 reserved pages in
+    place, mcore's pause/resume bookkeeping permuted the two rows at the first staggered rollover,
+    cross-wiring output ownership and positional Hyena state. Greedy packed output is compared with
+    serial output; combined top-k/top-p sampling is compared with the same packed batch using a
+    single-page reference layout so RNG consumption remains identical.
+    """
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Native dynamic-engine test requires a GPU")
+
+    prompts = [
+        ("near-boundary", "ACGT" * 63 + "ACG"),
+        ("on-boundary", "TGCA" * 64),
+    ]
+    assert [len(prompt) for _, prompt in prompts] == [255, 256]
+    prompt_file = tmp_path / "rollover_prompts.jsonl"
+    _write_prompts_jsonl(prompt_file, prompts)
+    common_args = (
+        "--max-seq-length",
+        "768",
+        "--inference-dynamic-batching-block-size",
+        str(KV_BLOCK_SIZE_TOKENS),
+        "--ignore-eos",
+        "--strict-generation",
+        "--return-log-probs",
+    )
+
+    serial = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=prompt_file,
+        output_file=tmp_path / "rollover_serial.jsonl",
+        max_new_tokens=270,
+        top_k=1,
+        max_batch_size=1,
+        evo2_batched_decode_size=1,
+        extra_args=common_args,
+    )
+    packed = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=prompt_file,
+        output_file=tmp_path / "rollover_packed.jsonl",
+        max_new_tokens=270,
+        top_k=1,
+        max_batch_size=2,
+        evo2_batched_decode_size=2,
+        expected_log_substrings=("[evo2-native] batched prompt prefill: requests=2",),
+        extra_args=common_args,
+    )
+
+    serial_by_id = {record["id"]: record for record in serial}
+    packed_by_id = {record["id"]: record for record in packed}
+    _assert_parallel_probe_matches_baseline(packed_by_id, serial_by_id)
+    assert all(record["usage"]["completion_tokens"] == 270 for record in packed)
+
+    top_p_reference_args = (
+        "--max-seq-length",
+        "768",
+        "--inference-dynamic-batching-block-size",
+        "1024",
+        "--ignore-eos",
+        "--strict-generation",
+        "--return-log-probs",
+    )
+    top_p_reference = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=prompt_file,
+        output_file=tmp_path / "top_p_single_page.jsonl",
+        max_new_tokens=270,
+        top_k=5,
+        top_p=0.999,
+        seed=1234,
+        max_batch_size=2,
+        evo2_batched_decode_size=2,
+        extra_args=top_p_reference_args,
+    )
+    top_p_rollover = run_infer_subprocess_parallel(
+        mbridge_checkpoint_path,
+        prompt_file=prompt_file,
+        output_file=tmp_path / "top_p_rollover.jsonl",
+        max_new_tokens=270,
+        top_k=5,
+        top_p=0.999,
+        seed=1234,
+        max_batch_size=2,
+        evo2_batched_decode_size=2,
+        extra_args=common_args,
+    )
+
+    top_p_reference_by_id = {record["id"]: record for record in top_p_reference}
+    top_p_rollover_by_id = {record["id"]: record for record in top_p_rollover}
+    _assert_parallel_probe_matches_baseline(top_p_rollover_by_id, top_p_reference_by_id)
 
 
 def test_native_mixed_prompt_contract(mbridge_checkpoint_path, tmp_path):

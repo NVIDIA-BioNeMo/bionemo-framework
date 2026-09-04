@@ -1383,11 +1383,77 @@ def _normalize_new_request_slots_for_packed_hyena(dyn_ctx: Any, request_count: i
         # tensor passed to Hyena binding. mcore reads the map again in
         # initialize_attention_state() and update_requests(). Reassigning the same freshly
         # allocated slot set before the first forward keeps those later reads aligned with
-        # the ascending packed Hyena views. Evo2 leaves prefix caching off and keeps the
-        # batched requests active until they reset together, so no restored state or
-        # within-group compaction retains the original order.
+        # the ascending packed Hyena views. Evo2 leaves prefix caching off, keeps the
+        # batched requests active until they reset together, and reserves rollover KV blocks
+        # before mcore can pause/reorder requests, so every physical row remains stable.
         request_slots.copy_(request_slots.flip(0))
     return request_slots
+
+
+def _reserve_packed_decode_rollover_blocks(dyn_ctx: Any, request_count: int) -> int:
+    """Reserve the next KV page without letting mcore permute packed request rows.
+
+    ``DynamicInferenceContext.update_requests`` normally handles a full final KV block by
+    temporarily pausing that request, moving paused rows to the left, and resuming them in LIFO
+    order after allocating a block. If only part of a heterogeneous Evo2 batch reaches the page
+    boundary, that changes the request-row order. Attention follows the moved bookkeeping, but
+    packed Hyena recurrent state and the result lists are intentionally bound to stable physical
+    rows, so the next decode step would combine one request's token with another request's state.
+
+    The Evo2 context is right-sized for every active request's full sequence and has no paused
+    block pool. Allocate boundary pages immediately before ``update_requests`` and mark their
+    offsets as just before the new page. Mcore then performs its normal metadata update from -1
+    to 0 without entering pause/resume or changing row order.
+
+    Returns:
+        Number of request rows for which a new KV block was reserved.
+    """
+    if request_count < 1:
+        raise ValueError(f"request_count must be positive, got {request_count}")
+    paused_request_count = int(getattr(dyn_ctx, "paused_request_count", 0))
+    if paused_request_count != 0:
+        raise RuntimeError("Packed Evo2 decode cannot reserve KV blocks while requests are paused")
+    active_request_count = int(dyn_ctx.total_request_count) - paused_request_count
+    if active_request_count != request_count:
+        raise RuntimeError(
+            f"Packed Evo2 decode expected {request_count} active request rows, found {active_request_count}"
+        )
+    if int(getattr(dyn_ctx, "num_speculative_tokens", 0)) != 0:
+        raise RuntimeError("Packed Evo2 decode does not support speculative-token KV rollover")
+
+    allocator = dyn_ctx.kv_block_allocator
+    if int(getattr(allocator, "paused_count", 0)) != 0:
+        raise RuntimeError("Packed Evo2 decode requires a dynamic context without a paused KV block pool")
+
+    block_size_tokens = int(dyn_ctx.block_size_tokens)
+    if block_size_tokens < 1:
+        raise RuntimeError(f"Invalid dynamic-context KV block size: {block_size_tokens}")
+    offsets = dyn_ctx.request_last_kv_block_offset[:request_count]
+    rollover_rows = torch.nonzero(offsets >= block_size_tokens - 1, as_tuple=True)[0]
+    rollover_count = int(rollover_rows.numel())
+    if rollover_count == 0:
+        return 0
+
+    block_counts = dyn_ctx.request_kv_block_counts
+    block_table = dyn_ctx.request_to_kv_block_ids
+    rollover_columns = block_counts[rollover_rows]
+    if bool((rollover_columns >= block_table.shape[1]).any().item()):
+        raise RuntimeError("Packed Evo2 decode exhausted a request's paged-KV block table")
+    if int(allocator.get_active_avail()) < rollover_count:
+        raise RuntimeError(
+            f"Packed Evo2 decode needs {rollover_count} rollover KV block(s), but the active pool "
+            f"has only {allocator.get_active_avail()} available"
+        )
+
+    new_block_ids = allocator.allocate_memory_blocks(rollover_count)
+    if new_block_ids is None or int(new_block_ids.numel()) != rollover_count:
+        raise RuntimeError(f"Packed Evo2 decode failed to allocate {rollover_count} rollover KV block(s)")
+
+    block_table[rollover_rows, rollover_columns] = new_block_ids
+    block_counts[rollover_rows] += 1
+    dyn_ctx.request_last_kv_block_id[rollover_rows] = new_block_ids
+    offsets[rollover_rows] = -1
+    return rollover_count
 
 
 def _warmup_native_dynamic_cuda_graphs(
@@ -2565,6 +2631,8 @@ def _generate_native_dynamic(
         stop_token_ids = _native_stop_token_ids(tokenizer)
         stop_token_mask: Optional[torch.Tensor] = None
         stopped_on_eos = [False for _ in range(batch_request_count)]
+        stable_request_ids: Optional[torch.Tensor] = None
+        stable_request_slots: Optional[torch.Tensor] = None
 
         def _forward_sample_update(*, count_generated: bool) -> bool:
             nonlocal stop_token_mask
@@ -2639,9 +2707,23 @@ def _generate_native_dynamic(
                 for request_idx, request_generated_ids in enumerate(generated_ids)
             )
             active_after_sample = torch.full((batch_request_count,), keep_group_active, dtype=torch.bool)
+            rollover_count = (
+                _reserve_packed_decode_rollover_blocks(dyn_ctx, batch_request_count) if keep_group_active else 0
+            )
             dyn_ctx.update_requests(active_after_sample, sampled_cpu)
             if int(getattr(dyn_ctx, "paused_request_count", 0)) != 0:
                 raise RuntimeError("Evo2 batched decode does not yet support paused dynamic requests")
+            if rollover_count:
+                request_ids_are_stable = stable_request_ids is not None and torch.equal(
+                    dyn_ctx.request_ids[:batch_request_count], stable_request_ids
+                )
+                request_slots_are_stable = stable_request_slots is not None and torch.equal(
+                    dyn_ctx.mamba_metadata.request_to_mamba_state_idx[:batch_request_count], stable_request_slots
+                )
+                if not request_ids_are_stable or not request_slots_are_stable:
+                    raise RuntimeError(
+                        "MCore reordered packed Evo2 request rows or Hyena state slots during paged-KV rollover"
+                    )
             return keep_group_active
 
         try:
@@ -2656,6 +2738,8 @@ def _generate_native_dynamic(
 
                 slots = _normalize_new_request_slots_for_packed_hyena(dyn_ctx, batch_request_count)
                 bind_hyena_packed_views_to_dynamic_context_batch(hyena_model, dyn_ctx, request_slots=slots)
+                stable_request_ids = dyn_ctx.request_ids[:batch_request_count].clone()
+                stable_request_slots = slots.clone()
                 dyn_ctx.evo2_batched_decode_enabled = True
                 if rank == 0:
                     logger.info(
