@@ -1418,13 +1418,13 @@ class _MockNativeDynamicContext:
         self.max_sequence_length = 128
         self.block_size_tokens = 16
         self.num_speculative_tokens = 0
-        self.mamba_metadata = SimpleNamespace(request_to_mamba_state_idx=torch.arange(32))
+        self.mamba_metadata = SimpleNamespace(request_to_mamba_state_idx=torch.arange(128))
         self.kv_block_allocator = _MockKVBlockAllocator()
-        self.request_ids = torch.full((32,), -1, dtype=torch.int32)
-        self.request_last_kv_block_offset = torch.full((32,), -1, dtype=torch.int32)
-        self.request_last_kv_block_id = torch.full((32,), -1, dtype=torch.int32)
-        self.request_kv_block_counts = torch.zeros(32, dtype=torch.int32)
-        self.request_to_kv_block_ids = torch.full((32, 16), -1, dtype=torch.int32)
+        self.request_ids = torch.full((128,), -1, dtype=torch.int32)
+        self.request_last_kv_block_offset = torch.full((128,), -1, dtype=torch.int32)
+        self.request_last_kv_block_id = torch.full((128,), -1, dtype=torch.int32)
+        self.request_kv_block_counts = torch.zeros(128, dtype=torch.int32)
+        self.request_to_kv_block_ids = torch.full((128, 16), -1, dtype=torch.int32)
         self.evo2_batched_decode_enabled = False
         self.paused_request_count = 0
         self.chunked_prefill_request_id = -1
