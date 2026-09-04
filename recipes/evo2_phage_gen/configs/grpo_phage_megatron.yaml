@@ -240,11 +240,12 @@ env:
   phage_qc:
     genome_length_min: 5306
     genome_length_max: 5493
-    # PhiX/Sinsheimervirus FASTA lengths (n=155) span 5,339-5,388 nt.
-    genome_length_reward_lower_zero: 5305
+    # PhiX/Sinsheimervirus FASTA lengths (n=155) span 5,339-5,388 nt. The wider
+    # lower shaping taper reaches short rollouts; both default decode caps exceed upper zero.
+    genome_length_reward_lower_zero: 3000
     genome_length_reward_lower_full: 5359
     genome_length_reward_upper_full: 5391
-    genome_length_reward_upper_zero: 5445
+    genome_length_reward_upper_zero: 5426
     gc_content_min: 30.0
     gc_content_max: 65.0
     homopolymer_max: 10

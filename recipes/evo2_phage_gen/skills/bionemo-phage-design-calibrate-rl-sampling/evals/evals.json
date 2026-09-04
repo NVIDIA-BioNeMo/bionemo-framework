@@ -9,7 +9,7 @@
         "The response reconstructs the SFT conditioning, orientation, wrappers, BOS/EOS, padding, masking, tokenization, and continuation boundary.",
         "It uses only cues present during SFT and does not copy the paper format when the selected checkpoint differs.",
         "It sweeps a reasonable temperature and prefix range with paired seeds and enough samples to compare uncertainty.",
-        "It places the decoder and calibration ceiling meaningfully inside any declining overlength reward region rather than exactly on the full-credit boundary, while preserving the separate hard acceptance interval and model context.",
+        "When termination is learned, it places every deployed no-EOD cap a small explicit distance beyond the upper zero so capped outputs receive no length credit without wasting a long flat-zero tail; if a wider lower taper is used to reach short rollouts, it identifies that as shaping credit rather than acceptance and preserves the separate hard interval.",
         "It materializes the selected prompt mixture and sampling settings in the eventual commands and treats simultaneous nonzero top-k/top-p as temperature, then top-k, then top-p.",
         "Calibration samples remain separate from RL validation and final rollout."
       ],

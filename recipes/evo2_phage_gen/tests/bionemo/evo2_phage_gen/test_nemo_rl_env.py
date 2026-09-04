@@ -237,10 +237,10 @@ def test_environment_maps_genome_length_reward_bounds(tmp_path: Path):
     env = env_cls(
         {
             "sequence_safety": _sequence_safety_mapping(tmp_path),
-            "genome_length_reward_lower_zero": 5305,
+            "genome_length_reward_lower_zero": 3000,
             "genome_length_reward_lower_full": 5359,
             "genome_length_reward_upper_full": 5391,
-            "genome_length_reward_upper_zero": 5445,
+            "genome_length_reward_upper_zero": 5426,
         }
     )
 
@@ -249,7 +249,7 @@ def test_environment_maps_genome_length_reward_bounds(tmp_path: Path):
         env.config.genome_length_reward_lower_full,
         env.config.genome_length_reward_upper_full,
         env.config.genome_length_reward_upper_zero,
-    ) == (5305.0, 5359.0, 5391.0, 5445.0)
+    ) == (3000.0, 5359.0, 5391.0, 5426.0)
 
 
 def test_gdpo_objective_scores_reduce_named_columns_positionally():

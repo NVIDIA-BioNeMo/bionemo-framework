@@ -265,10 +265,10 @@ def score_cell(
         config=NucleotideQCConfig(
             genome_length_min=5306,
             genome_length_max=5493,
-            genome_length_reward_lower_zero=5305,
+            genome_length_reward_lower_zero=3000,
             genome_length_reward_lower_full=5359,
             genome_length_reward_upper_full=5391,
-            genome_length_reward_upper_zero=5445,
+            genome_length_reward_upper_zero=5426,
             dustmask_filter=True,
             dustmasker_bin=str((tool_bin_dir / "dustmasker").resolve()),
         ),

@@ -72,21 +72,22 @@ def test_docs_and_configs_do_not_use_stale_workspace_paths():
 
 
 def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
-    """GRPO should default to the known-good serial Evo2 Megatron generation path."""
+    """GRPO should default to the known-good packed Evo2 Megatron generation path."""
     config_path = RECIPE_ROOT / "configs" / "grpo_phage_megatron.yaml"
     config = yaml.safe_load(config_path.read_text())
 
     generation_batch_size = config["policy"]["generation_batch_size"]
     generation_config = config["policy"]["generation"]
+    length_config = config["env"]["phage_qc"]
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
     dtensor_config = config["policy"]["dtensor_cfg"]
     tensor_model_parallel_size = config["policy"]["megatron_cfg"]["tensor_model_parallel_size"]
     train_data = config["data"]["train"]
 
-    assert config["env"]["phage_qc"]["genome_length_min"] == 5306
-    assert config["env"]["phage_qc"]["genome_length_max"] == 5493
+    assert length_config["genome_length_min"] == 5306
+    assert length_config["genome_length_max"] == 5493
     assert {
-        key: config["env"]["phage_qc"][key]
+        key: length_config[key]
         for key in (
             "genome_length_reward_lower_zero",
             "genome_length_reward_lower_full",
@@ -94,21 +95,18 @@ def test_grpo_config_uses_prompt_batch_size_for_evo2_generation():
             "genome_length_reward_upper_zero",
         )
     } == {
-        "genome_length_reward_lower_zero": 5305,
+        "genome_length_reward_lower_zero": 3000,
         "genome_length_reward_lower_full": 5359,
         "genome_length_reward_upper_full": 5391,
-        "genome_length_reward_upper_zero": 5445,
+        "genome_length_reward_upper_zero": 5426,
     }
+    assert generation_config["max_new_tokens"] == 5420
     assert generation_config["max_new_tokens"] + 16 == 5436
     assert generation_config["max_new_tokens"] + 24 == 5444
-    assert (
-        config["env"]["phage_qc"]["genome_length_reward_lower_full"]
-        - config["env"]["phage_qc"]["genome_length_reward_lower_zero"]
-        == config["env"]["phage_qc"]["genome_length_reward_upper_zero"]
-        - config["env"]["phage_qc"]["genome_length_reward_upper_full"]
-    )
-    assert config["env"]["phage_qc"]["genome_length_reward_upper_full"] < generation_config["max_new_tokens"] + 16
-    assert generation_config["max_new_tokens"] + 24 < config["env"]["phage_qc"]["genome_length_reward_upper_zero"]
+    assert length_config["genome_length_reward_lower_zero"] < length_config["genome_length_min"]
+    assert length_config["genome_length_reward_upper_full"] < generation_config["max_new_tokens"] + 16
+    assert generation_config["max_new_tokens"] + 16 - length_config["genome_length_reward_upper_zero"] == 10
+    assert generation_config["max_new_tokens"] + 24 - length_config["genome_length_reward_upper_zero"] == 18
     assert config["policy"]["max_total_sequence_length"] >= generation_config["max_new_tokens"] + 16
     assert config["env"]["phage_qc"]["weight_nucleotide_pass"] == 0.0
     assert config["env"]["phage_qc"]["dustmask_filter"] is True
@@ -280,7 +278,7 @@ def test_phix_example_documents_every_gdpo_objective():
     assert implementation_section.count("../src/bionemo/evo2_phage_gen/") >= len(
         config["env"]["phage_qc"]["gdpo_objectives"]
     )
-    for evidence in ("Sinsheimervirus", "5,339", "5,359", "5,388", "5,445", "FASTA"):
+    for evidence in ("Sinsheimervirus", "3,000", "5,339", "5,359", "5,388", "5,426", "FASTA"):
         assert evidence in score_section
 
 

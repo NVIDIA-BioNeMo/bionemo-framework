@@ -315,8 +315,8 @@ def test_score_nucleotide_metrics_rewards_passing_sequence():
         assert scored.loc[0, f"reward_safety_{safety_class}"] == 0.0
 
 
-def test_score_nucleotide_metrics_uses_configured_symmetric_genome_length_reward():
-    lengths = [5305, 5332, 5359, 5386, 5391, 5418, 5445, 5800]
+def test_score_nucleotide_metrics_uses_configured_shaping_genome_length_reward():
+    lengths = [2500, 3000, 4000, 5305, 5359, 5386, 5391, 5408, 5426, 5436, 5444]
     scored = score_nucleotide_metrics(
         pd.DataFrame(
             {
@@ -327,15 +327,17 @@ def test_score_nucleotide_metrics_uses_configured_symmetric_genome_length_reward
         config=NucleotideQCConfig(
             genome_length_min=5306,
             genome_length_max=5493,
-            genome_length_reward_lower_zero=5305,
+            genome_length_reward_lower_zero=3000,
             genome_length_reward_lower_full=5359,
             genome_length_reward_upper_full=5391,
-            genome_length_reward_upper_zero=5445,
+            genome_length_reward_upper_zero=5426,
         ),
     )
 
-    assert scored["reward_genome_length"].tolist() == pytest.approx([0.0, 0.5, 1.0, 1.0, 1.0, 0.5, 0.0, 0.0])
-    assert scored.loc[scored["genome_length"] == 5800, "reward_nucleotide_pass"].item() == 0.0
+    assert scored["reward_genome_length"].tolist() == pytest.approx(
+        [0.0, 0.0, 1000 / 2359, 2305 / 2359, 1.0, 1.0, 1.0, 18 / 35, 0.0, 0.0, 0.0]
+    )
+    assert scored.loc[scored["genome_length"] == 4000, "reward_nucleotide_pass"].item() == 0.0
 
 
 @pytest.mark.parametrize(

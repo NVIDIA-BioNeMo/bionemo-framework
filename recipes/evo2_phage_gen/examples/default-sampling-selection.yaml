@@ -3,7 +3,8 @@
 temperature: 1.0
 top_k: 5
 top_p: 0.999
-# Total caps are 5,436-5,444 nt for the 16/24-nt prompt mixture; sampled EOD may terminate earlier.
+# Total caps are 5,436-5,444 nt, 10-18 nt past the length reward's upper zero;
+# sampled EOD may terminate earlier.
 max_new_tokens: 5420
 prompt_lengths:
   - 16
