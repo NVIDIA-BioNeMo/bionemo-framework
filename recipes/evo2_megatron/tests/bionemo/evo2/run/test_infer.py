@@ -172,6 +172,118 @@ def test_graph_reset_clears_current_mcore_runner_cache(monkeypatch):
     assert delete_calls == [True]
 
 
+def test_graph_storage_signature_tracks_rebinding():
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, 4))
+            self.register_buffer("scale", torch.ones(4))
+
+    model = _Model()
+    original = infer_module._model_storage_signature(model)
+
+    weight_version = model.weight._version
+    scale_version = model.scale._version
+    with torch.no_grad():
+        model.weight.add_(1)
+        model.scale.mul_(2)
+    assert model.weight._version > weight_version
+    assert model.scale._version > scale_version
+    assert infer_module._model_storage_signature(model) == original
+
+    model.weight.data = model.weight.detach().clone()
+    rebound_parameter = infer_module._model_storage_signature(model)
+    assert rebound_parameter != original
+
+    model.scale.data = model.scale.detach().clone()
+    assert infer_module._model_storage_signature(model) != rebound_parameter
+
+
+@pytest.mark.parametrize("tensor_kind", ["parameter", "buffer"])
+def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, tensor_kind):
+    """Validation-first graphs must not survive a colocated model-tensor reallocation."""
+
+    class _Context:
+        max_sequence_length = 64
+        max_requests = 2
+        evo2_warmed_cuda_graph_request_counts = frozenset({2})
+
+        def reset(self):
+            events.append("context-reset")
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, 4))
+            self.register_buffer("scale", torch.ones(4))
+
+    model = _Model()
+    context = _Context()
+    static_context = SimpleNamespace(
+        evo2_static_cuda_graph_warmed=True,
+        evo2_static_cuda_graph_replay_verified=True,
+    )
+    nd = SimpleNamespace(
+        shared_dyn_ctx=context,
+        shared_dyn_ctx_key=(16, 64, False),
+        static_contexts={(2, 64): static_context},
+        cuda_graphs_enabled=True,
+        cuda_graph_model_storage_signature=infer_module._model_storage_signature(model),
+        hyena_model=model,
+        max_seq_length=64,
+    )
+    events = []
+    monkeypatch.setattr(infer_module, "_reset_layer_cuda_graphs", lambda _nd: events.append("graph-reset"))
+    monkeypatch.setattr(
+        infer_module,
+        "_warmup_native_dynamic_cuda_graphs",
+        lambda *_args, **_kwargs: (events.append(("graph-capture", context.evo2_warmed_cuda_graph_request_counts))),
+    )
+    monkeypatch.setattr(
+        infer_module,
+        "_validate_cuda_graph_capture",
+        lambda *_args, **_kwargs: events.append("graph-validate"),
+    )
+    monkeypatch.setattr(infer_module, "_begin_cuda_phase", lambda **_kwargs: 0.0)
+    monkeypatch.setattr(infer_module, "_finish_cuda_phase", lambda *_args, **_kwargs: infer_module._CudaPhaseStats())
+
+    with torch.no_grad():
+        model.weight.add_(1)
+    reused, _, _ = infer_module._get_or_build_shared_dynamic_context(
+        nd,
+        block_size_tokens=16,
+        max_tokens=64,
+        enable_chunked_prefill=False,
+        max_active_requests=2,
+        device=torch.device("cpu"),
+    )
+    assert reused is context
+    assert events == ["context-reset"]
+
+    rebound = model.weight if tensor_kind == "parameter" else model.scale
+    rebound.data = rebound.detach().clone()
+    recaptured, _, _ = infer_module._get_or_build_shared_dynamic_context(
+        nd,
+        block_size_tokens=16,
+        max_tokens=64,
+        enable_chunked_prefill=False,
+        max_active_requests=2,
+        device=torch.device("cpu"),
+    )
+    assert recaptured is context
+    assert events == [
+        "context-reset",
+        "graph-reset",
+        "context-reset",
+        ("graph-capture", frozenset()),
+        "graph-validate",
+    ]
+    assert context.evo2_warmed_cuda_graph_request_counts == frozenset({2})
+    assert not static_context.evo2_static_cuda_graph_warmed
+    assert not static_context.evo2_static_cuda_graph_replay_verified
+    assert nd.cuda_graph_model_storage_signature == infer_module._model_storage_signature(model)
+
+
 def test_static_flash_context_cache_invalidates_on_sequence_capacity_growth(monkeypatch):
     created = []
 

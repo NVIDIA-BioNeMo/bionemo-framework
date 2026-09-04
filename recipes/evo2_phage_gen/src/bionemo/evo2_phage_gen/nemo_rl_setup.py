@@ -147,6 +147,7 @@ def assert_nemo_rl_runtime() -> None:
     logits_sampling = importlib.import_module("nemo_rl.algorithms.logits_sampling_utils")
     cluster = importlib.import_module("nemo_rl.distributed.virtual_cluster")
     dataset_utils = importlib.import_module("nemo_rl.data.datasets.utils")
+    generation_worker = importlib.import_module("nemo_rl.models.generation.megatron.megatron_worker")
     if not callable(getattr(grpo, "split_environment_timing_metrics", None)):
         raise RuntimeError("NeMo-RL is missing environment timing support")
     if not callable(getattr(dataset_utils, "resolve_external_dataset_class", None)):
@@ -154,6 +155,9 @@ def assert_nemo_rl_runtime() -> None:
     sampling_parameters = inspect.signature(logits_sampling.apply_top_k_top_p).parameters
     if "target_token_ids" not in sampling_parameters:
         raise RuntimeError("NeMo-RL cannot retain sampled actions in filtered log-probability support")
+    generation_mixin = getattr(generation_worker, "MegatronGenerationMixin", None)
+    if not callable(getattr(generation_mixin, "_generation_adapter_requires_persistent_model_storage", None)):
+        raise RuntimeError("NeMo-RL cannot preserve CUDA-graph model storage across colocated refits")
     parameters = inspect.signature(cluster.init_ray).parameters
     if not {"include_dashboard", "num_cpus"}.issubset(parameters):
         raise RuntimeError("NeMo-RL is missing local Ray resource controls")

@@ -281,6 +281,22 @@ class Evo2MegatronGenerationAdapter:
         self.seed_stride = int(self.config.get("seed_stride", 1_000_003))
         self.call_index_offset = int(self.config.get("call_index_offset", 0))
 
+    def requires_persistent_model_storage(self, worker: Any) -> bool:
+        """Keep model tensors resident only after a CUDA graph has captured their storage."""
+        native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
+        if native_dynamic is None or not getattr(native_dynamic, "cuda_graphs_enabled", False):
+            return False
+
+        dynamic_graph_ready = bool(
+            getattr(native_dynamic, "shared_dyn_ctx", None) is not None
+            and getattr(native_dynamic, "cuda_graph_replay_verified", False)
+        )
+        static_graph_ready = any(
+            getattr(context, "evo2_static_cuda_graph_replay_verified", False)
+            for context in (getattr(native_dynamic, "static_contexts", None) or {}).values()
+        )
+        return dynamic_graph_ready or static_graph_ready
+
     def _distributed_rank(self, worker: Any) -> int:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             return int(torch.distributed.get_rank())
@@ -572,10 +588,11 @@ class Evo2MegatronGenerationAdapter:
     def finish_worker(self, worker: Any) -> None:
         """Reset requests while retaining the graph-warmed engine across RL cycles.
 
-        NeMo-RL calls this hook after every rollout and validation generation. Colocated optimizer
-        updates and refits preserve parameter storage, so captured graphs remain valid; derived
-        modal tables refresh in place before the next decode. Releasing this cache here would rebuild
-        the context and recapture the same physical request shapes every cycle.
+        NeMo-RL calls this hook after every rollout and validation generation. The adapter's
+        persistent-storage contract prevents its colocated offload from rebinding graph-captured
+        parameters; derived modal tables refresh in place before the next decode. Releasing this
+        cache here would rebuild the context and recapture the same physical request shapes every
+        cycle.
         """
         native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
         shared_dyn_ctx = getattr(native_dynamic, "shared_dyn_ctx", None)

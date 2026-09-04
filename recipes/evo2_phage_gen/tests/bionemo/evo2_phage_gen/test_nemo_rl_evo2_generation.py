@@ -25,6 +25,8 @@ from nemo_rl.models.generation.megatron.megatron_generation import (
     _adapter_requires_all_workers,
     _load_generation_adapter,
 )
+from nemo_rl.models.generation.megatron.megatron_worker import MegatronGenerationMixin
+from nemo_rl.models.policy.workers.megatron_policy_worker import MegatronPolicyWorkerImpl
 
 import bionemo.evo2_phage_gen.nemo_rl_evo2_generation as evo2_generation
 from bionemo.evo2_phage_gen.nemo_rl_evo2_generation import (
@@ -514,6 +516,65 @@ def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch
 
     assert worker._evo2_native_dynamic_components is native_dynamic
     assert context.reset_count == 2
+
+
+def test_graph_adapter_preserves_captured_model_storage():
+    adapter = Evo2MegatronGenerationAdapter({"seed": 17})
+    worker = SimpleNamespace(
+        _evo2_native_dynamic_components=None,
+        _load_generation_adapter=lambda: adapter,
+    )
+    assert not adapter.requires_persistent_model_storage(worker)
+
+    worker._evo2_native_dynamic_components = SimpleNamespace(
+        cuda_graphs_enabled=True,
+        shared_dyn_ctx=object(),
+        cuda_graph_replay_verified=False,
+        static_contexts={},
+    )
+    assert not adapter.requires_persistent_model_storage(worker)
+
+    worker._evo2_native_dynamic_components.cuda_graph_replay_verified = True
+    assert adapter.requires_persistent_model_storage(worker)
+    assert MegatronGenerationMixin._generation_adapter_requires_persistent_model_storage(worker)
+
+    worker._evo2_native_dynamic_components.shared_dyn_ctx = None
+    worker._evo2_native_dynamic_components.cuda_graph_replay_verified = False
+    worker._evo2_native_dynamic_components.static_contexts = {
+        (2, 64): SimpleNamespace(evo2_static_cuda_graph_replay_verified=False)
+    }
+    assert not adapter.requires_persistent_model_storage(worker)
+
+    static_context = worker._evo2_native_dynamic_components.static_contexts[(2, 64)]
+    static_context.evo2_static_cuda_graph_replay_verified = True
+    assert adapter.requires_persistent_model_storage(worker)
+
+    worker._evo2_native_dynamic_components.cuda_graphs_enabled = False
+    assert not adapter.requires_persistent_model_storage(worker)
+
+
+@pytest.mark.parametrize(("storage_required", "expected_move_params"), [(False, True), (True, False)])
+def test_refit_offload_respects_graph_storage(monkeypatch, storage_required, expected_move_params):
+    calls = []
+    model = SimpleNamespace(eval=lambda: calls.append(("eval",)))
+    worker = SimpleNamespace(
+        model=model,
+        _generation_adapter_requires_persistent_model_storage=lambda: storage_required,
+        move_model=lambda moved_model, device, **kwargs: (
+            calls.append(("move", moved_model, device, kwargs)) or moved_model
+        ),
+        offload_before_refit=lambda: calls.append(("offload-before-refit",)),
+    )
+    monkeypatch.setattr(torch.cuda.nvtx, "range_push", lambda _name: None)
+    monkeypatch.setattr(torch.cuda.nvtx, "range_pop", lambda: None)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda: 0)
+    monkeypatch.setattr(torch, "randn", lambda *_args, **_kwargs: SimpleNamespace(cuda=lambda: None))
+
+    MegatronPolicyWorkerImpl.offload_after_refit(worker)
+
+    assert calls[0] == ("move", model, "cpu", {"move_params": expected_move_params})
+    assert calls[1:] == [("eval",), ("offload-before-refit",)]
 
 
 def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id(monkeypatch):

@@ -392,6 +392,10 @@ class Evo2NativeDynamicComponents:
     cuda_graph_runner_count: int = 0
     cuda_graph_recorded_count: int = 0
     cuda_graph_replay_verified: bool = False
+    # Registered model-tensor storage captured by the current graph runners. Optimizer updates may
+    # change values in place, but an offload/reload can rebind the tensors to new allocations; in
+    # that case every runner must be discarded before another replay.
+    cuda_graph_model_storage_signature: Optional[tuple[tuple[Any, ...], ...]] = None
     # MCore wrapper used only when pipeline parallelism is active. It is bound lazily to the
     # current dynamic context because that context may be rebuilt when its capacity grows.
     inference_wrapper: Optional[Any] = None
@@ -1537,6 +1541,61 @@ def _validate_cuda_graph_capture(
         )
 
 
+def _model_storage_signature(model: torch.nn.Module) -> tuple[tuple[Any, ...], ...]:
+    """Describe graph-visible registered tensor storage without tracking tensor values.
+
+    CUDA graphs may safely observe optimizer updates made in place, but not a parameter or buffer
+    rebound by CPU offload/reload. Address and layout distinguish those cases; tensor object identity
+    and versions are deliberately excluded so harmless wrapper replacement and ordinary optimizer
+    steps retain graph reuse.
+    """
+    signature = []
+    seen: set[int] = set()
+    for iterator_name in ("parameters", "buffers"):
+        iterator = getattr(model, iterator_name, None)
+        if not callable(iterator):
+            continue
+        for tensor in iterator():
+            if not isinstance(tensor, torch.Tensor) or id(tensor) in seen:
+                continue
+            seen.add(id(tensor))
+            signature.append(
+                (
+                    int(tensor.data_ptr()),
+                    str(tensor.device),
+                    tensor.dtype,
+                    tuple(tensor.shape),
+                    tuple(tensor.stride()),
+                    int(tensor.storage_offset()),
+                )
+            )
+    return tuple(signature)
+
+
+def _record_cuda_graph_model_storage(nd: Evo2NativeDynamicComponents) -> None:
+    """Record the model allocations used by the runners just captured and replay-verified."""
+    nd.cuda_graph_model_storage_signature = _model_storage_signature(nd.hyena_model)
+
+
+def _invalidate_cuda_graphs_for_rebound_model_storage(nd: Evo2NativeDynamicComponents) -> bool:
+    """Invalidate graph runners when model offload/reload changed a captured address."""
+    if not nd.cuda_graphs_enabled:
+        return False
+    captured = getattr(nd, "cuda_graph_model_storage_signature", None)
+    if captured is None or captured == _model_storage_signature(nd.hyena_model):
+        return False
+
+    _reset_layer_cuda_graphs(nd)
+    if nd.shared_dyn_ctx is not None:
+        nd.shared_dyn_ctx.evo2_warmed_cuda_graph_request_counts = frozenset()
+    for context in nd.static_contexts.values():
+        context.evo2_static_cuda_graph_warmed = False
+        context.evo2_static_cuda_graph_replay_verified = False
+    if int(os.environ.get("RANK", "0")) == 0:
+        logger.info("[evo2-native-cg] model storage changed; recapturing CUDA graphs before replay")
+    return True
+
+
 def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
     """Drop all captured per-layer CUDA graphs so the next warmup re-captures at the new context size.
 
@@ -1566,6 +1625,7 @@ def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
     nd.cuda_graph_runner_count = 0
     nd.cuda_graph_recorded_count = 0
     nd.cuda_graph_replay_verified = False
+    nd.cuda_graph_model_storage_signature = None
 
 
 def _get_or_build_shared_dynamic_context(
@@ -1604,6 +1664,7 @@ def _get_or_build_shared_dynamic_context(
         raise ValueError("CUDA graph request counts must contain only positive values")
     if max(requested_graph_counts) > int(max_active_requests):
         raise ValueError("CUDA graph request counts cannot exceed max_active_requests")
+    _invalidate_cuda_graphs_for_rebound_model_storage(nd)
     if (
         cached is not None
         and nd.shared_dyn_ctx_key == ctx_key
@@ -1626,6 +1687,7 @@ def _get_or_build_shared_dynamic_context(
             )
             warmed_graph_counts |= missing_graph_counts
             _validate_cuda_graph_capture(nd, expected_request_counts=warmed_graph_counts)
+            _record_cuda_graph_model_storage(nd)
             cached.evo2_warmed_cuda_graph_request_counts = warmed_graph_counts
             capture_stats = _finish_cuda_phase(capture_started_at_s)
         return cached, _CudaPhaseStats(), capture_stats
@@ -1688,6 +1750,7 @@ def _get_or_build_shared_dynamic_context(
             request_counts=requested_graph_counts,
         )
         _validate_cuda_graph_capture(nd, expected_request_counts=requested_graph_counts)
+        _record_cuda_graph_model_storage(nd)
         dyn_ctx.evo2_warmed_cuda_graph_request_counts = requested_graph_counts
         cuda_graph_capture_stats = _finish_cuda_phase(capture_started_at_s)
     nd.shared_dyn_ctx = dyn_ctx
@@ -1705,6 +1768,7 @@ def _get_or_build_static_flash_context(
     """Return a graph-pointer-stable static context for one exact batch shape."""
     from megatron.core.inference.contexts import StaticInferenceContext
 
+    _invalidate_cuda_graphs_for_rebound_model_storage(nd)
     key = (int(batch_size), int(max_sequence_length))
     cached = nd.static_contexts.get(key)
     if cached is not None:
@@ -1926,6 +1990,7 @@ def _generate_static_flash(
                     )
                 context.evo2_static_cuda_graph_warmed = True
                 context.evo2_static_cuda_graph_replay_verified = True
+                _record_cuda_graph_model_storage(nd)
             _record_phase_stats(timings, memory, "cuda_graph_capture", graph_capture_stats)
 
             generated_ids: list[list[int]] = [[] for _ in range(request_count)]
